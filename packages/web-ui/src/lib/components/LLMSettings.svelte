@@ -245,10 +245,9 @@
 			// Switching FROM a pinned preset (Mistral) TO a free-text one
 			// (openai-compat). Detect "the URL we have was stamped by a
 			// pinned preset" via membership in `base_url_default` across
-			// the catalog — the previous-PR version compared to the NEW
-			// entry's base_url_default which is undefined for free-text
-			// presets, so the URL never cleared.
-			config = { ...config, api_base_url: '' };
+			// the catalog. Also clear openai_model_id (mistral-large-2512
+			// pinned against a free-text endpoint would 404 every probe).
+			config = { ...config, api_base_url: '', openai_model_id: '' };
 		} else if (!entry.requires_base_url && !entry.base_url_default) {
 			// P3-FOLLOWUP-HOTFIX-2: switching to a provider that uses neither
 			// a free-text nor a pinned base_url (Anthropic). Clear any stale
@@ -619,14 +618,14 @@
 						hitting after a provider switch.
 					-->
 					<div class="rounded border border-border bg-bg-subtle px-3 py-2 text-xs space-y-1">
-						<div class="font-medium text-text-muted">{t('llm.tier_set_heading') || 'Tier-set used by lynox'}</div>
+						<div class="font-medium text-text-muted">{t('llm.tier_set_heading')}</div>
 						<div class="flex flex-wrap gap-x-4 gap-y-1">
 							<span>
-								<span class="text-text-muted">{t('llm.tier_main') || 'Main (orchestration)'}:</span>
+								<span class="text-text-muted">{t('llm.tier_main')}:</span>
 								<span class="font-mono">{tierSet.main.label}</span>
 							</span>
 							<span>
-								<span class="text-text-muted">{t('llm.tier_small') || 'Small / fast (sub-tasks)'}:</span>
+								<span class="text-text-muted">{t('llm.tier_small')}:</span>
 								<span class="font-mono">{tierSet.small.label}</span>
 							</span>
 						</div>

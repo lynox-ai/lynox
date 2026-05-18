@@ -2293,22 +2293,32 @@ export class LynoxHTTPApi {
         errorResponse(res, 503, msg);
         return;
       }
+      // PRD-IA-V2 P3-PR-B (Security S4) parity: emit a names-only audit row
+      // for every BYOK secret write. /api/config audits at L~2510; secrets
+      // need the same trail for compliance + incident-replay.
+      try {
+        const audit = engine.getSecurityAudit();
+        audit?.record({
+          event_type: 'secret_update',
+          decision: 'applied',
+          source: 'http_api',
+          detail: JSON.stringify({
+            slot: name,
+            tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+          }),
+        });
+      } catch {
+        // Audit failure must not mask the user-visible write success.
+      }
       // Hot-reload the LLM client so subsequent sessions pick up the new key
-      // without a process restart. Wrap defensively — the secret is already
-      // persisted; a failed re-init shouldn't make the caller think the write
-      // didn't land. Surface the partial success with `hot_reload: false` so
-      // the UI can choose to nudge the user to refresh.
-      //
-      // Any of the BYOK provider slots (ANTHROPIC_API_KEY / MISTRAL_API_KEY /
-      // CUSTOM_API_KEY) should trigger a full reloadUserConfig: that path
-      // re-runs initLLMProvider + _configureOpenAIResolver + _recreateClient,
-      // which is what makes a Mistral/Custom key actually reach the adapter.
-      // Pre-1.5.2 only ANTHROPIC_API_KEY hot-reloaded → switching providers
-      // looked saved but the engine kept the old client.
+      // without a process restart. Uses reloadCredentials (not reloadUserConfig)
+      // because the gate in reloadUserConfig only re-creates `engine.client`
+      // when a config.json field changes — vault-only writes wouldn't fire it
+      // and `engine.client` (KG init + batch) would keep a stale key.
       let hotReload = true;
       if (PROVIDER_KEY_SLOTS.has(name)) {
         try {
-          await engine.reloadUserConfig();
+          await engine.reloadCredentials();
         } catch {
           hotReload = false;
         }
@@ -2858,12 +2868,18 @@ export class LynoxHTTPApi {
         return;
       }
       const provider = b['provider'];
+      // Validate against the LLMProvider union before the cast — keeps
+      // attacker-chosen slot names out of SECONDARY_SLOTS expansion paths.
+      const ALLOWED_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'openai', 'custom', 'vertex']);
+      if (!ALLOWED_PROVIDERS.has(provider)) {
+        errorResponse(res, 400, `Unknown provider "${provider}"`);
+        return;
+      }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
       // Vault fallback: when the user already saved the key earlier and now
       // hits "Verbindung testen" without re-typing, the form posts an empty
       // body key. Pre-1.5.2 the endpoint 400'd "API key required" even though
-      // the vault had the value. Resolve the active provider's slot here so
-      // the probe matches what the runtime adapter would actually use.
+      // the vault had the value.
       const apiKey = bodyKey || (resolveProviderApiKey({
         provider: provider as LLMProvider,
         secretStore: engine.getSecretStore(),

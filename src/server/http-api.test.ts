@@ -16,9 +16,11 @@ const mockSecretListNames = vi.fn().mockReturnValue(['ANTHROPIC_API_KEY']);
 const mockSecretSet = vi.fn();
 const mockSecretDelete = vi.fn().mockReturnValue(true);
 const mockSetApiKey = vi.fn();
-// v1.5.2: hoisted so tests can pin "all BYOK slots trigger reloadUserConfig".
-// Was previously created inside the per-instance Engine mock and unreachable.
+// v1.5.2: hoisted so tests can pin "all BYOK slots trigger reloadCredentials".
+// reloadCredentials is the vault-only hot-reload path; reloadUserConfig is
+// the config.json path. Mocked separately for clarity.
 const mockReloadUserConfig = vi.fn().mockResolvedValue(undefined);
+const mockReloadCredentials = vi.fn().mockResolvedValue(undefined);
 const mockHistoryGetRecentRuns = vi.fn().mockReturnValue([{ id: 'run-1', task_text: 'test', status: 'completed' }]);
 const mockHistorySearchRuns = vi.fn().mockReturnValue([]);
 const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'test' });
@@ -105,6 +107,7 @@ vi.mock('../core/engine.js', () => ({
     this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = mockReloadUserConfig;
+    this.reloadCredentials = mockReloadCredentials;
     this.getUserConfig = vi.fn().mockReturnValue({});
     this.setApiKey = mockSetApiKey;
     return this;
@@ -1388,7 +1391,7 @@ describe('LynoxHTTPApi', () => {
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
         'PUT /api/secrets/ANTHROPIC_API_KEY accepts user-scope in mode=%s',
         async (mode) => {
-          mockReloadUserConfig.mockClear();
+          mockReloadCredentials.mockClear();
           vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
           vi.stubEnv('LYNOX_MANAGED_MODE', mode);
           try {
@@ -1398,12 +1401,12 @@ describe('LynoxHTTPApi', () => {
             });
             expect(res.status).toBe(200);
             expect(mockSecretSet).toHaveBeenCalledWith('ANTHROPIC_API_KEY', 'sk-ant-test');
-            // v1.5.2: every BYOK provider slot now calls reloadUserConfig so
-            // a provider switch (Anthropic ↔ Mistral ↔ Custom) actually
-            // re-inits the engine client. Pre-fix only ANTHROPIC_API_KEY
-            // hot-reloaded → Mistral key landed in the vault but the engine
-            // kept the stale Anthropic adapter (rafael-prod 2026-05-18).
-            expect(mockReloadUserConfig).toHaveBeenCalled();
+            // v1.5.2: every BYOK provider slot calls reloadCredentials so a
+            // vault-only write actually re-creates the engine client.
+            // Pre-fix only ANTHROPIC_API_KEY hot-reloaded → Mistral key
+            // landed in the vault but engine kept stale adapter (rafael-prod
+            // 2026-05-18).
+            expect(mockReloadCredentials).toHaveBeenCalled();
           } finally {
             vi.unstubAllEnvs();
             vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -1414,7 +1417,7 @@ describe('LynoxHTTPApi', () => {
       it.each(['MISTRAL_API_KEY', 'OPENAI_API_KEY', 'CUSTOM_API_KEY'])(
         'PUT /api/secrets/%s accepts user-scope in managed mode AND hot-reloads',
         async (slot) => {
-          mockReloadUserConfig.mockClear();
+          mockReloadCredentials.mockClear();
           vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
           vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
           try {
@@ -1426,7 +1429,10 @@ describe('LynoxHTTPApi', () => {
             expect(mockSecretSet).toHaveBeenCalledWith(slot, 'sk-test');
             // All BYOK provider slots must reload the engine client —
             // see PROVIDER_KEY_SLOTS in core/llm/provider-keys.ts.
-            expect(mockReloadUserConfig).toHaveBeenCalled();
+            expect(mockReloadCredentials).toHaveBeenCalled();
+            // Lock the user-visible contract that drives the UI toast.
+            const body = await res.json() as { ok: boolean; hot_reload: boolean };
+            expect(body).toEqual({ ok: true, hot_reload: true });
           } finally {
             vi.unstubAllEnvs();
             vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -1499,8 +1505,8 @@ describe('LynoxHTTPApi', () => {
         expect(body.error).toBe('disk full');
       });
 
-      it('PUT /api/secrets/ANTHROPIC_API_KEY persists the secret but reports hot_reload:false when reloadUserConfig throws', async () => {
-        mockReloadUserConfig.mockRejectedValueOnce(new Error('client init failed'));
+      it('PUT /api/secrets/ANTHROPIC_API_KEY persists the secret but reports hot_reload:false when reloadCredentials throws', async () => {
+        mockReloadCredentials.mockRejectedValueOnce(new Error('client init failed'));
         const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
           method: 'PUT',
           body: JSON.stringify({ value: 'sk-ant-x' }),

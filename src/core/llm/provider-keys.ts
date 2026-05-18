@@ -1,8 +1,4 @@
-// Canonical map from LLM provider → vault slot name. Mirrors the web-ui's
-// VAULT_SLOTS in LLMSettings.svelte. The server side now reads this map
-// instead of hard-coding `ANTHROPIC_API_KEY` everywhere — without it,
-// switching to Mistral on a self-host without an Anthropic env fallback
-// would silently authenticate Mistral with the wrong key (or empty key).
+// Canonical provider → vault-slot map. Mirrors LLMSettings.svelte's VAULT_SLOTS.
 
 import type { LLMProvider } from '../../types/models.js';
 
@@ -37,7 +33,9 @@ export function vaultSlotForProvider(provider: LLMProvider | undefined | null): 
 }
 
 interface SecretStoreReader {
-  resolve(name: string): string | null | undefined;
+  // Matches the canonical SecretStore.resolve() signature in
+  // core/secret-store.ts — `string | null`, no `undefined`.
+  resolve(name: string): string | null;
 }
 
 export interface ResolveProviderApiKeyInput {

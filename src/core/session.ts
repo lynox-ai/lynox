@@ -1028,12 +1028,8 @@ export class Session {
       // below the model's native window (LLM Advanced UI offers 200k/500k/1M
       // at `/app/settings/llm/advanced` post P3-PR-X).
       maxContextWindowTokens: userConfig.max_context_window_tokens,
-      // Provider-aware key resolution: profile override → env-or-vault slot
-      // for the active provider → legacy userConfig.api_key (Anthropic only).
-      // Pre-1.5.2 this read `userConfig.api_key` directly, which is empty
-      // when the active provider is Mistral/Custom (their keys live under
-      // distinct vault slots) — Agent would then create an OpenAI adapter
-      // authenticated with an empty/wrong key. See [[provider-keys]].
+      // Provider-aware key resolution via [[provider-keys]] — pre-1.5.2 this
+      // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
       apiKey: this._profileOverride?.api_key ?? resolveProviderApiKey({
         provider: this._profileOverride?.provider ?? userConfig.provider,
         secretStore: engine.getSecretStore(),

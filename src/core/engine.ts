@@ -236,6 +236,22 @@ export class Engine {
     await this._reconcileBugsink(oldBugsinkActive);
   }
 
+  /**
+   * Force-refresh the LLM client + openai tier resolver from the live config
+   * + vault. Used by `/api/secrets/:slot` writes where only the vault changed
+   * — `reloadUserConfig` skips `_recreateClient` because no config.json field
+   * differs, so without this path the engine's `this.client` (used by KG
+   * init + batch) would keep a stale key after a BYOK rotation.
+   */
+  async reloadCredentials(): Promise<void> {
+    this.userConfig = loadConfig();
+    if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
+      await initLLMProvider(this.userConfig.provider);
+    }
+    this._configureOpenAIResolver();
+    this._recreateClient();
+  }
+
   /** Toggle Bugsink based on the new config — extracted so `_initBootstrap` and `reloadUserConfig` share the bring-up path. */
   private async _initBugsink(): Promise<void> {
     const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;

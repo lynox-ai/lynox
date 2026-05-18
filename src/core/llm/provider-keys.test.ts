@@ -47,17 +47,17 @@ describe('vaultSlotForProvider', () => {
 });
 
 describe('resolveProviderApiKey', () => {
-  const ORIG_ENV = { ...process.env };
-
   beforeEach(() => {
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.MISTRAL_API_KEY;
-    delete process.env.CUSTOM_API_KEY;
-    delete process.env.OPENAI_API_KEY;
+    // vi.stubEnv parity with the rest of the suite — also auto-restores on
+    // unstubAllEnvs. Empty string clears the var.
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('CUSTOM_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
   });
 
   afterEach(() => {
-    process.env = { ...ORIG_ENV };
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -105,8 +105,8 @@ describe('resolveProviderApiKey', () => {
   });
 
   it('reads the openai provider key from MISTRAL_API_KEY env, not ANTHROPIC_API_KEY', () => {
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-stale';
-    process.env.MISTRAL_API_KEY = 'sk-mistral-current';
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-stale');
+    vi.stubEnv('MISTRAL_API_KEY', 'sk-mistral-current');
     const result = resolveProviderApiKey({
       provider: 'openai',
       secretStore: null,
@@ -114,13 +114,44 @@ describe('resolveProviderApiKey', () => {
     expect(result).toBe('sk-mistral-current');
   });
 
+  it('falls back to OPENAI_API_KEY (secondary slot) when primary MISTRAL_API_KEY is empty', () => {
+    // OpenAI SDK convention — users who set the standard env name expect it
+    // to work for the openai provider without learning about the Mistral alias.
+    vi.stubEnv('OPENAI_API_KEY', 'sk-openai-secondary');
+    const result = resolveProviderApiKey({
+      provider: 'openai',
+      secretStore: null,
+    });
+    expect(result).toBe('sk-openai-secondary');
+  });
+
+  it('primary MISTRAL_API_KEY wins over secondary OPENAI_API_KEY when both are set', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'sk-mistral-primary');
+    vi.stubEnv('OPENAI_API_KEY', 'sk-openai-secondary');
+    const result = resolveProviderApiKey({
+      provider: 'openai',
+      secretStore: null,
+    });
+    expect(result).toBe('sk-mistral-primary');
+  });
+
   it('reads the custom provider key from CUSTOM_API_KEY slot', () => {
-    process.env.CUSTOM_API_KEY = 'sk-custom-key';
+    vi.stubEnv('CUSTOM_API_KEY', 'sk-custom-key');
     const result = resolveProviderApiKey({
       provider: 'custom',
       secretStore: null,
     });
     expect(result).toBe('sk-custom-key');
+  });
+
+  it('returns undefined for openai when secretStore is null AND every env slot is empty', () => {
+    // Explicit null-secretStore branch — the optional-chain in
+    // resolveProviderApiKey should short-circuit, never throw.
+    const result = resolveProviderApiKey({
+      provider: 'openai',
+      secretStore: null,
+    });
+    expect(result).toBeUndefined();
   });
 
   it('returns undefined when nothing matches (no env, no vault, no userConfig)', () => {
@@ -133,7 +164,7 @@ describe('resolveProviderApiKey', () => {
   });
 
   it('handles missing secretStore + missing userConfig gracefully', () => {
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-env-only';
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-env-only');
     const result = resolveProviderApiKey({
       provider: 'anthropic',
       secretStore: null,
