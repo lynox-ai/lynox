@@ -7,7 +7,19 @@
 	Per-provider keys persist in vault under their canonical names
 	(ANTHROPIC_API_KEY, MISTRAL_API_KEY, OPENAI_API_KEY) — switching providers
 	does NOT delete keys, so users can flip back without re-entering.
+
+	Tier-awareness audit (Settings v3 Item 2, 2026-05-19):
+	| Setting               | Self-host | BYOK | Managed |
+	|-----------------------|-----------|------|---------|
+	| provider tile pick    | ✓         | ✓    | ✓ curated allowlist (Anthropic + Mistral) |
+	| api_key field         | ✓         | ✓    | ✗ CP supplies → hidden |
+	| api_base_url (custom) | ✓         | ✗    | ✗ locks.custom_provider_endpoints |
+	| gcp_project_id/region | ✓         | ✗    | ✗ vertex retired in-product |
+	| default_tier          | ✓         | ✓    | ✓        |
+	| custom_endpoints reg. | ✓         | ✓    | ✗ locks.custom_endpoints |
+	| Test-connection btn   | ✓         | ✓    | ✗ hidden (CP key, no test surface) |
 -->
+
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';

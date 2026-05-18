@@ -7,11 +7,24 @@
 	stays `/api/config`; this surface PUTs the same fields the legacy
 	locations did, so a stale tab cannot drift state.
 
+	Tier-awareness audit (Settings v3 Item 2, 2026-05-19):
+	| Setting              | Self-host | BYOK | Managed |
+	|----------------------|-----------|------|---------|
+	| llm_mode             | ✓         | ✓    | ✗ admin-only |
+	| effort_level         | ✓         | ✓    | ✓        |
+	| thinking_mode        | ✓         | ✓    | ✓        |
+	| experience           | ✓         | ✓    | ✓        |
+	| embedding_provider   | ✓         | ✓    | ✗ silent-403 → hidden |
+	| max_context_window   | ✓         | ✓    | ✓ (managed caps still apply) |
+
 	Managed-tier gotchas baked in:
 	- `embedding_provider` is NOT in MANAGED_USER_WRITABLE_CONFIG (silent-403
 	  on managed) → hidden behind `isManaged`.
 	- `llm_mode` toggle is admin-only on managed per project_managed_llm_strategy
 	  → hidden when `providerLocked` OR when Mistral capability is not wired.
+	- `max_context_window_tokens` user choice clamps to model native via
+	  `effectiveContextWindow()` (server-side). Settings v3 Item 6 filters the
+	  radio set so users can't pick a cap above their active model's native.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
@@ -31,10 +44,31 @@
 		provider?: { reason: string; upgrade_cta?: { href: string; label: string } };
 	}
 
+	// Subset of MODEL_CAPABILITIES surfaced by /api/config — see
+	// http-api.ts:`active_model` block. Web-ui has no direct dep on
+	// `@lynox-ai/core` so the server pre-resolves the fields the UI needs.
+	interface ActiveModel {
+		id: string;
+		tier: 'opus' | 'sonnet' | 'haiku' | null;
+		provider: 'anthropic' | 'vertex' | 'openai' | 'custom';
+		contextWindow: number;
+		defaultMaxOutput: number;
+		maxContinuations: number;
+		features: {
+			vision: boolean;
+			extendedThinking: boolean;
+			toolUse: boolean;
+			promptCaching: boolean;
+			pdfInput: boolean;
+		};
+		uiLabel: string;
+	}
+
 	let config = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let managed = $state<boolean | null>(null);
 	let mistralAvailable = $state<boolean>(false);
+	let activeModel = $state<ActiveModel | null>(null);
 	let loaded = $state(false);
 	let saving = $state(false);
 
@@ -46,6 +80,7 @@
 				locks?: Locks;
 				managed?: string;
 				capabilities?: { mistral_available?: boolean };
+				active_model?: ActiveModel;
 			};
 			config = {
 				experience: body.experience,
@@ -58,6 +93,7 @@
 			locks = body.locks ?? {};
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
 			mistralAvailable = body.capabilities?.mistral_available === true;
+			activeModel = body.active_model ?? null;
 			loaded = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('llm.load_failed'), 'error', 5000);
@@ -106,12 +142,36 @@
 	// LLMSettings used to host this literal too (pre-P3-PR-C extraction); both
 	// historic surfaces PUT the same `/api/config` field, so backend SSoT was
 	// never duplicated.
-	const CONTEXT_OPTIONS: ReadonlyArray<{ value: number | undefined; labelKey: string; hintKey: string }> = [
-		{ value: undefined,  labelKey: 'llm.context_window.option.default', hintKey: 'llm.context_window.option.default_hint' },
-		{ value: 200_000,    labelKey: 'llm.context_window.option.200k',    hintKey: 'llm.context_window.option.200k_hint' },
-		{ value: 500_000,    labelKey: 'llm.context_window.option.500k',    hintKey: 'llm.context_window.option.500k_hint' },
-		{ value: 1_000_000,  labelKey: 'llm.context_window.option.1m',      hintKey: 'llm.context_window.option.1m_hint' },
+	//
+	// Settings v3 Item 6 (2026-05-19): cap milestones strictly less than the
+	// active model's native window. Pre-fix, picking "1M" on Sonnet base (200K
+	// native) silently capped to 200K — UI lied about effective cap. Picking
+	// "500K" on Mistral Large (131K native) did the same. Server resolves the
+	// native window via MODEL_CAPABILITIES[active_model.id] and the UI filters
+	// CAP_MILESTONES to those strictly below it (above-native is redundant
+	// with "default"). PR 3 will switch this to show-all-grayed.
+	const CAP_MILESTONES: ReadonlyArray<{ value: number; labelKey: string; hintKey: string }> = [
+		{ value: 32_000,    labelKey: 'llm.context_window.option.32k',  hintKey: 'llm.context_window.option.32k_hint' },
+		{ value: 100_000,   labelKey: 'llm.context_window.option.100k', hintKey: 'llm.context_window.option.100k_hint' },
+		{ value: 200_000,   labelKey: 'llm.context_window.option.200k', hintKey: 'llm.context_window.option.200k_hint' },
+		{ value: 500_000,   labelKey: 'llm.context_window.option.500k', hintKey: 'llm.context_window.option.500k_hint' },
 	];
+
+	const DEFAULT_OPTION = {
+		value: undefined as number | undefined,
+		labelKey: 'llm.context_window.option.default',
+		hintKey: 'llm.context_window.option.default_hint',
+	};
+
+	const contextOptions = $derived.by(() => {
+		const native = activeModel?.contextWindow;
+		if (native === undefined) {
+			// No active-model data (older engine without /api/config.active_model,
+			// or registry miss) → fall back to the legacy static list.
+			return [DEFAULT_OPTION, ...CAP_MILESTONES];
+		}
+		return [DEFAULT_OPTION, ...CAP_MILESTONES.filter((opt) => opt.value < native)];
+	});
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -211,8 +271,16 @@
 		<section aria-labelledby="adv-context-heading" class="border-t border-border pt-6">
 			<h2 id="adv-context-heading" class="text-lg font-medium mb-1">{t('llm.context_window.heading')}</h2>
 			<p class="text-xs text-text-muted mb-3">{t('llm.context_window.description')}</p>
+			{#if activeModel}
+				<!-- Settings v3 Item 6: surface the active model so the radio set
+				     below makes sense ("why is there no 500K option?" → because
+				     Sonnet caps at 200K). Single line, non-intrusive. -->
+				<p class="text-xs text-text-muted mb-3 italic">
+					{t('llm.context_window.active_model_label')}: <span class="font-mono not-italic">{activeModel.uiLabel}</span> ({(activeModel.contextWindow / 1000).toFixed(0)}K {t('llm.context_window.native')})
+				</p>
+			{/if}
 			<div class="space-y-2">
-				{#each CONTEXT_OPTIONS as opt (opt.value ?? 'default')}
+				{#each contextOptions as opt (opt.value ?? 'default')}
 					<label class="flex items-start gap-3 cursor-pointer">
 						<input type="radio" name="llm-context-window" value={opt.value}
 							bind:group={config.max_context_window_tokens}

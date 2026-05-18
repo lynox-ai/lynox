@@ -1278,6 +1278,28 @@ describe('LynoxHTTPApi', () => {
       expect(body['locks']).toEqual({});
     });
 
+    it('GET surfaces active_model with resolved capability data (Settings v3 Item 6)', async () => {
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      // Test fixture's default_tier is 'opus' → resolves to claude-opus-4-6
+      // under the Anthropic-direct provider (default).
+      expect(am!['id']).toBe('claude-opus-4-6');
+      expect(am!['tier']).toBe('opus');
+      expect(am!['provider']).toBe('anthropic');
+      expect(am!['contextWindow']).toBe(1_000_000);
+      expect(am!['defaultMaxOutput']).toBe(32_000);
+      expect(am!['maxContinuations']).toBe(20);
+      expect(am!['uiLabel']).toBe('Claude Opus 4.6');
+      const features = am!['features'] as Record<string, boolean>;
+      expect(features['vision']).toBe(true);
+      expect(features['extendedThinking']).toBe(true);
+      expect(features['toolUse']).toBe(true);
+      expect(features['promptCaching']).toBe(true);
+    });
+
     it('GET treats LYNOX_MANAGED_MODE=starter (BYOK) as non-managed for capability gating', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
       try {
