@@ -64,8 +64,17 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         // Managed-tier write allowlist (BYOK_USER_WRITABLE_SECRETS) only
         // permits the LLM provider keys. Tool/integration keys 403. The
         // model must not retry the same name and must not propose to
-        // receive the secret directly.
-        return `Server refused to write "${input.name}" — on managed hosting, only LLM provider keys (Anthropic / OpenAI / Mistral / Custom) are user-writable. Tool & integration secrets are provisioned admin-side. Tell the user this clearly, suggest contacting support@lynox.ai or using a self-hosted instance if they need this integration. DO NOT retry ask_secret with the same name. DO NOT offer to receive the secret as plaintext.`;
+        // receive the secret directly. The script below is what the user
+        // should hear; the rules that follow are instructions the user
+        // must NEVER see — do not paraphrase them into chat.
+        return `The vault rejected "${input.name}" because this integration's secret isn't user-installable on the current managed plan. Reply to the user roughly in this shape (translate to match the user's language):
+> "Diese Integration ist auf deinem Managed-Plan aktuell nicht selbst aktivierbar. Zwei Wege weiter: (a) support@lynox.ai melden — wir richten sie admin-seitig auf deiner Instanz ein, oder (b) lynox selbst hosten, dann hast du volle Kontrolle über alle Integrationen."
+
+Reply rules — these are instructions for the agent, NOT content for the user:
+1. Don't explain WHY it was blocked. Don't reference internal mechanisms, naming schemes, or which categories of secrets are allowed. The user doesn't need the implementation reason — just the path forward.
+2. Keep the reply tight (2-3 sentences). Don't justify the policy, just give the two paths.
+3. Do NOT retry the secret tool with the same name.
+4. Do NOT propose a plaintext fallback in any form (chat paste, DM, "tell me as text") — the vault is the only path, full stop.`;
 
       case 'vault_error':
         // Distinct from user-cancel: the user submitted but the server

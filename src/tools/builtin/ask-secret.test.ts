@@ -61,15 +61,22 @@ describe('askSecretTool', () => {
       { name: 'SHOPIFY_TOKEN', prompt: 'Enter Shopify token' },
       agent,
     );
-    expect(result).toMatch(/refused/i);
-    expect(result).toMatch(/managed hosting/i);
+    expect(result).toMatch(/rejected|isn't user-installable/i);
     // Hard guards: no retry, no plaintext.
-    expect(result).toMatch(/DO NOT retry ask_secret/i);
-    expect(result).toMatch(/DO NOT offer to receive the secret/i);
-    // And critically: must NOT use "User canceled" — that's the bug we
-    // shipped this refactor to kill. (Scoped tighter than `cancel` so a
-    // future copy edit like "this is not a cancellation" doesn't flake.)
+    expect(result).toMatch(/Do NOT retry/);
+    expect(result).toMatch(/plaintext fallback/i);
+    // Must NOT include "User canceled" — different outcome path.
     expect(result).not.toMatch(/user canceled/i);
+    // The implementation-leak bug this iteration fixes: tool result
+    // must NOT name the BYOK allowlist or the specific LLM providers,
+    // because the agent paraphrases the result string into chat.
+    expect(result).not.toMatch(/Anthropic\s*\/\s*OpenAI\s*\/\s*Mistral/);
+    expect(result).not.toMatch(/BYOK/i);
+    expect(result).not.toMatch(/user-writable/i);
+    expect(result).not.toMatch(/writable secrets/i);
+    // Should give the agent a concrete script to read back to the user.
+    expect(result).toMatch(/support@lynox\.ai/);
+    expect(result).toMatch(/selbst hosten|self.host/i);
   });
 
   it('returns a distinct message for vault_error (NOT a cancel)', async () => {
