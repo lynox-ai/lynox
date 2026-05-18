@@ -2,22 +2,46 @@
 
 ## 1.5.2 — 2026-05-18
 
-### Added
-
-<!-- no feat: commits since v1.5.1 -->
-
-### Changed
-
-<!-- no refactor/perf/chore/docs/test/ci/build/revert/style commits since v1.5.1 -->
+Patch — **LLM provider-switching hardening** (rafael QA across the day). After v1.5.1 shipped, switching from Anthropic to Mistral exposed five stacked bugs in the runtime + UI: the engine kept reading `ANTHROPIC_API_KEY` regardless of provider, `/api/llm/test` 400'd on saved-and-empty body keys, the model self-identified as "Claude Haiku" even though Mistral was dispatched, the UI hid the tier-set behind a single misleading "Modell" dropdown, and on managed the API-key input was a disabled red-herring. Six follow-up PRs land the wire-level fixes, the UI cleanup, and the explanatory anchors so a provider switch is robust + observable.
 
 ### Fixed
 
-- fix(ui): move 3rd-party API-key CRUD from LLM Settings to Automation Hub (#463)
-- fix(llm-ui): Mistral default-tier picker parity with Anthropic (#461)
-- fix(llm-ui): hide API-key + Test-connection on managed-hosting tier (#462)
-- fix(llm): per-turn model indicator + stop tier-alias self-ID leakage (#460)
-- fix(llm-ui): drop misleading Modell-dropdown for Mistral, keep for Anthropic (#459)
-- fix(llm): robust live provider switching + tier-set visibility (#458)
+- **Robust live provider switching (#456 follow-up #458)** — Engine `_recreateClient` now resolves the API key from the active provider's vault slot (Mistral → `MISTRAL_API_KEY`, Custom → `CUSTOM_API_KEY`, OpenAI → `OPENAI_API_KEY` secondary) instead of hardcoding `ANTHROPIC_API_KEY`. Session passes the provider-resolved key to the Agent. `/api/secrets/:slot` hot-reloads on every BYOK slot, not just `ANTHROPIC_API_KEY`. New canonical helper `core/llm/provider-keys.ts` mirrors the web-ui's `VAULT_SLOTS` map. (#458)
+- **`engine.reloadCredentials()` for vault-only writes (#458 round-1)** — Pre-fix the existing `reloadUserConfig` gated `_recreateClient` on config.json field deltas, so `/api/secrets/:slot` writes left `engine.client` stale (visible to KG init + batch ops). New `reloadCredentials()` forces re-init and is called by the secrets endpoint. (#458)
+- **`/api/llm/test` vault-fallback** — When the user previously saved a key and the form posts an empty body key (page reload), the endpoint now resolves from env > vault instead of returning `400 "API key required"`. Pre-fix made "Verbindung testen" unusable after the first save. (#458)
+- **UUID-validated test endpoint** — `POST /api/llm/test` validates `provider` against the LLMProvider union before the cast, closing a defensive gap for future `SECONDARY_SLOTS` expansion. (#458)
+- **Per-secret audit row** — Every BYOK secret write emits a `secret_update` SecurityAudit row (names-only, no values) matching the `PUT /api/config` audit parity from P3-PR-B. (#458)
+
+### Changed
+
+- **SYSTEM_PROMPT identity anchor (#458, #460)** — A new `modelIdentityContext` helper interpolates the active provider + actual model id into the system prompt and explicitly forbids tier-alias self-identification (`opus` / `sonnet` / `haiku` are routing tiers, not model names). Sanitises the user-controllable `openai_model_id` field (strips backticks/newlines/structural chars, caps 64) to close a prompt-injection vector on managed. Pre-fix Mistral confidently answered "Ich bin Claude Haiku" because nothing pinned its identity.
+- **LLM Settings → Mistral preset tier-set view (#459)** — The misleading single "Modell" dropdown (which wrote `openai_model_id` with no runtime effect on tier-aware providers) is gone for Mistral. The tier-set summary block now shows both Main + Small/fast model, with a one-line "lynox routes per turn — simple replies → small, complex → main" hint. Anthropic keeps its dropdown because there it binds to runtime-meaningful `default_tier`. (#459)
+- **Mistral default-tier picker parity with Anthropic (#461)** — Unified picker for every tier-aware provider, binding `default_tier`. On Mistral the tier maps via MISTRAL_MODEL_MAP (sonnet → Large, opus → Magistral, haiku → Small). The tier-set summary follows the user's selection (no more silent "Main: Mistral Large" while picker says Magistral).
+- **Per-turn model indicator in chat footer (#460)** — The SSE `turn_end.model` was already extracted for cost; now it surfaces next to "X tokens · $0.04 · `mistral-large-2512`" so users can see which model produced each reply (relevant when the auto-downgrade flipped to Small for a simple task).
+- **API-key + Test-connection hidden on managed tier (#462)** — On managed the CP supplies the LLM key; a disabled-but-visible input was misleading. Replaced with a short note: "API-Schlüssel werden von deinem Managed-Hosting-Plan bereitgestellt."
+- **Tier-set summary tracks `default_tier`** — Picking Magistral in the tier picker now flips "Main: Mistral Large" → "Main: Magistral Medium" in the summary block. (#461)
+
+### Removed
+
+- **`/app/settings/llm/keys` route** — The 3rd-party API-key CRUD (Tavily, DataForSEO, etc.) moves to `/app/hub?section=keys` (Automation Hub gains a 4th tab "API-Schlüssel" next to API Profiles). The old URL 301-redirects so bookmarks survive. The LLMSettings sub-nav loses its "API keys" link — that page now owns only Provider + Key + Model + Advanced/Memory sub-routes. (#463)
+
+### Security
+
+- **`PROVIDER_KEY_SLOTS` allowlist** — Centralises the BYOK secret slots (`ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, `OPENAI_API_KEY`, `CUSTOM_API_KEY`) so future provider additions extend one set instead of N call-sites. `MISTRAL_API_KEY` + `CUSTOM_API_KEY` are now in `BYOK_USER_WRITABLE_SECRETS` (was Anthropic + OpenAI only). (#458)
+- **Prompt-injection guard on `modelIdentityContext`** — Sanitises the user-controllable `openai_model_id` before interpolating into the system prompt's markdown code-span. Strips backticks, newlines, and any non-`[a-zA-Z0-9._:-]` char; caps length at 64. Managed users can write `openai_model_id`; without sanitisation an attacker could inject prompt instructions into the system role. (#458 round-3)
+
+### Migration Notes
+
+- `/app/settings/llm/keys` → `/app/hub?section=keys` (301)
+- Existing `/app/settings/keys` redirect chain still works (it 301'd to `/app/settings/llm/keys`, which now 301s to `/app/hub?section=keys`)
+- Vault slot semantics unchanged — Mistral keys stay in `MISTRAL_API_KEY`, Custom in `CUSTOM_API_KEY`, etc.
+- No env-var changes required. Self-host users with `ANTHROPIC_API_KEY` set continue to work; switching to Mistral now reads `MISTRAL_API_KEY` (vault or env) instead of falling back to the Anthropic env var.
+
+### Acknowledged Behaviour Changes
+
+- **Mistral Magistral as default_tier** — Users can now set Magistral Medium as their orchestration tier (it was previously unreachable via UI on Mistral). Cost is ~$2 in / $5 out per 1M tokens — similar to Mistral Large but routes through the reasoning-heavy variant.
+- **Auto-downgrade still applies on Mistral** — Simple turns continue to route to `mistral-small-2603` regardless of selected default_tier; the footer indicator now makes this observable. Disabling auto-downgrade is in the deferred Settings v3 sprint.
+
 ## 1.5.1 — 2026-05-18
 
 Patch — **IA Consolidation V2** + **chat-reliability hardening**. Three-phase shell refactor shipped as one patch: Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`); Phase 2 moves Activity into its own `/app/activity` root and repoints the footer cost/runs pills; Phase 3 finalizes Settings into 5 tier-conditional sections, splits Channels into 6 sub-routes, formalizes LLM sub-pages (Advanced/Memory), wires CommandPalette across all sub-routes, and deletes the deprecated Cost-Limits page. Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. Alongside the IA work, this release closes a chat-history-loss bug surfaced on rafael prod (#456): the agent loop now persists at every turn boundary instead of only end-of-run, the SvelteKit chat store's 404 recovery path now passes `threadId` so server-side eviction can't lose the conversation, and the SYSTEM_PROMPT carries a fabrication guardrail when memory_recall returns partial data. All legacy URLs 301-redirect — bookmarks survive.
