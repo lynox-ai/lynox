@@ -776,6 +776,30 @@ export class Session {
     }
   }
 
+  /**
+   * F-Eager-Persist: append any new messages from `agent.messages` into the
+   * ThreadStore. Called from the Agent's `onMessageCheckpoint` hook after
+   * every stable turn boundary. Idempotent — `getMessageCount` gives the
+   * persisted floor, and `slice(existingCount)` selects only what's new.
+   *
+   * Safe to call concurrently (better-sqlite3 serialises writes within a
+   * single process) and from the end-of-run persist block — if both fire
+   * back-to-back, the second sees an updated `existingCount` and appends
+   * an empty delta.
+   */
+  private _persistMessages(): void {
+    const threadStore = this.engine.getThreadStore();
+    if (!threadStore || !this.agent) return;
+    try {
+      const allMessages = this.agent.getMessages();
+      const existingCount = threadStore.getMessageCount(this.sessionId);
+      if (allMessages.length <= existingCount) return;
+      const delta = allMessages.slice(existingCount);
+      threadStore.appendMessages(this.sessionId, delta, existingCount);
+      threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
+    } catch { /* fire-and-forget — persistence failures must never break the run */ }
+  }
+
   // ── Model / Effort / Thinking ──
 
   setModel(tier: ModelTier): string {
@@ -938,6 +962,14 @@ export class Session {
       maxTokens: this._maxTokens,
       memory: engine.getMemory() ?? undefined,
       onStream: streamHandler,
+      // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
+      // each stable point in the agent loop (after assistant reply, after
+      // tool_results). Without this the end-of-run persist (line 506-526)
+      // was the ONLY save point — a container restart / OOM kill mid-loop
+      // lost every turn since the last completed run. Idempotent: each
+      // checkpoint reads existingCount from SQLite and only appends the
+      // delta, so duplicate fires are no-ops.
+      onMessageCheckpoint: () => this._persistMessages(),
       promptUser: this._promptUser
         ? (q: string, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
         : undefined,

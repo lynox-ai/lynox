@@ -1617,4 +1617,63 @@ describe('Agent', () => {
       expect(agent.getMaxContextWindowTokens()).toBeUndefined();
     });
   });
+
+  // F-Eager-Persist regression-pin (2026-05-18): the agent must fire its
+  // onMessageCheckpoint hook at each stable turn boundary so the Session can
+  // append new messages to the ThreadStore mid-run. Without this, a container
+  // restart / OOM kill mid-loop loses every turn since the last completed
+  // run — which is exactly what happened on rafael prod when a long
+  // conversation showed in the UI but the agent had zero history on resume.
+  describe('onMessageCheckpoint (F-Eager-Persist)', () => {
+    it('fires once per assistant turn on a simple end_turn response', async () => {
+      const checkpoint = vi.fn();
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        onMessageCheckpoint: checkpoint,
+      });
+      await agent.send('Hi');
+      expect(checkpoint).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires after assistant message AND after tool_results on a tool_use turn', async () => {
+      const checkpoint = vi.fn();
+      const tool = makeTool('fake_tool');
+      // First response: tool_use → triggers tool dispatch → tool_results pushed
+      // Second response: end_turn after tool_results
+      mockProcess
+        .mockResolvedValueOnce({
+          content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'fake_tool', input: {} }],
+          stop_reason: 'tool_use' as const,
+          usage: { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        })
+        .mockResolvedValueOnce(endTurnResponse('answer after tool'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        onMessageCheckpoint: checkpoint,
+      });
+      await agent.send('Use the tool');
+      // Three checkpoints: one after assistant tool_use, one after tool_results,
+      // plus one after the final assistant end_turn.
+      expect(checkpoint).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not break the loop when the checkpoint hook throws', async () => {
+      const checkpoint = vi.fn().mockImplementation(() => { throw new Error('persist failed'); });
+      mockProcess.mockResolvedValueOnce(endTurnResponse('still works'));
+      const agent = new Agent({
+        name: 'test-throw',
+        model: 'claude-sonnet-4-6',
+        onMessageCheckpoint: checkpoint,
+      });
+      // Must not throw — the hook is fire-and-forget by contract
+      const result = await agent.send('Hello');
+      expect(result).toBe('still works');
+      expect(checkpoint).toHaveBeenCalled();
+    });
+  });
 });

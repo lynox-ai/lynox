@@ -75,6 +75,19 @@ export interface AgentConfig {
    * production where the Session should own the budget.
    */
   sessionCounters?:    import('./agent.js').SessionCounters | undefined;
+  /**
+   * Eager-persist hook fired at every stable point in the agent loop (after
+   * assistant message, after tool_results). Lets the Session checkpoint
+   * messages to the ThreadStore mid-run so a container-restart or OOM kill
+   * during a long run doesn't lose the in-memory message buffer. Without
+   * this, persistence happened only at end-of-run — if the process died
+   * mid-loop, all turns since the last completed run were unrecoverable
+   * (2026-05-18 staging QA finding from rafael prod).
+   *
+   * Fire-and-forget — the hook should never throw or block the loop. Implementer
+   * is responsible for its own error handling.
+   */
+  onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
 }
 
 /** Minimal interface to avoid circular deps between agent and changeset module */

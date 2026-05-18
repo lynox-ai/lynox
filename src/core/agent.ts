@@ -55,6 +55,20 @@ export class Agent implements IAgent {
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
   onStream: StreamHandler | null;
+  /**
+   * Eager-persist hook. Invoked at stable points in the loop (after assistant
+   * message and after tool_results) so the Session can checkpoint to the
+   * ThreadStore mid-run. See `AgentConfig.onMessageCheckpoint` for rationale.
+   */
+  private readonly onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
+
+  /** Fire the eager-persist hook, swallowing any error so the loop doesn't die over a persist failure. */
+  private async _checkpoint(): Promise<void> {
+    if (!this.onMessageCheckpoint) return;
+    try {
+      await this.onMessageCheckpoint();
+    } catch { /* fire-and-forget — persistence failures must not break the loop */ }
+  }
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -159,6 +173,7 @@ export class Agent implements IAgent {
     this.memory = config.memory ?? null;
     this.tools = config.tools ?? [];
     this.onStream = config.onStream ?? null;
+    this.onMessageCheckpoint = config.onMessageCheckpoint;
     this.promptUser = config.promptUser;
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
@@ -346,6 +361,10 @@ export class Agent implements IAgent {
         (b): b is Exclude<typeof b, { type: 'thinking' }> => b.type !== 'thinking',
       ) as BetaContentBlockParam[];
       this.messages.push({ role: 'assistant', content: contentForHistory });
+      // F-Eager-Persist: checkpoint after each assistant message so the
+      // ThreadStore has the latest turn even if the process dies before the
+      // run() finally block runs (container restart, OOM).
+      await this._checkpoint();
 
       // Per-agent cost guard: track usage and enforce budget
       if (this.costGuard) {
@@ -396,6 +415,9 @@ export class Agent implements IAgent {
       if (response.stop_reason === 'tool_use') {
         const results = await this._dispatchTools(response.content);
         this.messages.push({ role: 'user', content: results });
+        // F-Eager-Persist: checkpoint after tool_results so a process kill
+        // before the next LLM call doesn't lose the tool work just done.
+        await this._checkpoint();
         continue;
       }
 
