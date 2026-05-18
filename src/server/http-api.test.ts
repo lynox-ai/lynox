@@ -910,6 +910,115 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // v29: /secret-saved must distinguish managed_blocked from user-cancel, and
+  // must not let a client mark another session's prompt as saved.
+  describe('POST /api/sessions/:id/secret-saved', () => {
+    async function withStore(test: (sid: string, ps: import('../core/prompt-store.js').PromptStore) => Promise<void>): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      try { await test('sec-1', realPromptStore); }
+      finally { engineRef.getPromptStore = original; db.close(); }
+    }
+
+    it('status="managed_blocked" persists answer_error (NOT a cancel)', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertAskSecret(sid, 'SHOPIFY_TOKEN', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST',
+          body: JSON.stringify({ status: 'managed_blocked', promptId }),
+        });
+        expect(res.status).toBe(200);
+        const row = ps.getById(promptId);
+        expect(row?.answer_error).toBe('managed_blocked');
+        expect(row?.answer_saved).toBe(0);
+      });
+    });
+
+    it('legacy {saved:true} still saves (back-compat)', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST',
+          body: JSON.stringify({ saved: true, promptId }),
+        });
+        expect(res.status).toBe(200);
+        const row = ps.getById(promptId);
+        expect(row?.answer_saved).toBe(1);
+        expect(row?.answer_error).toBeNull();
+      });
+    });
+
+    it('legacy {saved:false} reads as canceled (back-compat)', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST',
+          body: JSON.stringify({ saved: false, promptId }),
+        });
+        expect(res.status).toBe(200);
+        const row = ps.getById(promptId);
+        expect(row?.answer_saved).toBe(0);
+        expect(row?.answer_error).toBeNull();
+      });
+    });
+
+    it('missing status AND missing saved → vault_error (safe default)', async () => {
+      // The exact bug class this PR exists to kill: an ambiguous "we don't
+      // know what happened" answer must NOT be classified as a user-cancel
+      // (which would fire the agent's hard "DO NOT retry, DO NOT plaintext"
+      // guards). vault_error keeps the door open for a retry.
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ promptId }),
+        });
+        expect(res.status).toBe(200);
+        expect(ps.getById(promptId)?.answer_error).toBe('vault_error');
+      });
+    });
+
+    it('unknown status string → vault_error', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'bogus', promptId }),
+        });
+        expect(res.status).toBe(200);
+        expect(ps.getById(promptId)?.answer_error).toBe('vault_error');
+      });
+    });
+
+    it('rejects cross-session promptId (auth scope)', async () => {
+      await withStore(async (sid, ps) => {
+        // promptId belongs to session 'sec-1' but client POSTs against 'other-1'
+        const promptId = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/other-1/secret-saved`, {
+          method: 'POST',
+          body: JSON.stringify({ status: 'saved', promptId }),
+        });
+        // Falls through to per-session lookup; 'other-1' has no pending → 404.
+        expect(res.status).toBe(404);
+        // The original session's row must remain untouched.
+        expect(ps.getById(promptId)?.status).toBe('pending');
+      });
+    });
+  });
+
   describe('memory', () => {
     it('GET loads namespace', async () => {
       const res = await jsonFetch('/api/memory/knowledge');

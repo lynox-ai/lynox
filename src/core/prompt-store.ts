@@ -15,7 +15,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { TabQuestion, SecretOutcome } from '../types/agent.js';
+import type { TabQuestion, SecretOutcome } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,8 +35,9 @@ export interface PendingPromptRow {
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
-   * than a user cancel. See migration v29. Values: 'managed_blocked' |
-   * 'vault_error'. NULL for ask_user rows and for real save/cancel. */
+   * than a user cancel. See migration v29 and the `SecretOutcome` type for
+   * the canonical value set. NULL for ask_user rows and for real save/
+   * cancel. */
   answer_error: string | null;
   status: PromptStatus;
   created_at: string;

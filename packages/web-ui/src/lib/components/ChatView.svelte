@@ -476,15 +476,20 @@
 		}
 	});
 
-	// Common secret patterns for chat input guard
+	// Common secret patterns for chat input guard. Coverage matches the
+	// providers we ship with first-class integrations + the prefixes that
+	// most often leak into chat ("here's my Shopify token: shpat_…"). When
+	// a paste matches, the input is rejected with `chat.secret_warning`.
 	const SECRET_INPUT_PATTERNS = [
-		/\bsk-ant-[A-Za-z0-9_-]{20,}/,
-		/\bsk-[A-Za-z0-9]{20,}/,
-		/\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,
-		/\b(ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{10,}/,
-		/\bAKIA[A-Z0-9]{16}/,
-		/\bAIza[A-Za-z0-9_-]{35}/,
-		/\bxox[bpras]-[A-Za-z0-9-]{10,}/,
+		/\bsk-ant-[A-Za-z0-9_-]{20,}/,                       // Anthropic
+		/\bsk-[A-Za-z0-9]{20,}/,                             // OpenAI (sk-, sk-proj-)
+		/\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,              // Stripe
+		/\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}/, // GitHub
+		/\bAKIA[A-Z0-9]{16}/,                                // AWS access-key
+		/\bAIza[A-Za-z0-9_-]{35}/,                           // Google API key
+		/\bxox[bpoasr]-[A-Za-z0-9-]{10,}/,                   // Slack
+		/\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}/,               // Shopify (admin / app secret / partner / custom)
+		/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\./,  // JWT (3 base64 segments)
 	];
 
 	function looksLikeSecret(text: string): boolean {
@@ -494,9 +499,6 @@
 	async function handleSecretSave() {
 		if (!pendingSecret || !secretValue.trim()) return;
 		const result = await submitSecret(pendingSecret.name, secretValue.trim());
-		// Three outcomes: success / managed-tier blocked the name / generic
-		// vault failure. The agent gets a matching tool-result on the engine
-		// side; the UI toast just tells the user what happened.
 		if (result === 'saved') {
 			addToast(t('chat.secret_saved'), 'success', 3000);
 		} else if (result === 'managed_blocked') {

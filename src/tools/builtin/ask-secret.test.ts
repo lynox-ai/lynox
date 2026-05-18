@@ -66,9 +66,10 @@ describe('askSecretTool', () => {
     // Hard guards: no retry, no plaintext.
     expect(result).toMatch(/DO NOT retry ask_secret/i);
     expect(result).toMatch(/DO NOT offer to receive the secret/i);
-    // And critically: must NOT use the word "canceled" — that's the bug we
-    // shipped this refactor to kill.
-    expect(result.toLowerCase()).not.toContain('cancel');
+    // And critically: must NOT use "User canceled" — that's the bug we
+    // shipped this refactor to kill. (Scoped tighter than `cancel` so a
+    // future copy edit like "this is not a cancellation" doesn't flake.)
+    expect(result).not.toMatch(/user canceled/i);
   });
 
   it('returns a distinct message for vault_error (NOT a cancel)', async () => {
