@@ -23,6 +23,7 @@ export interface SecretStoreLike {
   isExpired(name: string): boolean;
   extractSecretNames(input: unknown): string[];
   resolveSecretRefs(input: unknown): unknown;
+  findUnresolvedSecretRefs(input: unknown): string[];
   set?(name: string, value: string, scope?: SecretScope, ttlMs?: number): void;
   deleteSecret?(name: string): boolean;
 }

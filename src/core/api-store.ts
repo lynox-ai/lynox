@@ -64,6 +64,35 @@ export interface ApiAuth {
    * - `oauth2`   — managed OAuth refresh-token flow.
    */
   type: 'none' | 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
+
+  /**
+   * OAuth2 metadata — used by `api_setup` action `fetch_token` to drive the
+   * token exchange. Eliminates the brittle "agent constructs the
+   * /oauth/access_token POST by hand and probably gets the body format
+   * wrong" pattern that broke the Shopify integration setup on 2026-05-18.
+   *
+   * Required when `auth.type === 'oauth2'`.
+   */
+  oauth?: {
+    /** Token endpoint URL. e.g. `https://<shop>.myshopify.com/admin/oauth/access_token`. */
+    token_url?: string | undefined;
+    /** OAuth grant type. `client_credentials` is the default for app-only flows. */
+    grant_type?: 'client_credentials' | 'refresh_token' | undefined;
+    /** Vault key name holding the client_id (UPPER_SNAKE_CASE). */
+    client_id_key?: string | undefined;
+    /** Vault key name holding the client_secret (UPPER_SNAKE_CASE). */
+    client_secret_key?: string | undefined;
+    /** For `refresh_token` grant: vault key name holding the refresh token. */
+    refresh_token_key?: string | undefined;
+    /** Optional space-separated scopes (e.g. `read_products write_products`). */
+    scope?: string | undefined;
+    /** Optional audience (Auth0-style flows). */
+    audience?: string | undefined;
+    /** Body encoding for the token POST. Most providers want `form`
+     *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
+     *  Default: `form`. */
+    body_format?: 'form' | 'json' | undefined;
+  } | undefined;
   /**
    * For 'basic': how the credential is stored.
    * - 'user_pass_split' — separate username + password fields combined at call time.
@@ -95,8 +124,10 @@ export type ShapeReducer = 'avg' | 'peak' | 'avg+peak' | 'count' | 'first_n' | '
  * the tool call.
  */
 export interface ResponseShape {
-  /** 'reduce' applies the rules; 'passthrough' is an explicit no-op marker. */
-  kind?: 'reduce' | 'passthrough' | undefined;
+  /** 'reduce' applies the rules; 'passthrough' is an explicit no-op marker;
+   *  'graphql' is a `reduce` alias signalling GraphQL-shaped include paths
+   *  (e.g. `data.<query>.edges[*].node`). Treat as `reduce` everywhere. */
+  kind?: 'reduce' | 'passthrough' | 'graphql' | undefined;
   /**
    * Whitelist of JSON paths to keep. Omit to keep all fields.
    * Path syntax: dot + `[]` for arrays, e.g.

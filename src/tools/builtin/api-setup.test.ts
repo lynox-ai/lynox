@@ -43,7 +43,7 @@ const SAMPLE_PROFILE: ApiProfile = {
   avoid: ['No GET for mutations'],
 };
 
-function createMockAgent(apiStore?: ApiStore | null) {
+function createMockAgent(apiStore?: ApiStore | null, secretStore?: unknown) {
   return {
     // Bootstrap fetches now charge against sessionCounters.httpRequests
     // (matches http.ts). The stub just provides a writable counter; tests
@@ -53,6 +53,7 @@ function createMockAgent(apiStore?: ApiStore | null) {
       approvedOutboundDomains: new Set<string>(),
       pendingOutboundPrompts: new Map<string, unknown>(),
     },
+    secretStore: secretStore ?? undefined,
     toolContext: {
       apiStore: apiStore ?? null,
       dataStore: null,
@@ -1387,6 +1388,144 @@ describe('api_setup tool', () => {
         agent,
       );
       expect(result).toContain('Invalid reducer');
+    });
+  });
+
+  // Staging 2026-05-18 incident: agent constructed the Shopify OAuth
+  // /access_token POST by hand via http_request and mis-handled body
+  // format + missing client_id, then mis-diagnosed the failure as a
+  // tool-level bug. `fetch_token` action does the exchange properly
+  // using profile.auth.oauth metadata and stores the resulting
+  // access_token in the vault — no more hand-rolled POSTs.
+  describe('fetch_token', () => {
+    // Minimal mock secret store implementing only what fetch_token uses:
+    // - resolveSecretRefs (used by the resolveOne probe in the handler)
+    // - set (used to persist the access_token)
+    function makeMockSecretStore(initial: Record<string, string>): unknown {
+      const store: Record<string, string> = { ...initial };
+      return {
+        resolveSecretRefs: (input: unknown): unknown => {
+          const text = JSON.stringify(input);
+          const resolved = text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (_m, name: string) => {
+            const v = store[name];
+            return v !== undefined ? v.replace(/["\\]/g, c => `\\${c}`) : `secret:${name}`;
+          });
+          try { return JSON.parse(resolved) as unknown; }
+          catch { return input; }
+        },
+        set: (name: string, value: string): void => { store[name] = value; },
+        _peek: (name: string) => store[name],
+      };
+    }
+
+    const SHOPIFY_PROFILE = {
+      id: 'shopify_seo',
+      name: 'Shopify',
+      base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+      description: 'Shopify Admin API',
+      auth: {
+        type: 'oauth2' as const,
+        vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
+        oauth: {
+          token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+          grant_type: 'client_credentials' as const,
+          client_id_key: 'SHOPIFY_CLIENT_ID',
+          client_secret_key: 'SHOPIFY_CLIENT_SECRET',
+          body_format: 'json' as const,
+        },
+      },
+      // Minimum so the create-completeness check passes.
+      endpoints: [{ method: 'POST' as const, path: '/graphql.json', description: 'GraphQL endpoint' }],
+      guidelines: ['Use GraphQL over REST'],
+      avoid: ['Avoid loading all fields in one query'],
+    };
+
+    it('refuses fetch_token when profile is missing', async () => {
+      const agent = createMockAgent(new ApiStore(), makeMockSecretStore({}));
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'does-not-exist' }, agent);
+      expect(result).toMatch(/not found/i);
+    });
+
+    it('refuses fetch_token when profile auth is not oauth2', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({}));
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'test-api' }, agent);
+      expect(result).toMatch(/oauth2/i);
+    });
+
+    it('refuses fetch_token when vault is missing client_id / client_secret', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({})); // empty vault
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE }, agent);
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      expect(result).toMatch(/missing the OAuth credentials/i);
+      expect(result).toContain('SHOPIFY_CLIENT_ID');
+      expect(result).toContain('SHOPIFY_CLIENT_SECRET');
+    });
+
+    it('does the token exchange and stores the access_token in the vault', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      }) as { _peek: (n: string) => string | undefined };
+      const agent = createMockAgent(store, vaultMock);
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE }, agent);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'shpat_returned_token_abc', expires_in: 86400 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/Token exchange OK/i);
+      expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
+      expect(result).toContain('86400s');
+      expect(vaultMock._peek('SHOPIFY_SEO_ACCESS_TOKEN')).toBe('shpat_returned_token_abc');
+
+      // Verify body format: profile says JSON, so the POST body should be
+      // a JSON string (not form-encoded).
+      const lastCall = fetchSpy.mock.calls[fetchSpy.mock.calls.length - 1]!;
+      const opts = lastCall[1] as { body?: string; headers?: Record<string, string> };
+      expect(opts.headers?.['Content-Type']).toBe('application/json');
+      const sentBody = JSON.parse(opts.body!) as Record<string, string>;
+      expect(sentBody['grant_type']).toBe('client_credentials');
+      expect(sentBody['client_id']).toBe('client-id-xyz');
+      expect(sentBody['client_secret']).toBe('shpss_secret_xyz');
+
+      fetchSpy.mockRestore();
+    });
+
+    it('surfaces external 4xx without blaming the tool', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'id',
+        SHOPIFY_CLIENT_SECRET: 'sec',
+      }));
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE }, agent);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('<!DOCTYPE html><html><body>app_not_installed</body></html>', {
+          status: 400,
+          headers: { 'content-type': 'text/html' },
+        })
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      // Tool result should explicitly tell the agent this is an external
+      // provider failure (not a lynox bug) and EXPLICITLY guard against
+      // recommending self-host as a workaround (that's the failure mode
+      // from the 2026-05-18 staging incident).
+      expect(result).toMatch(/HTTP 400/);
+      expect(result).toMatch(/external provider/i);
+      expect(result).toMatch(/NOT a lynox tool limitation/i);
+      expect(result).toMatch(/Do NOT recommend self-host/i);
+      fetchSpy.mockRestore();
     });
   });
 });

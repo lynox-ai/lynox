@@ -271,4 +271,62 @@ describe('SecretStore', () => {
       vi.useRealTimers();
     });
   });
+
+  // Staging 2026-05-18 incident: the resolver silently substituted nothing
+  // when a `secret:NAME` referenced a key the vault didn't have. The
+  // literal `secret:NAME` then got POSTed to Shopify, which echoed it
+  // back in the error message, which the agent mis-diagnosed as a
+  // tool-level bug ("http_request doesn't resolve secrets in bodies").
+  // The fix is fail-loud: agent.ts checks findUnresolvedSecretRefs and
+  // refuses the tool call with a clear error message.
+  describe('findUnresolvedSecretRefs (staging-incident regression pin)', () => {
+    it('returns empty when all referenced secrets resolve', () => {
+      const vault = mockVault([
+        ['A', { value: 'a-value', scope: 'any', ttlMs: 0 }],
+        ['B', { value: 'b-value', scope: 'any', ttlMs: 0 }],
+      ]);
+      const store = new SecretStore(undefined, vault);
+      expect(store.findUnresolvedSecretRefs({ x: 'secret:A', y: 'secret:B' })).toEqual([]);
+    });
+
+    it('returns the names of secrets the vault does NOT have', () => {
+      const vault = mockVault([
+        ['PRESENT', { value: 'p', scope: 'any', ttlMs: 0 }],
+      ]);
+      const store = new SecretStore(undefined, vault);
+      expect(store.findUnresolvedSecretRefs({
+        present: 'secret:PRESENT',
+        missing: 'secret:NOT_THERE',
+      })).toEqual(['NOT_THERE']);
+    });
+
+    it('detects unresolved refs in body strings (the actual staging path)', () => {
+      // The Shopify failure mode: client_id + client_secret are JSON-string
+      // body fields, not structured object fields. The resolver still walks
+      // through JSON.stringify → regex, but the test makes sure body-string
+      // matches are reported by findUnresolvedSecretRefs too.
+      const vault = mockVault([
+        ['CLIENT_SECRET', { value: 'shpss_xyz', scope: 'any', ttlMs: 0 }],
+      ]);
+      const store = new SecretStore(undefined, vault);
+      const input = {
+        url: 'https://example.com/oauth/access_token',
+        method: 'POST',
+        body: '{"client_id": "secret:CLIENT_ID", "client_secret": "secret:CLIENT_SECRET"}',
+      };
+      expect(store.findUnresolvedSecretRefs(input)).toEqual(['CLIENT_ID']);
+    });
+
+    it('deduplicates names that appear multiple times in the input', () => {
+      const store = new SecretStore();
+      const input = { a: 'secret:MISSING', b: 'also secret:MISSING here', c: 'secret:OTHER' };
+      const result = store.findUnresolvedSecretRefs(input);
+      expect(result.sort()).toEqual(['MISSING', 'OTHER']);
+    });
+
+    it('returns empty for input with no secret refs', () => {
+      const store = new SecretStore();
+      expect(store.findUnresolvedSecretRefs({ url: 'https://example.com', body: 'plain text' })).toEqual([]);
+    });
+  });
 });

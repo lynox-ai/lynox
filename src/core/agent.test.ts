@@ -1005,6 +1005,18 @@ describe('Agent', () => {
         recordConsent: vi.fn(),
         hasConsent: vi.fn().mockReturnValue(false),
         isExpired: vi.fn().mockReturnValue(false),
+        findUnresolvedSecretRefs: vi.fn().mockImplementation((input: unknown) => {
+          // Mirror the real implementation: list refs the vault doesn't have.
+          const text = JSON.stringify(input);
+          const names: string[] = [];
+          const pattern = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
+          let m;
+          while ((m = pattern.exec(text)) !== null) {
+            const n = m[1]!;
+            if (!names.includes(n) && store.resolve(n) === null) names.push(n);
+          }
+          return names;
+        }),
         extractSecretNames: vi.fn().mockImplementation((input: unknown) => {
           const text = JSON.stringify(input);
           const names: string[] = [];
