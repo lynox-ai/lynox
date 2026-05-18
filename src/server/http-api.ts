@@ -722,7 +722,16 @@ export class LynoxHTTPApi {
       `${LynoxHTTPApi.SESSION_COOKIE_NAME}=${token}`,
       'Path=/',
       'HttpOnly',
-      'SameSite=Strict',
+      // Lax (not Strict) — see web-ui setSessionCookie comment. Strict made
+      // top-level cross-site GETs to /login NOT carry the cookie; the load()
+      // redirect therefore couldn't catch a still-valid session on first
+      // paint, and the user only got bounced to /app after submitting the OTP
+      // form (looked like a bypass even though the cookie was genuine). Lax
+      // sends cookie on safe-method cross-site nav; CSRF on POST/PUT/DELETE
+      // is still blocked because Lax doesn't attach the cookie to cross-site
+      // form submissions. Rolling-refresh path must mirror the original
+      // login mint or each /api/* call would re-stamp Strict.
+      'SameSite=Lax',
       `Max-Age=${LynoxHTTPApi.SESSION_MAX_AGE_S}`,
     ];
     if (isTls) attrs.push('Secure');
@@ -1130,8 +1139,12 @@ export class LynoxHTTPApi {
     }
 
     // Google OAuth callback — unauthenticated (browser redirect from Google).
-    // Session cookie is unavailable here because sameSite:strict blocks cross-site
-    // navigations. CSRF protection is via the `state` parameter instead.
+    // CSRF protection is via the `state` parameter (HMAC-bound to a separate
+    // SameSite=Lax state cookie scoped to /api/google/callback). The main
+    // session cookie is now SameSite=Lax so it WOULD attach on this top-level
+    // cross-site GET, but we still route this path as unauthenticated — the
+    // OAuth state cookie + state-param verification is the authoritative
+    // identity check at this entry point.
     if (method === 'GET' && pathname === '/api/google/callback') {
       const handler = this.staticRoutes.get('GET /api/google/callback');
       if (handler) { await handler(req, res, {}, null); return; }
@@ -3720,10 +3733,11 @@ export class LynoxHTTPApi {
       }
 
       // Render the post-callback redirect page. Uses meta-refresh (not inline JS,
-      // which the engine API CSP `default-src 'none'` blocks; not a 302, which would
-      // continue the cross-site redirect chain Google → callback → settings where
-      // SameSite=Strict session cookies wouldn't be sent). Meta-refresh from this
-      // same-origin page navigates with cookies intact.
+      // which the engine API CSP `default-src 'none'` blocks; not a 302 directly
+      // out of the callback handler because we want a same-origin navigation
+      // hop for predictable cookie + history behaviour). Under SameSite=Lax
+      // the session cookie WOULD survive a direct 302 cross-site continuation
+      // too, but the meta-refresh keeps the cleaner same-origin pattern.
       const sendSuccessRedirect = (): void => {
         const target = `${process.env['ORIGIN'] ?? ''}/app/settings/channels/google`;
         const escaped = target.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);

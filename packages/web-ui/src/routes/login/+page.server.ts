@@ -53,7 +53,19 @@ function setSessionCookie(cookies: Parameters<PageServerLoad>[0]['cookies'], sec
 		path: '/',
 		httpOnly: true,
 		secure: isSecure,
-		sameSite: 'strict',
+		// Lax (not Strict): with Strict the cookie is NOT attached on top-level
+		// cross-site GETs (e.g. tap a link from Mail.app or another tab to
+		// cat.lynox.cloud/login). The server load() therefore can't redirect a
+		// logged-in user away from /login on first paint — they see the OTP
+		// form, type their email, click "Send code", and only THEN does the
+		// same-site form POST attach the cookie. enhance.update() re-runs the
+		// load function, the redirect fires, and the user is logged in without
+		// ever entering an OTP code. Confusing + looks like a bypass even
+		// though the cookie was genuinely valid. Lax sends cookie on safe
+		// methods (GET) cross-site → load() redirects on first paint as
+		// expected. State-changing POSTs (e.g. /api/run) still need same-site
+		// origin under Lax, so CSRF is still blocked. Cat 2026-05-19.
+		sameSite: 'lax',
 		maxAge: SESSION_MAX_AGE_S,
 	});
 }
@@ -170,9 +182,22 @@ export const actions: Actions = {
 	},
 
 	/** Managed: request OTP code via control plane. */
-	requestOtp: async ({ request, getClientAddress }) => {
+	requestOtp: async ({ request, cookies, getClientAddress }) => {
 		const secret = getSecret();
 		if (!secret) return fail(500, { error: 'Instance not configured.' });
+
+		// Defence in depth: if a valid session cookie is already attached to
+		// this POST, the user is already logged in. Redirect rather than spam
+		// the control plane with a useless /internal/auth/request — AND avoid
+		// the confusing UX where clicking "Send code" silently logs the user
+		// in (no email entered, no code entered) just because a stale cookie
+		// became visible to enhance.update()'s re-run of load(). With the
+		// switch to SameSite=Lax this case should be rare (load() catches it
+		// on first paint now), but the guard is cheap insurance.
+		const existingToken = cookies.get('lynox_session');
+		if (existingToken && verifySessionToken(existingToken, secret)) {
+			redirect(303, '/app');
+		}
 
 		const managed = getManagedConfig();
 		if (!managed) return fail(400, { error: 'Not a managed instance.' });
@@ -223,6 +248,13 @@ export const actions: Actions = {
 	verifyOtp: async ({ request, cookies, url, getClientAddress }) => {
 		const secret = getSecret();
 		if (!secret) redirect(303, '/app');
+
+		// Same guard as requestOtp: if already signed in, don't reach the
+		// control plane for a verify — just redirect.
+		const existingToken = cookies.get('lynox_session');
+		if (existingToken && verifySessionToken(existingToken, secret)) {
+			redirect(303, '/app');
+		}
 
 		const managed = getManagedConfig();
 		if (!managed) return fail(400, { error: 'Not a managed instance.' });
