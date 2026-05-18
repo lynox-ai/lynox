@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { currentDateContext, withCurrentTimePrefix, SYSTEM_PROMPT } from './prompts.js';
+import { currentDateContext, withCurrentTimePrefix, SYSTEM_PROMPT, modelIdentityContext } from './prompts.js';
 
 // File-level reset so a forgotten useRealTimers() in a future test can't
 // poison the next case's `new Date()` reads.
@@ -162,5 +162,48 @@ describe('SYSTEM_PROMPT honesty guardrail', () => {
     expect(SYSTEM_PROMPT).toMatch(/do not (pad|invent|fabricate|make up)/i);
     // The "ask the user" intent should also be there in some form.
     expect(SYSTEM_PROMPT).toMatch(/(ask the user|ask.*for the rest|surface what)/i);
+  });
+});
+
+// Fix C regression-pin (v1.5.2): SYSTEM_PROMPT alone does not anchor model
+// identity, so a Mistral/Custom model can hallucinate "I am Claude Haiku"
+// from training-data bias. modelIdentityContext is the injection point —
+// without it, the rafael-prod 2026-05-18 incident regresses.
+describe('modelIdentityContext', () => {
+  it('returns an empty string when provider or model is missing (no anchor possible)', () => {
+    expect(modelIdentityContext(undefined, 'claude-sonnet-4-6')).toBe('');
+    expect(modelIdentityContext('anthropic', undefined)).toBe('');
+    expect(modelIdentityContext(null, null)).toBe('');
+    expect(modelIdentityContext('', '')).toBe('');
+  });
+
+  it('names Anthropic as the provider when running Claude', () => {
+    const out = modelIdentityContext('anthropic', 'claude-sonnet-4-6');
+    expect(out).toContain('Anthropic');
+    expect(out).toContain('claude-sonnet-4-6');
+  });
+
+  it('names Mistral / OpenAI-compatible for the openai provider', () => {
+    const out = modelIdentityContext('openai', 'mistral-large-2512');
+    expect(out).toContain('Mistral');
+    expect(out).toContain('mistral-large-2512');
+  });
+
+  it('names the custom provider distinctly so the model knows it is not Anthropic-direct', () => {
+    const out = modelIdentityContext('custom', 'some-proxied-model');
+    expect(out).toContain('custom');
+    expect(out).toContain('some-proxied-model');
+  });
+
+  it('issues a negative imperative against claiming a different brand', () => {
+    const out = modelIdentityContext('openai', 'mistral-large-2512');
+    // Case-insensitive: "do not" / "Do not" / etc.
+    expect(out).toMatch(/do not (guess|claim|say)/i);
+  });
+
+  it('falls through cleanly for an unknown provider string (no throw)', () => {
+    const out = modelIdentityContext('future-provider-x', 'some-model');
+    expect(out).toContain('future-provider-x');
+    expect(out).toContain('some-model');
   });
 });

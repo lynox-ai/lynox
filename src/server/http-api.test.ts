@@ -16,6 +16,9 @@ const mockSecretListNames = vi.fn().mockReturnValue(['ANTHROPIC_API_KEY']);
 const mockSecretSet = vi.fn();
 const mockSecretDelete = vi.fn().mockReturnValue(true);
 const mockSetApiKey = vi.fn();
+// v1.5.2: hoisted so tests can pin "all BYOK slots trigger reloadUserConfig".
+// Was previously created inside the per-instance Engine mock and unreachable.
+const mockReloadUserConfig = vi.fn().mockResolvedValue(undefined);
 const mockHistoryGetRecentRuns = vi.fn().mockReturnValue([{ id: 'run-1', task_text: 'test', status: 'completed' }]);
 const mockHistorySearchRuns = vi.fn().mockReturnValue([]);
 const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'test' });
@@ -101,7 +104,7 @@ vi.mock('../core/engine.js', () => ({
     this.getPromptStore = vi.fn().mockReturnValue(null);
     this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
-    this.reloadUserConfig = vi.fn().mockResolvedValue(undefined);
+    this.reloadUserConfig = mockReloadUserConfig;
     this.getUserConfig = vi.fn().mockReturnValue({});
     this.setApiKey = mockSetApiKey;
     return this;
@@ -1385,6 +1388,7 @@ describe('LynoxHTTPApi', () => {
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
         'PUT /api/secrets/ANTHROPIC_API_KEY accepts user-scope in mode=%s',
         async (mode) => {
+          mockReloadUserConfig.mockClear();
           vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
           vi.stubEnv('LYNOX_MANAGED_MODE', mode);
           try {
@@ -1394,9 +1398,12 @@ describe('LynoxHTTPApi', () => {
             });
             expect(res.status).toBe(200);
             expect(mockSecretSet).toHaveBeenCalledWith('ANTHROPIC_API_KEY', 'sk-ant-test');
-            // Hot-reload path fires for ANTHROPIC_API_KEY specifically — the
-            // engine swaps the LLM client without a process restart.
-            expect(mockSetApiKey).toHaveBeenCalledWith('sk-ant-test');
+            // v1.5.2: every BYOK provider slot now calls reloadUserConfig so
+            // a provider switch (Anthropic ↔ Mistral ↔ Custom) actually
+            // re-inits the engine client. Pre-fix only ANTHROPIC_API_KEY
+            // hot-reloaded → Mistral key landed in the vault but the engine
+            // kept the stale Anthropic adapter (rafael-prod 2026-05-18).
+            expect(mockReloadUserConfig).toHaveBeenCalled();
           } finally {
             vi.unstubAllEnvs();
             vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -1404,24 +1411,28 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
-      it('PUT /api/secrets/OPENAI_API_KEY accepts user-scope in managed mode', async () => {
-        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
-        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
-        try {
-          const res = await jsonFetch('/api/secrets/OPENAI_API_KEY', {
-            method: 'PUT',
-            body: JSON.stringify({ value: 'sk-test' }),
-          });
-          expect(res.status).toBe(200);
-          // setApiKey is only triggered for the Anthropic key — OpenAI flows
-          // through a different adapter that picks the key up at session
-          // creation, no hot-reload needed.
-          expect(mockSetApiKey).not.toHaveBeenCalled();
-        } finally {
-          vi.unstubAllEnvs();
-          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
-        }
-      });
+      it.each(['MISTRAL_API_KEY', 'OPENAI_API_KEY', 'CUSTOM_API_KEY'])(
+        'PUT /api/secrets/%s accepts user-scope in managed mode AND hot-reloads',
+        async (slot) => {
+          mockReloadUserConfig.mockClear();
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          try {
+            const res = await jsonFetch(`/api/secrets/${slot}`, {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'sk-test' }),
+            });
+            expect(res.status).toBe(200);
+            expect(mockSecretSet).toHaveBeenCalledWith(slot, 'sk-test');
+            // All BYOK provider slots must reload the engine client —
+            // see PROVIDER_KEY_SLOTS in core/llm/provider-keys.ts.
+            expect(mockReloadUserConfig).toHaveBeenCalled();
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
 
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
         'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (not BYOK)',
@@ -1488,10 +1499,8 @@ describe('LynoxHTTPApi', () => {
         expect(body.error).toBe('disk full');
       });
 
-      it('PUT /api/secrets/ANTHROPIC_API_KEY persists the secret but reports hot_reload:false when setApiKey throws', async () => {
-        mockSetApiKey.mockImplementationOnce(() => {
-          throw new Error('client init failed');
-        });
+      it('PUT /api/secrets/ANTHROPIC_API_KEY persists the secret but reports hot_reload:false when reloadUserConfig throws', async () => {
+        mockReloadUserConfig.mockRejectedValueOnce(new Error('client init failed'));
         const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
           method: 'PUT',
           body: JSON.stringify({ value: 'sk-ant-x' }),
@@ -2054,9 +2063,21 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
-    it('400 when api_key is missing for anthropic', async () => {
-      const res = await llmTestFetch({ provider: 'anthropic' });
-      expect(res.status).toBe(400);
+    it('400 when api_key is missing for anthropic and no env/vault fallback', async () => {
+      // v1.5.2: the endpoint now falls back to env/vault when the body key
+      // is empty (so "Verbindung testen" after page reload works). Clear
+      // the provider env var so the 400 path is reachable for assertion.
+      // NOTE: scope env mutation to ANTHROPIC_API_KEY only — beforeAll sets
+      // LYNOX_TRUST_PROXY=true globally for the IP-keyed rate-limit, and
+      // unstubAllEnvs() would drop that, breaking the rate-limit test below.
+      const prev = process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_API_KEY;
+      try {
+        const res = await llmTestFetch({ provider: 'anthropic' });
+        expect(res.status).toBe(400);
+      } finally {
+        if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+      }
     });
 
     it('400 when base_url is missing for custom provider', async () => {
@@ -2064,9 +2085,33 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
-    it('400 when api_key is missing for openai provider', async () => {
-      const res = await llmTestFetch({ provider: 'openai', base_url: 'https://api.example.com/v1' });
-      expect(res.status).toBe(400);
+    it('400 when api_key is missing for openai provider and no env/vault fallback', async () => {
+      const prevMistral = process.env.MISTRAL_API_KEY;
+      const prevOpenAI = process.env.OPENAI_API_KEY;
+      delete process.env.MISTRAL_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      try {
+        const res = await llmTestFetch({ provider: 'openai', base_url: 'https://api.example.com/v1' });
+        expect(res.status).toBe(400);
+      } finally {
+        if (prevMistral !== undefined) process.env.MISTRAL_API_KEY = prevMistral;
+        if (prevOpenAI !== undefined) process.env.OPENAI_API_KEY = prevOpenAI;
+      }
+    });
+
+    it('v1.5.2: empty body api_key falls back to env (no 400)', async () => {
+      // Symmetric pin for Fix B — body key empty but env has a key, so the
+      // 400 path must NOT fire. Probe failure (no fetch mock) returns 200
+      // with a non-ok body or a network error, also not 400.
+      const prev = process.env.ANTHROPIC_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-env-stubbed';
+      try {
+        const res = await llmTestFetch({ provider: 'anthropic' });
+        expect(res.status).not.toBe(400);
+      } finally {
+        if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+        else delete process.env.ANTHROPIC_API_KEY;
+      }
     });
 
     it('vertex returns 200 with skipped=true (auth too heavy for sync probe)', async () => {

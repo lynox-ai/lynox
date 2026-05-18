@@ -22,6 +22,7 @@ import type {
 } from '../types/index.js';
 import { MODEL_MAP, CHARS_PER_TOKEN, CONTEXT_WINDOW, getModelId, clampTier } from '../types/index.js';
 import { getActiveProvider } from './llm-client.js';
+import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -39,6 +40,7 @@ import {
   CRM_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
   currentDateContext,
+  modelIdentityContext,
   withCurrentTimePrefix,
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
@@ -403,9 +405,15 @@ export class Session {
       const langName = { de: 'German', en: 'English', fr: 'French', it: 'Italian', es: 'Spanish', nl: 'Dutch', pt: 'Portuguese', sv: 'Swedish' }[this.engine.config.language] ?? this.engine.config.language;
       basePrompt += `\n\n**Language override**: Respond in ${langName}. The user has explicitly set this preference.`;
     }
+    // Mirror the prompt-assembly that _createAgent uses so the hash and the
+    // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
+    const runIdentityContext = modelIdentityContext(
+      this._profileOverride?.provider ?? this.engine.getUserConfig().provider,
+      model,
+    );
     const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt) + currentDateContext();
+      : basePrompt) + runIdentityContext + currentDateContext();
     const promptHash = hashPrompt(effectivePrompt);
 
     // Record run start
@@ -960,9 +968,15 @@ export class Session {
     if (userConfig.experience === 'developer') {
       basePrompt += DEVELOPER_PROMPT_SUFFIX;
     }
+    // Anchor the model identity so a third-party adapter (Mistral, custom)
+    // doesn't hallucinate "I am Claude Haiku" from training-data bias.
+    const identityContext = modelIdentityContext(
+      this._profileOverride?.provider ?? userConfig.provider,
+      model,
+    );
     const systemPrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt) + currentDateContext();
+      : basePrompt) + identityContext + currentDateContext();
 
     // Apply hook-based tool filtering (for Pro extensions)
     let effectiveTools = tools;
@@ -1014,7 +1028,17 @@ export class Session {
       // below the model's native window (LLM Advanced UI offers 200k/500k/1M
       // at `/app/settings/llm/advanced` post P3-PR-X).
       maxContextWindowTokens: userConfig.max_context_window_tokens,
-      apiKey: this._profileOverride?.api_key ?? userConfig.api_key,
+      // Provider-aware key resolution: profile override → env-or-vault slot
+      // for the active provider → legacy userConfig.api_key (Anthropic only).
+      // Pre-1.5.2 this read `userConfig.api_key` directly, which is empty
+      // when the active provider is Mistral/Custom (their keys live under
+      // distinct vault slots) — Agent would then create an OpenAI adapter
+      // authenticated with an empty/wrong key. See [[provider-keys]].
+      apiKey: this._profileOverride?.api_key ?? resolveProviderApiKey({
+        provider: this._profileOverride?.provider ?? userConfig.provider,
+        secretStore: engine.getSecretStore(),
+        userConfig,
+      }),
       apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
       provider: this._profileOverride?.provider ?? userConfig.provider,
       gcpProjectId: userConfig.gcp_project_id,

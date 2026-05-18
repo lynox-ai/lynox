@@ -127,6 +127,26 @@ The user is a developer. Adjust your communication style:
  * that line lives in the user message so it never invalidates the cached
  * system prefix.
  */
+/**
+ * Tell the model exactly which provider + model is running this turn. Without
+ * this anchor, an LLM that wasn't trained to know its own ID happily claims
+ * it's a different brand — rafael-prod 2026-05-18: Mistral-Large insisted it
+ * was Claude Haiku because the system prompt never told it otherwise. The
+ * line is short on purpose so it survives Anthropic's cache without bloating
+ * the prefix.
+ */
+export function modelIdentityContext(provider: string | undefined | null, modelId: string | undefined | null): string {
+  if (!provider || !modelId) return '';
+  const label: Record<string, string> = {
+    anthropic: 'Anthropic (Claude family)',
+    openai: 'Mistral / OpenAI-compatible',
+    custom: 'a custom Anthropic-compatible proxy',
+    vertex: 'Google Cloud Vertex AI (Claude family)',
+  };
+  const prettyProvider = label[provider] ?? provider;
+  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${modelId}\`. If asked what model or provider you are, state exactly this — do not guess, do not claim a different brand, do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+}
+
 export function currentDateContext(): string {
   const now = new Date();
   const iso = now.toISOString().slice(0, 13) + ':00:00Z';

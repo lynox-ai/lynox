@@ -187,6 +187,35 @@
 		}
 	}
 
+	/**
+	 * Pick the default openai_model_id when the user switches to a new
+	 * provider. Prefers the "main" tier (sonnet) so orchestration lands on
+	 * the workhorse model. Falls back to the first catalog entry. Returns
+	 * `undefined` for providers without an enumerated catalog (custom).
+	 */
+	function pickDefaultModelIdForEntry(entry: CatalogProvider): string | undefined {
+		if (!entry.models || entry.models.length === 0) return undefined;
+		const mainTier = entry.models.find((m) => m.tier === 'sonnet');
+		if (mainTier) return mainTier.id;
+		return entry.models[0]?.id;
+	}
+
+	/**
+	 * Return the {main, small} pair for the active provider's tier-set so
+	 * the UI can show both models that will run (main for orchestration,
+	 * small for fast sub-tasks). Pre-1.5.2 the picker only surfaced one
+	 * model — users couldn't see that switching providers also swaps the
+	 * small/fast model used in pipelines and spawn calls.
+	 */
+	function tierSetFor(entry: CatalogProvider | null | undefined): { main: CatalogModel | null; small: CatalogModel | null } {
+		if (!entry || !entry.models || entry.models.length === 0) {
+			return { main: null, small: null };
+		}
+		const main = entry.models.find((m) => m.tier === 'sonnet') ?? entry.models[0] ?? null;
+		const small = entry.models.find((m) => m.tier === 'haiku') ?? null;
+		return { main, small };
+	}
+
 	function selectCatalogEntry(entry: CatalogProvider): void {
 		if (isTileLocked(entry)) {
 			addToast(t('llm.locked_provider'), 'info', 3000);
@@ -194,11 +223,22 @@
 		}
 		activeProvider = entry.provider;
 		activeCatalogKey = catalogEntryKey(entry);
+		// Fix A (v1.5.2): auto-default the main-tier model for the new
+		// provider's catalog so the <select bind:value={openai_model_id}>
+		// renders the right option highlighted instead of blank. Pre-fix
+		// rafael-prod 2026-05-18: switching to Mistral left openai_model_id
+		// empty, the dropdown looked unselected, and "Verbindung testen"
+		// failed because no model was wired.
+		const defaultForNewProvider = pickDefaultModelIdForEntry(entry);
 		if (entry.base_url_default && !entry.requires_base_url) {
 			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
 			// doesn't have to type a URL they didn't choose.
-			config = { ...config, api_base_url: entry.base_url_default };
+			config = {
+				...config,
+				api_base_url: entry.base_url_default,
+				...(defaultForNewProvider ? { openai_model_id: defaultForNewProvider } : {}),
+			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
 			&& providers.some((p) => p.base_url_default === config.api_base_url)) {
@@ -565,6 +605,33 @@
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.custom_model_id_hint')}</span>
 				</label>
+			{/if}
+
+			{#if activeProviderEntry.models.length > 0}
+				{@const tierSet = tierSetFor(activeProviderEntry)}
+				{#if tierSet.main && tierSet.small}
+					<!--
+						Fix D (v1.5.2): make the provider's tier-set visible. lynox dispatches
+						orchestration on the "main" tier (Sonnet → Claude Sonnet 4.6 / Mistral
+						Large) and sub-tasks on the "small" tier (Haiku → Claude Haiku 4.5 /
+						Mistral Small). Pre-fix the UI only surfaced one dropdown, so users
+						didn't know what model their pipeline / spawn calls were actually
+						hitting after a provider switch.
+					-->
+					<div class="rounded border border-border bg-bg-subtle px-3 py-2 text-xs space-y-1">
+						<div class="font-medium text-text-muted">{t('llm.tier_set_heading') || 'Tier-set used by lynox'}</div>
+						<div class="flex flex-wrap gap-x-4 gap-y-1">
+							<span>
+								<span class="text-text-muted">{t('llm.tier_main') || 'Main (orchestration)'}:</span>
+								<span class="font-mono">{tierSet.main.label}</span>
+							</span>
+							<span>
+								<span class="text-text-muted">{t('llm.tier_small') || 'Small / fast (sub-tasks)'}:</span>
+								<span class="font-mono">{tierSet.small.label}</span>
+							</span>
+						</div>
+					</div>
+				{/if}
 			{/if}
 
 			<!-- Inline residency note -->

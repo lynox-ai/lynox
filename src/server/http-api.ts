@@ -20,6 +20,8 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
+import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
+import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
@@ -172,7 +174,16 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  * admin-only. Self-host has no admin secret, so cookie users are promoted to
  * admin scope at the auth layer and this gate never applies to them.
  */
-const BYOK_USER_WRITABLE_SECRETS = new Set(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+const BYOK_USER_WRITABLE_SECRETS = new Set([
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  // v1.5.2: Mistral + Custom (Anthropic-compat) live in dedicated slots so
+  // switching providers in the UI doesn't clobber an existing Anthropic key.
+  // The web-ui LLMSettings.svelte VAULT_SLOTS map is the source of truth;
+  // mirror it here so managed users can actually save those keys.
+  'MISTRAL_API_KEY',
+  'CUSTOM_API_KEY',
+]);
 
 /**
  * Config fields a managed-tier user can change via PUT /api/config. Everything
@@ -2287,10 +2298,17 @@ export class LynoxHTTPApi {
       // persisted; a failed re-init shouldn't make the caller think the write
       // didn't land. Surface the partial success with `hot_reload: false` so
       // the UI can choose to nudge the user to refresh.
+      //
+      // Any of the BYOK provider slots (ANTHROPIC_API_KEY / MISTRAL_API_KEY /
+      // CUSTOM_API_KEY) should trigger a full reloadUserConfig: that path
+      // re-runs initLLMProvider + _configureOpenAIResolver + _recreateClient,
+      // which is what makes a Mistral/Custom key actually reach the adapter.
+      // Pre-1.5.2 only ANTHROPIC_API_KEY hot-reloaded → switching providers
+      // looked saved but the engine kept the old client.
       let hotReload = true;
-      if (name === 'ANTHROPIC_API_KEY') {
+      if (PROVIDER_KEY_SLOTS.has(name)) {
         try {
-          engine.setApiKey(value);
+          await engine.reloadUserConfig();
         } catch {
           hotReload = false;
         }
@@ -2840,7 +2858,17 @@ export class LynoxHTTPApi {
         return;
       }
       const provider = b['provider'];
-      const apiKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
+      const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
+      // Vault fallback: when the user already saved the key earlier and now
+      // hits "Verbindung testen" without re-typing, the form posts an empty
+      // body key. Pre-1.5.2 the endpoint 400'd "API key required" even though
+      // the vault had the value. Resolve the active provider's slot here so
+      // the probe matches what the runtime adapter would actually use.
+      const apiKey = bodyKey || (resolveProviderApiKey({
+        provider: provider as LLMProvider,
+        secretStore: engine.getSecretStore(),
+        userConfig: engine.getUserConfig(),
+      }) ?? '');
       const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
       const model = typeof b['model'] === 'string' ? b['model'] : '';
       const started = Date.now();

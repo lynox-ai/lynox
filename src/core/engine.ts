@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider } from './llm-client.js';
+import { resolveProviderApiKey } from './llm/provider-keys.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,
@@ -280,18 +281,25 @@ export class Engine {
   }
 
   private _recreateClient(): void {
-    // Priority: explicit env var > vault > config.json
-    const apiKey = process.env['ANTHROPIC_API_KEY']
-      ?? this.secretStore?.resolve('ANTHROPIC_API_KEY')
-      ?? this.userConfig.api_key;
+    // Provider-aware key resolution: openai → MISTRAL_API_KEY slot, custom
+    // → CUSTOM_API_KEY, anthropic → ANTHROPIC_API_KEY (+ legacy config.api_key
+    // fallback). Vertex returns undefined — its auth is GCP OAuth.
+    //
+    // The pre-1.5.2 code always read the ANTHROPIC_API_KEY slot regardless
+    // of provider, so a Mistral switch on a host without an Anthropic env
+    // fallback authenticated the OpenAI adapter with an empty / wrong key
+    // (rafael-prod incident 2026-05-18).
+    const apiKey = resolveProviderApiKey({
+      provider: this.userConfig.provider,
+      secretStore: this.secretStore,
+      userConfig: this.userConfig,
+    });
     // Mirror the resolved Anthropic key into process.env so secondary SDK
     // instances (llm-helper's `callForStructuredJson` for the api_setup
-    // docs_url bootstrap, etc.) pick it up. Without this the engine's
-    // primary client works (it gets the resolved key directly) but every
-    // `new Anthropic()` elsewhere falls back to env-only resolution and
-    // throws "Could not resolve authentication method" — see the
-    // managed-BYOK Smart Bootstrap regression smoked 2026-05-15.
-    if (apiKey && this.userConfig.provider !== 'vertex' && this.userConfig.provider !== 'openai') {
+    // docs_url bootstrap, etc.) pick it up. Only for Anthropic — for
+    // openai/custom the adapter consumes the key directly via constructor,
+    // and we must NOT leak a Mistral/custom key into ANTHROPIC_API_KEY.
+    if (apiKey && this.userConfig.provider === 'anthropic') {
       process.env['ANTHROPIC_API_KEY'] = apiKey;
     }
     // Vertex AI: resolve GCP credentials from env > vault > config
