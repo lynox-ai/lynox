@@ -312,6 +312,19 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
   return value !== undefined && ADMIN_SPLIT_TIERS.has(value);
 }
 
+/**
+ * Predict whether an ask_secret call for the given name will be rejected by
+ * the vault PUT (managed tier + name not on BYOK_USER_WRITABLE_SECRETS).
+ *
+ * Exported so the session.promptSecret wire can short-circuit the UI prompt
+ * AND unit tests can lock the predicate without spinning up an SSE run.
+ * Reads `process.env['LYNOX_MANAGED_MODE']` at call time so test setups can
+ * stub the env per case.
+ */
+export function predictManagedBlocked(name: string): boolean {
+  return requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name);
+}
+
 /** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
 function requiresConfigLockGate(value: string | undefined): boolean {
   return value !== undefined && CONFIG_LOCKED_TIERS.has(value);
@@ -1769,7 +1782,29 @@ export class LynoxHTTPApi {
         // turn to interpret the failure. Predict + short-circuit so the
         // tool result is `managed_blocked` on the first call, never a
         // false-start cancel. Staging incident 2026-05-18.
-        if (requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
+        if (predictManagedBlocked(name)) {
+          // Audit-trail parity with the PUT /api/secrets/:name path at
+          // L~2364 — that path emits a `secret_update` row on accept.
+          // Pre-predict-block, every blocked attempt left a pending_prompts
+          // row with answer_error='managed_blocked' that incident-replay
+          // could read; the short-circuit removed that trail. Record a
+          // names-only `secret_blocked` event so the agent's attempt
+          // to write a non-allowlisted slot is still discoverable.
+          try {
+            const audit = engine.getSecurityAudit();
+            audit?.record({
+              event_type: 'secret_blocked',
+              decision: 'blocked',
+              source: 'managed_predict',
+              detail: JSON.stringify({
+                slot: name,
+                tool: 'ask_secret',
+                tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+              }),
+            });
+          } catch {
+            // Audit failure must not block the agent's tool result.
+          }
           return 'managed_blocked';
         }
 

@@ -1020,6 +1020,64 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // Pins the predict-block at the session.promptSecret wire (http-api.ts
+  // ~1772). The wire is created inside the /run closure and isn't directly
+  // reachable from tests; this exercises the same predicate function the
+  // wire delegates to (`predictManagedBlocked`). Locks the staging-incident
+  // fix in place: a future refactor that drops the early-return would have
+  // to either delete this function or break these assertions.
+  describe('predictManagedBlocked (managed-tier ask_secret short-circuit)', () => {
+    let predictManagedBlocked: (name: string) => boolean;
+    beforeAll(async () => {
+      ({ predictManagedBlocked } = await import('./http-api.js'));
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('returns true on managed mode for a non-allowlisted name', () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(true);
+      expect(predictManagedBlocked('DATAFORSEO_API_KEY')).toBe(true);
+    });
+
+    it('returns false on managed mode for an allowlisted LLM provider key', () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      // BYOK_USER_WRITABLE_SECRETS covers ANTHROPIC_API_KEY + OPENAI_API_KEY +
+      // MISTRAL_API_KEY + CUSTOM_API_KEY per http-api.ts:177.
+      expect(predictManagedBlocked('ANTHROPIC_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('OPENAI_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('MISTRAL_API_KEY')).toBe(false);
+    });
+
+    it('returns false on self-host (no LYNOX_MANAGED_MODE) regardless of name', () => {
+      // Critical invariant: self-host must still open the UI prompt for any
+      // name — the predict-block is managed-only. Pre-fix, removing the
+      // managed-mode guard would have silently blocked self-host integrations.
+      vi.stubEnv('LYNOX_MANAGED_MODE', undefined);
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);
+      expect(predictManagedBlocked('ANTHROPIC_API_KEY')).toBe(false);
+    });
+
+    it('returns false on managed BYOK (starter) tier', () => {
+      // ADMIN_SPLIT_TIERS includes 'starter' per requiresAdminSplitGate,
+      // so starter ALSO blocks non-allowlisted names (BYOK customers bring
+      // their own provider key but tool secrets are still admin-provisioned).
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(true);
+      expect(predictManagedBlocked('ANTHROPIC_API_KEY')).toBe(false);
+    });
+
+    it('returns false for unknown LYNOX_MANAGED_MODE values', () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'some-future-tier-we-do-not-know');
+      // Unknown tiers fail open (the gate is allowlist-shaped), matching
+      // requiresAdminSplitGate's semantics — better to over-prompt than
+      // to silently block on a tier we haven't reviewed.
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);
+    });
+  });
+
   describe('memory', () => {
     it('GET loads namespace', async () => {
       const res = await jsonFetch('/api/memory/knowledge');

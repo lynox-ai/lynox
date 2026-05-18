@@ -20,7 +20,7 @@ import type {
   PromptTabsFn,
   PromptSecretFn,
 } from '../types/index.js';
-import { getBetasForProvider, CHARS_PER_TOKEN, getContextWindow, getDefaultMaxTokens, getMaxContinuations } from '../types/index.js';
+import { getBetasForProvider, CHARS_PER_TOKEN, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -113,11 +113,12 @@ export class Agent implements IAgent {
   getMaxContextWindowTokens(): number | undefined {
     return this.maxContextWindowTokens;
   }
-  /** Effective context window after applying the user's optional cap — never returns more than the model's native window. */
+  /** Effective context window after applying the user's optional cap — never
+   *  returns more than the model's native window. Delegates to the shared
+   *  SSOT helper in models.ts so http-api.ts /sessions, session.ts
+   *  getContextUsagePercent, and this agent helper can't drift. */
   private _effectiveContextWindow(): number {
-    const native = getContextWindow(this.model);
-    const cap = this.maxContextWindowTokens;
-    return cap !== undefined && cap > 0 ? Math.min(native, cap) : native;
+    return effectiveContextWindow(this.model, this.maxContextWindowTokens);
   }
   private briefing: string | undefined;
   readonly autonomy: AutonomyLevel | undefined;
