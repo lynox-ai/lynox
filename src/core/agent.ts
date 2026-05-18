@@ -55,6 +55,15 @@ export class Agent implements IAgent {
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
   onStream: StreamHandler | null;
+  /** See `AgentConfig.onMessageCheckpoint` for contract + rationale. */
+  private readonly onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
+
+  private async _checkpoint(): Promise<void> {
+    if (!this.onMessageCheckpoint) return;
+    try {
+      await this.onMessageCheckpoint();
+    } catch { /* fire-and-forget — persistence failures must not break the loop */ }
+  }
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -159,6 +168,7 @@ export class Agent implements IAgent {
     this.memory = config.memory ?? null;
     this.tools = config.tools ?? [];
     this.onStream = config.onStream ?? null;
+    this.onMessageCheckpoint = config.onMessageCheckpoint;
     this.promptUser = config.promptUser;
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
@@ -346,6 +356,10 @@ export class Agent implements IAgent {
         (b): b is Exclude<typeof b, { type: 'thinking' }> => b.type !== 'thinking',
       ) as BetaContentBlockParam[];
       this.messages.push({ role: 'assistant', content: contentForHistory });
+      // F-Eager-Persist: checkpoint after each assistant message so the
+      // ThreadStore has the latest turn even if the process dies before the
+      // run() finally block runs (container restart, OOM).
+      await this._checkpoint();
 
       // Per-agent cost guard: track usage and enforce budget
       if (this.costGuard) {
@@ -396,6 +410,8 @@ export class Agent implements IAgent {
       if (response.stop_reason === 'tool_use') {
         const results = await this._dispatchTools(response.content);
         this.messages.push({ role: 'user', content: results });
+        // Same checkpoint after tool_results — see above.
+        await this._checkpoint();
         continue;
       }
 

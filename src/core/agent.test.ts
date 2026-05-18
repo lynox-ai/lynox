@@ -1617,4 +1617,67 @@ describe('Agent', () => {
       expect(agent.getMaxContextWindowTokens()).toBeUndefined();
     });
   });
+
+  // F-Eager-Persist regression-pin (2026-05-18): the agent must fire its
+  // onMessageCheckpoint hook at each stable turn boundary — rafael prod lost
+  // a long conversation when the engine restarted mid-loop.
+  describe('onMessageCheckpoint (F-Eager-Persist)', () => {
+    it('fires once per assistant turn on a simple end_turn response', async () => {
+      const checkpoint = vi.fn();
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        onMessageCheckpoint: checkpoint,
+      });
+      await agent.send('Hi');
+      expect(checkpoint).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires after assistant message AND after tool_results on a tool_use turn', async () => {
+      // Pin BOTH the call count AND the message growth — semantic coverage
+      // of "each checkpoint observes a longer buffer than the last", so a
+      // loop refactor that preserves checkpoint-per-stable-point but changes
+      // the exact count still passes IFF it remains monotonic.
+      const observedLengths: number[] = [];
+      const tool = makeTool('fake_tool');
+      mockProcess
+        .mockResolvedValueOnce({
+          content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'fake_tool', input: {} }],
+          stop_reason: 'tool_use' as const,
+          usage: { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        })
+        .mockResolvedValueOnce(endTurnResponse('answer after tool'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        onMessageCheckpoint: () => { observedLengths.push(agent.getMessages().length); },
+      });
+      await agent.send('Use the tool');
+      // At least three checkpoints expected (assistant tool_use → tool_results
+      // → end_turn). Use `>= 3` rather than a hard `=== 3` so a refactor that
+      // adds an extra stable-point checkpoint still passes — what we care
+      // about is that EVERY checkpoint observes growth (strictly monotonic).
+      expect(observedLengths.length).toBeGreaterThanOrEqual(3);
+      for (let i = 1; i < observedLengths.length; i++) {
+        expect(observedLengths[i]!).toBeGreaterThan(observedLengths[i - 1]!);
+      }
+    });
+
+    it('does not break the loop when the checkpoint hook throws', async () => {
+      const checkpoint = vi.fn().mockImplementation(() => { throw new Error('persist failed'); });
+      mockProcess.mockResolvedValueOnce(endTurnResponse('still works'));
+      const agent = new Agent({
+        name: 'test-throw',
+        model: 'claude-sonnet-4-6',
+        onMessageCheckpoint: checkpoint,
+      });
+      // Must not throw — the hook is fire-and-forget by contract
+      const result = await agent.send('Hello');
+      expect(result).toBe('still works');
+      expect(checkpoint).toHaveBeenCalled();
+    });
+  });
 });

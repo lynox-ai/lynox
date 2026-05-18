@@ -43,6 +43,7 @@ import {
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
+import { persistAgentMessages } from './eager-persist.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -390,6 +391,12 @@ export class Session {
     this._runToolNames.clear();
     this._retrievedMemoryIds = [];
 
+    // Capture the ThreadStore message count BEFORE the run starts so the
+    // end-of-run "is this the first run?" check survives eager-persist
+    // (without this, eager checkpoints during the run inflate existingCount
+    // and the first-run title generation never fires).
+    const startMessageCount = this.engine.getThreadStore()?.getMessageCount(this.sessionId) ?? 0;
+
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     if (this.engine.config.language) {
@@ -502,25 +509,35 @@ export class Session {
         }
       }
 
-      // Persist messages to thread (fire-and-forget)
+      // Roll up run-level fields. After F-Eager-Persist, `_persistMessages`
+      // has typically already appended every message + updated message_count
+      // during the run, so `appendMessages` here is normally a no-op. We
+      // still ALWAYS write the cost / token rollup (eager-persist doesn't
+      // know token counts; those are only computed here at run-end) plus
+      // the first-run title — both gated on the START count, not the now
+      // (`startMessageCount === 0` = "thread was empty when this run began").
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
           const existingCount = threadStore.getMessageCount(this.sessionId);
           const newMessages = allMessages.slice(existingCount);
           if (newMessages.length > 0) {
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount);
-            threadStore.updateThread(this.sessionId, {
+            // Combined append + rollup in one transaction (P1).
+            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
               message_count: allMessages.length,
               total_tokens: this.usage.input_tokens + this.usage.output_tokens,
               total_cost_usd: costUsd,
             });
-
-            // Auto-generate title on first run (heuristic: first user message)
-            if (existingCount === 0) {
-              const title = generateThreadTitle(taskText);
-              threadStore.updateThread(this.sessionId, { title });
-            }
+          } else {
+            // Eager already persisted — just stamp the cost/token rollup.
+            threadStore.updateThread(this.sessionId, {
+              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
+              total_cost_usd: costUsd,
+            });
+          }
+          if (startMessageCount === 0) {
+            const title = generateThreadTitle(taskText);
+            threadStore.updateThread(this.sessionId, { title });
           }
         } catch { /* fire-and-forget */ }
       }
@@ -596,14 +613,20 @@ export class Session {
         }
       }
 
-      // Persist messages to thread even on failure (preserve partial progress)
+      // Persist messages to thread even on failure (preserve partial progress).
+      // Uses the same combined-transaction shape as the success path (P1)
+      // when there's a delta to flush — one fsync instead of two. When eager
+      // already drained the delta, do a standalone message_count refresh.
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
           const existingCount = threadStore.getMessageCount(this.sessionId);
           const newMessages = allMessages.slice(existingCount);
           if (newMessages.length > 0) {
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount);
+            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
+              message_count: allMessages.length,
+            });
+          } else {
             threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
           }
         } catch { /* fire-and-forget */ }
@@ -776,6 +799,28 @@ export class Session {
     }
   }
 
+  /**
+   * F-Eager-Persist: append any new messages from `agent.messages` into the
+   * ThreadStore. Called from the Agent's `onMessageCheckpoint` hook after
+   * every stable turn boundary. Idempotent — `getMessageCount` gives the
+   * persisted floor, and `slice(existingCount)` selects only what's new.
+   *
+   * Safe to call concurrently (better-sqlite3 serialises writes within a
+   * single process) and from the end-of-run persist block — if both fire
+   * back-to-back, the second sees an updated `existingCount` and appends
+   * an empty delta.
+   */
+  private _persistMessages(): void {
+    if (!this.agent) return;
+    // Outcome is intentionally ignored — fire-and-forget contract; helper
+    // catches its own errors and returns an outcome enum for tests only.
+    persistAgentMessages({
+      threadStore: this.engine.getThreadStore(),
+      sessionId: this.sessionId,
+      allMessages: this.agent.getMessages(),
+    });
+  }
+
   // ── Model / Effort / Thinking ──
 
   setModel(tier: ModelTier): string {
@@ -938,6 +983,14 @@ export class Session {
       maxTokens: this._maxTokens,
       memory: engine.getMemory() ?? undefined,
       onStream: streamHandler,
+      // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
+      // each stable point in the agent loop (after assistant reply, after
+      // tool_results). Without this the end-of-run persist (line 506-526)
+      // was the ONLY save point — a container restart / OOM kill mid-loop
+      // lost every turn since the last completed run. Idempotent: each
+      // checkpoint reads existingCount from SQLite and only appends the
+      // delta, so duplicate fires are no-ops.
+      onMessageCheckpoint: () => this._persistMessages(),
       promptUser: this._promptUser
         ? (q: string, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
         : undefined,

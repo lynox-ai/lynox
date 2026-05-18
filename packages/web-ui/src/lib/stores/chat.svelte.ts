@@ -458,13 +458,30 @@ if (typeof window !== 'undefined') {
 	}
 }
 
-async function ensureSession(): Promise<string> {
+/**
+ * Ensure a backend session exists for the current chat. When `resumeThreadId`
+ * is passed, POSTs `{ threadId }` so the engine's `sessionStore.getOrCreate`
+ * loads the thread history from SQLite (resume path) rather than creating an
+ * empty session. Critical for the 404-recovery path: when the engine has
+ * evicted the in-memory session OR was restarted, the next /run call returns
+ * 404; without the threadId, recovery would create a brand-new sessionId →
+ * agent with zero history → user sees old thread in UI but agent can't see it
+ * (2026-05-18 staging QA from rafael prod).
+ */
+async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 	if (sessionId) return sessionId;
 	// Fire the hosting-tier probe alongside session creation — by the time
 	// any LLM error surfaces, the tier is known and error copy branches
 	// correctly.
 	void probeManagedTier();
-	const res = await fetch(`${getApiBase()}/sessions`, { method: 'POST' });
+	const init: RequestInit = resumeThreadId
+		? {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ threadId: resumeThreadId }),
+		}
+		: { method: 'POST' };
+	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
@@ -627,12 +644,17 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		body: JSON.stringify(payload)
 	});
 
-	// Session record missing (e.g. after container restart) — recreate and retry.
-	// Distinct from 401 (cookie-level auth failure) which is handled below.
+	// Session record missing (e.g. after container restart, eviction) —
+	// recreate via the resume path and retry. Without `resumeThreadId`, the
+	// backend would mint a fresh empty session and the agent would see zero
+	// history despite the UI showing all prior messages (2026-05-18 staging
+	// QA: F-404-Recovery from rafael prod). Distinct from 401 which is a
+	// cookie-level auth failure handled below.
 	if (res.status === 404) {
+		const previousThreadId = sid;
 		sessionId = null;
 		try {
-			sid = await ensureSession();
+			sid = await ensureSession(previousThreadId);
 		} catch (err) {
 			if (err instanceof SessionExpiredError) {
 				handleSessionExpired(assistantIdx, userMsgIdx);

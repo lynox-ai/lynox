@@ -105,12 +105,20 @@ export class ThreadStore {
 
   // ── Message Persistence ──
 
-  appendMessages(threadId: string, messages: BetaMessageParam[], startSeq: number): void {
+  appendMessages(threadId: string, messages: BetaMessageParam[], startSeq: number, threadUpdates?: {
+    message_count?: number | undefined;
+    total_tokens?: number | undefined;
+    total_cost_usd?: number | undefined;
+  }): void {
     const insert = this.db.prepare(`
       INSERT INTO thread_messages (thread_id, seq, role, content_json)
       VALUES (?, ?, ?, ?)
     `);
 
+    // Share one transaction (and one fsync under WAL) between the insert
+    // batch and the rollup updateThread — better-sqlite3 includes any
+    // statement run inside the batch lambda in the same atomic boundary.
+    // P1 from /pr-review #456 — was two fsyncs per checkpoint, now one.
     const batch = this.db.transaction((msgs: BetaMessageParam[], start: number) => {
       for (let i = 0; i < msgs.length; i++) {
         const msg = msgs[i]!;
@@ -121,6 +129,7 @@ export class ThreadStore {
           JSON.stringify(msg.content),
         );
       }
+      if (threadUpdates) this.updateThread(threadId, threadUpdates);
     });
 
     batch(messages, startSeq);

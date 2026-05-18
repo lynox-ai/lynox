@@ -568,6 +568,70 @@ describe('LynoxHTTPApi', () => {
       expect(body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
+    // S-M1 regression-pin from /pr-review #456: threadId must be a UUID.
+    // Without the gate an attacker could pollute the sessionStore Map and
+    // SQLite primary-key namespace with multi-MB strings (availability,
+    // not injection — SQLi is neutralised by parameterised statements).
+    it('rejects non-UUID threadId with 400', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'not-a-uuid' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string };
+      expect(body.error).toMatch(/invalid threadId/i);
+    });
+
+    it('rejects oversized threadId with 400', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'a'.repeat(10_000) }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('accepts a well-formed UUID threadId as resume', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: '550e8400-e29b-41d4-a716-446655440000' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440000');
+    });
+
+    // Round-3 Security finding: uppercase UUID would otherwise mint a NEW
+    // SQLite primary-key row + sessionStore Map entry, silently forking
+    // history. We normalise to lowercase before the regex test, so an
+    // uppercased resend should land on the SAME sessionId as the original.
+    it('normalises uppercase UUID threadId to lowercase', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: '550E8400-E29B-41D4-A716-446655440000' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440000');
+    });
+
+    it('treats null threadId as undefined (mints a fresh UUID)', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: null }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('rejects empty-string threadId with 400', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: '' }),
+      });
+      expect(res.status).toBe(400);
+    });
+
     it('deletes a session', async () => {
       mockSessionGet.mockReturnValue(mockSessionInstance);
       const res = await jsonFetch('/api/sessions/test-session', { method: 'DELETE' });

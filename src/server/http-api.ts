@@ -109,6 +109,15 @@ const TLS_KEY = process.env['LYNOX_TLS_KEY'] ?? '';
 /** IANA timezone allowlist. Covers all current zones (`America/Argentina/Buenos_Aires`, `Etc/GMT+12`, …) without admitting newlines, brackets or quotes that could break out of the per-turn `[Now: …]` marker on the prompt boundary. */
 const TZ_PATTERN = /^[A-Za-z0-9_+\-/]+$/;
 const TZ_MAX_LENGTH = 64;
+/**
+ * UUID format gate for client-supplied threadId on POST /api/sessions —
+ * without it, an attacker could POST oversized / arbitrary strings to
+ * pollute the in-memory sessionStore Map + the SQLite primary key
+ * namespace (DoS / hygiene; SQLi is neutralised by parameterised
+ * statements). Matches the shape `randomUUID()` produces (lowercase hex).
+ * /pr-review #456 finding S-M1.
+ */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Three deployment modes the engine has to keep distinct:
@@ -1479,7 +1488,18 @@ export class LynoxHTTPApi {
     // ── Sessions ──
     this.addStatic('user', 'POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
-      const threadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
+      const rawThreadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
+      // Lowercase-normalise BEFORE the regex check. SQLite TEXT PRIMARY KEY
+      // is case-sensitive with the default BINARY collation, so an uppercased
+      // UUID resend would mint a NEW sessionStore Map entry + a NEW thread row
+      // in SQLite, silently forking history. `randomUUID()` always emits
+      // lowercase; normalising here makes resume tolerant to either case.
+      // /pr-review #456 round-3 Security finding, 2026-05-18.
+      const threadId = rawThreadId?.toLowerCase();
+      if (threadId !== undefined && !UUID_REGEX.test(threadId)) {
+        errorResponse(res, 400, 'Invalid threadId — expected UUID');
+        return;
+      }
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,
