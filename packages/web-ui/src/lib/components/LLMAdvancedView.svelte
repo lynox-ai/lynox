@@ -284,9 +284,9 @@
 			{/if}
 			<div class="space-y-2">
 				{#each contextOptions as opt (opt.value ?? 'default')}
-					<label class="flex items-start gap-3 {opt.disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}"
+					<label class="flex items-start gap-3 {opt.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}"
 						title={opt.disabled && activeModel
-							? `${t('llm.context_window.option.above_native_tooltip')} (${formatContextWindow(activeModel.contextWindow)} ${t('llm.context_window.native')})`
+							? `${t('llm.context_window.option.above_native_tooltip')} (${formatContextWindow(activeModel.contextWindow)} ${t('llm.context_window.native')}).`
 							: undefined}>
 						<input type="radio" name="llm-context-window" value={opt.value}
 							bind:group={config.max_context_window_tokens}
