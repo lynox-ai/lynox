@@ -1,20 +1,27 @@
 # Changelog
 
-## 1.5.1 — UNRELEASED
+## 1.5.1 — 2026-05-18
 
-Patch — **IA Consolidation V2**. Three-phase refactor of the post-onboarding shell shipped as a single patch release. Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`). Phase 2 moves Activity into its own `/app/activity` root and repoints the footer cost/runs pills. Phase 3 (pending) finalizes Settings into 5 tier-conditional sections and deletes the deprecated Cost-Limits page. Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. All legacy URLs 301-redirect — bookmarks survive.
+Patch — **IA Consolidation V2** + **chat-reliability hardening**. Three-phase shell refactor shipped as one patch: Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`); Phase 2 moves Activity into its own `/app/activity` root and repoints the footer cost/runs pills; Phase 3 finalizes Settings into 5 tier-conditional sections, splits Channels into 6 sub-routes, formalizes LLM sub-pages (Advanced/Memory), wires CommandPalette across all sub-routes, and deletes the deprecated Cost-Limits page. Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. Alongside the IA work, this release closes a chat-history-loss bug surfaced on rafael prod (#456): the agent loop now persists at every turn boundary instead of only end-of-run, the SvelteKit chat store's 404 recovery path now passes `threadId` so server-side eviction can't lose the conversation, and the SYSTEM_PROMPT carries a fabrication guardrail when memory_recall returns partial data. All legacy URLs 301-redirect — bookmarks survive.
 
 ### Changed
 
 - **NEW top-level `/app/activity` route** — canonical home for Cost / Runs / History. Footer cost-pill and runs-pill now land here. Replaces the old `/app/hub?section=activity` sub-tab (auto-redirected for one release). (#422, #424)
 - **`/app/hub` shrinks to 3 tabs** (Workflows / Tasks / APIs) — Activity tab stripped; legacy `?section=activity*` query-strings redirect to `/app/activity?tab=*`. (#425)
-- **Cost & Limits page deprecated** (`/app/hub/cost-limits`). Page still works during the transition with a prominent deprecation banner; final removal lands in Phase 3 of this release. Cost limits move to Settings → Workspace → Limits, context window to Settings → LLM → Advanced. The 200k/500k/1M context-window radio is already available now under Settings → LLM. One-time transition toast on first visit. (#423, #427)
+- **Settings 5 tier-conditional sections** — Main / Data / Workspace (Self-Host) / Access / Account. Workspace section hidden on Managed; tier-gating via `selfHostOnly` / `managedOnly` predicates with default-null managed-probe pattern. (#434, #435, #446)
+- **Channel sub-routes** — `/app/settings/integrations/*` split into `/app/settings/channels/{mail,mail/rules,whatsapp,google,notifications,search}` + a hub index. Per-channel state stored in dedicated stores (`stores/integrations/*`). Mail-Rules gets its own route per Inbox-PRD pin. (#436, #448)
+- **LLM sub-pages** — `/app/settings/llm/{advanced,memory}` carved out of LLMSettings. Data-driven sub-route nav array (designed for OpenAI-native Phase 4 reuse). (#447)
+- **Tool-Toggles tier-conditional** — mounted at both `/app/settings/workspace/tools` (Self-Host) AND `/app/settings/privacy/tools` (Managed). Both routes always 200 OK; `SettingsIndex.keepItem()` hides the wrong one per tier — no async-redirect race. (#446)
 - **Mobile bottom-tab** — new on smaller viewports: Chat · Inbox · Activity · Intelligence · More-Drawer. `AppShell.svelte` previously only carried the desktop nav-rail. (#426)
-- **CommandPalette** — Activity entry added; `nav.activity` i18n key landed. (#426)
+- **CommandPalette extended** — entries for all Phase 3 sub-routes (Workspace, Channels, LLM Advanced/Memory, Privacy, Account); tier-gating mirrors SettingsIndex. (#426, #449)
 - **Footer Status-Panel** — pulls from `/usage/summary?period=today` (Voice STT/TTS included) instead of `/history/cost/daily`. One-time "now includes Voice" hint dismissed via localStorage. (#424)
+- **Google OAuth post-callback** — self-host meta-refresh lands on `/app/settings/channels/google` directly (was `/app/settings/integrations`). One fewer redirect hop. (#448)
 
 ### Fixed
 
+- **Chat history-loss on backgrounded sessions** — the agent loop now persists messages to `ThreadStore` at every stable turn boundary (after each assistant message and after every tool-result batch), not just at end-of-run. A container restart, OOM kill, or session eviction mid-loop no longer loses the in-flight conversation. Verified on staging via `message_count` growth per-turn (eager-persist hook in `agent.ts` + new `eager-persist.ts` helper with 8 unit-test contracts). Surfaced by rafael prod incident 2026-05-18. (#456)
+- **404 session-recovery preserves thread continuity** — when the SvelteKit chat store hits a 404 on `/api/sessions/<id>/run` (engine restart, session TTL expired), the recovery path now passes the active `threadId` to `POST /api/sessions` instead of minting an empty thread, so the model rejoins the existing conversation with `resumed: true` in the response. (#456)
+- **Anti-fabrication guardrail on partial memory recall** — when `memory_recall`, `read_file`, `data_store_query`, or KG entity lookup returns only part of what the user asked for, the SYSTEM_PROMPT now instructs the agent to surface what is known and ask for the rest, instead of padding the answer with plausible-sounding details. (#456)
 - **`formatCost` collapsed to a single canonical implementation** — three drifted copies (sub-cent rounding, cents-style, locale-aware) reconciled into one helper. (#420)
 - **Stale `update_check` setting** accepted via `passthrough` is now explicit in the config schema. (#421)
 - **`BackupsView` no longer leaks response-only fields** (`capabilities`/`locks`/`managed`) back into `~/.lynox/config.json` on save. (#421)
@@ -24,12 +31,17 @@ Patch — **IA Consolidation V2**. Three-phase refactor of the post-onboarding s
 - **`ConfigView.svelte` deleted** (1100+ LOC). 12 dual-homed settings now have a single SSoT in their extracted pages (LLMSettings Advanced/Memory, SecretsView, SystemSettings, CostLimits). (#421)
 - **`/app/settings/{keys,apis,data}` stub routes** — replaced with SSR-301 redirects to canonical homes (`/settings/llm/keys`, Automation → APIs, Intelligence → Data). (#418)
 - **`AutomationHub.svelte` Activity tab** — Activity has its own root now. (#425)
+- **`CostLimits.svelte` deleted** (-227 LOC) plus `/app/hub/cost-limits` route — replaced by `/app/settings/workspace/limits` (Self-Host) + `/app/settings/llm/advanced` (context-window). Legacy URL 301-redirects. CostLimits-only i18n keys pruned; shared `cost_limits.saved/save/loading/...` keys retained for use by Workspace and LLM views. (#450)
+- **`IntegrationsView.svelte` deleted** (-661 LOC) — superseded by 6 per-channel components (`MailSettings`, `WhatsAppSettings`, `GoogleSettings`, `NotificationsSettings`, `SearchSettings`, `ChannelHub`). Library barrel keeps `IntegrationsView` as an alias to `ChannelHub` for downstream compatibility. (#448)
 
 ### Security
 
 - **`LynoxUserConfigSchema` switched from `.passthrough()` to `.strict()`** — unknown PUT-fields are now rejected (HTTP 400) instead of silently persisted. Closes the ghost-write vector documented in V2 Round-1 Security review. (#421)
+- **`max_context_window_tokens` upper-bound** — `z.number().int().positive().max(1_000_000)` on the user-config schema. Blocks an attacker on a Managed instance from setting an unbounded value (the field is allowlisted in `MANAGED_USER_WRITABLE_CONFIG`); the schema is the load-bearing gate. Matches the largest UI radio option + Sonnet 4.6 frontier window. PRD-IA-V2 Security S3. (#447)
 - **New invariant test:** `disabled_tools` cannot enable a tool that `excludeTools` blocked (regression-pin for V2 Round-1 S7 finding). (#419)
-- **All settings-route 301-redirects use hardcoded path/tab allowlists** — no user-input pathname passthrough (Round-1 S2 mandate). Applies across `/app/settings/*` stubs and the `/app/hub?section=activity*` → `/app/activity` redirect chain. (#418, #425)
+- **`PUT /api/config` audit-log** — every write emits a `config_update` SecurityAudit event with `fields_changed: [keys]` (keys-only, never values, so the trail cannot leak secrets or spend caps). PRD-IA-V2 Security S4. (#435)
+- **All settings-route 301-redirects use hardcoded path/tab allowlists** — no user-input pathname passthrough (Round-1 S2 mandate). Applies across `/app/settings/*` stubs, `/app/hub?section=activity*` → `/app/activity` redirects, AND the new `/app/settings/integrations/*` → `/channels/*` redirect chain via `assertChannelTarget` helper + 30 contract tests covering URL-encoded, whitespace, case-sensitivity, and trailing-slash payload classes. (#418, #425, #448)
+- **`POST /api/sessions` threadId is UUID-validated and case-normalised** — module-scope lowercase-only regex + `rawThreadId.toLowerCase()` before the gate. Closes a silent thread-fork via uppercased UUID (SQLite TEXT PRIMARY KEY uses BINARY collation, so `DA65E649-…` would have minted a parallel thread next to `da65e649-…`). Caught by /pr-review round-3 Security on #456. (#456)
 
 ### Migration Notes
 
@@ -38,7 +50,13 @@ Patch — **IA Consolidation V2**. Three-phase refactor of the post-onboarding s
 - `/app/settings/apis` → `/app/automation?tab=apis` (301)
 - `/app/settings/data` → `/app/intelligence?tab=data` (301)
 - `/app/hub?section=activity*` → `/app/activity?tab=*` (301)
-- `/app/hub/cost-limits` → still live with deprecation banner; final removal in v1.7
+- `/app/hub/cost-limits` → `/app/settings/workspace/limits` (301; max_context_window_tokens moves to `/app/settings/llm/advanced`)
+- `/app/settings/backups` → `/app/settings/workspace/backups` (301)
+- `/app/settings/system?part=security` → `/app/settings/workspace/security` (301)
+- `/app/settings/integrations/tools` → `/app/settings/workspace/tools` (301 — Self-Host nav surfaces this; Managed surfaces `/app/settings/privacy/tools` instead, both routes always render)
+- `/app/settings/mobile` → `/app/settings/account/mobile` (301)
+- `/app/settings/integrations` → `/app/settings/channels` (301)
+- `/app/settings/integrations/{mail,mail/rules,whatsapp,google,notifications,search}` → `/app/settings/channels/<name>` (301)
 - Footer cost/runs pills now land on `/app/activity` (were `/app/hub?section=activity`)
 - Bookmarks survive — every old route 301-redirects.
 
