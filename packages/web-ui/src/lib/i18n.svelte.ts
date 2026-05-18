@@ -324,6 +324,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.context_window.description':     { de: 'Wie viele Tokens lynox pro Anfrage in den Kontext lädt. Größer = teurer.',     en: 'How many tokens lynox loads into context per request. Bigger = more expensive.' },
 	'llm.context_window.active_model_label': { de: 'Aktives Modell',                                                             en: 'Active model' },
 	'llm.context_window.native':          { de: 'nativ',                                                                          en: 'native' },
+	'llm.context_window.option.above_native_tooltip': { de: 'Über der nativen Kapazität des aktiven Modells — wird automatisch auf', en: 'Above the active model\'s native capacity — silently clamped to' },
 	'llm.context_window.option.default':       { de: 'Standard (vom Modell vorgegeben)',                                         en: 'Default (model-defined)' },
 	'llm.context_window.option.default_hint':  { de: 'Verwendet die native Kontext-Größe des aktiven Modells. Empfohlen.',       en: 'Uses the active model\'s native context window. Recommended.' },
 	'llm.context_window.option.32k':           { de: 'Sparsam — 32k Tokens',                                                     en: 'Frugal — 32k tokens' },
@@ -356,6 +357,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.advanced.subtitle':              { de: 'Wie gründlich der Agent arbeitet und wie viel Kontext er pro Anfrage lädt.',   en: 'How thoroughly the agent works and how much context it loads per request.' },
 	'llm.advanced.reasoning_heading':     { de: 'Denkstil',                                                                     en: 'Reasoning style' },
 	'llm.advanced.experience_heading':    { de: 'Kommunikation',                                                                en: 'Communication' },
+	// Settings v3 PR 3 (Item 8) — show-all-grayed tooltips
+	'llm.advanced.embedding_provider_managed_tooltip': { de: 'Auf Managed-Plänen vom CP verwaltet — lokale ONNX-Einbettung bleibt aktiv.', en: 'CP-managed on Managed plans — local ONNX embedding stays active.' },
 
 	// LLM Memory sub-page (PRD-IA-V2 P3-PR-C). Final home for memory_extraction
 	// and memory_half_life_days. Foundation-Rework may re-home this — sub-route
@@ -808,6 +811,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.workspace.limits_desc': { de: 'Ausgaben-Caps (Session, Tag, Monat) und HTTP-Limit', en: 'Spend caps (session, day, month) and HTTP rate limit' },
 	'settings.workspace.limits.spend_heading': { de: 'Ausgaben-Limits', en: 'Spend limits' },
 	'settings.workspace.limits.spend_subtitle': { de: 'Harte Kosten-Caps für diese Engine. Leer = kein Limit.', en: 'Hard cost caps for this engine. Empty = no limit.' },
+	// Settings v3 PR 3 (Items 9/11) — effective-limits pills
+	'settings.workspace.limits.effective_heading': { de: 'Aktive Limits', en: 'Effective limits' },
+	'settings.workspace.limits.pill_spawn_budget':  { de: 'Spawn-Budget',     en: 'Spawn budget' },
+	'settings.workspace.limits.pill_spawn_turns':   { de: 'Spawn-Turns',      en: 'Spawn turns' },
+	'settings.workspace.limits.pill_spawn_depth':   { de: 'Spawn-Tiefe',      en: 'Spawn depth' },
+	'settings.workspace.limits.pill_http_hour':     { de: 'HTTP/Stunde',      en: 'HTTP/hour' },
+	'settings.workspace.limits.pill_http_day':      { de: 'HTTP/Tag',         en: 'HTTP/day' },
+	'settings.workspace.limits.pill_ctx_default':   { de: 'Default-Kontext',  en: 'Default context' },
+	'settings.workspace.limits.pill_tier':          { de: 'Plan-Tier',        en: 'Plan tier' },
+	'settings.workspace.limits.pill_managed_note':  { de: 'Caps werden von deinem Managed-Plan verwaltet. Anpassung über support@lynox.ai.', en: 'Caps managed by your plan. Contact support@lynox.ai to adjust.' },
+	'settings.workspace.limits.disabled_managed_tooltip': { de: 'Von deinem Managed-Plan vorgegeben. Anpassung über support@lynox.ai.', en: 'Set by your Managed plan. Contact support@lynox.ai to adjust.' },
 	'settings.workspace.updates': { de: 'Updates', en: 'Updates' },
 	'settings.workspace.updates_desc': { de: 'Beim Engine-Start nach neuen Versionen suchen', en: 'Check for new versions at engine startup' },
 	// `settings.workspace.tools[_desc]` keys removed — SettingsIndex tile reuses

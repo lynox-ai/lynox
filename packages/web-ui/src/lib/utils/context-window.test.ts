@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filterContextMilestones, formatContextWindow, type ContextMilestone } from './context-window.js';
+import { buildContextOptions, filterContextMilestones, formatContextWindow, type ContextMilestone } from './context-window.js';
 
 const MILESTONES: ReadonlyArray<ContextMilestone> = [
 	{ value: 32_000,  labelKey: '32k',  hintKey: '32k_hint' },
@@ -7,6 +7,55 @@ const MILESTONES: ReadonlyArray<ContextMilestone> = [
 	{ value: 200_000, labelKey: '200k', hintKey: '200k_hint' },
 	{ value: 500_000, labelKey: '500k', hintKey: '500k_hint' },
 ];
+
+describe('buildContextOptions (Item 8 show-all-grayed)', () => {
+	it('returns all milestones enabled when native is undefined (legacy fallback)', () => {
+		const out = buildContextOptions(undefined, MILESTONES);
+		expect(out).toHaveLength(4);
+		for (const o of out) {
+			expect(o.disabled).toBe(false);
+			expect(o.hidden).toBe(false);
+		}
+	});
+
+	it('Sonnet base (200K) — 32K + 100K enabled, 200K hidden (redundant), 500K disabled', () => {
+		const out = buildContextOptions(200_000, MILESTONES);
+		expect(out.map((o) => [o.value, o.disabled, o.hidden])).toEqual([
+			[32_000,  false, false],
+			[100_000, false, false],
+			[200_000, false, true],   // == native → hidden
+			[500_000, true,  false],  // > native → disabled (was: silently clamped to 200K)
+		]);
+	});
+
+	it('Opus 1M native — all four enabled (none exceeds 1M, none equals)', () => {
+		const out = buildContextOptions(1_000_000, MILESTONES);
+		for (const o of out) {
+			expect(o.disabled).toBe(false);
+			expect(o.hidden).toBe(false);
+		}
+	});
+
+	it('Mistral Large (131_072) — 32K + 100K enabled, 200K + 500K disabled', () => {
+		const out = buildContextOptions(131_072, MILESTONES);
+		expect(out.map((o) => [o.value, o.disabled, o.hidden])).toEqual([
+			[32_000,  false, false],
+			[100_000, false, false],
+			[200_000, true,  false],
+			[500_000, true,  false],
+		]);
+	});
+
+	it('Mistral Small (32_000) — 32K hidden (redundant), rest disabled', () => {
+		const out = buildContextOptions(32_000, MILESTONES);
+		expect(out.map((o) => [o.value, o.disabled, o.hidden])).toEqual([
+			[32_000,  false, true],   // == native → hidden
+			[100_000, true,  false],
+			[200_000, true,  false],
+			[500_000, true,  false],
+		]);
+	});
+});
 
 describe('filterContextMilestones', () => {
 	it('returns all milestones when native is undefined (legacy fallback)', () => {
