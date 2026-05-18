@@ -252,9 +252,62 @@ describe('ModelCapability registry', () => {
       expect(cap!.maxContinuations).toBeGreaterThan(0);
       expect(cap!.pricing.input).toBeGreaterThanOrEqual(0);
       expect(cap!.uiLabel.length).toBeGreaterThan(0);
+      // Routed entries always carry a tier — null is reserved for bench-only
+      // models below. Settings v3 tier-detection relies on this invariant.
+      expect(cap!.tier, `routed model ${id} must have a tier`).not.toBeNull();
     }
     // Accessor falls back via normalizeModelId for @-suffixed vertex ids.
     expect(modelCapability('claude-sonnet-4-6@20260101')?.id).toBe('claude-sonnet-4-6');
+  });
+
+  it('pins provider classification per family', async () => {
+    // Settings v3 tier-detection + provider-switch logic reads `cap.provider`;
+    // a silent flip of a mistral entry to provider:'anthropic' (or vice versa)
+    // would mis-route LLM calls. Lock the families.
+    const { MODEL_CAPABILITIES } = await import('./models.js');
+    for (const id of ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001',
+                      'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]']) {
+      expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('anthropic');
+    }
+    expect(MODEL_CAPABILITIES['claude-haiku-4-5']!.provider).toBe('vertex');
+    for (const id of ['mistral-small-2603', 'mistral-large-2512', 'magistral-medium-2509',
+                      'ministral-8b-2410', 'ministral-3b-2410', 'open-mistral-nemo',
+                      'mistral-medium-2508', 'codestral-2508', 'magistral-small-2509']) {
+      expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('openai');
+    }
+  });
+
+  it('anchors capability flags per model family', async () => {
+    // Item 8 (show-all-grayed) reads `cap.features` to decide which settings
+    // to disable per active model. Anchor one feature per family so silent
+    // regression to vision/extendedThinking flags ships loud.
+    const { MODEL_CAPABILITIES } = await import('./models.js');
+    expect(MODEL_CAPABILITIES['claude-sonnet-4-6']!.features.extendedThinking).toBe(true);
+    expect(MODEL_CAPABILITIES['claude-sonnet-4-6']!.features.vision).toBe(true);
+    expect(MODEL_CAPABILITIES['mistral-small-2603']!.features.extendedThinking).toBe(false);
+    expect(MODEL_CAPABILITIES['mistral-small-2603']!.features.vision).toBe(false);
+    expect(MODEL_CAPABILITIES['mistral-large-2512']!.features.toolUse).toBe(true);
+  });
+
+  it('exposes bench-only Mistral roster with tier:null + non-negative pricing', async () => {
+    // These models aren't routed through MISTRAL_MODEL_MAP but appear in
+    // cost-guard / set-bench. A future cleanup that drops them silently
+    // would re-introduce the "Mistral-bench fall through to opus rate"
+    // regression class. Lock them down.
+    const { MODEL_CAPABILITIES } = await import('./models.js');
+    const benchOnlyIds = [
+      'ministral-8b-2410', 'ministral-3b-2410', 'open-mistral-nemo',
+      'mistral-medium-2508', 'mistral-medium-latest',
+      'codestral-2508', 'codestral-latest',
+      'magistral-small-2509', 'magistral-small-latest',
+    ];
+    for (const id of benchOnlyIds) {
+      const cap = MODEL_CAPABILITIES[id];
+      expect(cap, `missing bench-only entry ${id}`).toBeDefined();
+      expect(cap!.tier).toBeNull();
+      expect(cap!.pricing.input).toBeGreaterThanOrEqual(0);
+      expect(cap!.pricing.output).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('tags 1M-beta variants with the context-1m-2025-08-07 header', async () => {

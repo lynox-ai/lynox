@@ -19,10 +19,19 @@ function loadPricingOverride(): Record<string, ModelPricing> | null {
     const raw = readFileSync(join(getLynoxDir(), 'pricing.json'), 'utf-8');
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return null;
+    // Trusted-source cast: only an operator with write access to ~/.lynox can
+    // place this file. A malformed entry produces NaN in calculateCost, which
+    // fails cost-guard comparisons closed (fail-safe) rather than under-billing.
     return parsed as Record<string, ModelPricing>;
   } catch {
     return null;
   }
+}
+
+/** @internal — test-only hook to inject the override cache without touching
+ *  the filesystem. Pass `null` to clear, an object to seed. */
+export function _resetOverridePricingForTests(value: Record<string, ModelPricing> | null): void {
+  overridePricing = value;
 }
 
 export function getPricing(model: string): ModelPricing {

@@ -219,17 +219,19 @@ describe('callForStructuredJson', () => {
   });
 
   it('estimateCostUsd clamps the output projection to maxOutputTokens (Haiku pricing)', () => {
-    // Pricing reference (Haiku 4.5 list, 2026-05): input $0.80/M, output $4.00/M.
-    // 70_000 input tokens → $0.056 input cost.
-    // Naive 25%-of-input projection = 17_500 output tokens × $4/M = $0.070.
-    // Real API call caps output at maxOutputTokens (4_000) = $0.016.
-    // Therefore the clamped estimate must be ~$0.072, not ~$0.126.
+    // Pricing source: MODEL_CAPABILITIES['claude-haiku-4-5-20251001'] = $1/M
+    // input, $5/M output (SSOT — see types/models.ts). Pre-2026-05-18 this
+    // helper carried 0.80/4 locally which drifted from pricing.ts.
+    // 70_000 input tokens × $1/M = $0.070 input cost.
+    // Naive 25%-of-input projection = 17_500 output tokens × $5/M = $0.0875.
+    // Real API call caps output at maxOutputTokens (4_000) × $5/M = $0.020.
+    // Clamped estimate ≈ $0.090; unclamped ≈ $0.1575.
     const haiku = 'claude-haiku-4-5-20251001';
     const clamped = estimateCostUsd(70_000, 4_000, haiku);
     const unclamped = estimateCostUsd(70_000, 1_000_000, haiku); // cap well above 25% projection
-    expect(clamped).toBeCloseTo(0.072, 3);
-    expect(unclamped).toBeCloseTo(0.126, 3);
-    // The clamp is the difference: $0.054 lower per call at this input size.
+    expect(clamped).toBeCloseTo(0.090, 3);
+    expect(unclamped).toBeCloseTo(0.1575, 3);
+    // The clamp is the difference: $0.0675 lower per call at this input size.
     expect(unclamped - clamped).toBeGreaterThan(0.05);
   });
 
