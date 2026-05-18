@@ -61,21 +61,26 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         return `User canceled the secret prompt for "${input.name}". Acknowledge briefly and stop. DO NOT offer a plaintext fallback (no "tell me as text", "paste in chat", "send via DM"). The vault flow is the only way to submit credentials. If the task can't continue without this secret, ask the user once whether they want to retry; otherwise move on.`;
 
       case 'managed_blocked':
-        // Managed-tier write allowlist (BYOK_USER_WRITABLE_SECRETS) only
-        // permits the LLM provider keys. Tool/integration keys 403. The
-        // model must not retry the same name and must not propose to
-        // receive the secret directly. The template below is a SHAPE,
-        // not literal copy — agent translates to the user's language;
-        // the rules that follow are instructions the user must NEVER see.
-        return `The vault rejected "${input.name}" because this integration's secret isn't user-installable on the current managed plan. Reply to the user in their language (NOT this template language) — paraphrase the shape below:
-> "This integration isn't self-installable on your managed plan today. Two ways forward: (a) email support@lynox.ai — we'll enable it admin-side on your instance, or (b) self-host lynox for full control over all integrations."
+        // Post-2026-05-18 inversion: this outcome now ONLY fires for the
+        // narrow set of admin-only infrastructure secrets (LYNOX_*, MAIL_
+        // ACCOUNT_*, WHATSAPP_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*, etc.) —
+        // generic integration keys (SHOPIFY_*, STRIPE_*, etc.) are now
+        // user-writable on managed by default. So the agent should
+        // explain "this specific name maps to engine/channel infrastructure
+        // — use the relevant integration UI instead", NOT "your tier is
+        // restricted from integrations". The template below is a SHAPE,
+        // not literal copy — translate to the user's language; the rules
+        // that follow are instructions the user must NEVER see.
+        return `The vault rejected "${input.name}" because this name maps to engine or channel infrastructure (mail-account / OAuth / engine-internal credentials), which is managed by the platform — not by the agent or the end-user. Reply to the user in their language (NOT this template language) — paraphrase the shape below:
+> "Diesen Schlüssel kannst du nicht direkt setzen — er wird automatisch verwaltet (z.B. Mail-Konten über die Mail-Einstellungen, OAuth über die jeweilige Integration). Wenn du eine bestimmte Integration aktivieren willst, sag mir welche — ich kann dir den richtigen Weg dorthin zeigen."
 
 Reply rules — these are instructions for the agent, NOT content for the user:
-1. Translate to the user's language first. If the user has been writing in German, reply in German. In French, reply in French. The English template above is a SHAPE — never echo it verbatim.
-2. Don't explain WHY it was blocked. Don't reference internal mechanisms, naming schemes, or which categories of secrets are allowed. The user doesn't need the implementation reason — just the path forward.
-3. Keep the reply tight (2-3 sentences). Don't justify the policy, just give the two paths.
-4. Do NOT retry the secret tool with the same name.
-5. Do NOT propose a plaintext fallback in any form (chat paste, DM, "tell me as text") — the vault is the only path, full stop.`;
+1. Translate to the user's language first. The German example above is a SHAPE.
+2. Don't lecture about tiers, allowlists, or the managed-vs-self-host distinction — that's no longer the gating axis. The gating axis is "infrastructure secret" vs "integration secret you bring".
+3. If the user clearly wanted an INTEGRATION (e.g. they asked about Shopify, Stripe, DataForSEO), the name was probably wrong — propose a corrected name (e.g. SHOPIFY_ACCESS_TOKEN, STRIPE_API_KEY) and retry \`ask_secret\` with that name. Integration secrets pass without gating; only the specific name was misaligned with the platform's infrastructure namespace.
+4. If the user genuinely needs an infrastructure key set (rare — should never be an agent-initiated request), direct them to the relevant integration UI: Mail accounts → mail settings, Google → Google OAuth flow, etc.
+5. Do NOT retry the secret tool with the SAME admin-only name — try a different (integration-flavoured) name if you suspect misalignment, but admin-only names will keep failing.
+6. Do NOT propose a plaintext fallback in any form (chat paste, DM, "tell me as text") — the vault is the only path for any secret, full stop.`;
 
       case 'vault_error':
         // Distinct from user-cancel: the user submitted but the server

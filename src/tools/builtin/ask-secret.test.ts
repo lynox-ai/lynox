@@ -54,31 +54,36 @@ describe('askSecretTool', () => {
   });
 
   it('returns a distinct message for managed_blocked (NOT a cancel)', async () => {
+    // 2026-05-18 inversion: managed_blocked now only fires for admin-only
+    // infrastructure names (LYNOX_*, MAIL_ACCOUNT_*, etc.) — Shopify/Stripe/
+    // etc. pass freely. The tool result text now reflects that boundary:
+    // "this is infrastructure / channel-managed, not a tier restriction".
     const promptSecret = vi.fn().mockResolvedValue('managed_blocked');
     const agent = makeAgent({ promptSecret });
 
     const result = await askSecretTool.handler(
-      { name: 'SHOPIFY_TOKEN', prompt: 'Enter Shopify token' },
+      { name: 'LYNOX_HTTP_SECRET', prompt: 'Enter engine HTTP secret' },
       agent,
     );
-    expect(result).toMatch(/rejected|isn't user-installable/i);
-    // Hard guards: no retry, no plaintext. Both case-insensitive so a
-    // future copy edit to lowercase "do not retry" / "Don't retry" still
-    // pins the intent without flaking.
+    expect(result).toMatch(/rejected/i);
+    expect(result).toMatch(/infrastructure|engine|channel/i);
+    // Hard guards: no retry-with-same-name, no plaintext.
     expect(result).toMatch(/do ?not retry|don't retry/i);
     expect(result).toMatch(/plaintext fallback/i);
     // Must NOT include "User canceled" — different outcome path.
     expect(result).not.toMatch(/user canceled/i);
-    // The implementation-leak bug this iteration fixes: tool result
-    // must NOT name the BYOK allowlist or the specific LLM providers,
-    // because the agent paraphrases the result string into chat.
+    // The previous leak-bug: tool result must NOT name the (now-retired)
+    // allowlist or the specific LLM providers, in case the agent paraphrases.
     expect(result).not.toMatch(/Anthropic\s*\/\s*OpenAI\s*\/\s*Mistral/);
     expect(result).not.toMatch(/BYOK/i);
     expect(result).not.toMatch(/user-writable/i);
     expect(result).not.toMatch(/writable secrets/i);
-    // Should give the agent a concrete script to read back to the user.
-    expect(result).toMatch(/support@lynox\.ai/);
-    expect(result).toMatch(/selbst hosten|self.host/i);
+    // Don't lecture about tier or managed-vs-self-host (the gating axis is
+    // now name-shape, not tier). Guard against accidental re-introduction.
+    expect(result).not.toMatch(/your managed plan|on your tier/i);
+    // Should clue the agent that if the user wanted an integration, the
+    // name was probably misaligned — propose a corrected one and retry.
+    expect(result).toMatch(/(integration|corrected name|propose)/i);
   });
 
   it('returns a distinct message for vault_error (NOT a cancel)', async () => {
