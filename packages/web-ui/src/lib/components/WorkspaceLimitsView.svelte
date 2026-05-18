@@ -22,6 +22,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { formatContextWindow } from '../utils/context-window.js';
 
 	interface UserConfig {
 		max_monthly_cost_usd?: number;
@@ -126,49 +127,52 @@
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('cost_limits.loading')}</p>
 	{:else}
-		<!-- Item 9/11: Effective-limits pills row. Always shown. On self-host/BYOK
-		     these reflect the engine's actual numeric caps (from getHardLimits()).
-		     On managed the row shows a tier-tag pill since the CP enforces
-		     per-customer caps not exposed through this endpoint. -->
-		<section aria-labelledby="wl-pills-heading" class="space-y-2">
-			<h2 id="wl-pills-heading" class="text-sm font-medium text-text-muted">
-				{t('settings.workspace.limits.effective_heading')}
-			</h2>
-			<div class="flex flex-wrap gap-2 text-xs">
-				{#if hardLimits && !isManagedLimits(hardLimits)}
-					<span class="rounded border border-border bg-bg-subtle px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_spawn_budget')}:</span>
-						<span class="font-mono">${(hardLimits.per_spawn_cents / 100).toFixed(2)} – ${(hardLimits.max_per_spawn_cents / 100).toFixed(2)}</span>
-					</span>
-					<span class="rounded border border-border bg-bg-subtle px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_spawn_turns')}:</span>
-						<span class="font-mono">{hardLimits.spawn_max_turns}</span>
-					</span>
-					<span class="rounded border border-border bg-bg-subtle px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_spawn_depth')}:</span>
-						<span class="font-mono">{hardLimits.spawn_max_depth}</span>
-					</span>
-					<span class="rounded border border-border bg-bg-subtle px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_http_hour')}:</span>
-						<span class="font-mono">{hardLimits.tool_http_per_hour}/h</span>
-					</span>
-					<span class="rounded border border-border bg-bg-subtle px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_http_day')}:</span>
-						<span class="font-mono">{hardLimits.tool_http_per_day}/d</span>
-					</span>
-					<span class="rounded border border-border bg-bg-subtle px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_ctx_default')}:</span>
-						<span class="font-mono">{Math.round(hardLimits.default_context_window_tokens / 1000)}K</span>
-					</span>
-				{:else if isManagedLimits(hardLimits)}
-					<span class="rounded border border-accent/40 bg-accent/5 px-2 py-1">
-						<span class="text-text-muted">{t('settings.workspace.limits.pill_tier')}:</span>
-						<span class="font-mono">{hardLimits.tier}</span>
-					</span>
-					<span class="text-text-muted self-center">{t('settings.workspace.limits.pill_managed_note')}</span>
-				{/if}
-			</div>
-		</section>
+		<!-- Item 9/11: Effective-limits pills row. Self-host/BYOK pills carry
+		     numeric caps from getHardLimits(); managed renders a tier-tag pill
+		     since the CP enforces per-customer caps not exposed here. Section
+		     suppressed entirely when hard_limits is missing (older engine) so
+		     we don't render a heading over an empty row. -->
+		{#if hardLimits}
+			<section aria-labelledby="wl-pills-heading" class="space-y-2">
+				<h2 id="wl-pills-heading" class="text-sm font-medium text-text-muted">
+					{t('settings.workspace.limits.effective_heading')}
+				</h2>
+				<div class="flex flex-wrap gap-2 text-xs">
+					{#if !isManagedLimits(hardLimits)}
+						<span class="rounded border border-border bg-bg-subtle px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_spawn_budget')}:</span>
+							<span class="font-mono">${(hardLimits.per_spawn_cents / 100).toFixed(2)} – ${(hardLimits.max_per_spawn_cents / 100).toFixed(2)}</span>
+						</span>
+						<span class="rounded border border-border bg-bg-subtle px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_spawn_turns')}:</span>
+							<span class="font-mono">{hardLimits.spawn_max_turns}</span>
+						</span>
+						<span class="rounded border border-border bg-bg-subtle px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_spawn_depth')}:</span>
+							<span class="font-mono">{hardLimits.spawn_max_depth}</span>
+						</span>
+						<span class="rounded border border-border bg-bg-subtle px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_http_hour')}:</span>
+							<span class="font-mono">{hardLimits.tool_http_per_hour}/h</span>
+						</span>
+						<span class="rounded border border-border bg-bg-subtle px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_http_day')}:</span>
+							<span class="font-mono">{hardLimits.tool_http_per_day}/d</span>
+						</span>
+						<span class="rounded border border-border bg-bg-subtle px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_ctx_default')}:</span>
+							<span class="font-mono">{formatContextWindow(hardLimits.default_context_window_tokens)}</span>
+						</span>
+					{:else}
+						<span class="rounded border border-accent/40 bg-accent/5 px-2 py-1">
+							<span class="text-text-muted">{t('settings.workspace.limits.pill_tier')}:</span>
+							<span class="font-mono">{hardLimits.tier}</span>
+						</span>
+						<span class="text-text-muted self-center">{t('settings.workspace.limits.pill_managed_note')}</span>
+					{/if}
+				</div>
+			</section>
+		{/if}
 
 		<!-- Spend limits — Item 8: grayed on managed (with tooltip) instead of
 		     hidden. Inputs always rendered so the user can see what's gated. -->

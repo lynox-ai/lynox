@@ -324,7 +324,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.context_window.description':     { de: 'Wie viele Tokens lynox pro Anfrage in den Kontext lädt. Größer = teurer.',     en: 'How many tokens lynox loads into context per request. Bigger = more expensive.' },
 	'llm.context_window.active_model_label': { de: 'Aktives Modell',                                                             en: 'Active model' },
 	'llm.context_window.native':          { de: 'nativ',                                                                          en: 'native' },
-	'llm.context_window.option.above_native_tooltip': { de: 'Über der nativen Kapazität des aktiven Modells — wird automatisch auf', en: 'Above the active model\'s native capacity — silently clamped to' },
+	'llm.context_window.option.above_native_tooltip': { de: 'Über der nativen Kapazität des aktiven Modells. Engine kappt auf den nativen Wert', en: 'Above the active model\'s native capacity. Engine silently caps to the native value' },
 	'llm.context_window.option.default':       { de: 'Standard (vom Modell vorgegeben)',                                         en: 'Default (model-defined)' },
 	'llm.context_window.option.default_hint':  { de: 'Verwendet die native Kontext-Größe des aktiven Modells. Empfohlen.',       en: 'Uses the active model\'s native context window. Recommended.' },
 	'llm.context_window.option.32k':           { de: 'Sparsam — 32k Tokens',                                                     en: 'Frugal — 32k tokens' },
