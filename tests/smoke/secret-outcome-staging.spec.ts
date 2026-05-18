@@ -58,10 +58,13 @@ test.describe('secret-outcome v29 e2e', () => {
     await expect(page).toHaveTitle(/lynox|app/i);
   });
 
-  test('managed-tier rejects non-LLM vault writes with 403', async ({ page }) => {
+  test('managed-tier rejects admin-only infrastructure names with 403', async ({ page }) => {
+    // 2026-05-18 inversion: the gate now fires for the NARROW set of
+    // admin-only patterns (LYNOX_*, MAIL_ACCOUNT_*, etc.) — generic
+    // integration keys (SHOPIFY_*, STRIPE_*, …) pass on managed.
     await page.goto(`${STAGING}/app`);
     const result = await page.evaluate(async (base: string) => {
-      const r = await fetch(`${base}/api/secrets/SHOPIFY_PW_SMOKE`, {
+      const r = await fetch(`${base}/api/secrets/LYNOX_FAKE_SMOKE_INFRA`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -70,15 +73,32 @@ test.describe('secret-outcome v29 e2e', () => {
       return { status: r.status, body: await r.text() };
     }, STAGING);
     expect(result.status).toBe(403);
-    expect(result.body).toMatch(/not user-writable|Managed mode/i);
+    expect(result.body).toMatch(/admin-managed|Managed mode/i);
   });
 
-  test('allowlisted ANTHROPIC_API_KEY accepts (no 403)', async ({ page }) => {
+  test('managed-tier ACCEPTS integration secrets (the core-promise case)', async ({ page }) => {
+    // SHOPIFY_/STRIPE_/etc. names must NOT 403 on managed. The vault
+    // PUT returns 400 (missing-value with empty body) — confirming the
+    // gate passed. The previous behaviour returned 403 because the
+    // allowlist only permitted LLM provider keys; the inversion fixes
+    // that to honour the lynox core promise.
     await page.goto(`${STAGING}/app`);
     const result = await page.evaluate(async (base: string) => {
-      // Use an empty body — engine returns 400 "Missing value" but the
-      // 403 allowlist gate has already passed at that point. We only
-      // care that allowlist != tighter-than-needed.
+      const r = await fetch(`${base}/api/secrets/SHOPIFY_SMOKE_TEST_INTEGRATION`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({}),
+      });
+      return r.status;
+    }, STAGING);
+    // 400 = missing-value (gate passed). 403 = managed-gate (regression).
+    expect(result).toBe(400);
+  });
+
+  test('LLM provider keys also pass through (regression backstop)', async ({ page }) => {
+    await page.goto(`${STAGING}/app`);
+    const result = await page.evaluate(async (base: string) => {
       const r = await fetch(`${base}/api/secrets/ANTHROPIC_API_KEY`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -87,7 +107,6 @@ test.describe('secret-outcome v29 e2e', () => {
       });
       return r.status;
     }, STAGING);
-    // 400 = missing value (gate passed). 403 = allowlist failure (bug).
     expect(result).toBe(400);
   });
 
