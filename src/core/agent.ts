@@ -840,6 +840,27 @@ export class Agent implements IAgent {
     if (this.secretStore) {
       const secretNames = this.secretStore.extractSecretNames(tc.input);
       if (secretNames.length > 0) {
+        // Fail-loud gate: refuse the tool call if ANY referenced secret
+        // is missing from the vault. Previously the resolver silently
+        // left the `secret:NAME` literal in place, which then got sent
+        // to the external API and surfaced as a confusing 4xx where the
+        // service echoed the literal back. The agent then mis-diagnosed
+        // it as a tool-limitation. Now: clear error → agent can either
+        // call ask_secret to store the missing name, or pick a different
+        // approach. Staging 2026-05-18 incident: SHOPIFY_CLIENT_ID never
+        // stored, agent POSTed `client_secret: "secret:SHOPIFY_CLIENT_ID"`
+        // verbatim and read Shopify's echo as "secrets don't resolve in
+        // bodies". They do — when the vault has the value.
+        const unresolved = this.secretStore.findUnresolvedSecretRefs(tc.input);
+        if (unresolved.length > 0) {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${unresolved.map((n) => `"${n}"`).join(', ')}. The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value, then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
+            is_error: true,
+          };
+        }
+
         // Consent gate: first use requires user approval
         const unconsented = secretNames.filter(n => !this.secretStore!.hasConsent(n));
         if (unconsented.length > 0) {

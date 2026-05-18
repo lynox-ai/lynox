@@ -43,7 +43,7 @@ const DOCS_FETCH_TIMEOUT_MS = 15_000;
  */
 const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
-type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine';
+type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token';
 
 interface RefinePatch {
   addGuidelines?: string[] | undefined;
@@ -58,8 +58,10 @@ interface ApiSetupInput {
   action: ApiSetupAction;
   /** API profile data (required for create/update). */
   profile?: ApiProfile | undefined;
-  /** Profile ID (required for delete/view/refine). */
+  /** Profile ID (required for delete/view/refine/fetch_token). */
   id?: string | undefined;
+  /** For fetch_token: vault key name to store the access_token under. Default: derived from id. */
+  output_secret_name?: string | undefined;
   /** OpenAPI spec URL — preferred bootstrap source when an OpenAPI 3.x JSON spec exists. */
   openapi_url?: string | undefined;
   /**
@@ -77,7 +79,13 @@ const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'des
 const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const VALID_SHAPE_KINDS = new Set(['reduce', 'passthrough']);
+// `graphql` accepted 2026-05-18 as alias for `reduce` with GraphQL-shaped
+// include paths (e.g. "data.products.edges[*].node"). The reducer treats
+// it identically to `reduce` but the explicit name signals intent to the
+// agent (don't confuse with REST passthrough) — staging incident: Shopify
+// integration setup hit `Invalid response_shape.kind "graphql"` because
+// the schema didn't accept GraphQL as a first-class shape.
+const VALID_SHAPE_KINDS = new Set(['reduce', 'passthrough', 'graphql']);
 const VALID_REDUCERS = new Set(['avg', 'peak', 'avg+peak', 'count', 'first_n', 'last_n']);
 const VALID_OUTPUT_VOLUMES = new Set(['small', 'medium', 'large', 'streaming']);
 const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
@@ -105,7 +113,32 @@ function validateProfile(profile: ApiProfile): string | null {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
-      return 'auth.vault_keys is required for auth.type="oauth2" (refresh-token slot)';
+      return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
+    }
+    // OAuth2 metadata: required when type='oauth2' AND the agent intends to
+    // use action=fetch_token. We still allow profiles that just carry the
+    // auth.type='oauth2' label without metadata (legacy / human-driven
+    // flows), but the metadata-shape gets validated when present.
+    if (profile.auth.type === 'oauth2' && profile.auth.oauth) {
+      const o = profile.auth.oauth;
+      if (o.token_url !== undefined) {
+        try { new URL(o.token_url); } catch {
+          return `Invalid auth.oauth.token_url: "${o.token_url}" is not a valid URL`;
+        }
+      }
+      if (o.grant_type !== undefined && o.grant_type !== 'client_credentials' && o.grant_type !== 'refresh_token') {
+        return `Invalid auth.oauth.grant_type "${o.grant_type}": must be "client_credentials" or "refresh_token"`;
+      }
+      if (o.body_format !== undefined && o.body_format !== 'form' && o.body_format !== 'json') {
+        return `Invalid auth.oauth.body_format "${o.body_format}": must be "form" or "json"`;
+      }
+      const keyPattern = /^[A-Z][A-Z0-9_]{0,63}$/;
+      for (const field of ['client_id_key', 'client_secret_key', 'refresh_token_key'] as const) {
+        const v = o[field];
+        if (v !== undefined && !keyPattern.test(v)) {
+          return `Invalid auth.oauth.${field} "${v}": must be UPPER_SNAKE_CASE, start with a letter, 1-64 chars`;
+        }
+      }
     }
   }
   if (profile.rate_limit) {
@@ -805,13 +838,13 @@ function applyRefine(existing: ApiProfile, patch: RefinePatch): ApiProfile {
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   definition: {
     name: 'api_setup',
-    description: 'Create, update, delete, list, view, bootstrap, or refine API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). Returns a draft profile; enrich it with extra guidelines/avoid/response_shape (from reading the docs) and then call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit). Use when a call teaches you something new.\n- delete: pass `id`.',
+    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). Returns a draft profile; enrich it with extra guidelines/avoid/response_shape (from reading the docs) and then call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit). Use when a call teaches you something new.\n- delete: pass `id`.\n- fetch_token: pass `id`. Drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata. Resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN` (override via `output_secret_name`). Use INSTEAD of constructing the /oauth/access_token POST by hand via http_request — that path is brittle and gets the body format wrong for half the providers.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine'],
+          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token'],
           description: 'Action to perform',
         },
         profile: {
@@ -833,6 +866,10 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         refine: {
           type: 'object',
           description: 'Additive patch for refine action: {addGuidelines[], addAvoid[], addNotes[], addEndpoints[], response_shape, rate_limit}.',
+        },
+        output_secret_name: {
+          type: 'string',
+          description: 'For fetch_token action: vault key name to store the resulting access_token under. UPPER_SNAKE_CASE. Default: `${id.toUpperCase()}_ACCESS_TOKEN`.',
         },
       },
       required: ['action'],
@@ -1069,6 +1106,116 @@ Next steps before calling create:
       return `Deleted API profile "${id}". Changes take effect on next restart.`;
     }
 
-    return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", or "delete".';
+    if (input.action === 'fetch_token') {
+      if (!input.id) return 'Error: "id" is required for fetch_token action.';
+      const apiStore = agent.toolContext?.apiStore;
+      const profile = apiStore?.get(input.id);
+      if (!profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
+      if (profile.auth?.type !== 'oauth2') {
+        return `Error: profile "${input.id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
+      }
+      const oauth = profile.auth.oauth;
+      if (!oauth?.token_url) {
+        return `Error: profile "${input.id}" auth.oauth is missing token_url. Update the profile with the OAuth token endpoint (e.g. https://<shop>.myshopify.com/admin/oauth/access_token).`;
+      }
+      const grantType = oauth.grant_type ?? 'client_credentials';
+      const bodyFormat = oauth.body_format ?? 'form';
+      const clientIdKey = oauth.client_id_key;
+      const clientSecretKey = oauth.client_secret_key;
+      if (!clientIdKey || !clientSecretKey) {
+        return `Error: profile "${input.id}" auth.oauth is missing client_id_key or client_secret_key. Update the profile with the vault key names that hold the OAuth credentials.`;
+      }
+      const secretStore = agent.secretStore;
+      if (!secretStore) {
+        return 'Error: no secret store wired in this context — cannot resolve OAuth credentials.';
+      }
+      // Resolve directly from the store rather than via `secret:NAME` refs
+      // in the body — agent shouldn't see the values, and we need to
+      // build the request body ourselves anyway.
+      const resolveOne = (name: string): string | null => {
+        // SecretStoreLike doesn't expose `resolve()` on the interface; use
+        // the same indirection as resolveSecretRefs (extract + resolve via
+        // a single-key probe).
+        const probe = { _: `secret:${name}` };
+        const probed = secretStore.resolveSecretRefs(probe) as { _: string };
+        return probed._ === `secret:${name}` ? null : probed._;
+      };
+      const clientId = resolveOne(clientIdKey);
+      const clientSecret = resolveOne(clientSecretKey);
+      const missing: string[] = [];
+      if (clientId === null) missing.push(clientIdKey);
+      if (clientSecret === null) missing.push(clientSecretKey);
+      if (grantType === 'refresh_token' && oauth.refresh_token_key) {
+        const rt = resolveOne(oauth.refresh_token_key);
+        if (rt === null) missing.push(oauth.refresh_token_key);
+      }
+      if (missing.length > 0) {
+        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${n}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+      }
+      const params: Record<string, string> = {
+        grant_type: grantType,
+        client_id: clientId!,
+        client_secret: clientSecret!,
+      };
+      if (oauth.scope) params['scope'] = oauth.scope;
+      if (oauth.audience) params['audience'] = oauth.audience;
+      if (grantType === 'refresh_token' && oauth.refresh_token_key) {
+        const rt = resolveOne(oauth.refresh_token_key);
+        if (rt !== null) params['refresh_token'] = rt;
+      }
+      const headers: Record<string, string> = { 'Accept': 'application/json' };
+      let body: string;
+      if (bodyFormat === 'json') {
+        headers['Content-Type'] = 'application/json';
+        body = JSON.stringify(params);
+      } else {
+        headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        body = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+      }
+      let response: Response;
+      try {
+        response = await fetchWithValidatedRedirects(oauth.token_url, {
+          method: 'POST',
+          headers,
+          body,
+        });
+      } catch (err) {
+        return `Error: token exchange to ${oauth.token_url} failed: ${err instanceof Error ? err.message : String(err)}.`;
+      }
+      const respText = await response.text();
+      if (!response.ok) {
+        // Trim verbose HTML error pages — keep the first ~500 chars so the
+        // agent can diagnose without flooding context.
+        const snippet = respText.length > 500 ? respText.slice(0, 500) + '…[truncated]' : respText;
+        return `Token exchange failed with HTTP ${response.status}. Response body:\n${snippet}\n\nThis is the external provider rejecting the credentials or app config — NOT a lynox tool limitation. Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage. Do NOT recommend self-host or tier changes for this kind of failure.`;
+      }
+      let parsed: { access_token?: string; expires_in?: number; refresh_token?: string; scope?: string; token_type?: string };
+      try {
+        parsed = JSON.parse(respText) as typeof parsed;
+      } catch {
+        return `Token exchange returned HTTP ${response.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
+      }
+      const accessToken = parsed.access_token;
+      if (!accessToken || typeof accessToken !== 'string') {
+        return `Token exchange returned HTTP ${response.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
+      }
+      const outputName = input.output_secret_name ?? `${input.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
+        return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
+      }
+      if (!secretStore.set) {
+        return 'Error: secret store has no write path in this context — cannot persist the access_token.';
+      }
+      secretStore.set(outputName, accessToken);
+      // Stash refresh_token too if the response carries one (for later refresh_token grants).
+      if (parsed.refresh_token && typeof parsed.refresh_token === 'string') {
+        const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
+        secretStore.set(refreshName, parsed.refresh_token);
+      }
+      const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
+      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). Reference via \`secret:${outputName}\` in http_request calls. ${parsed.refresh_token ? `Refresh token stored as \`${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN\`.` : ''}`;
+    }
+
+    return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", or "fetch_token".';
   },
 };
