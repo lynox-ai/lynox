@@ -30,7 +30,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { filterContextMilestones, formatContextWindow, type ContextMilestone } from '../utils/context-window.js';
+	import { buildContextOptions, formatContextWindow, type ContextMilestone } from '../utils/context-window.js';
 
 	interface UserConfig {
 		experience?: 'business' | 'developer';
@@ -162,11 +162,18 @@
 		value: undefined as number | undefined,
 		labelKey: 'llm.context_window.option.default',
 		hintKey: 'llm.context_window.option.default_hint',
+		disabled: false,
+		hidden: false,
 	};
 
+	// Settings v3 Item 8: show-all-grayed — above-native milestones render
+	// disabled with a tooltip rather than vanishing, so users see WHY they
+	// can't pick 1M on Sonnet base. Below-native and exact-native are still
+	// filtered (hidden) to keep the list focused; PR 2 introduced this split
+	// and PR 3 only flips the above-native branch from filtered to disabled.
 	const contextOptions = $derived([
 		DEFAULT_OPTION,
-		...filterContextMilestones(activeModel?.contextWindow, CAP_MILESTONES),
+		...buildContextOptions(activeModel?.contextWindow, CAP_MILESTONES).filter((opt) => !opt.hidden),
 	]);
 </script>
 
@@ -248,17 +255,17 @@
 				</select>
 			</label>
 
-			{#if !isManaged}
-				<!-- embedding_provider is not in MANAGED_USER_WRITABLE_CONFIG (http-api.ts) —
-				     hidden on managed to avoid the silent-403 UX trap. -->
-				<label class="block">
-					<span class="block text-sm font-medium mb-1">{t('config.embedding_provider')}</span>
-					<select bind:value={config.embedding_provider} disabled={!loaded}
-						class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-						<option value="onnx">{t('config.embedding_onnx')}</option>
-					</select>
-				</label>
-			{/if}
+			<!-- embedding_provider is not in MANAGED_USER_WRITABLE_CONFIG (http-api.ts) —
+			     Item 8 (show-all-grayed, 2026-05-19): rendered disabled with a tooltip
+			     on managed instead of hidden, so the user can see what's gated. The
+			     silent-403 UX trap is now prevented by the disabled-input state. -->
+			<label class="block" title={isManaged ? t('llm.advanced.embedding_provider_managed_tooltip') : undefined}>
+				<span class="block text-sm font-medium mb-1">{t('config.embedding_provider')}</span>
+				<select bind:value={config.embedding_provider} disabled={!loaded || isManaged}
+					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50 disabled:cursor-not-allowed">
+					<option value="onnx">{t('config.embedding_onnx')}</option>
+				</select>
+			</label>
 		</section>
 
 		<!-- Context window — was a temporary interim on CostLimits.svelte (P2-PR-C),
@@ -277,10 +284,13 @@
 			{/if}
 			<div class="space-y-2">
 				{#each contextOptions as opt (opt.value ?? 'default')}
-					<label class="flex items-start gap-3 cursor-pointer">
+					<label class="flex items-start gap-3 {opt.disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}"
+						title={opt.disabled && activeModel
+							? `${t('llm.context_window.option.above_native_tooltip')} (${formatContextWindow(activeModel.contextWindow)} ${t('llm.context_window.native')})`
+							: undefined}>
 						<input type="radio" name="llm-context-window" value={opt.value}
 							bind:group={config.max_context_window_tokens}
-							disabled={!loaded} class="mt-1 disabled:opacity-50" />
+							disabled={!loaded || opt.disabled} class="mt-1 disabled:opacity-50" />
 						<div class="flex-1">
 							<div class="text-sm font-medium">{t(opt.labelKey)}</div>
 							<div class="text-xs text-text-muted">{t(opt.hintKey)}</div>

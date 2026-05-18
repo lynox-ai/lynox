@@ -1,5 +1,5 @@
-// Settings v3 Item 6 helpers — pure functions extracted from LLMAdvancedView
-// so the filter + formatter logic is unit-testable without Svelte runtime.
+// Settings v3 Items 6/8 helpers — pure functions extracted from LLMAdvancedView
+// so the option-list logic is unit-testable without Svelte runtime.
 
 export interface ContextMilestone {
 	value: number;
@@ -7,14 +7,50 @@ export interface ContextMilestone {
 	hintKey: string;
 }
 
+export interface ContextOption {
+	value: number | undefined;
+	labelKey: string;
+	hintKey: string;
+	/** True when the milestone exceeds the active model's native window —
+	 *  rendered disabled with a tooltip rather than hidden (Item 8). */
+	disabled: boolean;
+	/** True when the milestone equals the active model's native window —
+	 *  redundant with the "Default" radio; hidden to keep the list clean. */
+	hidden: boolean;
+}
+
 /**
- * Filter cap milestones to those strictly below the active model's native
- * context window. Above-native is redundant with the "default" radio
- * (which uses native, no cap) and pre-fix the UI offered "1M" on
- * Sonnet base which silently capped to 200K — lying UI.
+ * Build the context-window radio list with show-all-grayed semantics:
+ * - `< native` → enabled (real cap users can pick)
+ * - `== native` → hidden (redundant with the "Default" radio above)
+ * - `> native` → disabled (over-promise: engine would silently clamp)
  *
  * When `native` is undefined (older engine without /api/config.active_model
- * or registry miss), returns all milestones so the page still renders.
+ * or registry miss), all milestones render enabled (legacy behaviour).
+ *
+ * Pre-2026-05-19 the UI hard-coded [200k, 500k, 1M] regardless of model,
+ * so Sonnet base users saw "1M" silently clamping to 200K — lying UI.
+ */
+export function buildContextOptions(
+	native: number | undefined,
+	milestones: ReadonlyArray<ContextMilestone>,
+): ContextOption[] {
+	return milestones.map((m) => ({
+		value: m.value,
+		labelKey: m.labelKey,
+		hintKey: m.hintKey,
+		disabled: native !== undefined && m.value > native,
+		hidden: native !== undefined && m.value === native,
+	}));
+}
+
+/**
+ * Legacy entry point — kept for back-compat with PR 2 callers. Returns the
+ * subset of milestones that should render as enabled radios (drops both
+ * hidden + disabled). New code should call `buildContextOptions` and render
+ * the disabled milestones grayed with tooltip per Item 8.
+ *
+ * @deprecated use `buildContextOptions` instead.
  */
 export function filterContextMilestones(
 	native: number | undefined,
