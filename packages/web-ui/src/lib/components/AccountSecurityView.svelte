@@ -57,6 +57,18 @@
 		loaded = true;
 	}
 
+	// Defensive JSON parser — the engine forwards /auth/passkey to the CP;
+	// transient errors (CP unreachable, proxy gap) can surface as HTML 404/502
+	// pages where .json() throws. Wrapping locally lets us emit the right
+	// step-specific toast instead of the generic passkey_failed catch.
+	async function readJson(res: Response): Promise<unknown | null> {
+		try {
+			return await res.json();
+		} catch {
+			return null;
+		}
+	}
+
 	async function enrol(): Promise<void> {
 		registering = true;
 		try {
@@ -65,14 +77,17 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'register/start' }),
 			});
-			if (!startRes.ok) {
+			const options = await readJson(startRes);
+			if (!startRes.ok || options === null) {
 				addToast(t('account.security.passkey_start_failed'), 'error', 5000);
 				return;
 			}
-			const options = await startRes.json();
 
 			const { startRegistration } = await import('@simplewebauthn/browser');
-			const regResponse = await startRegistration({ optionsJSON: options });
+			// startRegistration accepts a PublicKeyCredentialCreationOptionsJSON;
+			// the CP returns the canonical SimpleWebAuthn shape so the cast is
+			// safe in practice. Typed as `unknown` here for strict-mode parity.
+			const regResponse = await startRegistration({ optionsJSON: options as Parameters<typeof startRegistration>[0]['optionsJSON'] });
 
 			const ua = navigator.userAgent;
 			const deviceName = /iPhone|iPad/.test(ua) ? 'iPhone/iPad'
@@ -86,10 +101,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action: 'register/complete', response: regResponse, deviceName }),
 			});
-			const verifyData = (await verifyRes.json()) as { verified?: boolean; error?: string };
+			const verifyData = await readJson(verifyRes) as { verified?: boolean; error?: string } | null;
 
-			if (!verifyRes.ok || !verifyData.verified) {
-				addToast(verifyData.error ?? t('account.security.passkey_failed'), 'error', 5000);
+			if (!verifyRes.ok || !verifyData?.verified) {
+				addToast(verifyData?.error ?? t('account.security.passkey_failed'), 'error', 5000);
 				return;
 			}
 
