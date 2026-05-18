@@ -488,8 +488,8 @@
 		/\bAKIA[A-Z0-9]{16}/,                                // AWS access-key
 		/\bAIza[A-Za-z0-9_-]{35}/,                           // Google API key
 		/\bxox[bpoasr]-[A-Za-z0-9-]{10,}/,                   // Slack
-		/\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}/,               // Shopify (admin / app secret / partner / custom)
-		/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\./,  // JWT (3 base64 segments)
+		/\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}/,                    // Shopify (admin / app secret / partner / custom)
+		/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/, // JWT (3 base64 segments — header.payload.signature)
 	];
 
 	function looksLikeSecret(text: string): boolean {

@@ -31,7 +31,7 @@
 	// Showing them in the generic-keys list confuses operators because the
 	// "Ändern" button here writes to a different code path than the channel's
 	// edit form, races silently, and the names (e.g. MAIL_ACCOUNT_STAGING_RULE)
-	// don't read as "API keys" the way TAVILY_API_KEY does. Filter by prefix.
+	// don't read as "API keys" the way DATAFORSEO_LOGIN does. Filter by prefix.
 	const CHANNEL_MANAGED_PREFIXES: ReadonlyArray<string> = [
 		'MAIL_ACCOUNT_',
 		'WHATSAPP_',

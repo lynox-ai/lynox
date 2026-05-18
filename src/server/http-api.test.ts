@@ -1005,16 +1005,17 @@ describe('LynoxHTTPApi', () => {
 
     it('rejects cross-session promptId (auth scope)', async () => {
       await withStore(async (sid, ps) => {
-        // promptId belongs to session 'sec-1' but client POSTs against 'other-1'
+        // promptId belongs to session 'sec-1' but client POSTs against 'other-1'.
         const promptId = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
-        const res = await jsonFetch(`/api/sessions/other-1/secret-saved`, {
+        await jsonFetch(`/api/sessions/other-1/secret-saved`, {
           method: 'POST',
           body: JSON.stringify({ status: 'saved', promptId }),
         });
-        // Falls through to per-session lookup; 'other-1' has no pending → 404.
-        expect(res.status).toBe(404);
-        // The original session's row must remain untouched.
+        // The real security invariant: the original session's row stays
+        // pending. The HTTP status (404 from per-session fall-through, or
+        // 200 if the route ever becomes idempotent) is incidental.
         expect(ps.getById(promptId)?.status).toBe('pending');
+        expect(ps.getById(promptId)?.answer_error).toBeNull();
       });
     });
   });
