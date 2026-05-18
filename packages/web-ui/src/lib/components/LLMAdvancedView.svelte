@@ -30,6 +30,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { filterContextMilestones, formatContextWindow, type ContextMilestone } from '../utils/context-window.js';
 
 	interface UserConfig {
 		experience?: 'business' | 'developer';
@@ -150,7 +151,7 @@
 	// native window via MODEL_CAPABILITIES[active_model.id] and the UI filters
 	// CAP_MILESTONES to those strictly below it (above-native is redundant
 	// with "default"). PR 3 will switch this to show-all-grayed.
-	const CAP_MILESTONES: ReadonlyArray<{ value: number; labelKey: string; hintKey: string }> = [
+	const CAP_MILESTONES: ReadonlyArray<ContextMilestone> = [
 		{ value: 32_000,    labelKey: 'llm.context_window.option.32k',  hintKey: 'llm.context_window.option.32k_hint' },
 		{ value: 100_000,   labelKey: 'llm.context_window.option.100k', hintKey: 'llm.context_window.option.100k_hint' },
 		{ value: 200_000,   labelKey: 'llm.context_window.option.200k', hintKey: 'llm.context_window.option.200k_hint' },
@@ -163,15 +164,10 @@
 		hintKey: 'llm.context_window.option.default_hint',
 	};
 
-	const contextOptions = $derived.by(() => {
-		const native = activeModel?.contextWindow;
-		if (native === undefined) {
-			// No active-model data (older engine without /api/config.active_model,
-			// or registry miss) → fall back to the legacy static list.
-			return [DEFAULT_OPTION, ...CAP_MILESTONES];
-		}
-		return [DEFAULT_OPTION, ...CAP_MILESTONES.filter((opt) => opt.value < native)];
-	});
+	const contextOptions = $derived([
+		DEFAULT_OPTION,
+		...filterContextMilestones(activeModel?.contextWindow, CAP_MILESTONES),
+	]);
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -276,7 +272,7 @@
 				     below makes sense ("why is there no 500K option?" → because
 				     Sonnet caps at 200K). Single line, non-intrusive. -->
 				<p class="text-xs text-text-muted mb-3 italic">
-					{t('llm.context_window.active_model_label')}: <span class="font-mono not-italic">{activeModel.uiLabel}</span> ({(activeModel.contextWindow / 1000).toFixed(0)}K {t('llm.context_window.native')})
+					{t('llm.context_window.active_model_label')}: <span class="font-mono not-italic">{activeModel.uiLabel}</span> ({formatContextWindow(activeModel.contextWindow)} {t('llm.context_window.native')})
 				</p>
 			{/if}
 			<div class="space-y-2">

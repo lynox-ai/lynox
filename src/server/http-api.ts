@@ -2599,14 +2599,22 @@ export class LynoxHTTPApi {
       if (activeCap) {
         redacted['active_model'] = {
           id: activeCap.id,
-          tier: activeCap.tier,
-          provider: activeCap.provider,
+          tier: activeTier,
+          // Use the runtime-active provider, not `activeCap.provider`, so an
+          // openai-compat instance whose tier resolver fell back to an
+          // Anthropic id (no MISTRAL_MODEL_MAP bootstrap) still reports
+          // `'openai'` to the UI for tier-awareness gating.
+          provider: activeProvider,
           contextWindow: activeCap.contextWindow,
           defaultMaxOutput: activeCap.defaultMaxOutput,
           maxContinuations: activeCap.maxContinuations,
           features: activeCap.features,
           uiLabel: activeCap.uiLabel,
         };
+      } else {
+        // Unknown id (legacy custom-endpoint model or registry gap). UI falls
+        // back to the legacy static radio list. Surface for support tracing.
+        console.warn(`[http-api] /config: no MODEL_CAPABILITIES entry for ${activeModelId} (tier=${activeTier}, provider=${activeProvider})`);
       }
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
