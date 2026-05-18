@@ -144,9 +144,21 @@ export function normalizeModelId(model: string): string {
 export const CHARS_PER_TOKEN = 3.5;
 
 const _CONTEXT_WINDOW: Record<string, number> = {
+  'claude-opus-4-7':         1_000_000,
   'claude-opus-4-6':         1_000_000,
   'claude-sonnet-4-6':         200_000,
   'claude-haiku-4-5-20251001': 200_000,
+  // `[1m]`-suffix variants — Anthropic's identifier for the 1M-context
+  // beta when the `anthropic-beta: context-1m-2025-08-07` header is on.
+  // Without these entries the lookup falls through to the 200k default
+  // (normalizeModelId only strips @YYYYMMDD), which historically caused
+  // the staging "Kontext: 423%" UI mismatch when an extended-Sonnet
+  // session was treated as 200k for trim/percentage calc. Pricing
+  // (core/pricing.ts) mirrors the base model for now — Anthropic may
+  // levy a 1M-tier premium later; revisit when that lands.
+  'claude-opus-4-7[1m]':     1_000_000,
+  'claude-opus-4-6[1m]':     1_000_000,
+  'claude-sonnet-4-6[1m]':   1_000_000,
   // Mistral set — large + magistral both 128K, small 32K (per Mistral docs)
   'mistral-small-2603':         32_000,
   'mistral-large-2512':        131_072,
@@ -158,9 +170,16 @@ const _CONTEXT_WINDOW: Record<string, number> = {
 };
 
 const _DEFAULT_MAX_TOKENS: Record<string, number> = {
+  'claude-opus-4-7':         32_000,
   'claude-opus-4-6':         32_000,
   'claude-sonnet-4-6':       16_000,
   'claude-haiku-4-5-20251001': 8_192,
+  // `[1m]`-variant entries mirror the base model — beta-on doesn't change
+  // the max-output cap. See _CONTEXT_WINDOW comment for why explicit
+  // entries beat normalize-and-strip.
+  'claude-opus-4-7[1m]':     32_000,
+  'claude-opus-4-6[1m]':     32_000,
+  'claude-sonnet-4-6[1m]':   16_000,
   // Mistral set
   'mistral-small-2603':       8_192,
   'mistral-large-2512':      16_000,
@@ -172,9 +191,15 @@ const _DEFAULT_MAX_TOKENS: Record<string, number> = {
 };
 
 const _MAX_CONTINUATIONS: Record<string, number> = {
+  'claude-opus-4-7':           20,
   'claude-opus-4-6':           20,
   'claude-sonnet-4-6':         10,
   'claude-haiku-4-5-20251001':  5,
+  // `[1m]`-variant entries mirror base tier — same continuation budget
+  // applies regardless of context-window beta.
+  'claude-opus-4-7[1m]':       20,
+  'claude-opus-4-6[1m]':       20,
+  'claude-sonnet-4-6[1m]':     10,
   // Mistral set — mirror tier ordering (small=5 / large=10 / magistral=20)
   'mistral-small-2603':         5,
   'mistral-large-2512':        10,
@@ -188,6 +213,18 @@ const _MAX_CONTINUATIONS: Record<string, number> = {
 /** Look up context window size. Normalizes provider-prefixed model IDs automatically. */
 export function getContextWindow(model: string): number {
   return _CONTEXT_WINDOW[model] ?? _CONTEXT_WINDOW[normalizeModelId(model)] ?? 200_000;
+}
+
+/** Effective context window after applying the user's optional cap. Mirrors
+ *  Agent._effectiveContextWindow so server-side endpoints + session bookkeeping
+ *  can compute the same value the agent actually uses internally — staging
+ *  2026-05-18 shipped this with three separate copies of the formula that
+ *  drifted (UI showed 423% because /sessions returned the native window
+ *  while the agent had applied a smaller user cap). Single source of truth.
+ *  Never returns more than the model's native window. */
+export function effectiveContextWindow(model: string, userCap: number | undefined): number {
+  const native = getContextWindow(model);
+  return userCap !== undefined && userCap > 0 ? Math.min(native, userCap) : native;
 }
 
 /** Look up default max output tokens. Normalizes provider-prefixed model IDs automatically. */

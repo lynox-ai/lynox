@@ -262,3 +262,73 @@ describe('read edge cases', () => {
     expect(result).toContain('Error');
   });
 });
+
+// API-setup-reminder regression-pin (staging incident 2026-05-18): Haiku ran
+// web_research twice for Shopify but still recommended read-only scopes for
+// an SEO use case (which needs writes). The system-prompt HARD RULES were in
+// place but Haiku ignored them. Injecting the reminder INTO the tool result
+// — right next to the docs the agent is about to act on — is the just-in-
+// time pointer that lives in Haiku's local context window when it decides.
+describe('API-setup reminder injection', () => {
+  function makeApiDocsProvider(): SearchProvider {
+    return mockProvider([
+      { title: 'Shopify scopes', url: 'https://shopify.dev/docs/api/admin/access-scopes', snippet: 'read_products write_products …' },
+    ]);
+  }
+
+  it('appends the reminder when the search query mentions API / OAuth / scopes', async () => {
+    const tool = createWebSearchTool(makeApiDocsProvider());
+    const result = await tool.handler({ action: 'search', query: 'Shopify custom app access token OAuth scopes' }, {} as never);
+    expect(result).toContain('Agent reminder');
+    // Spot-check the three concrete reminders.
+    expect(result).toMatch(/Match the user's stated use case/i);
+    expect(result).toMatch(/write_.*scopes|write_\*/i);
+    expect(result).toMatch(/Hold .*ask_secret/i);
+  });
+
+  it('appends the reminder when reading a developer.* / *.dev URL', async () => {
+    const provider = mockProvider();
+    // Mock content extraction to avoid network. The handler always calls
+    // extractContent on read; vi.spyOn the extractor module here.
+    const extractMod = await import('./content-extractor.js');
+    vi.spyOn(extractMod, 'extractContent').mockResolvedValue({
+      title: 'Shopify Admin API',
+      url: 'https://shopify.dev/docs/admin-api/getting-started',
+      wordCount: 100,
+      content: 'GraphQL Admin API…',
+      truncated: false,
+    });
+    const tool = createWebSearchTool(provider);
+    const result = await tool.handler({ action: 'read', url: 'https://shopify.dev/docs/admin-api/getting-started' }, {} as never);
+    expect(result).toContain('Agent reminder');
+    // Critical assertion: the reminder must be OUTSIDE the untrusted_data
+    // wrap so the model treats it as system guidance, not page content.
+    const dataEndIdx = result.lastIndexOf('</untrusted_data>');
+    const reminderIdx = result.indexOf('Agent reminder');
+    expect(dataEndIdx).toBeGreaterThan(-1);
+    expect(reminderIdx).toBeGreaterThan(dataEndIdx);
+  });
+
+  it('does NOT inject the reminder for general web queries', async () => {
+    const provider = mockProvider([
+      { title: 'Some news', url: 'https://example.com/news', snippet: 'Unrelated' },
+    ]);
+    const tool = createWebSearchTool(provider);
+    const result = await tool.handler({ action: 'search', query: 'weekend weather Zurich' }, {} as never);
+    expect(result).not.toContain('Agent reminder');
+  });
+
+  it('does NOT inject the reminder for non-API URLs on read', async () => {
+    const extractMod = await import('./content-extractor.js');
+    vi.spyOn(extractMod, 'extractContent').mockResolvedValue({
+      title: 'A blog post',
+      url: 'https://example.com/blog/some-post',
+      wordCount: 100,
+      content: 'Blog content',
+      truncated: false,
+    });
+    const tool = createWebSearchTool(mockProvider());
+    const result = await tool.handler({ action: 'read', url: 'https://example.com/blog/some-post' }, {} as never);
+    expect(result).not.toContain('Agent reminder');
+  });
+});
