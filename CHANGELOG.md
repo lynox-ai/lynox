@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.5.2 — 2026-05-18
+
+### Added
+
+<!-- no feat: commits since v1.5.1 -->
+
+### Changed
+
+<!-- no refactor/perf/chore/docs/test/ci/build/revert/style commits since v1.5.1 -->
+
+### Fixed
+
+- fix(ui): move 3rd-party API-key CRUD from LLM Settings to Automation Hub (#463)
+- fix(llm-ui): Mistral default-tier picker parity with Anthropic (#461)
+- fix(llm-ui): hide API-key + Test-connection on managed-hosting tier (#462)
+- fix(llm): per-turn model indicator + stop tier-alias self-ID leakage (#460)
+- fix(llm-ui): drop misleading Modell-dropdown for Mistral, keep for Anthropic (#459)
+- fix(llm): robust live provider switching + tier-set visibility (#458)
 ## 1.5.1 — 2026-05-18
 
 Patch — **IA Consolidation V2** + **chat-reliability hardening**. Three-phase shell refactor shipped as one patch: Phase 1 collapses the dual-home `ConfigView` SSoT drift (1100+ LOC deleted, 12 settings now have single canonical pages, schema switches to `.strict()`); Phase 2 moves Activity into its own `/app/activity` root and repoints the footer cost/runs pills; Phase 3 finalizes Settings into 5 tier-conditional sections, splits Channels into 6 sub-routes, formalizes LLM sub-pages (Advanced/Memory), wires CommandPalette across all sub-routes, and deletes the deprecated Cost-Limits page. Mobile gets a net-new bottom-tab (Chat · Inbox · Activity · Intelligence · More). One canonical `formatCost` replaces three drifted implementations. Alongside the IA work, this release closes a chat-history-loss bug surfaced on rafael prod (#456): the agent loop now persists at every turn boundary instead of only end-of-run, the SvelteKit chat store's 404 recovery path now passes `threadId` so server-side eviction can't lose the conversation, and the SYSTEM_PROMPT carries a fabrication guardrail when memory_recall returns partial data. All legacy URLs 301-redirect — bookmarks survive.
