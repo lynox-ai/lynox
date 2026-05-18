@@ -227,3 +227,42 @@ describe('effectiveContextWindow', () => {
     expect(effectiveContextWindow('claude-sonnet-4-6', -1)).toBe(200_000);
   });
 });
+
+// ModelCapability registry — Settings v3 sprint substrate. The three legacy
+// fact-maps (_CONTEXT_WINDOW / _DEFAULT_MAX_TOKENS / _MAX_CONTINUATIONS) +
+// pricing.ts DEFAULT_PRICING collapsed into one registry. The legacy helpers
+// (getContextWindow/getDefaultMaxTokens/getMaxContinuations) now delegate to
+// the registry — this suite locks down the shape directly so a future
+// helper-replacement refactor can't silently drop fields.
+describe('ModelCapability registry', () => {
+  it('exposes every routed Claude + Mistral model with full capability data', async () => {
+    const { MODEL_CAPABILITIES, modelCapability } = await import('./models.js');
+    const routedIds = [
+      'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6',
+      'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
+      'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]',
+      'mistral-small-2603', 'mistral-large-2512', 'magistral-medium-2509',
+    ];
+    for (const id of routedIds) {
+      const cap = MODEL_CAPABILITIES[id];
+      expect(cap, `missing registry entry for ${id}`).toBeDefined();
+      expect(cap!.id).toBe(id);
+      expect(cap!.contextWindow).toBeGreaterThan(0);
+      expect(cap!.defaultMaxOutput).toBeGreaterThan(0);
+      expect(cap!.maxContinuations).toBeGreaterThan(0);
+      expect(cap!.pricing.input).toBeGreaterThanOrEqual(0);
+      expect(cap!.uiLabel.length).toBeGreaterThan(0);
+    }
+    // Accessor falls back via normalizeModelId for @-suffixed vertex ids.
+    expect(modelCapability('claude-sonnet-4-6@20260101')?.id).toBe('claude-sonnet-4-6');
+  });
+
+  it('tags 1M-beta variants with the context-1m-2025-08-07 header', async () => {
+    const { MODEL_CAPABILITIES } = await import('./models.js');
+    for (const id of ['claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]']) {
+      expect(MODEL_CAPABILITIES[id]!.betaHeaders).toContain('context-1m-2025-08-07');
+    }
+    // Base (non-1M) variants stay header-free.
+    expect(MODEL_CAPABILITIES['claude-sonnet-4-6']!.betaHeaders).toEqual([]);
+  });
+});

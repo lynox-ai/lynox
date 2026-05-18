@@ -1,49 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
-import { normalizeModelId } from '../types/models.js';
+import { modelCapability, normalizeModelId } from '../types/models.js';
+import type { ModelPricing } from '../types/models.js';
 
-export interface ModelPricing {
-  input: number;
-  output: number;
-  cacheWrite: number;
-  cacheRead: number;
-}
+export type { ModelPricing };
 
-const DEFAULT_PRICING: Record<string, ModelPricing> = {
-  'claude-opus-4-7':           { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
-  'claude-opus-4-6':           { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
-  'claude-sonnet-4-6':         { input: 3,    output: 15, cacheWrite: 3.75,  cacheRead: 0.30 },
-  'claude-haiku-4-5-20251001': { input: 1,    output: 5,  cacheWrite: 1.25,  cacheRead: 0.10 },
-  // `[1m]`-suffix variants — Anthropic's identifier when the
-  // `context-1m-2025-08-07` beta header is on. Pricing mirrors the base
-  // model; revisit if/when Anthropic publishes a separate 1M-tier rate.
-  // See types/models.ts _CONTEXT_WINDOW comment for the broader
-  // explicit-variant-entry rationale.
-  'claude-opus-4-7[1m]':       { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
-  'claude-opus-4-6[1m]':       { input: 5,    output: 25, cacheWrite: 6.25,  cacheRead: 0.50 },
-  'claude-sonnet-4-6[1m]':     { input: 3,    output: 15, cacheWrite: 3.75,  cacheRead: 0.30 },
-  // Mistral set (eu-sovereign tier-map; see MISTRAL_MODEL_MAP in types/models.ts).
-  // No prompt-cache pricing — Mistral exposes `prompt_cache_key` but bills the
-  // cached prefix at the standard input rate. Mirror cacheRead/cacheWrite =
-  // input rate so opportunistic cache hits don't get charged at zero.
-  'mistral-small-2603':        { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
-  'mistral-large-2512':        { input: 2,    output: 6,    cacheWrite: 2,    cacheRead: 2    },
-  'magistral-medium-2509':     { input: 2,    output: 5,    cacheWrite: 2,    cacheRead: 2    },
-  // Phase 3 PR E — Mistral roster fill. Pricing mirrors Phase 2 set-bench
-  // cells (ministral-*, open-mistral-nemo, mistral-medium-*) and Mistral
-  // published rates as of 2026-05 (codestral, magistral-small,
-  // mistral-medium-2508 = Medium 3.1). cacheWrite/cacheRead = input rate
-  // (Mistral doesn't ship a separate cache tier).
-  'ministral-8b-2410':         { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.10 },
-  'ministral-3b-2410':         { input: 0.04, output: 0.04, cacheWrite: 0.04, cacheRead: 0.04 },
-  'open-mistral-nemo':         { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.15 },
-  'mistral-medium-2508':       { input: 0.40, output: 2,    cacheWrite: 0.40, cacheRead: 0.40 },
-  'mistral-medium-latest':     { input: 0.40, output: 2,    cacheWrite: 0.40, cacheRead: 0.40 },
-  'codestral-2508':            { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
-  'codestral-latest':          { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
-  'magistral-small-2509':      { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
-  'magistral-small-latest':    { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
+/** Fallback when neither override nor registry has an entry — Opus base
+ *  rate as the conservative default (matches pre-registry behaviour). */
+const FALLBACK_PRICING: ModelPricing = {
+  input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50,
 };
 
 let overridePricing: Record<string, ModelPricing> | null = null;
@@ -64,9 +30,10 @@ export function getPricing(model: string): ModelPricing {
     overridePricing = loadPricingOverride() ?? {};
   }
   const base = normalizeModelId(model);
+  // Override file wins (operator opt-in), then registry, then conservative fallback.
   return overridePricing[model] ?? overridePricing[base]
-    ?? DEFAULT_PRICING[model] ?? DEFAULT_PRICING[base]
-    ?? DEFAULT_PRICING['claude-opus-4-6']!;
+    ?? modelCapability(model)?.pricing
+    ?? FALLBACK_PRICING;
 }
 
 export function calculateCost(model: string, usage: {
