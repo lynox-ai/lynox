@@ -848,7 +848,7 @@ export class Agent implements IAgent {
         // it as a tool-limitation. Now: clear error → agent can either
         // call ask_secret to store the missing name, or pick a different
         // approach. Staging 2026-05-18 incident: SHOPIFY_CLIENT_ID never
-        // stored, agent POSTed `client_secret: "secret:SHOPIFY_CLIENT_ID"`
+        // stored, agent POSTed the unresolved `secret:` reference literal
         // verbatim and read Shopify's echo as "secrets don't resolve in
         // bodies". They do — when the vault has the value.
         const unresolved = this.secretStore.findUnresolvedSecretRefs(tc.input);

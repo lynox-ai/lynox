@@ -420,6 +420,37 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // Engine-managed OAuth2 Authorization for matched api_profile.
+    // Profile drives — the agent should NOT have to remember which vault key
+    // holds the current access_token. Two failure modes this prevents:
+    //   1. Agent re-references the OLD vault key after api_setup recreates a
+    //      profile (staging 2026-05-18: SHOPIFY_ACCESS_TOKEN was stale, but
+    //      fetch_token had written the new token to SHOPIFY_SEO_ACCESS_TOKEN.
+    //      Agent kept reaching for the old key → 401 forever).
+    //   2. Token rotation: when fetch_token mints a fresh access_token, every
+    //      subsequent http_request to this profile should use it automatically.
+    // For oauth2 profiles, engine owns auth — override whatever the agent set.
+    if (toolContext?.apiStore && agent.secretStore) {
+      try {
+        const reqHostnameForAuth = new URL(input.url).hostname;
+        const oauthProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
+        if (oauthProfile?.auth?.type === 'oauth2') {
+          const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
+          const resolvedToken = agent.secretStore.resolve(tokenKey);
+          if (resolvedToken) {
+            for (const k of Object.keys(headers)) {
+              if (k.toLowerCase() === 'authorization') delete headers[k];
+            }
+            headers['Authorization'] = `Bearer ${resolvedToken}`;
+          } else {
+            return `Error: api_profile "${oauthProfile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${oauthProfile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.`;
+          }
+        }
+      } catch {
+        // Invalid URL — caught by validateUrl below
+      }
+    }
+
     // GET-based exfiltration detection
     if (method === 'GET' || method === 'HEAD') {
       const exfilWarning = detectGetExfiltration(input.url);
