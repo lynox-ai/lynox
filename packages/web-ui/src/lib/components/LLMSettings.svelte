@@ -406,7 +406,8 @@
 		descKey: string;
 	}
 	const llmSubRoutes: ReadonlyArray<SubRoute> = [
-		{ href: '/app/settings/llm/keys',     titleKey: 'llm.subnav.keys.title',     descKey: 'llm.subnav.keys.desc' },
+		// v1.5.2: API keys for 3rd-party tools (Tavily, DataForSEO, …) moved
+		// to /app/hub?section=keys so they live next to API Profile endpoints.
 		{ href: '/app/settings/llm/advanced', titleKey: 'llm.subnav.advanced.title', descKey: 'llm.subnav.advanced.desc' },
 		{ href: '/app/settings/llm/memory',   titleKey: 'llm.subnav.memory.title',   descKey: 'llm.subnav.memory.desc' },
 	];
