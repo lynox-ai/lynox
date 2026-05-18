@@ -355,7 +355,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'], description: 'HTTP method (default: GET)' },
         headers: { type: 'object', description: 'Request headers as key-value pairs' },
         body: { type: 'string', description: 'Request body (for POST/PUT/PATCH)' },
-        timeout_ms: { type: 'number', description: 'Request timeout in milliseconds (default: 30000)' },
+        timeout_ms: { type: 'number', description: 'Request timeout in milliseconds (default: 30000, hard cap: 60000). Includes both connection and full body read — a hung response body still trips the timeout. If an API legitimately needs >60s, use webhooks or polling instead.' },
       },
       required: ['url'],
     },
@@ -487,14 +487,38 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (input.body && method !== 'GET' && method !== 'HEAD') {
       opts.body = input.body;
     }
-    const timeoutMs = input.timeout_ms ?? 30_000;
+    // Hard cap. The original 30s default + agent-overridable timeout meant a
+    // hung Shopify endpoint locked cat's session for 28 min on 2026-05-19 —
+    // the agent's run held the per-session mutex while readBodyLimited blocked
+    // on a stalled response body. AbortController.signal propagates to fetch
+    // but NOT to response.body.getReader() once headers have arrived, so a
+    // chunked-transfer stall is invisible to the timeout below. Race below
+    // is the wrap-around guarantee: no matter where in the pipeline things
+    // hang, the whole tool call resolves within HARD_CAP.
+    const HTTP_HARD_CAP_MS = 60_000;
+    const requestedTimeout = input.timeout_ms ?? 30_000;
+    const timeoutMs = Math.min(Math.max(1, requestedTimeout), HTTP_HARD_CAP_MS);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     opts.signal = controller.signal;
 
+    // Wall-clock timeout that wins even if the abort signal doesn't fire (e.g.
+    // body-stream hang). Resolves with a thrown HttpTimeoutError so the catch
+    // below can format the agent-visible message.
+    let wallTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    const wallTimeout = new Promise<never>((_, reject) => {
+      wallTimeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`HTTP request timed out after ${timeoutMs}ms (wall clock)`));
+      }, timeoutMs + 1000);
+    });
+
     try {
       agent.sessionCounters.httpRequests++;
-      const response = await fetchWithValidatedRedirects(input.url, opts, toolContext);
+      const response = await Promise.race([
+        fetchWithValidatedRedirects(input.url, opts, toolContext),
+        wallTimeout,
+      ]);
       const status = `${response.status} ${response.statusText}`;
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
@@ -514,7 +538,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       let body = '';
       const contentType = response.headers.get('content-type') ?? '';
       const responseLimit = agent.toolContext?.userConfig?.http_response_limit ?? DEFAULT_RESPONSE_BYTES;
-      const { text, truncated } = await readBodyLimited(response, responseLimit);
+      // Race the body read against the same wall-clock — Node fetch's response
+      // body stream doesn't honour signal aborts after headers arrive, so a
+      // chunked-transfer stall here would otherwise hang the run.
+      const { text, truncated } = await Promise.race([
+        readBodyLimited(response, responseLimit),
+        wallTimeout,
+      ]);
 
       if (contentType.includes('json') && !truncated) {
         try {
@@ -586,6 +616,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       throw err;
     } finally {
       clearTimeout(timeoutId);
+      if (wallTimeoutId !== undefined) clearTimeout(wallTimeoutId);
     }
   },
 };

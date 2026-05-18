@@ -2028,7 +2028,16 @@
 			{#if retryStatus}
 				<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-2.5 text-sm text-warning flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-					<span>{retryStatus.reason === 'busy' ? t('chat.busy_wait') : t('chat.retry').replace('{attempt}', String(retryStatus.attempt)).replace('{max}', String(retryStatus.maxAttempts))}</span>
+					<span class="flex-1">{retryStatus.reason === 'busy' ? t('chat.busy_wait') : t('chat.retry').replace('{attempt}', String(retryStatus.attempt)).replace('{max}', String(retryStatus.maxAttempts))}</span>
+					{#if retryStatus.reason === 'busy' && retryStatus.attempt >= 10}
+						<button
+							onclick={() => { abortRun(); addToast(t('chat.busy_aborted'), 'info', 3000); }}
+							class="shrink-0 rounded-[var(--radius-sm)] border border-warning/40 bg-warning/20 px-2.5 py-1 text-xs font-medium hover:bg-warning/30 transition-colors"
+							title={t('chat.busy_cancel_title')}
+						>
+							{t('chat.busy_cancel')}
+						</button>
+					{/if}
 				</div>
 			{/if}
 
