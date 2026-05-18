@@ -462,12 +462,59 @@
 
 	const secretGeneration = $derived(getSecretPromptGeneration());
 
-	// Reset secret UI state when a new prompt arrives (e.g. retry after cancel)
+	// Draft persistence for the ask_secret input. Cat 2026-05-18: on iOS the
+	// WebView gets suspended (Chrome + Safari both — they share the iOS
+	// WebKit) when the user switches to 1Password to fetch a credential. If
+	// memory pressure tips the system to outright kill the WebView, the
+	// in-memory $state is gone on resume. sessionStorage survives suspend
+	// reliably and survives at least one bf-cache restore. Key is scoped by
+	// promptId so resuming the SAME prompt after a disconnect hydrates the
+	// half-typed value back, but a NEW prompt (different id) starts empty.
+	const draftPromptId = $derived(getPendingSecretPrompt()?.promptId ?? null);
+	const draftKey = $derived(draftPromptId ? `lynox:secret_draft:${draftPromptId}` : null);
+
+	// Reset secret UI state when a new prompt arrives — but hydrate from
+	// sessionStorage if a draft exists for THIS promptId (resume case).
+	// Tracked on promptId, NOT secretGeneration: checkPendingPrompt() bumps
+	// the generation on resume too, which would otherwise wipe the draft.
 	$effect(() => {
-		void secretGeneration; // track
-		secretValue = '';
-		secretConsented = false;
+		void secretGeneration; // still tracked so cancel/retry resets correctly
+		const id = draftPromptId;
+		if (!id) {
+			secretValue = '';
+			secretConsented = false;
+			return;
+		}
+		// Try to hydrate. Fall back to empty if no draft, storage blocked, or
+		// stored value is corrupted (defence in depth — sessionStorage is
+		// origin-scoped and not user-controllable from outside lynox, but
+		// don't crash on a bad value).
+		let restored = '';
+		try {
+			const raw = sessionStorage.getItem(`lynox:secret_draft:${id}`);
+			if (typeof raw === 'string') restored = raw;
+		} catch { /* sessionStorage blocked (Safari private mode etc.) */ }
+		secretValue = restored;
+		// If a draft existed, user already consented before the disconnect —
+		// no point making them re-consent. Otherwise clear consent.
+		secretConsented = restored.length > 0;
 	});
+
+	// Persist every keystroke. Cheap (single sessionStorage.setItem) and the
+	// alternative (debounce) risks losing the last few chars on a sudden
+	// WebView kill.
+	$effect(() => {
+		if (!draftKey) return;
+		try {
+			if (secretValue) sessionStorage.setItem(draftKey, secretValue);
+			else sessionStorage.removeItem(draftKey);
+		} catch { /* blocked — accept the regression rather than crashing */ }
+	});
+
+	function clearSecretDraft(): void {
+		if (!draftKey) return;
+		try { sessionStorage.removeItem(draftKey); } catch { /* blocked */ }
+	}
 
 	// Auto-focus password input when consent is given
 	$effect(() => {
@@ -501,16 +548,20 @@
 		const result = await submitSecret(pendingSecret.name, secretValue.trim());
 		if (result === 'saved') {
 			addToast(t('chat.secret_saved'), 'success', 3000);
+			clearSecretDraft();
 		} else if (result === 'managed_blocked') {
 			addToast(t('chat.secret_managed_blocked'), 'error', 7000);
+			clearSecretDraft();
 		} else {
 			addToast(t('chat.secret_vault_error'), 'error', 5000);
+			// vault_error: keep the draft so the user doesn't have to re-type
 		}
 		secretValue = '';
 		secretConsented = false;
 	}
 
 	function handleSecretCancel() {
+		clearSecretDraft();
 		cancelSecret();
 		secretValue = '';
 		secretConsented = false;

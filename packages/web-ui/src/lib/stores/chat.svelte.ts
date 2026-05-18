@@ -367,6 +367,21 @@ let runStartedAt = $state<number | null>(null);
 let runPromptCount = $state(0);
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
+
+// iOS Safari + Chrome (both WebKit on iOS) suspend the JS runtime when the
+// tab is backgrounded. When the user switches to 1Password / Mail / etc. to
+// fetch a credential and switches back, the in-flight SSE reader throws as
+// the underlying socket was torn down. The 2s blind retry below sometimes
+// also fails (the network stack hasn't fully resumed) — and a "Verbindung
+// verloren" toast lands ON the still-active ask_secret form, scaring
+// non-passkey users who then refresh and lose context. Per cat's recurring
+// reports 2026-03 through 2026-05.
+//
+// _suppressConnErrorUntil: when set, any "connection lost" toast triggered
+// in this window is swallowed. We assume the silent retry will catch up.
+// Set on visibilitychange→visible (Date.now()+5000) AND cleared by any
+// successful SSE event (handled below in handleSSEEvent's first call).
+let _suppressConnErrorUntil = 0;
 let authError = $state(false);
 let messageQueue = $state<QueuedMessage[]>([]);
 
@@ -456,6 +471,45 @@ if (typeof window !== 'undefined') {
 	});
 	// Flush pending persist on tab close to prevent data loss
 	window.addEventListener('beforeunload', () => persistChatNow());
+
+	// iOS app-switch recovery: when the user comes back from 1Password / Mail /
+	// another app, give the in-flight SSE retry ~5s to silently catch up before
+	// any "connection lost" toast is allowed to fire. Also re-check the server
+	// for a still-active pending_prompt so a re-rendered ask_secret form lands
+	// without the user having to refresh.
+	let _tabHiddenAt: number | null = null;
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') {
+			_tabHiddenAt = Date.now();
+		} else if (document.visibilityState === 'visible' && _tabHiddenAt !== null) {
+			const hiddenMs = Date.now() - _tabHiddenAt;
+			_tabHiddenAt = null;
+			// Only suppress for genuine app-switches (>1s hidden) — a brief
+			// dropdown / native-share-sheet flicker shouldn't change behaviour.
+			if (hiddenMs > 1000) {
+				_suppressConnErrorUntil = Date.now() + 5000;
+				// If a toast was set during the hidden window, retract it — the
+				// retry below may still succeed.
+				if (chatError === t('chat.error_connection')) {
+					chatError = null;
+					chatErrorDetail = null;
+				}
+				if (sessionId) void checkPendingPrompt();
+			}
+		}
+	});
+	// pageshow fires on bfcache restore where visibilitychange may not. Same
+	// treatment — be lenient with the next "connection lost" attempt.
+	window.addEventListener('pageshow', (e) => {
+		if ((e as PageTransitionEvent).persisted) {
+			_suppressConnErrorUntil = Date.now() + 5000;
+			if (chatError === t('chat.error_connection')) {
+				chatError = null;
+				chatErrorDetail = null;
+			}
+			if (sessionId) void checkPendingPrompt();
+		}
+	});
 
 	// On page load, check for pending prompts from a previous session
 	if (sessionId && !isStreaming) {
@@ -879,14 +933,25 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 					throw new Error('Retry failed');
 				}
 			} catch {
-				chatError = t('chat.error_connection');
-				chatErrorDetail = null;
+				// Suppress the toast if the user just came back from an
+				// app-switch (visibilitychange / pageshow opened a 5s
+				// window). Within that window, "connection lost" is almost
+				// always a stale-socket false-positive — the next user
+				// action reconnects naturally. User-message is still marked
+				// failed so the input's retry control works, but we don't
+				// drive non-passkey users to refresh + lose context.
+				if (Date.now() >= _suppressConnErrorUntil) {
+					chatError = t('chat.error_connection');
+					chatErrorDetail = null;
+				}
 				if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 				if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 			}
 		} else {
-			chatError = t('chat.error_connection');
-			chatErrorDetail = null;
+			if (Date.now() >= _suppressConnErrorUntil) {
+				chatError = t('chat.error_connection');
+				chatErrorDetail = null;
+			}
 			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 			if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 		}
