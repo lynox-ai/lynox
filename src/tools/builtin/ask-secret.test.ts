@@ -62,8 +62,10 @@ describe('askSecretTool', () => {
       agent,
     );
     expect(result).toMatch(/rejected|isn't user-installable/i);
-    // Hard guards: no retry, no plaintext.
-    expect(result).toMatch(/Do NOT retry/);
+    // Hard guards: no retry, no plaintext. Both case-insensitive so a
+    // future copy edit to lowercase "do not retry" / "Don't retry" still
+    // pins the intent without flaking.
+    expect(result).toMatch(/do ?not retry|don't retry/i);
     expect(result).toMatch(/plaintext fallback/i);
     // Must NOT include "User canceled" — different outcome path.
     expect(result).not.toMatch(/user canceled/i);

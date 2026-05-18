@@ -3,10 +3,14 @@
  *
  * This is NOT wired into CI — invoke via:
  *
- *   STAGING_SESSION_COOKIE=$(bash scripts/mint-staging-cookie.sh) \
+ *   STAGING_COOKIE=$(bash scripts/mint-staging-cookie.sh) \
  *   SMOKE_BASE_URL=https://engine.lynox.cloud \
  *   pnpm exec playwright test tests/smoke/secret-outcome-staging.spec.ts \
  *     --project=chromium --reporter=list
+ *
+ * Env var names match the sibling smoke specs (phase4-visual.spec.ts) and
+ * scripts/mint-staging-cookie.sh — keep aligned to avoid the third name
+ * drift this comment exists to prevent.
  *
  * What it verifies:
  *   1. The app actually loads under cookie auth on staging.
@@ -26,11 +30,15 @@
 import { test, expect } from '@playwright/test';
 
 const STAGING = process.env['SMOKE_BASE_URL'] ?? 'https://engine.lynox.cloud';
-const COOKIE = process.env['STAGING_SESSION_COOKIE'] ?? '';
+const COOKIE = process.env['STAGING_COOKIE'] ?? '';
+
+// Single skip at describe level — one clean reason in the report instead of
+// five identical per-test skips, and avoids spinning a browser context per
+// test when the cookie is absent.
+test.skip(!COOKIE, 'STAGING_COOKIE required — staging-only smoke spec');
 
 test.describe('secret-outcome v29 e2e', () => {
   test.beforeEach(async ({ context }) => {
-    test.skip(!COOKIE, 'STAGING_SESSION_COOKIE not set — skipping');
     const url = new URL(STAGING);
     await context.addCookies([{
       name: 'lynox_session',

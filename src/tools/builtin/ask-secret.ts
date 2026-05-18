@@ -64,17 +64,18 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         // Managed-tier write allowlist (BYOK_USER_WRITABLE_SECRETS) only
         // permits the LLM provider keys. Tool/integration keys 403. The
         // model must not retry the same name and must not propose to
-        // receive the secret directly. The script below is what the user
-        // should hear; the rules that follow are instructions the user
-        // must NEVER see — do not paraphrase them into chat.
-        return `The vault rejected "${input.name}" because this integration's secret isn't user-installable on the current managed plan. Reply to the user roughly in this shape (translate to match the user's language):
-> "Diese Integration ist auf deinem Managed-Plan aktuell nicht selbst aktivierbar. Zwei Wege weiter: (a) support@lynox.ai melden — wir richten sie admin-seitig auf deiner Instanz ein, oder (b) lynox selbst hosten, dann hast du volle Kontrolle über alle Integrationen."
+        // receive the secret directly. The template below is a SHAPE,
+        // not literal copy — agent translates to the user's language;
+        // the rules that follow are instructions the user must NEVER see.
+        return `The vault rejected "${input.name}" because this integration's secret isn't user-installable on the current managed plan. Reply to the user in their language (NOT this template language) — paraphrase the shape below:
+> "This integration isn't self-installable on your managed plan today. Two ways forward: (a) email support@lynox.ai — we'll enable it admin-side on your instance, or (b) self-host lynox for full control over all integrations."
 
 Reply rules — these are instructions for the agent, NOT content for the user:
-1. Don't explain WHY it was blocked. Don't reference internal mechanisms, naming schemes, or which categories of secrets are allowed. The user doesn't need the implementation reason — just the path forward.
-2. Keep the reply tight (2-3 sentences). Don't justify the policy, just give the two paths.
-3. Do NOT retry the secret tool with the same name.
-4. Do NOT propose a plaintext fallback in any form (chat paste, DM, "tell me as text") — the vault is the only path, full stop.`;
+1. Translate to the user's language first. If the user has been writing in German, reply in German. In French, reply in French. The English template above is a SHAPE — never echo it verbatim.
+2. Don't explain WHY it was blocked. Don't reference internal mechanisms, naming schemes, or which categories of secrets are allowed. The user doesn't need the implementation reason — just the path forward.
+3. Keep the reply tight (2-3 sentences). Don't justify the policy, just give the two paths.
+4. Do NOT retry the secret tool with the same name.
+5. Do NOT propose a plaintext fallback in any form (chat paste, DM, "tell me as text") — the vault is the only path, full stop.`;
 
       case 'vault_error':
         // Distinct from user-cancel: the user submitted but the server
