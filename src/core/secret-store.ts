@@ -300,7 +300,7 @@ export class SecretStore implements SecretStoreLike {
    * (no in-memory match, no vault match). Used by the agent's pre-tool gate
    * to refuse-with-clear-error instead of silently sending literal
    * `secret:NAME` strings to the external service — staging 2026-05-18
-   * incident: agent POSTed `client_secret: "secret:SHOPIFY_CLIENT_ID"` to
+   * incident: agent POSTed the unresolved `secret:` reference literal to
    * Shopify because the vault didn't have that name; Shopify echoed the
    * literal in the error message and the agent mis-diagnosed it as
    * "http_request tool limitation" and recommended self-host. With this
