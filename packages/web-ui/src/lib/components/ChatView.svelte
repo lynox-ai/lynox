@@ -1485,6 +1485,11 @@
 		if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
 			parts.push(`API: ${fmtCost(u.apiCostUsd)}`);
 		}
+		// rafael QA 2026-05-18: surface the actual dispatched model id so the
+		// user can verify their provider choice actually applies (and so
+		// auto-downgrade is observable rather than hidden behind an
+		// Anthropic-flavoured tier alias in the model's text response).
+		if (u.model) parts.push(u.model);
 		return parts.join(' · ');
 	}
 

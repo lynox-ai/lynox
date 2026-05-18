@@ -70,6 +70,11 @@ export interface UsageInfo {
 	 *  populated by the api_cost stream event. Distinct from `costUsd` which is
 	 *  LLM-only. Surfaces in the thread footer rollup. */
 	apiCostUsd?: number;
+	/** Actual model that produced this turn — comes from the engine's turn_end
+	 *  event. Differs from the session default when the auto-downgrade flipped
+	 *  to the haiku-tier for a simple task; surfaces in the footer so the user
+	 *  can tell which model their reply came from. */
+	model?: string;
 }
 
 /** Single profiled-API call attributed to a chat message. Populated by the
@@ -1219,6 +1224,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					cacheRead: (prev?.cacheRead ?? 0) + cacheRead,
 					cacheWrite: (prev?.cacheWrite ?? 0) + cacheWrite,
 					costUsd: (prev?.costUsd ?? 0) + costUsd,
+					// Surface the actual dispatched model (e.g. mistral-large-2512
+					// vs mistral-small-2603 after auto-downgrade) so the UI can
+					// show it next to the cost. Last-write-wins on multi-turn
+					// runs — typically only the final turn's model is shown.
+					...(turnModel ? { model: turnModel } : {}),
 				};
 				// Update context estimate (input tokens ≈ current context usage)
 				if (!contextBudget || inTok > (contextBudget.totalTokens ?? 0)) {
