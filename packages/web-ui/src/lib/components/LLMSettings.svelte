@@ -19,7 +19,6 @@
 	| custom_endpoints reg. | ✓         | ✓    | ✗ locks.custom_endpoints |
 	| Test-connection btn   | ✓         | ✓    | ✗ hidden (CP key, no test surface) |
 -->
-
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
