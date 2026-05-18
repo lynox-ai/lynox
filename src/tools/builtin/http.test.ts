@@ -991,4 +991,121 @@ describe('httpRequestTool', () => {
       expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
     });
   });
+
+  // Staging 2026-05-18 (lynox-chat-2026-05-18.md): http_request hit 401
+  // against the Shopify API profile. Vault had a stale access_token from a
+  // previous client_credentials grant. The agent treated it as a long-lived
+  // token, told the user to "re-paste from Shopify Admin", and looped on
+  // 401s — Shopify Dev Dashboard doesn't expose long-lived tokens anymore.
+  // Fix: when a 401 lands on an URL matched by an OAuth2-managed profile,
+  // append a system hint pointing at `api_setup fetch_token`.
+  describe('OAuth2 401 hint', () => {
+    it('appends fetch_token hint on 401 for an oauth2 profile with token_url', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+            grant_type: 'client_credentials',
+            client_id_key: 'SHOPIFY_CLIENT_ID',
+            client_secret_key: 'SHOPIFY_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+        json: {},
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+
+      // Hint must be OUTSIDE the untrusted_data wrap so the agent treats
+      // it as system guidance, not response content.
+      expect(result).toMatch(/Agent reminder.*OAuth2 401/i);
+      expect(result).toContain('api_setup');
+      expect(result).toContain('fetch_token');
+      expect(result).toContain('shopify_seo');
+      // The negative-rule guard against the failure mode:
+      expect(result).toMatch(/re-paste a token/i);
+      // Sanity: the hint appears AFTER the untrusted_data close tag.
+      const dataEnd = result.lastIndexOf('</untrusted_data>');
+      const hintAt = result.indexOf('Agent reminder');
+      expect(dataEnd).toBeGreaterThan(-1);
+      expect(hintAt).toBeGreaterThan(dataEnd);
+    });
+
+    it('does NOT append the hint when the 401 is on a non-oauth2 profile', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'plain_bearer',
+        name: 'Plain Bearer',
+        base_url: 'https://api.example.com/v1',
+        description: 'Bearer token API',
+        auth: { type: 'bearer', vault_keys: ['EXAMPLE_API_KEY'] },
+      });
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://api.example.com/v1/me' }, agent);
+
+      expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
+      expect(result).not.toContain('fetch_token');
+    });
+
+    it('does NOT append the hint on 401 when no profile matches the hostname', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://no-profile-host.example.com/x' }, agent);
+
+      expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
+    });
+
+    it('does NOT append the hint on a non-401 response from an oauth2 profile', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'oauth_profile',
+        name: 'OAuth Profile',
+        base_url: 'https://o.example.com/v1',
+        description: 'OAuth-managed API',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['CID', 'CSEC'],
+          oauth: { token_url: 'https://o.example.com/oauth/token', grant_type: 'client_credentials' as const, client_id_key: 'CID', client_secret_key: 'CSEC' },
+        },
+      });
+
+      mockDnsPublic();
+      // 200 OK — happy path, no hint expected.
+      const mockResp = createMockResponse({ status: 200, headers: { 'content-type': 'application/json' }, json: { ok: true } });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://o.example.com/v1/data' }, agent);
+
+      expect(result).not.toMatch(/Agent reminder.*OAuth2 401/i);
+    });
+  });
 });
