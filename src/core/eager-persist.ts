@@ -1,20 +1,14 @@
-// === Eager-persist helper ===
-//
-// Pure helper extracted from `Session._persistMessages` so its idempotency +
-// shrink-handling contract can be unit-tested without the surrounding
-// engine/agent/session machinery (T1 from /pr-review #456, 2026-05-18).
-//
-// The hot path: agent emits onMessageCheckpoint at every stable turn boundary
-// → Session calls this helper with the current agent buffer → helper appends
-// the delta to ThreadStore (combined with a message_count rollup in one
-// transaction). Without eager-persist, a container restart / OOM kill
-// mid-loop loses every turn since the last completed run-end (rafael prod
-// 2026-05-18 incident).
+// Pure helper for the eager-persist hook fired by the agent loop. Without
+// this checkpoint, a container restart or OOM kill mid-loop drops every
+// turn since the last completed run-end (rafael prod 2026-05-18 incident).
+// Extracted from `Session._persistMessages` so the contract is unit-testable.
 
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { ThreadStore } from './thread-store.js';
 
 export interface EagerPersistInput {
+  /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
+   *  thread store wired (e.g. CLI-mode without persistence). */
   threadStore: ThreadStore | null;
   sessionId: string;
   allMessages: BetaMessageParam[];

@@ -1656,11 +1656,14 @@ describe('Agent', () => {
         onMessageCheckpoint: () => { observedLengths.push(agent.getMessages().length); },
       });
       await agent.send('Use the tool');
-      // Three checkpoints: assistant tool_use → tool_results → assistant end_turn.
-      expect(observedLengths.length).toBe(3);
-      // Strictly monotonic — every checkpoint sees more messages than the previous.
-      expect(observedLengths[1]!).toBeGreaterThan(observedLengths[0]!);
-      expect(observedLengths[2]!).toBeGreaterThan(observedLengths[1]!);
+      // At least three checkpoints expected (assistant tool_use → tool_results
+      // → end_turn). Use `>= 3` rather than a hard `=== 3` so a refactor that
+      // adds an extra stable-point checkpoint still passes — what we care
+      // about is that EVERY checkpoint observes growth (strictly monotonic).
+      expect(observedLengths.length).toBeGreaterThanOrEqual(3);
+      for (let i = 1; i < observedLengths.length; i++) {
+        expect(observedLengths[i]!).toBeGreaterThan(observedLengths[i - 1]!);
+      }
     });
 
     it('does not break the loop when the checkpoint hook throws', async () => {

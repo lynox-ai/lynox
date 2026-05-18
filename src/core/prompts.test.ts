@@ -156,10 +156,11 @@ describe('withCurrentTimePrefix', () => {
 describe('SYSTEM_PROMPT honesty guardrail', () => {
   it('includes the F-Halu guardrail directing the agent to ask rather than fabricate', () => {
     expect(SYSTEM_PROMPT).toMatch(/honesty over completeness/i);
-    // Either "DO NOT pad" or "DO NOT invent" — at least one negative
-    // imperative must survive paraphrasing.
-    expect(SYSTEM_PROMPT).toMatch(/DO NOT (pad|invent|fabricate|make up)/);
-    // The general "ask the user" intent should also be there in some form.
+    // Either "DO NOT pad" / "DO NOT invent" / similar — at least one negative
+    // imperative must survive paraphrasing. Case-insensitive so a rewrite
+    // to lowercase "do not pad" still pins the intent.
+    expect(SYSTEM_PROMPT).toMatch(/do not (pad|invent|fabricate|make up)/i);
+    // The "ask the user" intent should also be there in some form.
     expect(SYSTEM_PROMPT).toMatch(/(ask the user|ask.*for the rest|surface what)/i);
   });
 });

@@ -614,18 +614,21 @@ export class Session {
       }
 
       // Persist messages to thread even on failure (preserve partial progress).
-      // Same gating shape as the success path: only `appendMessages` is gated
-      // on a non-empty delta — `message_count` always updates so the row
-      // reflects post-eager-persist truth.
+      // Uses the same combined-transaction shape as the success path (P1)
+      // when there's a delta to flush — one fsync instead of two. When eager
+      // already drained the delta, do a standalone message_count refresh.
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
           const existingCount = threadStore.getMessageCount(this.sessionId);
           const newMessages = allMessages.slice(existingCount);
           if (newMessages.length > 0) {
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount);
+            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
+              message_count: allMessages.length,
+            });
+          } else {
+            threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
           }
-          threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
         } catch { /* fire-and-forget */ }
       }
 
@@ -809,15 +812,13 @@ export class Session {
    */
   private _persistMessages(): void {
     if (!this.agent) return;
+    // Outcome is intentionally ignored — fire-and-forget contract; helper
+    // catches its own errors and returns an outcome enum for tests only.
     persistAgentMessages({
-      threadStore: this.engine.getThreadStore() ?? null,
+      threadStore: this.engine.getThreadStore(),
       sessionId: this.sessionId,
       allMessages: this.agent.getMessages(),
     });
-    // Returned outcome is intentionally ignored — fire-and-forget contract.
-    // The helper handles its own try/catch and returns `{ kind: 'error' }`
-    // on throws; we don't propagate because the run must never die on a
-    // persist failure.
   }
 
   // ── Model / Effort / Thinking ──

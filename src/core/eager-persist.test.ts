@@ -36,7 +36,6 @@ describe('persistAgentMessages', () => {
     vi.restoreAllMocks();
   });
 
-  // ── Case (d): null threadStore early-return ──
   it('returns noop("no-threadstore") when threadStore is null', () => {
     const result = persistAgentMessages({
       threadStore: null,
@@ -46,7 +45,6 @@ describe('persistAgentMessages', () => {
     expect(result).toEqual({ kind: 'noop', reason: 'no-threadstore' });
   });
 
-  // ── Case (a): no-new-messages early-return ──
   it('returns noop("no-new-messages") when in-memory buffer == SQLite floor', () => {
     const store = makeMockThreadStore({ initialCount: 3 });
     const result = persistAgentMessages({
@@ -69,7 +67,6 @@ describe('persistAgentMessages', () => {
     expect(store.appendMessages).not.toHaveBeenCalled();
   });
 
-  // ── Case (b): non-empty delta → appends with correct slice + startSeq ──
   it('appends only the delta when in-memory buffer is larger than floor', () => {
     const store = makeMockThreadStore({ initialCount: 2 });
     const allMessages = [
@@ -94,7 +91,6 @@ describe('persistAgentMessages', () => {
     );
   });
 
-  // ── Case (c, shrink): buffer below floor → warn + skip, disk truth wins ──
   it('skips with warn when in-memory buffer is shorter than persisted floor (shrink case)', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = makeMockThreadStore({ initialCount: 10 });
@@ -111,7 +107,6 @@ describe('persistAgentMessages', () => {
     expect(warnSpy.mock.calls[0]![0]).toContain('s1');
   });
 
-  // ── Case (c, throw): getMessageCount fails → catch + return error outcome ──
   it('returns error outcome (no rethrow) when getMessageCount throws', () => {
     const store = makeMockThreadStore({ getCountThrows: true });
     const result = persistAgentMessages({
@@ -139,7 +134,6 @@ describe('persistAgentMessages', () => {
     }
   });
 
-  // ── Idempotency: two back-to-back calls with no new state ──
   it('is idempotent — second call after the first sees no-new-messages', () => {
     const store = makeMockThreadStore({ initialCount: 1 });
     const allMessages = [msg('user', 'a'), msg('assistant', 'b')];

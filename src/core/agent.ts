@@ -410,8 +410,7 @@ export class Agent implements IAgent {
       if (response.stop_reason === 'tool_use') {
         const results = await this._dispatchTools(response.content);
         this.messages.push({ role: 'user', content: results });
-        // F-Eager-Persist: checkpoint after tool_results so a process kill
-        // before the next LLM call doesn't lose the tool work just done.
+        // Same checkpoint after tool_results — see above.
         await this._checkpoint();
         continue;
       }
