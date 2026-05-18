@@ -567,7 +567,26 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
-      const wrapped = wrapUntrustedData(rawResult, 'http_response');
+      let wrapped = wrapUntrustedData(rawResult, 'http_response');
+
+      // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
+      // agent treats it as system guidance, not external response data.
+      // Fires when an http_request hits 401 against an URL matched by an
+      // api_profile with `auth.type: 'oauth2'` AND `auth.oauth.token_url`
+      // set — the 2026-05-18 Shopify failure mode: stale vault
+      // access_token + agent ping-ponged the user through "re-paste from
+      // admin UI" instead of calling `api_setup fetch_token`.
+      if (response.status === 401 && toolContext?.apiStore) {
+        try {
+          const reqHostname = new URL(input.url).hostname;
+          const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
+          if (matchedProfile?.auth?.type === 'oauth2' && matchedProfile.auth.oauth?.token_url) {
+            wrapped += `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.`;
+          }
+        } catch {
+          // Bad URL fell through earlier; nothing to do.
+        }
+      }
 
       // Phase E (api-cost-display): if this hit a profiled API with a per_call
       // cost model, surface the cost on the streamHandler so the web-ui can
