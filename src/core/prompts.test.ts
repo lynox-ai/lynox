@@ -216,11 +216,15 @@ describe('modelIdentityContext', () => {
 describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
   it('strips backticks from modelId so the markdown code-span boundary cannot be broken', () => {
     const out = modelIdentityContext('openai', 'mistral`evil');
-    // Only the structural break-out char (backtick) matters — alphanumeric
-    // payload that survives sanitization stays harmlessly inside the code
-    // span. Pin: exactly the wrapping pair of backticks survives.
+    // Only the structural break-out char (backtick) in the USER-supplied
+    // modelId matters — alphanumeric payload that survives sanitization
+    // stays harmlessly inside the code span. The prompt body itself uses
+    // backticks for other tier-name code-spans (`sonnet`, `haiku`, …),
+    // so count just the sanitised-id portion.
     expect(out).not.toContain('mistral`evil');
-    expect(out.match(/`/g)?.length).toBe(2);
+    // The injected id appears as `mistralevil` (backtick stripped) wrapped
+    // in its own code-span — pin that exact appearance.
+    expect(out).toContain('`mistralevil`');
   });
 
   it('strips newlines from modelId so an attacker cannot inject a fake "**rule**:" line', () => {
