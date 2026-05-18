@@ -390,6 +390,12 @@ export class Session {
     this._runToolNames.clear();
     this._retrievedMemoryIds = [];
 
+    // Capture the ThreadStore message count BEFORE the run starts so the
+    // end-of-run "is this the first run?" check survives eager-persist
+    // (without this, eager checkpoints during the run inflate existingCount
+    // and the first-run title generation never fires).
+    const startMessageCount = this.engine.getThreadStore()?.getMessageCount(this.sessionId) ?? 0;
+
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     if (this.engine.config.language) {
@@ -502,7 +508,12 @@ export class Session {
         }
       }
 
-      // Persist messages to thread (fire-and-forget)
+      // Persist messages + roll up run-level fields (fire-and-forget).
+      // The eager `_persistMessages` hook (F-Eager-Persist) usually drains
+      // `newMessages` to zero before we reach this point — keep the
+      // `appendMessages` call gated on a non-empty delta but ALWAYS update
+      // cost / token / title here, otherwise those run-level rollups would
+      // stop landing in SQLite once eager-persist is on.
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
@@ -510,17 +521,18 @@ export class Session {
           const newMessages = allMessages.slice(existingCount);
           if (newMessages.length > 0) {
             threadStore.appendMessages(this.sessionId, newMessages, existingCount);
-            threadStore.updateThread(this.sessionId, {
-              message_count: allMessages.length,
-              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
-              total_cost_usd: costUsd,
-            });
-
-            // Auto-generate title on first run (heuristic: first user message)
-            if (existingCount === 0) {
-              const title = generateThreadTitle(taskText);
-              threadStore.updateThread(this.sessionId, { title });
-            }
+          }
+          threadStore.updateThread(this.sessionId, {
+            message_count: allMessages.length,
+            total_tokens: this.usage.input_tokens + this.usage.output_tokens,
+            total_cost_usd: costUsd,
+          });
+          // Auto-generate title on first run — uses `startMessageCount`
+          // captured BEFORE the run started, since eager-persist has by now
+          // inflated `existingCount` past 0 on the very first run too.
+          if (startMessageCount === 0) {
+            const title = generateThreadTitle(taskText);
+            threadStore.updateThread(this.sessionId, { title });
           }
         } catch { /* fire-and-forget */ }
       }
@@ -596,7 +608,10 @@ export class Session {
         }
       }
 
-      // Persist messages to thread even on failure (preserve partial progress)
+      // Persist messages to thread even on failure (preserve partial progress).
+      // Same gating shape as the success path: only `appendMessages` is gated
+      // on a non-empty delta — `message_count` always updates so the row
+      // reflects post-eager-persist truth.
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
@@ -604,8 +619,8 @@ export class Session {
           const newMessages = allMessages.slice(existingCount);
           if (newMessages.length > 0) {
             threadStore.appendMessages(this.sessionId, newMessages, existingCount);
-            threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
           }
+          threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
         } catch { /* fire-and-forget */ }
       }
 
@@ -793,7 +808,15 @@ export class Session {
     try {
       const allMessages = this.agent.getMessages();
       const existingCount = threadStore.getMessageCount(this.sessionId);
-      if (allMessages.length <= existingCount) return;
+      // In-memory buffer below SQLite floor means `_truncateHistory` ran and
+      // dropped earlier messages from the agent's view — SQLite still owns
+      // the full history. Skip (disk truth wins) but log once so a divergent
+      // thread doesn't go silently stale across runs.
+      if (allMessages.length < existingCount) {
+        console.warn(`[session] in-memory buffer (${allMessages.length}) shorter than persisted floor (${existingCount}) for thread ${this.sessionId} — skipping eager persist; disk remains source of truth`);
+        return;
+      }
+      if (allMessages.length === existingCount) return;
       const delta = allMessages.slice(existingCount);
       threadStore.appendMessages(this.sessionId, delta, existingCount);
       threadStore.updateThread(this.sessionId, { message_count: allMessages.length });

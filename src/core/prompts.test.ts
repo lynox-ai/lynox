@@ -145,10 +145,8 @@ describe('withCurrentTimePrefix', () => {
 });
 
 // F-Halu regression-pin (2026-05-18): the SYSTEM_PROMPT must include the
-// "Honesty over completeness" guardrail. Without it, the agent fabricates
-// plausible-sounding details when memory_recall returns partial answers —
-// as it did on rafael prod, inventing a "Zeitfenster zu vermeiden" list
-// that wasn't in any stored memory.
+// "Honesty over completeness" guardrail — rafael prod fabricated a list
+// when memory_recall returned only a partial answer.
 describe('SYSTEM_PROMPT honesty guardrail', () => {
   it('includes the F-Halu guardrail directing the agent to ask rather than fabricate', () => {
     expect(SYSTEM_PROMPT).toMatch(/honesty over completeness/i);

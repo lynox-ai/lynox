@@ -1619,11 +1619,8 @@ describe('Agent', () => {
   });
 
   // F-Eager-Persist regression-pin (2026-05-18): the agent must fire its
-  // onMessageCheckpoint hook at each stable turn boundary so the Session can
-  // append new messages to the ThreadStore mid-run. Without this, a container
-  // restart / OOM kill mid-loop loses every turn since the last completed
-  // run — which is exactly what happened on rafael prod when a long
-  // conversation showed in the UI but the agent had zero history on resume.
+  // onMessageCheckpoint hook at each stable turn boundary — rafael prod lost
+  // a long conversation when the engine restarted mid-loop.
   describe('onMessageCheckpoint (F-Eager-Persist)', () => {
     it('fires once per assistant turn on a simple end_turn response', async () => {
       const checkpoint = vi.fn();

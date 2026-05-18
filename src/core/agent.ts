@@ -55,14 +55,9 @@ export class Agent implements IAgent {
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
   onStream: StreamHandler | null;
-  /**
-   * Eager-persist hook. Invoked at stable points in the loop (after assistant
-   * message and after tool_results) so the Session can checkpoint to the
-   * ThreadStore mid-run. See `AgentConfig.onMessageCheckpoint` for rationale.
-   */
+  /** See `AgentConfig.onMessageCheckpoint` for contract + rationale. */
   private readonly onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
 
-  /** Fire the eager-persist hook, swallowing any error so the loop doesn't die over a persist failure. */
   private async _checkpoint(): Promise<void> {
     if (!this.onMessageCheckpoint) return;
     try {
