@@ -570,24 +570,31 @@
 			{/if}
 
 			{#if activeProviderEntry.models.length > 0}
-				<label class="block">
-					<span class="block text-sm font-medium mb-1">{t('llm.model')}</span>
-					{#if activeProvider === 'openai'}
-						<select disabled={!loaded || providerLocked} bind:value={config.openai_model_id}
-							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-							{#each activeProviderEntry.models as m (m.id)}
-								<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
-							{/each}
-						</select>
-					{:else}
+				{#if activeProvider === 'anthropic'}
+					<!-- Anthropic: the dropdown binds to `default_tier` which IS
+					     runtime-meaningful (sets the starting orchestration tier
+					     before auto-downgrade). Keep it. -->
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('llm.default_tier_heading')}</span>
 						<select disabled={!loaded || providerLocked} bind:value={config.default_tier}
 							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 							{#each activeProviderEntry.models as m (m.id)}
 								<option value={m.tier ?? m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
 							{/each}
 						</select>
-					{/if}
-				</label>
+					</label>
+				{/if}
+				<!--
+					Mistral preset (activeProvider==='openai' with catalog): the old
+					dropdown wrote `openai_model_id`, which is only consulted as a
+					fallback when a tier is missing from MISTRAL_MODEL_MAP. All three
+					Mistral tiers (sonnet→Large, haiku→Small, opus→Magistral) are
+					mapped, so the dropdown value was never actually used at runtime.
+					Users picked "Magistral Medium" and the engine still routed to
+					Mistral Large. v1.5.2 UX cleanup (rafael QA 2026-05-18): drop
+					the dropdown for this case — the tier-set summary below is the
+					single source of truth and lynox routes automatically per turn.
+				-->
 			{:else if activeProvider === 'custom'}
 				<!--
 					Custom (Anthropic-compatible) endpoints have no enumerated model
@@ -617,7 +624,7 @@
 						didn't know what model their pipeline / spawn calls were actually
 						hitting after a provider switch.
 					-->
-					<div class="rounded border border-border bg-bg-subtle px-3 py-2 text-xs space-y-1">
+					<div class="rounded border border-border bg-bg-subtle px-3 py-2 text-xs space-y-1.5">
 						<div class="font-medium text-text-muted">{t('llm.tier_set_heading')}</div>
 						<div class="flex flex-wrap gap-x-4 gap-y-1">
 							<span>
@@ -629,6 +636,7 @@
 								<span class="font-mono">{tierSet.small.label}</span>
 							</span>
 						</div>
+						<div class="text-text-muted">{t('llm.tier_set_routing_hint')}</div>
 					</div>
 				{/if}
 			{/if}
