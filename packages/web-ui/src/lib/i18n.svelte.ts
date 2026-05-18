@@ -283,6 +283,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.tier_set_heading':   { de: 'Modell-Set für diesen Anbieter',                                            en: 'Models used for this provider' },
 	'llm.tier_main':          { de: 'Hauptmodell (Orchestrierung)',                                              en: 'Main (orchestration)' },
 	'llm.tier_small':         { de: 'Schnelles Modell (Teilaufgaben)',                                           en: 'Small / fast (sub-tasks)' },
+	'llm.tier_set_routing_hint': { de: 'lynox wählt automatisch — kurze, einfache Antworten laufen aufs schnelle Modell, komplexe Aufgaben aufs Hauptmodell.', en: 'lynox routes per turn — simple replies go to the small model, complex tasks to the main one.' },
+	'llm.default_tier_heading': { de: 'Standard-Tier',                                                           en: 'Default tier' },
 	'llm.test_connection':    { de: 'Verbindung testen',                                                         en: 'Test connection' },
 	'llm.testing':            { de: 'Teste …',                                                                   en: 'Testing …' },
 	'llm.test_ok':            { de: 'Verbindung steht',                                                          en: 'Connected' },
