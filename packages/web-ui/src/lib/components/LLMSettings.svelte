@@ -13,6 +13,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
+	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
 	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
 	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
@@ -371,6 +372,10 @@
 	}
 
 	$effect(() => { void load(); });
+	// v1.5.2: hydrate the managed-tier flag so the API-key + Test-connection
+	// blocks can be hidden entirely on managed (where the CP supplies the
+	// LLM key — the user has no path to provide their own).
+	$effect(() => { void loadManagedStatus(); });
 
 	const activeProviderEntry = $derived(
 		providers.find((p) => catalogEntryKey(p) === activeCatalogKey)
@@ -492,7 +497,7 @@
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotFor(activeProviderEntry.provider)}
+			{#if slotFor(activeProviderEntry.provider) && !isManaged()}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
@@ -501,6 +506,13 @@
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
+			{:else if isManaged()}
+				<!-- v1.5.2: on managed tiers, the CP supplies the LLM key — the
+				     input would be misleading-disabled. Replace with a short
+				     note so the user knows why the field is missing. -->
+				<p class="text-xs text-text-muted rounded border border-border/50 bg-bg-subtle px-3 py-2">
+					{t('llm.api_key_managed_note')}
+				</p>
 			{/if}
 
 			{#if activeProviderEntry.requires_base_url}
@@ -646,7 +658,10 @@
 				<span class="font-medium">{t('llm.residency')}:</span> {activeProviderEntry.default_residency}
 			</p>
 
-			<!-- Connection-test row -->
+			<!-- Connection-test row — hidden on managed (CP-supplied key, can't
+			     be re-tested by the customer; the engine probe still runs on
+			     server start). -->
+			{#if !isManaged()}
 			<div class="flex items-center gap-3">
 				<button type="button" onclick={testConnection} disabled={testing || providerLocked || !loaded}
 					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">
@@ -658,6 +673,7 @@
 					<span class="text-sm text-danger">✗ {testResult.message}</span>
 				{/if}
 			</div>
+			{/if}
 		</section>
 
 		<!-- Save row — provider / model / custom-endpoint changes only. Advanced,
