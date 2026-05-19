@@ -211,7 +211,7 @@
 	{#if ttsAvailable}
 		<button
 			onclick={toggleAutoSpeak}
-			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-subtle'}"
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-muted'}"
 			title={autoSpeakOn ? (speakState === 'playing' ? t('status.autospeak_playing') : t('status.autospeak_on')) : t('status.autospeak_off')}
 			aria-label={autoSpeakOn ? t('status.autospeak_on') : t('status.autospeak_off')}
 			aria-pressed={autoSpeakOn}
@@ -229,7 +229,7 @@
 	{#if sttAvailable}
 		<button
 			onclick={toggleVoiceAutoSend}
-			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSendOn ? 'text-accent-text' : 'text-text-subtle'}"
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSendOn ? 'text-accent-text' : 'text-text-muted'}"
 			title={autoSendOn ? t('status.autosend_on') : t('status.autosend_off')}
 			aria-label={autoSendOn ? t('status.autosend_on') : t('status.autosend_off')}
 			aria-pressed={autoSendOn}
