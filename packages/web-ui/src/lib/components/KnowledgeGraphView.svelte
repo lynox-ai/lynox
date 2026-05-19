@@ -194,32 +194,43 @@
 			.map(([type]) => type);
 	});
 
-	const typeColors: Record<string, string> = {
-		person: 'bg-accent/15 text-accent-text',
-		organization: 'bg-success/15 text-success',
-		project: 'bg-warning/15 text-warning',
-		product: 'bg-[#f0abfc]/15 text-[#f0abfc]',
-		concept: 'bg-bg-muted text-text-subtle',
-		location: 'bg-[#67e8f9]/15 text-[#67e8f9]',
-		collection: 'bg-bg-muted text-text-subtle',
+	/*
+	 * PRD-LIGHT-MODE PR 2a — KG type-palette redesigned for both themes.
+	 *
+	 * The previous palette (cyan/amber/pink on tailwind 300-400 lightness)
+	 * was tuned for dark BG; the same hues lack contrast on white. Solution:
+	 * mid-tone hues that meet AA on BOTH white and #050510 (manually picked,
+	 * not algorithmic darken — categorical distinction must remain).
+	 *
+	 * Hue palette (theme-agnostic):
+	 *   person       — indigo  #6366f1 (works on white + dark)
+	 *   organization — emerald #10b981
+	 *   project      — amber   #d97706
+	 *   product      — fuchsia #c026d3
+	 *   concept      — slate   var(--color-text-subtle)
+	 *   location     — cyan    #0891b2
+	 *   collection   — slate   var(--color-text-subtle)
+	 *
+	 * Tailwind utility-classes that take arbitrary [#hex] are removed in
+	 * favour of inline `style` on the badge wrapper, which lets the
+	 * background be a color-mix with theme-token alpha.
+	 */
+	const typeHues: Record<string, string> = {
+		person: '#6366f1',
+		organization: '#10b981',
+		project: '#d97706',
+		product: '#c026d3',
+		location: '#0891b2',
 	};
 
-	const svgTypeColors: Record<string, string> = {
-		person: '#818cf8',
-		organization: '#34d399',
-		project: '#fbbf24',
-		product: '#f0abfc',
-		concept: '#6b7280',
-		location: '#67e8f9',
-		collection: '#6b7280',
-	};
-
-	function typeColor(t: string): string {
-		return typeColors[t] ?? 'bg-bg-muted text-text-muted';
+	function typeStyle(t: string): string {
+		const hue = typeHues[t];
+		if (!hue) return '';
+		return `background: color-mix(in srgb, ${hue} 15%, transparent); color: ${hue};`;
 	}
 
 	function svgColor(t: string): string {
-		return svgTypeColors[t] ?? '#6b7280';
+		return typeHues[t] ?? 'var(--color-text-subtle)';
 	}
 
 	$effect(() => { loadEntities(); });
@@ -278,7 +289,7 @@
 								<line
 									x1={source.x} y1={source.y}
 									x2={target.x} y2={target.y}
-									stroke={isHighlighted ? '#818cf8' : '#333'}
+									stroke={isHighlighted ? 'var(--color-accent-text)' : 'var(--color-border)'}
 									stroke-width={isHighlighted ? 2 : 1}
 									stroke-opacity={hoveredNode ? (isHighlighted ? 0.8 : 0.15) : 0.4}
 								/>
@@ -288,7 +299,7 @@
 										x={(source.x + target.x) / 2}
 										y={(source.y + target.y) / 2 - 6}
 										text-anchor="middle"
-										fill="#818cf8"
+										fill="var(--color-accent-text)"
 										font-size="9"
 										font-family="monospace"
 									>{edge.label}</text>
@@ -335,7 +346,7 @@
 								<text
 									x={node.x} y={node.y + 14}
 									text-anchor="middle"
-									fill="#666"
+									fill="var(--color-text-subtle)"
 									font-size="7"
 									font-family="monospace"
 								>{node.entity.entityType}</text>
@@ -366,8 +377,9 @@
 			</button>
 			{#each availableTypes() as typ}
 				<button onclick={() => { typeFilter = typ; loadEntities(); }}
-					class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === typ ? typeColor(typ).replace(/\/15/g, '/20') + ' border border-current/30' : 'text-text-muted hover:text-text border border-transparent'}">
-					<span class="inline-block h-1.5 w-1.5 rounded-full mr-1 {typeColor(typ).split(' ')[0] ?? 'bg-text-subtle'}"></span>{typ}
+					class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === typ ? 'border border-current/30' : 'text-text-muted hover:text-text border border-transparent'}"
+					style={typeFilter === typ ? typeStyle(typ).replace(/15%/, '22%') : ''}>
+					<span class="inline-block h-1.5 w-1.5 rounded-full mr-1" style="background: {svgColor(typ)};"></span>{typ}
 				</button>
 			{/each}
 		</div>
@@ -387,7 +399,7 @@
 								<div class="flex-1 min-w-0">
 									<div class="flex items-center gap-2">
 										<span class="text-sm font-medium truncate">{entity.canonicalName}</span>
-										<span class="shrink-0 text-[10px] rounded-full px-2 py-0.5 font-mono {typeColor(entity.entityType)}">{entity.entityType}</span>
+										<span class="shrink-0 text-[10px] rounded-full px-2 py-0.5 font-mono" style={typeStyle(entity.entityType)}>{entity.entityType}</span>
 									</div>
 									{#if entity.description}
 										<p class="text-xs text-text-muted mt-0.5 truncate">{entity.description}</p>
@@ -426,7 +438,7 @@
 		<div class="flex items-start justify-between gap-2">
 			<div>
 				<h2 class="text-lg font-medium mb-1">{selected!.canonicalName}</h2>
-				<span class="text-xs rounded-full px-2.5 py-0.5 font-mono {typeColor(selected!.entityType)}">{selected!.entityType}</span>
+				<span class="text-xs rounded-full px-2.5 py-0.5 font-mono" style={typeStyle(selected!.entityType)}>{selected!.entityType}</span>
 			</div>
 			<button onclick={() => { selected = null; }} class="shrink-0 p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label="Close">
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>

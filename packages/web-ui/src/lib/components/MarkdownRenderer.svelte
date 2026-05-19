@@ -6,6 +6,7 @@
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
 
 	interface Props {
@@ -38,30 +39,51 @@
 
 	// ── Mermaid ──────────────────────────────────────────────
 
-	let mermaidReady = false;
+	let mermaidInitTheme: ResolvedTheme | null = null;
+
+	function mermaidVars(theme: ResolvedTheme): Record<string, string> {
+		if (theme === 'light') {
+			return {
+				primaryColor: '#eceef2',
+				primaryTextColor: '#0b0b14',
+				primaryBorderColor: '#21179b',
+				lineColor: '#6b6e7b',
+				secondaryColor: '#f6f7f9',
+				tertiaryColor: '#ffffff',
+				background: '#ffffff',
+				mainBkg: '#f6f7f9',
+				nodeBorder: '#21179b',
+				clusterBkg: '#ffffff',
+				titleColor: '#0b0b14',
+				edgeLabelBackground: '#ffffff'
+			};
+		}
+		return {
+			primaryColor: '#6525EF',
+			primaryTextColor: '#e8e8f0',
+			primaryBorderColor: '#3d3d5c',
+			lineColor: '#8888aa',
+			secondaryColor: '#1a1a3e',
+			tertiaryColor: '#0c0c20',
+			background: '#0c0c20',
+			mainBkg: '#1a1a3e',
+			nodeBorder: '#6525EF',
+			clusterBkg: '#0c0c20',
+			titleColor: '#e8e8f0',
+			edgeLabelBackground: '#0c0c20'
+		};
+	}
 
 	async function renderMermaid(code: string): Promise<string> {
 		const { default: mermaid } = await import('mermaid');
-		if (!mermaidReady) {
+		const theme = getResolvedTheme();
+		if (mermaidInitTheme !== theme) {
 			mermaid.initialize({
 				startOnLoad: false,
-				theme: 'dark',
-				themeVariables: {
-					primaryColor: '#6525EF',
-					primaryTextColor: '#e8e8f0',
-					primaryBorderColor: '#3d3d5c',
-					lineColor: '#8888aa',
-					secondaryColor: '#1a1a3e',
-					tertiaryColor: '#0c0c20',
-					background: '#0c0c20',
-					mainBkg: '#1a1a3e',
-					nodeBorder: '#6525EF',
-					clusterBkg: '#0c0c20',
-					titleColor: '#e8e8f0',
-					edgeLabelBackground: '#0c0c20'
-				}
+				theme: theme === 'light' ? 'default' : 'dark',
+				themeVariables: mermaidVars(theme)
 			});
-			mermaidReady = true;
+			mermaidInitTheme = theme;
 		}
 		const id = `mermaid-${crypto.randomUUID().slice(0, 8)}`;
 		const { svg } = await mermaid.render(id, code);
@@ -134,7 +156,14 @@
 	function buildArtifact(code: string): string {
 		if (isMarkdownArtifact(code)) return buildMarkdownArtifact(code);
 		const { title, clean } = extractTitle(code);
-		const defaultStyles = `<style>body{background:#0a0a1a;color:#e8e8f0;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
+		// PRD-LIGHT-MODE PR 2a — srcdoc is sandboxed; CSS-vars from parent don't
+		// inherit into the iframe document. Read the theme at render time and
+		// inject matching styles. Theme-flip invalidates richCache (downstream
+		// $effect on getResolvedTheme) so srcdoc is regenerated.
+		const theme = getResolvedTheme();
+		const bg = theme === 'light' ? '#ffffff' : '#0a0a1a';
+		const fg = theme === 'light' ? '#0b0b14' : '#e8e8f0';
+		const defaultStyles = `<style>body{background:${bg};color:${fg};font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
 		const overflowFix = `<style>html,body{overflow-x:hidden!important;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
@@ -284,6 +313,11 @@
 		setTimeout(() => URL.revokeObjectURL(url), 60_000);
 	}
 
+	/*
+	 * Print stylesheet — INTENTIONALLY fixed light-on-white regardless of
+	 * UI theme. "Save as PDF" should produce a printable document. Hex
+	 * values below are exempt from the hex-guard allowlist.
+	 */
 	function buildPrintDocument(title: string, renderedBody: string): string {
 		const safeTitle = escapeHtml(title);
 		return `<!DOCTYPE html>
@@ -367,7 +401,9 @@ window.addEventListener('afterprint', function () { window.close(); });
 
 		const img = new Image();
 		img.onload = () => {
-			c.fillStyle = '#0c0c20';
+			// Asset-export background follows current UI theme so the exported
+			// PNG matches what the user just saw.
+			c.fillStyle = getResolvedTheme() === 'light' ? '#ffffff' : '#0c0c20';
 			c.fillRect(0, 0, bbox.width, bbox.height);
 			c.drawImage(img, 0, 0, bbox.width, bbox.height);
 			const a = document.createElement('a');
@@ -438,7 +474,7 @@ window.addEventListener('afterprint', function () { window.close(); });
 			if (!doc) return null;
 			const { default: html2canvas } = await import('html2canvas');
 			return await html2canvas(doc.body, {
-				backgroundColor: '#0a0a1a',
+				backgroundColor: getResolvedTheme() === 'light' ? '#ffffff' : '#0a0a1a',
 				scale: 2,
 				useCORS: true,
 				width: 800,
@@ -569,7 +605,8 @@ window.addEventListener('afterprint', function () { window.close(); });
 				}
 
 				try {
-					return { original: match[0], result: await codeToHtml(code, { lang, theme: 'github-dark' }) };
+					const shikiTheme = getResolvedTheme() === 'light' ? 'github-light' : 'github-dark';
+					return { original: match[0], result: await codeToHtml(code, { lang, theme: shikiTheme }) };
 				} catch {
 					return { original: match[0], result: match[0] };
 				}
@@ -582,8 +619,27 @@ window.addEventListener('afterprint', function () { window.close(); });
 		return result;
 	}
 
+	/*
+	 * PRD-LIGHT-MODE PR 2a — theme-reactive re-render.
+	 *
+	 * Mermaid SVGs, Shiki-highlighted HTML, and iframe srcdoc all bake the
+	 * theme palette into their output. When the user toggles theme:
+	 *   1. richCache.clear() drops cached SVGs + iframe srcdocs.
+	 *   2. processBlocks re-runs (theme is read via getResolvedTheme()).
+	 *   3. highlightedHtml is reassigned, Svelte re-renders.
+	 *
+	 * Reading getResolvedTheme() inside the $effect tracks it as a dep, so
+	 * the effect re-fires on theme change without any explicit subscription.
+	 */
 	$effect(() => {
 		const html = baseHtml;
+		const theme = getResolvedTheme();
+		// Touch theme so $effect tracks it.
+		void theme;
+		// On theme change, clear caches so re-render picks up new palette.
+		if (mermaidInitTheme !== null && mermaidInitTheme !== theme) {
+			richCache.clear();
+		}
 		const codeBlockRegex = /<pre><code class="language-(\w+)">([\s\S]*?)<\/code><\/pre>/g;
 		const matches = [...html.matchAll(codeBlockRegex)];
 
@@ -866,16 +922,16 @@ window.addEventListener('afterprint', function () { window.close(); });
 	div :global(.mermaid-error) {
 		margin: 1rem 0;
 		padding: 0.75rem 1rem;
-		border: 1px solid var(--color-danger, #ef4444);
+		border: 1px solid var(--color-danger);
 		border-radius: var(--radius-md);
-		background: color-mix(in srgb, var(--color-danger, #ef4444) 8%, transparent);
+		background: color-mix(in srgb, var(--color-danger) 8%, transparent);
 		font-size: 0.8125rem;
 	}
 	div :global(.mermaid-error-header) {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		color: var(--color-danger, #ef4444);
+		color: var(--color-danger);
 		font-weight: 600;
 		margin-bottom: 0.375rem;
 	}
@@ -886,8 +942,8 @@ window.addEventListener('afterprint', function () { window.close(); });
 		width: 1.125rem;
 		height: 1.125rem;
 		border-radius: 50%;
-		background: var(--color-danger, #ef4444);
-		color: #fff;
+		background: var(--color-danger);
+		color: var(--color-bg);
 		font-size: 0.6875rem;
 		line-height: 1;
 	}
@@ -952,7 +1008,7 @@ window.addEventListener('afterprint', function () { window.close(); });
 	div :global(.artifact-label) {
 		font-size: 0.6875rem;
 		font-weight: 500;
-		color: var(--color-accent-text, #9B8AFF);
+		color: var(--color-accent-text);
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 		margin-right: auto;
@@ -1024,8 +1080,8 @@ window.addEventListener('afterprint', function () { window.close(); });
 		width: 100%;
 		border: none;
 		display: block;
-		background: #0a0a1a;
-		color-scheme: dark;
+		background: var(--color-bg-elevated);
+		color-scheme: light dark;
 	}
 	div :global(.artifact-collapsed .artifact-frame) {
 		display: none;

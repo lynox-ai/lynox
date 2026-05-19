@@ -2575,8 +2575,8 @@
 		50% { transform: translateY(-6px); }
 	}
 	@keyframes iconGlow {
-		0%, 100% { filter: drop-shadow(0 0 8px rgba(101, 37, 239, 0.3)); }
-		50% { filter: drop-shadow(0 0 20px rgba(101, 37, 239, 0.6)); }
+		0%, 100% { filter: drop-shadow(0 0 8px color-mix(in srgb, var(--color-accent) 30%, transparent)); }
+		50% { filter: drop-shadow(0 0 20px color-mix(in srgb, var(--color-accent) 60%, transparent)); }
 	}
 	.welcome-fade :global(.icon-entrance) {
 		animation: iconEntrance 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both;
@@ -2602,7 +2602,7 @@
 		margin-top: -36px;
 		margin-left: -36px;
 		border-radius: 50%;
-		border: 2px solid rgba(155, 138, 255, 0.4);
+		border: 2px solid color-mix(in srgb, var(--color-accent-text) 40%, transparent);
 		z-index: 0;
 		animation: sonarPulse 5s ease-out infinite;
 	}
@@ -2624,23 +2624,23 @@
 		align-items: center;
 		padding: 0.75rem 1rem;
 		border-radius: var(--radius-md);
-		border: 1px solid var(--color-border, #1a1a4a);
-		background: var(--color-bg-subtle, #0a0a1a);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-subtle);
 		cursor: pointer;
 		transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 		text-align: left;
 	}
 	:global(.prompt-chip:hover) {
-		border-color: var(--color-accent, #6525EF);
-		box-shadow: 0 0 16px rgba(101, 37, 239, 0.08);
-		background: var(--color-bg-muted, #0c0c20);
+		border-color: var(--color-accent);
+		box-shadow: 0 0 16px color-mix(in srgb, var(--color-accent) 8%, transparent);
+		background: var(--color-bg-muted);
 	}
 	:global(.prompt-chip-text) {
 		font-size: 0.8125rem;
-		color: var(--color-text-muted, #8888aa);
+		color: var(--color-text-muted);
 	}
 	:global(.prompt-chip:hover .prompt-chip-text) {
-		color: var(--color-text, #e8e8f0);
+		color: var(--color-text);
 	}
 
 	/* Mic-button recording state: soft outward pulse + subtle breathing

@@ -191,32 +191,107 @@
 {/if}
 
 <style>
+	/*
+	 * PRD-LIGHT-MODE PR 2a — full rewrite. The previous style block referenced
+	 * --color-surface / --color-muted which do NOT exist in app.css, so the
+	 * hex fallbacks (#141414, #999, etc.) were ALWAYS active and the
+	 * component appeared dark-themed regardless of [data-theme]. All values
+	 * now resolve via the canonical tokens that work in both themes.
+	 */
 	.wa {
 		padding: 1rem 1.25rem;
-		border: 1px solid var(--color-border, #2a2a2a);
+		border: 1px solid var(--color-border);
 		border-radius: 0.5rem;
 		margin-bottom: 1.5rem;
-		background: var(--color-surface, #141414);
+		background: var(--color-bg-subtle);
 	}
 	header h3 { margin: 0 0 0.25rem 0; font-size: 1.05rem; }
-	.sub { color: var(--color-muted, #999); font-size: 0.85rem; margin: 0 0 1rem 0; }
-	.muted { color: var(--color-muted, #888); font-size: 0.85rem; }
-	.warn { color: #e0a030; background: rgba(224, 160, 48, 0.08); padding: 0.5rem 0.75rem; border-left: 3px solid #e0a030; border-radius: 0.25rem; font-size: 0.85rem; }
+	.sub { color: var(--color-text-muted); font-size: 0.85rem; margin: 0 0 1rem 0; }
+	.muted { color: var(--color-text-muted); font-size: 0.85rem; }
+	.warn {
+		color: var(--color-warning);
+		background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+		padding: 0.5rem 0.75rem;
+		border-left: 3px solid var(--color-warning);
+		border-radius: 0.25rem;
+		font-size: 0.85rem;
+	}
 	.row { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; }
 	.pill { padding: 0.15rem 0.6rem; border-radius: 1rem; font-size: 0.75rem; }
-	.pill.ok { background: rgba(74, 222, 128, 0.12); color: #4ade80; }
-	.instructions { background: rgba(255,255,255,0.03); padding: 0.75rem 1rem; border-radius: 0.4rem; margin-bottom: 1rem; font-size: 0.85rem; }
+	.pill.ok {
+		background: color-mix(in srgb, var(--color-success) 12%, transparent);
+		color: var(--color-success);
+	}
+	.instructions {
+		background: var(--color-bg-muted);
+		padding: 0.75rem 1rem;
+		border-radius: 0.4rem;
+		margin-bottom: 1rem;
+		font-size: 0.85rem;
+	}
 	.instructions ol { margin: 0.25rem 0 0.75rem 1.2rem; padding: 0; }
 	.instructions li { margin-bottom: 0.4rem; }
-	code { font-size: 0.8em; background: rgba(255,255,255,0.05); padding: 0.05em 0.3em; border-radius: 0.2em; }
+	code {
+		font-size: 0.8em;
+		background: var(--color-code-bg);
+		padding: 0.05em 0.3em;
+		border-radius: 0.2em;
+	}
 	.form { display: flex; flex-direction: column; gap: 0.75rem; }
-	.form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--color-muted, #bbb); }
-	.form input { padding: 0.5rem 0.6rem; border-radius: 0.3rem; border: 1px solid var(--color-border, #333); background: var(--color-bg, #0d0d0d); color: inherit; font-family: inherit; font-size: 0.9rem; }
+	.form label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: 0.85rem;
+		color: var(--color-text-muted);
+	}
+	.form input {
+		padding: 0.5rem 0.6rem;
+		border-radius: 0.3rem;
+		border: 1px solid var(--color-border);
+		background: var(--color-bg);
+		color: inherit;
+		font-family: inherit;
+		font-size: 0.9rem;
+	}
 	.actions { display: flex; gap: 0.75rem; margin-top: 0.5rem; }
-	.btn-primary { background: #3b82f6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.3rem; cursor: pointer; font-size: 0.9rem; }
+	.btn-primary {
+		background: var(--color-accent);
+		color: white;
+		border: none;
+		padding: 0.5rem 1rem;
+		border-radius: 0.3rem;
+		cursor: pointer;
+		font-size: 0.9rem;
+	}
+	.btn-primary:hover { background: var(--color-accent-hover); }
 	.btn-primary:disabled { opacity: 0.5; cursor: wait; }
-	.btn-danger { background: transparent; color: #f87171; border: 1px solid #f87171; padding: 0.35rem 0.75rem; border-radius: 0.3rem; cursor: pointer; font-size: 0.8rem; }
+	.btn-danger {
+		background: transparent;
+		color: var(--color-danger);
+		border: 1px solid var(--color-danger);
+		padding: 0.35rem 0.75rem;
+		border-radius: 0.3rem;
+		cursor: pointer;
+		font-size: 0.8rem;
+	}
 	.btn-danger:disabled { opacity: 0.5; }
-	.btn-link { background: none; border: none; color: #3b82f6; cursor: pointer; font-size: 0.85rem; text-decoration: underline; }
-	.mini { background: none; border: 1px solid #444; color: #888; padding: 0.1rem 0.4rem; border-radius: 0.2rem; font-size: 0.7rem; cursor: pointer; margin-left: 0.25rem; }
+	.btn-link {
+		background: none;
+		border: none;
+		color: var(--color-accent-text);
+		cursor: pointer;
+		font-size: 0.85rem;
+		text-decoration: underline;
+	}
+	.mini {
+		background: none;
+		border: 1px solid var(--color-border-hover);
+		color: var(--color-text-muted);
+		padding: 0.1rem 0.4rem;
+		border-radius: 0.2rem;
+		font-size: 0.7rem;
+		cursor: pointer;
+		margin-left: 0.25rem;
+	}
 </style>
