@@ -20,3 +20,10 @@ pre-commit:
     typecheck:
       run: npm run typecheck
       stage_fixed: true
+    hex-guard:
+      # PRD-LIGHT-MODE PR 3 — fail if a web-ui change introduces hardcoded
+      # 6-digit hex outside the allowlisted asset-export / categorical paths.
+      run: bash packages/web-ui/scripts/hex-guard.sh
+      skip:
+        - merge
+        - rebase
