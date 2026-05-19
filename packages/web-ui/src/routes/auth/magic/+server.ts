@@ -22,6 +22,7 @@ import {
 	isRateLimited,
 	recordFailedLogin,
 	clearRateLimit,
+	isHttpsRequest,
 	SESSION_MAX_AGE_S,
 } from '$lib/server/auth.js';
 import { decideMagicLinkOutcome, type MagicLinkOutcome } from '$lib/server/magic-link.js';
@@ -37,18 +38,6 @@ function getManagedConfig(): { instanceId: string; controlPlaneUrl: string } | n
 
 function getSecret(): string | null {
 	return env.LYNOX_HTTP_SECRET ?? null;
-}
-
-/**
- * Detect whether the request reached us over TLS, accounting for a
- * TLS-terminating reverse proxy (Traefik/Caddy/CF). Without this the
- * `lynox_session` cookie may be set without `Secure` on managed deployments
- * where SvelteKit sees the upstream as `http:`.
- */
-function isHttpsRequest(url: URL, request: Request): boolean {
-	if (url.protocol === 'https:') return true;
-	const xfp = request.headers.get('x-forwarded-proto') ?? '';
-	return xfp.split(',')[0]?.trim().toLowerCase() === 'https';
 }
 
 function setSessionCookie(

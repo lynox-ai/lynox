@@ -4,6 +4,7 @@ import {
 	createSessionToken,
 	verifySessionToken,
 	secretEquals,
+	isHttpsRequest,
 	SESSION_MAX_AGE_S,
 } from './auth.js';
 
@@ -156,5 +157,52 @@ describe('secretEquals', () => {
 
 	it('returns false for inputs of different lengths (no length oracle)', () => {
 		expect(secretEquals('short', SECRET)).toBe(false);
+	});
+});
+
+describe('isHttpsRequest', () => {
+	function mkRequest(xfp?: string): Request {
+		const headers = new Headers();
+		if (xfp !== undefined) headers.set('x-forwarded-proto', xfp);
+		return new Request('http://internal', { headers });
+	}
+
+	it('returns true when url.protocol is https (direct TLS, no proxy)', () => {
+		const url = new URL('https://acme.lynox.cloud/login');
+		expect(isHttpsRequest(url, mkRequest())).toBe(true);
+	});
+
+	it('returns true when proxy sets x-forwarded-proto=https on an http inner hop', () => {
+		// The actual managed-deployment case: Traefik/CF terminates TLS, the
+		// inner Node sees http:. Without the XFP fallback the Secure flag
+		// would silently drop on managed instances.
+		const url = new URL('http://internal-traefik/login');
+		expect(isHttpsRequest(url, mkRequest('https'))).toBe(true);
+	});
+
+	it('returns false on plain http with no proxy header (self-hosted LAN)', () => {
+		const url = new URL('http://my-lynox.local:3000/login');
+		expect(isHttpsRequest(url, mkRequest())).toBe(false);
+	});
+
+	it('takes the first entry of a comma-separated XFP chain', () => {
+		// XFP can stack `client-protocol, proxy-protocol, ...` — only the
+		// first is the originating client.
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('https, http'))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('http, https'))).toBe(false);
+	});
+
+	it('is case-insensitive on the XFP scheme', () => {
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('HTTPS'))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('Https'))).toBe(true);
+	});
+
+	it('returns false for unexpected XFP values', () => {
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('ws'))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest(''))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest('  '))).toBe(false);
 	});
 });

@@ -12,6 +12,7 @@ import {
 	isRateLimited,
 	recordFailedLogin,
 	clearRateLimit,
+	isHttpsRequest,
 	SESSION_MAX_AGE_S,
 } from '$lib/server/auth.js';
 
@@ -72,7 +73,7 @@ function setSessionCookie(cookies: Parameters<PageServerLoad>[0]['cookies'], sec
 
 // ── Load function ──────────────────────────────────────────────────
 
-export const load: PageServerLoad = async ({ cookies, url, getClientAddress, setHeaders }) => {
+export const load: PageServerLoad = async ({ cookies, url, request, getClientAddress, setHeaders }) => {
 	// Prevent caching — login state is dynamic (managed mode, passkey status)
 	setHeaders({ 'Cache-Control': 'no-store' });
 	const secret = getSecret();
@@ -93,7 +94,7 @@ export const load: PageServerLoad = async ({ cookies, url, getClientAddress, set
 			return { isManaged: false };
 		}
 		clearRateLimit(ip);
-		setSessionCookie(cookies, secret, url.protocol === 'https:');
+		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 		redirect(303, '/app');
 	}
 
@@ -109,7 +110,7 @@ export const load: PageServerLoad = async ({ cookies, url, getClientAddress, set
 		}
 		clearRateLimit(ip);
 		consumeOnboardingToken();
-		setSessionCookie(cookies, secret, url.protocol === 'https:');
+		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 		redirect(303, '/app');
 	}
 
@@ -177,7 +178,7 @@ export const actions: Actions = {
 		}
 
 		clearRateLimit(ip);
-		setSessionCookie(cookies, secret, url.protocol === 'https:');
+		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 		redirect(303, '/app');
 	},
 
@@ -294,7 +295,7 @@ export const actions: Actions = {
 
 			// OTP valid — create local session
 			clearRateLimit(ip);
-			setSessionCookie(cookies, secret, url.protocol === 'https:');
+			setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 			redirect(303, '/app');
 		} catch (err: unknown) {
 			if (isRedirect(err)) throw err;
@@ -352,7 +353,7 @@ export const actions: Actions = {
 		}
 
 		clearRateLimit(ip);
-		setSessionCookie(cookies, secret, url.protocol === 'https:');
+		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 		redirect(303, '/app');
 	},
 };

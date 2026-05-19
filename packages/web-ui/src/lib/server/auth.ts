@@ -56,6 +56,25 @@ export function secretEquals(input: string, secret: string): boolean {
 	return timingSafeEqual(a, b);
 }
 
+/**
+ * Decide whether the originating request was over HTTPS. Behind a TLS-
+ * terminating reverse proxy (Traefik / Cloudflare), `url.protocol` reflects
+ * the proxy→app inner hop and is always `http:`; the trustworthy signal is
+ * the `x-forwarded-proto` header the proxy sets. Falls back to
+ * `url.protocol` for direct connections (self-hosted localhost / LAN dev).
+ *
+ * Used to set the `Secure` flag on session cookies — missing the flag on
+ * managed deployments lets the browser send the cookie over plaintext if
+ * an HTTPS-downgrade can be coerced. Previously inlined as
+ * `url.protocol === 'https:'` at six call sites in login + magic; the
+ * inline form silently dropped the flag behind every reverse proxy.
+ */
+export function isHttpsRequest(url: URL, request: Request): boolean {
+	if (url.protocol === 'https:') return true;
+	const xfp = request.headers.get('x-forwarded-proto') ?? '';
+	return xfp.split(',')[0]?.trim().toLowerCase() === 'https';
+}
+
 // ── Rate limiting (in-memory, per-IP) ───────────────────────────────
 
 interface RateLimitEntry {
