@@ -571,7 +571,11 @@
 					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
 						<Icon name="hamburger" size="md" />
 					</button>
-					<img src="/logo-brand.svg" alt="lynox" class="h-5 w-auto" />
+					<!-- PRD-LIGHT-MODE PR 4 — two static <img>, CSS visibility-switch
+					     by [data-theme]. Avoids SSR/hydrate flicker that any reactive
+					     getResolvedTheme() lookup would introduce on the header. -->
+					<img src="/logo-brand-dark.svg" alt="lynox" class="h-5 w-auto logo-brand-dark" />
+					<img src="/logo-brand-light.svg" alt="lynox" class="h-5 w-auto logo-brand-light" />
 				</div>
 
 				<!-- Center: Cmd+K hint -->
@@ -764,3 +768,12 @@
 		{/if}
 	{/if}
 </div>
+
+<style>
+	/* PRD-LIGHT-MODE PR 4 — Header logo theme switch.
+	   The dark variant has white "eyes" on the brand-violet circle for crisp
+	   contrast on the dark canvas. The light variant uses brand indigo on
+	   white. Both keep the brand-violet face circle. */
+	:global([data-theme="dark"]) .logo-brand-light { display: none; }
+	:global([data-theme="light"]) .logo-brand-dark { display: none; }
+</style>
