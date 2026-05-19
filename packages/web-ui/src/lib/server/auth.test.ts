@@ -199,10 +199,43 @@ describe('isHttpsRequest', () => {
 		expect(isHttpsRequest(url, mkRequest('Https'))).toBe(true);
 	});
 
+	it('trims surrounding whitespace before comparing', () => {
+		// Some proxies emit `x-forwarded-proto:  https` with leading spaces;
+		// the trim() must normalize before strict-equality. Lock this in.
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest(' https'))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('https '))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('  https  '))).toBe(true);
+	});
+
 	it('returns false for unexpected XFP values', () => {
 		const url = new URL('http://internal/login');
 		expect(isHttpsRequest(url, mkRequest('ws'))).toBe(false);
 		expect(isHttpsRequest(url, mkRequest(''))).toBe(false);
 		expect(isHttpsRequest(url, mkRequest('  '))).toBe(false);
+	});
+
+	it('rejects header-smuggled scheme strings (lock against loose-match refactor)', () => {
+		// Strict-equality compare today makes these all safe; the test
+		// guards against a future "startsWith" or "includes" refactor
+		// that would silently accept attacker-crafted values.
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('javascript:'))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest('https://attacker.example'))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest('<script>https</script>'))).toBe(false);
+	});
+
+	it.each([
+		['https://acme.lynox.cloud:8443/login'],
+		['https://acme.lynox.cloud/login?next=%2Fapp'],
+		['https://[::1]:3000/login'],
+		['https://127.0.0.1/login'],
+	])('honours url.protocol short-circuit on %s regardless of XFP', (rawUrl) => {
+		const url = new URL(rawUrl);
+		// XFP is intentionally not 'https' — the url.protocol short-circuit
+		// should still return true because we already terminated TLS at the
+		// app boundary.
+		expect(isHttpsRequest(url, mkRequest(''))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('http'))).toBe(true);
 	});
 });
