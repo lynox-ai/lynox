@@ -450,7 +450,7 @@
 					<button
 						type="button"
 						onclick={() => onComposeClick()}
-						class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90"
+						class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 					>{t('inbox.compose_new')}</button>
 				</div>
 
@@ -772,7 +772,7 @@
 				>{t('inbox.compose_collision_discard')}</button>
 				<button
 					type="button"
-					class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90"
+					class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 					onclick={() => resolveCollisionSaveAndOpen()}
 				>{t('inbox.compose_collision_save_new')}</button>
 			</div>

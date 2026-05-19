@@ -1635,7 +1635,7 @@
 							<button
 								onclick={saveInlineKey}
 								disabled={!setupKey.trim() || setupSaving}
-								class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+								class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-30 transition-opacity"
 							>
 								{setupSaving ? t('onboard.setting_up') : t('onboard.save_key')}
 							</button>
@@ -1712,7 +1712,7 @@
 														<button
 															onclick={submitOnboardingUrl}
 															disabled={!onboardingUrl.trim()}
-															class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+															class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-30 transition-opacity"
 														>
 															{t('onboard.url_go')}
 														</button>
@@ -2124,7 +2124,7 @@
 								<div class="flex gap-2 mt-1.5">
 									<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
 										disabled={!(batchSelections[i] ?? []).length}
-										class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30"
+										class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-accent-fg hover:opacity-90 disabled:opacity-30"
 									>{t('chat.send')}</button>
 									<button onclick={() => answerPrompt('__dismissed__')}
 										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-subtle hover:text-text transition-all"
@@ -2134,7 +2134,7 @@
 								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex flex-col sm:flex-row gap-1.5">
 									<input bind:value={batchFreetext} placeholder={q.question} class="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[16px] md:text-xs outline-none focus:border-border-hover" />
 									<div class="flex gap-1.5">
-										<button type="submit" disabled={!batchFreetext.trim()} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+										<button type="submit" disabled={!batchFreetext.trim()} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-accent-fg hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
 										<button type="button" onclick={() => answerPrompt('__dismissed__')} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
 									</div>
 								</form>
@@ -2490,7 +2490,7 @@
 						<button
 							onclick={handleSend}
 							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset}
-							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-accent-fg hover:opacity-90 disabled:opacity-30 transition-all"
 							aria-label={t('chat.send')}
 						>
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
@@ -2539,7 +2539,7 @@
 			</div>
 			<p class="text-xs text-text-muted">{t('config.vault_key_hint')}</p>
 			<div class="flex gap-2">
-				<button onclick={confirmVaultCheckpoint} class="flex-1 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90">
+				<button onclick={confirmVaultCheckpoint} class="flex-1 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90">
 					{t('onboard.vault_confirm_btn')}
 				</button>
 				<button onclick={confirmVaultCheckpoint} class="rounded-[var(--radius-sm)] border border-border px-4 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all">

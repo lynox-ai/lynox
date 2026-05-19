@@ -314,7 +314,7 @@
 			<button
 				onclick={createTask}
 				disabled={!newTitle.trim()}
-				class="rounded-[var(--radius-sm)] px-4 py-2 text-sm font-medium transition-colors enabled:bg-accent enabled:text-text enabled:hover:opacity-90 disabled:bg-bg-muted disabled:text-text-subtle disabled:cursor-not-allowed"
+				class="rounded-[var(--radius-sm)] px-4 py-2 text-sm font-medium transition-colors enabled:bg-accent enabled:text-accent-fg enabled:hover:opacity-90 disabled:bg-bg-muted disabled:text-accent-fg-subtle disabled:cursor-not-allowed"
 			>
 				{t('tasks.create')}
 			</button>

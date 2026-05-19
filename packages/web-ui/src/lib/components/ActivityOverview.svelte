@@ -326,7 +326,7 @@
 						<p class="text-sm text-text-muted mt-2 max-w-md mx-auto">{t('activity.empty.description')}</p>
 						<a
 							href="/app"
-							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-text px-4 py-2 text-sm hover:opacity-90 transition-opacity"
+							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-accent-fg px-4 py-2 text-sm hover:opacity-90 transition-opacity"
 						>
 							{t('activity.empty.cta')}
 						</a>
@@ -453,7 +453,7 @@
 						<p class="text-sm text-text-muted mt-2 max-w-md mx-auto">{t('activity.empty.history.description')}</p>
 						<a
 							href="/app"
-							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-text px-4 py-2 text-sm hover:opacity-90 transition-opacity"
+							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-accent-fg px-4 py-2 text-sm hover:opacity-90 transition-opacity"
 						>
 							{t('activity.empty.cta')}
 						</a>
@@ -479,7 +479,7 @@
 						<p class="text-sm text-text-muted mt-2 max-w-md mx-auto">{t('activity.empty.workflows.description')}</p>
 						<a
 							href="/app"
-							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-text px-4 py-2 text-sm hover:opacity-90 transition-opacity"
+							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-accent-fg px-4 py-2 text-sm hover:opacity-90 transition-opacity"
 						>
 							{t('activity.empty.cta')}
 						</a>

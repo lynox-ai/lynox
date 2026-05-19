@@ -681,7 +681,7 @@
 						>{t('session.dismiss')}</button>
 						<a
 							href="/login"
-							class="rounded-[var(--radius-sm)] bg-accent text-text px-3 py-1.5 text-[11px] hover:opacity-90"
+							class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 						>{t('session.relogin')}</a>
 					</div>
 				</div>

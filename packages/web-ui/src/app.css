@@ -44,6 +44,7 @@
 	--lyx-accent-hover: #7b3fff;
 	--lyx-accent-text: #9B8AFF;
 	--lyx-accent-disabled: color-mix(in srgb, #6525EF 35%, #0c0c20);
+	--lyx-accent-fg: #ffffff;
 	--lyx-focus-ring: #9B8AFF;
 	--lyx-danger: #ef4444;
 	--lyx-success: #22c55e;
@@ -67,6 +68,7 @@
 	--lyx-accent-hover: #1a1280;
 	--lyx-accent-text: #2a1fb8;
 	--lyx-accent-disabled: color-mix(in srgb, #21179b 35%, #eceef2);
+	--lyx-accent-fg: #ffffff;
 	--lyx-focus-ring: #0b0b14;
 	--lyx-danger: #c0341d;
 	--lyx-success: #15803d;
@@ -90,6 +92,7 @@
 	--color-accent-hover: var(--lyx-accent-hover);
 	--color-accent-text: var(--lyx-accent-text);
 	--color-accent-disabled: var(--lyx-accent-disabled);
+	--color-accent-fg: var(--lyx-accent-fg);
 	--color-focus-ring: var(--lyx-focus-ring);
 	--color-danger: var(--lyx-danger);
 	--color-success: var(--lyx-success);

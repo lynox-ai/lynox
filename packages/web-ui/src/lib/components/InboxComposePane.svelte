@@ -138,7 +138,7 @@
 			>{t('inbox.compose_cancel')}</button>
 			<button
 				type="submit"
-				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[11px] hover:opacity-90 disabled:opacity-50"
+				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90 disabled:opacity-50"
 				disabled={sending || selectedAccountId === null}
 			>{sending ? t('inbox.compose_sending') : t('inbox.compose_send')}</button>
 		</footer>

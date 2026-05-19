@@ -130,7 +130,7 @@
 				<button
 					type="button"
 					onclick={() => onStartTriage?.()}
-					class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-4 py-2 text-[12px] hover:opacity-90"
+					class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-4 py-2 text-[12px] hover:opacity-90"
 				>
 					{t('inbox.kopilot_start_triage')}
 				</button>
