@@ -1334,6 +1334,52 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET surfaces LYNOX_STRIPE_PORTAL_LOGIN_URL when set + valid (v1.6.0 billing stopgap)', async () => {
+      vi.stubEnv('LYNOX_STRIPE_PORTAL_LOGIN_URL', 'https://billing.stripe.com/p/login/test_xxx');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['stripe_portal_login_url']).toBe('https://billing.stripe.com/p/login/test_xxx');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('GET omits stripe_portal_login_url when env is unset', async () => {
+      // No env set → field absent. Default fixture state — vi.stubEnv not called.
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body).not.toHaveProperty('stripe_portal_login_url');
+    });
+
+    it('GET rejects stripe_portal_login_url that does not pass prefix-guard (defense vs misconfig)', async () => {
+      // Anything other than https://billing.stripe.com/* gets dropped, even
+      // if env is explicitly set — engine never forwards an attacker URL.
+      vi.stubEnv('LYNOX_STRIPE_PORTAL_LOGIN_URL', 'https://evil.example.com/portal');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body).not.toHaveProperty('stripe_portal_login_url');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('GET rejects http:// (not https) stripe_portal_login_url', async () => {
+      vi.stubEnv('LYNOX_STRIPE_PORTAL_LOGIN_URL', 'http://billing.stripe.com/p/login/x');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body).not.toHaveProperty('stripe_portal_login_url');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('GET treats LYNOX_MANAGED_MODE=starter (BYOK) as non-managed for capability gating', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
       try {
