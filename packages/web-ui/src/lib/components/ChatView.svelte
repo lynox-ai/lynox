@@ -50,7 +50,7 @@
 		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
-	import { getApiBase, getPipelineStatusV2 } from '../config.svelte.js';
+	import { getApiBase, getPipelineStatusV2, getDemoMode } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
@@ -80,6 +80,16 @@
 		{ key: 'chip_1', descKey: 'chip_1_desc' },
 		{ key: 'chip_2', descKey: 'chip_2_desc' },
 		{ key: 'chip_3', descKey: 'chip_3_desc' },
+	] as const;
+
+	// Demo-mode chips — independent suggestion buttons that hit the seeded
+	// tenant data directly. No state machine, no URL collection, no ask_user
+	// round-trip. Locale flips the full set (meridian-demo = EN consultancy
+	// scenario, nordberg-demo = DE manufacturer scenario) via i18n keys.
+	const DEMO_CHIPS = [
+		{ key: 'demo_chip_1', descKey: 'demo_chip_1_desc' },
+		{ key: 'demo_chip_2', descKey: 'demo_chip_2_desc' },
+		{ key: 'demo_chip_3', descKey: 'demo_chip_3_desc' },
 	] as const;
 
 	// Agent context prefixes — tell the agent exactly what to do per step
@@ -126,6 +136,16 @@
 		// Step 1: show URL input instead of sending immediately
 		if (idx === 0) { showUrlInput = true; return; }
 		sendOnboardingStep(idx);
+	}
+
+	function handleDemoChipClick(idx: number) {
+		const chip = DEMO_CHIPS[idx];
+		if (!chip) return;
+		const prompt = t(`onboard.${chip.key}` as 'onboard.demo_chip_1');
+		// Demo chips are direct prompts — no agent-context preamble, no
+		// effort overrides; the demo tenant runs on the cheap-tier defaults
+		// the CP provisioner injects.
+		sendMessage(prompt);
 	}
 
 	function sendOnboardingStep(idx: number, url?: string) {
@@ -1561,7 +1581,7 @@
 	     them in the thumb sweep zone for right-handed mobile users — the
 	     stats column is read-only, the icons are the actual touch targets. -->
 	<div class="flex items-center gap-2 mt-2">
-		{#if usage && !isStreaming}
+		{#if usage && !isStreaming && !getDemoMode()}
 			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage)}</span>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
@@ -1671,8 +1691,28 @@
 								</div>
 							{/if}
 
+							<!-- Demo-mode: independent suggestion chips, no state machine -->
+							{#if getDemoMode() && showOnboarding}
+								<div class="mt-6 space-y-2.5">
+									<p class="text-center text-sm text-text-muted mb-4">{t('onboard.demo_hint')}</p>
+									{#each DEMO_CHIPS as chip, idx}
+										<button
+											onclick={() => handleDemoChipClick(idx)}
+											class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
+										>
+											<div class="flex items-center gap-3">
+												<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
+												<div class="flex-1 min-w-0">
+													<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.demo_chip_1')}</span>
+													<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.demo_chip_1_desc')}</p>
+												</div>
+												<svg class="shrink-0 text-accent-text" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+											</div>
+										</button>
+									{/each}
+								</div>
 							<!-- Onboarding: all steps with done/current/future states -->
-							{#if showOnboarding}
+							{:else if showOnboarding}
 								<div class="mt-6 space-y-2.5">
 									<p class="text-center text-sm text-text-muted mb-4">{t('onboard.ready_hint')}</p>
 									{#each ONBOARDING_CHIPS as chip, idx}

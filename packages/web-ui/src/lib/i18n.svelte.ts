@@ -755,6 +755,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.chip_2_desc': { de: 'lynox fragt gezielt nach, was die Website nicht verrät', en: 'lynox asks about what the website doesn\'t reveal' },
 	'onboard.chip_3': { de: 'Recherchiere meine Konkurrenz', en: 'Research my competitors' },
 	'onboard.chip_3_desc': { de: 'Wettbewerber finden, vergleichen und als Artifact darstellen', en: 'Find competitors, compare, and present as artifact' },
+	// Demo-mode suggestion chips. Locale flips the full set: EN = meridian-style
+	// consultancy seed, DE = nordberg-style manufacturer seed. The prompts are
+	// generic enough to work against either tenant's KG/CRM seed without
+	// hardcoding entity names.
+	'onboard.demo_hint': { de: 'Probier eine dieser Suggestion aus — alle Daten sind bereits geseeded.', en: 'Try one of these — all the data is already seeded.' },
+	'onboard.demo_chip_1': { de: 'Zeig mir meine offenen Deals', en: 'Show me my open deals' },
+	'onboard.demo_chip_1_desc': { de: 'CRM-Pipeline-Übersicht aus dem Knowledge Graph', en: 'CRM pipeline overview straight from the knowledge graph' },
+	'onboard.demo_chip_2': { de: 'Was habe ich letzte Woche gemacht?', en: 'What did I do last week?' },
+	'onboard.demo_chip_2_desc': { de: 'Aktivitäts-Recap aus den Memories und Threads', en: 'Activity recap from memories and threads' },
+	'onboard.demo_chip_3': { de: 'Entwirf ein Follow-up an meinen wichtigsten Kunden', en: 'Draft a follow-up to my biggest client' },
+	'onboard.demo_chip_3_desc': { de: 'lynox identifiziert den Kunden und entwirft die Mail', en: 'lynox identifies the client and drafts the email' },
 	'onboard.step': { de: 'Schritt', en: 'Step' },
 	'onboard.step_done': { de: 'Erledigt', en: 'Done' },
 	'onboard.skip_onboarding': { de: 'Überspringen — einfach loschatten', en: 'Skip — just start chatting' },
