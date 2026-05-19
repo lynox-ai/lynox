@@ -43,10 +43,17 @@
 		{ match: (n) => n.startsWith('data_store_'),          key: 'data',           labelKey: 'tools.category.data' },
 		{ match: (n) => n === 'contacts' || n === 'deals' || n === 'interactions',    key: 'crm',  labelKey: 'tools.category.crm' },
 		{ match: (n) => n.startsWith('task_') || n === 'plan_task' || n === 'step_complete', key: 'tasks', labelKey: 'tools.category.tasks' },
-		{ match: (n) => n === 'run_pipeline' || n === 'spawn_agent' || n === 'propose_dag',  key: 'orchestration', labelKey: 'tools.category.orchestration' },
+		// Orchestration covers parallel work + workflow-template management.
+		// `capture_process` + `promote_process` are workflow tools (save the
+		// current session as reusable template, then promote it to a parameterized
+		// workflow) — categorically orchestration, not system. Rafael's QA 2026-05-19
+		// flagged the original `_process`-in-system regex as wrong.
+		{ match: (n) => n === 'run_pipeline' || n === 'spawn_agent' || n === 'propose_dag' || n === 'capture_process' || n === 'promote_process', key: 'orchestration', labelKey: 'tools.category.orchestration' },
 		{ match: (n) => n === 'ask_user' || n === 'ask_secret',                       key: 'interaction', labelKey: 'tools.category.interaction' },
 		{ match: (n) => n === 'api_setup' || n === 'vault_secrets',                   key: 'integration', labelKey: 'tools.category.integration' },
-		{ match: (n) => n === 'bash' || n.endsWith('_process') || n === 'extract' || n === 'score_results', key: 'system', labelKey: 'tools.category.system' },
+		// System = shell + content extraction + result scoring. Process tools
+		// moved to orchestration above.
+		{ match: (n) => n === 'bash' || n === 'extract' || n === 'score_results',     key: 'system',      labelKey: 'tools.category.system' },
 	];
 	const FALLBACK_CATEGORY = { key: 'other', labelKey: 'tools.category.other' };
 
