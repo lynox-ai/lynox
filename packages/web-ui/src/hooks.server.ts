@@ -3,16 +3,7 @@ import { redirect } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
-
-/** Exact paths that never require authentication. */
-const PUBLIC_EXACT = new Set(['/login', '/logout', '/health']);
-/** Prefixes that never require authentication (with trailing slash enforced). */
-const PUBLIC_PREFIXES = ['/auth/passkey'];
-
-function isPublic(pathname: string): boolean {
-	if (PUBLIC_EXACT.has(pathname)) return true;
-	return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
-}
+import { isPublic } from '$lib/server/public-paths.js';
 
 const handleAuth: Handle = async ({ event, resolve }) => {
 	const secret = env.LYNOX_HTTP_SECRET;
