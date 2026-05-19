@@ -12,7 +12,6 @@ The full license text is available at: https://www.apache.org/licenses/LICENSE-2
 - **dompurify** (dual-licensed MPL-2.0 OR Apache-2.0) - Copyright Dr.-Ing. Mario Heiderich, Cure53
 - **google-auth-library** - Copyright Google LLC (used by Google Workspace OAuth integration)
 - **@anthropic-ai/vertex-sdk** — Copyright Anthropic (dormant; kept for the Vertex provider path documented in CLAUDE.md)
-- **iconv-lite** - Copyright Alexander Shtuchkin (used for inbound-mail charset conversion)
 
 ## MIT License
 
@@ -31,6 +30,7 @@ The following dependencies are licensed under the MIT License.
 - **nodemailer** - Copyright Andris Reinman (outbound SMTP via the Mail integration)
 - **imapflow** - Copyright Andris Reinman (inbound IMAP via the Mail integration)
 - **email-reply-parser** - Copyright Will Durand / Daniel Spinks (quoting/reply detection on inbound mail)
+- **iconv-lite** - Copyright Alexander Shtuchkin (used for inbound-mail charset conversion)
 
 ## MPL 2.0
 
