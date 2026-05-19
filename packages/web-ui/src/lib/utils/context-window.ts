@@ -45,31 +45,20 @@ export function buildContextOptions(
 }
 
 /**
- * Legacy entry point — kept for back-compat with PR 2 callers. Returns the
- * subset of milestones that should render as enabled radios (drops both
- * hidden + disabled). New code should call `buildContextOptions` and render
- * the disabled milestones grayed with tooltip per Item 8.
- *
- * @deprecated use `buildContextOptions` instead.
- */
-export function filterContextMilestones(
-	native: number | undefined,
-	milestones: ReadonlyArray<ContextMilestone>,
-): ContextMilestone[] {
-	if (native === undefined) return [...milestones];
-	return milestones.filter((m) => m.value < native);
-}
-
-/**
  * Format a context-window size for the active-model label. Splits on
  * the 1M boundary so 1_000_000 renders as "1M" rather than "1000K".
  * Half-millions (e.g. 500_000) stay as "500K" since "0.5M" reads worse.
+ *
+ * Edge case: tokens that round to ≥1000K (e.g. 999_500) cross over to "1M"
+ * to avoid the misleading "1000K" rendering for near-1M registry entries.
  */
 export function formatContextWindow(tokens: number): string {
-	if (tokens >= 1_000_000) {
-		const m = tokens / 1_000_000;
-		// Strip trailing .0 (1.0M → 1M) but keep .5/.1/etc when present.
+	const k = Math.round(tokens / 1000);
+	if (k >= 1000) {
+		// Derive `m` from the rounded `k` so near-1M values (e.g. 999_999 K=1000)
+		// render as "1M" instead of "1.0M" via `toFixed(1)` on 0.999999.
+		const m = k / 1000;
 		return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1)}M`;
 	}
-	return `${Math.round(tokens / 1000)}K`;
+	return `${k}K`;
 }

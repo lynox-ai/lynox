@@ -162,6 +162,7 @@
 		{ value: 100_000,   labelKey: 'llm.context_window.option.100k', hintKey: 'llm.context_window.option.100k_hint' },
 		{ value: 200_000,   labelKey: 'llm.context_window.option.200k', hintKey: 'llm.context_window.option.200k_hint' },
 		{ value: 500_000,   labelKey: 'llm.context_window.option.500k', hintKey: 'llm.context_window.option.500k_hint' },
+		{ value: 1_000_000, labelKey: 'llm.context_window.option.1m',   hintKey: 'llm.context_window.option.1m_hint' },
 	];
 
 	const DEFAULT_OPTION = {
@@ -177,9 +178,14 @@
 	// can't pick 1M on Sonnet base. Below-native and exact-native are still
 	// filtered (hidden) to keep the list focused; PR 2 introduced this split
 	// and PR 3 only flips the above-native branch from filtered to disabled.
+	// Hide native-match milestone (redundant with "Default") UNLESS the user
+	// explicitly saved that exact value — otherwise the bound radio would have
+	// no match and silently render as "no selection" on re-load.
 	const contextOptions = $derived([
 		DEFAULT_OPTION,
-		...buildContextOptions(activeModel?.contextWindow, CAP_MILESTONES).filter((opt) => !opt.hidden),
+		...buildContextOptions(activeModel?.contextWindow, CAP_MILESTONES).filter(
+			(opt) => !opt.hidden || opt.value === config.max_context_window_tokens,
+		),
 	]);
 </script>
 

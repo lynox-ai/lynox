@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildContextOptions, filterContextMilestones, formatContextWindow, type ContextMilestone } from './context-window.js';
+import { buildContextOptions, formatContextWindow, type ContextMilestone } from './context-window.js';
 
 const MILESTONES: ReadonlyArray<ContextMilestone> = [
 	{ value: 32_000,  labelKey: '32k',  hintKey: '32k_hint' },
@@ -57,38 +57,6 @@ describe('buildContextOptions (Item 8 show-all-grayed)', () => {
 	});
 });
 
-describe('filterContextMilestones', () => {
-	it('returns all milestones when native is undefined (legacy fallback)', () => {
-		expect(filterContextMilestones(undefined, MILESTONES)).toEqual(MILESTONES);
-	});
-
-	it('keeps only milestones strictly below Sonnet base native (200K)', () => {
-		// Pre-fix this offered "500k" and "1M" caps that silently clamped to 200k.
-		const out = filterContextMilestones(200_000, MILESTONES);
-		expect(out.map((m) => m.value)).toEqual([32_000, 100_000]);
-	});
-
-	it('keeps all milestones below Opus 1M native', () => {
-		// Opus has the full ladder available; "default" still represents 1M.
-		const out = filterContextMilestones(1_000_000, MILESTONES);
-		expect(out.map((m) => m.value)).toEqual([32_000, 100_000, 200_000, 500_000]);
-	});
-
-	it('keeps only 32K + 100K below Mistral Large native (131_072)', () => {
-		// Mistral Large is 128K-ish — the 200K and 500K milestones would
-		// over-promise the native cap.
-		const out = filterContextMilestones(131_072, MILESTONES);
-		expect(out.map((m) => m.value)).toEqual([32_000, 100_000]);
-	});
-
-	it('returns empty cap list for Mistral Small native (32_000)', () => {
-		// 32K is the smallest cap milestone — strictly-less-than rule means
-		// nothing remains; UI shows only the "default" option.
-		const out = filterContextMilestones(32_000, MILESTONES);
-		expect(out).toEqual([]);
-	});
-});
-
 describe('formatContextWindow', () => {
 	it('renders Sonnet base as 200K', () => {
 		expect(formatContextWindow(200_000)).toBe('200K');
@@ -115,5 +83,16 @@ describe('formatContextWindow', () => {
 
 	it('strips trailing .0 on whole-million values', () => {
 		expect(formatContextWindow(2_000_000)).toBe('2M');
+	});
+
+	it('rounds near-1M values to "1M" rather than "1000K"', () => {
+		// Math.round(999_999 / 1000) = 1000 → would render "1000K" if the
+		// boundary check were `>= 1_000_000`; the rounded-K threshold catches it.
+		expect(formatContextWindow(999_999)).toBe('1M');
+		expect(formatContextWindow(999_500)).toBe('1M');
+	});
+
+	it('renders below-rounding-boundary values as "K"', () => {
+		expect(formatContextWindow(999_499)).toBe('999K');
 	});
 });

@@ -29,8 +29,14 @@ describe('Pricing', () => {
   });
 
   describe('override-file precedence', () => {
+    // Pin to an explicit empty map so the file-system probe never runs;
+    // otherwise a stray `~/.lynox/pricing.json` on the host (or CI cache)
+    // would silently bleed into the first override test.
+    beforeEach(() => {
+      _resetOverridePricingForTests({});
+    });
     afterEach(() => {
-      _resetOverridePricingForTests(null);
+      _resetOverridePricingForTests({});
     });
 
     it('override entries win over the registry for the exact model id', () => {

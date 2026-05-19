@@ -11,11 +11,16 @@
 	with control.lynox.cloud. So we link to the CP page; the user authenticates
 	with their existing customer session there and clicks the portal button.
 
-	Tier-awareness audit:
-	| Surface             | Self-host | BYOK | Managed |
-	|---------------------|-----------|------|---------|
-	| Subscription tier   | ✗ N/A     | ✗ N/A | ✓ shown |
-	| Manage subscription | ✗ hidden  | ✗ hidden | ✓ button |
+	Tier-awareness audit (`managed` value from /api/config):
+	| Surface             | null (self-host/BYOK) | 'starter' (Hosted CHF 39) | 'managed'/'managed_pro'/'eu' |
+	|---------------------|-----------------------|---------------------------|------------------------------|
+	| Subscription tier   | ✗ self_host_note      | ✓ "Hosted" label          | ✓ tier label                 |
+	| Manage subscription | ✗ hidden              | ✓ portal CTA              | ✓ portal CTA                 |
+
+	All non-null `managed` values map to a paying Stripe customer in the CP
+	(starter = Hosted, managed = Managed, managed_pro = Pro, eu = legacy alias).
+	The self_host_note branch covers true self-host where the LYNOX_MANAGED_MODE
+	flag is absent.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';

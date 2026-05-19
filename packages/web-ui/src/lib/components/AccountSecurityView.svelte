@@ -61,7 +61,7 @@
 	// transient errors (CP unreachable, proxy gap) can surface as HTML 404/502
 	// pages where .json() throws. Wrapping locally lets us emit the right
 	// step-specific toast instead of the generic passkey_failed catch.
-	async function readJson(res: Response): Promise<unknown | null> {
+	async function readJson(res: Response): Promise<unknown> {
 		try {
 			return await res.json();
 		} catch {
@@ -84,9 +84,8 @@
 			}
 
 			const { startRegistration } = await import('@simplewebauthn/browser');
-			// startRegistration accepts a PublicKeyCredentialCreationOptionsJSON;
-			// the CP returns the canonical SimpleWebAuthn shape so the cast is
-			// safe in practice. Typed as `unknown` here for strict-mode parity.
+			// CP returns canonical SimpleWebAuthn shape — cast is the contract
+			// boundary; runtime validation would duplicate browser-side checks.
 			const regResponse = await startRegistration({ optionsJSON: options as Parameters<typeof startRegistration>[0]['optionsJSON'] });
 
 			const ua = navigator.userAgent;
