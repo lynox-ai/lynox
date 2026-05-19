@@ -7,9 +7,11 @@
 	from the list so the surface stays "everything that ISN'T the LLM key".
 
 	Backend: reuses the existing /api/secrets endpoints already wired for KeysView.
-	On managed tiers PUT is allowlisted (BYOK_USER_WRITABLE_SECRETS in http-api.ts)
-	to just ANTHROPIC_API_KEY + OPENAI_API_KEY — so generic-key creation will 403.
-	We surface a managed-info notice instead of failing silently.
+	Managed-tier policy (inverted 2026-05-18 — see INFRA_ADMIN_ONLY_PATTERNS in
+	http-api.ts): default is USER-WRITABLE. Only a narrow set of infrastructure
+	patterns (LYNOX_*, MAIL_ACCOUNT_*, WHATSAPP_*, GOOGLE_OAUTH_*, SMTP_*,
+	IMAP_*, MANAGED_*) is admin-only and gets a 403. The managed-tier notice
+	below explains the boundary, not "everything is blocked".
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';

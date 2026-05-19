@@ -166,24 +166,43 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 };
 
 /**
- * BYOK-provider secrets a managed-tier user can self-serve via the SetupBanner
- * UI. Auth layer pins managed cookie users to `user` scope (see ~L1049 —
- * `adminSecret ? 'user' : 'admin'`), so a strict admin gate would lock managed
- * customers out of their own API-key wizard. The whitelist is narrow on
- * purpose — every other secret (SMTP password, webhook tokens, …) stays
- * admin-only. Self-host has no admin secret, so cookie users are promoted to
- * admin scope at the auth layer and this gate never applies to them.
+ * Secret-writability policy for managed-tier cookie users (auth-scope = user
+ * per ~L1049 `adminSecret ? 'user' : 'admin'`). Self-host has no admin secret
+ * so cookie users are promoted to admin and this gate never applies.
+ *
+ * **Default = user-writable.** This is the lynox product promise: a managed
+ * customer can connect their own Shopify / Stripe / DataForSEO / Hetzner /
+ * arbitrary tool credentials without filing a support ticket. The previous
+ * allowlist (`BYOK_USER_WRITABLE_SECRETS` — only LLM provider keys) violated
+ * that promise — every integration the agent wanted to use needed admin
+ * provisioning. Inverted 2026-05-18 after rafael's QA: see
+ * [[feedback_canary_pinning]] + [[project_managed_user_secrets_promise]].
+ *
+ * **Deny-list — admin-only patterns** (cookie users get 403 for these):
+ *  - `LYNOX_*`        engine-internal infra (HTTP_SECRET, VAULT_KEY, BUGSINK_DSN, etc.)
+ *  - `MANAGED_*`      CP-managed control-plane secrets
+ *  - `MAIL_ACCOUNT_*` channel-managed via Mail settings UI (writes race the
+ *                     dedicated mail-account form — they have their own path)
+ *  - `WHATSAPP_*`     channel-managed via WhatsApp integration
+ *  - `GOOGLE_OAUTH_*` channel-managed via Google OAuth flow
+ *  - `SMTP_*`/`IMAP_*` engine in/outbound mail server credentials
+ *
+ * Everything else passes: SHOPIFY_*, STRIPE_*, DATAFORSEO_*, BREVO_*,
+ * HETZNER_*, ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.
  */
-const BYOK_USER_WRITABLE_SECRETS = new Set([
-  'ANTHROPIC_API_KEY',
-  'OPENAI_API_KEY',
-  // v1.5.2: Mistral + Custom (Anthropic-compat) live in dedicated slots so
-  // switching providers in the UI doesn't clobber an existing Anthropic key.
-  // The web-ui LLMSettings.svelte VAULT_SLOTS map is the source of truth;
-  // mirror it here so managed users can actually save those keys.
-  'MISTRAL_API_KEY',
-  'CUSTOM_API_KEY',
-]);
+const INFRA_ADMIN_ONLY_PATTERNS: ReadonlyArray<RegExp> = [
+  /^LYNOX_/,
+  /^MANAGED_/,
+  /^MAIL_ACCOUNT_/,
+  /^WHATSAPP_/,
+  /^GOOGLE_OAUTH_/,
+  /^SMTP_/,
+  /^IMAP_/,
+];
+
+function isAdminOnlySecret(name: string): boolean {
+  return INFRA_ADMIN_ONLY_PATTERNS.some((p) => p.test(name));
+}
 
 /**
  * Config fields a managed-tier user can change via PUT /api/config. Everything
@@ -314,15 +333,18 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
 
 /**
  * Predict whether an ask_secret call for the given name will be rejected by
- * the vault PUT (managed tier + name not on BYOK_USER_WRITABLE_SECRETS).
+ * the vault PUT (managed tier + name matches an admin-only infrastructure
+ * pattern). Almost all agent-issued secrets pass — the predicate now fires
+ * only for the narrow set of LYNOX_/MANAGED_/MAIL_ACCOUNT_/WHATSAPP_/
+ * GOOGLE_OAUTH_/SMTP_/IMAP_ infrastructure names.
  *
  * Exported so the session.promptSecret wire can short-circuit the UI prompt
- * AND unit tests can lock the predicate without spinning up an SSE run.
- * Reads `process.env['LYNOX_MANAGED_MODE']` at call time so test setups can
- * stub the env per case.
+ * for the rare admin-only cases AND unit tests can lock the predicate
+ * without spinning up an SSE run. Reads `process.env['LYNOX_MANAGED_MODE']`
+ * at call time so test setups can stub the env per case.
  */
 export function predictManagedBlocked(name: string): boolean {
-  return requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name);
+  return requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && isAdminOnlySecret(name);
 }
 
 /** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
@@ -1796,9 +1818,10 @@ export class LynoxHTTPApi {
         if (!promptStore) return 'vault_error';
 
         // Predict managed-tier rejection BEFORE opening the UI prompt.
-        // On managed mode, only BYOK_USER_WRITABLE_SECRETS names can ever
-        // succeed at the vault PUT — opening the prompt for any other
-        // name leads to a guaranteed 403 round-trip plus a confused user
+        // On managed mode, names matching INFRA_ADMIN_ONLY_PATTERNS will be
+        // 403'd by the vault PUT (engine-internal + channel-managed creds
+        // stay admin-only by design). For those names — opening the prompt
+        // leads to a guaranteed 403 round-trip plus a confused user
         // who typed a secret that wasn't writable, then a wasted agent
         // turn to interpret the failure. Predict + short-circuit so the
         // tool result is `managed_blocked` on the first call, never a
@@ -2400,11 +2423,12 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
       const name = params['name']!;
-      // Managed-tier user (cookie auth → user scope per L~1049): only the BYOK
-      // provider keys are writable. Self-host has no admin secret, so cookie
-      // users are already promoted to admin and this gate never applies.
-      if (requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && !BYOK_USER_WRITABLE_SECRETS.has(name)) {
-        errorResponse(res, 403, `Managed mode: secret "${name}" is not user-writable`);
+      // Managed-tier user (cookie auth → user scope per L~1049): user-writable
+      // for any name EXCEPT infrastructure / channel-managed patterns (see
+      // INFRA_ADMIN_ONLY_PATTERNS doc). Self-host has no admin secret, so
+      // cookie users are already promoted to admin and this gate never applies.
+      if (requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && isAdminOnlySecret(name)) {
+        errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Set this via the relevant integration UI or contact support@lynox.ai.`);
         return;
       }
       const store = engine.getSecretStore();

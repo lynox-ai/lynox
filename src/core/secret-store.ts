@@ -295,6 +295,23 @@ export class SecretStore implements SecretStoreLike {
     }
   }
 
+  /**
+   * Like extractSecretNames but returns only the names that DON'T resolve
+   * (no in-memory match, no vault match). Used by the agent's pre-tool gate
+   * to refuse-with-clear-error instead of silently sending literal
+   * `secret:NAME` strings to the external service — staging 2026-05-18
+   * incident: agent POSTed the unresolved `secret:` reference literal to
+   * Shopify because the vault didn't have that name; Shopify echoed the
+   * literal in the error message and the agent mis-diagnosed it as
+   * "http_request tool limitation" and recommended self-host. With this
+   * gate the agent gets "vault has no SHOPIFY_CLIENT_ID, store it via
+   * ask_secret first" and can recover correctly.
+   */
+  findUnresolvedSecretRefs(input: unknown): string[] {
+    const names = this.extractSecretNames(input);
+    return names.filter((n) => this.resolve(n) === null);
+  }
+
   /** Whether a vault is attached */
   get hasVault(): boolean {
     return this.vault !== null;

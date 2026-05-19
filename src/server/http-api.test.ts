@@ -1020,13 +1020,19 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
-  // Pins the predict-block at the session.promptSecret wire (http-api.ts
-  // ~1772). The wire is created inside the /run closure and isn't directly
-  // reachable from tests; this exercises the same predicate function the
-  // wire delegates to (`predictManagedBlocked`). Locks the staging-incident
-  // fix in place: a future refactor that drops the early-return would have
-  // to either delete this function or break these assertions.
-  describe('predictManagedBlocked (managed-tier ask_secret short-circuit)', () => {
+  // Pins the predict-block at the session.promptSecret wire (http-api.ts).
+  // The wire is created inside the /run closure and isn't directly reachable
+  // from tests; this exercises the same predicate function the wire delegates
+  // to (`predictManagedBlocked`).
+  //
+  // 2026-05-18 INVERSION: the predicate now fires for the NARROW set of
+  // admin-only infrastructure patterns (LYNOX_*, MANAGED_*, MAIL_ACCOUNT_*,
+  // WHATSAPP_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*). Almost all agent-asked
+  // secrets — Shopify, Stripe, DataForSEO, Hetzner, arbitrary integration
+  // names — pass on managed by default. This realises the lynox core
+  // promise: managed customers can connect their own tools without filing
+  // a support ticket. See [[project_managed_user_secrets_promise]].
+  describe('predictManagedBlocked (admin-only deny-list)', () => {
     let predictManagedBlocked: (name: string) => boolean;
     beforeAll(async () => {
       ({ predictManagedBlocked } = await import('./http-api.js'));
@@ -1036,44 +1042,77 @@ describe('LynoxHTTPApi', () => {
       vi.unstubAllEnvs();
     });
 
-    it('returns true on managed mode for a non-allowlisted name', () => {
+    it('returns FALSE on managed mode for integration secrets (the core-promise case)', () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
-      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(true);
-      expect(predictManagedBlocked('DATAFORSEO_API_KEY')).toBe(true);
+      // The previous behaviour returned TRUE for these — they hit the old
+      // allowlist and got 403'd. The whole point of the inversion is that
+      // these now flow through to the UI prompt as expected.
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);
+      expect(predictManagedBlocked('SHOPIFY_ACCESS_TOKEN')).toBe(false);
+      expect(predictManagedBlocked('STRIPE_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('DATAFORSEO_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('DATAFORSEO_LOGIN')).toBe(false);
+      expect(predictManagedBlocked('BREVO_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('HETZNER_API_TOKEN')).toBe(false);
+      expect(predictManagedBlocked('SOMETHING_RANDOM_KEY')).toBe(false);
     });
 
-    it('returns false on managed mode for an allowlisted LLM provider key', () => {
+    it('returns FALSE on managed mode for LLM provider keys', () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
-      // BYOK_USER_WRITABLE_SECRETS covers ANTHROPIC_API_KEY + OPENAI_API_KEY +
-      // MISTRAL_API_KEY + CUSTOM_API_KEY per http-api.ts:177.
       expect(predictManagedBlocked('ANTHROPIC_API_KEY')).toBe(false);
       expect(predictManagedBlocked('OPENAI_API_KEY')).toBe(false);
       expect(predictManagedBlocked('MISTRAL_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('CUSTOM_API_KEY')).toBe(false);
     });
 
-    it('returns false on self-host (no LYNOX_MANAGED_MODE) regardless of name', () => {
-      // Critical invariant: self-host must still open the UI prompt for any
-      // name — the predict-block is managed-only. Pre-fix, removing the
-      // managed-mode guard would have silently blocked self-host integrations.
+    it('returns TRUE on managed mode for engine-internal LYNOX_* names', () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      // Engine-internal — customers must not be able to forge sessions,
+      // overwrite the vault key, swap the error-reporting DSN, etc.
+      expect(predictManagedBlocked('LYNOX_HTTP_SECRET')).toBe(true);
+      expect(predictManagedBlocked('LYNOX_VAULT_KEY')).toBe(true);
+      expect(predictManagedBlocked('LYNOX_BUGSINK_DSN')).toBe(true);
+      expect(predictManagedBlocked('LYNOX_MANAGED_MODE')).toBe(true);
+    });
+
+    it('returns TRUE on managed mode for channel-managed infrastructure', () => {
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      // These have dedicated integration UIs that own the writes; direct
+      // PUT here would race / drift those forms.
+      expect(predictManagedBlocked('MAIL_ACCOUNT_STAGING_RULE')).toBe(true);
+      expect(predictManagedBlocked('WHATSAPP_ACCESS_TOKEN')).toBe(true);
+      expect(predictManagedBlocked('GOOGLE_OAUTH_REFRESH_TOKEN')).toBe(true);
+      expect(predictManagedBlocked('SMTP_PASSWORD')).toBe(true);
+      expect(predictManagedBlocked('IMAP_PASSWORD')).toBe(true);
+      expect(predictManagedBlocked('MANAGED_SECRETS_MASTER_KEY')).toBe(true);
+    });
+
+    it('returns FALSE on self-host (no LYNOX_MANAGED_MODE) regardless of name', () => {
+      // Self-host has no admin secret → cookie users are promoted to admin
+      // → the gate never applies. Even LYNOX_* names go through normal
+      // UI prompts (the operator IS the admin).
       vi.stubEnv('LYNOX_MANAGED_MODE', undefined);
       expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);
       expect(predictManagedBlocked('ANTHROPIC_API_KEY')).toBe(false);
+      expect(predictManagedBlocked('LYNOX_HTTP_SECRET')).toBe(false);
+      expect(predictManagedBlocked('MAIL_ACCOUNT_X')).toBe(false);
     });
 
-    it('returns false on managed BYOK (starter) tier', () => {
-      // ADMIN_SPLIT_TIERS includes 'starter' per requiresAdminSplitGate,
-      // so starter ALSO blocks non-allowlisted names (BYOK customers bring
-      // their own provider key but tool secrets are still admin-provisioned).
+    it('returns TRUE on managed BYOK (starter) tier for admin-only names', () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
-      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(true);
+      expect(predictManagedBlocked('LYNOX_HTTP_SECRET')).toBe(true);
+      expect(predictManagedBlocked('MAIL_ACCOUNT_X')).toBe(true);
+      // BYOK starter customers can also set their integration keys.
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);
       expect(predictManagedBlocked('ANTHROPIC_API_KEY')).toBe(false);
     });
 
     it('returns false for unknown LYNOX_MANAGED_MODE values', () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'some-future-tier-we-do-not-know');
-      // Unknown tiers fail open (the gate is allowlist-shaped), matching
-      // requiresAdminSplitGate's semantics — better to over-prompt than
-      // to silently block on a tier we haven't reviewed.
+      // Unknown tiers fail open (the gate is allowlist-shaped via
+      // requiresAdminSplitGate — better to over-prompt than to silently
+      // block on a tier we haven't reviewed).
+      expect(predictManagedBlocked('LYNOX_HTTP_SECRET')).toBe(false);
       expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);
     });
   });
@@ -1610,8 +1649,10 @@ describe('LynoxHTTPApi', () => {
       );
 
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
-        'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (not BYOK)',
+        'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (admin-only infra)',
         async (mode) => {
+          // SMTP_PASSWORD matches `/^SMTP_/` in INFRA_ADMIN_ONLY_PATTERNS —
+          // engine outbound mail credential, not a customer-bringable key.
           vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
           vi.stubEnv('LYNOX_MANAGED_MODE', mode);
           try {
@@ -1621,7 +1662,7 @@ describe('LynoxHTTPApi', () => {
             });
             expect(res.status).toBe(403);
             const body = await res.json() as { error: string };
-            expect(body.error).toContain('not user-writable');
+            expect(body.error).toMatch(/admin-managed|infrastructure|channel-managed/);
             expect(mockSecretSet).not.toHaveBeenCalled();
           } finally {
             vi.unstubAllEnvs();

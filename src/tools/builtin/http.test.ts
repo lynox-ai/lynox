@@ -1053,4 +1053,290 @@ describe('httpRequestTool', () => {
       expect(Date.now() - started).toBeLessThan(3000);
     }, 5000);
   });
+
+  // Staging 2026-05-18 (lynox-chat-2026-05-18.md): http_request hit 401
+  // against the Shopify API profile. Vault had a stale access_token from a
+  // previous client_credentials grant. The agent treated it as a long-lived
+  // token, told the user to "re-paste from Shopify Admin", and looped on
+  // 401s — Shopify Dev Dashboard doesn't expose long-lived tokens anymore.
+  // Fix: when a 401 lands on an URL matched by an OAuth2-managed profile,
+  // append a system hint pointing at `api_setup fetch_token`.
+  describe('OAuth2 401 hint', () => {
+    it('appends fetch_token hint on 401 for an oauth2 profile with token_url', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+            grant_type: 'client_credentials',
+            client_id_key: 'SHOPIFY_CLIENT_ID',
+            client_secret_key: 'SHOPIFY_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+        json: {},
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+
+      // Hint must be OUTSIDE the untrusted_data wrap so the agent treats
+      // it as system guidance, not response content.
+      expect(result).toMatch(/Agent reminder.*OAuth2 401/i);
+      expect(result).toContain('api_setup');
+      expect(result).toContain('fetch_token');
+      expect(result).toContain('shopify_seo');
+      // The negative-rule guard against the failure mode:
+      expect(result).toMatch(/re-paste a token/i);
+      // Sanity: the hint appears AFTER the untrusted_data close tag.
+      const dataEnd = result.lastIndexOf('</untrusted_data>');
+      const hintAt = result.indexOf('Agent reminder');
+      expect(dataEnd).toBeGreaterThan(-1);
+      expect(hintAt).toBeGreaterThan(dataEnd);
+    });
+
+    it('does NOT append the hint when the 401 is on a non-oauth2 profile', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'plain_bearer',
+        name: 'Plain Bearer',
+        base_url: 'https://api.example.com/v1',
+        description: 'Bearer token API',
+        auth: { type: 'bearer', vault_keys: ['EXAMPLE_API_KEY'] },
+      });
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://api.example.com/v1/me' }, agent);
+
+      expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
+      expect(result).not.toContain('fetch_token');
+    });
+
+    it('does NOT append the hint on 401 when no profile matches the hostname', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+
+      mockDnsPublic();
+      const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://no-profile-host.example.com/x' }, agent);
+
+      expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
+    });
+
+    it('does NOT append the hint on a non-401 response from an oauth2 profile', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'oauth_profile',
+        name: 'OAuth Profile',
+        base_url: 'https://o.example.com/v1',
+        description: 'OAuth-managed API',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['CID', 'CSEC'],
+          oauth: { token_url: 'https://o.example.com/oauth/token', grant_type: 'client_credentials' as const, client_id_key: 'CID', client_secret_key: 'CSEC' },
+        },
+      });
+
+      mockDnsPublic();
+      // 200 OK — happy path, no hint expected.
+      const mockResp = createMockResponse({ status: 200, headers: { 'content-type': 'application/json' }, json: { ok: true } });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://o.example.com/v1/data' }, agent);
+
+      expect(result).not.toMatch(/Agent reminder.*OAuth2 401/i);
+    });
+  });
+
+  // Staging 2026-05-18 (lynox-chat-2026-05-18 (2).md):
+  // fetch_token successfully minted a fresh token and wrote it to
+  // SHOPIFY_SEO_ACCESS_TOKEN, but the agent's subsequent http_request kept
+  // pulling Authorization from the OLD vault key SHOPIFY_ACCESS_TOKEN
+  // (left over from an earlier setup attempt). 401 forever.
+  // Fix: for oauth2 profiles, the engine auto-injects Authorization from
+  // the canonical `${id}_ACCESS_TOKEN` vault key. The agent doesn't need
+  // to wire bearer auth at all — and even if it tries, we override.
+  describe('OAuth2 engine-managed bearer injection', () => {
+    function makeSecretStore(secrets: Record<string, string>): import('../../types/index.js').SecretStoreLike {
+      return {
+        getMasked: (n) => secrets[n] ? '****' : null,
+        resolve: (n) => secrets[n] ?? null,
+        listNames: () => Object.keys(secrets),
+        containsSecret: () => false,
+        maskSecrets: (t) => t,
+        recordConsent: () => {},
+        hasConsent: () => true,
+        isExpired: () => false,
+        extractSecretNames: () => [],
+        resolveSecretRefs: (i) => i,
+        findUnresolvedSecretRefs: () => [],
+      };
+    }
+
+    it('auto-injects Authorization: Bearer from vault when oauth2 profile matches', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['SHOPIFY_SEO_ACCESS_TOKEN'],
+          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+        },
+      });
+
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: { 'content-type': 'application/json' }, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+
+      const callArgs = fetchMock.mock.calls[0][1];
+      expect(callArgs.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer fresh-token-xyz' }));
+    });
+
+    it('overrides stale Authorization header the agent set with the canonical token', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+        },
+      });
+
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: { 'content-type': 'application/json' }, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      await handler({
+        url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json',
+        method: 'GET',
+        headers: { Authorization: 'Bearer stale-old-token-from-previous-profile' },
+      }, agent);
+
+      const callArgs = fetchMock.mock.calls[0][1];
+      expect(callArgs.headers.Authorization).toBe('Bearer fresh-token-xyz');
+      expect(callArgs.headers.Authorization).not.toContain('stale-old-token');
+    });
+
+    it('strips lowercase authorization header on override (no duplicate header)', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+        },
+      });
+
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh' });
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      await handler({
+        url: 'https://shop.myshopify.com/admin/api/2026-04/x',
+        headers: { authorization: 'Bearer stale-lowercase' },
+      }, agent);
+
+      const sentHeaders = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+      const authKeys = Object.keys(sentHeaders).filter((k) => k.toLowerCase() === 'authorization');
+      expect(authKeys).toEqual(['Authorization']);
+      expect(sentHeaders['Authorization']).toBe('Bearer fresh');
+    });
+
+    it('fail-loud when oauth2 profile matches but vault has no access_token', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+        },
+      });
+
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const secretStore = makeSecretStore({});
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+
+      expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
+      expect(result).toContain('fetch_token');
+      expect(result).toContain('shopify_seo');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('does NOT inject for non-oauth2 profiles (bearer auth left to the agent)', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'plain_bearer',
+        name: 'Plain Bearer',
+        base_url: 'https://api.example.com/v1',
+        description: 'Bearer token API',
+        auth: { type: 'bearer', vault_keys: ['EXAMPLE_API_KEY'] },
+      });
+
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const secretStore = makeSecretStore({ PLAIN_BEARER_ACCESS_TOKEN: 'should-be-ignored' });
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      await handler({
+        url: 'https://api.example.com/v1/me',
+        headers: { Authorization: 'Bearer agent-set-token' },
+      }, agent);
+
+      const callArgs = fetchMock.mock.calls[0][1];
+      expect(callArgs.headers.Authorization).toBe('Bearer agent-set-token');
+    });
+  });
 });

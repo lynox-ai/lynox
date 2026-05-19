@@ -420,6 +420,37 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // Engine-managed OAuth2 Authorization for matched api_profile.
+    // Profile drives — the agent should NOT have to remember which vault key
+    // holds the current access_token. Two failure modes this prevents:
+    //   1. Agent re-references the OLD vault key after api_setup recreates a
+    //      profile (staging 2026-05-18: SHOPIFY_ACCESS_TOKEN was stale, but
+    //      fetch_token had written the new token to SHOPIFY_SEO_ACCESS_TOKEN.
+    //      Agent kept reaching for the old key → 401 forever).
+    //   2. Token rotation: when fetch_token mints a fresh access_token, every
+    //      subsequent http_request to this profile should use it automatically.
+    // For oauth2 profiles, engine owns auth — override whatever the agent set.
+    if (toolContext?.apiStore && agent.secretStore) {
+      try {
+        const reqHostnameForAuth = new URL(input.url).hostname;
+        const oauthProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
+        if (oauthProfile?.auth?.type === 'oauth2') {
+          const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
+          const resolvedToken = agent.secretStore.resolve(tokenKey);
+          if (resolvedToken) {
+            for (const k of Object.keys(headers)) {
+              if (k.toLowerCase() === 'authorization') delete headers[k];
+            }
+            headers['Authorization'] = `Bearer ${resolvedToken}`;
+          } else {
+            return `Error: api_profile "${oauthProfile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${oauthProfile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.`;
+          }
+        }
+      } catch {
+        // Invalid URL — caught by validateUrl below
+      }
+    }
+
     // GET-based exfiltration detection
     if (method === 'GET' || method === 'HEAD') {
       const exfilWarning = detectGetExfiltration(input.url);
@@ -567,7 +598,26 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
-      const wrapped = wrapUntrustedData(rawResult, 'http_response');
+      let wrapped = wrapUntrustedData(rawResult, 'http_response');
+
+      // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
+      // agent treats it as system guidance, not external response data.
+      // Fires when an http_request hits 401 against an URL matched by an
+      // api_profile with `auth.type: 'oauth2'` AND `auth.oauth.token_url`
+      // set — the 2026-05-18 Shopify failure mode: stale vault
+      // access_token + agent ping-ponged the user through "re-paste from
+      // admin UI" instead of calling `api_setup fetch_token`.
+      if (response.status === 401 && toolContext?.apiStore) {
+        try {
+          const reqHostname = new URL(input.url).hostname;
+          const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
+          if (matchedProfile?.auth?.type === 'oauth2' && matchedProfile.auth.oauth?.token_url) {
+            wrapped += `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.`;
+          }
+        } catch {
+          // Bad URL fell through earlier; nothing to do.
+        }
+      }
 
       // Phase E (api-cost-display): if this hit a profiled API with a per_call
       // cost model, surface the cost on the streamHandler so the web-ui can
