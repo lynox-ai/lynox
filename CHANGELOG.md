@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.6.0 — 2026-05-19
+
+Minor — **Magic-Link OTP + Settings v3 inline-merge + Stripe-portal stopgap**. Adds passwordless email login as a third auth method alongside passkey + password. Settings v3 sprint lands the capability registry, tier audit, show-all-grayed pattern, Account pages, and inline merge of Advanced into the LLM main page. The broken `control.lynox.cloud/checkout/account` CTA in Account+Billing is replaced with a Stripe-hosted Customer Portal link + `support@` fallback (full engine→CP→Stripe SSO deferred — see `PRD-STRIPE-PORTAL-SSO.md` v3). Light-mode theme ships. Plus a session-cookie hardening pass (`SameSite=Lax` + OTP stale-session guards) and a `http_request` hang-fix that previously could lock a session.
+
+### Added
+
+- **Magic-link OTP auth (#472, pro #149)** — Email-driven passwordless login alongside passkey + password. HMAC token mint/verify/consume with nonce-replay protection, 15-min TTL. Staging-E2E proven on `meridian-demo` via Mailpit.
+- **Light mode (#476)** — Web-UI theme switcher; persists to user prefs.
+- **Settings v3 sprint (#471)** — `ModelCapability` registry as single source of truth for tier/context-window display. Tier-awareness audit across all settings pages. Show-all-grayed pattern for managed-blocked sections. Account pages (Appearance, Security, Limits, Updates) split out from monolithic `SystemSettings`. Advanced merged inline into the LLM main page.
+- **Stripe-portal URL forwarding (pro #151)** — `MANAGED_STRIPE_PORTAL_LOGIN_URL` from CP env now flows to every managed instance's `.env` as `LYNOX_STRIPE_PORTAL_LOGIN_URL`. Engine `/api/config` surfaces it under `stripe_portal_login_url` for the Account+Billing CTA. Prefix-guarded to `https://billing.stripe.com/`.
+
+### Fixed
+
+- **Broken `control.lynox.cloud/checkout/account` CTA (#478)** — Account+Billing now opens the Stripe-hosted Customer Portal login URL when configured, falls back to `mailto:support@lynox.ai` otherwise.
+- **`/auth/magic` auth-gate hole (#477)** — Magic-link callback route exempted from the session-cookie auth gate (was 401-blocking the pre-login token verification).
+- **LLM defaults dropdown (#479)** — `effort_level`, `thinking_mode`, `experience` selects now show a `Default` option matching the model's actual default instead of forcing a choice between "Schnell" / "Deaktiviert".
+- **Settings sub-view back-links (#479)** — `← Back to settings` added on Account Appearance, Workspace Security, Workspace Limits, Workspace Updates (were dead-ends).
+- **Tool taxonomy (#479)** — `capture_process` + `promote_process` moved from System to Orchestration (the `_process` regex was incorrectly bucketing workflow tools as System).
+- **OTP stale-session bypass (#469)** — Guarded OTP actions against requests with stale session cookies; `SameSite=Lax` migration tightens cross-site request scope.
+- **`http_request` hang unsticks session (#470)** — Wall-clock cap + takeover + cancel for hung HTTP requests.
+- **`managed_blocked` prediction (#466)** — UI predicts managed-blocked state from tier instead of waiting for runtime 403. Fixes context-window display drift on managed.
+- **`ask_secret` managed-vs-cancel (#465)** — Distinguish CP-rejected secret writes (managed-blocked) from user-cancel in `ask_secret`.
+
+### Security
+
+- **Managed secret allowlist inverted (#468)** — Default user-writable on managed; narrow deny-list (`LYNOX_*`, `MANAGED_*`, `MAIL_ACCOUNT_*`, `WHATSAPP_*`, `GOOGLE_OAUTH_*`, `SMTP_*`, `IMAP_*`) is admin-only. Realises the core promise: customers connect any API without filing a support ticket.
+- **OAuth2 fail-loud** — OAuth flow errors now surface immediately rather than silent-fail.
+- **Engine-managed Bearer auth** — Stricter Bearer-token verification across managed surfaces.
+
+### Internal
+
+- **Mailpit on staging-CP (pro #150)** — Outbound mail sink for OTP / magic-link / dunning testing on `control-staging.lynox.cloud`.
+- **Deps bump (#475)** — Minor-and-patch group, 12 updates.
+
 ## 1.5.2 — 2026-05-18
 
 Patch — **LLM provider-switching hardening** (rafael QA across the day). After v1.5.1 shipped, switching from Anthropic to Mistral exposed five stacked bugs in the runtime + UI: the engine kept reading `ANTHROPIC_API_KEY` regardless of provider, `/api/llm/test` 400'd on saved-and-empty body keys, the model self-identified as "Claude Haiku" even though Mistral was dispatched, the UI hid the tier-set behind a single misleading "Modell" dropdown, and on managed the API-key input was a disabled red-herring. Six follow-up PRs land the wire-level fixes, the UI cleanup, and the explanatory anchors so a provider switch is robust + observable.
