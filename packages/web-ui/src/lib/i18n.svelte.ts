@@ -322,8 +322,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	// (PRD-IA-V2 P3-PR-C). Previously routed through CostLimits.svelte (deleted in P3-PR-X).
 	'llm.context_window.heading':         { de: 'Kontextfenster',                                                                en: 'Context window' },
 	'llm.context_window.description':     { de: 'Wie viele Tokens lynox pro Anfrage in den Kontext lädt. Größer = teurer.',     en: 'How many tokens lynox loads into context per request. Bigger = more expensive.' },
+	'llm.context_window.active_model_label': { de: 'Aktives Modell',                                                             en: 'Active model' },
+	'llm.context_window.native':          { de: 'nativ',                                                                          en: 'native' },
+	'llm.context_window.option.above_native_tooltip': { de: 'Über der nativen Kapazität des aktiven Modells. Engine kappt auf den nativen Wert', en: 'Above the active model\'s native capacity. Engine silently caps to the native value' },
 	'llm.context_window.option.default':       { de: 'Standard (vom Modell vorgegeben)',                                         en: 'Default (model-defined)' },
 	'llm.context_window.option.default_hint':  { de: 'Verwendet die native Kontext-Größe des aktiven Modells. Empfohlen.',       en: 'Uses the active model\'s native context window. Recommended.' },
+	'llm.context_window.option.32k':           { de: 'Sparsam — 32k Tokens',                                                     en: 'Frugal — 32k tokens' },
+	'llm.context_window.option.32k_hint':      { de: 'Aggressives Trimmen. Senkt Input-Kosten stark; verkürzt Thread-Gedächtnis.', en: 'Aggressive trim. Cuts input cost hard; shortens thread memory.' },
+	'llm.context_window.option.100k':          { de: 'Knapp — 100k Tokens',                                                      en: 'Tight — 100k tokens' },
+	'llm.context_window.option.100k_hint':     { de: 'Etwa halbe Sonnet-Kappung. Spart Tokens bei langen Threads.',              en: 'About half of Sonnet\'s cap. Saves tokens on long threads.' },
 	'llm.context_window.option.200k':          { de: 'Standard — 200k Tokens',                                                   en: 'Standard — 200k tokens' },
 	'llm.context_window.option.200k_hint':     { de: 'Default-Kappung. Empfohlen für die meisten Aufgaben.',                     en: 'Default cap. Recommended for most tasks.' },
 	'llm.context_window.option.500k':          { de: 'Erweitert — 500k Tokens',                                                  en: 'Extended — 500k tokens' },
@@ -348,8 +355,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	// context-window, llm_mode, embedding_provider, experience.
 	'llm.advanced.title':                 { de: 'LLM — Erweitert',                                                              en: 'LLM — Advanced' },
 	'llm.advanced.subtitle':              { de: 'Wie gründlich der Agent arbeitet und wie viel Kontext er pro Anfrage lädt.',   en: 'How thoroughly the agent works and how much context it loads per request.' },
+	'llm.advanced.expand_label':          { de: 'Erweiterte Einstellungen',                                                     en: 'Advanced settings' },
 	'llm.advanced.reasoning_heading':     { de: 'Denkstil',                                                                     en: 'Reasoning style' },
 	'llm.advanced.experience_heading':    { de: 'Kommunikation',                                                                en: 'Communication' },
+	// Settings v3 PR 3 (Item 8) — show-all-grayed tooltips
+	'llm.advanced.embedding_provider_managed_tooltip': { de: 'Auf Managed-Plänen vom CP verwaltet — lokale ONNX-Einbettung bleibt aktiv.', en: 'CP-managed on Managed plans — local ONNX embedding stays active.' },
 
 	// LLM Memory sub-page (PRD-IA-V2 P3-PR-C). Final home for memory_extraction
 	// and memory_half_life_days. Foundation-Rework may re-home this — sub-route
@@ -788,6 +798,42 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.section_account': { de: 'Konto & Zugang', en: 'Account & Access' },
 	'settings.account.mobile': { de: 'Mobiler Zugang', en: 'Mobile Access' },
 	'settings.account.migration': { de: 'Migration zu Managed', en: 'Migration to Managed' },
+	// Settings v3 PR 4 (Items 10 + 12) — Account: Billing + Security tiles
+	'settings.account.billing': { de: 'Abo & Rechnung', en: 'Subscription & billing' },
+	'settings.account.billing_desc': { de: 'Karte ändern, Rechnungen ansehen, Plan wechseln, kündigen.', en: 'Change card, view invoices, switch plan, cancel.' },
+	'settings.account.security': { de: 'Sicherheit', en: 'Security' },
+	'settings.account.security_desc': { de: 'Passkey-Einrichtung für schnelle, sichere Wiederanmeldung.', en: 'Set up a passkey for fast, secure re-authentication.' },
+	'account.back_to_settings': { de: 'Zurück zu Einstellungen', en: 'Back to Settings' },
+	// Account → Billing
+	'account.billing.title': { de: 'Abo & Rechnung', en: 'Subscription & billing' },
+	'account.billing.subtitle': { de: 'Verwalte dein Managed-Abo via Stripe Customer Portal.', en: 'Manage your Managed subscription via the Stripe customer portal.' },
+	'account.billing.loading': { de: 'Lade Abo-Status…', en: 'Loading subscription status…' },
+	'account.billing.load_failed': { de: 'Abo-Status konnte nicht geladen werden.', en: 'Could not load subscription status.' },
+	'account.billing.current_tier': { de: 'Aktueller Plan', en: 'Current plan' },
+	'account.billing.tier.hosted': { de: 'Hosted (BYOK)', en: 'Hosted (BYOK)' },
+	'account.billing.tier.managed': { de: 'Managed', en: 'Managed' },
+	'account.billing.tier.managed_pro': { de: 'Managed Pro', en: 'Managed Pro' },
+	'account.billing.self_host_note': { de: 'Self-Host: kein Abo vorhanden. Diese Seite ist für Managed-Plans gedacht.', en: 'Self-host: no subscription. This page is for Managed plans.' },
+	'account.billing.portal_description': { de: 'Im Stripe Customer Portal kannst du Karte ändern, Rechnungen herunterladen, Plan wechseln oder kündigen.', en: 'In the Stripe customer portal you can change your card, download invoices, switch plan, or cancel.' },
+	'account.billing.portal_cta': { de: 'Abo verwalten', en: 'Manage subscription' },
+	'account.billing.portal_hint': { de: 'Öffnet die Konto-Übersicht auf control.lynox.cloud (eigener Login).', en: 'Opens the account dashboard on control.lynox.cloud (separate login).' },
+	// Account → Security
+	'account.security.title': { de: 'Sicherheit', en: 'Security' },
+	'account.security.subtitle': { de: 'Passkey für schnellere, sicherere Wiederanmeldung — kein 6-stelliger Code mehr.', en: 'Passkey for faster, more secure re-authentication — no more 6-digit codes.' },
+	'account.security.loading': { de: 'Lade Passkey-Status…', en: 'Loading passkey status…' },
+	'account.security.self_host_note': { de: 'Self-Host: kein Login-Flow auf der Engine. Passkey-Verwaltung ist nur für Managed-Instanzen relevant.', en: 'Self-host: no login flow on the engine itself. Passkey management is only relevant for Managed instances.' },
+	'account.security.webauthn_unsupported': { de: 'Dieser Browser unterstützt keine Passkeys (WebAuthn).', en: 'This browser does not support passkeys (WebAuthn).' },
+	'account.security.passkey_status': { de: 'Passkey-Status', en: 'Passkey status' },
+	'account.security.passkey_none_label': { de: 'Kein Passkey eingerichtet', en: 'No passkey registered' },
+	'account.security.passkey_none_hint': { de: 'Du loggst dich derzeit mit dem 6-stelligen E-Mail-Code ein.', en: 'You currently sign in with the 6-digit email code.' },
+	'account.security.passkey_enrolled_label': { de: 'Passkey aktiv', en: 'Passkey enrolled' },
+	'account.security.passkey_enrolled_hint': { de: 'Schnelles Login via Touch ID, Face ID oder Sicherheitsschlüssel.', en: 'Fast sign-in via Touch ID, Face ID, or security key.' },
+	'account.security.passkey_enrol_cta': { de: 'Passkey einrichten', en: 'Set up passkey' },
+	'account.security.passkey_replace_cta': { de: 'Passkey ersetzen', en: 'Replace passkey' },
+	'account.security.passkey_registering': { de: 'Registriere…', en: 'Registering…' },
+	'account.security.passkey_enrolled': { de: 'Passkey erfolgreich registriert.', en: 'Passkey registered successfully.' },
+	'account.security.passkey_failed': { de: 'Passkey-Registrierung fehlgeschlagen.', en: 'Passkey registration failed.' },
+	'account.security.passkey_start_failed': { de: 'Registrierung konnte nicht gestartet werden.', en: 'Could not start registration.' },
 	// PRD-IA-V2 P3-PR-B — Workspace & System section (Self-Host only).
 	// Underscore naming matches existing section_main / section_data / section_access.
 	'settings.section_workspace': { de: 'Workspace & System', en: 'Workspace & System' },
@@ -802,6 +848,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.workspace.limits_desc': { de: 'Ausgaben-Caps (Session, Tag, Monat) und HTTP-Limit', en: 'Spend caps (session, day, month) and HTTP rate limit' },
 	'settings.workspace.limits.spend_heading': { de: 'Ausgaben-Limits', en: 'Spend limits' },
 	'settings.workspace.limits.spend_subtitle': { de: 'Harte Kosten-Caps für diese Engine. Leer = kein Limit.', en: 'Hard cost caps for this engine. Empty = no limit.' },
+	// Settings v3 PR 3 (Items 9/11) — effective-limits pills
+	'settings.workspace.limits.effective_heading': { de: 'Aktive Limits', en: 'Effective limits' },
+	'settings.workspace.limits.pill_spawn_budget':  { de: 'Spawn-Budget',     en: 'Spawn budget' },
+	'settings.workspace.limits.pill_spawn_turns':   { de: 'Spawn-Turns',      en: 'Spawn turns' },
+	'settings.workspace.limits.pill_spawn_depth':   { de: 'Spawn-Tiefe',      en: 'Spawn depth' },
+	'settings.workspace.limits.pill_http_hour':     { de: 'HTTP/Stunde',      en: 'HTTP/hour' },
+	'settings.workspace.limits.pill_http_day':      { de: 'HTTP/Tag',         en: 'HTTP/day' },
+	'settings.workspace.limits.pill_ctx_default':   { de: 'Default-Kontext',  en: 'Default context' },
+	'settings.workspace.limits.pill_tier':          { de: 'Plan-Tier',        en: 'Plan tier' },
+	'settings.workspace.limits.pill_managed_note':  { de: 'Caps werden von deinem Managed-Plan verwaltet. Anpassung über support@lynox.ai.', en: 'Caps managed by your plan. Contact support@lynox.ai to adjust.' },
+	'settings.workspace.limits.disabled_managed_tooltip': { de: 'Von deinem Managed-Plan vorgegeben. Anpassung über support@lynox.ai.', en: 'Set by your Managed plan. Contact support@lynox.ai to adjust.' },
 	'settings.workspace.updates': { de: 'Updates', en: 'Updates' },
 	'settings.workspace.updates_desc': { de: 'Beim Engine-Start nach neuen Versionen suchen', en: 'Check for new versions at engine startup' },
 	// `settings.workspace.tools[_desc]` keys removed — SettingsIndex tile reuses

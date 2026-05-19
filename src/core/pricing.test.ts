@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { calculateCost, getPricing } from './pricing.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { calculateCost, getPricing, _resetOverridePricingForTests } from './pricing.js';
 
 describe('Pricing', () => {
   it('returns pricing for known models', () => {
@@ -21,7 +21,49 @@ describe('Pricing', () => {
 
   it('falls back to opus pricing for unknown models', () => {
     const unknown = getPricing('unknown-model');
-    expect(unknown.input).toBe(5);
+    // Full fallback shape — verifies the FALLBACK_PRICING constant survives a
+    // future registry change that drops claude-opus-4-6 from the registry
+    // (which would silently re-route the previous "claude-opus-4-6 fallback"
+    // path through the same numbers via a different code path).
+    expect(unknown).toEqual({ input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 });
+  });
+
+  describe('override-file precedence', () => {
+    // Pin to an explicit empty map so the file-system probe never runs;
+    // otherwise a stray `~/.lynox/pricing.json` on the host (or CI cache)
+    // would silently bleed into the first override test.
+    beforeEach(() => {
+      _resetOverridePricingForTests({});
+    });
+    afterEach(() => {
+      _resetOverridePricingForTests({});
+    });
+
+    it('override entries win over the registry for the exact model id', () => {
+      _resetOverridePricingForTests({
+        'claude-opus-4-6': { input: 99, output: 99, cacheWrite: 0, cacheRead: 0 },
+      });
+      const opus = getPricing('claude-opus-4-6');
+      expect(opus.input).toBe(99);
+      expect(opus.output).toBe(99);
+    });
+
+    it('override entries win via normalizeModelId for @-suffixed ids', () => {
+      _resetOverridePricingForTests({
+        'claude-sonnet-4-6': { input: 88, output: 88, cacheWrite: 0, cacheRead: 0 },
+      });
+      // Vertex-style @YYYYMMDD suffix normalises to the base id; override on
+      // the base should still apply to the suffixed lookup.
+      expect(getPricing('claude-sonnet-4-6@20260101').input).toBe(88);
+    });
+
+    it('registry wins when no override entry for the model exists', () => {
+      _resetOverridePricingForTests({
+        'some-other-model': { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 },
+      });
+      // Unaffected models still resolve through the registry.
+      expect(getPricing('claude-sonnet-4-6').input).toBe(3);
+    });
   });
 
   it('calculates cost correctly for opus', () => {

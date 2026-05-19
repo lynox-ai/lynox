@@ -1,3 +1,5 @@
+import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
+
 // === 4.1 Model Tiers & Providers ===
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
@@ -143,76 +145,373 @@ export function normalizeModelId(model: string): string {
 /** Approximate characters per token for context estimation. */
 export const CHARS_PER_TOKEN = 3.5;
 
-const _CONTEXT_WINDOW: Record<string, number> = {
-  'claude-opus-4-7':         1_000_000,
-  'claude-opus-4-6':         1_000_000,
-  'claude-sonnet-4-6':         200_000,
-  'claude-haiku-4-5-20251001': 200_000,
-  // `[1m]`-suffix variants — Anthropic's identifier for the 1M-context
-  // beta when the `anthropic-beta: context-1m-2025-08-07` header is on.
-  // Without these entries the lookup falls through to the 200k default
-  // (normalizeModelId only strips @YYYYMMDD), which historically caused
-  // the staging "Kontext: 423%" UI mismatch when an extended-Sonnet
-  // session was treated as 200k for trim/percentage calc. Pricing
-  // (core/pricing.ts) mirrors the base model for now — Anthropic may
-  // levy a 1M-tier premium later; revisit when that lands.
-  'claude-opus-4-7[1m]':     1_000_000,
-  'claude-opus-4-6[1m]':     1_000_000,
-  'claude-sonnet-4-6[1m]':   1_000_000,
-  // Mistral set — large + magistral both 128K, small 32K (per Mistral docs)
-  'mistral-small-2603':         32_000,
-  'mistral-large-2512':        131_072,
-  'magistral-medium-2509':     131_072,
-  // Tier-keyed aliases (provider-independent)
-  'opus':   1_000_000,
-  'sonnet':   200_000,
-  'haiku':    200_000,
+// === 4.2 Model Capability Registry ===
+
+/** Pricing per million tokens. cacheWrite/cacheRead default to input rate
+ *  for providers without separate cache tiers (e.g. Mistral). */
+export interface ModelPricing {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+}
+
+/** Capability flags surfaced to UI + agent (e.g. show-all-grayed pattern). */
+export interface ModelFeatures {
+  vision: boolean;
+  extendedThinking: boolean;
+  toolUse: boolean;
+  promptCaching: boolean;
+  pdfInput: boolean;
+}
+
+/**
+ * Single source of truth for per-model facts. Keyed by canonical provider
+ * model id (no tier aliases). Replaces the pre-2026-05-18 scattered
+ * _CONTEXT_WINDOW / _DEFAULT_MAX_TOKENS / _MAX_CONTINUATIONS / pricing maps
+ * that drifted (staging "Kontext: 423%" bug came from three sites with the
+ * same formula and two stale copies — see commit ed428cc8 follow-up).
+ */
+export interface ModelCapability {
+  /** Provider's canonical id (e.g. 'claude-sonnet-4-6', 'mistral-large-2512'). */
+  id: string;
+  /** Provider this model belongs to. */
+  provider: LLMProvider;
+  /** Tier classification. `null` for utility / bench-only models without tier routing. */
+  tier: ModelTier | null;
+  /** Native context window in tokens. */
+  contextWindow: number;
+  /** Default max output tokens when caller doesn't specify. */
+  defaultMaxOutput: number;
+  /** Max continuation attempts the Agent will run for this model. */
+  maxContinuations: number;
+  /** Beta headers required to unlock this variant (e.g. ['context-1m-2025-08-07']). */
+  betaHeaders: AnthropicBeta[];
+  /** Capability flags. */
+  features: ModelFeatures;
+  /** Pricing per million tokens. */
+  pricing: ModelPricing;
+  /** Human-readable label for UI dropdowns / pills. */
+  uiLabel: string;
+}
+
+const CLAUDE_FEATURES: ModelFeatures = {
+  vision: true,
+  extendedThinking: true,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: true,
 };
 
-const _DEFAULT_MAX_TOKENS: Record<string, number> = {
-  'claude-opus-4-7':         32_000,
-  'claude-opus-4-6':         32_000,
-  'claude-sonnet-4-6':       16_000,
-  'claude-haiku-4-5-20251001': 8_192,
-  // `[1m]`-variant entries mirror the base model — beta-on doesn't change
-  // the max-output cap. See _CONTEXT_WINDOW comment for why explicit
-  // entries beat normalize-and-strip.
-  'claude-opus-4-7[1m]':     32_000,
-  'claude-opus-4-6[1m]':     32_000,
-  'claude-sonnet-4-6[1m]':   16_000,
-  // Mistral set
-  'mistral-small-2603':       8_192,
-  'mistral-large-2512':      16_000,
-  'magistral-medium-2509':   32_000,
-  // Tier-keyed aliases
-  'opus':   32_000,
-  'sonnet': 16_000,
-  'haiku':   8_192,
+const MISTRAL_FEATURES_LARGE: ModelFeatures = {
+  vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
 };
 
-const _MAX_CONTINUATIONS: Record<string, number> = {
-  'claude-opus-4-7':           20,
-  'claude-opus-4-6':           20,
-  'claude-sonnet-4-6':         10,
-  'claude-haiku-4-5-20251001':  5,
-  // `[1m]`-variant entries mirror base tier — same continuation budget
-  // applies regardless of context-window beta.
-  'claude-opus-4-7[1m]':       20,
-  'claude-opus-4-6[1m]':       20,
-  'claude-sonnet-4-6[1m]':     10,
-  // Mistral set — mirror tier ordering (small=5 / large=10 / magistral=20)
-  'mistral-small-2603':         5,
-  'mistral-large-2512':        10,
-  'magistral-medium-2509':     20,
-  // Tier-keyed aliases
-  'opus':   20,
-  'sonnet': 10,
-  'haiku':   5,
+const MISTRAL_FEATURES_SMALL: ModelFeatures = {
+  vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
 };
+
+const ONE_M_BETA: AnthropicBeta[] = ['context-1m-2025-08-07'];
+
+export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
+  // === Anthropic Claude (direct + custom proxy) ===
+  'claude-opus-4-7': {
+    id: 'claude-opus-4-7',
+    provider: 'anthropic',
+    tier: 'opus',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 4.7',
+  },
+  'claude-opus-4-6': {
+    id: 'claude-opus-4-6',
+    provider: 'anthropic',
+    tier: 'opus',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 4.6',
+  },
+  'claude-sonnet-4-6': {
+    id: 'claude-sonnet-4-6',
+    provider: 'anthropic',
+    tier: 'sonnet',
+    contextWindow: 200_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
+    uiLabel: 'Claude Sonnet 4.6',
+  },
+  'claude-haiku-4-5-20251001': {
+    id: 'claude-haiku-4-5-20251001',
+    provider: 'anthropic',
+    tier: 'haiku',
+    contextWindow: 200_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
+    uiLabel: 'Claude Haiku 4.5',
+  },
+  // Vertex AI variant — same model, different id surface (no date suffix).
+  'claude-haiku-4-5': {
+    id: 'claude-haiku-4-5',
+    provider: 'vertex',
+    tier: 'haiku',
+    contextWindow: 200_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
+    uiLabel: 'Claude Haiku 4.5',
+  },
+  // 1M-context beta variants — Anthropic's identifier for the 1M-context
+  // beta when `anthropic-beta: context-1m-2025-08-07` is on. Without these
+  // explicit entries the lookup falls through to the 200k default (only
+  // @YYYYMMDD gets stripped, not bracket suffixes), which historically caused
+  // the staging "Kontext: 423%" UI mismatch when an extended-Sonnet session
+  // was treated as 200k for trim/percentage calc. Pricing mirrors the base
+  // model for now — Anthropic may levy a 1M-tier premium later; revisit when
+  // that lands.
+  'claude-opus-4-7[1m]': {
+    id: 'claude-opus-4-7[1m]',
+    provider: 'anthropic',
+    tier: 'opus',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: ONE_M_BETA,
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 4.7 (1M)',
+  },
+  'claude-opus-4-6[1m]': {
+    id: 'claude-opus-4-6[1m]',
+    provider: 'anthropic',
+    tier: 'opus',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: ONE_M_BETA,
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 4.6 (1M)',
+  },
+  'claude-sonnet-4-6[1m]': {
+    id: 'claude-sonnet-4-6[1m]',
+    provider: 'anthropic',
+    tier: 'sonnet',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: ONE_M_BETA,
+    features: CLAUDE_FEATURES,
+    pricing: { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
+    uiLabel: 'Claude Sonnet 4.6 (1M)',
+  },
+  // === Mistral tier-set (eu-sovereign managed via openai-compat) ===
+  // cacheWrite/cacheRead mirror input rate — Mistral exposes
+  // `prompt_cache_key` but bills the cached prefix at the standard input
+  // rate. Setting these to zero would under-bill opportunistic cache hits.
+  'mistral-small-2603': {
+    id: 'mistral-small-2603',
+    provider: 'openai',
+    tier: 'haiku',
+    contextWindow: 32_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
+    uiLabel: 'Mistral Small',
+  },
+  'mistral-large-2512': {
+    id: 'mistral-large-2512',
+    provider: 'openai',
+    tier: 'sonnet',
+    contextWindow: 131_072,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 2, output: 6, cacheWrite: 2, cacheRead: 2 },
+    uiLabel: 'Mistral Large',
+  },
+  'magistral-medium-2509': {
+    id: 'magistral-medium-2509',
+    provider: 'openai',
+    tier: 'opus',
+    contextWindow: 131_072,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 2, output: 5, cacheWrite: 2, cacheRead: 2 },
+    uiLabel: 'Magistral Medium',
+  },
+  // === Mistral bench-only roster (set-bench cost tracking; no tier routing) ===
+  // contextWindow values from Mistral docs (2026-05). These models aren't
+  // wired into MISTRAL_MODEL_MAP — they're only referenced by set-bench and
+  // cost-guard so the user can opt-in via openai_model_id.
+  'ministral-8b-2410': {
+    id: 'ministral-8b-2410',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 32_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.10 },
+    uiLabel: 'Ministral 8B',
+  },
+  'ministral-3b-2410': {
+    id: 'ministral-3b-2410',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 32_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.04, output: 0.04, cacheWrite: 0.04, cacheRead: 0.04 },
+    uiLabel: 'Ministral 3B',
+  },
+  'open-mistral-nemo': {
+    id: 'open-mistral-nemo',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 128_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.15 },
+    uiLabel: 'Mistral Nemo',
+  },
+  'mistral-medium-2508': {
+    id: 'mistral-medium-2508',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 128_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 0.40, output: 2, cacheWrite: 0.40, cacheRead: 0.40 },
+    uiLabel: 'Mistral Medium 3.1',
+  },
+  'mistral-medium-latest': {
+    id: 'mistral-medium-latest',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 128_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 0.40, output: 2, cacheWrite: 0.40, cacheRead: 0.40 },
+    uiLabel: 'Mistral Medium (latest)',
+  },
+  'codestral-2508': {
+    id: 'codestral-2508',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 256_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
+    uiLabel: 'Codestral',
+  },
+  'codestral-latest': {
+    id: 'codestral-latest',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 256_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
+    uiLabel: 'Codestral (latest)',
+  },
+  'magistral-small-2509': {
+    id: 'magistral-small-2509',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 40_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
+    uiLabel: 'Magistral Small',
+  },
+  'magistral-small-latest': {
+    id: 'magistral-small-latest',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 40_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
+    uiLabel: 'Magistral Small (latest)',
+  },
+};
+
+/** Resolve a model id (canonical or @-suffixed Vertex variant) to its
+ *  capability entry. Returns `undefined` for unknown models — callers must
+ *  decide whether that's a hard error or a soft fallback. */
+export function modelCapability(model: string): ModelCapability | undefined {
+  return MODEL_CAPABILITIES[model] ?? MODEL_CAPABILITIES[normalizeModelId(model)];
+}
+
+/** Backstop for unknown model ids. Matches the pre-registry hard-coded
+ *  fallbacks in getContextWindow / getDefaultMaxTokens / getMaxContinuations. */
+const FALLBACK_CAPABILITY = {
+  contextWindow: 200_000,
+  defaultMaxOutput: 16_000,
+  maxContinuations: 10,
+} as const;
+
+/** Resolve a model id to its capability entry, falling back to a sensible
+ *  default capability if the id is unknown. Used by helpers like
+ *  `getContextWindow` that historically returned safe defaults rather than
+ *  throwing on unknown ids. */
+function modelCapabilityOrFallback(model: string): {
+  contextWindow: number;
+  defaultMaxOutput: number;
+  maxContinuations: number;
+} {
+  return modelCapability(model) ?? FALLBACK_CAPABILITY;
+}
 
 /** Look up context window size. Normalizes provider-prefixed model IDs automatically. */
 export function getContextWindow(model: string): number {
-  return _CONTEXT_WINDOW[model] ?? _CONTEXT_WINDOW[normalizeModelId(model)] ?? 200_000;
+  return modelCapabilityOrFallback(model).contextWindow;
 }
 
 /** Effective context window after applying the user's optional cap. Mirrors
@@ -229,18 +528,13 @@ export function effectiveContextWindow(model: string, userCap: number | undefine
 
 /** Look up default max output tokens. Normalizes provider-prefixed model IDs automatically. */
 export function getDefaultMaxTokens(model: string): number {
-  return _DEFAULT_MAX_TOKENS[model] ?? _DEFAULT_MAX_TOKENS[normalizeModelId(model)] ?? 16_000;
+  return modelCapabilityOrFallback(model).defaultMaxOutput;
 }
 
 /** Look up max continuation attempts. Normalizes provider-prefixed model IDs automatically. */
 export function getMaxContinuations(model: string): number {
-  return _MAX_CONTINUATIONS[model] ?? _MAX_CONTINUATIONS[normalizeModelId(model)] ?? 10;
+  return modelCapabilityOrFallback(model).maxContinuations;
 }
-
-// Re-export raw maps for backward compatibility (e.g. tier-keyed lookups via MODEL_MAP[tier])
-export const CONTEXT_WINDOW = _CONTEXT_WINDOW;
-export const DEFAULT_MAX_TOKENS = _DEFAULT_MAX_TOKENS;
-export const MAX_CONTINUATIONS = _MAX_CONTINUATIONS;
 
 // === Thinking & Effort ===
 

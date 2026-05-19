@@ -26,7 +26,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -2586,6 +2586,36 @@ export class LynoxHTTPApi {
         locks.custom_endpoints = { reason: 'managed-tier' };
       }
       redacted['locks'] = locks;
+      // Settings v3 Item 6 (model-aware context-window radios): resolve the
+      // currently active model from tier + provider and surface its native
+      // capability data so the UI doesn't have to bundle the registry or
+      // guess from a tier alias. UI filters context-window radio options to
+      // values ≤ contextWindow; show-all-grayed (Item 8) reads `features` to
+      // disable settings that don't apply to the active model.
+      const activeProvider = getActiveProvider();
+      const activeTier = config.default_tier ?? 'sonnet';
+      const activeModelId = getModelId(activeTier, activeProvider);
+      const activeCap = modelCapability(activeModelId);
+      if (activeCap) {
+        redacted['active_model'] = {
+          id: activeCap.id,
+          tier: activeTier,
+          // Use the runtime-active provider, not `activeCap.provider`, so an
+          // openai-compat instance whose tier resolver fell back to an
+          // Anthropic id (no MISTRAL_MODEL_MAP bootstrap) still reports
+          // `'openai'` to the UI for tier-awareness gating.
+          provider: activeProvider,
+          contextWindow: activeCap.contextWindow,
+          defaultMaxOutput: activeCap.defaultMaxOutput,
+          maxContinuations: activeCap.maxContinuations,
+          features: activeCap.features,
+          uiLabel: activeCap.uiLabel,
+        };
+      } else {
+        // Unknown id (legacy custom-endpoint model or registry gap). UI falls
+        // back to the legacy static radio list. Surface for support tracing.
+        console.warn(`[http-api] /config: no MODEL_CAPABILITIES entry for ${activeModelId} (tier=${activeTier}, provider=${activeProvider})`);
+      }
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);

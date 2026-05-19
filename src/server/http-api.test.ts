@@ -1278,6 +1278,62 @@ describe('LynoxHTTPApi', () => {
       expect(body['locks']).toEqual({});
     });
 
+    it('GET surfaces active_model with resolved capability data (Settings v3 Item 6)', async () => {
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      // Test fixture's default_tier is 'opus' → resolves to claude-opus-4-6
+      // under the Anthropic-direct provider (default).
+      expect(am!['id']).toBe('claude-opus-4-6');
+      expect(am!['tier']).toBe('opus');
+      expect(am!['provider']).toBe('anthropic');
+      expect(am!['contextWindow']).toBe(1_000_000);
+      expect(am!['defaultMaxOutput']).toBe(32_000);
+      expect(am!['maxContinuations']).toBe(20);
+      expect(am!['uiLabel']).toBe('Claude Opus 4.6');
+      const features = am!['features'] as Record<string, boolean>;
+      expect(features['vision']).toBe(true);
+      expect(features['extendedThinking']).toBe(true);
+      expect(features['toolUse']).toBe(true);
+      expect(features['promptCaching']).toBe(true);
+      // pdfInput is also part of the contract (Settings v3 PR 3 show-all-grayed
+      // reads it). Locked here so a future trim of CLAUDE_FEATURES doesn't
+      // silently drop it.
+      expect(features['pdfInput']).toBe(true);
+    });
+
+    it('GET resolves active_model under Mistral tier-set (openai provider)', async () => {
+      // Bootstrap the openai resolver the way engine.ts does for managed-EU
+      // tenants, then flip getActiveProvider via the module-level state.
+      const { setOpenAIModelResolver, MISTRAL_MODEL_MAP } = await import('../types/models.js');
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const am = body['active_model'] as Record<string, unknown> | undefined;
+        expect(am).toBeDefined();
+        // Fixture default_tier='opus' → Mistral 'magistral-medium-2509'.
+        expect(am!['id']).toBe('magistral-medium-2509');
+        expect(am!['provider']).toBe('openai');
+        expect(am!['tier']).toBe('opus');
+        expect(am!['contextWindow']).toBe(131_072);
+        expect(am!['uiLabel']).toBe('Magistral Medium');
+        // Mistral lineage carries different feature flags than Claude.
+        const features = am!['features'] as Record<string, boolean>;
+        expect(features['extendedThinking']).toBe(false);
+        expect(features['vision']).toBe(false);
+        expect(features['toolUse']).toBe(true);
+      } finally {
+        providerSpy.mockRestore();
+        setOpenAIModelResolver({ map: null, fallbackModelId: null });
+      }
+    });
+
     it('GET treats LYNOX_MANAGED_MODE=starter (BYOK) as non-managed for capability gating', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
       try {
