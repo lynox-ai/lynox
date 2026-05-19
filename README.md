@@ -8,7 +8,7 @@
 
 **Run your business. Not your tools.**
 
-One open-source agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM (Anthropic, Mistral, or any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, Groq). Source-available (ELv2), self-hosted, no vendor lock-in.
+One source-available agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM (Anthropic, Mistral, or any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, Groq). Self-hosted under the Elastic License 2.0, no vendor lock-in.
 
 > [!IMPORTANT]
 > **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
@@ -98,6 +98,7 @@ npx @lynox-ai/core
 ```bash
 git clone https://github.com/lynox-ai/lynox.git
 cd lynox && pnpm install
+cp .env.example .env    # set ANTHROPIC_API_KEY (or another provider) inside
 pnpm run dev
 ```
 

@@ -25,7 +25,7 @@ We will acknowledge your report within 48 hours and aim to provide a fix within 
 
 ## Security Audit (April 2026)
 
-Independent OWASP Top 10 review of the lynox Core engine and Web UI. No critical or high-severity vulnerabilities found.
+Internal OWASP Top 10 review of the lynox Core engine and Web UI against an internal security checklist (last full pass 2026-03-30). No critical or high-severity vulnerabilities found. Independent third-party validation is on the SOC2 roadmap.
 
 ### Results by Category
 
