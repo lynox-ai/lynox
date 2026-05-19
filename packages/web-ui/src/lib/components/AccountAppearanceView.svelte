@@ -9,7 +9,8 @@
 	import { t } from '../i18n.svelte.js';
 </script>
 
-<div class="p-6 max-w-3xl mx-auto">
+<div class="p-6 max-w-3xl mx-auto space-y-4">
+	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('account.back_to_settings')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6">{t('appearance.heading')}</h1>
 
 	<section class="space-y-4">

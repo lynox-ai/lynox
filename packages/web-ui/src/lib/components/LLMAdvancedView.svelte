@@ -236,8 +236,12 @@
 			<label class="block">
 				<span class="block text-sm font-medium mb-1">{t('config.effort')}</span>
 				<span class="block text-xs text-text-muted mb-1">{t('config.effort_desc')}</span>
+				<!-- v1.6.0 fix (rafael QA 2026-05-19): "Default" option as first
+				     entry so unset config doesn't render as "low" / "Schnell"
+				     (= minimum quality) as if the user had explicitly picked it. -->
 				<select bind:value={config.effort_level} disabled={!loaded}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+					<option value={undefined}>{t('config.effort_default')}</option>
 					<option value="low">{t('config.effort_low')}</option>
 					<option value="medium">{t('config.effort_medium')}</option>
 					<option value="high">{t('config.effort_high')}</option>
@@ -250,6 +254,7 @@
 				<span class="block text-xs text-text-muted mb-1">{t('config.thinking_desc')}</span>
 				<select bind:value={config.thinking_mode} disabled={!loaded}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+					<option value={undefined}>{t('config.thinking_default')}</option>
 					<option value="disabled">{t('config.thinking_disabled')}</option>
 					<option value="adaptive">{t('config.thinking_adaptive')}</option>
 				</select>
@@ -264,6 +269,7 @@
 				<span class="block text-xs text-text-muted mb-1">{t('config.experience_desc')}</span>
 				<select bind:value={config.experience} disabled={!loaded}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+					<option value={undefined}>{t('config.experience_default')}</option>
 					<option value="business">{t('config.experience_business')}</option>
 					<option value="developer">{t('config.experience_developer')}</option>
 				</select>
