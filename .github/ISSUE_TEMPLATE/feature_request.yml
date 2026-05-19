@@ -30,7 +30,6 @@ body:
         - Memory / RAG
         - Pipelines / DAG
         - Tools
-        - Telegram
         - MCP Server
         - DataStore
         - Docker / Deployment
