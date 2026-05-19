@@ -272,8 +272,8 @@
 
 						<p class="text-sm text-text-muted">
 							{isDE
-								? `Wir haben einen Code an ${submittedEmail} gesendet.`
-								: `We sent a code to ${submittedEmail}.`}
+								? `Wir haben dir an ${submittedEmail} einen Link geschickt — klick ihn an, oder gib den Code ein.`
+								: `We sent a link to ${submittedEmail} — tap it, or enter the code below.`}
 						</p>
 
 						{#if otpCountdown > 0}
