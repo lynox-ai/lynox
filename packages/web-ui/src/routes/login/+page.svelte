@@ -140,7 +140,10 @@
 <div class="flex min-h-screen items-center justify-center bg-bg px-4">
 	<div class="w-full max-w-sm">
 		<div class="mb-8 flex flex-col items-center gap-4">
-			<img src="/logo.svg" alt="lynox" class="h-20" />
+			<!-- Two <img> elements + CSS visibility-switch keeps SSR fully
+			     static (no flash) while letting [data-theme] flip the variant. -->
+			<img src="/logo-dark.svg" alt="lynox" class="h-20 logo-theme-dark" />
+			<img src="/logo-light.svg" alt="lynox" class="h-20 logo-theme-light" />
 			{#if data.isManaged}
 				<p class="text-sm text-text-muted">
 					{isDE ? 'Mit deiner E-Mail-Adresse anmelden.' : 'Sign in with your email.'}
@@ -380,3 +383,9 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* Logo theme-switch — show only the matching variant per [data-theme]. */
+	:global([data-theme="dark"]) .logo-theme-light { display: none; }
+	:global([data-theme="light"]) .logo-theme-dark { display: none; }
+</style>

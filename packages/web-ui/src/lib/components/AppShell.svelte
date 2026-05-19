@@ -350,7 +350,7 @@
 		<!-- Mobile overlay -->
 		{#if sidebarOpen}
 			<button
-				class="fixed inset-0 z-30 bg-black/80 md:hidden backdrop-blur-sm"
+				class="fixed inset-0 z-30 bg-bg-overlay/80 md:hidden backdrop-blur-sm"
 				onclick={() => (sidebarOpen = false)}
 				aria-label="Close menu"
 			></button>
@@ -362,7 +362,7 @@
 		<nav
 			onmouseenter={onRailEnter}
 			onmouseleave={onRailLeave}
-			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle pb-3 transition-[width,transform] duration-150 md:static md:translate-x-0
+			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle transition-[width,transform] duration-150 md:static md:translate-x-0
 			{sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
 			{railExpanded ? 'md:w-60' : 'md:w-14'}"
 			style="padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);"
@@ -522,15 +522,21 @@
 				 it produced ~34px of empty space on iPhone below the row that
 				 the user perceived as a layout bug. The Home Indicator zone is
 				 reserved for system gestures but not off-limits; the Settings
-				 link's tap target still sits above the indicator bar. -->
-			<div class="border-t border-border px-2 py-3">
+				 link's tap target still sits above the indicator bar.
+
+				 Bottom-row height is locked to MATCH the ChatView input bar
+				 height (border-t + py-2 + h-11 button = 61px content). This
+				 keeps the sidebar's Settings row visually flush with the
+				 chat composer above the page-wide StatusBar. Updates to the
+				 ChatView input bar height must update the `py-2` here too. -->
+			<div class="border-t border-border px-2 py-2">
 				<div class="flex items-center gap-1 {railExpanded ? '' : 'md:flex-col md:gap-0.5'}">
 					<a
 						href="/app/settings"
 						onclick={() => { sidebarOpen = false; expandedSection = null; }}
 						title={t('nav.settings')}
-						class="flex flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] py-2 text-sm transition-all
-						{railExpanded ? 'px-3' : 'md:flex-none md:justify-center md:px-2 md:w-10 px-3'}
+						class="flex flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] h-11 text-sm transition-all
+						{railExpanded ? 'px-3' : 'md:flex-none md:justify-center md:px-2 md:w-11 px-3'}
 						{isActive('/app/settings', false)
 							? 'bg-accent/10 text-accent-text border-l-2 border-accent'
 							: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
@@ -538,21 +544,24 @@
 						<Icon name="settings" size="sm" />
 						<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.settings')}</span>
 					</a>
-					<!-- Pin/unpin rail (desktop only). Shows the current state's
-						action label so the user knows what clicking will do. -->
+					<!-- Pin/unpin rail (desktop only). chevron-double-right when
+						 collapsed (= "expand to lock open"), chevron-double-left
+						 when pinned (= "collapse"). Hamburger/thumbtack was
+						 ambiguous — the hamburger looks like a "menu" trigger
+						 on a row that's already a menu. -->
 					<button
 						type="button"
 						onclick={togglePin}
 						title={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
 						aria-label={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
 						aria-pressed={railPinned}
-						class="hidden md:flex items-center justify-center h-10 w-10 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
+						class="hidden md:flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
 					>
-						<Icon name={railPinned ? 'pin' : 'hamburger'} size="sm" />
+						<Icon name={railPinned ? 'chevron_double_left' : 'chevron_double_right'} size="sm" />
 					</button>
 					<a
 						href="/logout"
-						class="flex items-center justify-center min-h-[40px] min-w-[40px] rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
+						class="flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
 						aria-label={t('nav.logout')}
 						title={t('nav.logout')}
 					>
@@ -571,7 +580,11 @@
 					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
 						<Icon name="hamburger" size="md" />
 					</button>
-					<img src="/logo-brand.svg" alt="lynox" class="h-5 w-auto" />
+					<!-- PRD-LIGHT-MODE PR 4 — two static <img>, CSS visibility-switch
+					     by [data-theme]. Avoids SSR/hydrate flicker that any reactive
+					     getResolvedTheme() lookup would introduce on the header. -->
+					<img src="/logo-brand-dark.svg" alt="lynox" class="h-5 w-auto logo-brand-dark" />
+					<img src="/logo-brand-light.svg" alt="lynox" class="h-5 w-auto logo-brand-light" />
 				</div>
 
 				<!-- Center: Cmd+K hint -->
@@ -677,7 +690,7 @@
 						>{t('session.dismiss')}</button>
 						<a
 							href="/login"
-							class="rounded-[var(--radius-sm)] bg-accent text-text px-3 py-1.5 text-[11px] hover:opacity-90"
+							class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 						>{t('session.relogin')}</a>
 					</div>
 				</div>
@@ -764,3 +777,12 @@
 		{/if}
 	{/if}
 </div>
+
+<style>
+	/* PRD-LIGHT-MODE PR 4 — Header logo theme switch.
+	   The dark variant has white "eyes" on the brand-violet circle for crisp
+	   contrast on the dark canvas. The light variant uses brand indigo on
+	   white. Both keep the brand-violet face circle. */
+	:global([data-theme="dark"]) .logo-brand-light { display: none; }
+	:global([data-theme="light"]) .logo-brand-dark { display: none; }
+</style>

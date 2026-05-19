@@ -142,7 +142,7 @@
 					<button
 						onclick={saveGoogleCredentials}
 						disabled={!getGoogleClientId().trim() || !getGoogleClientSecret().trim() || isGoogleCredSaving()}
-						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 					>
 						{isGoogleCredSaving() ? t('settings.saving') : t('integrations.save_credentials')}
 					</button>
@@ -157,11 +157,11 @@
 					<div class="inline-flex rounded-[var(--radius-md)] border border-border overflow-hidden">
 						<button
 							onclick={() => setScopeMode('readonly')}
-							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'readonly' ? 'bg-accent text-accent-fg' : 'bg-bg text-accent-fg-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_readonly')}</button>
 						<button
 							onclick={() => setScopeMode('full')}
-							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'full' ? 'bg-accent text-accent-fg' : 'bg-bg text-accent-fg-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_full')}</button>
 					</div>
 					{#if getScopeMode() === 'full'}
@@ -172,7 +172,7 @@
 					<button
 						onclick={startGoogleAuth}
 						disabled={isConnecting()}
-						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+						class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 					>
 						{isConnecting() ? t('integrations.connecting') : t('integrations.reconnect_google')}
 					</button>
@@ -224,11 +224,11 @@
 					<div class="inline-flex rounded-[var(--radius-md)] border border-border overflow-hidden">
 						<button
 							onclick={() => setScopeMode('readonly')}
-							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'readonly' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'readonly' ? 'bg-accent text-accent-fg' : 'bg-bg text-accent-fg-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_readonly')}</button>
 						<button
 							onclick={() => setScopeMode('full')}
-							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'full' ? 'bg-accent text-text' : 'bg-bg text-text-muted hover:bg-bg-hover'}"
+							class="px-3 py-1.5 text-xs transition-colors {getScopeMode() === 'full' ? 'bg-accent text-accent-fg' : 'bg-bg text-accent-fg-muted hover:bg-bg-hover'}"
 						>{t('integrations.scope_full')}</button>
 					</div>
 					{#if getScopeMode() === 'full'}
@@ -238,7 +238,7 @@
 				<button
 					onclick={startGoogleAuth}
 					disabled={isConnecting()}
-					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 				>
 					{isConnecting() ? t('integrations.connecting') : t('integrations.connect_google')}
 				</button>

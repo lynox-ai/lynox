@@ -1635,7 +1635,7 @@
 							<button
 								onclick={saveInlineKey}
 								disabled={!setupKey.trim() || setupSaving}
-								class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+								class="w-full rounded-[var(--radius-sm)] bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-30 transition-opacity"
 							>
 								{setupSaving ? t('onboard.setting_up') : t('onboard.save_key')}
 							</button>
@@ -1712,7 +1712,7 @@
 														<button
 															onclick={submitOnboardingUrl}
 															disabled={!onboardingUrl.trim()}
-															class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90 disabled:opacity-30 transition-opacity"
+															class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-30 transition-opacity"
 														>
 															{t('onboard.url_go')}
 														</button>
@@ -2124,7 +2124,7 @@
 								<div class="flex gap-2 mt-1.5">
 									<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
 										disabled={!(batchSelections[i] ?? []).length}
-										class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30"
+										class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-accent-fg hover:opacity-90 disabled:opacity-30"
 									>{t('chat.send')}</button>
 									<button onclick={() => answerPrompt('__dismissed__')}
 										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-subtle hover:text-text transition-all"
@@ -2134,7 +2134,7 @@
 								<form onsubmit={(e) => { e.preventDefault(); const val = batchFreetext.trim(); if (val) answerPrompt(val); batchFreetext = ''; }} class="flex flex-col sm:flex-row gap-1.5">
 									<input bind:value={batchFreetext} placeholder={q.question} class="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[16px] md:text-xs outline-none focus:border-border-hover" />
 									<div class="flex gap-1.5">
-										<button type="submit" disabled={!batchFreetext.trim()} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-text hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
+										<button type="submit" disabled={!batchFreetext.trim()} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-accent-fg hover:opacity-90 disabled:opacity-30">{t('chat.send')}</button>
 										<button type="button" onclick={() => answerPrompt('__dismissed__')} class="flex-1 sm:flex-none rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
 									</div>
 								</form>
@@ -2490,7 +2490,7 @@
 						<button
 							onclick={handleSend}
 							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset}
-							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-text hover:opacity-90 disabled:opacity-30 transition-all"
+							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-accent-fg hover:opacity-90 disabled:opacity-30 transition-all"
 							aria-label={t('chat.send')}
 						>
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
@@ -2518,7 +2518,7 @@
 </div>
 
 {#if showVaultCheckpoint && vaultCheckpointKey}
-	<div class="fixed inset-0 z-[9998] bg-black/40 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
+	<div class="fixed inset-0 z-[9998] bg-bg-overlay/40 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
 		onkeydown={(e) => { if (e.key === 'Escape') confirmVaultCheckpoint(); }}
 	>
 		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-md mx-4 space-y-4">
@@ -2539,7 +2539,7 @@
 			</div>
 			<p class="text-xs text-text-muted">{t('config.vault_key_hint')}</p>
 			<div class="flex gap-2">
-				<button onclick={confirmVaultCheckpoint} class="flex-1 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-text hover:opacity-90">
+				<button onclick={confirmVaultCheckpoint} class="flex-1 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90">
 					{t('onboard.vault_confirm_btn')}
 				</button>
 				<button onclick={confirmVaultCheckpoint} class="rounded-[var(--radius-sm)] border border-border px-4 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all">
@@ -2575,8 +2575,8 @@
 		50% { transform: translateY(-6px); }
 	}
 	@keyframes iconGlow {
-		0%, 100% { filter: drop-shadow(0 0 8px rgba(101, 37, 239, 0.3)); }
-		50% { filter: drop-shadow(0 0 20px rgba(101, 37, 239, 0.6)); }
+		0%, 100% { filter: drop-shadow(0 0 8px color-mix(in srgb, var(--color-accent) 30%, transparent)); }
+		50% { filter: drop-shadow(0 0 20px color-mix(in srgb, var(--color-accent) 60%, transparent)); }
 	}
 	.welcome-fade :global(.icon-entrance) {
 		animation: iconEntrance 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both;
@@ -2602,7 +2602,7 @@
 		margin-top: -36px;
 		margin-left: -36px;
 		border-radius: 50%;
-		border: 2px solid rgba(155, 138, 255, 0.4);
+		border: 2px solid color-mix(in srgb, var(--color-accent-text) 40%, transparent);
 		z-index: 0;
 		animation: sonarPulse 5s ease-out infinite;
 	}
@@ -2624,23 +2624,23 @@
 		align-items: center;
 		padding: 0.75rem 1rem;
 		border-radius: var(--radius-md);
-		border: 1px solid var(--color-border, #1a1a4a);
-		background: var(--color-bg-subtle, #0a0a1a);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-subtle);
 		cursor: pointer;
 		transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 		text-align: left;
 	}
 	:global(.prompt-chip:hover) {
-		border-color: var(--color-accent, #6525EF);
-		box-shadow: 0 0 16px rgba(101, 37, 239, 0.08);
-		background: var(--color-bg-muted, #0c0c20);
+		border-color: var(--color-accent);
+		box-shadow: 0 0 16px color-mix(in srgb, var(--color-accent) 8%, transparent);
+		background: var(--color-bg-muted);
 	}
 	:global(.prompt-chip-text) {
 		font-size: 0.8125rem;
-		color: var(--color-text-muted, #8888aa);
+		color: var(--color-text-muted);
 	}
 	:global(.prompt-chip:hover .prompt-chip-text) {
-		color: var(--color-text, #e8e8f0);
+		color: var(--color-text);
 	}
 
 	/* Mic-button recording state: soft outward pulse + subtle breathing

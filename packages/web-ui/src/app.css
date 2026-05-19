@@ -21,22 +21,83 @@
 	font-display: swap;
 }
 
-@theme {
-	/* Matched to lynox.ai website design system */
-	--color-bg: #050510;
-	--color-bg-subtle: #0a0a1a;
-	--color-bg-muted: #0c0c20;
-	--color-border: #1a1a4a;
-	--color-border-hover: #2a2a5a;
-	--color-text: #e8e8f0;
-	--color-text-muted: #8888aa;
-	--color-text-subtle: #7e7eaa;
-	--color-accent: #6525EF;
-	--color-accent-hover: #7b3fff;
-	--color-accent-text: #9B8AFF;
-	--color-danger: #ef4444;
-	--color-success: #22c55e;
-	--color-warning: #f59e0b;
+/* Tailwind v4 custom-variant binds the dark: modifier to our data-theme attr. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/*
+ * Dark = default (also SSR fallback when JS is off / FOUC-script fails).
+ * Layered :root + [data-theme=dark] selectors so an absent attribute still
+ * renders dark — keeps existing dark-only consumers correct.
+ */
+:root, [data-theme="dark"] {
+	--lyx-bg: #050510;
+	--lyx-bg-subtle: #0a0a1a;
+	--lyx-bg-muted: #0c0c20;
+	--lyx-bg-elevated: #0a0a1a;
+	--lyx-bg-overlay: #000000;
+	--lyx-border: #1a1a4a;
+	--lyx-border-hover: #2a2a5a;
+	--lyx-text: #e8e8f0;
+	--lyx-text-muted: #8888aa;
+	--lyx-text-subtle: #7e7eaa;
+	--lyx-accent: #6525EF;
+	--lyx-accent-hover: #7b3fff;
+	--lyx-accent-text: #9B8AFF;
+	--lyx-accent-disabled: color-mix(in srgb, #6525EF 35%, #0c0c20);
+	--lyx-accent-fg: #ffffff;
+	--lyx-focus-ring: #9B8AFF;
+	--lyx-danger: #ef4444;
+	--lyx-success: #22c55e;
+	--lyx-warning: #f59e0b;
+	--lyx-code-bg: #0c0c20;
+	color-scheme: dark;
+}
+
+[data-theme="light"] {
+	--lyx-bg: #ffffff;
+	--lyx-bg-subtle: #f6f7f9;
+	--lyx-bg-muted: #eceef2;
+	--lyx-bg-elevated: #ffffff;
+	--lyx-bg-overlay: #0b0b14;
+	--lyx-border: #e3e5ea;
+	--lyx-border-hover: #c6c9d1;
+	--lyx-text: #0b0b14;
+	--lyx-text-muted: #4a4d57;
+	--lyx-text-subtle: #6b6e7b;
+	--lyx-accent: #21179b;
+	--lyx-accent-hover: #1a1280;
+	--lyx-accent-text: #2a1fb8;
+	--lyx-accent-disabled: color-mix(in srgb, #21179b 35%, #eceef2);
+	--lyx-accent-fg: #ffffff;
+	--lyx-focus-ring: #0b0b14;
+	--lyx-danger: #c0341d;
+	--lyx-success: #15803d;
+	--lyx-warning: #b45309;
+	--lyx-code-bg: #f2f3f6;
+	color-scheme: light;
+}
+
+@theme inline {
+	--color-bg: var(--lyx-bg);
+	--color-bg-subtle: var(--lyx-bg-subtle);
+	--color-bg-muted: var(--lyx-bg-muted);
+	--color-bg-elevated: var(--lyx-bg-elevated);
+	--color-bg-overlay: var(--lyx-bg-overlay);
+	--color-border: var(--lyx-border);
+	--color-border-hover: var(--lyx-border-hover);
+	--color-text: var(--lyx-text);
+	--color-text-muted: var(--lyx-text-muted);
+	--color-text-subtle: var(--lyx-text-subtle);
+	--color-accent: var(--lyx-accent);
+	--color-accent-hover: var(--lyx-accent-hover);
+	--color-accent-text: var(--lyx-accent-text);
+	--color-accent-disabled: var(--lyx-accent-disabled);
+	--color-accent-fg: var(--lyx-accent-fg);
+	--color-focus-ring: var(--lyx-focus-ring);
+	--color-danger: var(--lyx-danger);
+	--color-success: var(--lyx-success);
+	--color-warning: var(--lyx-warning);
+	--color-code-bg: var(--lyx-code-bg);
 	--font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 	--font-mono: "IBM Plex Mono", ui-monospace, monospace;
 	--radius-sm: 4px;
@@ -59,16 +120,26 @@ body {
 	margin: 0;
 }
 
-/* Custom select styling (dark mode compatible) */
+/*
+ * Custom select arrow — two SVG variants scoped per [data-theme].
+ * CSS-vars can't be interpolated into data: URLs. Mask-image was tried but
+ * masks paint the whole element. Two static URL strings is the simplest
+ * theme-aware fix.
+ */
 select {
 	appearance: none;
 	-webkit-appearance: none;
-	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%238888aa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 	background-repeat: no-repeat;
 	background-position: right 0.75rem center;
 	padding-right: 2rem;
 	cursor: pointer;
 	outline: none;
+}
+:root select, [data-theme="dark"] select {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%238888aa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+[data-theme="light"] select {
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%234a4d57' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 select:focus {
@@ -129,10 +200,17 @@ textarea::-webkit-scrollbar {
 	scrollbar-color: var(--color-border) transparent;
 }
 
-/* Focus styles matching website */
+/*
+ * Focus styles — high-contrast outer ring + inner ring trick.
+ * box-shadow paints a 2px ring in the page background between the element
+ * and the outer outline. On bg-accent buttons (where outline=#0b0b14 in
+ * light could merge with neighbouring shadow) the inner white-ish ring
+ * keeps the focus indicator legible. WCAG 2.4.7-compliant.
+ */
 :focus-visible {
-	outline: 2px solid var(--color-accent-text);
+	outline: 2px solid var(--color-focus-ring);
 	outline-offset: 2px;
+	box-shadow: 0 0 0 2px var(--color-bg);
 	border-radius: var(--radius-sm);
 }
 

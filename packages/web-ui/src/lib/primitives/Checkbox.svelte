@@ -39,10 +39,10 @@
 />
 
 <style>
-	/* Override default platform styling to match the dark theme. Native
-	   checkboxes render with browser-themed white squares + ✓ glyph that
-	   clash hard on bg #050510. We style the box ourselves and draw a
-	   custom checkmark via CSS mask. */
+	/* Override default platform styling so the checkbox follows our tokens
+	   in both themes. Native checkboxes render with browser-themed white
+	   squares + checkmark glyph that clash hard on the dark canvas. We
+	   style the box ourselves and draw a custom checkmark via CSS mask. */
 	.lynox-checkbox {
 		appearance: none;
 		-webkit-appearance: none;

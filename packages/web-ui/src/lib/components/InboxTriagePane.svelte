@@ -221,7 +221,7 @@
 			<button
 				type="button"
 				onclick={() => onReply?.(full.item)}
-				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-3 py-1.5 text-[12px] hover:opacity-90"
+				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[12px] hover:opacity-90"
 			>
 				↩ {t('inbox.action_reply')}
 			</button>

@@ -61,7 +61,7 @@
 		<button
 			type="button"
 			onclick={expandInlinePrompt}
-			class="ml-auto flex-shrink-0 rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-text hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-accent/40"
+			class="ml-auto flex-shrink-0 rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-accent-fg hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-accent/40"
 		>{t('prompt_anchor.answer')}</button>
 	</div>
 </div>

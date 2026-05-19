@@ -113,8 +113,11 @@
 			// managed-only (no subscription on self-host). Security tile is shown on
 			// every tier — Item 8 show-all-grayed pattern handles the per-tier disable
 			// state inside AccountSecurityView itself.
+			// PRD-LIGHT-MODE (2026-05-19): Appearance tile is all-tier (theme is
+			// user-personalisation, independent of plan).
 			labelKey: 'settings.section_account',
 			items: [
+				{ href: '/app/settings/account/appearance', titleKey: 'settings.account.appearance', descKey: 'settings.account.appearance_desc' },
 				{ href: '/app/settings/account/billing', titleKey: 'settings.account.billing', descKey: 'settings.account.billing_desc', managedOnly: true },
 				{ href: '/app/settings/account/security', titleKey: 'settings.account.security', descKey: 'settings.account.security_desc' },
 				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },

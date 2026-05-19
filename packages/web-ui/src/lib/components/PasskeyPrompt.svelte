@@ -106,7 +106,7 @@
 	<div class="fixed inset-x-4 bottom-24 z-50 rounded-xl border border-border bg-bg-subtle p-4 shadow-2xl backdrop-blur-sm sm:bottom-12 sm:left-auto sm:right-4 sm:w-80">
 		{#if success}
 			<div class="flex items-center gap-3">
-				<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-green-500/10 text-green-400">
+				<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-success/10 text-success">
 					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
 					</svg>

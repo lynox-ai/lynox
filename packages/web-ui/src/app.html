@@ -1,9 +1,13 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-		<meta name="theme-color" content="#050510" />
+		<!-- Dual theme-color: browser picks the matching media. The light value
+		     stays in effect for OS=light, dark for OS=dark. iOS PWA installed
+		     status-bar style is a known limitation (cannot live-toggle). -->
+		<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+		<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#050510" />
 		<meta name="description" content="Run your business. Not your tools." />
 
 		<!-- PWA manifest (installable, no service worker) -->
@@ -17,6 +21,30 @@
 		<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
 
 		<title>lynox</title>
+
+		<!--
+			Light-Mode FOUC guard. Synchronous, runs BEFORE SvelteKit hydrates
+			so the data-theme attribute is set before first paint. Strict
+			allowlist on the localStorage value (defense-in-depth against any
+			vector that writes lyx-theme from outside our setTheme API).
+		-->
+		<script>
+			(function () {
+				try {
+					var stored = null;
+					try { stored = localStorage.getItem('lyx-theme'); } catch (e) { /* private mode */ }
+					var resolved;
+					if (stored === 'light' || stored === 'dark') {
+						resolved = stored;
+					} else {
+						resolved = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+					}
+					document.documentElement.setAttribute('data-theme', resolved);
+				} catch (e) {
+					document.documentElement.setAttribute('data-theme', 'dark');
+				}
+			})();
+		</script>
 
 		<!--
 			Cold-start stale-bundle guard. Runs BEFORE SvelteKit hydrates so

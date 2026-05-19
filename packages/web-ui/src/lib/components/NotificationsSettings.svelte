@@ -199,7 +199,7 @@
 			<button
 				onclick={async () => { const ok = await enablePushNotifications(); addToast(ok ? t('integrations.push_enabled') : t('integrations.push_enable_failed'), ok ? 'success' : 'error'); }}
 				disabled={isPushLoading()}
-				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+				class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 			>
 				{isPushLoading() ? t('common.loading') : t('integrations.push_enable')}
 			</button>

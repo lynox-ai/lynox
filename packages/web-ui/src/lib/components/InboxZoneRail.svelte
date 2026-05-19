@@ -78,7 +78,7 @@
 		<button
 			type="button"
 			onclick={() => onCompose()}
-			class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-text px-2.5 py-2 text-[12px] hover:opacity-90 mb-1.5"
+			class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-2.5 py-2 text-[12px] hover:opacity-90 mb-1.5"
 		>
 			+ {t('inbox.compose_new')}
 		</button>

@@ -122,7 +122,7 @@
 		<!-- Backdrop. Click anywhere outside the sheet to close. -->
 		<button
 			type="button"
-			class="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm"
+			class="fixed inset-0 z-40 bg-bg-overlay/60 backdrop-blur-sm"
 			onclick={closeDrawer}
 			aria-label={t('mobile_nav.drawer.close')}
 		></button>

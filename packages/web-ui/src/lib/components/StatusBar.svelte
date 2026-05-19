@@ -211,7 +211,7 @@
 	{#if ttsAvailable}
 		<button
 			onclick={toggleAutoSpeak}
-			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-subtle'}"
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSpeakOn ? 'text-accent-text' : 'text-text-muted'}"
 			title={autoSpeakOn ? (speakState === 'playing' ? t('status.autospeak_playing') : t('status.autospeak_on')) : t('status.autospeak_off')}
 			aria-label={autoSpeakOn ? t('status.autospeak_on') : t('status.autospeak_off')}
 			aria-pressed={autoSpeakOn}
@@ -229,7 +229,7 @@
 	{#if sttAvailable}
 		<button
 			onclick={toggleVoiceAutoSend}
-			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSendOn ? 'text-accent-text' : 'text-text-subtle'}"
+			class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 {autoSendOn ? 'text-accent-text' : 'text-text-muted'}"
 			title={autoSendOn ? t('status.autosend_on') : t('status.autosend_off')}
 			aria-label={autoSendOn ? t('status.autosend_on') : t('status.autosend_off')}
 			aria-pressed={autoSendOn}
@@ -353,7 +353,7 @@
 
 <!-- Status Panel Overlay -->
 {#if panelOpen}
-	<button class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" onclick={closePanel} aria-label="Close"></button>
+	<button class="fixed inset-0 z-50 bg-bg-overlay/60 backdrop-blur-sm" onclick={closePanel} aria-label="Close"></button>
 	<div class="fixed z-50 bottom-8 md:bottom-9 left-2 right-2 md:left-auto md:right-auto md:w-96 bg-bg-subtle border border-border rounded-[var(--radius-lg)] shadow-2xl overflow-hidden" style="md:margin-left: 0.5rem;">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-3 border-b border-border">

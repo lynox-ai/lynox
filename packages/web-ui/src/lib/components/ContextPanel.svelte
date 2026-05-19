@@ -149,14 +149,14 @@
 
 			<!-- === Bash === -->
 			{:else if ctx.toolName === 'bash'}
-				<div class="rounded-[var(--radius-md)] bg-[#1a1a2e] border border-border overflow-hidden">
+				<div class="rounded-[var(--radius-md)] bg-bg-muted border border-border overflow-hidden">
 					<div class="px-3 py-1.5 border-b border-border flex items-center gap-2">
 						<span class="h-2 w-2 rounded-full bg-danger"></span>
 						<span class="h-2 w-2 rounded-full bg-warning"></span>
 						<span class="h-2 w-2 rounded-full bg-success"></span>
 						<span class="text-[10px] font-mono text-text-subtle ml-2">Terminal</span>
 					</div>
-					<pre class="px-3 py-2 text-xs font-mono text-green-400 whitespace-pre-wrap break-all max-h-60 overflow-y-auto scrollbar-thin">$ {getInput('command')}</pre>
+					<pre class="px-3 py-2 text-xs font-mono text-success whitespace-pre-wrap break-all max-h-60 overflow-y-auto scrollbar-thin">$ {getInput('command')}</pre>
 					{#if ctx.toolResult}
 						<pre class="px-3 py-2 text-xs font-mono text-text-muted whitespace-pre-wrap break-all max-h-40 overflow-y-auto scrollbar-thin border-t border-border">{truncate(ctx.toolResult, 1500)}</pre>
 					{/if}

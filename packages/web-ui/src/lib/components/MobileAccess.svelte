@@ -57,7 +57,9 @@
 		</div>
 	{:else}
 		<div class="flex flex-col items-center gap-5">
-			<!-- QR Code -->
+			<!-- QR Code — INTENTIONALLY fixed-light (white BG + dark cells)
+			     regardless of UI theme. QR codes are conventionally dark-on-
+			     white and many scanners struggle with inverted contrast. -->
 			{#if qrMatrix}
 				<div class="rounded-[var(--radius-lg)] bg-white p-5 shadow-lg">
 					<svg

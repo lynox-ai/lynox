@@ -803,6 +803,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.account.billing_desc': { de: 'Karte ändern, Rechnungen ansehen, Plan wechseln, kündigen.', en: 'Change card, view invoices, switch plan, cancel.' },
 	'settings.account.security': { de: 'Sicherheit', en: 'Security' },
 	'settings.account.security_desc': { de: 'Passkey-Einrichtung für schnelle, sichere Wiederanmeldung.', en: 'Set up a passkey for fast, secure re-authentication.' },
+	// PRD-LIGHT-MODE (2026-05-19) — Appearance: theme preference
+	'settings.account.appearance': { de: 'Darstellung', en: 'Appearance' },
+	'settings.account.appearance_desc': { de: 'Theme wählen — System, Hell oder Dunkel.', en: 'Choose theme — System, Light or Dark.' },
+	'appearance.heading': { de: 'Darstellung', en: 'Appearance' },
+	'appearance.system_hint': { de: 'Im System-Modus folgt das Theme deinen OS-Einstellungen und wechselt automatisch.', en: 'In System mode the theme follows your OS setting and switches automatically.' },
+	'theme.heading': { de: 'Theme', en: 'Theme' },
+	'theme.subtitle': { de: 'Wähle Hell, Dunkel oder folge dem System.', en: 'Choose Light, Dark, or follow the system setting.' },
+	'theme.system': { de: 'System', en: 'System' },
+	'theme.light': { de: 'Hell', en: 'Light' },
+	'theme.dark': { de: 'Dunkel', en: 'Dark' },
 	'account.back_to_settings': { de: 'Zurück zu Einstellungen', en: 'Back to Settings' },
 	// Account → Billing
 	'account.billing.title': { de: 'Abo & Rechnung', en: 'Subscription & billing' },

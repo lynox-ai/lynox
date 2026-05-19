@@ -151,7 +151,7 @@
 				<button
 					onclick={saveEdit}
 					disabled={saving}
-					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 				>
 					{saving ? t('settings.saving') : t('settings.save')}
 				</button>
@@ -182,7 +182,7 @@
 							<button
 								onclick={() => updateEntry(entry, (date ? `[${date}] ` : '') + editingText)}
 								disabled={saving}
-								class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-text hover:opacity-90 disabled:opacity-30"
+								class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-accent-fg hover:opacity-90 disabled:opacity-30"
 							>{t('common.save')}</button>
 							<button
 								onclick={() => { editingIdx = null; }}
@@ -229,7 +229,7 @@
 				<button
 					onclick={appendEntry}
 					disabled={!appendText.trim() || saving}
-					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-text hover:opacity-90 disabled:opacity-50"
+					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 				>
 					{t('memory.add_button')}
 				</button>

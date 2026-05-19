@@ -190,7 +190,7 @@
 
 <!-- Setup Wizard Modal -->
 {#if loaded && showWizard && apiKeyMissing}
-	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-bg-overlay/60 backdrop-blur-sm p-4">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 		<div

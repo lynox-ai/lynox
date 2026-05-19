@@ -368,7 +368,7 @@
 {#if getDraftPane() !== null}
 	{@const pane = getDraftPane()!}
 	<div
-		class="fixed inset-0 z-40 flex sm:items-stretch sm:justify-end bg-black/40 backdrop-blur-sm"
+		class="fixed inset-0 z-40 flex sm:items-stretch sm:justify-end bg-bg-overlay/40 backdrop-blur-sm"
 		role="presentation"
 		onclick={() => { flushNow(); closeDraftPane(); }}
 	>
@@ -589,7 +589,7 @@
 
 	{#if pendingTone !== null}
 		<div
-			class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
+			class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-bg-overlay/40 backdrop-blur-sm p-0 sm:p-4"
 			role="presentation"
 			onclick={cancelTone}
 		>
