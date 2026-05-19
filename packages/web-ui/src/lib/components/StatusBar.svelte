@@ -353,7 +353,7 @@
 
 <!-- Status Panel Overlay -->
 {#if panelOpen}
-	<button class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" onclick={closePanel} aria-label="Close"></button>
+	<button class="fixed inset-0 z-50 bg-bg-overlay/60 backdrop-blur-sm" onclick={closePanel} aria-label="Close"></button>
 	<div class="fixed z-50 bottom-8 md:bottom-9 left-2 right-2 md:left-auto md:right-auto md:w-96 bg-bg-subtle border border-border rounded-[var(--radius-lg)] shadow-2xl overflow-hidden" style="md:margin-left: 0.5rem;">
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-3 border-b border-border">

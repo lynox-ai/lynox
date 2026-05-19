@@ -350,7 +350,7 @@
 		<!-- Mobile overlay -->
 		{#if sidebarOpen}
 			<button
-				class="fixed inset-0 z-30 bg-black/80 md:hidden backdrop-blur-sm"
+				class="fixed inset-0 z-30 bg-bg-overlay/80 md:hidden backdrop-blur-sm"
 				onclick={() => (sidebarOpen = false)}
 				aria-label="Close menu"
 			></button>

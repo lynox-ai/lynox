@@ -180,7 +180,7 @@
 {#if confirmDelete}
 	<div
 		bind:this={deleteDialogRef}
-		class="fixed inset-0 z-[9998] bg-black/60 flex items-center justify-center"
+		class="fixed inset-0 z-[9998] bg-bg-overlay/60 flex items-center justify-center"
 		role="dialog" aria-modal="true" tabindex="-1"
 		onclick={(e) => { if (e.target === e.currentTarget) { confirmDelete = null; deleteDialogTrigger?.focus(); } }}
 		onkeydown={(e) => { if (e.key === 'Escape') { confirmDelete = null; deleteDialogTrigger?.focus(); } }}
@@ -190,7 +190,7 @@
 			<p class="text-sm text-text">{t('artifacts.confirm_delete')}</p>
 			<div class="flex gap-3 justify-end">
 				<button type="button" class="text-xs text-text-muted hover:text-text px-3 py-1.5" onclick={() => { confirmDelete = null; deleteDialogTrigger?.focus(); }}>{t('artifacts.cancel')}</button>
-				<button type="button" class="text-xs text-danger hover:text-red-400 border border-danger/30 rounded-[var(--radius-sm)] px-3 py-1.5" onclick={() => handleDelete(confirmDelete!)}>{t('artifacts.delete')}</button>
+				<button type="button" class="text-xs text-danger hover:opacity-80 border border-danger/30 rounded-[var(--radius-sm)] px-3 py-1.5" onclick={() => handleDelete(confirmDelete!)}>{t('artifacts.delete')}</button>
 			</div>
 		</div>
 	</div>
@@ -213,7 +213,7 @@
 				<iframe
 					srcdoc={injectCsp(selected.content)}
 					sandbox="allow-scripts"
-					class="w-full h-full border-none bg-[#0a0a1a]"
+					class="w-full h-full border-none bg-bg-elevated"
 					title={selected.title}
 				></iframe>
 			{:else if selected.type === 'mermaid'}

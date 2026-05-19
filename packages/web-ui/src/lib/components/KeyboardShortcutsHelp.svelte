@@ -46,7 +46,7 @@
 
 {#if open}
 	<div
-		class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
+		class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-bg-overlay/40 backdrop-blur-sm p-0 sm:p-4"
 		role="presentation"
 		onclick={onClose}
 	>

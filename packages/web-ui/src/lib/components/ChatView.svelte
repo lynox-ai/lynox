@@ -2518,7 +2518,7 @@
 </div>
 
 {#if showVaultCheckpoint && vaultCheckpointKey}
-	<div class="fixed inset-0 z-[9998] bg-black/40 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
+	<div class="fixed inset-0 z-[9998] bg-bg-overlay/40 flex items-center justify-center" role="dialog" aria-modal="true" tabindex="-1"
 		onkeydown={(e) => { if (e.key === 'Escape') confirmVaultCheckpoint(); }}
 	>
 		<div class="bg-bg border border-border rounded-[var(--radius-md)] p-6 max-w-md mx-4 space-y-4">
