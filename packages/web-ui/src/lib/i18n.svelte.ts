@@ -826,7 +826,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'account.billing.self_host_note': { de: 'Self-Host: kein Abo vorhanden. Diese Seite ist für Managed-Plans gedacht.', en: 'Self-host: no subscription. This page is for Managed plans.' },
 	'account.billing.portal_description': { de: 'Im Stripe Customer Portal kannst du Karte ändern, Rechnungen herunterladen, Plan wechseln oder kündigen.', en: 'In the Stripe customer portal you can change your card, download invoices, switch plan, or cancel.' },
 	'account.billing.portal_cta': { de: 'Abo verwalten', en: 'Manage subscription' },
-	'account.billing.portal_hint': { de: 'Öffnet die Konto-Übersicht auf control.lynox.cloud (eigener Login).', en: 'Opens the account dashboard on control.lynox.cloud (separate login).' },
+	'account.billing.portal_hint': { de: 'Stripe schickt dir per Mail einen Login-Link — Portal öffnet sich danach automatisch.', en: 'Stripe emails you a login link — the portal opens automatically afterwards.' },
+	'account.billing.support_heading': { de: 'Andere Anfragen', en: 'Other requests' },
+	'account.billing.support_body': { de: 'Für Refunds, mittlere Plan-Wechsel oder spezielle Rechnungs-Korrekturen erreichst du uns unter ', en: 'For refunds, mid-cycle plan changes or special billing corrections reach us at ' },
 	// Account → Security
 	'account.security.title': { de: 'Sicherheit', en: 'Security' },
 	'account.security.subtitle': { de: 'Passkey für schnellere, sicherere Wiederanmeldung — kein 6-stelliger Code mehr.', en: 'Passkey for faster, more secure re-authentication — no more 6-digit codes.' },

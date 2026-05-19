@@ -2619,6 +2619,19 @@ export class LynoxHTTPApi {
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
+
+      // Stripe Customer Portal hosted-login URL (v1.6.0 stopgap for PR 3).
+      // When set, the engine surfaces it as `stripe_portal_login_url` so the
+      // Account/Billing page can render a working CTA that drops the customer
+      // into Stripe's email-OTP login (Stripe handles auth + portal — no
+      // cross-domain cookie tanz). Set per-instance via `sync-env` admin API
+      // until the PR 3 sprint moves it into the CP config-generator pipeline.
+      // See [[project_pr3_stripe_portal_sso_deferred]] for the full SSO plan.
+      const stripePortalUrl = process.env['LYNOX_STRIPE_PORTAL_LOGIN_URL'];
+      if (stripePortalUrl && /^https:\/\/billing\.stripe\.com\//.test(stripePortalUrl)) {
+        redacted['stripe_portal_login_url'] = stripePortalUrl;
+      }
+
       jsonResponse(res, 200, redacted);
     });
 
