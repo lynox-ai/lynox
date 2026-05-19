@@ -7,6 +7,7 @@ describe('isPublic — exact matches', () => {
 		['/logout'],
 		['/health'],
 		['/auth/magic'],
+		['/'],
 	])('treats %s as public', (path) => {
 		expect(isPublic(path)).toBe(true);
 	});
@@ -39,7 +40,11 @@ describe('isPublic — prefix matches', () => {
 
 describe('isPublic — defaults to protected', () => {
 	it('treats unknown paths as protected', () => {
-		expect(isPublic('/')).toBe(false);
+		// `/` was moved into PUBLIC_EXACT (see header note on `public-paths.ts`)
+		// because the root +page.server.ts is now a pure-redirect handler that
+		// fires the demo-mode auto-session short-circuit on `LYNOX_DEMO_MODE=true`
+		// tenants. Without the public exemption the auth gate redirects /
+		// straight to /login and the short-circuit never runs.
 		expect(isPublic('/app')).toBe(false);
 		expect(isPublic('/app/chat')).toBe(false);
 		expect(isPublic('/api/config')).toBe(false);
@@ -55,6 +60,7 @@ describe('PUBLIC_EXACT + PUBLIC_PREFIXES — public-surface inventory', () => {
 	// `public-paths.ts`'s header comment before touching this assertion.
 	it('locks the current public-path inventory', () => {
 		expect([...PUBLIC_EXACT].sort()).toEqual([
+			'/',
 			'/auth/magic',
 			'/health',
 			'/login',
