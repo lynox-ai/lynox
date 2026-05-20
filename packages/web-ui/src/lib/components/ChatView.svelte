@@ -1493,6 +1493,15 @@
 		autoScroll = true;
 		pinUntil = performance.now() + 1200;
 		if (pinFrame === null) pinFrame = requestAnimationFrame(pinToBottomStep);
+		// Cancel the pin loop when the component unmounts or another thread is
+		// opened mid-pin, so a stale loop can't touch a torn-down node or
+		// extend the pin window onto the next thread.
+		return () => {
+			if (pinFrame !== null) {
+				cancelAnimationFrame(pinFrame);
+				pinFrame = null;
+			}
+		};
 	});
 
 	function handleKeydown(e: KeyboardEvent) {
