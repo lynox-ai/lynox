@@ -116,18 +116,33 @@ describe('ThreadStore.setMessageUsage', () => {
     store.createThread('t1');
   });
 
-  it('stamps usage JSON onto the targeted assistant message only', () => {
+  it('stamps usage JSON onto the latest assistant message only', () => {
     store.appendMessages('t1', [makeMessage('user', 'hi'), makeMessage('assistant', 'hello')], 0, { message_count: 2 });
     const usage = JSON.stringify({ tokensIn: 100, tokensOut: 20, costUsd: 0.01 });
-    store.setMessageUsage('t1', 1, usage);
+    store.setMessageUsage('t1', usage);
     const rows = store.getMessages('t1');
     expect(rows[1]?.usage_json).toBe(usage);
     expect(rows[0]?.usage_json).toBeNull();
   });
 
-  it('is a no-op on a user message (role guard)', () => {
+  it('targets the highest-seq assistant row even when a tool_result trails', () => {
+    store.appendMessages('t1', [
+      makeMessage('user', 'hi'),
+      makeMessage('assistant', 'first'),
+      makeMessage('assistant', 'final'),
+      makeMessage('user', 'tool_result carrier'),
+    ], 0, { message_count: 4 });
+    const usage = JSON.stringify({ tokensIn: 50 });
+    store.setMessageUsage('t1', usage);
+    const rows = store.getMessages('t1');
+    expect(rows[2]?.usage_json).toBe(usage); // 'final' assistant row (seq 2)
+    expect(rows[1]?.usage_json).toBeNull();  // earlier assistant row untouched
+    expect(rows[3]?.usage_json).toBeNull();  // trailing user row untouched
+  });
+
+  it('is a no-op when the thread has no assistant message', () => {
     store.appendMessages('t1', [makeMessage('user', 'hi')], 0, { message_count: 1 });
-    store.setMessageUsage('t1', 0, JSON.stringify({ tokensIn: 5 }));
+    store.setMessageUsage('t1', JSON.stringify({ tokensIn: 5 }));
     expect(store.getMessages('t1')[0]?.usage_json).toBeNull();
   });
 });

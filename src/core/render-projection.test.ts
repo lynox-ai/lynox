@@ -206,4 +206,10 @@ describe('projectMessages — usage', () => {
     const [msg] = projectMessages([r]);
     expect(msg?.usage).toBeUndefined();
   });
+
+  it('fills missing numeric fields with 0', () => {
+    const r: ThreadMessageRecord = { ...rec(0, 'assistant', 'x'), usage_json: JSON.stringify({ tokensIn: 100 }) };
+    const [msg] = projectMessages([r]);
+    expect(msg?.usage).toEqual({ tokensIn: 100, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 });
+  });
 });

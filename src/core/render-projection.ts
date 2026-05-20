@@ -134,7 +134,7 @@ function parseUsage(raw: string | null): RenderedUsage | undefined {
       cacheWrite: num('cacheWrite'),
       costUsd: num('costUsd'),
     };
-    if (typeof u['model'] === 'string') usage.model = u['model'];
+    if (typeof u['model'] === 'string') usage.model = u['model'].slice(0, 64);
     return usage;
   } catch {
     return undefined;

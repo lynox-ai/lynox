@@ -157,14 +157,20 @@ export class ThreadStore {
   }
 
   /**
-   * Attach a JSON token/cost rollup to one assistant message. Called once
-   * per run with the run's final assistant message, so the per-message
-   * usage footer survives a thread resume. The `role = 'assistant'` guard
-   * makes a wrong seq a harmless no-op rather than stamping a user bubble.
+   * Attach a JSON token/cost rollup to a thread's most recent assistant
+   * message. Called once per run at run-end so the per-message usage footer
+   * survives a thread resume. Self-targets the highest-seq assistant row,
+   * so a trailing tool_result carrier can't divert the stamp; a no-op when
+   * the thread has no assistant message yet.
    */
-  setMessageUsage(threadId: string, seq: number, usageJson: string): void {
+  setMessageUsage(threadId: string, usageJson: string): void {
     this.db.prepare(
-      "UPDATE thread_messages SET usage_json = ? WHERE thread_id = ? AND seq = ? AND role = 'assistant'",
-    ).run(usageJson, threadId, seq);
+      `UPDATE thread_messages SET usage_json = ?
+       WHERE id = (
+         SELECT id FROM thread_messages
+         WHERE thread_id = ? AND role = 'assistant'
+         ORDER BY seq DESC LIMIT 1
+       )`,
+    ).run(usageJson, threadId);
   }
 }
