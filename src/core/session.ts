@@ -547,6 +547,18 @@ export class Session {
             const title = generateThreadTitle(taskText);
             threadStore.updateThread(this.sessionId, { title });
           }
+          // Stamp this run's token/cost totals onto its final assistant
+          // message so the per-message footer survives a thread resume —
+          // usage was previously in-memory only. `tokensIn` follows the UI
+          // convention: base input + both cache buckets.
+          threadStore.setMessageUsage(this.sessionId, JSON.stringify({
+            tokensIn: tokensIn + cacheRead + cacheWrite,
+            tokensOut,
+            cacheRead,
+            cacheWrite,
+            costUsd,
+            model,
+          }));
         } catch { /* fire-and-forget */ }
       }
 

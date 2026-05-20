@@ -1938,6 +1938,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				content: string;
 				blocks?: ContentBlock[];
 				toolCalls?: ToolCallInfo[];
+				usage?: UsageInfo;
 			}
 			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
 			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
@@ -1948,6 +1949,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 					};
 					if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
 					if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
+					if (m.usage) cm.usage = m.usage;
 					return cm;
 				}),
 			);
