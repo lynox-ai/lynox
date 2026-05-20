@@ -35,6 +35,7 @@ function freshDb(): Database.Database {
       seq INTEGER NOT NULL,
       role TEXT NOT NULL,
       content_json TEXT NOT NULL,
+      usage_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
@@ -102,5 +103,31 @@ describe('ThreadStore.appendMessages with threadUpdates (P1 contract)', () => {
       { seq: 1, role: 'assistant' },
       { seq: 2, role: 'user' },
     ]);
+  });
+});
+
+describe('ThreadStore.setMessageUsage', () => {
+  let db: Database.Database;
+  let store: ThreadStore;
+
+  beforeEach(() => {
+    db = freshDb();
+    store = new ThreadStore(db);
+    store.createThread('t1');
+  });
+
+  it('stamps usage JSON onto the targeted assistant message only', () => {
+    store.appendMessages('t1', [makeMessage('user', 'hi'), makeMessage('assistant', 'hello')], 0, { message_count: 2 });
+    const usage = JSON.stringify({ tokensIn: 100, tokensOut: 20, costUsd: 0.01 });
+    store.setMessageUsage('t1', 1, usage);
+    const rows = store.getMessages('t1');
+    expect(rows[1]?.usage_json).toBe(usage);
+    expect(rows[0]?.usage_json).toBeNull();
+  });
+
+  it('is a no-op on a user message (role guard)', () => {
+    store.appendMessages('t1', [makeMessage('user', 'hi')], 0, { message_count: 1 });
+    store.setMessageUsage('t1', 0, JSON.stringify({ tokensIn: 5 }));
+    expect(store.getMessages('t1')[0]?.usage_json).toBeNull();
   });
 });

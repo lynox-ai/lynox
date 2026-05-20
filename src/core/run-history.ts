@@ -647,6 +647,14 @@ const MIGRATIONS: string[] = [
   // tool + http-api /secret-saved endpoint for the wire shape.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (29);
    ALTER TABLE pending_prompts ADD COLUMN answer_error TEXT;`,
+
+  // v30: Per-message LLM usage. Each run stamps its token/cost totals onto
+  // its final assistant message so the per-message footer survives a thread
+  // resume — usage previously lived only in memory during the run and was
+  // lost on reload. Nullable: pre-v30 rows (and failed runs) read as NULL,
+  // which the UI renders exactly as today (no footer).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (30);
+   ALTER TABLE thread_messages ADD COLUMN usage_json TEXT;`,
 ];
 
 export class RunHistory {

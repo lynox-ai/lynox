@@ -24,6 +24,9 @@ export interface ThreadMessageRecord {
   seq: number;
   role: string;
   content_json: string;
+  /** JSON-encoded token/cost rollup, or null. Only the final assistant
+   *  message of a run carries it — see `ThreadStore.setMessageUsage`. */
+  usage_json: string | null;
   created_at: string;
 }
 
@@ -151,5 +154,17 @@ export class ThreadStore {
       'SELECT COUNT(*) as cnt FROM thread_messages WHERE thread_id = ?',
     ).get(threadId) as { cnt: number } | undefined;
     return row?.cnt ?? 0;
+  }
+
+  /**
+   * Attach a JSON token/cost rollup to one assistant message. Called once
+   * per run with the run's final assistant message, so the per-message
+   * usage footer survives a thread resume. The `role = 'assistant'` guard
+   * makes a wrong seq a harmless no-op rather than stamping a user bubble.
+   */
+  setMessageUsage(threadId: string, seq: number, usageJson: string): void {
+    this.db.prepare(
+      "UPDATE thread_messages SET usage_json = ? WHERE thread_id = ? AND seq = ? AND role = 'assistant'",
+    ).run(usageJson, threadId, seq);
   }
 }

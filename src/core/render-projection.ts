@@ -25,12 +25,25 @@ export type RenderedContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; index: number };
 
+/** Token/cost rollup for one assistant turn. Mirrors the Web UI `UsageInfo`
+ *  so the client consumes it 1:1. `tokensIn` is the full input (base + both
+ *  cache buckets). */
+export interface RenderedUsage {
+  tokensIn: number;
+  tokensOut: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+  model?: string;
+}
+
 export interface RenderedMessage {
   seq: number;
   role: 'user' | 'assistant';
   content: string;
   blocks?: RenderedContentBlock[];
   toolCalls?: RenderedToolCall[];
+  usage?: RenderedUsage;
   created_at: string;
 }
 
@@ -103,6 +116,31 @@ function parseContent(raw: string): RawContentBlock[] | string {
   }
 }
 
+/** Parse the stored `usage_json` column into a `RenderedUsage`. Tolerant:
+ *  null / malformed / missing-fields all collapse to `undefined`, so a bad
+ *  row degrades to "no footer" instead of breaking the whole projection. */
+function parseUsage(raw: string | null): RenderedUsage | undefined {
+  if (!raw) return undefined;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (v === null || typeof v !== 'object') return undefined;
+    const u = v as Record<string, unknown>;
+    if (typeof u['tokensIn'] !== 'number') return undefined;
+    const num = (k: string): number => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+    const usage: RenderedUsage = {
+      tokensIn: u['tokensIn'],
+      tokensOut: num('tokensOut'),
+      cacheRead: num('cacheRead'),
+      cacheWrite: num('cacheWrite'),
+      costUsd: num('costUsd'),
+    };
+    if (typeof u['model'] === 'string') usage.model = u['model'];
+    return usage;
+  } catch {
+    return undefined;
+  }
+}
+
 export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage[] {
   const out: RenderedMessage[] = [];
   // Carries tool_use id → its RenderedToolCall, so later tool_result
@@ -143,17 +181,22 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     }
 
     // role === 'assistant'
+    const usage = parseUsage(r.usage_json);
     if (typeof content === 'string') {
-      out.push({
+      const msg: RenderedMessage = {
         seq: r.seq,
         role: 'assistant',
         content,
         created_at: r.created_at,
-      });
+      };
+      if (usage) msg.usage = usage;
+      out.push(msg);
       continue;
     }
     if (!Array.isArray(content)) {
-      out.push({ seq: r.seq, role: 'assistant', content: '', created_at: r.created_at });
+      const fallback: RenderedMessage = { seq: r.seq, role: 'assistant', content: '', created_at: r.created_at };
+      if (usage) fallback.usage = usage;
+      out.push(fallback);
       continue;
     }
 
@@ -188,6 +231,7 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     };
     if (blocks.length > 0) msg.blocks = blocks;
     if (toolCalls.length > 0) msg.toolCalls = toolCalls;
+    if (usage) msg.usage = usage;
     out.push(msg);
   }
 

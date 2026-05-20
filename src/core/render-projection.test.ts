@@ -9,6 +9,7 @@ function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
     seq,
     role,
     content_json: JSON.stringify(content),
+    usage_json: null,
     created_at: '2026-04-23T00:00:00Z',
   };
 }
@@ -182,5 +183,27 @@ describe('projectMessages', () => {
     expect(out[1]?.toolCalls?.[0]?.result).toBe('RA');
     // Third emitted (fifth in roles) got RB
     expect(out[4]?.toolCalls?.[0]?.result).toBe('RB');
+  });
+});
+
+describe('projectMessages — usage', () => {
+  it('attaches parsed usage to an assistant message', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', [{ type: 'text', text: 'hi' }]),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 5, cacheWrite: 0, costUsd: 0.01, model: 'sonnet' }),
+    };
+    const [msg] = projectMessages([r]);
+    expect(msg?.usage).toEqual({ tokensIn: 100, tokensOut: 20, cacheRead: 5, cacheWrite: 0, costUsd: 0.01, model: 'sonnet' });
+  });
+
+  it('leaves usage undefined when usage_json is null', () => {
+    const [msg] = projectMessages([rec(0, 'assistant', 'plain text')]);
+    expect(msg?.usage).toBeUndefined();
+  });
+
+  it('drops malformed usage_json instead of throwing', () => {
+    const r: ThreadMessageRecord = { ...rec(0, 'assistant', 'x'), usage_json: 'not-json' };
+    const [msg] = projectMessages([r]);
+    expect(msg?.usage).toBeUndefined();
   });
 });
