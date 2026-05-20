@@ -1439,6 +1439,12 @@
 		});
 	}
 
+	// Manual jump-to-newest, wired to the floating scroll-to-bottom button.
+	function scrollToBottom(): void {
+		autoScroll = true;
+		if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+	}
+
 	// Track streaming token churn and tool-call activity so the effect
 	// re-runs while the assistant is writing, not just when a turn ends.
 	const streamSignal = $derived.by(() => {
@@ -1459,6 +1465,43 @@
 				if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
 			});
 		}
+	});
+
+	// Jump to the newest message when a thread is opened (history click, or
+	// mount with a thread already resumed). The streamSignal effect above only
+	// reacts to live token churn, and markdown/artifacts grow scrollHeight
+	// asynchronously after the messages array is assigned — plus resumeThread()
+	// swaps local-cache messages for server data a few hundred ms later. So
+	// re-pin to the bottom every frame for a short window instead of once.
+	let lastOpenedThread: string | undefined;
+	let pinFrame: number | null = null;
+	let pinUntil = 0;
+
+	function pinToBottomStep(): void {
+		pinFrame = null;
+		if (!messagesEl || !autoScroll || performance.now() > pinUntil) return;
+		messagesEl.scrollTop = messagesEl.scrollHeight;
+		pinFrame = requestAnimationFrame(pinToBottomStep);
+	}
+
+	$effect(() => {
+		const tid = currentSessionId;
+		if (!tid || tid === lastOpenedThread) return;
+		lastOpenedThread = tid;
+		// A freshly opened thread re-engages auto-scroll even if the user had
+		// scrolled up in the previously viewed thread.
+		autoScroll = true;
+		pinUntil = performance.now() + 1200;
+		if (pinFrame === null) pinFrame = requestAnimationFrame(pinToBottomStep);
+		// Cancel the pin loop when the component unmounts or another thread is
+		// opened mid-pin, so a stale loop can't touch a torn-down node or
+		// extend the pin window onto the next thread.
+		return () => {
+			if (pinFrame !== null) {
+				cancelAnimationFrame(pinFrame);
+				pinFrame = null;
+			}
+		};
 	});
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -1608,7 +1651,10 @@
 {/snippet}
 
 <div class="flex h-full flex-col">
-	<!-- Messages -->
+	<!-- Messages — wrapped in a relative flex column so the floating
+	     scroll-to-bottom button can anchor to the viewport's lower-right
+	     without overlapping the composer below. -->
+	<div class="relative flex min-h-0 flex-1 flex-col">
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
@@ -2063,6 +2109,23 @@
 		</div>
 	</div>
 
+	{#if !autoScroll && messages.length > 0}
+		<!-- Appears once the user scrolls away from the newest message;
+		     onMessagesScroll keeps `autoScroll` in sync with scroll position. -->
+		<button
+			type="button"
+			onclick={scrollToBottom}
+			class="absolute bottom-3 right-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-bg text-text-muted shadow-lg transition-colors hover:border-border-hover hover:text-text"
+			aria-label={t('chat.scroll_to_bottom')}
+			title={t('chat.scroll_to_bottom')}
+		>
+			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+				<path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+			</svg>
+		</button>
+	{/if}
+	</div>
+
 	<!-- Pipeline progress: sticky above input during active execution only -->
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
@@ -2325,7 +2388,7 @@
 					<div class="mt-2 flex flex-wrap gap-1.5 pb-1">
 						{#each sessionArtifacts as a}
 							<a
-								href="/app/artifacts?focus={encodeURIComponent(a.id)}"
+								href="/app/artifacts?id={encodeURIComponent(a.id)}"
 								class="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] text-text-muted hover:text-text hover:border-accent/40 transition-all max-w-[20rem]"
 								title={a.title}
 							>
