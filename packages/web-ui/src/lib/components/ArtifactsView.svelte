@@ -15,6 +15,9 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	let selected = $state<Artifact | null>(null);
+	// True when `selected` was opened via the chat deep-link (?id=…) — drives
+	// the toolbar back button to return to the chat instead of the gallery.
+	let openedFromChat = $state(false);
 	let confirmDelete = $state<string | null>(null);
 	let deleteDialogRef = $state<HTMLDivElement | null>(null);
 	let deleteDialogTrigger: HTMLElement | null = null;
@@ -44,7 +47,7 @@
 			// re-open the same artifact. keepFocus avoids stealing focus from
 			// the about-to-mount preview dialog.
 			void goto('/app/artifacts', { replaceState: true, keepFocus: true, noScroll: true });
-			void openArtifact(match);
+			void openArtifact(match, true);
 		}
 	});
 
@@ -55,13 +58,23 @@
 		}
 	});
 
-	async function openArtifact(meta: ArtifactMeta) {
+	async function openArtifact(meta: ArtifactMeta, fromChat = false) {
 		const full = await getArtifact(meta.id);
-		if (full) selected = full;
+		if (full) {
+			openedFromChat = fromChat;
+			selected = full;
+		}
 	}
 
 	function closePreview() {
 		selected = null;
+	}
+
+	// Back action for the fullscreen preview: return to the chat when the
+	// artifact was deep-linked from there, otherwise close back to the gallery.
+	function goBack() {
+		if (openedFromChat) void goto('/app');
+		else closePreview();
 	}
 
 	async function handleDelete(id: string) {
@@ -115,7 +128,7 @@
 		function handleEscape(e: KeyboardEvent) {
 			if (e.key !== 'Escape') return;
 			if (confirmDelete) confirmDelete = null;
-			else if (selected) closePreview();
+			else if (selected) goBack();
 		}
 		window.addEventListener('keydown', handleEscape);
 		return () => window.removeEventListener('keydown', handleEscape);
@@ -201,7 +214,7 @@
 	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label={selected.title} style="padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);">
 		<!-- Toolbar -->
 		<div class="flex items-center gap-3 px-4 md:px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
-			<button type="button" class="text-text-muted hover:text-text text-sm p-1" onclick={closePreview}>← {t('artifacts.back')}</button>
+			<button type="button" class="text-text-muted hover:text-text text-sm p-1" onclick={goBack}>← {openedFromChat ? t('artifacts.back_to_chat') : t('artifacts.back')}</button>
 			<h2 class="text-sm font-medium text-text flex-1 truncate">{selected.title}</h2>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
 			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>Export</button>

@@ -19,6 +19,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'artifacts.confirm_delete': { de: 'Dieses Artifact wirklich löschen?', en: 'Delete this artifact?' },
 	'artifacts.back': { de: 'Zurück', en: 'Back' },
+	'artifacts.back_to_chat': { de: 'Zurück zum Chat', en: 'Back to chat' },
 	'artifacts.saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
 	'artifacts.saved_chip': { de: 'In Artefakten gespeichert', en: 'Saved to artifacts' },
 
@@ -72,24 +73,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'nav.inbox': { de: 'Inbox', en: 'Inbox' },
 	'nav.rail_pin': { de: 'Sidebar fixieren', en: 'Pin sidebar' },
 	'nav.rail_unpin': { de: 'Sidebar ausklappbar lassen', en: 'Unpin sidebar' },
-
-	// Mobile Bottom-Tab (PRD-IA-V2 P2-PR-E) — net-new component, 5 slots.
-	// Chat keeps position 1 (left-thumb invariant per Round-1 UX U5).
-	// "Mehr" opens a drawer with Hub / Artefakte / Settings / Logout so the
-	// 5-slot budget covers daily flows without forcing the user to memorize
-	// where less-frequent surfaces live.
-	'mobile_nav.aria_label':   { de: 'Mobile Navigation', en: 'Mobile navigation' },
-	'mobile_nav.chat':         { de: 'Chat',         en: 'Chat' },
-	'mobile_nav.inbox':        { de: 'Inbox',        en: 'Inbox' },
-	'mobile_nav.activity':     { de: 'Aktivität',    en: 'Activity' },
-	'mobile_nav.intelligence': { de: 'Intelligence', en: 'Intelligence' },
-	'mobile_nav.more':         { de: 'Mehr',         en: 'More' },
-	'mobile_nav.drawer.hub':       { de: 'Automation',    en: 'Automation' },
-	'mobile_nav.drawer.artifacts': { de: 'Artefakte',     en: 'Artifacts' },
-	'mobile_nav.drawer.settings':  { de: 'Einstellungen', en: 'Settings' },
-	'mobile_nav.drawer.logout':    { de: 'Abmelden',      en: 'Log out' },
-	'mobile_nav.drawer.title':     { de: 'Weitere Bereiche', en: 'More sections' },
-	'mobile_nav.drawer.close':     { de: 'Menü schließen',  en: 'Close menu' },
 
 	// Hub tabs
 	'hub.intelligence.wissen': { de: 'Wissen', en: 'Knowledge' },
@@ -689,6 +672,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.speak': { de: 'Antwort vorlesen', en: 'Read aloud' },
 	'chat.speak_synthesizing': { de: 'Wird erzeugt…', en: 'Synthesizing…' },
 	'chat.stop_speaking': { de: 'Wiedergabe stoppen', en: 'Stop playback' },
+	'chat.scroll_to_bottom': { de: 'Nach unten scrollen', en: 'Scroll to bottom' },
 	'chat.speak_failed_unavailable': { de: 'Vorlesen nicht verfügbar — der Server hat keinen MISTRAL_API_KEY oder dieser ist abgelaufen.', en: 'Voice unavailable — server is missing MISTRAL_API_KEY or it expired.' },
 	'chat.speak_failed_too_long': { de: 'Vorlesen fehlgeschlagen — Text zu lang (max. 10 000 Zeichen).', en: 'Voice failed — text too long (max 10 000 characters).' },
 	'chat.speak_failed_http': { de: 'Vorlesen fehlgeschlagen — Server-Fehler', en: 'Voice failed — server error' },
