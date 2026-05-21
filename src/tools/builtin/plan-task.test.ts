@@ -7,25 +7,6 @@ vi.mock('../../core/dag-planner.js', () => ({
   estimatePipelineCost: vi.fn().mockReturnValue({ steps: [], totalCostUsd: 0.02 }),
 }));
 
-// Mock the orchestrated dispatch — keep the rest of pipeline.js real so the
-// in-memory pipeline store (storePipeline / getPipeline / _resetPipelineStore)
-// still works. This lets the routing tests assert which path a plan took
-// without actually spinning up runManifest sub-agents.
-const mockDispatchOrchestratedPipeline = vi.fn();
-vi.mock('./pipeline.js', async () => {
-  const actual = await vi.importActual<typeof import('./pipeline.js')>('./pipeline.js');
-  return {
-    ...actual,
-    dispatchOrchestratedPipeline: (...args: unknown[]) => mockDispatchOrchestratedPipeline(...args),
-  };
-});
-
-// Mock startTrackedPlan so tests can assert tracked-vs-orchestrated routing.
-const mockStartTrackedPlan = vi.fn();
-vi.mock('../../core/plan-tracker.js', () => ({
-  startTrackedPlan: (...args: unknown[]) => mockStartTrackedPlan(...args),
-}));
-
 import { planTaskTool, phasesToPipelineSteps } from './plan-task.js';
 import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
@@ -49,10 +30,6 @@ function makeAgent(overrides: Partial<IAgent> = {}, userConfig: LynoxUserConfig 
 beforeEach(() => {
   _resetPipelineStore();
   vi.clearAllMocks();
-  // Default: the orchestrated dispatch resolves with a formatted result string.
-  mockDispatchOrchestratedPipeline.mockResolvedValue(
-    JSON.stringify({ status: 'completed', steps: [], totalCostUsd: 0.01 }),
-  );
 });
 
 describe('planTaskTool', () => {
@@ -205,9 +182,9 @@ describe('planTaskTool', () => {
     expect(question).toContain('Shall I proceed?');
   });
 
-  // --- Pipeline bridge ---
+  // --- Workflow bridge (D4 — decoupled: plan_task never executes) ---
 
-  it('should create pipeline on phased plan approval', async () => {
+  it('should create a stored workflow on phased plan approval', async () => {
     const promptUser = vi.fn().mockResolvedValue('Proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
@@ -221,18 +198,18 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const parsed = JSON.parse(result) as { approved: boolean; pipeline_id: string };
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
     expect(parsed.approved).toBe(true);
-    expect(parsed.pipeline_id).toBeDefined();
+    expect(parsed.workflow_id).toBeDefined();
 
-    const pipeline = getPipeline(parsed.pipeline_id);
+    const pipeline = getPipeline(parsed.workflow_id);
     expect(pipeline).toBeDefined();
     expect(pipeline!.goal).toBe('Build quarterly report');
     expect(pipeline!.steps).toHaveLength(2);
     expect(pipeline!.steps[1]!.input_from).toEqual(['fetch-data']);
   });
 
-  it('should not create pipeline for flat steps', async () => {
+  it('should not create a workflow for flat steps', async () => {
     const promptUser = vi.fn().mockResolvedValue('Proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
@@ -242,10 +219,10 @@ describe('planTaskTool', () => {
 
     const parsed = JSON.parse(result) as Record<string, unknown>;
     expect(parsed.approved).toBe(true);
-    expect(parsed).not.toHaveProperty('pipeline_id');
+    expect(parsed).not.toHaveProperty('workflow_id');
   });
 
-  it('should not create pipeline on cancel', async () => {
+  it('should not create a workflow on cancel', async () => {
     const promptUser = vi.fn().mockResolvedValue('Cancel');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
@@ -258,7 +235,7 @@ describe('planTaskTool', () => {
 
     const parsed = JSON.parse(result) as Record<string, unknown>;
     expect(parsed.approved).toBe(false);
-    expect(parsed).not.toHaveProperty('pipeline_id');
+    expect(parsed).not.toHaveProperty('workflow_id');
   });
 
   it('should list user steps in response', async () => {
@@ -276,13 +253,13 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const parsed = JSON.parse(result) as { approved: boolean; pipeline_id: string; user_steps: string[] };
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string; user_steps: string[] };
     expect(parsed.approved).toBe(true);
-    expect(parsed.pipeline_id).toBeDefined();
+    expect(parsed.workflow_id).toBeDefined();
     expect(parsed.user_steps).toEqual(['Review findings']);
   });
 
-  it('should auto-approve with pipeline in non-interactive context', async () => {
+  it('should auto-approve with a stored workflow in non-interactive context', async () => {
     const agent = makeAgent({ promptUser: undefined });
     const result = await planTaskTool.handler(
       {
@@ -295,19 +272,19 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const parsed = JSON.parse(result) as { approved: boolean; pipeline_id: string };
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
     expect(parsed.approved).toBe(true);
-    expect(parsed.pipeline_id).toBeDefined();
+    expect(parsed.workflow_id).toBeDefined();
   });
 });
 
-describe('plan_task — O7 orchestrated routing', () => {
-  it('routes a ≥3-independent-step plan to the orchestrated runner', async () => {
+describe('plan_task — decoupled from execution (D4/D9)', () => {
+  it('never executes — returns only { approved, workflow_id } on approval', async () => {
     const promptUser = vi.fn().mockResolvedValue('Proceed');
     const agent = makeAgent({ promptUser });
     const result = await planTaskTool.handler(
       {
-        summary: 'Fetch three APIs in parallel',
+        summary: 'Fetch three APIs',
         phases: [
           { name: 'Fetch API one', steps: ['call A'] },
           { name: 'Fetch API two', steps: ['call B'] },
@@ -319,45 +296,18 @@ describe('plan_task — O7 orchestrated routing', () => {
 
     const parsed = JSON.parse(result) as Record<string, unknown>;
     expect(parsed['approved']).toBe(true);
-    expect(parsed['orchestrated']).toBe(true);
-    expect(parsed['tracked']).toBe(false);
-    expect(parsed['pipeline_id']).toBeDefined();
-    expect(parsed['result']).toBeDefined();
-    // Orchestrated path dispatches via runManifest, NOT startTrackedPlan.
-    expect(mockDispatchOrchestratedPipeline).toHaveBeenCalledOnce();
-    expect(mockStartTrackedPlan).not.toHaveBeenCalled();
-
-    // The stored pipeline records the orchestrated execution mode.
-    const pipeline = getPipeline(parsed['pipeline_id'] as string);
-    expect(pipeline!.executionMode).toBe('orchestrated');
+    expect(parsed['workflow_id']).toBeDefined();
+    // No execution-mode flags leak onto the agent surface anymore (D9).
+    expect(parsed).not.toHaveProperty('tracked');
+    expect(parsed).not.toHaveProperty('orchestrated');
+    expect(parsed).not.toHaveProperty('result');
+    expect(parsed).not.toHaveProperty('orchestration_fallback');
   });
 
-  it('routes a plan with a cheap-tier step to the orchestrated runner', async () => {
+  it('stores the workflow with executionMode always "orchestrated"', async () => {
     const promptUser = vi.fn().mockResolvedValue('Proceed');
     const agent = makeAgent({ promptUser });
-    // Only 2 sequential steps — fails the count rule — but one is haiku.
-    const result = await planTaskTool.handler(
-      {
-        summary: 'Format a small report',
-        phases: [
-          { name: 'Gather data', steps: ['query'] },
-          { name: 'Format output', steps: ['format'], model: 'haiku', depends_on: ['Gather data'] },
-        ],
-      },
-      agent,
-    );
-
-    const parsed = JSON.parse(result) as Record<string, unknown>;
-    expect(parsed['orchestrated']).toBe(true);
-    expect(parsed['tracked']).toBe(false);
-    expect(mockDispatchOrchestratedPipeline).toHaveBeenCalledOnce();
-    expect(mockStartTrackedPlan).not.toHaveBeenCalled();
-  });
-
-  it('keeps a small sequential plan on the tracked path (no regression)', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
-    const agent = makeAgent({ promptUser });
-    // 2 steps, sequential, no cheap tier → tracked.
+    // A small, sequential, non-cheap-tier plan — historically "tracked".
     const result = await planTaskTool.handler(
       {
         summary: 'Two-step sequential plan',
@@ -369,20 +319,12 @@ describe('plan_task — O7 orchestrated routing', () => {
       agent,
     );
 
-    const parsed = JSON.parse(result) as Record<string, unknown>;
-    expect(parsed['approved']).toBe(true);
-    expect(parsed['tracked']).toBe(true);
-    expect(parsed['orchestrated']).toBeUndefined();
-    expect(parsed['result']).toBeUndefined();
-    // Tracked path arms startTrackedPlan, NOT the orchestrated runner.
-    expect(mockStartTrackedPlan).toHaveBeenCalledOnce();
-    expect(mockDispatchOrchestratedPipeline).not.toHaveBeenCalled();
-
-    const pipeline = getPipeline(parsed['pipeline_id'] as string);
-    expect(pipeline!.executionMode).toBe('tracked');
+    const parsed = JSON.parse(result) as { workflow_id: string };
+    const pipeline = getPipeline(parsed.workflow_id);
+    expect(pipeline!.executionMode).toBe('orchestrated');
   });
 
-  it('routes orchestrated plans in the non-interactive auto-approve path too', async () => {
+  it('decouples in the non-interactive auto-approve path too', async () => {
     const agent = makeAgent({ promptUser: undefined });
     const result = await planTaskTool.handler(
       {
@@ -397,16 +339,17 @@ describe('plan_task — O7 orchestrated routing', () => {
     );
 
     const parsed = JSON.parse(result) as Record<string, unknown>;
-    expect(parsed['orchestrated']).toBe(true);
-    expect(parsed['tracked']).toBe(false);
-    expect(mockDispatchOrchestratedPipeline).toHaveBeenCalledOnce();
-    expect(mockStartTrackedPlan).not.toHaveBeenCalled();
+    expect(parsed['approved']).toBe(true);
+    expect(parsed['workflow_id']).toBeDefined();
+    expect(parsed).not.toHaveProperty('tracked');
+    expect(parsed).not.toHaveProperty('orchestrated');
+    expect(parsed).not.toHaveProperty('result');
   });
 
-  it('does not dispatch or track when the plan is canceled', async () => {
+  it('does not create a workflow when the plan is canceled', async () => {
     const promptUser = vi.fn().mockResolvedValue('Cancel');
     const agent = makeAgent({ promptUser });
-    await planTaskTool.handler(
+    const result = await planTaskTool.handler(
       {
         summary: 'Canceled parallel plan',
         phases: [
@@ -418,38 +361,9 @@ describe('plan_task — O7 orchestrated routing', () => {
       agent,
     );
 
-    expect(mockDispatchOrchestratedPipeline).not.toHaveBeenCalled();
-    expect(mockStartTrackedPlan).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the tracked path when orchestrated dispatch fails', async () => {
-    // A failed dispatch returns an `Error: …` string — the approved plan must
-    // still run (tracked), never silently no-op.
-    mockDispatchOrchestratedPipeline.mockResolvedValueOnce(
-      'Error: Pipeline execution failed: boom',
-    );
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
-    const agent = makeAgent({ promptUser });
-    const result = await planTaskTool.handler(
-      {
-        summary: 'Three independent checks that fail to dispatch',
-        phases: [
-          { name: 'Check A', steps: ['ping A'] },
-          { name: 'Check B', steps: ['ping B'] },
-          { name: 'Check C', steps: ['ping C'] },
-        ],
-      },
-      agent,
-    );
-
     const parsed = JSON.parse(result) as Record<string, unknown>;
-    expect(parsed['approved']).toBe(true);
-    expect(parsed['orchestrated']).toBe(false);
-    expect(parsed['tracked']).toBe(true);
-    expect(parsed['orchestration_fallback']).toBe('Error: Pipeline execution failed: boom');
-    // The plan still runs — tracked path armed after the dispatch failure.
-    expect(mockDispatchOrchestratedPipeline).toHaveBeenCalledOnce();
-    expect(mockStartTrackedPlan).toHaveBeenCalledOnce();
+    expect(parsed['approved']).toBe(false);
+    expect(parsed).not.toHaveProperty('workflow_id');
   });
 });
 
@@ -564,12 +478,12 @@ describe('plan_task auto-planning fallback', () => {
       agent,
     );
 
-    const parsed = JSON.parse(result) as { approved: boolean; pipeline_id: string };
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
     expect(parsed.approved).toBe(true);
-    expect(parsed.pipeline_id).toBeDefined();
+    expect(parsed.workflow_id).toBeDefined();
     expect(mockPlanDAG).toHaveBeenCalledOnce();
 
-    const pipeline = getPipeline(parsed.pipeline_id);
+    const pipeline = getPipeline(parsed.workflow_id);
     expect(pipeline).toBeDefined();
     expect(pipeline!.steps).toHaveLength(2);
     expect(pipeline!.steps[1]!.input_from).toEqual(['research']);
@@ -587,7 +501,7 @@ describe('plan_task auto-planning fallback', () => {
 
     const parsed = JSON.parse(result) as { approved: boolean };
     expect(parsed.approved).toBe(true);
-    expect(parsed).not.toHaveProperty('pipeline_id');
+    expect(parsed).not.toHaveProperty('workflow_id');
   });
 
   it('should skip auto-plan when no API key configured', async () => {
@@ -614,7 +528,7 @@ describe('plan_task auto-planning fallback', () => {
     );
 
     expect(mockPlanDAG).not.toHaveBeenCalled();
-    const parsed = JSON.parse(result) as { approved: boolean; pipeline_id: string };
-    expect(parsed.pipeline_id).toBeDefined();
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
+    expect(parsed.workflow_id).toBeDefined();
   });
 });

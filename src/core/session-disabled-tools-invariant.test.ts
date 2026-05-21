@@ -161,7 +161,6 @@ vi.mock('../tools/builtin/index.js', () => ({
   setTaskManager: vi.fn(),
   planTaskTool: { definition: { name: 'plan_task' }, handler: vi.fn() },
   saveWorkflowTool: { definition: { name: 'save_workflow' }, handler: vi.fn() },
-  stepCompleteTool: { definition: { name: 'step_complete' }, handler: vi.fn() },
   setProcessConfig: vi.fn(),
   apiSetupTool: { definition: { name: 'api_setup' }, handler: vi.fn() },
   dataStoreCreateTool: { definition: { name: 'data_store_create' }, handler: vi.fn() },

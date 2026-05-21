@@ -29,6 +29,7 @@ import {
   storePipeline,
   getPipeline,
   _resetPipelineStore,
+  _summarizeStepOutput,
 } from './pipeline.js';
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
@@ -750,5 +751,28 @@ describe('getPipeline — legacy mode backfill', () => {
     getPipeline(pipelineId, fakeRunHistory as never);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
+  });
+});
+
+// --- Per-step summary plumb (A2/U1/R1) ---
+describe('_summarizeStepOutput', () => {
+  it('takes the first non-empty line and collapses whitespace', () => {
+    expect(_summarizeStepOutput('  Fetched 12 records\n\nmore detail'))
+      .toBe('Fetched 12 records');
+  });
+
+  it('collapses internal runs of whitespace', () => {
+    expect(_summarizeStepOutput('Did\t\tthe   thing')).toBe('Did the thing');
+  });
+
+  it('returns an empty string for blank output', () => {
+    expect(_summarizeStepOutput('   \n  \n')).toBe('');
+  });
+
+  it('truncates a long first line with an ellipsis', () => {
+    const long = 'x'.repeat(400);
+    const summary = _summarizeStepOutput(long);
+    expect(summary.length).toBe(160);
+    expect(summary.endsWith('…')).toBe(true);
   });
 });

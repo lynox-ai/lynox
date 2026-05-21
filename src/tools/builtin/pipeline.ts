@@ -125,6 +125,28 @@ function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'st
   };
 }
 
+/** Max characters for the per-step summary surfaced on the live checklist. */
+const STEP_SUMMARY_MAX = 160;
+
+/**
+ * Condense a step's raw output into a one-line summary for the live progress
+ * checklist. Collapses whitespace, takes the first non-empty line, and caps
+ * the length — the structured checklist widget is the single progress surface
+ * (D9), so this carries what the removed `step_complete` narration used to.
+ *
+ * Exported for unit testing (`_` prefix marks it test-only, like
+ * `_resetPipelineStore`).
+ */
+export function _summarizeStepOutput(result: string): string {
+  const firstLine = result
+    .split('\n')
+    .map(l => l.trim())
+    .find(l => l.length > 0) ?? '';
+  const collapsed = firstLine.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= STEP_SUMMARY_MAX) return collapsed;
+  return `${collapsed.slice(0, STEP_SUMMARY_MAX - 1)}…`;
+}
+
 function buildProgressHooks(pipelineStreamHandler: StreamHandler | null, manifest?: Manifest): RunHooks {
   const handler = pipelineStreamHandler;
   if (!handler) return {};
@@ -181,7 +203,12 @@ function buildProgressHooks(pipelineStreamHandler: StreamHandler | null, manifes
       stopHeartbeat(output.stepId);
       void handler({
         type: 'pipeline_progress', stepId: output.stepId, status: 'completed',
-        durationMs: output.durationMs, agent: 'pipeline',
+        durationMs: output.durationMs,
+        // Per-step summary for the live checklist (R1) — a one-line condensation
+        // of the step's output. Replaces the inline narration the removed
+        // `step_complete` tool used to echo into the message stream.
+        summary: _summarizeStepOutput(output.result),
+        agent: 'pipeline',
       });
     },
     onStepSkipped: (stepId: string, reason: string) => {
