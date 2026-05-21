@@ -205,6 +205,30 @@ describe('SYSTEM_PROMPT doc-research hard rules', () => {
   });
 });
 
+// Operator-channel regression-pin (PRD-AGENT-EFFICIENCY §7.1.1): the agent
+// had NO explicit operator-channel knowledge in SYSTEM_PROMPT and so
+// hallucinated "Telegram" — a channel removed 2026-05-15. The new
+// "Operator channels" block names the real surfaces and explicitly denies
+// the non-existent ones. These assertions are the proof for the "agent
+// never offers Telegram / correctly names its channels" acceptance.
+describe('SYSTEM_PROMPT operator channels', () => {
+  it('names the real operator channels (chat, web-push, ask_user, mail_send)', () => {
+    expect(SYSTEM_PROMPT).toMatch(/operator channels/i);
+    // Background/async alerts go through web-push notifications.
+    expect(SYSTEM_PROMPT).toMatch(/web-push|notification/i);
+    // ask_user is the blocking-question channel.
+    expect(SYSTEM_PROMPT).toContain('ask_user');
+    // Email is reachable only via the mail_send tool.
+    expect(SYSTEM_PROMPT).toContain('mail_send');
+  });
+
+  it('does NOT mention Telegram (removed 2026-05-15 — hallucination guard)', () => {
+    // Case-insensitive: the literal failure mode was the agent offering
+    // "Telegram" to a user. The string must not appear in any casing.
+    expect(SYSTEM_PROMPT).not.toMatch(/telegram/i);
+  });
+});
+
 // Fix C regression-pin (v1.5.2): SYSTEM_PROMPT alone does not anchor model
 // identity, so a Mistral/Custom model can hallucinate "I am Claude Haiku"
 // from training-data bias. modelIdentityContext is the injection point —
