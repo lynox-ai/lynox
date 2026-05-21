@@ -4,8 +4,8 @@
 	 *  one consistent, living presence wherever it is working — never a
 	 *  generic spinner. */
 	interface Props {
-		/** Drives the state-coupled animation. `thinking`, `transcribing`
-		 *  and `idle` all share the base breathing motion. */
+		/** Drives the state-coupled animation. `thinking` and `idle` share
+		 *  the base breathing motion; `transcribing` gets a bolder pulse. */
 		state: 'thinking' | 'tool' | 'writing' | 'transcribing' | 'idle';
 	}
 
@@ -19,8 +19,8 @@
 	   baked-in spring (overshoot, then settle) gives each state weight, so
 	   it reads as alive rather than mechanical. transform-origin sits near
 	   the base so the icon squashes onto its "feet". The base breathing
-	   covers thinking / transcribing / idle — whenever the icon is shown
-	   the agent is working, so it never sits fully still. */
+	   covers thinking and idle — whenever the icon is shown the agent is
+	   working, so it never sits fully still. */
 	.agent-presence {
 		display: inline-block;
 		height: 1.125rem;
@@ -39,6 +39,13 @@
 	.agent-presence.writing {
 		animation: lynox-nod 0.62s ease-in-out infinite;
 	}
+	/* transcribing — a bold, lively squash-pulse. Voice processing is a
+	   brief, active moment, so it gets a deliberately larger + faster
+	   motion than the calm thinking breath — it must read as unmistakably
+	   animated in the second or two it is on screen. */
+	.agent-presence.transcribing {
+		animation: lynox-listen 0.9s ease-in-out infinite;
+	}
 	@keyframes lynox-breathe {
 		0%, 100% { transform: scaleX(1.03) scaleY(0.97); }
 		50% { transform: scaleX(0.98) scaleY(1.05) translateY(-1.5px); }
@@ -55,6 +62,10 @@
 		0%, 100% { transform: scaleX(1) scaleY(1) translateY(0); }
 		35% { transform: scaleX(1.07) scaleY(0.89) translateY(2px); }
 		62% { transform: scaleX(0.98) scaleY(1.04) translateY(-1.5px); }
+	}
+	@keyframes lynox-listen {
+		0%, 100% { transform: scaleX(1.1) scaleY(0.9); }
+		50% { transform: scaleX(0.9) scaleY(1.12) translateY(-2px); }
 	}
 	/* Accessibility: no motion when the user asked the OS to reduce it. */
 	@media (prefers-reduced-motion: reduce) {
