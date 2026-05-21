@@ -285,10 +285,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   const steps = input.steps!;
 
   if (steps.length === 0) {
-    return 'Error: Pipeline must have at least one step.';
+    return 'Error: Workflow must have at least one step.';
   }
   if (steps.length > MAX_STEPS) {
-    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
+    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
   }
 
   // Validate unique IDs
@@ -336,7 +336,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
-    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
@@ -406,21 +406,21 @@ export async function dispatchOrchestratedPipeline(
   // executePipelineById guard so the dispatch fails fast with a clear error
   // rather than throwing "ask_user is not set" deep inside a step.
   if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
-    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
+    return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
   if (planned.executed) {
-    return `Error: Pipeline "${planned.id}" has already been executed.`;
+    return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
   if (steps.length === 0) {
-    return 'Error: Pipeline has no steps to execute.';
+    return 'Error: Workflow has no steps to execute.';
   }
   if (steps.length > MAX_STEPS) {
-    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps.`;
+    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
   }
 
   try {
@@ -446,7 +446,7 @@ export async function dispatchOrchestratedPipeline(
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     planned.executed = false; // Allow retry on validation errors
-    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
@@ -460,7 +460,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // clear error rather than running steps that will throw "ask_user is not
   // set" deep in the run.
   if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
-    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
+    return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
@@ -486,12 +486,12 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
-      return `Error: Pipeline retry failed: ${getErrorMessage(err)}`;
+      return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
     }
   }
 
   if (planned.executed) {
-    return `Error: Pipeline "${planned.id}" has already been executed.`;
+    return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
   // Deep copy steps for modification
@@ -507,7 +507,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   }
 
   if (steps.length > MAX_STEPS) {
-    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps.`;
+    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
   }
 
   try {
@@ -538,7 +538,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     planned.executed = false; // Allow retry on validation errors
-    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
@@ -621,7 +621,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     const pipelineStreamHandler = agent.toolContext.streamHandler;
     const pipelineRunHistory = agent.toolContext.runHistory;
     if (!pipelineConfig) {
-      return 'Error: Pipeline config not initialized. Pipeline tools are not available.';
+      return 'Error: Workflow config not initialized. Workflow tools are not available.';
     }
 
     if (pipelineTools.length === 0) {

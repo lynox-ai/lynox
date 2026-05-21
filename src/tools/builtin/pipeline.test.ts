@@ -116,7 +116,7 @@ describe('run_workflow — inline steps', () => {
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       makePipelineAgent({ config: null }),
     );
-    expect(result).toBe('Error: Pipeline config not initialized. Pipeline tools are not available.');
+    expect(result).toBe('Error: Workflow config not initialized. Workflow tools are not available.');
   });
 
   it('returns error when no parent tools', async () => {
@@ -151,7 +151,7 @@ describe('run_workflow — inline steps', () => {
       { name: 'test', steps: [] },
       agent,
     );
-    expect(result).toBe('Error: Pipeline must have at least one step.');
+    expect(result).toBe('Error: Workflow must have at least one step.');
   });
 
   it('returns error when steps exceed MAX_STEPS (20)', async () => {
@@ -161,7 +161,7 @@ describe('run_workflow — inline steps', () => {
       { name: 'test', steps },
       agent,
     );
-    expect(result).toBe('Error: Pipeline exceeds maximum of 20 steps (got 21).');
+    expect(result).toBe('Error: Workflow exceeds maximum of 20 steps (got 21).');
   });
 
   it('returns error for duplicate step IDs', async () => {
@@ -299,7 +299,7 @@ describe('run_workflow — inline steps', () => {
       agent,
     );
 
-    expect(result).toContain('Error: Pipeline execution failed: Cycle detected in DAG');
+    expect(result).toContain('Error: Workflow execution failed: Cycle detected in DAG');
   });
 
   it('builds manifest with v1.1 and inline runtime', async () => {
@@ -353,7 +353,7 @@ describe('run_workflow — inline steps', () => {
       agent,
     );
 
-    expect(result).toBe('Error: Pipeline execution failed: Agent crashed');
+    expect(result).toBe('Error: Workflow execution failed: Agent crashed');
   });
 });
 
@@ -589,7 +589,7 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
       { workflow_id: pipelineId },
       agent,
     );
-    expect(firstResult).toContain('Error: Pipeline execution failed');
+    expect(firstResult).toContain('Error: Workflow execution failed');
 
     // Second attempt should work (executed flag reset to false on error)
     mockValidateManifest.mockImplementation((m: unknown) => m);
