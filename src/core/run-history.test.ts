@@ -687,12 +687,16 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('renamePlannedPipeline updates manifest_name and returns true', () => {
+    it('renamePlannedPipeline updates manifest_name AND manifest_json name', () => {
       const h = createHistory();
       insertPlanned(h, 'plan-rn', 'old name');
       expect(h.renamePlannedPipeline('plan-rn', 'new name')).toBe(true);
       const [row] = h.getPlannedPipelines(10);
       expect(row!.manifest_name).toBe('new name');
+      // The name also lives inside manifest_json — the library list and
+      // getPipeline's SQLite fallback prefer it, so the rename must propagate
+      // there too, else it is a visible no-op.
+      expect((JSON.parse(row!.manifest_json) as { name: string }).name).toBe('new name');
       h.close();
     });
 

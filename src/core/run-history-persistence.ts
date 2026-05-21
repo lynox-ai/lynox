@@ -492,11 +492,16 @@ export function getPlannedPipelines(db: Database.Database, limit = 100): Array<{
   }>;
 }
 
-/** Rename a planned pipeline's display name (`manifest_name`). */
+/**
+ * Rename a planned pipeline's display name. The name lives in TWO places — the
+ * `manifest_name` column AND the serialized `PlannedPipeline.name` inside
+ * `manifest_json` (which the library list and `getPipeline`'s SQLite fallback
+ * both prefer). Both are patched together so a rename actually propagates.
+ */
 export function renamePlannedPipeline(db: Database.Database, id: string, name: string): boolean {
   const res = db.prepare(
-    "UPDATE pipeline_runs SET manifest_name = ? WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
-  ).run(name, id, `${id}%`);
+    "UPDATE pipeline_runs SET manifest_name = ?, manifest_json = json_set(manifest_json, '$.name', ?) WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
+  ).run(name, name, id, `${id}%`);
   return res.changes > 0;
 }
 

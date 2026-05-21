@@ -2852,7 +2852,10 @@ export class LynoxHTTPApi {
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '100', 10) || 100, 1), 500);
-      const rows = history.getPlannedPipelines(limit);
+      // Over-fetch: the `template` filter runs app-layer below, so a plain
+      // LIMIT would let non-template planned rows (un-run plans) starve the
+      // result. Scan a generous fixed window, then slice to `limit`.
+      const rows = history.getPlannedPipelines(500);
       const workflows: Array<{ id: string; name: string; description: string; step_count: number; created_at: string }> = [];
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
@@ -2868,7 +2871,7 @@ export class LynoxHTTPApi {
           created_at: row.started_at,
         });
       }
-      jsonResponse(res, 200, { workflows });
+      jsonResponse(res, 200, { workflows: workflows.slice(0, limit) });
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params) => {
@@ -2892,6 +2895,9 @@ export class LynoxHTTPApi {
       const name = (body as Record<string, unknown>)['name'];
       if (typeof name !== 'string' || name.trim().length === 0) {
         errorResponse(res, 400, 'name is required'); return;
+      }
+      if (name.trim().length > 200) {
+        errorResponse(res, 400, 'name too long (max 200 characters)'); return;
       }
       const renamed = history.renamePlannedPipeline(params['id']!, name.trim());
       if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }
