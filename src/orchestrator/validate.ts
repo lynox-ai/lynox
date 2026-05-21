@@ -127,7 +127,7 @@ export class AutonomousPipelineViolation extends Error {
  * and any step references ask_user / ask_secret / ask_human. Interactive
  * pipelines are unrestricted.
  *
- * Called by plan_task, promote_process, the future Workflows editor save
+ * Called by plan_task, save_workflow, the future Workflows editor save
  * endpoint, and again at WorkerLoop scheduler-registration time.
  */
 export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode): void {

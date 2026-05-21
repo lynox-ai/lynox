@@ -153,8 +153,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   taskListTool: { definition: { name: 'task_list' }, handler: vi.fn() },
   setTaskManager: vi.fn(),
   planTaskTool: { definition: { name: 'plan_task' }, handler: vi.fn() },
-  captureProcessTool: { definition: { name: 'capture_process' }, handler: vi.fn() },
-  promoteProcessTool: { definition: { name: 'promote_process' }, handler: vi.fn() },
+  saveWorkflowTool: { definition: { name: 'save_workflow' }, handler: vi.fn() },
   stepCompleteTool: { definition: { name: 'step_complete' }, handler: vi.fn() },
   setProcessConfig: vi.fn(),
   apiSetupTool: { definition: { name: 'api_setup' }, handler: vi.fn() },
@@ -353,9 +352,9 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 33 builtin always; +5 mail tools when vault is available.
+      // 32 builtin always; +5 mail tools when vault is available.
       // WhatsApp is gated behind LYNOX_FEATURE_WHATSAPP_INBOX (off in tests).
-      expect([33, 38]).toContain(mockRegister.mock.calls.length);
+      expect([32, 37]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -425,9 +424,9 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 33 builtin always; +5 mail tools when vault is available.
+      // 32 builtin always; +5 mail tools when vault is available.
       // WhatsApp is gated behind LYNOX_FEATURE_WHATSAPP_INBOX (off in tests).
-      expect([33, 38]).toContain(mockRegister.mock.calls.length);
+      expect([32, 37]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

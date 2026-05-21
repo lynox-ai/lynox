@@ -584,7 +584,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         },
         workflow_id: {
           type: 'string',
-          description: 'ID of a stored workflow to execute (from plan_task or promote_process)',
+          description: 'ID of a stored workflow to execute (from plan_task or save_workflow)',
         },
         on_failure: {
           type: 'string',

@@ -56,8 +56,7 @@ import {
   dataStoreListTool,
   dataStoreDeleteTool,
   dataStoreDropTool,
-  captureProcessTool,
-  promoteProcessTool,
+  saveWorkflowTool,
   stepCompleteTool,
   apiSetupTool,
   artifactSaveTool,
@@ -1022,8 +1021,7 @@ export class Engine {
     this.registry
       .register(runWorkflowTool)
       .register(stepCompleteTool)
-      .register(captureProcessTool)
-      .register(promoteProcessTool);
+      .register(saveWorkflowTool);
     // Update tool context with pipeline dependencies
     this._toolContext.tools = this.registry.getEntries();
     this._toolContext.runHistory = this.runHistory ?? null;
