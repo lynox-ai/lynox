@@ -214,7 +214,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'activity.kind.voice_tts': { de: 'Sprachausgabe (TTS)',  en: 'Voice output (TTS)' },
 	'activity.kind.voice_stt': { de: 'Spracheingabe (STT)',  en: 'Voice input (STT)' },
 	'activity.projection.warning': { de: 'Beim aktuellen Tempo ist das Budget in {days} Tagen aufgebraucht.', en: 'At the current pace your budget is exhausted in {days} days.' },
-	'activity.workflows.subtitle':       { de: 'Aggregierte Pipeline-Kosten. Klicke „Pro Schritt", um die Schritt-Aufschlüsselung im Hub-Builder zu öffnen.', en: 'Aggregated pipeline costs. Click "Per step" to open the step-level breakdown in the Hub builder.' },
+	'activity.workflows.subtitle':       { de: 'Aggregierte Workflow-Kosten. Klicke „Pro Schritt", um die Schritt-Aufschlüsselung im Hub-Builder zu öffnen.', en: 'Aggregated workflow costs. Click "Per step" to open the step-level breakdown in the Hub builder.' },
 	'activity.workflows.avg_label':      { de: 'Ø Dauer',     en: 'Avg duration' },
 	'activity.workflows.per_step_link':  { de: 'Pro Schritt →', en: 'Per step →' },
 	// Empty-state (PRD-IA-V2 P2-PR-A spec) — same heading + CTA across all 3
@@ -223,7 +223,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'activity.empty.description':            { de: 'Starte einen Chat oder einen Workflow, um zu sehen, was lynox für dich tut.', en: 'Start a chat or a workflow to see what lynox is doing for you.' },
 	'activity.empty.cta':                    { de: '→ Chat',                        en: '→ Chat' },
 	'activity.empty.history.description':    { de: 'Hier erscheinen abgeschlossene Runs, sobald der Agent zum ersten Mal gelaufen ist.', en: 'Completed runs show up here once the agent has run at least once.' },
-	'activity.empty.workflows.description':  { de: 'Hier sammeln sich Pipeline-Läufe mit Kosten und Dauer, sobald der erste Workflow ausgeführt wurde.', en: 'Pipeline runs with cost and duration land here once you execute your first workflow.' },
+	'activity.empty.workflows.description':  { de: 'Hier sammeln sich Workflow-Läufe mit Kosten und Dauer, sobald der erste Workflow ausgeführt wurde.', en: 'Workflow runs with cost and duration land here once you execute your first workflow.' },
 	// Tool Toggles (T5 of deferred-batch)
 	'tools.heading':       { de: 'Tool-Berechtigungen',                                                          en: 'Tool permissions' },
 	'tools.subtitle':      { de: 'Bestimmt, welche Tools dem Agenten zur Verfügung stehen. Deaktivierte Tools werden serverseitig aus der Registry ausgeblendet — ein prompt-injizierter Aufruf erreicht sie nicht.', en: 'Controls which tools the agent has access to. Disabled tools are hidden from the registry server-side — a prompt-injected call cannot reach them.' },
@@ -353,7 +353,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Workflows
 	'workflow.title': { de: 'Workflows', en: 'Workflows' },
 	'workflow.empty': { de: 'Noch keine Workflows ausgeführt.', en: 'No workflows executed yet.' },
-	'workflow.empty_hint': { de: 'Starte einen Workflow per Chat oder /pipeline Befehl.', en: 'Start a workflow via chat or /pipeline command.' },
+	'workflow.empty_hint': { de: 'Starte einen Workflow per Chat.', en: 'Start a workflow via chat.' },
 	'workflow.steps': { de: 'Schritte', en: 'steps' },
 	'workflow.duration': { de: 'Dauer', en: 'Duration' },
 	'workflow.cost': { de: 'Kosten', en: 'Cost' },
@@ -597,7 +597,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.activity.tool.api_setup.extracting': { de: 'Extrahiert Auth + Limits...', en: 'Extracting auth + limits...' },
 	'chat.activity.tool.api_setup.finalizing': { de: 'Erstellt Profil-Entwurf...', en: 'Finalizing draft...' },
 	'chat.activity.tool.api_call': { de: 'Ruft API auf...', en: 'Calling API...' },
-	'chat.activity.tool.run_pipeline': { de: 'Führt Pipeline aus...', en: 'Running pipeline...' },
+	'chat.activity.tool.run_workflow': { de: 'Führt Workflow aus...', en: 'Running workflow...' },
 	'chat.activity.tool.knowledge_recall': { de: 'Sucht im Wissensgraph...', en: 'Searching knowledge graph...' },
 	'chat.activity.tool.knowledge_store': { de: 'Speichert im Wissensgraph...', en: 'Saving to knowledge graph...' },
 	'chat.activity.tool.contacts_search': { de: 'Sucht Kontakte...', en: 'Searching contacts...' },
@@ -1284,7 +1284,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'history.response': { de: 'Antwort', en: 'Response' },
 	'history.load_more': { de: 'Mehr laden', en: 'Load more' },
 	'history.files_written': { de: 'Erstellte Dateien', en: 'Files written' },
-	'history.pipeline': { de: 'Pipeline', en: 'Pipeline' },
+	'history.pipeline': { de: 'Workflow', en: 'Workflow' },
 	'history.spawned': { de: 'Sub-Agent', en: 'Sub-agent' },
 	'history.search': { de: 'Runs durchsuchen...', en: 'Search runs...' },
 	'history.all_statuses': { de: 'Alle Status', en: 'All statuses' },
@@ -1346,7 +1346,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.command': { de: 'Befehl', en: 'Command' },
 	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
 	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },
-	'tool.pipeline': { de: 'Pipeline', en: 'Pipeline' },
+	'tool.pipeline': { de: 'Workflow', en: 'Workflow' },
 	'tool.question': { de: 'Frage an dich', en: 'Question for you' },
 	'tool.calendar': { de: 'Kalender', en: 'Calendar' },
 

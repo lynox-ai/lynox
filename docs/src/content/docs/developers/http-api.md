@@ -244,14 +244,14 @@ GET    /api/files/read            # Read file preview (max 1 MB)
 DELETE /api/files                 # Delete file
 ```
 
-### Pipelines
+### Workflows
 
 ```
-GET  /api/pipelines               # List pipeline runs
-GET  /api/pipelines/:id           # Pipeline details
-GET  /api/pipelines/:id/steps     # Pipeline step results
-GET  /api/pipelines/stats/steps   # Step statistics
-GET  /api/pipelines/stats/cost    # Pipeline cost stats
+GET  /api/workflows               # List workflow runs
+GET  /api/workflows/:id           # Workflow details
+GET  /api/workflows/:id/steps     # Workflow step results
+GET  /api/workflows/stats/steps   # Step statistics
+GET  /api/workflows/stats/cost    # Workflow cost stats
 ```
 
 ### DataStore

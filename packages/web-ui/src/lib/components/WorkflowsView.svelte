@@ -50,7 +50,7 @@
 		loading = true;
 		error = '';
 		try {
-			const res = await fetch(`${getApiBase()}/pipelines?limit=50`);
+			const res = await fetch(`${getApiBase()}/workflows?limit=50`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { runs: PipelineRun[] };
 			runs = data.runs;
@@ -66,8 +66,8 @@
 		expandedSteps = new Set();
 		try {
 			const [runRes, stepsRes] = await Promise.all([
-				fetch(`${getApiBase()}/pipelines/${id}`),
-				fetch(`${getApiBase()}/pipelines/${id}/steps`),
+				fetch(`${getApiBase()}/workflows/${id}`),
+				fetch(`${getApiBase()}/workflows/${id}/steps`),
 			]);
 			if (!runRes.ok || !stepsRes.ok) throw new Error();
 			selectedRun = (await runRes.json()) as PipelineRunDetail;

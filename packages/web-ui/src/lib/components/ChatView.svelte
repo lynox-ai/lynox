@@ -316,7 +316,7 @@
 			case 'bash': return { action: t('tool.command'), subject: String(inp?.['command'] ?? '').slice(0, 60) };
 			case 'http_request': return { action: t('tool.api_request'), subject: `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}` };
 			case 'web_research': return { action: t('tool.web_search'), subject: String(inp?.['query'] ?? '') };
-			case 'run_pipeline': return { action: t('tool.pipeline'), subject: String(inp?.['name'] ?? '') };
+			case 'run_workflow': return { action: t('tool.pipeline'), subject: String(inp?.['name'] ?? '') };
 			case 'spawn_agent': return { action: t('tool.delegated'), subject: String(inp?.['task'] ?? '').slice(0, 50) };
 			case 'artifact_save': return { action: t('tool.artifact_saved'), subject: String(inp?.['title'] ?? '') };
 			case 'task_create': return { action: t('tool.task_created'), subject: String(inp?.['title'] ?? '') };
@@ -1286,7 +1286,7 @@
 				list_files: t('chat.activity.tool.list_files'),
 				api_setup: t('chat.activity.tool.api_setup'),
 				api_call: t('chat.activity.tool.api_call'),
-				run_pipeline: t('chat.activity.tool.run_pipeline'),
+				run_workflow: t('chat.activity.tool.run_workflow'),
 				knowledge_recall: t('chat.activity.tool.knowledge_recall'),
 				knowledge_store: t('chat.activity.tool.knowledge_store'),
 				contacts_search: t('chat.activity.tool.contacts_search'),

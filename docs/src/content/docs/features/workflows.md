@@ -27,7 +27,7 @@ The role determines which model is used, what tools are available, and how auton
 
 ## Background Tasks
 
-![Workflows — pipeline runs with steps, costs, and duration](../../../assets/screenshots/workflows.jpg)
+![Workflows — workflow runs with steps, costs, and duration](../../../assets/screenshots/workflows.jpg)
 
 lynox can run tasks in the background — scheduled or triggered. Results are delivered via your notification channel (Web UI Activity Hub, mail, or push).
 
@@ -48,7 +48,7 @@ Or create tasks in the Web UI under Settings → Tasks.
 | **Standard** | Runs a prompt as an autonomous agent session |
 | **Watch** | Monitors a URL for changes — only processes when content differs |
 | **Backup** | Automated database backup (no LLM cost) |
-| **Pipeline** | Multi-step workflow with dependent tasks |
+| **Workflow** | Multi-step workflow with dependent tasks |
 
 ### Scheduling
 
@@ -75,9 +75,9 @@ Watch tasks are cost-efficient — lynox fetches the URL and computes a hash. On
 
 You can target specific parts of a page with CSS selectors for more precise monitoring.
 
-## Process Capture
+## Saving a workflow
 
-When you work through a task interactively, lynox can capture the workflow as a reusable template:
+When you work through a task interactively, lynox can save the workflow as a reusable template:
 
 1. Work through the task step by step with lynox
 2. Ask: *"Save this as a workflow"*

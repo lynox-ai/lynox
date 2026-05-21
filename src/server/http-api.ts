@@ -2800,8 +2800,8 @@ export class LynoxHTTPApi {
       await this._serveUsageCurrent(req, res, engine);
     });
 
-    // ── Pipelines ──
-    this.addStatic('user', 'GET /api/pipelines', async (req, res) => {
+    // ── Workflows ──
+    this.addStatic('user', 'GET /api/workflows', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2810,7 +2810,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { runs });
     });
 
-    this.addStatic('user', 'GET /api/pipelines/stats/steps', async (req, res) => {
+    this.addStatic('user', 'GET /api/workflows/stats/steps', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2819,7 +2819,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { stats });
     });
 
-    this.addStatic('user', 'GET /api/pipelines/stats/cost', async (req, res) => {
+    this.addStatic('user', 'GET /api/workflows/stats/cost', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -2828,7 +2828,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { stats });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/pipelines/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const run = history.getPipelineRun(params['id']!);
@@ -2836,7 +2836,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, run);
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/pipelines/:id/steps', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
