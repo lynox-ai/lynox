@@ -2,8 +2,22 @@ import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../t
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific } from '../../core/scope-resolver.js';
+import { estimateTokens } from '../../core/llm-helper.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
+
+/**
+ * Token budget for a namespace-only (no-query) memory_recall.
+ *
+ * A no-query recall used to return the ENTIRE namespace file into context
+ * (commonly 15-20K tokens), which then gets re-cached on every subsequent
+ * turn -- pure cost + context bloat. When the caller gives no query we cannot
+ * relevance-rank, so instead we return a recency/importance-ranked subset
+ * capped at this budget. ~5K tokens keeps the most relevant memory available
+ * while leaving the bulk of the context window for the actual conversation.
+ * A recall WITH a query is unaffected and still returns the full namespace.
+ */
+const RECALL_NO_QUERY_TOKEN_BUDGET = 5_000;
 
 interface MemoryStoreInput {
   namespace: MemoryNamespace;
@@ -13,7 +27,89 @@ interface MemoryStoreInput {
 
 interface MemoryRecallInput {
   namespace: MemoryNamespace;
+  query?: string | undefined;
   scope?: string | undefined;
+}
+
+/** A single memory line paired with the score used to rank it. */
+interface RankedEntry {
+  line: string;
+  score: number;
+}
+
+/**
+ * Rank the lines of a namespace file for a no-query recall and return the
+ * highest-scoring subset that fits within tokenBudget.
+ *
+ * Ranking signal (no query available, so no relevance signal):
+ *  - Recency: a [YYYY-MM-DD] date prefix (present on status entries and on
+ *    any dated line) contributes a score proportional to how recent it is;
+ *    undated lines get a neutral baseline. File order is the tiebreaker --
+ *    append writes newest lines last, so later lines rank above earlier ones.
+ *  - Importance: longer, substantive lines (a real fact vs. a stray fragment)
+ *    get a small boost, capped so verbosity cannot dominate recency.
+ *
+ * Entries are emitted in their original file order (not score order) so the
+ * returned subset still reads as a coherent, chronological slice of memory.
+ */
+function rankNoQueryEntries(content: string, tokenBudget: number): {
+  text: string;
+  shown: number;
+  total: number;
+} {
+  const lines = content.split('\n').filter(l => l.trim().length > 0);
+  const total = lines.length;
+  if (total === 0) {
+    return { text: '', shown: 0, total: 0 };
+  }
+
+  const dateRe = /^\[(\d{4}-\d{2}-\d{2})\]/;
+  const now = Date.now();
+  const RECENCY_WINDOW_MS = 90 * 86_400_000; // dates older than 90d score ~0 for recency
+
+  const ranked: RankedEntry[] = lines.map((line, index) => {
+    // File-order signal: newest lines are appended last -> later index ranks higher.
+    const orderScore = (index + 1) / total;
+
+    // Recency signal from an explicit date prefix, if present.
+    let recencyScore = 0.5; // neutral baseline for undated lines
+    const match = dateRe.exec(line);
+    if (match) {
+      const entryTime = new Date(match[1]!).getTime();
+      if (!Number.isNaN(entryTime)) {
+        const ageMs = Math.max(0, now - entryTime);
+        recencyScore = Math.max(0, 1 - ageMs / RECENCY_WINDOW_MS);
+      }
+    }
+
+    // Importance signal: substantive lines beat fragments, but capped at 0.3
+    // so a long line can never outrank a recent one on length alone.
+    const importanceScore = Math.min(line.trim().length / 200, 1) * 0.3;
+
+    const score = recencyScore + orderScore * 0.5 + importanceScore;
+    return { line, score };
+  });
+
+  // Pick the top entries by score until the token budget is exhausted.
+  const selected = new Set<number>();
+  let usedTokens = 0;
+  const byScore = ranked
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => b.entry.score - a.entry.score);
+
+  for (const { entry, index } of byScore) {
+    const cost = estimateTokens(entry.line) + 1; // +1 for the joining newline
+    if (usedTokens + cost > tokenBudget && selected.size > 0) {
+      continue; // skip -- would overflow; keep scanning for smaller entries
+    }
+    selected.add(index);
+    usedTokens += cost;
+    if (usedTokens >= tokenBudget) break;
+  }
+
+  // Emit in original file order so the slice reads chronologically.
+  const text = lines.filter((_, index) => selected.has(index)).join('\n');
+  return { text, shown: selected.size, total };
 }
 
 interface MemoryDeleteInput {
@@ -91,7 +187,7 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
 export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
   definition: {
     name: 'memory_recall',
-    description: 'Look up previously saved knowledge by searching for relevant content. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
+    description: 'Look up previously saved knowledge by searching for relevant content. Pass a `query` describing what you need — this returns the full set of matching memory. Omitting `query` returns only a bounded, recency-ranked sample of the namespace (not everything), so always prefer passing a query when you know what you are after. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -100,6 +196,10 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
           type: 'string',
           enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to recall from. knowledge = durable business facts about the user/company. methods = reusable techniques or playbooks. status = the user\'s explicitly stated focus; treat returned status entries as historical notes, never as the current session\'s goals unless the user has restated them this turn. learnings = lessons from past outcomes.',
+        },
+        query: {
+          type: 'string',
+          description: 'What you are looking for. With a query, the full set of matching memory is returned. Omit only when you genuinely want a broad sample — then a bounded recency-ranked subset is returned instead of the whole namespace.',
         },
         scope: {
           type: 'string',
@@ -119,13 +219,32 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
-    if (scopeRef) {
-      const content = await agent.memory.loadScoped(input.namespace, scopeRef);
-      return content ?? `No content found in ${input.namespace} namespace (scope: ${input.scope}).`;
+    const content = scopeRef
+      ? await agent.memory.loadScoped(input.namespace, scopeRef)
+      : await agent.memory.load(input.namespace);
+
+    if (content === null) {
+      return scopeRef
+        ? `No content found in ${input.namespace} namespace (scope: ${input.scope}).`
+        : `No content found in ${input.namespace} namespace.`;
     }
 
-    const content = await agent.memory.load(input.namespace);
-    return content ?? `No content found in ${input.namespace} namespace.`;
+    // With a query: keep the full existing behavior — return the whole
+    // namespace so the caller can scan/search it themselves.
+    if (input.query !== undefined && input.query.trim().length > 0) {
+      return content;
+    }
+
+    // No-query (namespace-only): a full dump is 15-20K tokens of context bloat.
+    // Return a recency/importance-ranked subset capped at the token budget.
+    const { text, shown, total } = rankNoQueryEntries(content, RECALL_NO_QUERY_TOKEN_BUDGET);
+    if (shown === 0) {
+      return content; // nothing to rank (single empty line etc.) — return as-is
+    }
+    if (shown >= total) {
+      return text; // whole namespace fit within the budget — no truncation note
+    }
+    return `${text}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
   },
 };
 
