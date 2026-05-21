@@ -835,7 +835,13 @@
 						const trimmed = finalText.trim();
 						if (trimmed) {
 							if (isVoiceAutoSendEnabled()) {
-								await sendMessage(`🎤 ${trimmed}`);
+								// Transcription is done — release the composer before the
+								// agent run starts. The run has its own presence (the
+								// streaming activity bar); keeping `transcribing` true
+								// through `await sendMessage` would freeze the composer on
+								// "Transcribing…" for the entire answer.
+								transcribing = false;
+								void sendMessage(`🎤 ${trimmed}`);
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
@@ -1861,13 +1867,12 @@
 		<div class="mx-auto max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.compactionNote}
-					<div class="flex items-center gap-3 py-1 text-[11px] text-text-subtle" role="status">
-						<div class="h-px flex-1 bg-border"></div>
-						<span class="flex items-center gap-1.5 shrink-0">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M6 12h12M9 17h6" /></svg>
-							{t('context.compacted_marker')}
-						</span>
-						<div class="h-px flex-1 bg-border"></div>
+					<!-- Rendered as a left-bordered inline block, the same visual
+					     language as tool rows and step markers, so the compaction
+					     is a traceable event in the history — not a faint divider. -->
+					<div class="flex items-start gap-2 text-[13px] md:text-[11px] border-l-2 border-accent/30 pl-3 py-1 md:py-0.5" role="status">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 text-accent/60 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M6 12h12M9 17h6" /></svg>
+						<span class="text-text-subtle">{t('context.compacted_marker')}</span>
 					</div>
 				{:else if msg.role === 'user'}
 					{@const userText = stripNowMarker(msg.content)}
