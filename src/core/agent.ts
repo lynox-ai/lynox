@@ -389,9 +389,6 @@ export class Agent implements IAgent {
         }
         return extractText([]);
       }
-      // Snapshot before the assistant reply is appended — anchors the
-      // incremental occupancy estimate against the next call's real usage.
-      const msgCountAtCall = this.messages.length;
       const response = await this._callAPI();
 
       // Strip thinking blocks — signatures are invalidated by proxies
@@ -405,9 +402,8 @@ export class Agent implements IAgent {
       await this._checkpoint();
 
       // Exact context occupancy from real API usage — ground truth for the
-      // context-window meter. The figure is the prompt size of the call just
-      // made (cached prefix included); msgCountAtCall anchors the incremental
-      // delta for the next pre-call estimate.
+      // context-window meter. realInput is the prompt size of the call just
+      // made (cached prefix included).
       {
         const u = response.usage;
         const realInput = u.input_tokens
@@ -415,7 +411,11 @@ export class Agent implements IAgent {
           + (u.cache_creation_input_tokens ?? 0);
         if (realInput > 0) {
           this._lastRealInputTokens = realInput;
-          this._lastRealAtMsgCount = msgCountAtCall;
+          // messages is now [...prompt messages, assistant reply]. The API
+          // priced the prompt (all but that just-pushed reply), so the reply
+          // onward is the delta for the next estimate. Derived from the
+          // post-truncation array — correct even if _callAPI dropped history.
+          this._lastRealAtMsgCount = this.messages.length - 1;
           if (this.onStream) {
             const maxCtx = this._effectiveContextWindow();
             void this.onStream({

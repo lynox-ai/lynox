@@ -1773,5 +1773,65 @@ describe('Agent', () => {
       // No history and no anchor → estimate collapses to ~zero.
       expect(agent.getEstimatedOccupancyTokens()).toBeLessThan(1_000);
     });
+
+    it('skips the post-call budget event when the response reports zero usage', async () => {
+      const events: StreamEvent[] = [];
+      mockProcess.mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 0, output_tokens: 0 },
+      });
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        onStream: (e: StreamEvent) => { events.push(e); },
+      });
+      await agent.send('Hi');
+
+      // The post-call exact-usage event omits the systemTokens breakdown the
+      // pre-call estimate carries. realInput === 0 → it must not fire.
+      const postCall = events.filter(
+        (e): e is Extract<StreamEvent, { type: 'context_budget' }> =>
+          e.type === 'context_budget' && e.systemTokens === undefined,
+      );
+      expect(postCall).toHaveLength(0);
+    });
+
+    it('advances the estimate by the new-message delta on a second call', async () => {
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+
+      mockProcess.mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'first' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 50_000, output_tokens: 50 },
+      });
+      await agent.send('one');
+      const afterFirst = agent.getEstimatedOccupancyTokens();
+      expect(afterFirst).toBeGreaterThanOrEqual(50_000);
+      expect(afterFirst).toBeLessThan(55_000);
+
+      mockProcess.mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'second' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 90_000, output_tokens: 50 },
+      });
+      await agent.send('two');
+      const afterSecond = agent.getEstimatedOccupancyTokens();
+      // Second call's real prompt was 90k; the estimate re-anchors to it plus
+      // only the tiny delta of the assistant reply appended since.
+      expect(afterSecond).toBeGreaterThanOrEqual(90_000);
+      expect(afterSecond).toBeLessThan(95_000);
+    });
+
+    it('falls back to a char estimate before any real usage exists', async () => {
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      // No send() yet → no real-usage anchor → char-estimate fallback path.
+      expect(agent.getEstimatedOccupancyTokens()).toBe(0);
+
+      agent.loadMessages([{ role: 'user', content: 'x'.repeat(3_500) }]);
+      const occ = agent.getEstimatedOccupancyTokens();
+      expect(occ).toBeGreaterThan(0);
+      expect(occ).toBeLessThan(5_000);
+    });
   });
 });

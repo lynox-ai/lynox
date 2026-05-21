@@ -775,9 +775,6 @@ export class Session {
    */
   getContextUsagePercent(): number {
     if (!this.agent) return 0;
-    // Real last-call usage when available — the same figure the UI meter shows
-    // — so auto-compaction triggers on true occupancy, not a char-estimate that
-    // over-counts JSON overhead and fired compaction far too early.
     const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
     const userCap = this.engine.getUserConfig().max_context_window_tokens;
     const maxCtx = effectiveContextWindow(MODEL_MAP[this._model], userCap);
