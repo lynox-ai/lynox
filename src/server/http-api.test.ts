@@ -35,6 +35,10 @@ const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: '
   by_kind: [],
   daily: [],
 }));
+// Saved Workflows library (PRD-WORKFLOW-UX D13).
+const mockHistoryGetPlannedPipelines = vi.fn().mockReturnValue([]);
+const mockHistoryRenamePlannedPipeline = vi.fn().mockReturnValue(true);
+const mockHistoryDeletePlannedPipeline = vi.fn().mockReturnValue(true);
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -95,6 +99,9 @@ vi.mock('../core/engine.js', () => ({
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
       getUsageSummary: mockHistoryGetUsageSummary,
+      getPlannedPipelines: mockHistoryGetPlannedPipelines,
+      renamePlannedPipeline: mockHistoryRenamePlannedPipeline,
+      deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
     });
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,
@@ -144,6 +151,16 @@ vi.mock('../core/config.js', () => ({
   }),
   saveUserConfig: vi.fn(),
   reloadConfig: vi.fn(),
+}));
+
+// POST /api/workflows/:id/run dynamically imports the pipeline tool module.
+// Mock only runSavedWorkflow — the rest of the (heavy) module is irrelevant
+// to these HTTP-route tests and pulls in the orchestrator otherwise.
+const mockRunSavedWorkflow = vi.fn();
+const mockForgetPipeline = vi.fn();
+vi.mock('../tools/builtin/pipeline.js', () => ({
+  runSavedWorkflow: mockRunSavedWorkflow,
+  forgetPipeline: mockForgetPipeline,
 }));
 
 // === Import after mocks ===
@@ -1645,6 +1662,99 @@ describe('LynoxHTTPApi', () => {
     it('POST /api/tasks/:id/complete completes a task', async () => {
       const res = await jsonFetch('/api/tasks/task-1/complete', { method: 'POST' });
       expect(res.status).toBe(200);
+    });
+  });
+
+  // PRD-WORKFLOW-UX D13 — Saved Workflows library endpoints.
+  describe('saved workflows library', () => {
+    it('GET /api/workflows/library lists only template rows', async () => {
+      mockHistoryGetPlannedPipelines.mockReturnValue([
+        { id: 'wf-1', manifest_name: 'Monthly Report', manifest_json: JSON.stringify({ template: true, name: 'Monthly Report', goal: 'Compile the monthly report', steps: [{ id: 's1' }, { id: 's2' }] }), step_count: 2, started_at: '2026-05-21T00:00:00Z' },
+        { id: 'wf-2', manifest_name: 'One-shot plan', manifest_json: JSON.stringify({ template: false, name: 'One-shot plan', goal: 'g', steps: [{ id: 's1' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
+        { id: 'wf-3', manifest_name: 'corrupt', manifest_json: 'not json', step_count: 0, started_at: '2026-05-19T00:00:00Z' },
+      ]);
+      const res = await jsonFetch('/api/workflows/library');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { workflows: Array<{ id: string; name: string; description: string; step_count: number }> };
+      expect(body.workflows).toHaveLength(1);
+      expect(body.workflows[0]!.id).toBe('wf-1');
+      expect(body.workflows[0]!.name).toBe('Monthly Report');
+      expect(body.workflows[0]!.description).toBe('Compile the monthly report');
+      expect(body.workflows[0]!.step_count).toBe(2);
+    });
+
+    it('GET /api/workflows/library returns empty list when none saved', async () => {
+      mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      const res = await jsonFetch('/api/workflows/library');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { workflows: unknown[] };
+      expect(body.workflows).toEqual([]);
+    });
+
+    it('POST /api/workflows/:id/run executes a saved workflow', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-xyz', status: 'completed' });
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ran: boolean; runId: string; status: string };
+      expect(body.ran).toBe(true);
+      expect(body.runId).toBe('run-xyz');
+      expect(body.status).toBe('completed');
+      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything());
+    });
+
+    it('POST /api/workflows/:id/run returns 404 when the workflow is missing', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow "wf-x" not found.' });
+      const res = await jsonFetch('/api/workflows/wf-x/run', { method: 'POST' });
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /api/workflows/:id/run returns 400 on an execution error', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow execution failed: boom' });
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH /api/workflows/:id renames a saved workflow and evicts the cache', async () => {
+      mockHistoryRenamePlannedPipeline.mockReturnValue(true);
+      const res = await jsonFetch('/api/workflows/wf-1', {
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'New Name' }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockHistoryRenamePlannedPipeline).toHaveBeenCalledWith('wf-1', 'New Name');
+      expect(mockForgetPipeline).toHaveBeenCalledWith('wf-1');
+    });
+
+    it('PATCH /api/workflows/:id rejects an empty name', async () => {
+      const res = await jsonFetch('/api/workflows/wf-1', {
+        method: 'PATCH',
+        body: JSON.stringify({ name: '   ' }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH /api/workflows/:id returns 404 for an unknown id', async () => {
+      mockHistoryRenamePlannedPipeline.mockReturnValue(false);
+      const res = await jsonFetch('/api/workflows/ghost', {
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'X' }),
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it('DELETE /api/workflows/:id deletes a saved workflow and evicts the cache', async () => {
+      mockHistoryDeletePlannedPipeline.mockReturnValue(true);
+      const res = await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { deleted: boolean };
+      expect(body.deleted).toBe(true);
+      expect(mockForgetPipeline).toHaveBeenCalledWith('wf-1');
+    });
+
+    it('DELETE /api/workflows/:id returns 404 for an unknown id', async () => {
+      mockHistoryDeletePlannedPipeline.mockReturnValue(false);
+      const res = await jsonFetch('/api/workflows/ghost', { method: 'DELETE' });
+      expect(res.status).toBe(404);
     });
   });
 

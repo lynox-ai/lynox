@@ -91,6 +91,20 @@ export function getPipelineStore(): Map<string, PlannedPipeline> {
   return pipelineStore;
 }
 
+/**
+ * Drop a pipeline from the in-memory cache. The Saved-Workflows library
+ * (PRD §6.8) deletes/renames the SQLite row directly; without evicting the
+ * cache, a later `getPipeline` could resurrect a stale copy (a deleted
+ * workflow staying runnable, a rename not reflected). Supports prefix match
+ * so a short id evicts the full-id entry too.
+ */
+export function forgetPipeline(id: string): void {
+  if (pipelineStore.delete(id)) return;
+  for (const key of pipelineStore.keys()) {
+    if (key.startsWith(id)) { pipelineStore.delete(key); return; }
+  }
+}
+
 /** Get executed state for retry */
 export function getExecutedResult(pipelineId: string): { manifest: Manifest; state: RunState } | undefined {
   return executedStates.get(pipelineId);
@@ -474,6 +488,71 @@ export async function dispatchOrchestratedPipeline(
   } catch (err: unknown) {
     planned.executed = false; // Allow retry on validation errors
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+  }
+}
+
+/** Outcome of a Saved-Workflows-library "Run" action. */
+export interface RunSavedWorkflowResult {
+  ok: boolean;
+  /** ID of the fresh `pipeline_runs` row written for this execution. */
+  runId?: string | undefined;
+  status?: string | undefined;
+  error?: string | undefined;
+}
+
+/**
+ * Run a *saved workflow* (a `PlannedPipeline` with `template:true`) headless,
+ * for the Saved-Workflows library UI's "Run" action (PRD §6.8 / D13).
+ *
+ * Unlike `executePipelineById` / `dispatchOrchestratedPipeline`, this never
+ * consumes the template: a saved workflow is reusable by definition, so the
+ * stored row is left untouched and a *fresh* `pipeline_runs` row (the
+ * orchestrated run's `state.runId`) is written for every invocation. The
+ * library "Run" is fire-once per click; live progress streaming is a chat
+ * concern, so no `streamHandler` is wired.
+ *
+ * Interactive saved workflows are refused — they need a live chat session.
+ */
+export async function runSavedWorkflow(
+  workflowId: string,
+  runHistory: RunHistory | null,
+  config: LynoxUserConfig,
+): Promise<RunSavedWorkflowResult> {
+  if (!runHistory) {
+    return { ok: false, error: 'Run history is not available.' };
+  }
+
+  const planned = getPipeline(workflowId, runHistory);
+  if (!planned) {
+    return { ok: false, error: `Workflow "${workflowId}" not found.` };
+  }
+  if (!planned.template) {
+    return { ok: false, error: `Workflow "${planned.id}" is not a saved workflow.` };
+  }
+  if (planned.mode === 'interactive') {
+    return {
+      ok: false,
+      error: `Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and must be run from a chat session.`,
+    };
+  }
+
+  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
+  if (steps.length === 0) {
+    return { ok: false, error: 'Workflow has no steps to execute.' };
+  }
+  if (steps.length > MAX_STEPS) {
+    return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
+  }
+
+  const resultLimit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
+  try {
+    const manifest = buildManifest(planned.name, steps, 'stop');
+    validateManifest(manifest);
+    const state = await runManifest(manifest, config, { runHistory });
+    persistPipelineRun(state, manifest, runHistory, resultLimit);
+    return { ok: true, runId: state.runId, status: state.status };
+  } catch (err: unknown) {
+    return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
   }
 }
 

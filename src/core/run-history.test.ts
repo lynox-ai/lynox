@@ -638,6 +638,104 @@ describe('RunHistory', () => {
     });
   });
 
+  // === Saved Workflows library (PRD-WORKFLOW-UX D13) ===
+
+  describe('Planned pipelines library (D13)', () => {
+    // insertPlannedPipeline serializes the whole object into manifest_json,
+    // so anything extra (template flag) round-trips inside it.
+    function insertPlanned(
+      h: ReturnType<typeof createHistory>,
+      id: string,
+      name: string,
+      extra: Record<string, unknown> = {},
+    ): void {
+      h.insertPlannedPipeline({
+        id, name, goal: `goal-${name}`,
+        steps: [{ id: 'step-1', task: 'do' }],
+        reasoning: 'r', estimatedCost: 0.01,
+        createdAt: new Date().toISOString(),
+        ...extra,
+      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+    }
+
+    it('getPlannedPipelines returns only status=planned rows, newest first', () => {
+      const h = createHistory();
+      insertPlanned(h, 'plan-a', 'first');
+      insertPlanned(h, 'plan-b', 'second');
+      // A non-planned run must not surface here.
+      h.insertPipelineRun({ id: 'exec-1', manifestName: 'executed', status: 'completed', manifestJson: '{}' });
+      const list = h.getPlannedPipelines(10);
+      expect(list).toHaveLength(2);
+      expect(list.map((r) => r.id).sort()).toEqual(['plan-a', 'plan-b']);
+      expect(list.every((r) => typeof r.manifest_json === 'string')).toBe(true);
+      h.close();
+    });
+
+    it('getPlannedPipelines respects the limit', () => {
+      const h = createHistory();
+      for (let i = 0; i < 5; i++) insertPlanned(h, `plan-${i}`, `wf-${i}`);
+      expect(h.getPlannedPipelines(3)).toHaveLength(3);
+      h.close();
+    });
+
+    it('getPlannedPipelines manifest_json carries the template flag', () => {
+      const h = createHistory();
+      insertPlanned(h, 'plan-tpl', 'tpl', { template: true });
+      const [row] = h.getPlannedPipelines(10);
+      const parsed = JSON.parse(row!.manifest_json) as { template?: boolean };
+      expect(parsed.template).toBe(true);
+      h.close();
+    });
+
+    it('renamePlannedPipeline updates manifest_name AND manifest_json name', () => {
+      const h = createHistory();
+      insertPlanned(h, 'plan-rn', 'old name');
+      expect(h.renamePlannedPipeline('plan-rn', 'new name')).toBe(true);
+      const [row] = h.getPlannedPipelines(10);
+      expect(row!.manifest_name).toBe('new name');
+      // The name also lives inside manifest_json — the library list and
+      // getPipeline's SQLite fallback prefer it, so the rename must propagate
+      // there too, else it is a visible no-op.
+      expect((JSON.parse(row!.manifest_json) as { name: string }).name).toBe('new name');
+      h.close();
+    });
+
+    it('renamePlannedPipeline returns false for an unknown id', () => {
+      const h = createHistory();
+      expect(h.renamePlannedPipeline('nope', 'x')).toBe(false);
+      h.close();
+    });
+
+    it('renamePlannedPipeline does not rename a non-planned run', () => {
+      const h = createHistory();
+      h.insertPipelineRun({ id: 'exec-2', manifestName: 'done', status: 'completed', manifestJson: '{}' });
+      expect(h.renamePlannedPipeline('exec-2', 'hacked')).toBe(false);
+      h.close();
+    });
+
+    it('deletePlannedPipeline removes the row and returns true', () => {
+      const h = createHistory();
+      insertPlanned(h, 'plan-del', 'doomed');
+      expect(h.deletePlannedPipeline('plan-del')).toBe(true);
+      expect(h.getPlannedPipelines(10)).toHaveLength(0);
+      h.close();
+    });
+
+    it('deletePlannedPipeline returns false for an unknown id', () => {
+      const h = createHistory();
+      expect(h.deletePlannedPipeline('ghost')).toBe(false);
+      h.close();
+    });
+
+    it('deletePlannedPipeline does not delete a non-planned run', () => {
+      const h = createHistory();
+      h.insertPipelineRun({ id: 'exec-3', manifestName: 'done', status: 'completed', manifestJson: '{}' });
+      expect(h.deletePlannedPipeline('exec-3')).toBe(false);
+      expect(h.getPipelineRun('exec-3')).toBeDefined();
+      h.close();
+    });
+  });
+
   // === v8 Scope registry & embedding scope fields ===
 
   describe('Scope registry (v8)', () => {

@@ -2843,6 +2843,81 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { steps });
     }));
 
+    // ── Saved Workflows library (PRD §6.8 / D13) ──
+    // A "saved workflow" = a planned pipeline (status='planned') whose
+    // deserialized manifest_json.template === true. There is no `template`
+    // column — the filter is app-layer, no migration.
+    this.addStatic('user', 'GET /api/workflows/library', async (req, res) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '100', 10) || 100, 1), 500);
+      // Over-fetch: the `template` filter runs app-layer below, so a plain
+      // LIMIT would let non-template planned rows (un-run plans) starve the
+      // result. Scan a generous fixed window, then slice to `limit`.
+      const rows = history.getPlannedPipelines(500);
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; created_at: string }> = [];
+      for (const row of rows) {
+        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
+        try {
+          parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
+        } catch { continue; } // skip corrupt rows
+        if (parsed.template !== true) continue; // app-layer template filter
+        workflows.push({
+          id: row.id,
+          name: typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : row.manifest_name,
+          description: typeof parsed.goal === 'string' ? parsed.goal : '',
+          step_count: Array.isArray(parsed.steps) ? parsed.steps.length : row.step_count,
+          created_at: row.started_at,
+        });
+      }
+      jsonResponse(res, 200, { workflows: workflows.slice(0, limit) });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const { runSavedWorkflow } = await import('../tools/builtin/pipeline.js');
+      const config = engine.getUserConfig();
+      const result = await runSavedWorkflow(params['id']!, history, config);
+      if (!result.ok) {
+        const code = result.error?.includes('not found') ? 404 : 400;
+        errorResponse(res, code, result.error ?? 'Workflow run failed');
+        return;
+      }
+      jsonResponse(res, 200, { ran: true, runId: result.runId, status: result.status });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/workflows/:id', async (_req, res, params, body) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
+      const name = (body as Record<string, unknown>)['name'];
+      if (typeof name !== 'string' || name.trim().length === 0) {
+        errorResponse(res, 400, 'name is required'); return;
+      }
+      if (name.trim().length > 200) {
+        errorResponse(res, 400, 'name too long (max 200 characters)'); return;
+      }
+      const renamed = history.renamePlannedPipeline(params['id']!, name.trim());
+      if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }
+      // Evict the in-memory cache so a later run reflects the new name.
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(params['id']!);
+      jsonResponse(res, 200, { renamed: true });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/workflows/:id', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const deleted = history.deletePlannedPipeline(params['id']!);
+      if (!deleted) { errorResponse(res, 404, 'Workflow not found'); return; }
+      // Evict the in-memory cache so the deleted workflow can't be resurrected.
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(params['id']!);
+      jsonResponse(res, 200, { deleted: true });
+    }));
+
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
       const taskManager = engine.getTaskManager();

@@ -6,6 +6,7 @@
 	import SecretsView from './SecretsView.svelte';
 	import TasksView from './TasksView.svelte';
 	import WorkflowsView from './WorkflowsView.svelte';
+	import WorkflowLibraryView from './WorkflowLibraryView.svelte';
 
 	// PRD-IA-V2 P2-PR-D — Activity tab stripped. AutomationHub is now Builder-only.
 	// `/app/hub?section=activity*` is redirected SSR-side by
@@ -15,7 +16,7 @@
 	// moved here from /settings/llm/keys. Sits next to APIs (endpoints) so
 	// related Automation surfaces — endpoint definitions + their auth — share
 	// one place instead of straddling LLM Settings and Automation.
-	type Tab = 'workflows' | 'tasks' | 'apis' | 'keys';
+	type Tab = 'workflows' | 'library' | 'tasks' | 'apis' | 'keys';
 
 	// `?section=` (not `?tab=`) is intentional — historic collision-avoidance
 	// with the embedded ActivityHub which used `?tab=`. Now that Activity is
@@ -26,7 +27,7 @@
 	// still rewrite via the $effect below (1-release grace; cleanup later).
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('section');
-		if (p === 'tasks' || p === 'apis' || p === 'keys') return p;
+		if (p === 'library' || p === 'tasks' || p === 'apis' || p === 'keys') return p;
 		if (p === 'reminders') return 'tasks'; // backwards-compat
 		return 'workflows';
 	})());
@@ -55,6 +56,7 @@
 
 	const tabs: ReadonlyArray<{ id: Tab; labelKey: string }> = [
 		{ id: 'workflows', labelKey: 'hub.automation.workflows' },
+		{ id: 'library', labelKey: 'hub.automation.library' },
 		{ id: 'tasks', labelKey: 'hub.automation.tasks' },
 		{ id: 'apis', labelKey: 'hub.automation.apis' },
 		{ id: 'keys', labelKey: 'hub.automation.keys' },
@@ -74,6 +76,8 @@
 	<div class="flex-1 overflow-y-auto">
 		{#if tab === 'workflows'}
 			<WorkflowsView />
+		{:else if tab === 'library'}
+			<WorkflowLibraryView />
 		{:else if tab === 'tasks'}
 			<TasksView />
 		{:else if tab === 'apis'}
