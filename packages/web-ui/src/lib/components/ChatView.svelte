@@ -1816,7 +1816,16 @@
 
 		<div class="mx-auto max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
-				{#if msg.role === 'user'}
+				{#if msg.compactionNote}
+					<div class="flex items-center gap-3 py-1 text-[11px] text-text-subtle" role="status">
+						<div class="h-px flex-1 bg-border"></div>
+						<span class="flex items-center gap-1.5 shrink-0">
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M6 12h12M9 17h6" /></svg>
+							{t('context.compacted_marker')}
+						</span>
+						<div class="h-px flex-1 bg-border"></div>
+					</div>
+				{:else if msg.role === 'user'}
 					{@const userText = stripNowMarker(msg.content)}
 					<div class="flex justify-end items-start gap-1.5">
 						{#if msg.queued}

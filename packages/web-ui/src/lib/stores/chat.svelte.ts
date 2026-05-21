@@ -120,6 +120,9 @@ export interface ChatMessage {
 	failed?: boolean;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
+	/** Set on a synthetic marker bubble inserted when the engine auto-compacts
+	 *  the conversation — renders as an inline "conversation compacted" divider. */
+	compactionNote?: { previousPercent: number };
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
 }
@@ -1330,6 +1333,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'context_compacted': {
 			const prevPct = data['previousUsagePercent'] as number | undefined;
 			contextBudget = null;
+			// Persistent inline marker in the transcript — a 5s toast alone
+			// left users unsure whether compaction had lost their context.
+			messages.push({ role: 'assistant', content: '', compactionNote: { previousPercent: prevPct ?? 0 } });
 			addToast(t('context.compacted').replace('{pct}', String(prevPct ?? '?')), 'info', 5000);
 			break;
 		}

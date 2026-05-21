@@ -746,9 +746,10 @@ export class Session {
    * Used by CLI /compact command and auto-compaction.
    */
   async compact(focus?: string): Promise<{ success: boolean; summary: string }> {
-    const prompt = focus
-      ? `Summarize the key points of our conversation so far, focusing on: ${focus}. Be extremely concise — bullet points only.`
-      : 'Summarize the key points of our conversation so far. Be extremely concise — bullet points only.';
+    // Structured compaction: a lossy prose summary used to drop artifacts and
+    // open tasks, leaving the agent unable to continue. Name what must survive.
+    const base = 'Summarize the conversation so far so work can continue without the full history. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
+    const prompt = focus ? `${base}\nGive extra weight to: ${focus}.` : base;
     let summary = '';
     try {
       summary = await this.run(prompt);
