@@ -106,6 +106,38 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getSessionToolCalls gathers tool calls across all runs in a session', () => {
+    const h = createHistory();
+    // Two runs in the SAME session (one conversation, two turns).
+    const runA = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'sonnet', modelId: 'm' });
+    h.insertToolCall({ runId: runA, toolName: 'http_request', inputJson: '{"url":"a"}', outputJson: 'ok', durationMs: 10, sequenceOrder: 0 });
+    h.insertToolCall({ runId: runA, toolName: 'write_file', inputJson: '{"path":"r.pdf"}', outputJson: 'ok', durationMs: 20, sequenceOrder: 1 });
+
+    const runB = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 2', modelTier: 'sonnet', modelId: 'm' });
+    h.insertToolCall({ runId: runB, toolName: 'capture_process', inputJson: '{}', outputJson: 'ok', durationMs: 5, sequenceOrder: 0 });
+
+    // A run in a DIFFERENT session — must not leak in.
+    const runOther = h.insertRun({ sessionId: 'thread-2', taskText: 'other', modelTier: 'sonnet', modelId: 'm' });
+    h.insertToolCall({ runId: runOther, toolName: 'bash', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+
+    const sessionCalls = h.getSessionToolCalls('thread-1');
+    // Run-creation order then sequence_order: runA[0], runA[1], runB[0].
+    expect(sessionCalls.map(c => c.tool_name)).toEqual(['http_request', 'write_file', 'capture_process']);
+    // Decryption preserved through the join.
+    expect(sessionCalls[0]!.input_json).toBe('{"url":"a"}');
+    expect(sessionCalls[1]!.output_json).toBe('ok');
+
+    // No regression: single-run scope still returns only that run's calls.
+    expect(h.getRunToolCalls(runB).map(c => c.tool_name)).toEqual(['capture_process']);
+    expect(h.getRunToolCalls(runA).map(c => c.tool_name)).toEqual(['http_request', 'write_file']);
+
+    // Other session is isolated.
+    expect(h.getSessionToolCalls('thread-2').map(c => c.tool_name)).toEqual(['bash']);
+    // Unknown session yields nothing.
+    expect(h.getSessionToolCalls('nope')).toEqual([]);
+    h.close();
+  });
+
   it('returns recent runs', () => {
     const h = createHistory();
     for (let i = 0; i < 5; i++) {

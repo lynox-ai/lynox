@@ -933,6 +933,23 @@ export class RunHistory {
     return rows.map(tc => this._decToolCall(tc));
   }
 
+  /**
+   * All tool calls across every run belonging to one session (thread).
+   * A conversation spans many runs (one per turn); `getRunToolCalls` only sees
+   * a single run, so process capture must read the whole session instead.
+   * Ordered by run creation, then `rowid` to disambiguate same-second runs
+   * (`runs.created_at` has second granularity), then per-run sequence.
+   */
+  getSessionToolCalls(sessionId: string): ToolCallRecord[] {
+    const rows = this.db.prepare(`
+      SELECT tc.* FROM run_tool_calls tc
+      JOIN runs r ON r.id = tc.run_id
+      WHERE r.session_id = ?
+      ORDER BY r.created_at, r.rowid, tc.sequence_order
+    `).all(sessionId) as ToolCallRecord[];
+    return rows.map(tc => this._decToolCall(tc));
+  }
+
   /** Per-run data with tool names for Pattern Engine. */
   getRunsForAnalysis(limit = 200): AnalysisRun[] {
     const rows = this.db.prepare(`
