@@ -115,6 +115,13 @@ export interface IAgent {
    */
   readonly sessionCounters: SessionCounters;
   /**
+   * Per-conversation store of large tool results evicted at the last
+   * compaction. The `recall_tool_result` tool reads it to re-fetch a payload
+   * by handle id. Owned by the Session; undefined for ad-hoc Agents built
+   * outside a Session. See {@link import('../core/tool-result-blob-store.js').ToolResultBlobStore}.
+   */
+  readonly toolResultBlobStore?: import('../core/tool-result-blob-store.js').ToolResultBlobStore | undefined;
+  /**
    * IANA timezone for the human user, propagated to sub-agents so scheduled
    * times render in the user's wallclock. Mutable (no `readonly`) so the host
    * Session can refresh it per /run without recreating the Agent; sub-agent

@@ -174,6 +174,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactSaveTool: { definition: { name: 'artifact_save' }, handler: vi.fn() },
   artifactListTool: { definition: { name: 'artifact_list' }, handler: vi.fn() },
   artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
+  recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
 }));
 
 vi.mock('../integrations/mail/state.js', () => ({

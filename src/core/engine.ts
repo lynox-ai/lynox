@@ -63,6 +63,7 @@ import {
   artifactSaveTool,
   artifactListTool,
   artifactDeleteTool,
+  recallToolResultTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
@@ -579,7 +580,8 @@ export class Engine {
       .register(taskCreateTool)
       .register(taskUpdateTool)
       .register(taskListTool)
-      .register(planTaskTool);
+      .register(planTaskTool)
+      .register(recallToolResultTool);
 
     // Wire task manager if run history is available
     if (this.runHistory) {

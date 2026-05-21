@@ -130,6 +130,8 @@ export class Agent implements IAgent {
   readonly isolation: import('../types/index.js').IsolationConfig | undefined;
   readonly toolContext: ToolContext;
   readonly sessionCounters: import('../types/agent.js').SessionCounters;
+  /** Per-conversation blob store for tool results recallable after compaction. */
+  readonly toolResultBlobStore: import('./tool-result-blob-store.js').ToolResultBlobStore | undefined;
   /** Mutable so Session can update per-request without recreating the agent — sub-agent paths still inherit a snapshot. */
   userTimezone: string | undefined;
   private readonly changesetManager: ChangesetManagerLike | undefined;
@@ -229,6 +231,7 @@ export class Agent implements IAgent {
       approvedOutboundDomains: new Set<string>(),
       pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
+    this.toolResultBlobStore = config.toolResultBlobStore;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
     this.costGuard = config.costGuard
