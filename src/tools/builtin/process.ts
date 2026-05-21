@@ -50,7 +50,19 @@ export const captureProcessTool: ToolEntry<CaptureInput> = {
     }
 
     try {
-      const toolCalls = _runHistory.getRunToolCalls(runId);
+      // A conversation spans many runs (one per turn); `agent.currentRunId` is
+      // the run executing capture_process itself, which holds no prior workflow
+      // tool calls. Resolve the owning session and gather its full tool-call
+      // history so capture sees the actual work the user just did.
+      // Prefer the agent's thread id; fall back to the run's session_id;
+      // fall back again to single-run scope if neither resolves (treats an
+      // empty-string session_id, the column default, as unresolved).
+      const sessionId = agent.currentThreadId
+        || _runHistory.getRun(runId)?.session_id
+        || undefined;
+      const toolCalls = sessionId
+        ? _runHistory.getSessionToolCalls(sessionId)
+        : _runHistory.getRunToolCalls(runId);
       if (toolCalls.length === 0) {
         return 'No tool calls found in this session. Nothing to capture.';
       }

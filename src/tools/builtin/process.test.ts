@@ -23,13 +23,22 @@ vi.mock('../../core/process-capture.js', () => ({
   } satisfies ProcessRecord),
 }));
 
+const RUN_TOOL_CALL = { id: 'tc1', run_id: 'run-abc', tool_name: 'http_request', input_json: '{}', output_json: '', duration_ms: 100, sequence_order: 0 };
+const SESSION_TOOL_CALLS = [
+  { id: 'tc0', run_id: 'run-earlier', tool_name: 'http_request', input_json: '{}', output_json: '', duration_ms: 100, sequence_order: 0 },
+  { id: 'tc1', run_id: 'run-earlier', tool_name: 'write_file', input_json: '{}', output_json: '', duration_ms: 80, sequence_order: 1 },
+  { id: 'tc2', run_id: 'run-abc', tool_name: 'capture_process', input_json: '{}', output_json: '', duration_ms: 5, sequence_order: 0 },
+];
+
 // Mock RunHistory
 function makeMockRunHistory() {
   const processes = new Map<string, ProcessRecord>();
   return {
-    getRunToolCalls: vi.fn().mockReturnValue([
-      { id: 'tc1', run_id: 'run-abc', tool_name: 'http_request', input_json: '{}', output_json: '', duration_ms: 100, sequence_order: 0 },
-    ]),
+    // Current-run scope: holds only this turn's calls (the capture_process call).
+    getRunToolCalls: vi.fn().mockReturnValue([RUN_TOOL_CALL]),
+    // Session scope: holds the workflow tool calls from earlier turns.
+    getSessionToolCalls: vi.fn().mockReturnValue(SESSION_TOOL_CALLS),
+    getRun: vi.fn().mockReturnValue({ id: 'run-abc', session_id: 'thread-1' }),
     insertProcess: vi.fn().mockImplementation((record: ProcessRecord) => {
       processes.set(record.id, record);
     }),
@@ -103,6 +112,7 @@ describe('capture_process tool', () => {
 
   it('should error when no tool calls found', async () => {
     mockHistory.getRunToolCalls.mockReturnValue([]);
+    mockHistory.getSessionToolCalls.mockReturnValue([]);
     const agent = makeAgent({}, mockHistory);
     const result = await captureProcessTool.handler(
       { name: 'Test' },
@@ -110,6 +120,51 @@ describe('capture_process tool', () => {
     );
 
     expect(result).toContain('No tool calls');
+  });
+
+  it('gathers session-wide tool calls, not just the current run', async () => {
+    // currentThreadId resolves the session; capture must read across turns.
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await captureProcessTool.handler(
+      { name: 'Monthly Report' },
+      agent,
+    );
+
+    // The session-scoped query is used, the single-run query is not.
+    expect(mockHistory.getSessionToolCalls).toHaveBeenCalledWith('thread-1');
+    expect(mockHistory.getRunToolCalls).not.toHaveBeenCalled();
+
+    // captureProcess receives the session-wide calls + keeps currentRunId as source.
+    const { captureProcess } = await import('../../core/process-capture.js');
+    expect(captureProcess).toHaveBeenCalledWith(
+      'run-abc',
+      'Monthly Report',
+      SESSION_TOOL_CALLS,
+      expect.objectContaining({ apiKey: 'test-key' }),
+    );
+
+    const parsed = JSON.parse(result) as { process_id: string };
+    expect(parsed.process_id).toBe('proc-123');
+  });
+
+  it('falls back to run.session_id when currentThreadId is absent', async () => {
+    // No currentThreadId -> resolve via getRun(currentRunId).session_id.
+    const agent = makeAgent({ currentThreadId: undefined }, mockHistory);
+    await captureProcessTool.handler({ name: 'Test' }, agent);
+
+    expect(mockHistory.getRun).toHaveBeenCalledWith('run-abc');
+    expect(mockHistory.getSessionToolCalls).toHaveBeenCalledWith('thread-1');
+    expect(mockHistory.getRunToolCalls).not.toHaveBeenCalled();
+  });
+
+  it('falls back to single-run scope when no session can be resolved', async () => {
+    // Neither a thread id nor a run.session_id -> legacy current-run behaviour.
+    mockHistory.getRun.mockReturnValue({ id: 'run-abc', session_id: '' });
+    const agent = makeAgent({ currentThreadId: undefined }, mockHistory);
+    await captureProcessTool.handler({ name: 'Test' }, agent);
+
+    expect(mockHistory.getRunToolCalls).toHaveBeenCalledWith('run-abc');
+    expect(mockHistory.getSessionToolCalls).not.toHaveBeenCalled();
   });
 });
 
