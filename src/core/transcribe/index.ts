@@ -110,12 +110,12 @@ export const HAS_WHISPER = hasTranscribeProvider();
 
 function buildSessionTerms(session: TranscribeSessionContext | undefined): string[] {
   if (!session) return [];
+  // KG entity labels are intentionally not forwarded — see session-builder.ts.
   return buildSessionGlossary({
     ...(session.contactNames !== undefined ? { contactNames: session.contactNames } : {}),
     ...(session.apiProfileNames !== undefined ? { apiProfileNames: session.apiProfileNames } : {}),
     ...(session.workflowNames !== undefined ? { workflowNames: session.workflowNames } : {}),
     ...(session.threadTitles !== undefined ? { threadTitles: session.threadTitles } : {}),
-    ...(session.kgEntityLabels !== undefined ? { kgEntityLabels: session.kgEntityLabels } : {}),
   });
 }
 

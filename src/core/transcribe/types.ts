@@ -33,6 +33,10 @@ export interface TranscribeProvider {
  * Minimal session surface the glossary session-builder reads.
  * Intentionally structural (not `Session`) so the builder is testable with
  * plain object stubs and doesn't pull the full engine graph into tests.
+ *
+ * Note: Knowledge-Graph entity labels are deliberately not part of this surface.
+ * KG holds hundreds of single-word proper nouns that collided with ordinary
+ * speech in the fuzzy glossary rewrite, so they are excluded as a voice hint.
  */
 export interface TranscribeSessionContext {
   readonly sessionId?: string | undefined;
@@ -43,8 +47,6 @@ export interface TranscribeSessionContext {
   readonly contactNames?: readonly string[] | undefined;
   /** Registered API/tool profile names. */
   readonly apiProfileNames?: readonly string[] | undefined;
-  /** Knowledge-graph entity labels. */
-  readonly kgEntityLabels?: readonly string[] | undefined;
   /** Custom workflow / pipeline names. */
   readonly workflowNames?: readonly string[] | undefined;
 }

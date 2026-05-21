@@ -7,13 +7,12 @@ import { channels } from '../../observability.js';
 import { buildSessionGlossary, SessionGlossaryCache } from './session-builder.js';
 
 describe('buildSessionGlossary', () => {
-  it('assembles terms from all five sources in priority order', () => {
+  it('assembles terms from all four sources in priority order', () => {
     const terms = buildSessionGlossary({
       contactNames: ['Roland Müller'],
       apiProfileNames: ['Stripe'],
       workflowNames: ['Release Pipeline'],
       threadTitles: ['Billing Fix'],
-      kgEntityLabels: ['Hetzner'],
     });
     // Contacts come first (highest priority in the apply step).
     expect(terms[0]).toBe('Roland Müller');
@@ -24,13 +23,12 @@ describe('buildSessionGlossary', () => {
     expect(terms).toContain('Stripe');
     expect(terms).toContain('Release Pipeline');
     expect(terms).toContain('Billing Fix');
-    expect(terms).toContain('Hetzner');
   });
 
   it('dedupes case-insensitively across sources', () => {
     const terms = buildSessionGlossary({
       contactNames: ['roland'],
-      kgEntityLabels: ['Roland'],
+      workflowNames: ['Roland'],
     });
     // Only one of the two should remain — the contact wins (arrives first).
     const rolandCount = terms.filter((t) => t.toLowerCase() === 'roland').length;

@@ -14,7 +14,6 @@ interface FakeEngineParts {
   apis?: Array<{ name: string }>;
   threads?: Array<{ id: string; title: string }>;
   currentThread?: { id: string; title: string };
-  entities?: Array<{ canonical_name: string }>;
 }
 
 function makeEngine(parts: FakeEngineParts): Engine {
@@ -30,20 +29,18 @@ function makeEngine(parts: FakeEngineParts): Engine {
         listThreads: (_opts: unknown) => parts.threads ?? [],
       }
     : null;
-  const knowledgeLayer = parts.entities !== undefined
-    ? { getDb: () => ({ listEntities: (_opts: unknown) => parts.entities }) }
-    : null;
 
   return {
     getCRM: () => crm,
     getApiStore: () => apiStore,
     getThreadStore: () => threadStore,
-    getKnowledgeLayer: () => knowledgeLayer,
+    // KG is intentionally never read by the session-context extractor.
+    getKnowledgeLayer: () => null,
   } as unknown as Engine;
 }
 
 describe('extractSessionContext', () => {
-  it('assembles a context from all four stores', () => {
+  it('assembles a context from CRM, API and thread stores', () => {
     const engine = makeEngine({
       contacts: [{ name: 'Roland' }, { name: 'Amanda' }],
       apis: [{ name: 'Stripe' }, { name: 'Gmail' }],
@@ -52,7 +49,6 @@ describe('extractSessionContext', () => {
         { id: 'thread-1', title: 'Billing bug' },
         { id: 'thread-2', title: 'Release prep' },
       ],
-      entities: [{ canonical_name: 'Hetzner' }, { canonical_name: 'Mistral' }],
     });
 
     const ctx = extractSessionContext(engine, 'thread-1');
@@ -61,7 +57,21 @@ describe('extractSessionContext', () => {
     expect(ctx.contactNames).toEqual(['Roland', 'Amanda']);
     expect(ctx.apiProfileNames).toEqual(['Stripe', 'Gmail']);
     expect(ctx.threadTitles).toEqual(['Billing bug', 'Release prep']);
-    expect(ctx.kgEntityLabels).toEqual(['Hetzner', 'Mistral']);
+  });
+
+  it('never reads KG entity labels (excluded as a voice hint)', () => {
+    // Even with a knowledge layer wired up, the extractor must not surface its
+    // entities — KG proper nouns over-biased the fuzzy glossary rewrite.
+    const engine = {
+      getCRM: () => null,
+      getApiStore: () => null,
+      getThreadStore: () => null,
+      getKnowledgeLayer: () => ({
+        getDb: () => ({ listEntities: () => [{ canonical_name: 'Olten' }] }),
+      }),
+    } as unknown as Engine;
+    const ctx = extractSessionContext(engine, 't');
+    expect(ctx).not.toHaveProperty('kgEntityLabels');
   });
 
   it('handles missing stores gracefully (omits the keys)', () => {
@@ -70,7 +80,6 @@ describe('extractSessionContext', () => {
     expect(ctx.contactNames).toBeUndefined();
     expect(ctx.apiProfileNames).toBeUndefined();
     expect(ctx.threadTitles).toBeUndefined();
-    expect(ctx.kgEntityLabels).toBeUndefined();
     expect(ctx.sessionId).toBe('thread-x');
     expect(ctx.threadId).toBe('thread-x');
   });
@@ -107,14 +116,12 @@ describe('extractSessionContext', () => {
     expect(ctx.threadTitles).toEqual(['Current work', 'Other work']);
   });
 
-  it('caps contacts and KG entities according to opts', () => {
+  it('caps contacts according to opts', () => {
     const engine = makeEngine({
       contacts: Array.from({ length: 200 }, (_, i) => ({ name: `C${i}` })),
-      entities: Array.from({ length: 500 }, (_, i) => ({ canonical_name: `E${i}` })),
     });
-    const ctx = extractSessionContext(engine, 't', { maxContacts: 10, maxKgEntities: 5 });
+    const ctx = extractSessionContext(engine, 't', { maxContacts: 10 });
     expect(ctx.contactNames).toHaveLength(10);
-    expect(ctx.kgEntityLabels).toHaveLength(5);
   });
 
   it('swallows store errors and still returns a usable context', () => {
