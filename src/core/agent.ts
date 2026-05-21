@@ -395,7 +395,16 @@ export class Agent implements IAgent {
       const contentForHistory = response.content.filter(
         (b): b is Exclude<typeof b, { type: 'thinking' }> => b.type !== 'thinking',
       ) as BetaContentBlockParam[];
-      this.messages.push({ role: 'assistant', content: contentForHistory });
+      // A thinking-only response (entire output budget spent on extended
+      // thinking before max_tokens) strips to an empty array. Anthropic rejects
+      // an assistant message with empty content and that would break the very
+      // next request — substitute a minimal placeholder so history stays valid.
+      this.messages.push({
+        role: 'assistant',
+        content: contentForHistory.length > 0
+          ? contentForHistory
+          : [{ type: 'text', text: '[…]' }],
+      });
       // F-Eager-Persist: checkpoint after each assistant message so the
       // ThreadStore has the latest turn even if the process dies before the
       // run() finally block runs (container restart, OOM).
@@ -458,8 +467,12 @@ export class Agent implements IAgent {
       }
 
       if (response.stop_reason === 'max_tokens') {
-        // Let max_tokens fall through to continuation logic if configured
-        if (this.continuationPrompt && this.continuationCount < this.maxContinuations) {
+        // The model ran out of output budget mid-turn. Continue regardless of
+        // whether an autonomous continuationPrompt is configured — hitting
+        // max_tokens is itself the signal to continue, gated only by the
+        // continuation cap. Without this, a turn whose whole output budget
+        // went to extended thinking returned an empty assistant message.
+        if (this.continuationCount < this.maxContinuations) {
           this.continuationCount++;
           if (this.onStream) {
             await this.onStream({ type: 'continuation', iteration: this.continuationCount, max: this.maxContinuations, agent: this.name });
@@ -467,12 +480,16 @@ export class Agent implements IAgent {
           this.messages.push({ role: 'user', content: 'Your previous response was truncated due to length. Please continue from where you left off.' });
           return this._loop();
         }
+        // Continuation cap exhausted — surface a clear notice rather than an
+        // empty bubble when the truncated turn produced no visible text.
         const text = extractText(response.content);
         if (this.memory && !this.skipMemoryExtraction) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
           this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
         }
-        return text;
+        return text.trim().length > 0
+          ? text
+          : '[Response stopped: the output limit was reached before any text was produced — the task is likely too large for one turn. Try splitting it into smaller steps.]';
       }
 
       if (response.stop_reason === 'tool_use') {
