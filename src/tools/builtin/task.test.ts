@@ -242,6 +242,21 @@ describe('Task Tools', () => {
       expect(created?.schedule_cron).toBe('0 9 * * *');
       expect(created?.next_run_at).toBeTruthy();
     });
+
+    // PR1: the tool param was renamed `pipeline_id` -> `workflow_id`, but the
+    // DB column `tasks.pipeline_id` stays (no migration — PRD §6.6). Pin that
+    // the handler maps the new param onto the existing column.
+    it('maps workflow_id onto the pipeline_id column via createPipelineTask', async () => {
+      const result = await taskCreateTool.handler(
+        { title: 'Weekly report', assignee: 'lynox', workflow_id: 'wf-abc123', schedule: '0 9 * * 1' },
+        makeAgent(),
+      );
+      expect(result).toContain('Workflow task created');
+      const created = tm.list().find((t) => t.title === 'Weekly report');
+      expect(created?.pipeline_id).toBe('wf-abc123');
+      expect(created?.task_type).toBe('pipeline');
+      expect(created?.schedule_cron).toBe('0 9 * * 1');
+    });
   });
 
   describe('task_update', () => {

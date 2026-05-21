@@ -144,7 +144,7 @@ export function finalizeTrackedPlan(
   const totalDurationMs = new Date(now).getTime() - new Date(plan.startedAt).getTime();
   const hasErrors = [...plan.stepResults.values()].some(r => r.status === 'failed');
 
-  // Persist to RunHistory (same tables as run_pipeline)
+  // Persist to RunHistory (same tables as run_workflow)
   if (runHistory) {
     try {
       runHistory.insertPipelineRun({

@@ -219,7 +219,7 @@ export const promoteProcessTool: ToolEntry<PromoteInput> = {
         steps: pipelineSteps.length,
         parameters: record.parameters.map(p => p.name),
         estimated_cost: `$${costEstimate.totalCostUsd.toFixed(4)}`,
-        next: `Call run_pipeline with pipeline_id "${pipelineId}" to run this workflow.`,
+        next: `Call run_workflow with workflow_id "${pipelineId}" to run this workflow.`,
       }, null, 2);
     } catch (err) {
       logErrorChain('promote_process', err);

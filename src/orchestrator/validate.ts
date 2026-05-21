@@ -5,6 +5,15 @@ import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
 
+/**
+ * Hard ceiling on workflow steps — single source of truth.
+ * Lives here (the lower-level validation module) rather than in
+ * `pipeline.ts` so the declarative `.max()` on the manifest schema and the
+ * imperative checks in `pipeline.ts` share one constant without an
+ * import cycle (`pipeline.ts` already depends on this module).
+ */
+export const MAX_STEPS = 20;
+
 const ConditionOperators = ['lt', 'gt', 'eq', 'neq', 'gte', 'lte', 'exists', 'not_exists', 'contains'] as const;
 
 const ManifestConditionSchema = z.object({
@@ -44,7 +53,7 @@ const ManifestSchema_1_0 = z.object({
   name: z.string().min(1),
   triggered_by: z.string(),
   context: z.record(z.string(), z.unknown()).default({}),
-  agents: z.array(ManifestStepSchema).min(1),
+  agents: z.array(ManifestStepSchema).min(1).max(MAX_STEPS),
   gate_points: z.array(z.string()).default([]),
   on_failure: z.enum(['stop', 'continue', 'notify']).default('stop'),
 });
@@ -54,7 +63,7 @@ const ManifestSchema_1_1 = z.object({
   name: z.string().min(1),
   triggered_by: z.string(),
   context: z.record(z.string(), z.unknown()).default({}),
-  agents: z.array(ManifestStepSchema).min(1),
+  agents: z.array(ManifestStepSchema).min(1).max(MAX_STEPS),
   gate_points: z.array(z.string()).default([]),
   on_failure: z.enum(['stop', 'continue', 'notify']).default('stop'),
   execution: z.enum(['sequential', 'parallel']).default('parallel'),

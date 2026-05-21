@@ -138,7 +138,7 @@ describe('validateToolInput', () => {
 
   // Regression guard: builtin tools use `{ type: 'object' }` with no `properties`
   // declared as the "free-form payload" idiom (http_request.headers,
-  // data_store_insert.records[*], run_pipeline.context, etc). Strict-by-default
+  // data_store_insert.records[*], run_workflow.context, etc). Strict-by-default
   // here would reject every real call.
   describe('free-form object idiom', () => {
     it('accepts arbitrary keys when nested object has no properties declared', () => {
@@ -251,17 +251,17 @@ describe('validateToolInput', () => {
       expect(result.ok).toBe(true);
     });
 
-    it('run_pipeline accepts arbitrary context map', () => {
+    it('run_workflow accepts arbitrary context map', () => {
       const schema: BetaTool['input_schema'] = {
         type: 'object',
         properties: {
-          pipeline_id: { type: 'string' },
+          workflow_id: { type: 'string' },
           context: { type: 'object' },
         },
-        required: ['pipeline_id'],
+        required: ['workflow_id'],
       };
       const result = validateToolInput(schema, {
-        pipeline_id: 'wf-123',
+        workflow_id: 'wf-123',
         context: { customer: 'acme', month: '2026-04', dry_run: true },
       });
       expect(result.ok).toBe(true);

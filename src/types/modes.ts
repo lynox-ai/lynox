@@ -12,7 +12,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   web_research: 'Searching the web',
   spawn_agent: 'Delegating',
   ask_user: 'Asking you',
-  run_pipeline: 'Running workflow',
+  run_workflow: 'Running workflow',
   plan_task: 'Planning',
   task_create: 'Creating task',
   task_update: 'Updating task',

@@ -156,7 +156,7 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
  * The stored `executionMode` is set by the O7 classifier
  * (`shouldRunOrchestrated`): eligible plans (≥3 independent steps OR any
  * cheap-tier step) are stored `'orchestrated'`; everything else stays
- * `'tracked'`. The field is advisory for `run_pipeline` (which always uses
+ * `'tracked'`. The field is advisory for `run_workflow` (which always uses
  * `runManifest`), but it keeps the persisted pipeline metadata honest and
  * lets the post-approval routing in the handler read back the decision.
  */
@@ -198,7 +198,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
       'Present a plan before executing complex tasks. Use after understanding the problem. ' +
       'Provide phases for structured plans, or just a summary to auto-generate a plan. ' +
       'On approval, agent phases are automatically converted to a pipeline. ' +
-      'Returns pipeline_id — call run_pipeline to run it.',
+      'Returns pipeline_id — call run_workflow with it as workflow_id to run it.',
     input_schema: {
       type: 'object' as const,
       properties: {

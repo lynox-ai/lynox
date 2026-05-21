@@ -45,7 +45,7 @@ import {
   askSecretTool,
   batchFilesTool,
   httpRequestTool,
-  runPipelineTool,
+  runWorkflowTool,
   taskCreateTool,
   taskUpdateTool,
   taskListTool,
@@ -1020,7 +1020,7 @@ export class Engine {
     if (this._pipelinesEnabled) return;
     this._pipelinesEnabled = true;
     this.registry
-      .register(runPipelineTool)
+      .register(runWorkflowTool)
       .register(stepCompleteTool)
       .register(captureProcessTool)
       .register(promoteProcessTool);

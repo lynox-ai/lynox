@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation } from './validate.js';
+import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS } from './validate.js';
 import type { InlinePipelineStep, PlannedPipeline } from '../types/index.js';
 
 const validManifest = {
@@ -61,6 +61,22 @@ describe('validateManifest', () => {
 
   it('throws when agents array is empty', () => {
     expect(() => validateManifest({ ...validManifest, agents: [] }))
+      .toThrow('Invalid manifest');
+  });
+
+  it('accepts an agents array exactly at the MAX_STEPS ceiling', () => {
+    const atCeiling = Array.from({ length: MAX_STEPS }, (_, i) => ({
+      id: `step-${String(i)}`, agent: 'my-agent', runtime: 'mock' as const,
+    }));
+    expect(() => validateManifest({ ...validManifest, agents: atCeiling }))
+      .not.toThrow();
+  });
+
+  it('throws when agents array exceeds the MAX_STEPS ceiling', () => {
+    const overCeiling = Array.from({ length: MAX_STEPS + 1 }, (_, i) => ({
+      id: `step-${String(i)}`, agent: 'my-agent', runtime: 'mock' as const,
+    }));
+    expect(() => validateManifest({ ...validManifest, agents: overCeiling }))
       .toThrow('Invalid manifest');
   });
 

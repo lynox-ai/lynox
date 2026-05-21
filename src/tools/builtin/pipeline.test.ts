@@ -16,14 +16,16 @@ vi.mock('../../orchestrator/runner.js', () => ({
   retryManifest: (...args: unknown[]) => mockRetryManifest(...args),
 }));
 
-// Mock validate
+// Mock validate — keep MAX_STEPS in sync with the real module (pipeline.ts
+// imports the canonical constant from here).
 const mockValidateManifest = vi.fn();
 vi.mock('../../orchestrator/validate.js', () => ({
   validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
+  MAX_STEPS: 20,
 }));
 
 import {
-  runPipelineTool,
+  runWorkflowTool,
   storePipeline,
   getPipeline,
   _resetPipelineStore,
@@ -102,7 +104,7 @@ function seedStoredPipeline(steps?: InlinePipelineStep[]): string {
   return pipelineId;
 }
 
-describe('run_pipeline — inline steps', () => {
+describe('run_workflow — inline steps', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetPipelineStore();
@@ -110,61 +112,61 @@ describe('run_pipeline — inline steps', () => {
   });
 
   it('returns error when config not initialized', async () => {
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       makePipelineAgent({ config: null }),
     );
-    expect(result).toBe('Error: Pipeline config not initialized. Pipeline tools are not available.');
+    expect(result).toBe('Error: Workflow config not initialized. Workflow tools are not available.');
   });
 
   it('returns error when no parent tools', async () => {
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       makePipelineAgent({ tools: [] }),
     );
     expect(result).toBe('Error: No parent tools available for inline pipeline steps.');
   });
 
-  it('returns error when both steps and pipeline_id provided', async () => {
+  it('returns error when both steps and workflow_id provided', async () => {
     const agent = makePipelineAgent();
-    const result = await runPipelineTool.handler(
-      { name: 'test', steps: [makeStep('s1', 'do thing')], pipeline_id: 'some-id' },
+    const result = await runWorkflowTool.handler(
+      { name: 'test', steps: [makeStep('s1', 'do thing')], workflow_id: 'some-id' },
       agent,
     );
-    expect(result).toBe('Error: Provide either steps[] or pipeline_id, not both.');
+    expect(result).toBe('Error: Provide either steps[] or workflow_id, not both.');
   });
 
-  it('returns error when neither steps nor pipeline_id provided', async () => {
+  it('returns error when neither steps nor workflow_id provided', async () => {
     const agent = makePipelineAgent();
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test' },
       agent,
     );
-    expect(result).toBe('Error: Provide steps[] for inline execution or pipeline_id for a stored pipeline.');
+    expect(result).toBe('Error: Provide steps[] for inline execution or workflow_id for a stored workflow.');
   });
 
   it('returns error for empty steps array', async () => {
     const agent = makePipelineAgent();
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [] },
       agent,
     );
-    expect(result).toBe('Error: Pipeline must have at least one step.');
+    expect(result).toBe('Error: Workflow must have at least one step.');
   });
 
   it('returns error when steps exceed MAX_STEPS (20)', async () => {
     const agent = makePipelineAgent();
     const steps = Array.from({ length: 21 }, (_, i) => makeStep(`s${i}`, `task ${i}`));
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps },
       agent,
     );
-    expect(result).toBe('Error: Pipeline exceeds maximum of 20 steps (got 21).');
+    expect(result).toBe('Error: Workflow exceeds maximum of 20 steps (got 21).');
   });
 
   it('returns error for duplicate step IDs', async () => {
     const agent = makePipelineAgent();
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('dup', 'first'), makeStep('dup', 'second')] },
       agent,
     );
@@ -175,7 +177,7 @@ describe('run_pipeline — inline steps', () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'single', steps: [makeStep('s1', 'do thing')] },
       agent,
     );
@@ -205,7 +207,7 @@ describe('run_pipeline — inline steps', () => {
     });
     mockRunManifest.mockResolvedValueOnce(multiState);
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       {
         name: 'multi',
         steps: [
@@ -230,7 +232,7 @@ describe('run_pipeline — inline steps', () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
-    await runPipelineTool.handler(
+    await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')], on_failure: 'continue' },
       agent,
     );
@@ -244,7 +246,7 @@ describe('run_pipeline — inline steps', () => {
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
     const context = { repo: 'lynox', branch: 'main' };
-    await runPipelineTool.handler(
+    await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')], context },
       agent,
     );
@@ -267,7 +269,7 @@ describe('run_pipeline — inline steps', () => {
     });
     mockRunManifest.mockResolvedValueOnce(state);
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       agent,
     );
@@ -286,7 +288,7 @@ describe('run_pipeline — inline steps', () => {
       throw new Error('Cycle detected in DAG');
     });
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       {
         name: 'cyclic',
         steps: [
@@ -297,14 +299,14 @@ describe('run_pipeline — inline steps', () => {
       agent,
     );
 
-    expect(result).toContain('Error: Pipeline execution failed: Cycle detected in DAG');
+    expect(result).toContain('Error: Workflow execution failed: Cycle detected in DAG');
   });
 
   it('builds manifest with v1.1 and inline runtime', async () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
-    await runPipelineTool.handler(
+    await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       agent,
     );
@@ -332,7 +334,7 @@ describe('run_pipeline — inline steps', () => {
     });
     mockRunManifest.mockResolvedValueOnce(state);
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'a'), makeStep('s2', 'b')] },
       agent,
     );
@@ -346,29 +348,29 @@ describe('run_pipeline — inline steps', () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockRejectedValueOnce(new Error('Agent crashed'));
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       agent,
     );
 
-    expect(result).toBe('Error: Pipeline execution failed: Agent crashed');
+    expect(result).toBe('Error: Workflow execution failed: Agent crashed');
   });
 });
 
-describe('run_pipeline — stored pipeline (pipeline_id)', () => {
+describe('run_workflow — stored workflow (workflow_id)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetPipelineStore();
     mockValidateManifest.mockImplementation((m: unknown) => m);
   });
 
-  it('returns error for unknown pipeline_id', async () => {
+  it('returns error for unknown workflow_id', async () => {
     const agent = makePipelineAgent();
-    const result = await runPipelineTool.handler(
-      { pipeline_id: 'nonexistent-id' },
+    const result = await runWorkflowTool.handler(
+      { workflow_id: 'nonexistent-id' },
       agent,
     );
-    expect(result).toContain('Error: Pipeline "nonexistent-id" not found');
+    expect(result).toContain('Error: Workflow "nonexistent-id" not found');
   });
 
   it('refuses an interactive pipeline run from a non-prompt-capable agent', async () => {
@@ -388,8 +390,8 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
       template: false,
       mode: 'interactive',
     });
-    const result = await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    const result = await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
     expect(result).toMatch(/requires a live chat session/);
@@ -401,14 +403,14 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
 
     // Execute once
     mockRunManifest.mockResolvedValueOnce(makeRunState());
-    await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
 
     // Try to execute again
-    const result = await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    const result = await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
     expect(result).toContain('has already been executed');
@@ -432,8 +434,8 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     });
     mockRunManifest.mockResolvedValueOnce(state);
 
-    const result = await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    const result = await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
 
@@ -464,9 +466,9 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
       ]),
     }));
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       {
-        pipeline_id: pipelineId,
+        workflow_id: pipelineId,
         modifications: [{ step_id: 'b', action: 'remove' }],
       },
       agent,
@@ -497,9 +499,9 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
       ]),
     }));
 
-    await runPipelineTool.handler(
+    await runWorkflowTool.handler(
       {
-        pipeline_id: pipelineId,
+        workflow_id: pipelineId,
         modifications: [{ step_id: 'a', action: 'remove' }],
       },
       agent,
@@ -516,9 +518,9 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
 
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
-    await runPipelineTool.handler(
+    await runWorkflowTool.handler(
       {
-        pipeline_id: pipelineId,
+        workflow_id: pipelineId,
         modifications: [{ step_id: 'analyze', action: 'update_task', value: 'Deep analysis of auth module' }],
       },
       agent,
@@ -533,9 +535,9 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       {
-        pipeline_id: pipelineId,
+        workflow_id: pipelineId,
         modifications: [{ step_id: 'nonexistent', action: 'remove' }],
       },
       agent,
@@ -548,9 +550,9 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       {
-        pipeline_id: pipelineId,
+        workflow_id: pipelineId,
         modifications: [{ step_id: 'analyze', action: 'update_task' }],
       },
       agent,
@@ -563,9 +565,9 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline([{ id: 'only', task: 'the only step' }]);
 
-    const result = await runPipelineTool.handler(
+    const result = await runWorkflowTool.handler(
       {
-        pipeline_id: pipelineId,
+        workflow_id: pipelineId,
         modifications: [{ step_id: 'only', action: 'remove' }],
       },
       agent,
@@ -583,18 +585,18 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
       throw new Error('Schema validation failed');
     });
 
-    const firstResult = await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    const firstResult = await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
-    expect(firstResult).toContain('Error: Pipeline execution failed');
+    expect(firstResult).toContain('Error: Workflow execution failed');
 
     // Second attempt should work (executed flag reset to false on error)
     mockValidateManifest.mockImplementation((m: unknown) => m);
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
-    const secondResult = await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    const secondResult = await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
     const parsed = JSON.parse(secondResult) as Record<string, unknown>;
@@ -607,15 +609,15 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
 
     // First execution
     mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
-    await runPipelineTool.handler(
-      { pipeline_id: pipelineId },
+    await runWorkflowTool.handler(
+      { workflow_id: pipelineId },
       agent,
     );
 
     // Retry
     mockRetryManifest.mockResolvedValueOnce(makeRunState());
-    const result = await runPipelineTool.handler(
-      { pipeline_id: pipelineId, retry: true },
+    const result = await runWorkflowTool.handler(
+      { workflow_id: pipelineId, retry: true },
       agent,
     );
 
@@ -628,8 +630,8 @@ describe('run_pipeline — stored pipeline (pipeline_id)', () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();
 
-    const result = await runPipelineTool.handler(
-      { pipeline_id: pipelineId, retry: true },
+    const result = await runWorkflowTool.handler(
+      { workflow_id: pipelineId, retry: true },
       agent,
     );
 

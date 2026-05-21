@@ -17,7 +17,7 @@ interface TaskCreateInput {
   schedule?: string | undefined;
   watch_url?: string | undefined;
   watch_interval_minutes?: number | undefined;
-  pipeline_id?: string | undefined;
+  workflow_id?: string | undefined;
 }
 
 interface TaskUpdateInput {
@@ -61,7 +61,7 @@ function formatTaskLine(t: { id: string; title: string; priority: string; status
 // keep false positives away from legitimate prose. JSON keys are always
 // double-quoted in real payloads, so the single-quote branch was dead weight.
 const EMBEDDED_TASK_PARAMS_PATTERN =
-  /"\s*,\s*"(schedule|priority|assignee|due_date|parent_task_id|watch_url|watch_interval_minutes|pipeline_id|scope|tags|title)"\s*:\s*["[\dtf]/i;
+  /"\s*,\s*"(schedule|priority|assignee|due_date|parent_task_id|watch_url|watch_interval_minutes|workflow_id|scope|tags|title)"\s*:\s*["[\dtf]/i;
 
 function detectEmbeddedParams(field: string, value: string | undefined): string | null {
   if (!value) return null;
@@ -91,7 +91,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\'). For a one-shot future task use run_at instead.' },
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', description: 'How often to check the watched URL (in minutes). Default: 60.' },
-        pipeline_id: { type: 'string', description: 'ID of a stored workflow/pipeline to execute on this schedule.' },
+        workflow_id: { type: 'string', description: 'ID of a stored workflow to execute on this schedule.' },
       },
       required: ['title'],
     },
@@ -133,15 +133,17 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parentTaskId: input.parent_task_id,
       };
 
-      if (input.pipeline_id) {
+      if (input.workflow_id) {
+        // The tool param is `workflow_id`; the TaskManager + DB column remain
+        // `pipelineId` / `tasks.pipeline_id` (no migration — see PRD §6.6).
         const task = managerRef.createPipelineTask({
           ...baseParams,
-          pipelineId: input.pipeline_id,
+          pipelineId: input.workflow_id,
           scheduleCron: input.schedule,
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
         const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-        return `Pipeline task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}`;
+        return `Workflow task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}`;
       }
 
       if (input.schedule) {

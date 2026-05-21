@@ -779,9 +779,9 @@ export class Agent implements IAgent {
    * The audit (`A-PD-01`) caught five stale names here: `list_files`,
    * `data_store`, `pipeline_run`, `pipeline_list`, `watch_url`. None of
    * those exact strings match a registered tool — `data_store` is a
-   * prefix for six tools, `pipeline_run` was renamed to `run_pipeline`,
+   * prefix for six tools, `pipeline_run` was renamed (now `run_workflow`),
    * and the others never existed. Because the gate uses exact-match
-   * Set.has(), results from `run_pipeline`, `data_store_*` etc. were
+   * Set.has(), results from `run_workflow`, `data_store_*` etc. were
    * needlessly running through the injection scanner. The right names
    * are the actual registered tool ids — keep them in sync with
    * `src/tools/registry.ts`.
@@ -795,7 +795,7 @@ export class Agent implements IAgent {
     'api_setup',
     'data_store_create', 'data_store_insert', 'data_store_query',
     'data_store_list', 'data_store_delete', 'data_store_drop',
-    'plan_task', 'run_pipeline', 'step_complete',
+    'plan_task', 'run_workflow', 'step_complete',
   ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {

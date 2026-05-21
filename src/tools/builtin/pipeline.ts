@@ -1,5 +1,5 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler } from '../../types/index.js';
-import { validateManifest } from '../../orchestrator/validate.js';
+import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
@@ -9,7 +9,6 @@ import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
-const MAX_STEPS = 20;
 const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
 
@@ -286,10 +285,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   const steps = input.steps!;
 
   if (steps.length === 0) {
-    return 'Error: Pipeline must have at least one step.';
+    return 'Error: Workflow must have at least one step.';
   }
   if (steps.length > MAX_STEPS) {
-    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
+    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
   }
 
   // Validate unique IDs
@@ -337,7 +336,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
-    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
@@ -407,21 +406,21 @@ export async function dispatchOrchestratedPipeline(
   // executePipelineById guard so the dispatch fails fast with a clear error
   // rather than throwing "ask_user is not set" deep inside a step.
   if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
-    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
+    return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
   if (planned.executed) {
-    return `Error: Pipeline "${planned.id}" has already been executed.`;
+    return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
   if (steps.length === 0) {
-    return 'Error: Pipeline has no steps to execute.';
+    return 'Error: Workflow has no steps to execute.';
   }
   if (steps.length > MAX_STEPS) {
-    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps.`;
+    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
   }
 
   try {
@@ -447,21 +446,21 @@ export async function dispatchOrchestratedPipeline(
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     planned.executed = false; // Allow retry on validation errors
-    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
-  const planned = getPipeline(input.pipeline_id!, deps.runHistory);
+  const planned = getPipeline(input.workflow_id!, deps.runHistory);
   if (!planned) {
-    return `Error: Pipeline "${input.pipeline_id}" not found.`;
+    return `Error: Workflow "${input.workflow_id}" not found.`;
   }
 
   // Interactive pipelines need a live prompt-capable session. Refuse with a
   // clear error rather than running steps that will throw "ask_user is not
   // set" deep in the run.
   if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
-    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
+    return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
@@ -487,12 +486,12 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
-      return `Error: Pipeline retry failed: ${getErrorMessage(err)}`;
+      return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
     }
   }
 
   if (planned.executed) {
-    return `Error: Pipeline "${planned.id}" has already been executed.`;
+    return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
   // Deep copy steps for modification
@@ -508,7 +507,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   }
 
   if (steps.length > MAX_STEPS) {
-    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps.`;
+    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
   }
 
   try {
@@ -539,27 +538,27 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     planned.executed = false; // Allow retry on validation errors
-    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
-// ===== run_pipeline =====
+// ===== run_workflow =====
 
 interface RunPipelineInput {
   name?: string | undefined;
   steps?: InlinePipelineStep[] | undefined;
-  pipeline_id?: string | undefined;
+  workflow_id?: string | undefined;
   on_failure?: 'stop' | 'continue' | 'notify' | undefined;
   context?: Record<string, unknown> | undefined;
   retry?: boolean | undefined;
   modifications?: StepModification[] | undefined;
 }
 
-export const runPipelineTool: ToolEntry<RunPipelineInput> = {
+export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
   definition: {
-    name: 'run_pipeline',
+    name: 'run_workflow',
     description:
-      'Execute a multi-step workflow. Provide steps[] for inline execution, or pipeline_id to run a stored pipeline. ' +
+      'Execute a multi-step workflow. Provide steps[] for inline execution, or workflow_id to run a stored workflow. ' +
       'Steps without dependencies run in parallel automatically.',
     eager_input_streaming: true,
     input_schema: {
@@ -583,7 +582,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
             required: ['id', 'task'],
           },
         },
-        pipeline_id: {
+        workflow_id: {
           type: 'string',
           description: 'ID of a stored workflow to execute (from plan_task or promote_process)',
         },
@@ -598,11 +597,11 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         },
         retry: {
           type: 'boolean',
-          description: 'If true, skip completed steps and re-execute only failed/skipped ones (requires pipeline_id)',
+          description: 'If true, skip completed steps and re-execute only failed/skipped ones (requires workflow_id)',
         },
         modifications: {
           type: 'array',
-          description: 'Modify steps before execution (requires pipeline_id)',
+          description: 'Modify steps before execution (requires workflow_id)',
           items: {
             type: 'object',
             properties: {
@@ -622,24 +621,24 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
     const pipelineStreamHandler = agent.toolContext.streamHandler;
     const pipelineRunHistory = agent.toolContext.runHistory;
     if (!pipelineConfig) {
-      return 'Error: Pipeline config not initialized. Pipeline tools are not available.';
+      return 'Error: Workflow config not initialized. Workflow tools are not available.';
     }
 
     if (pipelineTools.length === 0) {
       return 'Error: No parent tools available for inline pipeline steps.';
     }
 
-    if (input.steps && input.pipeline_id) {
-      return 'Error: Provide either steps[] or pipeline_id, not both.';
+    if (input.steps && input.workflow_id) {
+      return 'Error: Provide either steps[] or workflow_id, not both.';
     }
 
-    if (!input.steps && !input.pipeline_id) {
-      return 'Error: Provide steps[] for inline execution or pipeline_id for a stored pipeline.';
+    if (!input.steps && !input.workflow_id) {
+      return 'Error: Provide steps[] for inline execution or workflow_id for a stored workflow.';
     }
 
     const pipelineToolContext = agent.toolContext;
 
-    // run_pipeline is always called from a chat session; inherit the parent
+    // run_workflow is always called from a chat session; inherit the parent
     // agent's prompt callbacks so sub-agents can route ask_user/ask_secret
     // back through the live SSE stream. Stored autonomous pipelines that
     // somehow get invoked here will still be rejected at executePipelineById
@@ -653,7 +652,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         }
       : undefined;
 
-    if (input.pipeline_id) {
+    if (input.workflow_id) {
       return executePipelineById(input, {
         config: pipelineConfig,
         tools: pipelineTools,
