@@ -62,6 +62,10 @@ function shannonEntropy(s: string): number {
 
 function looksHighEntropy(token: string): boolean {
   // Long, mixed-charset, and high per-character entropy = likely a secret.
+  // 24-char floor is a deliberate gap: shorter secrets (e.g. 16-char keys)
+  // are not entropy-redacted — lowering it risks mangling legitimate IDs and
+  // hashes in prose. Prefixed/known-shape short secrets are still caught by
+  // the value-pattern scan above.
   if (token.length < 24) return false;
   const hasUpper = /[A-Z]/.test(token);
   const hasLower = /[a-z]/.test(token);
@@ -84,18 +88,28 @@ function redactSecrets(text: string): string {
   const scoped = text.length > MAX_REDACTION_SCAN_CHARS
     ? text.slice(0, MAX_REDACTION_SCAN_CHARS)
     : text;
-  // 1. Key-name redaction — `"api_key": "..."` style JSON pairs.
+  // 1. Key-name redaction — `"api_key": "..."` style JSON pairs. The
+  //    `[a-z0-9_-]*` prefix catches namespaced keys whose name ENDS in a
+  //    sensitive keyword (`db-password`, `csrf_token`, `x_api_key`), not just
+  //    the bare keyword. A keyword buried mid-name is intentionally not matched
+  //    — a trailing wildcard would redact innocuous fields like `token_count`.
   let redacted = scoped.replace(
-    /"(api_?key|token|secret|password|authorization|access_token|refresh_token|client_secret)":\s*"[^"]*"/gi,
+    /"([a-z0-9_-]*(?:api_?key|token|secret|password|authorization|access_token|refresh_token|client_secret))":\s*"[^"]*"/gi,
     '"$1": "[REDACTED]"',
+  );
+  // 1b. URL-embedded credentials — redact the `user:pass@` userinfo.
+  redacted = redacted.replace(
+    /([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/:@]+@/gi,
+    '$1[REDACTED]@',
   );
   // 2. Value-pattern scanning — bearer tokens, xox…, JWT, provider prefixes.
   for (const pattern of VALUE_SECRET_PATTERNS) {
     redacted = redacted.replace(pattern, REDACTED);
   }
-  // 3. High-entropy bare strings — split on quotes/whitespace, redact each
+  // 3. High-entropy bare strings — split on quotes/whitespace + `=;&` so a
+  //    secret in `cookie=…;k=…` style runs is isolated, then redact each
   //    token that looks like a random secret.
-  redacted = redacted.replace(/[^\s"'`,]{24,}/g, match =>
+  redacted = redacted.replace(/[^\s"'`,=;&]{24,}/g, match =>
     looksHighEntropy(match) ? REDACTED : match,
   );
   return redacted;

@@ -35,6 +35,7 @@ interface SaveWorkflowInput {
  * placeholders in the step task so the workflow stays re-parameterizable.
  */
 function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
+  const validOrders = new Set(record.steps.map(s => s.order));
   return record.steps.map(step => {
     const paramHints = record.parameters
       .filter(p => {
@@ -48,12 +49,11 @@ function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
       ? `${step.description}\n\nParameters: ${paramHints}`
       : step.description;
 
-    // Convert dependsOn indices to step IDs.
+    // `dependsOn` holds step `order` values — the same space the `step-<order>`
+    // IDs below use. Keep only deps that resolve to a real step so a stale
+    // order can never leave a dangling `input_from` reference.
     const input_from = step.dependsOn?.length
-      ? step.dependsOn.map(idx => {
-          const dep = record.steps[idx];
-          return dep ? `step-${idx}` : undefined;
-        }).filter((id): id is string => id !== undefined)
+      ? step.dependsOn.filter(order => validOrders.has(order)).map(order => `step-${order}`)
       : undefined;
 
     return {

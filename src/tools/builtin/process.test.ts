@@ -105,6 +105,27 @@ describe('save_workflow — session source', () => {
     expect(pipeline!.steps[1]!.input_from).toEqual(['step-0']);
   });
 
+  it('resolves input_from by step order even when order != array index', async () => {
+    // Regression: processToSteps builds step IDs as `step-<order>`. Deriving
+    // `input_from` from the array index instead of the order value left a
+    // dangling reference whenever a captured record's `order` was not 0,1,2…
+    captureProcessMock.mockResolvedValue({
+      ...structuredClone(SAMPLE_RECORD),
+      steps: [
+        { order: 10, tool: 'http_request', description: 'Fetch', inputTemplate: {}, dependsOn: [] },
+        { order: 20, tool: 'write_file', description: 'Report', inputTemplate: {}, dependsOn: [10] },
+      ],
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    const parsed = JSON.parse(result) as { workflow_id: string };
+    const pipeline = getPipeline(parsed.workflow_id);
+    expect(pipeline!.steps[0]!.id).toBe('step-10');
+    expect(pipeline!.steps[1]!.id).toBe('step-20');
+    // input_from must point at step[0]'s real id (`step-10`), not `step-1`.
+    expect(pipeline!.steps[1]!.input_from).toEqual(['step-10']);
+  });
+
   it('writes the internal ProcessRecord for lineage (D11) linked to the pipeline', async () => {
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);

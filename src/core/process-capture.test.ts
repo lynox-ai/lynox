@@ -222,4 +222,22 @@ describe('captureProcess — secret redaction', () => {
     // Neither the whole key nor a recognisable prefix fragment survives.
     expect(payload).not.toContain('sk-live_AbCdEfGhIjKlMnOpQrStUvWxYz');
   });
+
+  it('redacts namespaced secret keys whose name ends in a keyword', async () => {
+    const calls: ToolCallRecord[] = [
+      { id: 'a', run_id: 'r', tool_name: 'http_request', input_json: '{"db-password":"Hunter2-prod-XYZ","x_api_key":"keykeykey-7777"}', output_json: 'ok', duration_ms: 1, sequence_order: 0 },
+    ];
+    await captureProcess('r', 'X', calls, { apiKey: 'k' });
+    const payload = sentPayload();
+    expect(payload).not.toContain('Hunter2-prod-XYZ');
+    expect(payload).not.toContain('keykeykey-7777');
+  });
+
+  it('redacts URL-embedded credentials (user:pass@host)', async () => {
+    const calls: ToolCallRecord[] = [
+      { id: 'a', run_id: 'r', tool_name: 'http_request', input_json: '{"dsn":"postgres://admin:s3cretPwd9@db.internal:5432/app"}', output_json: 'ok', duration_ms: 1, sequence_order: 0 },
+    ];
+    await captureProcess('r', 'X', calls, { apiKey: 'k' });
+    expect(sentPayload()).not.toContain('s3cretPwd9');
+  });
 });
