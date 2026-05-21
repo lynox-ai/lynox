@@ -90,29 +90,29 @@
 		/* Pivot the scan-tilt around the base, like a head turning. */
 		transform-origin: 50% 85%;
 	}
-	/* thinking — a slow, calm vertical bob. */
+	/* thinking — a calm but pronounced vertical bob. */
 	.activity-indicator.thinking {
-		animation: lynox-bob 1.8s ease-in-out infinite;
+		animation: lynox-bob 1.7s ease-in-out infinite;
 	}
-	/* tool — a side-to-side "scanning" tilt, the agent looking around. */
+	/* tool — a wide side-to-side "scanning" tilt, the agent looking around. */
 	.activity-indicator.tool {
-		animation: lynox-scan 1.4s ease-in-out infinite;
+		animation: lynox-scan 1.3s ease-in-out infinite;
 	}
-	/* writing — a quick, rhythmic nod. */
+	/* writing — a fast, punchy nod. */
 	.activity-indicator.writing {
-		animation: lynox-nod 0.7s ease-in-out infinite;
+		animation: lynox-nod 0.5s ease-in-out infinite;
 	}
 	@keyframes lynox-bob {
-		0%, 100% { transform: translateY(1px); }
-		50% { transform: translateY(-2px); }
+		0%, 100% { transform: translateY(2px); }
+		50% { transform: translateY(-4px); }
 	}
 	@keyframes lynox-scan {
-		0%, 100% { transform: rotate(-7deg); }
-		50% { transform: rotate(7deg); }
+		0%, 100% { transform: rotate(-12deg); }
+		50% { transform: rotate(12deg); }
 	}
 	@keyframes lynox-nod {
-		0%, 100% { transform: translateY(-1px); }
-		45% { transform: translateY(2px); }
+		0%, 100% { transform: translateY(-2px); }
+		45% { transform: translateY(4px); }
 	}
 	/* Accessibility: no motion when the user asked the OS to reduce it. */
 	@media (prefers-reduced-motion: reduce) {
