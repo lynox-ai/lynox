@@ -349,6 +349,24 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
           userTimezone: agent.userTimezone,
           sessionCounters: agent.sessionCounters,
         });
+        // Graceful degradation: a failed orchestrated dispatch returns an
+        // `Error: …` string (e.g. an interactive plan reached in a headless
+        // context, or a validation error). Fall back to the tracked inline
+        // path so the approved plan still runs — never silently no-op a plan
+        // the user just approved.
+        if (orchestratedResult.startsWith('Error:')) {
+          startTrackedPlan(planned, agent.toolContext);
+          return JSON.stringify({
+            approved: true,
+            tracked: true,
+            orchestrated: false,
+            orchestration_fallback: orchestratedResult,
+            pipeline_id: pipelineId || undefined,
+            steps: planned.steps.map(s => ({ id: s.id, task: s.task })),
+            user_steps: userSteps,
+            ...(includeEstimatedCost ? { estimated_cost_usd: estimatedCostUsd } : {}),
+          });
+        }
         return JSON.stringify({
           approved: true,
           tracked: false,

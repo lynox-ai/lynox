@@ -421,6 +421,36 @@ describe('plan_task — O7 orchestrated routing', () => {
     expect(mockDispatchOrchestratedPipeline).not.toHaveBeenCalled();
     expect(mockStartTrackedPlan).not.toHaveBeenCalled();
   });
+
+  it('falls back to the tracked path when orchestrated dispatch fails', async () => {
+    // A failed dispatch returns an `Error: …` string — the approved plan must
+    // still run (tracked), never silently no-op.
+    mockDispatchOrchestratedPipeline.mockResolvedValueOnce(
+      'Error: Pipeline execution failed: boom',
+    );
+    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const agent = makeAgent({ promptUser });
+    const result = await planTaskTool.handler(
+      {
+        summary: 'Three independent checks that fail to dispatch',
+        phases: [
+          { name: 'Check A', steps: ['ping A'] },
+          { name: 'Check B', steps: ['ping B'] },
+          { name: 'Check C', steps: ['ping C'] },
+        ],
+      },
+      agent,
+    );
+
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    expect(parsed['approved']).toBe(true);
+    expect(parsed['orchestrated']).toBe(false);
+    expect(parsed['tracked']).toBe(true);
+    expect(parsed['orchestration_fallback']).toBe('Error: Pipeline execution failed: boom');
+    // The plan still runs — tracked path armed after the dispatch failure.
+    expect(mockDispatchOrchestratedPipeline).toHaveBeenCalledOnce();
+    expect(mockStartTrackedPlan).toHaveBeenCalledOnce();
+  });
 });
 
 describe('phasesToPipelineSteps', () => {
