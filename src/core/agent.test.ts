@@ -1509,7 +1509,7 @@ describe('Agent', () => {
       expect(be.messageTokens).toBeGreaterThan(0);
     });
 
-    it('does not emit context_budget when usage is low', async () => {
+    it('emits context_budget even at low usage so the meter stays live', async () => {
       const events: StreamEvent[] = [];
       const agent = new Agent({
         name: 'test',
@@ -1520,8 +1520,18 @@ describe('Agent', () => {
       mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
       await agent.send('hello');
 
-      const budgetEvents = events.filter(e => e.type === 'context_budget');
-      expect(budgetEvents.length).toBe(0);
+      // PR1: the budget is reported on every call (no longer gated at >70%) so
+      // the UI meter is accurate from the first turn and can fall again later.
+      const budgetEvents = events.filter(
+        (e): e is Extract<StreamEvent, { type: 'context_budget' }> => e.type === 'context_budget',
+      );
+      expect(budgetEvents.length).toBeGreaterThanOrEqual(1);
+      for (const be of budgetEvents) {
+        expect(be.maxTokens).toBe(200_000);
+        expect(be.usagePercent).toBeLessThanOrEqual(100);
+      }
+      // A trivial 'hello' turn is nowhere near full.
+      expect(budgetEvents[budgetEvents.length - 1]!.usagePercent).toBeLessThan(70);
     });
   });
 
@@ -1690,6 +1700,78 @@ describe('Agent', () => {
       const result = await agent.send('Hello');
       expect(result).toBe('still works');
       expect(checkpoint).toHaveBeenCalled();
+    });
+  });
+
+  describe('context budget', () => {
+    it('emits context_budget with exact API usage, never exceeding 100%', async () => {
+      const events: StreamEvent[] = [];
+      mockProcess.mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 5_000,
+          cache_read_input_tokens: 140_000,
+          cache_creation_input_tokens: 10_000,
+          output_tokens: 50,
+        },
+      });
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        onStream: (e: StreamEvent) => { events.push(e); },
+      });
+      await agent.send('Hi');
+
+      const budgets = events.filter(
+        (e): e is Extract<StreamEvent, { type: 'context_budget' }> => e.type === 'context_budget',
+      );
+      expect(budgets.length).toBeGreaterThan(0);
+      // The post-call event carries the EXACT prompt size the API reported —
+      // input + cache_read + cache_creation — not a char-estimate.
+      const last = budgets[budgets.length - 1]!;
+      expect(last.totalTokens).toBe(155_000);
+      expect(last.maxTokens).toBe(200_000);
+      expect(last.usagePercent).toBe(78);
+      // The whole point of PR1: real usage is bounded by the API, so the meter
+      // can never show the old >100% (262%) readouts.
+      for (const b of budgets) expect(b.usagePercent).toBeLessThanOrEqual(100);
+    });
+
+    it('getEstimatedOccupancyTokens reflects real usage after a call', async () => {
+      mockProcess.mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 80_000,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          output_tokens: 50,
+        },
+      });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await agent.send('Hi');
+
+      // Real 80k anchor + only the char-estimated delta of the assistant reply
+      // appended since — far below the old whole-history char-estimate.
+      const occ = agent.getEstimatedOccupancyTokens();
+      expect(occ).toBeGreaterThanOrEqual(80_000);
+      expect(occ).toBeLessThan(90_000);
+    });
+
+    it('reset() clears the real-usage anchor', async () => {
+      mockProcess.mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 80_000, output_tokens: 50 },
+      });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await agent.send('Hi');
+      expect(agent.getEstimatedOccupancyTokens()).toBeGreaterThanOrEqual(80_000);
+
+      agent.reset();
+      // No history and no anchor → estimate collapses to ~zero.
+      expect(agent.getEstimatedOccupancyTokens()).toBeLessThan(1_000);
     });
   });
 });

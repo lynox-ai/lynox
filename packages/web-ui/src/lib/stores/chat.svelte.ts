@@ -1230,11 +1230,10 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					// runs — typically only the final turn's model is shown.
 					...(turnModel ? { model: turnModel } : {}),
 				};
-				// Update context estimate (input tokens ≈ current context usage)
-				if (!contextBudget || inTok > (contextBudget.totalTokens ?? 0)) {
-					const pct = Math.round(inTok / contextWindow * 100);
-					contextBudget = { totalTokens: inTok, maxTokens: contextWindow, usagePercent: pct };
-				}
+				// Context budget is owned solely by the engine `context_budget`
+				// event (exact API usage). turn_end no longer writes it — the old
+				// path summed cache-reads across sub-calls and only ratcheted up,
+				// producing the >100% readouts and a figure that never fell.
 			}
 			// Final text block: if the assistant ended on text (no trailing tool
 			// call), emit it now so auto-speak picks up the closing paragraph.

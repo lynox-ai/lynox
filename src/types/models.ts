@@ -521,9 +521,17 @@ export function getContextWindow(model: string): number {
  *  drifted (UI showed 423% because /sessions returned the native window
  *  while the agent had applied a smaller user cap). Single source of truth.
  *  Never returns more than the model's native window. */
+/** Floor for a user-supplied context-window cap. Stops an absurdly small
+ *  `max_context_window_tokens` setting from starving the system prompt + tool
+ *  definitions and bricking every request. */
+export const MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS = 32_000;
+
 export function effectiveContextWindow(model: string, userCap: number | undefined): number {
   const native = getContextWindow(model);
-  return userCap !== undefined && userCap > 0 ? Math.min(native, userCap) : native;
+  if (userCap !== undefined && userCap > 0) {
+    return Math.min(native, Math.max(userCap, MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS));
+  }
+  return native;
 }
 
 /** Look up default max output tokens. Normalizes provider-prefixed model IDs automatically. */

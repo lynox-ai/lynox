@@ -149,6 +149,12 @@ export class Agent implements IAgent {
   private _msgLenVersion = -1;
   private _msgCount = 0;
   private _runningMsgLen = 0;
+  /** Exact prompt-token count of the most recent API call (input + cache_read
+   *  + cache_creation). undefined before the first call of the session. */
+  private _lastRealInputTokens: number | undefined;
+  /** messages.length when _lastRealInputTokens was captured (before the
+   *  assistant reply was appended) — anchors the incremental delta estimate. */
+  private _lastRealAtMsgCount = 0;
   private _loopToolCount = 0;
   private _pendingMemory: Promise<void>[] = [];
   private _settledMemory = new WeakSet<Promise<void>>();
@@ -241,6 +247,8 @@ export class Agent implements IAgent {
 
   reset(): void {
     this.messages = [];
+    this._lastRealInputTokens = undefined;
+    this._lastRealAtMsgCount = 0;
   }
 
   getMessages(): BetaMessageParam[] {
@@ -252,6 +260,9 @@ export class Agent implements IAgent {
     // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
     // so normalise at the single entry point for external history.
     this.messages = sanitizeToolPairs(messages);
+    // Rehydrated history invalidates the last real-usage anchor.
+    this._lastRealInputTokens = undefined;
+    this._lastRealAtMsgCount = 0;
   }
 
   abort(): void {
@@ -309,6 +320,34 @@ export class Agent implements IAgent {
     return this._msgLenCache;
   }
 
+  /**
+   * Best estimate of current prompt occupancy in tokens. Once the API has
+   * reported real usage, this is the exact last-call prompt size plus a
+   * char-estimate of only the messages appended since — far more accurate than
+   * char-estimating the whole history, which over-counts JSON structural
+   * overhead and produced the >100% context readouts.
+   */
+  private _estimateOccupancyTokens(overheadTokens: number): number {
+    if (this._lastRealInputTokens !== undefined && this.messages.length >= this._lastRealAtMsgCount) {
+      let deltaLen = 0;
+      for (let i = this._lastRealAtMsgCount; i < this.messages.length; i++) {
+        deltaLen += JSON.stringify(this.messages[i]).length;
+      }
+      // _lastRealInputTokens already includes system + tool overhead.
+      return this._lastRealInputTokens + deltaLen / CHARS_PER_TOKEN;
+    }
+    return this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens;
+  }
+
+  /**
+   * Current best estimate of prompt occupancy in tokens — for session-level
+   * bookkeeping (auto-compaction trigger). Uses exact last-call usage when
+   * available so the compaction trigger and the UI meter agree on one number.
+   */
+  getEstimatedOccupancyTokens(): number {
+    return this._estimateOccupancyTokens(0);
+  }
+
   async send(userMessage: string | unknown[]): Promise<string> {
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. Telegram vision: image + text)
@@ -350,6 +389,9 @@ export class Agent implements IAgent {
         }
         return extractText([]);
       }
+      // Snapshot before the assistant reply is appended — anchors the
+      // incremental occupancy estimate against the next call's real usage.
+      const msgCountAtCall = this.messages.length;
       const response = await this._callAPI();
 
       // Strip thinking blocks — signatures are invalidated by proxies
@@ -361,6 +403,31 @@ export class Agent implements IAgent {
       // ThreadStore has the latest turn even if the process dies before the
       // run() finally block runs (container restart, OOM).
       await this._checkpoint();
+
+      // Exact context occupancy from real API usage — ground truth for the
+      // context-window meter. The figure is the prompt size of the call just
+      // made (cached prefix included); msgCountAtCall anchors the incremental
+      // delta for the next pre-call estimate.
+      {
+        const u = response.usage;
+        const realInput = u.input_tokens
+          + (u.cache_read_input_tokens ?? 0)
+          + (u.cache_creation_input_tokens ?? 0);
+        if (realInput > 0) {
+          this._lastRealInputTokens = realInput;
+          this._lastRealAtMsgCount = msgCountAtCall;
+          if (this.onStream) {
+            const maxCtx = this._effectiveContextWindow();
+            void this.onStream({
+              type: 'context_budget',
+              totalTokens: realInput,
+              maxTokens: maxCtx,
+              usagePercent: Math.round((realInput / maxCtx) * 100),
+              agent: this.name,
+            });
+          }
+        }
+      }
 
       // Per-agent cost guard: track usage and enforce budget
       if (this.costGuard) {
@@ -464,8 +531,7 @@ export class Agent implements IAgent {
       ];
     }
 
-    const msgTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
-    const totalTokens = msgTokens + overheadTokens;
+    const totalTokens = this._estimateOccupancyTokens(overheadTokens);
     const maxCtx = this._effectiveContextWindow();
     // Budget for messages = total context minus overhead, with 15% safety margin
     if (totalTokens < maxCtx * 0.85) return;
@@ -565,24 +631,25 @@ export class Agent implements IAgent {
     const overheadTokens = systemTokens + toolTokens + mcpOverhead;
     this._truncateHistory(overheadTokens);
 
-    // Emit context budget breakdown when usage exceeds 70% (helps debugging context pressure)
+    // Pre-call context-budget estimate: real prompt size of the last call plus
+    // a char-estimate of only the messages appended since (see
+    // _estimateOccupancyTokens). Superseded by the exact post-call figure a
+    // moment later; emitted every call so the meter is live before the
+    // (possibly long) response and can fall after truncation.
     if (this.onStream) {
       const messageTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
-      const totalTokens = messageTokens + overheadTokens;
+      const totalTokens = this._estimateOccupancyTokens(overheadTokens);
       const maxCtx = this._effectiveContextWindow();
-      const usagePercent = Math.round(totalTokens / maxCtx * 100);
-      if (usagePercent > 70) {
-        void this.onStream({
-          type: 'context_budget',
-          systemTokens: Math.round(systemTokens),
-          toolTokens: Math.round(toolTokens),
-          messageTokens: Math.round(messageTokens),
-          totalTokens: Math.round(totalTokens),
-          maxTokens: maxCtx,
-          usagePercent,
-          agent: this.name,
-        });
-      }
+      void this.onStream({
+        type: 'context_budget',
+        systemTokens: Math.round(systemTokens),
+        toolTokens: Math.round(toolTokens),
+        messageTokens: Math.round(messageTokens),
+        totalTokens: Math.round(totalTokens),
+        maxTokens: maxCtx,
+        usagePercent: Math.round((totalTokens / maxCtx) * 100),
+        agent: this.name,
+      });
     }
 
     const signal = this.abortController?.signal;
