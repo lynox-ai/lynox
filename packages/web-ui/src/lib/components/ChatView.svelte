@@ -720,7 +720,10 @@
 	}
 
 	async function startRecording() {
-		if (recording || isStartingRecording) return;
+		// `transcribing` guards the keyboard shortcut path — the on-screen mic
+		// button is already removed from the DOM while the composer shows the
+		// transcribing spinner.
+		if (recording || isStartingRecording || transcribing) return;
 		isStartingRecording = true;
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
@@ -756,13 +759,27 @@
 					return;
 				}
 
+				// Lock the composer into the transcribing state — it swaps the
+				// input row for a spinner, so a second voice message cannot be
+				// started (mic, typing or send) until this one fully resolves.
+				// This is the double-submit guard: one voice turn at a time.
+				transcribing = true;
+
 				// Show placeholder bubble immediately with live transcription
 				const placeholderIdx = pushPlaceholder(`🎤 ${t('chat.voice_processing')}`);
 
 				const reader = new FileReader();
+				reader.onerror = () => {
+					transcribing = false;
+					removePlaceholder(placeholderIdx);
+					addToast(t('chat.transcribe_failed'), 'error');
+				};
 				reader.onload = async () => {
-					const base64 = (reader.result as string).split(',')[1] ?? '';
 					try {
+						// Inside the try so a non-string result still hits the
+						// `finally` below — otherwise `transcribing` would stay
+						// true and lock the composer permanently.
+						const base64 = (reader.result as string).split(',')[1] ?? '';
 						const res = await fetch(`${getApiBase()}/transcribe`, {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
@@ -833,6 +850,10 @@
 					} catch {
 						removePlaceholder(placeholderIdx);
 						addToast(t('chat.transcribe_failed'), 'error');
+					} finally {
+						// Release the composer no matter how the turn ended —
+						// success, transcribe error, or network failure.
+						transcribing = false;
 					}
 				};
 				reader.readAsDataURL(blob);
@@ -860,8 +881,13 @@
 	}
 
 	function stopRecording() {
-		if (!recording || !mediaRecorder) return;
-		mediaRecorder.stop();
+		const recorder = mediaRecorder;
+		if (!recording || !recorder) return;
+		// Re-entry guard: clear the ref synchronously so a second tap, fired
+		// before the async `stop` event lands, cannot call .stop() again on an
+		// already-inactive recorder (which throws InvalidStateError).
+		mediaRecorder = null;
+		recorder.stop();
 	}
 
 	// Standalone onboarding: check if LLM provider is configured
