@@ -55,7 +55,7 @@
 	aria-label={t('chat.activity.bar_aria_label')}
 >
 	<div class="max-w-3xl mx-auto flex items-center gap-2 min-w-0">
-		<span class="activity-indicator {activity}" aria-hidden="true"></span>
+		<img src="/icon.svg" alt="" class="activity-indicator {activity}" aria-hidden="true" />
 		<span class="text-xs md:text-sm text-text font-medium truncate min-w-0">
 			{label}
 		</span>
@@ -76,53 +76,48 @@
 </div>
 
 <style>
-	/* State-coupled micro-animation on the status indicator. Each agent
-	   state gets a distinct, deliberately subtle motion so the user can
-	   read "what is it doing" at a glance without parsing the label. */
+	/* State-coupled motion on the lynox icon — the agent's "presence" in
+	   the status bar. Each state gets a distinct, characterful motion so
+	   the user reads "what is it doing" at a glance. Motion-led per the
+	   product call; the glow is a faint, static brand aura. */
 	.activity-indicator {
-		position: relative;
 		display: inline-block;
-		height: 0.5rem;
-		width: 0.5rem;
+		height: 1.125rem;
+		width: 1.125rem;
 		flex-shrink: 0;
-		border-radius: 9999px;
-		background: var(--color-accent);
-		/* The tool ripple intentionally scales past the dot — let it bleed. */
-		overflow: visible;
+		/* Faint brand-purple aura so the icon reads as an active presence. */
+		filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--color-accent) 40%, transparent));
+		/* Pivot the scan-tilt around the base, like a head turning. */
+		transform-origin: 50% 85%;
 	}
-	/* thinking — a slow, calm breathing pulse. */
+	/* thinking — a slow, calm vertical bob. */
 	.activity-indicator.thinking {
-		animation: lynox-breathe 1.8s ease-in-out infinite;
+		animation: lynox-bob 1.8s ease-in-out infinite;
 	}
-	/* writing — a steady cursor-like blink. */
+	/* tool — a side-to-side "scanning" tilt, the agent looking around. */
+	.activity-indicator.tool {
+		animation: lynox-scan 1.4s ease-in-out infinite;
+	}
+	/* writing — a quick, rhythmic nod. */
 	.activity-indicator.writing {
-		animation: lynox-blink 1s ease-in-out infinite;
+		animation: lynox-nod 0.7s ease-in-out infinite;
 	}
-	/* tool — an outward ripple, the feeling of active work radiating. */
-	.activity-indicator.tool::after {
-		content: '';
-		position: absolute;
-		inset: 0;
-		border-radius: 9999px;
-		border: 1px solid var(--color-accent);
-		animation: lynox-ripple 1.4s ease-out infinite;
+	@keyframes lynox-bob {
+		0%, 100% { transform: translateY(1px); }
+		50% { transform: translateY(-2px); }
 	}
-	@keyframes lynox-breathe {
-		0%, 100% { transform: scale(0.72); opacity: 0.55; }
-		50% { transform: scale(1.05); opacity: 1; }
+	@keyframes lynox-scan {
+		0%, 100% { transform: rotate(-7deg); }
+		50% { transform: rotate(7deg); }
 	}
-	@keyframes lynox-blink {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.25; }
-	}
-	@keyframes lynox-ripple {
-		0% { transform: scale(1); opacity: 0.7; }
-		100% { transform: scale(2.8); opacity: 0; }
+	@keyframes lynox-nod {
+		0%, 100% { transform: translateY(-1px); }
+		45% { transform: translateY(2px); }
 	}
 	/* Accessibility: no motion when the user asked the OS to reduce it. */
 	@media (prefers-reduced-motion: reduce) {
 		.activity-indicator.thinking,
-		.activity-indicator.writing,
-		.activity-indicator.tool::after { animation: none; }
+		.activity-indicator.tool,
+		.activity-indicator.writing { animation: none; }
 	}
 </style>
