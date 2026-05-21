@@ -372,7 +372,7 @@ function applyModifications(steps: InlinePipelineStep[], modifications: StepModi
   return null; // no error
 }
 
-interface PipelineDeps {
+export interface PipelineDeps {
   config: LynoxUserConfig;
   tools: ToolEntry[];
   streamHandler: StreamHandler | null;
@@ -388,6 +388,67 @@ interface PipelineDeps {
    * counters object.
    */
   sessionCounters?: import('../../types/agent.js').SessionCounters | undefined;
+}
+
+/**
+ * Run a stored pipeline through the orchestrated runner (`runManifest`) — the
+ * exact isolation path `executePipelineById` uses (one fresh sub-agent per
+ * step, per-step `model` honored via `resolveModelForCost`). Exported so the
+ * O7 auto-trigger in `plan_task` can dispatch eligible plans straight to the
+ * orchestrated runner instead of running them inline on the main loop.
+ *
+ * Returns the formatted `PipelineResult` JSON, or an `Error: ...` string.
+ */
+export async function dispatchOrchestratedPipeline(
+  planned: PlannedPipeline,
+  deps: PipelineDeps,
+): Promise<string> {
+  // Interactive pipelines need a live prompt-capable session — mirror the
+  // executePipelineById guard so the dispatch fails fast with a clear error
+  // rather than throwing "ask_user is not set" deep inside a step.
+  if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
+    return `Error: Pipeline "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
+  }
+
+  if (planned.executed) {
+    return `Error: Pipeline "${planned.id}" has already been executed.`;
+  }
+
+  const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
+  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
+
+  if (steps.length === 0) {
+    return 'Error: Pipeline has no steps to execute.';
+  }
+  if (steps.length > MAX_STEPS) {
+    return `Error: Pipeline exceeds maximum of ${MAX_STEPS} steps.`;
+  }
+
+  try {
+    const manifest = buildManifest(planned.name, steps, 'stop');
+    validateManifest(manifest);
+    planned.executed = true;
+
+    const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    const state = await runManifest(manifest, deps.config, {
+      parentTools: deps.tools,
+      parentToolContext: deps.toolContext,
+      hooks,
+      runHistory: deps.runHistory ?? undefined,
+      parentPrompt: deps.parentPrompt,
+      userTimezone: deps.userTimezone,
+      parentSessionCounters: deps.sessionCounters,
+    });
+
+    executedStates.set(planned.id, { manifest, state });
+    persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
+    try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
+
+    return formatResult(state, planned.name, resultLimit);
+  } catch (err: unknown) {
+    planned.executed = false; // Allow retry on validation errors
+    return `Error: Pipeline execution failed: ${getErrorMessage(err)}`;
+  }
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
