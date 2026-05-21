@@ -2,8 +2,14 @@
  * Session glossary builder.
  *
  * Assembles the user-specific vocabulary the transcriber should bias toward:
- * CRM contact names, registered API/tool names, recent thread titles, KG
- * entity labels, custom workflow names. Feeds `applySessionGlossary()`.
+ * CRM contact names, registered API/tool names, recent thread titles, custom
+ * workflow names. Feeds `applySessionGlossary()`.
+ *
+ * Knowledge-Graph entity labels are deliberately NOT a source. They were the
+ * biggest collision surface for the fuzzy rewriter — KG holds hundreds of
+ * single-word proper nouns (place names, brands) that sit within edit distance
+ * of ordinary speech ("wollen" → "Olten"). Contacts / APIs / workflows / thread
+ * titles are entities the user actively names and are far safer to bias toward.
  *
  * Two entry points:
  *   - `buildSessionGlossary(sources)` — pure function (tested with plain stubs).
@@ -11,20 +17,24 @@
  *     invalidation for live usage.
  *
  * Order matters for the apply step: terms earlier in the list win ties. Default
- * priority: contact names > API/tool names > workflow names > thread titles >
- * KG entity labels. Rationale: named entities the user actively types about
- * (contacts, tools) are the most likely intended targets for a misheard word.
+ * priority: contact names > API/tool names > workflow names > thread titles.
+ * Rationale: named entities the user actively types about (contacts, tools) are
+ * the most likely intended targets for a misheard word.
  */
 
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 
-/** Raw term sources for a session. All fields optional; undefined = not available. */
+/**
+ * Raw term sources for a session. All fields optional; undefined = not available.
+ *
+ * Knowledge-Graph entity labels are intentionally absent — see the module
+ * comment. They over-biased the fuzzy rewriter into corrupting common words.
+ */
 export interface SessionSources {
   readonly contactNames?: readonly string[] | undefined;
   readonly apiProfileNames?: readonly string[] | undefined;
   readonly workflowNames?: readonly string[] | undefined;
   readonly threadTitles?: readonly string[] | undefined;
-  readonly kgEntityLabels?: readonly string[] | undefined;
 }
 
 export interface BuildGlossaryOptions {
@@ -32,13 +42,12 @@ export interface BuildGlossaryOptions {
   readonly minLength?: number;
   /** Max total terms to emit (cap memory + apply cost). Default 200. */
   readonly maxTerms?: number;
-  /** Per-source cap before merging. Default 80 contacts, 50 tools, 50 threads, 200 KG entities. */
+  /** Per-source cap before merging. Default 80 contacts, 50 tools, 50 threads. */
   readonly perSourceCap?: {
     readonly contacts?: number;
     readonly apis?: number;
     readonly workflows?: number;
     readonly threads?: number;
-    readonly kg?: number;
   };
 }
 
@@ -59,7 +68,6 @@ export function buildSessionGlossary(
     apis: opts.perSourceCap?.apis ?? 50,
     workflows: opts.perSourceCap?.workflows ?? 50,
     threads: opts.perSourceCap?.threads ?? 50,
-    kg: opts.perSourceCap?.kg ?? 200,
   };
 
   const seen = new Set<string>(); // dedupe key (lowercased)
@@ -93,7 +101,6 @@ export function buildSessionGlossary(
   for (const name of take(sources.apiProfileNames, caps.apis)) expand(name, push);
   for (const name of take(sources.workflowNames, caps.workflows)) expand(name, push);
   for (const title of take(sources.threadTitles, caps.threads)) expand(title, push);
-  for (const label of take(sources.kgEntityLabels, caps.kg)) expand(label, push);
 
   return out.slice(0, maxTotal);
 }

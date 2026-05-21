@@ -5,11 +5,14 @@
  *   - CRM contact names (biased rewriting for "Rolland" → "Roland")
  *   - Registered API / tool profile names (`Stripe`, `Gmail`, custom tools)
  *   - Current + recent thread titles (topical vocabulary)
- *   - KG entity canonical names (user-specific proper nouns)
+ *
+ * Knowledge-Graph entity labels are deliberately NOT read here: KG holds
+ * hundreds of single-word proper nouns that collided with ordinary speech in
+ * the fuzzy glossary rewrite ("wollen" → "Olten"). Excluding them is the fix.
  *
  * All store reads are best-effort and tolerate a null store — a fresh engine
- * without a CRM or KG still produces a valid (empty-ish) context. No store
- * is required for the facade to work.
+ * without a CRM still produces a valid (empty-ish) context. No store is
+ * required for the facade to work.
  */
 
 import type { Engine } from './../engine.js';
@@ -18,8 +21,6 @@ import type { TranscribeSessionContext } from './types.js';
 export interface ExtractOptions {
   /** Max contacts to include. Default 80 — matches glossary cap. */
   readonly maxContacts?: number;
-  /** Max KG entities to include. Default 200. */
-  readonly maxKgEntities?: number;
   /** How many recent thread titles to include (including the current). Default 10. */
   readonly recentThreadTitles?: number;
 }
@@ -35,13 +36,11 @@ export function extractSessionContext(
   opts: ExtractOptions = {},
 ): TranscribeSessionContext {
   const maxContacts = opts.maxContacts ?? 80;
-  const maxKg = opts.maxKgEntities ?? 200;
   const recentThreads = opts.recentThreadTitles ?? 10;
 
   const contactNames = readContactNames(engine, maxContacts);
   const apiProfileNames = readApiProfileNames(engine);
   const threadTitles = readThreadTitles(engine, sessionId, recentThreads);
-  const kgEntityLabels = readKgEntityLabels(engine, maxKg);
 
   const ctx: Record<string, unknown> = {};
   if (sessionId) ctx['sessionId'] = sessionId;
@@ -49,7 +48,6 @@ export function extractSessionContext(
   if (contactNames.length > 0) ctx['contactNames'] = contactNames;
   if (apiProfileNames.length > 0) ctx['apiProfileNames'] = apiProfileNames;
   if (threadTitles.length > 0) ctx['threadTitles'] = threadTitles;
-  if (kgEntityLabels.length > 0) ctx['kgEntityLabels'] = kgEntityLabels;
 
   return ctx as TranscribeSessionContext;
 }
@@ -97,19 +95,4 @@ function readThreadTitles(engine: Engine, sessionId: string | null, recent: numb
     // best-effort
   }
   return titles;
-}
-
-function readKgEntityLabels(engine: Engine, cap: number): string[] {
-  const kg = engine.getKnowledgeLayer();
-  if (!kg) return [];
-  try {
-    const db = kg.getDb();
-    const rows = db.listEntities({ limit: cap });
-    const labels = rows
-      .map((r) => (typeof r.canonical_name === 'string' ? r.canonical_name : ''))
-      .filter((n) => n.length > 0);
-    return labels.slice(0, cap);
-  } catch {
-    return [];
-  }
 }

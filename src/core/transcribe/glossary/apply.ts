@@ -7,13 +7,16 @@
  *     the rewrite is unconditional. Unicode-aware word boundaries (German ä/ö/ü/ß
  *     need this — \b is ASCII-only in JavaScript regex without the u flag).
  *   - applySessionGlossary(text, terms, stopList): fuzzy. Scans word tokens and
- *     rewrites ones within edit-distance 2 of a session term, *if* the candidate
- *     isn't a common-language token. Avoids "rund" → "Ron" false positives.
+ *     rewrites ones within edit-distance 1 of a session term, *if* the candidate
+ *     isn't a common-language token. The tight distance + a curated stop list of
+ *     ~450 high-frequency DE/EN words keep ordinary speech from being rewritten
+ *     into proper nouns ("bitte" → "Britta", "wollen" → "Olten").
  *
  * Pure functions — no I/O, no state. O(n·m) where n = tokens and m = terms.
  */
 
 import type { GlossaryTerm } from './core-terms.js';
+import { STOP_WORDS } from './stop-words.js';
 
 /** Pattern quoting — keep anchors / metacharacters literal inside RegExp. */
 function escapeRegex(s: string): string {
@@ -45,27 +48,16 @@ export function applyGlossary(text: string, terms: readonly GlossaryTerm[]): str
 
 /**
  * Tokens we refuse to rewrite even if they look close to a session term.
- * Kept small: this is an allowlist of common German + English words that a
- * contact/tool name could plausibly collide with. Extend as false positives
- * surface in real use. Stored lowercase.
+ *
+ * Backed by the curated `STOP_WORDS` list (~450 high-frequency DE + EN words:
+ * function words, modal + auxiliary verbs, common lexical verbs and nouns,
+ * numerals, politeness words). Any word here is NEVER rewritten — this is the
+ * primary guard against the STT post-process turning ordinary speech into
+ * proper nouns from the user's context. Stored lowercase.
+ *
+ * Re-exported under the historical name for back-compat with existing callers.
  */
-export const DEFAULT_STOP_LIST: ReadonlySet<string> = new Set([
-  // German
-  'rund', 'bund', 'hund', 'mund', 'fund', 'grund', 'stund',
-  'und', 'uns', 'aus', 'auf', 'für', 'mit', 'von', 'vom', 'bei',
-  'der', 'die', 'das', 'den', 'dem', 'des',
-  'ein', 'eine', 'einer', 'eines', 'einem', 'einen',
-  'ich', 'mir', 'mich', 'wir', 'uns',
-  'haben', 'habe', 'habt', 'hatte', 'sein', 'bin', 'ist', 'sind',
-  'werden', 'wird', 'wurde', 'worden',
-  'kann', 'könnte', 'müssen', 'soll', 'will',
-  'neu', 'neue', 'neuer', 'alt', 'alte',
-  'gut', 'gute', 'schlecht',
-  // English
-  'and', 'the', 'this', 'that', 'with', 'from', 'have', 'has', 'had',
-  'want', 'wants', 'need', 'needs',
-  'good', 'bad', 'new', 'old', 'run', 'runs', 'ran',
-]);
+export const DEFAULT_STOP_LIST: ReadonlySet<string> = STOP_WORDS;
 
 /** Levenshtein edit distance between two strings (lowercased). */
 function editDistance(a: string, b: string): number {
@@ -92,7 +84,7 @@ function editDistance(a: string, b: string): number {
 }
 
 export interface SessionApplyOptions {
-  /** Max Levenshtein distance between a token and a session term to trigger rewrite. Default 2. */
+  /** Max Levenshtein distance between a token and a session term to trigger rewrite. Default 1. */
   readonly maxEditDistance?: number;
   /** Minimum token length before the fuzzy path runs (shorter words are ambiguous). Default 4. */
   readonly minTokenLength?: number;
@@ -117,7 +109,7 @@ export function applySessionGlossary(
 ): string {
   if (!text || sessionTerms.length === 0) return text;
 
-  const maxDist = opts.maxEditDistance ?? 2;
+  const maxDist = opts.maxEditDistance ?? 1;
   const minLen = opts.minTokenLength ?? 4;
   const stopList = opts.stopList ?? DEFAULT_STOP_LIST;
 
@@ -143,7 +135,10 @@ export function applySessionGlossary(
     for (const term of sessionTerms) {
       const dist = editDistance(lower, term.toLowerCase());
       if (dist > maxDist) continue;
-      if (dist >= Math.ceil(token.length / 2)) continue; // don't rewrite when >= half the token changes
+      // Don't rewrite when the edit touches a third or more of the token —
+      // a tighter ratio guard than before (was half), so short common words
+      // can't be nudged into a similar-length proper noun.
+      if (dist >= Math.ceil(token.length / 3)) continue;
       if (!best || dist < best.dist) best = { term, dist };
       if (dist === 0) break;
     }

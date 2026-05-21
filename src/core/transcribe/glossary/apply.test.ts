@@ -122,10 +122,10 @@ describe('applySessionGlossary (fuzzy)', () => {
       .toBe('Kalle ruft an');
   });
 
-  it('does not rewrite when distance >= half the token length (noise guard)', () => {
-    // "abc" → "xyz" distance 3, token length 3, would otherwise be within maxDist=3
-    // but the half-length guard (3 >= ceil(3/2)=2) blocks this to avoid turning
-    // tiny tokens into unrelated terms.
+  it('does not rewrite when distance >= a third of the token length (noise guard)', () => {
+    // "abcd" → "xyzd" is distance 3, token length 4. Even with maxEditDistance=3
+    // the ratio guard (3 >= ceil(4/3)=2) blocks this to avoid turning a token
+    // into an unrelated term when most of it would change.
     expect(applySessionGlossary('abcd efgh', ['xyzd'], { maxEditDistance: 3, minTokenLength: 3 }))
       .toBe('abcd efgh');
   });
@@ -146,5 +146,15 @@ describe('applySessionGlossary (fuzzy)', () => {
     expect(DEFAULT_STOP_LIST.has('und')).toBe(true);
     expect(DEFAULT_STOP_LIST.has('the')).toBe(true);
     expect(DEFAULT_STOP_LIST.has('with')).toBe(true);
+  });
+
+  it('DEFAULT_STOP_LIST protects high-frequency words that collide with names', () => {
+    // The exact words that regressed: "bitte" → "Britta", "wollen" → "Olten".
+    for (const w of ['bitte', 'wollen', 'haben', 'gerne', 'sollen', 'müssen',
+      'können', 'möchte', 'machen', 'gehen', 'danke', 'please', 'thanks',
+      'want', 'should', 'could']) {
+      expect(DEFAULT_STOP_LIST.has(w)).toBe(true);
+    }
+    expect(DEFAULT_STOP_LIST.size).toBeGreaterThanOrEqual(400);
   });
 });
