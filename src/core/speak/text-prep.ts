@@ -261,6 +261,12 @@ function stripInline(s: string): string {
   t = t.replace(/\s*[→←↔⇒⇐⇔↗↘]\s*/g, ', ');
   t = t.replace(/\s*(?:<->|<=>|->|<-|=>|<=)\s*/g, ', ');
 
+  // Special-character normalization (hyphen runs, word slashes, unmatched
+  // parens) — runs after the arrow/dash pass (so collapsed `->` dashes are
+  // already gone) and before the residual-bracket strip (so unmatched parens
+  // are decided by balance, not blindly left in).
+  t = normalizeSpecialCharsForTts(t);
+
   // Residual brackets and pipes (e.g. orphan "|" from broken tables).
   t = t.replace(/[<>|]/g, '');
 
@@ -269,6 +275,99 @@ function stripInline(s: string): string {
   t = t.replace(/([.,;:!?]){2,}/g, '$1');
   t = t.replace(/\s+/g, ' ').trim();
   return t;
+}
+
+/**
+ * Normalize TTS-hostile special characters that survive `stripInline`'s
+ * markdown/URL/arrow passes. Mistral Voxtral garbles sentences that still
+ * carry hyphens, word-slashes, or unbalanced parentheses — it reads the
+ * literal punctuation or stumbles on the prosody. This pass is deliberately
+ * CONSERVATIVE (DECISION O2): it only touches the cases where the punctuation
+ * is unambiguously not part of ordinary prose, so legitimate German
+ * hyphenated compounds, dates, and matched parentheticals all survive.
+ *
+ * Three rules:
+ *
+ *  1. Hyphen → space, but ONLY inside an abbreviation/digit run. A hyphen is
+ *     converted iff at least one of the two tokens it joins is an acronym
+ *     (≥2 consecutive uppercase letters) or a pure digit-run. So
+ *     `3-API-Workflow` → `3 API Workflow` and `ALL-CAPS` → `ALL CAPS`, while
+ *     ordinary hyphenated compounds stay intact: `E-Mail` (single capital
+ *     `E`, not ≥2), `Gewinn-Marge` (both Title-case), `state-of-the-art`
+ *     (all lowercase), `Müller-Lüdenscheidt` (both Title-case proper nouns).
+ *     Multi-hyphen runs are handled hyphen-by-hyphen, each decided on its own
+ *     two adjacent tokens.
+ *
+ *  2. Slash between two letters → ", ". `und/oder` → `und, oder`. Only fires
+ *     for `letter/letter` with no whitespace on either side — digit/digit
+ *     slashes (dates like `2026/05/21`, fractions) and whitespace-adjacent
+ *     slashes are left untouched.
+ *
+ *  3. Drop unmatched parentheses. A balance-scan with a stack removes any
+ *     `(` with no later matching `)` and any `)` with no earlier matching
+ *     `(`. Matched pairs are left exactly as-is — a real parenthetical reads
+ *     fine in TTS; only the orphan bracket is noise.
+ *
+ * Pure function: no side effects, never throws, empty input → empty string.
+ * Exported so it can be unit-tested in isolation.
+ */
+export function normalizeSpecialCharsForTts(s: string): string {
+  if (!s) return '';
+  let t = s;
+
+  // Rule 1 — hyphen → space in acronym/digit-adjacent runs only. The token
+  // on each side of a hyphen is the maximal run of letters/digits touching
+  // it. `isAcronymOrDigits` is true for ≥2-uppercase acronyms or pure digit
+  // runs; a single capital ("E" in "E-Mail") or any Title-/lower-case word
+  // ("Mail", "Marge", "art") returns false → hyphen kept. Each hyphen in a
+  // multi-hyphen run is decided independently on its own neighbours.
+  t = t.replace(/([\p{L}\p{N}]+)-(?=[\p{L}\p{N}])/gu, (whole, left: string, offset: number, full: string) => {
+    const rightMatch = full.slice(offset + whole.length).match(/^[\p{L}\p{N}]+/u);
+    const right = rightMatch ? rightMatch[0] : '';
+    if (isAcronymOrDigits(left) || isAcronymOrDigits(right)) return `${left} `;
+    return whole;
+  });
+
+  // Rule 2 — slash between two letters → ", ". Lookarounds keep it strictly
+  // letter/letter: digit/digit slashes (dates, fractions) and any
+  // whitespace-adjacent slash are excluded.
+  t = t.replace(/(?<=\p{L})\/(?=\p{L})/gu, ', ');
+
+  // Rule 3 — drop unmatched parentheses via a stack balance-scan. Indices of
+  // `(` are pushed; a `)` pops one (matched pair) or, if the stack is empty,
+  // marks itself unmatched. Whatever remains on the stack at the end is a set
+  // of unmatched `(`. Both sets of indices are then removed.
+  const drop = new Set<number>();
+  const openIndices: number[] = [];
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (ch === '(') openIndices.push(i);
+    else if (ch === ')') {
+      if (openIndices.length > 0) openIndices.pop();
+      else drop.add(i);
+    }
+  }
+  for (const idx of openIndices) drop.add(idx);
+  if (drop.size > 0) {
+    let out = '';
+    for (let i = 0; i < t.length; i++) {
+      if (!drop.has(i)) out += t[i];
+    }
+    t = out;
+  }
+
+  return t;
+}
+
+/**
+ * True iff `tok` is an acronym (≥2 consecutive uppercase letters anywhere)
+ * or a pure digit-run. Used by Rule 1 to decide whether a hyphen joins an
+ * abbreviation/number — the only case where hyphen→space is safe.
+ */
+function isAcronymOrDigits(tok: string): boolean {
+  if (tok.length === 0) return false;
+  if (/^\p{Nd}+$/u.test(tok)) return true;          // pure digits
+  return /\p{Lu}{2,}/u.test(tok);                    // ≥2 consecutive uppercase
 }
 
 /**
