@@ -1263,7 +1263,18 @@
 				datastore_query: t('chat.activity.tool.datastore_query'),
 				datastore_write: t('chat.activity.tool.datastore_write'),
 			};
-			return toolLabels[streamToolName] ?? t('chat.activity.tool.default');
+			const baseLabel = toolLabels[streamToolName] ?? t('chat.activity.tool.default');
+			// Append the concrete subject (file, query, URL, …) of the running
+			// tool call so the bar reads as a live ticker rather than a static
+			// "working…". The running call is the last tool call on the last
+			// assistant message while streamActivity is 'tool'.
+			const lastMsg = messages[messages.length - 1];
+			const tcs = lastMsg && lastMsg.role === 'assistant' ? lastMsg.toolCalls : undefined;
+			const runningTc = tcs && tcs.length > 0 ? tcs[tcs.length - 1] : undefined;
+			const subject = runningTc && runningTc.status === 'running'
+				? toolCallLabel(runningTc)?.subject ?? ''
+				: '';
+			return subject ? `${baseLabel} · ${subject}` : baseLabel;
 		}
 		return t('chat.thinking');
 	});
@@ -2494,6 +2505,7 @@
 		     because the agent is waiting on the user, not working. -->
 		<StreamingActivityBar
 			label={streamingLabel}
+			activity={streamActivity}
 			currentToolStartedAt={currentToolStartedAt}
 			lastEventAt={lastEventAt}
 		/>
