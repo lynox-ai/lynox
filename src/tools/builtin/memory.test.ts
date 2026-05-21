@@ -163,6 +163,116 @@ describe('memoryRecallTool', () => {
   });
 });
 
+describe('memoryRecallTool no-query scoping (PR7)', () => {
+  // Build a namespace with many large entries: ~120 entries x ~600 chars each
+  // ≈ 72K chars ≈ 20K tokens — well over any sensible no-query budget.
+  function bigNamespace(count: number): string {
+    return Array.from({ length: count }, (_, i) => {
+      const day = String((i % 28) + 1).padStart(2, '0');
+      const body = `Memory entry number ${i + 1}. `.repeat(20).trim();
+      return `[2026-04-${day}] ${body}`;
+    }).join('\n');
+  }
+
+  it('returns a bounded subset for a namespace-only recall over a large namespace', async () => {
+    const content = bigNamespace(120);
+    const load = vi.fn().mockResolvedValue(content);
+    const agent = makeAgent(makeMockMemory({ load }));
+
+    const result = await memoryRecallTool.handler({ namespace: 'knowledge' }, agent);
+
+    // Result must be far smaller than the full dump.
+    expect(result.length).toBeLessThan(content.length);
+    // ~5K-token budget => ~17.5K chars; allow headroom for the truncation note.
+    expect(result.length).toBeLessThan(20_000);
+    // It must surface the truncation note telling the agent it was capped.
+    expect(result).toContain('Showing');
+    expect(result).toContain('of 120 knowledge entries');
+    expect(result).toContain('Pass a `query`');
+  });
+
+  it('ranks recent entries above older ones for a no-query recall', async () => {
+    // Old entry first, recent entry last (append order = newest last).
+    const oldLine = '[2020-01-01] Ancient fact that should be deprioritised by recency.';
+    const recentToday = new Date().toISOString().slice(0, 10);
+    const recentLine = `[${recentToday}] Fresh fact that should rank near the top.`;
+    // Pad with bulk so the budget cannot fit everything and ranking matters.
+    const filler = Array.from({ length: 200 }, (_, i) =>
+      `[2023-06-15] Filler entry ${i} ${'x'.repeat(120)}`,
+    );
+    const content = [oldLine, ...filler, recentLine].join('\n');
+    const load = vi.fn().mockResolvedValue(content);
+    const agent = makeAgent(makeMockMemory({ load }));
+
+    const result = await memoryRecallTool.handler({ namespace: 'status' }, agent);
+
+    // The most recent entry must survive the cap; the ancient one must be dropped.
+    expect(result).toContain('Fresh fact that should rank near the top');
+    expect(result).not.toContain('Ancient fact that should be deprioritised');
+  });
+
+  it('returns the whole namespace untruncated when it fits in the budget', async () => {
+    const small = '[2026-05-01] Small fact A\n[2026-05-02] Small fact B';
+    const load = vi.fn().mockResolvedValue(small);
+    const agent = makeAgent(makeMockMemory({ load }));
+
+    const result = await memoryRecallTool.handler({ namespace: 'knowledge' }, agent);
+    expect(result).toBe(small);
+    expect(result).not.toContain('Showing');
+  });
+
+  it('keeps the full-namespace behavior unchanged when a query is provided', async () => {
+    const content = bigNamespace(120);
+    const load = vi.fn().mockResolvedValue(content);
+    const agent = makeAgent(makeMockMemory({ load }));
+
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: 'entry number 7' },
+      agent,
+    );
+    // With a query, the full namespace is returned verbatim — no cap, no note.
+    expect(result).toBe(content);
+    expect(result).not.toContain('Showing');
+  });
+
+  it('treats a blank/whitespace query as no-query (bounded subset)', async () => {
+    const content = bigNamespace(120);
+    const load = vi.fn().mockResolvedValue(content);
+    const agent = makeAgent(makeMockMemory({ load }));
+
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: '   ' },
+      agent,
+    );
+    expect(result.length).toBeLessThan(content.length);
+    expect(result).toContain('Showing');
+  });
+
+  it('still returns "No content found" when the namespace is empty', async () => {
+    const load = vi.fn().mockResolvedValue(null);
+    const agent = makeAgent(makeMockMemory({ load }));
+
+    const result = await memoryRecallTool.handler({ namespace: 'methods' }, agent);
+    expect(result).toBe('No content found in methods namespace.');
+  });
+
+  it('applies the no-query cap to scoped recalls too', async () => {
+    const content = bigNamespace(120);
+    const loadScoped = vi.fn().mockResolvedValue(content);
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ loadScoped })),
+      activeScopes: [{ type: 'user', id: 'alex' }],
+    };
+
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', scope: 'user:alex' },
+      agent,
+    );
+    expect(result.length).toBeLessThan(content.length);
+    expect(result).toContain('Showing');
+  });
+});
+
 describe('memoryDeleteTool', () => {
   it('calls agent.memory.delete and returns confirmation with count', async () => {
     const deleteFn = vi.fn().mockResolvedValue(3);
