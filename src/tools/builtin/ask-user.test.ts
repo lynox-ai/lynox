@@ -22,7 +22,6 @@ function makeToolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     artifactStore: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
-    activePlan: null,
     pendingStepHint: null,
     ...overrides,
   };

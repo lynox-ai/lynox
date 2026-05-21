@@ -61,29 +61,8 @@ export interface ToolContext {
   isolationEnvOverride: Record<string, string> | undefined;
   isolationMinimalEnv: boolean;
 
-  // ── Tracked plan execution ──
-  activePlan: ActiveTrackedPlan | null;
-
   // ── Step hint from ask_user (applied at next session.run()) ──
   pendingStepHint: StepHint | null;
-}
-
-export interface TrackedStepResult {
-  stepId: string;
-  status: 'completed' | 'failed' | 'skipped';
-  summary: string;
-  startedAt: string;
-  completedAt: string;
-  durationMs: number;
-}
-
-export interface ActiveTrackedPlan {
-  pipelineId: string;
-  name: string;
-  goal: string;
-  steps: Array<{ id: string; task: string; inputFrom?: string[] | undefined }>;
-  startedAt: string;
-  stepResults: Map<string, TrackedStepResult>;
 }
 
 /** Create a default (empty) ToolContext. */
@@ -107,7 +86,6 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     artifactStore: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
-    activePlan: null,
     pendingStepHint: null,
   };
 }

@@ -322,7 +322,7 @@ describe('assertPlannedPipelineIsValid', () => {
     estimatedCost: 0,
     createdAt: new Date().toISOString(),
     executed: false,
-    executionMode: 'tracked',
+    executionMode: 'orchestrated',
     template: false,
   };
 

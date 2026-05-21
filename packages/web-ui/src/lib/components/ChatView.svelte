@@ -298,7 +298,7 @@
 	 *  dispatches them to a non-iframe renderer (markdown prose, data download). */
 	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'csv', 'tsv', 'json', 'text']);
 	/** Tool calls that get special rendering (not grouped with regular tools) */
-	const SPECIAL_TOOLS = new Set(['plan_task', 'step_complete']);
+	const SPECIAL_TOOLS = new Set(['plan_task']);
 
 	/** Tool call label: returns { action, subject } or null if hidden */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
@@ -328,8 +328,7 @@
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
-		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
-		| { type: 'step_done'; stepId: string; summary: string };
+		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -404,17 +403,6 @@
 					const rawPhases = (inp?.['phases'] ?? []) as Array<{ name: string; steps?: string[] }>;
 					const phases = rawPhases.map(p => ({ name: p.name, steps: p.steps ?? [] }));
 					result.push({ type: 'plan', summary, phases });
-					continue;
-				}
-
-				// Special: step_complete → step done marker
-				if (tc.name === 'step_complete') {
-					const inp = tc.input as Record<string, unknown> | undefined;
-					result.push({
-						type: 'step_done',
-						stepId: String(inp?.['step_id'] ?? ''),
-						summary: String(inp?.['summary'] ?? ''),
-					});
 					continue;
 				}
 
@@ -1935,12 +1923,6 @@
 										{/each}
 									</div>
 								</details>
-							{:else if gBlock.type === 'step_done'}
-								{@const stepName = gBlock.stepId.replace(/-/g, ' ').replace(/^\w/, c => c.toUpperCase())}
-								<div class="flex items-start gap-2 md:gap-1.5 text-[13px] md:text-[11px] border-l-2 border-success/30 pl-3 py-1 md:py-0.5">
-									<span class="text-success text-xs md:text-[10px] font-bold flex-shrink-0 mt-px">✓</span>
-									<span class="text-text-muted"><span class="font-medium">{stepName}</span>{#if gBlock.summary}<span class="text-text-subtle/70"> — {gBlock.summary.length > 120 ? gBlock.summary.slice(0, 120) + '...' : gBlock.summary}</span>{/if}</span>
-								</div>
 							{:else if gBlock.type === 'tools'}
 								{@const toolDef = getToolIcon(gBlock.toolName)}
 								{@const isRunning = gBlock.status === 'running'}

@@ -130,6 +130,11 @@
 								<span class="ml-auto text-xs md:text-[10px] text-text-subtle tabular-nums flex-shrink-0">{formatElapsed(step)}</span>
 							{/if}
 						</div>
+
+						<!-- Per-step result summary -->
+						{#if step.summary}
+							<p class="mt-0.5 pl-3 text-xs md:text-[10px] text-text-subtle/70 line-clamp-2 break-words">{step.summary}</p>
+						{/if}
 					</div>
 				{/each}
 			</div>

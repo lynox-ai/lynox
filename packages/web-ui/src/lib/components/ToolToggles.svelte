@@ -42,7 +42,7 @@
 		{ match: (n) => n.startsWith('memory_'),              key: 'memory',         labelKey: 'tools.category.memory' },
 		{ match: (n) => n.startsWith('data_store_'),          key: 'data',           labelKey: 'tools.category.data' },
 		{ match: (n) => n === 'contacts' || n === 'deals' || n === 'interactions',    key: 'crm',  labelKey: 'tools.category.crm' },
-		{ match: (n) => n.startsWith('task_') || n === 'plan_task' || n === 'step_complete', key: 'tasks', labelKey: 'tools.category.tasks' },
+		{ match: (n) => n.startsWith('task_') || n === 'plan_task', key: 'tasks', labelKey: 'tools.category.tasks' },
 		// Orchestration covers parallel work + workflow-template management.
 		// `capture_process` + `promote_process` are workflow tools (save the
 		// current session as reusable template, then promote it to a parameterized
