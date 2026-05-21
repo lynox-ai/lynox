@@ -109,6 +109,7 @@ export const LynoxUserConfigSchema = z.object({
   mcp_exposed_tools:       z.array(z.string()).optional(),
   experience:              z.enum(['business', 'developer']).optional(),
   max_tool_result_chars:   z.number().min(1_000).max(500_000).optional(),
+  tool_result_blob_threshold_chars: z.number().min(256).max(500_000).optional(),
   knowledge_graph_enabled: z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),

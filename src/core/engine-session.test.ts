@@ -28,7 +28,10 @@ const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
 
 vi.mock('./agent.js', () => ({
-  Agent: vi.fn().mockImplementation(function () {
+  Agent: vi.fn().mockImplementation(function (config: { toolResultBlobStore?: unknown }) {
+    // @ts-expect-error mock constructor — capture the Session-owned blob store
+    // so compaction tests can assert recall round-trips through the real store.
+    this.toolResultBlobStore = config?.toolResultBlobStore;
     // @ts-expect-error mock constructor
     this.send = mockSend;
     // @ts-expect-error mock constructor
@@ -164,6 +167,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactSaveTool: { definition: { name: 'artifact_save' }, handler: vi.fn() },
   artifactListTool: { definition: { name: 'artifact_list' }, handler: vi.fn() },
   artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
+  recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
 }));
 
 vi.mock('../integrations/mail/state.js', () => ({
@@ -349,9 +353,9 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 32 builtin always; +5 mail tools when vault is available.
+      // 33 builtin always; +5 mail tools when vault is available.
       // WhatsApp is gated behind LYNOX_FEATURE_WHATSAPP_INBOX (off in tests).
-      expect([32, 37]).toContain(mockRegister.mock.calls.length);
+      expect([33, 38]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -421,9 +425,9 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 32 builtin always; +5 mail tools when vault is available.
+      // 33 builtin always; +5 mail tools when vault is available.
       // WhatsApp is gated behind LYNOX_FEATURE_WHATSAPP_INBOX (off in tests).
-      expect([32, 37]).toContain(mockRegister.mock.calls.length);
+      expect([33, 38]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
@@ -699,6 +703,126 @@ describe('Engine + Session (Orchestrator)', () => {
 
       // Should not throw
       await expect(engine.shutdown()).resolves.toBeUndefined();
+    });
+  });
+
+  // -- compact() — Phase 2 Context Hygiene --
+
+  describe('compact() recall blob store', () => {
+    /** A history with one oversized + one small tool result. */
+    function historyWithBigResult(bigChars = 6_000): unknown[] {
+      return [
+        { role: 'user', content: 'fetch the data' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'tu-big', name: 'http_request', input: {} },
+            { type: 'tool_use', id: 'tu-small', name: 'read_file', input: {} },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'tu-big', content: 'D'.repeat(bigChars) },
+            { type: 'tool_result', tool_use_id: 'tu-small', content: 'tiny' },
+          ],
+        },
+        { role: 'assistant', content: 'done' },
+      ];
+    }
+
+    it('evicts a large tool result and lists a recall handle in the synthetic context', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetMessages.mockReturnValue(historyWithBigResult());
+      vi.spyOn(session, 'run').mockResolvedValue('SUMMARY TEXT');
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      // The synthetic context handed to loadMessages must mention the handle.
+      const synthetic = mockLoadMessages.mock.calls.at(-1)?.[0] as Array<{ content: unknown }>;
+      const joined = JSON.stringify(synthetic);
+      expect(joined).toContain('recall_tool_result');
+      expect(joined).toContain('tr-1');
+      expect(joined).toContain('http_request');
+      // The small result is NOT promoted to a handle.
+      expect(joined).not.toContain('read_file');
+    });
+
+    it('recall_tool_result round-trips the evicted payload by id', async () => {
+      const { session } = await createEngineAndSession();
+      const payload = 'D'.repeat(6_000);
+      mockGetMessages.mockReturnValue(historyWithBigResult());
+      vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
+
+      await session.compact();
+
+      // The Session-owned blob store is captured on the mock Agent.
+      const agent = session.getAgent() as unknown as {
+        toolResultBlobStore?: import('./tool-result-blob-store.js').ToolResultBlobStore;
+      };
+      const store = agent.toolResultBlobStore!;
+      expect(store.size).toBe(1);
+
+      const { recallToolResultTool } = await import('../tools/builtin/recall-tool-result.js');
+      const recalled = await recallToolResultTool.handler(
+        { id: 'tr-1' },
+        { toolResultBlobStore: store } as unknown as import('../types/index.js').IAgent,
+      );
+      expect(recalled).toBe(payload);
+    });
+
+    it('clears the store at the next compaction so an old handle is hard-dropped', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetMessages.mockReturnValue(historyWithBigResult());
+      vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
+
+      await session.compact();
+      const agent = session.getAgent() as unknown as {
+        toolResultBlobStore?: import('./tool-result-blob-store.js').ToolResultBlobStore;
+      };
+      const store = agent.toolResultBlobStore!;
+      expect(store.get('tr-1')).toBeDefined();
+
+      // Second compaction with no large results — start-of-compact clear must
+      // hard-drop the prior window's blob.
+      mockGetMessages.mockReturnValue([{ role: 'assistant', content: 'short' }]);
+      await session.compact();
+      expect(store.get('tr-1')).toBeUndefined();
+      expect(store.size).toBe(0);
+    });
+
+    it('honors a custom tool_result_blob_threshold_chars from userConfig', async () => {
+      // 2 KB result — below the 4 KB default, above a 1 KB custom threshold.
+      const { engine, session } = await createEngineAndSession();
+      // userConfig is loaded from disk, not the engine ctor — mutate it directly.
+      engine.getUserConfig().tool_result_blob_threshold_chars = 1_024;
+      mockGetMessages.mockReturnValue(historyWithBigResult(2_048));
+      vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
+
+      await session.compact();
+      const agent = session.getAgent() as unknown as {
+        toolResultBlobStore?: import('./tool-result-blob-store.js').ToolResultBlobStore;
+      };
+      expect(agent.toolResultBlobStore!.size).toBe(1);
+
+      // And with the default 4 KB threshold the same 2 KB result is left alone.
+      delete engine.getUserConfig().tool_result_blob_threshold_chars;
+    });
+
+    it('does not add a recall block when no result exceeds the threshold', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ]);
+      vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
+
+      await session.compact();
+      const synthetic = mockLoadMessages.mock.calls.at(-1)?.[0] as unknown[];
+      // Just the 2 standard summary messages, no recall block.
+      expect(synthetic).toHaveLength(2);
+      expect(JSON.stringify(synthetic)).not.toContain('recall_tool_result');
     });
   });
 });

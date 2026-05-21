@@ -30,6 +30,10 @@ import { channels } from './observability.js';
 import { abortSpawnedAgents } from '../tools/builtin/spawn.js';
 import { abortPipelineAgents } from '../orchestrator/runtime-adapter.js';
 import { ChangesetManager } from './changeset.js';
+import {
+  ToolResultBlobStore,
+  DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
+} from './tool-result-blob-store.js';
 import { isWorkspaceActive } from './workspace.js';
 import { checkPersistentBudget } from './session-budget.js';
 import {
@@ -129,6 +133,15 @@ export class Session {
     pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
   private _userTimezone: string | null = null;
+  /**
+   * Phase 2 Context Hygiene — per-conversation store of large tool results
+   * evicted at the last `compact()`. Owned here so it survives Agent
+   * recreation (setModel/setEffort/_recreateAgent all rebuild the Agent);
+   * the same reference is threaded into every Agent so the
+   * `recall_tool_result` tool resolves handles. Cleared at the start of the
+   * next `compact()` — see `compact()`.
+   */
+  private readonly _toolResultBlobStore = new ToolResultBlobStore();
 
   // Per-session config (copied from engine.config at creation, mutated independently)
   private _registryVersion = 0;
@@ -746,6 +759,17 @@ export class Session {
    * Used by CLI /compact command and auto-compaction.
    */
   async compact(focus?: string): Promise<{ success: boolean; summary: string }> {
+    // Phase 2 Context Hygiene: clear blobs retained at the *previous*
+    // compaction first. A blob is recallable only until the next compaction —
+    // this clear is what hard-drops the prior window and is the sole bound on
+    // the store's memory (it can never grow across more than one window).
+    this._toolResultBlobStore.clear();
+
+    // Snapshot the pre-summary history. Large tool results live here; the
+    // summary run below only *appends* (the summary prompt + reply), so the
+    // snapshot still captures every result that is about to be reset away.
+    const preCompactionMessages = this.saveMessages();
+
     // Structured compaction: a lossy prose summary used to drop artifacts and
     // open tasks, leaving the agent unable to continue. Name what must survive.
     const base = 'Summarize the conversation so far so work can continue without the full history. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
@@ -756,12 +780,38 @@ export class Session {
     } catch {
       // Compaction prompt failed — reset anyway to free context
     }
+
+    // Evict large tool results into the blob store BEFORE the reset, so the
+    // verbatim payloads survive the history wipe and stay recallable via
+    // `recall_tool_result`. Eviction runs only here (O4/O5) — never
+    // mid-conversation — so the warm prompt cache is untouched between turns.
+    const thresholdChars = this.engine.getUserConfig().tool_result_blob_threshold_chars
+      ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
+    const handles = this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);
+
     this.reset();
     if (summary) {
-      this.loadMessages([
+      const messages: BetaMessageParam[] = [
         { role: 'user' as const, content: 'What have we discussed so far?' },
         { role: 'assistant' as const, content: `[Conversation summary]\n${summary}` },
-      ]);
+      ];
+      // D2 stub-with-a-handle: tell the agent which large tool results from
+      // before the summary are still re-fetchable, one descriptor per id.
+      if (handles.length > 0) {
+        const lines = handles.map(h => `- recall_tool_result("${h.id}") — ${h.descriptor}`);
+        messages.push(
+          {
+            role: 'user' as const,
+            content: 'Are any large tool results from before the summary still available?',
+          },
+          {
+            role: 'assistant' as const,
+            content:
+              `[Recallable tool results]\nThese large tool outputs from before the summary were set aside and can be re-fetched verbatim with recall_tool_result("<id>"). They remain available only until the next compaction:\n${lines.join('\n')}`,
+          },
+        );
+      }
+      this.loadMessages(messages);
       return { success: true, summary };
     }
     return { success: false, summary: '' };
@@ -1063,6 +1113,9 @@ export class Session {
       changesetManager: this._changesetManager ?? undefined,
       toolContext,
       sessionCounters: this._sessionCounters,
+      // Phase 2: same blob-store reference across every Agent recreation so
+      // `recall_tool_result` resolves handles minted by a prior `compact()`.
+      toolResultBlobStore: this._toolResultBlobStore,
       userTimezone: this._userTimezone ?? undefined,
     });
 

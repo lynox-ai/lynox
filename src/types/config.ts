@@ -76,6 +76,14 @@ export interface AgentConfig {
    */
   sessionCounters?:    import('./agent.js').SessionCounters | undefined;
   /**
+   * Per-conversation blob store for large tool results evicted at the last
+   * compaction (Phase 2 Context Hygiene). The Session allocates one and
+   * threads the same reference into the main Agent + every sub-agent so the
+   * `recall_tool_result` tool resolves handles regardless of which agent
+   * issues the call. Undefined for ad-hoc Agents built outside a Session.
+   */
+  toolResultBlobStore?: import('../core/tool-result-blob-store.js').ToolResultBlobStore | undefined;
+  /**
    * Eager-persist hook fired at every stable point in the agent loop (after
    * assistant message, after tool_results). Lets the Session checkpoint
    * messages to the ThreadStore mid-run so a container-restart or OOM kill
@@ -264,6 +272,13 @@ export interface LynoxUserConfig {
   http_response_limit?: number | undefined;
   /** Max chars for a single tool result before truncation. Default: 80000 */
   max_tool_result_chars?: number | undefined;
+  /**
+   * Phase 2 Context Hygiene: minimum tool-result payload size in chars for
+   * eviction into the recall blob store at compaction. A result above this
+   * size is preserved (recallable via `recall_tool_result`) instead of being
+   * lost when `compact()` resets the message history. Default: 4096.
+   */
+  tool_result_blob_threshold_chars?: number | undefined;
   /** Enable Knowledge Graph for entity-aware memory. Default: true */
   knowledge_graph_enabled?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */

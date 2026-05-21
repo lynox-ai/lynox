@@ -14,3 +14,4 @@ export { captureProcessTool, promoteProcessTool } from './process.js';
 export { stepCompleteTool } from './step-complete.js';
 export { apiSetupTool } from './api-setup.js';
 export { artifactSaveTool, artifactListTool, artifactDeleteTool } from './artifact.js';
+export { recallToolResultTool } from './recall-tool-result.js';
