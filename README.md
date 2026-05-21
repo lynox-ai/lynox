@@ -19,7 +19,7 @@ One open-source agent that learns your business — handles CRM, workflows, rese
 - **"Summarize this PDF"** — Drop a file, get structured key points. lynox saves the context for later.
 - **"Research [topic] and give me the key points"** — Plans research phases, searches the web, cites sources, stores findings in the knowledge graph.
 - **"Same as last Monday"** — lynox recognizes the pattern. "Want me to do this every Monday?" One tap, it's automated.
-- **"What changed on competitor.com?"** — Started as a one-time check. Now runs weekly and alerts you via Telegram when something shifts.
+- **"What changed on competitor.com?"** — Started as a one-time check. Now runs weekly and notifies you when something shifts.
 
 ## Quick start
 
@@ -40,7 +40,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ```
 ┌──────────────────────────────────────┐
 │              You                     │
-│  Web UI · Telegram · CLI · MCP       │
+│  Web UI · Mobile · CLI · MCP         │
 └──────────────┬───────────────────────┘
                │
 ┌──────────────▼───────────────────────┐
@@ -67,7 +67,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA. QR code login for instant phone access.
 - **Activity Bar** — Every tool call streams live with its current sub-phase (e.g. "Reading API docs..." → "Extracting auth..."). No mysterious 30-second waits.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
-- **Telegram Bot** — Mobile notifications and quick tasks. Voice, photos, files, follow-up suggestions.
+- **Mobile Access** — Voice input (Whisper STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
 - **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
@@ -108,7 +108,7 @@ cp .env.example .env       # add your API key
 docker compose up
 ```
 
-See [Docker docs](https://docs.lynox.ai/daily-use/docker/) for Telegram, encryption, and production deployment.
+See [Docker docs](https://docs.lynox.ai/daily-use/docker/) for encryption and production deployment.
 
 ## Your first run
 
@@ -124,9 +124,9 @@ ANTHROPIC_API_KEY=sk-ant-... npx @lynox-ai/core "Summarize the last 5 commits in
 
 This starts an in-process engine, runs the task, and exits.
 
-### Telegram (mobile)
+### Mobile access (PWA)
 
-Create a bot via [@BotFather](https://t.me/BotFather), add the token in Web UI → Settings → Integrations.
+Open [localhost:3000](http://localhost:3000) on your phone and use your browser's "Add to Home Screen" to install lynox as a PWA. The QR code in Web UI → Settings makes pairing instant — scan it on any device to get a pre-authenticated session.
 
 ## Testing and security
 
