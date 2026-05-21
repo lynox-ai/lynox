@@ -49,12 +49,14 @@
 </script>
 
 <div
-	class="streaming-activity-bar border-t border-accent/30 bg-accent/5 px-4 py-2"
+	class="streaming-activity-bar border-t border-accent/30 bg-accent/5 px-2 py-2 md:px-4 md:py-2"
 	role="status"
 	aria-live="polite"
 	aria-label={t('chat.activity.bar_aria_label')}
 >
-	<div class="max-w-3xl mx-auto flex items-center gap-2 min-w-0">
+	<!-- Width + padding mirror the composer below exactly, so the icon
+	     lines up with the composer's attach (paperclip) button. -->
+	<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-2 min-w-0">
 		<img src="/icon.svg" alt="" class="activity-indicator {activity}" aria-hidden="true" />
 		<span class="text-xs md:text-sm text-text font-medium truncate min-w-0">
 			{label}
@@ -98,9 +100,9 @@
 	.activity-indicator.tool {
 		animation: lynox-scan 1.3s ease-in-out infinite;
 	}
-	/* writing — a fast, punchy nod. */
+	/* writing — a quick, gentle nod. */
 	.activity-indicator.writing {
-		animation: lynox-nod 0.5s ease-in-out infinite;
+		animation: lynox-nod 0.55s ease-in-out infinite;
 	}
 	@keyframes lynox-bob {
 		0%, 100% { transform: translateY(2px); }
@@ -111,8 +113,8 @@
 		50% { transform: rotate(12deg); }
 	}
 	@keyframes lynox-nod {
-		0%, 100% { transform: translateY(-2px); }
-		45% { transform: translateY(4px); }
+		0%, 100% { transform: translateY(-1px); }
+		45% { transform: translateY(2px); }
 	}
 	/* Accessibility: no motion when the user asked the OS to reduce it. */
 	@media (prefers-reduced-motion: reduce) {
