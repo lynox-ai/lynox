@@ -73,7 +73,7 @@
 <div class="pipeline-progress rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 	<!-- Header -->
 	<div class="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-subtle/50">
-		<span class="text-xs md:text-[10px] font-mono uppercase tracking-widest text-text-subtle">Pipeline</span>
+		<span class="text-xs md:text-[10px] font-mono uppercase tracking-widest text-text-subtle">Workflow</span>
 		{#if allDone}
 			<span class="h-1.5 w-1.5 rounded-full bg-success"></span>
 		{:else if hasFailed}

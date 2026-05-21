@@ -14,7 +14,7 @@
 		memory_store: 'tool.remembered', memory_recall: 'tool.knowledge_recalled',
 		memory_update: 'tool.knowledge_updated', data_store_query: 'tool.data_queried',
 		data_store_insert: 'tool.data_stored', data_store_create: 'tool.table_created',
-		run_pipeline: 'tool.pipeline', ask_user: 'tool.question',
+		run_workflow: 'tool.pipeline', ask_user: 'tool.question',
 		task_create: 'tool.task_created', plan_task: 'tool.plan_created',
 		artifact_save: 'tool.artifact_saved', google_calendar: 'tool.calendar',
 	};

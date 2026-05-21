@@ -207,7 +207,7 @@
 		workflowsLoading = true;
 		workflowsError = '';
 		try {
-			const res = await fetch(`${getApiBase()}/pipelines?limit=200`);
+			const res = await fetch(`${getApiBase()}/workflows?limit=200`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { runs: PipelineRun[] };
 			pipelineRuns = data.runs;

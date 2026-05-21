@@ -48,7 +48,7 @@
 		// current session as reusable template, then promote it to a parameterized
 		// workflow) — categorically orchestration, not system. Rafael's QA 2026-05-19
 		// flagged the original `_process`-in-system regex as wrong.
-		{ match: (n) => n === 'run_pipeline' || n === 'spawn_agent' || n === 'propose_dag' || n === 'capture_process' || n === 'promote_process', key: 'orchestration', labelKey: 'tools.category.orchestration' },
+		{ match: (n) => n === 'run_workflow' || n === 'spawn_agent' || n === 'propose_dag' || n === 'capture_process' || n === 'promote_process', key: 'orchestration', labelKey: 'tools.category.orchestration' },
 		{ match: (n) => n === 'ask_user' || n === 'ask_secret',                       key: 'interaction', labelKey: 'tools.category.interaction' },
 		{ match: (n) => n === 'api_setup' || n === 'vault_secrets',                   key: 'integration', labelKey: 'tools.category.integration' },
 		// System = shell + content extraction + result scoring. Process tools
