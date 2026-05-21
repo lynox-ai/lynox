@@ -90,6 +90,7 @@ export interface ApiCallCost {
 
 export type ContentBlock =
 	| { type: 'text'; text: string }
+	| { type: 'thinking'; text: string }
 	| { type: 'tool_call'; index: number };
 
 export interface FollowUpSuggestion {
@@ -978,13 +979,35 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			}
 			break;
 		}
-		case 'thinking':
-			msg.thinking = (msg.thinking ?? '') + String(data['thinking'] ?? '');
+		case 'thinking': {
+			const thinkingText = String(data['thinking'] ?? '');
+			// An empty delta carries no reasoning — skip it so it can't push a
+			// blank thinking block that persists invisibly in msg.blocks.
+			if (thinkingText.length === 0) break;
+			// Kept as a flat string for persistence + the legacy bottom pill
+			// on threads saved before interleaved thinking blocks existed.
+			msg.thinking = (msg.thinking ?? '') + thinkingText;
+			// Interleaved blocks: append to the running thinking block or start
+			// a new one so reasoning shows in chronological order between the
+			// text and tool rows instead of collapsed into one trailing pill.
+			msg.blocks = msg.blocks ?? [];
+			const lastThinkBlock = msg.blocks[msg.blocks.length - 1];
+			if (lastThinkBlock && lastThinkBlock.type === 'thinking') {
+				lastThinkBlock.text += thinkingText;
+			} else {
+				// A text segment that precedes thinking just became complete —
+				// emit it so auto-speak can start without waiting for turn_end.
+				if (lastThinkBlock && lastThinkBlock.type === 'text') {
+					emitCompletedTextBlock(lastThinkBlock.text, `msg-${idx}-block-${msg.blocks.length - 1}`);
+				}
+				msg.blocks.push({ type: 'thinking', text: thinkingText });
+			}
 			streamingActivity = 'thinking';
 			streamingToolName = null;
 			streamingToolPhase = null;
 			currentToolStartedAt = null;
 			break;
+		}
 		case 'heartbeat':
 			// Server keepalive carrying a real event so the SSE comment-line
 			// keepalives don't have to suffice. lastEventAt was already bumped

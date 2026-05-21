@@ -322,6 +322,7 @@
 
 	type GroupedBlock =
 		| { type: 'text'; text: string }
+		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'step_done'; stepId: string; summary: string };
@@ -360,7 +361,9 @@
 		);
 
 		for (const block of blocks) {
-			if (block.type === 'text' && block.text) {
+			if (block.type === 'thinking') {
+				if (block.text) result.push({ type: 'thinking', text: block.text });
+			} else if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
 			} else if (block.type === 'tool_call') {
 				const tc = toolCalls[block.index];
@@ -1856,7 +1859,10 @@
 					</div>
 				{:else}
 					<div class="space-y-2">
-						{#if msg.thinking}
+						{#if msg.thinking && !msg.blocks?.some((b) => b.type === 'thinking')}
+							<!-- Legacy threads saved before interleaved thinking blocks
+							     existed keep the single trailing pill. New messages
+							     render thinking inline in the block loop below. -->
 							<details class="text-xs text-text-subtle">
 								<summary class="cursor-pointer hover:text-text-muted font-mono uppercase tracking-widest text-[11px]">{t('chat.thinking_label')}</summary>
 								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs text-text-subtle/70 border-l-2 border-accent/20 pl-3">{maskText(msg.thinking ?? '')}</pre>
@@ -1944,6 +1950,19 @@
 										{/each}
 									</div>
 								{/if}
+							{:else if gBlock.type === 'thinking' && gBlock.text}
+								<!-- Mask once: the preview must be redacted too, not just
+								     the body — a secret in the first chars would otherwise
+								     leak in the always-visible summary line. -->
+								{@const maskedThinking = maskText(gBlock.text)}
+								{@const thinkPreview = maskedThinking.slice(0, 300).replace(/\s+/g, ' ').trim()}
+								<details class="text-xs text-text-subtle border-l-2 border-accent/20 pl-3 py-0.5 my-1">
+									<summary class="cursor-pointer hover:text-text-muted">
+										<span class="font-mono uppercase tracking-widest text-[10px] text-text-subtle/60">{t('chat.thinking_label')}</span>
+										<span class="text-text-subtle/50 ml-1.5">{thinkPreview.slice(0, 90)}{thinkPreview.length > 90 ? '…' : ''}</span>
+									</summary>
+									<pre class="mt-1.5 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-subtle/60">{maskedThinking}</pre>
+								</details>
 							{:else if gBlock.type === 'text' && gBlock.text}
 								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
 						{/if}
