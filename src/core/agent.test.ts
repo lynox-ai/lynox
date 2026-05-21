@@ -366,7 +366,21 @@ describe('Agent', () => {
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       const result = await agent.send('an impossible single-turn task');
       expect(result).toContain('output limit was reached');
-      expect(result.length).toBeGreaterThan(0);
+      // Proves the queue drained exactly — initial turn + 10 continuations,
+      // no leak into the next test, no early stop before the cap.
+      expect(mockProcess).toHaveBeenCalledTimes(11);
+    });
+
+    it('returns the truncated text, not the notice, when an exhausted turn still has text', async () => {
+      // The notice only replaces an *empty* exhausted turn. When the final
+      // truncated turn carries visible text, that text must come through.
+      for (let i = 0; i < 11; i++) {
+        mockProcess.mockResolvedValueOnce(maxTokensResponse('partial'));
+      }
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const result = await agent.send('a task that keeps getting truncated');
+      expect(result).toBe('partial');
+      expect(mockProcess).toHaveBeenCalledTimes(11);
     });
 
     it('tool_use: dispatches tools and continues loop', async () => {
