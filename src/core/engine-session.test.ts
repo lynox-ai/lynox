@@ -37,6 +37,9 @@ vi.mock('./agent.js', () => ({
     this.abort = mockAbort;
     // @ts-expect-error mock constructor
     this.getMessages = mockGetMessages;
+    // @ts-expect-error mock constructor — mirrors the pre-PR1 char-estimate so
+    // Session.getContextUsagePercent behaves identically under the mock.
+    this.getEstimatedOccupancyTokens = () => JSON.stringify(mockGetMessages() ?? []).length / 3.5;
     // @ts-expect-error mock constructor
     this.loadMessages = mockLoadMessages;
     // @ts-expect-error mock constructor

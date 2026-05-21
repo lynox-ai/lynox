@@ -331,7 +331,7 @@
 			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">
 				<div class="{color} h-full rounded-full transition-all duration-500" style="width: {Math.min(pct, 100)}%"></div>
 			</div>
-			<span class="text-[10px] font-mono {textColor}">{pct}%</span>
+			<span class="text-[10px] font-mono {textColor}">{Math.min(pct, 100)}%</span>
 		</div>
 	{/if}
 

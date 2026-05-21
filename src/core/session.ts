@@ -20,7 +20,7 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { MODEL_MAP, CHARS_PER_TOKEN, effectiveContextWindow, getModelId, clampTier } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, getModelId, clampTier } from '../types/index.js';
 import { getActiveProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
@@ -768,18 +768,14 @@ export class Session {
 
   /**
    * Estimate current context usage percentage.
-   * Uses the same CHARS_PER_TOKEN constant as agent truncation, and the SAME
-   * effective window the agent itself uses for trim decisions — pre-fix this
-   * read the model's native window, ignoring the user's
-   * `max_context_window_tokens` cap, so auto-compact fired at the wrong
-   * threshold whenever the user had set a smaller cap. See
-   * effectiveContextWindow in models.ts for the SSOT formula.
+   * Sources occupancy from the agent's last real API usage when available (the
+   * exact figure the UI meter shows) so auto-compaction triggers on true
+   * occupancy — not a char-estimate that over-counts JSON overhead. Applies the
+   * user's `max_context_window_tokens` cap via the effectiveContextWindow SSOT.
    */
   getContextUsagePercent(): number {
     if (!this.agent) return 0;
-    const messages = this.agent.getMessages();
-    const msgLen = JSON.stringify(messages).length;
-    const estimatedTokens = msgLen / CHARS_PER_TOKEN;
+    const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
     const userCap = this.engine.getUserConfig().max_context_window_tokens;
     const maxCtx = effectiveContextWindow(MODEL_MAP[this._model], userCap);
     return Math.round(estimatedTokens / maxCtx * 100);

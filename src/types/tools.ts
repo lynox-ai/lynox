@@ -80,7 +80,7 @@ export type StreamEvent =
   | { type: 'pipeline_progress'; stepId: string; status: 'started' | 'completed' | 'skipped' | 'failed';
       detail?: string | undefined; durationMs?: number | undefined; elapsed?: number | undefined; agent: string }
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
-  | { type: 'context_budget'; systemTokens: number; toolTokens: number; messageTokens: number;
+  | { type: 'context_budget'; systemTokens?: number; toolTokens?: number; messageTokens?: number;
       totalTokens: number; maxTokens: number; usagePercent: number; agent: string }
   | { type: 'changeset_ready'; fileCount: number; agent: string }
   | { type: 'context_compacted'; summary: string; previousUsagePercent: number; agent: string };

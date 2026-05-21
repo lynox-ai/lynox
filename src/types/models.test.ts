@@ -226,6 +226,17 @@ describe('effectiveContextWindow', () => {
     expect(effectiveContextWindow('claude-sonnet-4-6', 0)).toBe(200_000);
     expect(effectiveContextWindow('claude-sonnet-4-6', -1)).toBe(200_000);
   });
+
+  it('floors an absurdly small user cap so requests are not starved', () => {
+    // A tiny max_context_window_tokens (e.g. 5k) leaves no room for the system
+    // prompt + tool definitions and would brick every request — clamp up to
+    // the floor (MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS = 32k).
+    expect(effectiveContextWindow('claude-sonnet-4-6', 5_000)).toBe(32_000);
+    expect(effectiveContextWindow('claude-sonnet-4-6', 20_000)).toBe(32_000);
+    // A cap exactly at the floor stays; a cap comfortably above is untouched.
+    expect(effectiveContextWindow('claude-sonnet-4-6', 32_000)).toBe(32_000);
+    expect(effectiveContextWindow('claude-sonnet-4-6', 120_000)).toBe(120_000);
+  });
 });
 
 // ModelCapability registry — Settings v3 sprint substrate. The three legacy

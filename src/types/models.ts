@@ -514,6 +514,11 @@ export function getContextWindow(model: string): number {
   return modelCapabilityOrFallback(model).contextWindow;
 }
 
+/** Floor for a user-supplied context-window cap. Stops an absurdly small
+ *  `max_context_window_tokens` setting from starving the system prompt + tool
+ *  definitions and bricking every request. */
+export const MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS = 32_000;
+
 /** Effective context window after applying the user's optional cap. Mirrors
  *  Agent._effectiveContextWindow so server-side endpoints + session bookkeeping
  *  can compute the same value the agent actually uses internally — staging
@@ -523,7 +528,10 @@ export function getContextWindow(model: string): number {
  *  Never returns more than the model's native window. */
 export function effectiveContextWindow(model: string, userCap: number | undefined): number {
   const native = getContextWindow(model);
-  return userCap !== undefined && userCap > 0 ? Math.min(native, userCap) : native;
+  if (userCap !== undefined && userCap > 0) {
+    return Math.min(native, Math.max(userCap, MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS));
+  }
+  return native;
 }
 
 /** Look up default max output tokens. Normalizes provider-prefixed model IDs automatically. */
