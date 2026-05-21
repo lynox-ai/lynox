@@ -85,6 +85,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.insights': { de: 'Insights (Beta)', en: 'Insights (beta)' },
 	'hub.intelligence.graph_overview': { de: 'Graph', en: 'Graph' },
 	'hub.automation.workflows': { de: 'Workflows', en: 'Workflows' },
+	'hub.automation.library': { de: 'Gespeicherte Workflows', en: 'Saved Workflows' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
 	'hub.automation.apis': { de: 'APIs', en: 'APIs' },
@@ -1153,6 +1154,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.who': { de: 'Wer?', en: 'Who?' },
 	'tasks.assignee_lynox': { de: 'lynox (automatisch)', en: 'lynox (automatic)' },
 	'tasks.assignee_user': { de: 'Ich (Erinnerung)', en: 'Me (reminder)' },
+
+	// Saved Workflows library (PRD-WORKFLOW-UX D13)
+	'workflow_library.title': { de: 'Gespeicherte Workflows', en: 'Saved Workflows' },
+	'workflow_library.empty': { de: 'Noch keine gespeicherten Workflows.', en: 'No saved workflows yet.' },
+	'workflow_library.empty_hint': { de: 'Sag lynox im Chat z.B. "Speichere das als Workflow", nachdem eine mehrstufige Aufgabe erledigt ist.', en: 'Tell lynox in chat e.g. "Save that as a workflow" after a multi-step task is done.' },
+	'workflow_library.steps': { de: 'Schritte', en: 'steps' },
+	'workflow_library.run': { de: 'Ausführen', en: 'Run' },
+	'workflow_library.running': { de: 'Läuft...', en: 'Running...' },
+	'workflow_library.rename': { de: 'Umbenennen', en: 'Rename' },
+	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },
+	'workflow_library.save': { de: 'Speichern', en: 'Save' },
+	'workflow_library.cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'workflow_library.run_started': { de: 'Workflow gestartet.', en: 'Workflow started.' },
+	'workflow_library.run_done': { de: 'Workflow abgeschlossen.', en: 'Workflow completed.' },
+	'workflow_library.run_failed': { de: 'Workflow-Ausführung fehlgeschlagen.', en: 'Workflow run failed.' },
+	'workflow_library.delete_confirm': { de: 'Diesen gespeicherten Workflow löschen?', en: 'Delete this saved workflow?' },
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },

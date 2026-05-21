@@ -476,6 +476,38 @@ export function getPlannedPipeline(db: Database.Database, id: string): { id: str
   ).get(id, `${id}%`) as { id: string; manifest_json: string } | undefined;
 }
 
+/**
+ * List every planned pipeline row (`status='planned'`), newest first. The
+ * "saved workflow" library filter — `manifest_json.template === true` — is an
+ * app-layer concern (there is no `template` column, PRD §6.8 / D13), so this
+ * query stays a plain status filter and the caller deserializes + filters.
+ */
+export function getPlannedPipelines(db: Database.Database, limit = 100): Array<{
+  id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+}> {
+  return db.prepare(
+    "SELECT id, manifest_name, manifest_json, step_count, started_at FROM pipeline_runs WHERE status = 'planned' ORDER BY started_at DESC LIMIT ?"
+  ).all(limit) as Array<{
+    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+  }>;
+}
+
+/** Rename a planned pipeline's display name (`manifest_name`). */
+export function renamePlannedPipeline(db: Database.Database, id: string, name: string): boolean {
+  const res = db.prepare(
+    "UPDATE pipeline_runs SET manifest_name = ? WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
+  ).run(name, id, `${id}%`);
+  return res.changes > 0;
+}
+
+/** Delete a planned pipeline row. Only `status='planned'` rows are removable. */
+export function deletePlannedPipeline(db: Database.Database, id: string): boolean {
+  const res = db.prepare(
+    "DELETE FROM pipeline_runs WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
+  ).run(id, `${id}%`);
+  return res.changes > 0;
+}
+
 export function markPipelineExecuted(db: Database.Database, id: string): void {
   db.prepare("UPDATE pipeline_runs SET status = 'executed', completed_at = datetime('now') WHERE id = ?").run(id);
 }

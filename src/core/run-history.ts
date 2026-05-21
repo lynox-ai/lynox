@@ -1525,6 +1525,27 @@ export class RunHistory {
     return persistence.getPlannedPipeline(this.db, id);
   }
 
+  /**
+   * List planned pipelines (`status='planned'`), newest first. Backs the
+   * Saved-Workflows library (PRD §6.8 / D13) — the caller filters on the
+   * deserialized `manifest_json.template === true`.
+   */
+  getPlannedPipelines(limit = 100): Array<{
+    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+  }> {
+    return persistence.getPlannedPipelines(this.db, limit);
+  }
+
+  /** Rename a planned pipeline's display name. Returns false if no row matched. */
+  renamePlannedPipeline(id: string, name: string): boolean {
+    return persistence.renamePlannedPipeline(this.db, id, name);
+  }
+
+  /** Delete a planned pipeline. Returns false if no row matched. */
+  deletePlannedPipeline(id: string): boolean {
+    return persistence.deletePlannedPipeline(this.db, id);
+  }
+
   markPipelineExecuted(id: string): void {
     persistence.markPipelineExecuted(this.db, id);
   }

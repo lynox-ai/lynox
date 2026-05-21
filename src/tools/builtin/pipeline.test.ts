@@ -28,6 +28,8 @@ import {
   runWorkflowTool,
   storePipeline,
   getPipeline,
+  runSavedWorkflow,
+  forgetPipeline,
   _resetPipelineStore,
 } from './pipeline.js';
 import type { IAgent } from '../../types/index.js';
@@ -750,5 +752,102 @@ describe('getPipeline — legacy mode backfill', () => {
     getPipeline(pipelineId, fakeRunHistory as never);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
+  });
+});
+
+// PRD-WORKFLOW-UX D13 — Saved Workflows library "Run" path.
+describe('runSavedWorkflow', () => {
+  // Minimal RunHistory stub — persistPipelineRun fire-and-forgets these.
+  const fakeRunHistory = {
+    getPlannedPipeline: () => undefined,
+    insertPipelineRun: vi.fn(),
+    insertPipelineStepResult: vi.fn(),
+  };
+
+  function seedSavedWorkflow(opts?: { template?: boolean; mode?: 'autonomous' | 'interactive'; steps?: InlinePipelineStep[] }): string {
+    const id = 'saved-wf-id';
+    storePipeline(id, {
+      id,
+      name: 'Monthly Report',
+      goal: 'Compile the monthly report',
+      steps: opts?.steps ?? [{ id: 'gather', task: 'Gather data' }],
+      reasoning: 'saved',
+      estimatedCost: 0.02,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'orchestrated',
+      template: opts?.template ?? true,
+      mode: opts?.mode ?? 'autonomous',
+    });
+    return id;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  it('runs a saved workflow and reports the fresh run id', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-1' }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(true);
+    expect(result.runId).toBe('fresh-run-1');
+    expect(result.status).toBe('completed');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not consume the template — a saved workflow stays re-runnable', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValue(makeRunState());
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    // The stored template must not have been flipped to executed.
+    expect(getPipeline(id)?.executed).toBe(false);
+    const second = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(second.ok).toBe(true);
+    expect(mockRunManifest).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns an error when the workflow is not found', async () => {
+    const result = await runSavedWorkflow('ghost', fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not found/);
+  });
+
+  it('refuses a planned pipeline that is not a saved template', async () => {
+    const id = seedSavedWorkflow({ template: false });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not a saved workflow/);
+  });
+
+  it('refuses an interactive saved workflow', async () => {
+    const id = seedSavedWorkflow({ mode: 'interactive' });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/interactive/);
+  });
+
+  it('returns an error when run history is unavailable', async () => {
+    const result = await runSavedWorkflow('any', null, mockConfig);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Run history is not available/);
+  });
+
+  it('surfaces a runManifest failure as an execution error', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockRejectedValueOnce(new Error('boom'));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Workflow execution failed/);
+  });
+
+  it('forgetPipeline evicts a cached entry by id', () => {
+    const id = seedSavedWorkflow();
+    expect(getPipeline(id)).toBeDefined();
+    forgetPipeline(id);
+    // No SQLite fallback passed — a forgotten entry is gone.
+    expect(getPipeline(id)).toBeUndefined();
   });
 });
