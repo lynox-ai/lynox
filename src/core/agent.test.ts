@@ -310,17 +310,63 @@ describe('Agent', () => {
       );
     });
 
-    it('max_tokens without continuationPrompt: returns text without continuation', async () => {
-      mockProcess.mockResolvedValueOnce(maxTokensResponse('truncated'));
+    it('max_tokens continues even without a continuationPrompt', async () => {
+      // PR2: hitting max_tokens is itself the signal to continue — it no longer
+      // requires an autonomous continuationPrompt to be configured.
+      mockProcess
+        .mockResolvedValueOnce(maxTokensResponse('partial'))
+        .mockResolvedValueOnce(endTurnResponse(' and the rest'));
 
-      const agent = new Agent({
-        name: 'test',
-        model: 'claude-sonnet-4-6',
-        // No continuationPrompt
-      });
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', onStream });
       const result = await agent.send('Write something');
-      expect(result).toBe('truncated');
-      expect(mockProcess).toHaveBeenCalledTimes(1);
+      expect(result).toBe(' and the rest');
+      expect(mockProcess).toHaveBeenCalledTimes(2);
+      expect(onStream).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'continuation', iteration: 1 }),
+      );
+    });
+
+    it('continues a max_tokens turn that produced no visible text', async () => {
+      // The bug: a turn whose entire output budget went to extended thinking
+      // hit max_tokens with zero text blocks — the assistant message rendered
+      // empty. It must continue and surface real text instead.
+      mockProcess
+        .mockResolvedValueOnce({
+          content: [],
+          stop_reason: 'max_tokens',
+          usage: { input_tokens: 100, output_tokens: 16_000 },
+        })
+        .mockResolvedValueOnce(endTurnResponse('the actual answer'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const result = await agent.send('do a big task');
+      expect(result).toBe('the actual answer');
+      expect(mockProcess).toHaveBeenCalledTimes(2);
+      // The thinking-only turn was recorded with a non-empty placeholder so the
+      // continuation request stays valid (Anthropic rejects empty content).
+      const assistantEmpty = agent.getMessages().some(
+        m => m.role === 'assistant' && Array.isArray(m.content) && m.content.length === 0,
+      );
+      expect(assistantEmpty).toBe(false);
+    });
+
+    it('surfaces a notice instead of an empty turn when continuations are exhausted', async () => {
+      // Every call hits max_tokens with no text → the continuation cap is
+      // exhausted and the turn still produced nothing visible. Exactly 11
+      // queued: the initial turn + maxContinuations(10) continuations — over-
+      // queuing would leak into the next test (clearAllMocks keeps the queue).
+      for (let i = 0; i < 11; i++) {
+        mockProcess.mockResolvedValueOnce({
+          content: [],
+          stop_reason: 'max_tokens',
+          usage: { input_tokens: 100, output_tokens: 16_000 },
+        });
+      }
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const result = await agent.send('an impossible single-turn task');
+      expect(result).toContain('output limit was reached');
+      expect(result.length).toBeGreaterThan(0);
     });
 
     it('tool_use: dispatches tools and continues loop', async () => {
@@ -843,25 +889,28 @@ describe('Agent', () => {
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
     });
 
-    it('setContinuationPrompt() updates the prompt', async () => {
-      // Initially no continuation: max_tokens returns text directly
-      mockProcess.mockResolvedValueOnce(maxTokensResponse('truncated'));
-
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
-      let result = await agent.send('Task');
-      expect(result).toBe('truncated');
-      expect(mockProcess).toHaveBeenCalledTimes(1);
-
-      // Set continuation prompt: now max_tokens should continue
-      agent.reset();
-      mockProcess.mockClear();
-      agent.setContinuationPrompt('Keep going');
+    it('setContinuationPrompt() feeds the post-maxIterations continuation', async () => {
+      // After PR2 max_tokens always continues, so continuationPrompt now only
+      // drives the post-maxIterations continuation. Verify the setter feeds
+      // that path — the configured prompt is injected verbatim.
+      const tool = makeTool('noop');
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        maxIterations: 2,
+      });
+      agent.setContinuationPrompt('Keep going please');
       mockProcess
-        .mockResolvedValueOnce(maxTokensResponse('partial'))
-        .mockResolvedValueOnce(endTurnResponse('complete'));
-      result = await agent.send('Task2');
-      expect(result).toBe('complete');
-      expect(mockProcess).toHaveBeenCalledTimes(2);
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'noop', input: {} }]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't2', name: 'noop', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('finished'));
+      const result = await agent.send('go');
+      expect(result).toBe('finished');
+      const injected = agent.getMessages().some(
+        m => m.role === 'user' && m.content === 'Keep going please',
+      );
+      expect(injected).toBe(true);
     });
   });
 
