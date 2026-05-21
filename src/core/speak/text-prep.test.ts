@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { prepareForSpeech } from './text-prep.js';
+import { normalizeSpecialCharsForTts, prepareForSpeech } from './text-prep.js';
 
 describe('prepareForSpeech — block strategies', () => {
   it('returns empty string for empty input', () => {
@@ -472,6 +472,86 @@ describe("'auto' lang detection", () => {
     // "Prüfung läuft" have no stopwords but are unambiguously German.
     const md = 'Prüfung läuft.\n\n- A\n- B\n- C\n- D';
     expect(prepareForSpeech(md, 'auto')).toContain('Liste mit 4 Einträgen');
+  });
+});
+
+describe('normalizeSpecialCharsForTts — special-char normalization', () => {
+  it('returns empty string for empty input', () => {
+    expect(normalizeSpecialCharsForTts('')).toBe('');
+  });
+
+  it('converts hyphen to space in digit/acronym runs', () => {
+    expect(normalizeSpecialCharsForTts('3-API-Workflow')).toBe('3 API Workflow');
+  });
+
+  it('converts hyphen to space in ALL-CAPS runs', () => {
+    expect(normalizeSpecialCharsForTts('ALL-CAPS')).toBe('ALL CAPS');
+  });
+
+  it('leaves E-Mail intact (single capital, not an acronym)', () => {
+    expect(normalizeSpecialCharsForTts('E-Mail')).toBe('E-Mail');
+  });
+
+  it('leaves an ordinary German hyphenated compound intact', () => {
+    expect(normalizeSpecialCharsForTts('Gewinn-Marge')).toBe('Gewinn-Marge');
+  });
+
+  it('leaves an all-lowercase hyphenated phrase intact', () => {
+    expect(normalizeSpecialCharsForTts('state-of-the-art')).toBe('state-of-the-art');
+  });
+
+  it('leaves a hyphenated proper-noun compound intact', () => {
+    // Both sides Title-case — a real surname, must survive.
+    expect(normalizeSpecialCharsForTts('Müller-Lüdenscheidt')).toBe('Müller-Lüdenscheidt');
+  });
+
+  it('converts a slash between two words to a comma', () => {
+    expect(normalizeSpecialCharsForTts('und/oder')).toBe('und, oder');
+  });
+
+  it('leaves a numeric date slash intact', () => {
+    expect(normalizeSpecialCharsForTts('2026/05/21')).toBe('2026/05/21');
+  });
+
+  it('leaves a whitespace-adjacent slash intact', () => {
+    expect(normalizeSpecialCharsForTts('A / B')).toBe('A / B');
+  });
+
+  it('drops an unmatched opening parenthesis', () => {
+    expect(normalizeSpecialCharsForTts('Das (ist ein Test')).toBe('Das ist ein Test');
+  });
+
+  it('drops an unmatched closing parenthesis', () => {
+    expect(normalizeSpecialCharsForTts('Das ist ein Test)')).toBe('Das ist ein Test');
+  });
+
+  it('preserves a matched parenthesis pair', () => {
+    expect(normalizeSpecialCharsForTts('Das (ein Test) hier')).toBe('Das (ein Test) hier');
+  });
+
+  it('preserves nested matched parentheses but drops only the orphan', () => {
+    // Inner pair matched, one stray trailing ) → only the orphan goes.
+    expect(normalizeSpecialCharsForTts('a (b (c) d) e)')).toBe('a (b (c) d) e');
+  });
+
+  it('handles a mix of all three rules in one string', () => {
+    expect(normalizeSpecialCharsForTts('Der 3-API-Workflow für und/oder (ungeschlossen'))
+      .toBe('Der 3 API Workflow für und, oder ungeschlossen');
+  });
+});
+
+describe('prepareForSpeech — special-char normalization end-to-end', () => {
+  it('cleans a sentence mixing a hyphenated abbreviation, a slash, and a stray paren', () => {
+    // Realistic reported case: Voxtral garbles "3-API", reads "und/oder"
+    // literally, and stumbles on the orphan "(". After normalization the
+    // spoken output carries no hyphen-in-acronym, no word-slash, no orphan
+    // paren — while the ordinary compound "E-Mail" stays intact.
+    const md = 'Schick die 3-API-Doku per E-Mail und/oder (intern an Anna.';
+    const out = prepareForSpeech(md, 'de');
+    expect(out).toBe('Schick die 3 API Doku per E-Mail und, oder intern an Anna.');
+    expect(out).not.toContain('(');
+    expect(out).not.toContain('/');
+    expect(out).toContain('E-Mail');
   });
 });
 
