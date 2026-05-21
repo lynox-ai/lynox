@@ -36,8 +36,8 @@ When creating plan phases, set \`model\`, \`thinking\`, and \`effort\` per phase
 Only set fields that differ from defaults. The system may clamp the tier if the deployment has a cap — this is transparent.
 
 ### Workflow lifecycle
-- Plans are workflow templates. Completed tracked plans can be scheduled via \`task_create(workflow_id, schedule)\`.
-- \`capture_process\` / \`promote_process\`: Convert ad-hoc work (no plan) into a workflow retroactively.`;
+- Plans are workflow templates. Completed plans can be scheduled via \`task_create(workflow_id, schedule)\`.
+- \`save_workflow\`: Save a procedure as a reusable workflow in one call — omit \`workflow_id\` to save the work just done in this session, or pass a \`workflow_id\` to make an existing plan reusable.`;
 
 /** DataStore-specific prompt appended only when data store tools are registered */
 export const DATASTORE_PROMPT_SUFFIX = `
@@ -261,7 +261,7 @@ export const SYSTEM_PROMPT = `You are lynox — a digital coworker that learns t
 - **\`type: "svg"\`** — static vector graphics.
 - Use \`artifact_list\` to check existing, and the \`id\` parameter to update an existing artifact with fresh data rather than creating a new one every turn.
 
-**Workflow capture**: Tracked plans are already workflow templates. After tracked execution → "Save as reusable workflow?". For ad-hoc work without a plan → \`capture_process\` → \`promote_process\`.
+**Workflow capture**: To make a procedure reusable, call \`save_workflow\` once — omit \`workflow_id\` to save the work just done in this session, or pass a \`plan_task\` \`workflow_id\` to turn an existing plan into a reusable workflow. It returns a \`workflow_id\` for \`run_workflow\` / \`task_create\`.
 
 ## Decision Logic
 

@@ -1,51 +1,51 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { captureProcessTool, promoteProcessTool } from './process.js';
-import { _resetPipelineStore, getPipeline } from './pipeline.js';
+import { saveWorkflowTool } from './process.js';
+import { _resetPipelineStore, getPipeline, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
-import type { IAgent, ProcessRecord, LynoxUserConfig } from '../../types/index.js';
+import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
 
-// Mock process-capture module
+// === Mock process-capture (the Haiku extraction step) ===
+
+const captureProcessMock = vi.fn();
 vi.mock('../../core/process-capture.js', () => ({
-  captureProcess: vi.fn().mockResolvedValue({
-    id: 'proc-123',
-    name: 'Test Process',
-    description: 'A test process',
-    sourceRunId: 'run-abc',
-    steps: [
-      { order: 0, tool: 'http_request', description: 'Fetch data from API', inputTemplate: { url: '{{api_url}}' }, dependsOn: [] },
-      { order: 1, tool: 'write_file', description: 'Generate report', inputTemplate: { path: 'report.pdf' }, dependsOn: [0] },
-    ],
-    parameters: [
-      { name: 'api_url', description: 'API endpoint', type: 'string', defaultValue: 'https://api.example.com', source: 'user_input' },
-      { name: 'time_range', description: 'Reporting period', type: 'date', defaultValue: 'last month', source: 'relative_date' },
-    ],
-    createdAt: '2026-03-21T12:00:00.000Z',
-  } satisfies ProcessRecord),
+  captureProcess: (...args: unknown[]) => captureProcessMock(...args),
 }));
 
-const RUN_TOOL_CALL = { id: 'tc1', run_id: 'run-abc', tool_name: 'http_request', input_json: '{}', output_json: '', duration_ms: 100, sequence_order: 0 };
+const SAMPLE_RECORD: ProcessRecord = {
+  id: 'proc-123',
+  name: 'Test Process',
+  description: 'A test process',
+  sourceRunId: 'run-abc',
+  steps: [
+    { order: 0, tool: 'http_request', description: 'Fetch data from API', inputTemplate: { url: '{{api_url}}' }, dependsOn: [] },
+    { order: 1, tool: 'write_file', description: 'Generate report', inputTemplate: { path: 'report.pdf' }, dependsOn: [0] },
+  ],
+  parameters: [
+    { name: 'api_url', description: 'API endpoint', type: 'string', defaultValue: 'https://api.example.com', source: 'user_input' },
+    { name: 'time_range', description: 'Reporting period', type: 'date', defaultValue: 'last month', source: 'relative_date' },
+  ],
+  createdAt: '2026-03-21T12:00:00.000Z',
+};
+
 const SESSION_TOOL_CALLS = [
   { id: 'tc0', run_id: 'run-earlier', tool_name: 'http_request', input_json: '{}', output_json: '', duration_ms: 100, sequence_order: 0 },
   { id: 'tc1', run_id: 'run-earlier', tool_name: 'write_file', input_json: '{}', output_json: '', duration_ms: 80, sequence_order: 1 },
-  { id: 'tc2', run_id: 'run-abc', tool_name: 'capture_process', input_json: '{}', output_json: '', duration_ms: 5, sequence_order: 0 },
+  { id: 'tc2', run_id: 'run-abc', tool_name: 'save_workflow', input_json: '{}', output_json: '', duration_ms: 5, sequence_order: 0 },
 ];
 
-// Mock RunHistory
+// === Mock RunHistory ===
+
 function makeMockRunHistory() {
   const processes = new Map<string, ProcessRecord>();
   return {
-    // Current-run scope: holds only this turn's calls (the capture_process call).
-    getRunToolCalls: vi.fn().mockReturnValue([RUN_TOOL_CALL]),
-    // Session scope: holds the workflow tool calls from earlier turns.
+    getRunToolCalls: vi.fn().mockReturnValue([SESSION_TOOL_CALLS[0]]),
     getSessionToolCalls: vi.fn().mockReturnValue(SESSION_TOOL_CALLS),
     getRun: vi.fn().mockReturnValue({ id: 'run-abc', session_id: 'thread-1' }),
     insertProcess: vi.fn().mockImplementation((record: ProcessRecord) => {
       processes.set(record.id, record);
     }),
     getProcess: vi.fn().mockImplementation((id: string) => processes.get(id)),
-    updateProcessPromotion: vi.fn(),
-    listProcesses: vi.fn().mockReturnValue([]),
-    deleteProcess: vi.fn().mockReturnValue(true),
+    getPlannedPipeline: vi.fn().mockReturnValue(undefined),
     getAvgStepCostByModelTier: vi.fn().mockReturnValue({}),
     _store: processes,
   };
@@ -53,7 +53,11 @@ function makeMockRunHistory() {
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
-function makeAgent(overrides: Partial<IAgent> = {}, runHistory: unknown = null, userConfig: LynoxUserConfig = mockConfig): IAgent {
+function makeAgent(
+  overrides: Partial<IAgent> = {},
+  runHistory: unknown = null,
+  userConfig: LynoxUserConfig = mockConfig,
+): IAgent {
   const toolContext = createToolContext(userConfig);
   toolContext.runHistory = runHistory as never;
   return {
@@ -68,89 +72,88 @@ function makeAgent(overrides: Partial<IAgent> = {}, runHistory: unknown = null, 
   } as unknown as IAgent;
 }
 
-describe('capture_process tool', () => {
+// =====================================================================
+// Source A — session capture (no workflow_id)
+// =====================================================================
+
+describe('save_workflow — session source', () => {
   let mockHistory: ReturnType<typeof makeMockRunHistory>;
 
   beforeEach(() => {
     _resetPipelineStore();
     mockHistory = makeMockRunHistory();
+    captureProcessMock.mockReset();
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
   });
 
-  it('should capture process from current run', async () => {
-    const agent = makeAgent({}, mockHistory);
-    const result = await captureProcessTool.handler(
-      { name: 'Monthly Report' },
-      agent,
-    );
+  it('captures the session and stores a reusable workflow in one call', async () => {
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
 
-    const parsed = JSON.parse(result) as { process_id: string; step_count: number; parameter_count: number };
-    expect(parsed.process_id).toBe('proc-123');
-    expect(parsed.step_count).toBe(2);
-    expect(parsed.parameter_count).toBe(2);
+    const parsed = JSON.parse(result) as { workflow_id: string; steps: number; source: string; parameters: string[] };
+    expect(parsed.workflow_id).toBeDefined();
+    expect(parsed.steps).toBe(2);
+    expect(parsed.source).toBe('session');
+    expect(parsed.parameters).toEqual(['api_url', 'time_range']);
+
+    // The PlannedPipeline is stored, flagged as a reusable template.
+    const pipeline = getPipeline(parsed.workflow_id);
+    expect(pipeline).toBeDefined();
+    expect(pipeline!.template).toBe(true);
+    expect(pipeline!.executed).toBe(false);
+    expect(pipeline!.steps).toHaveLength(2);
+    expect(pipeline!.steps[1]!.input_from).toEqual(['step-0']);
+  });
+
+  it('resolves input_from by step order even when order != array index', async () => {
+    // Regression: processToSteps builds step IDs as `step-<order>`. Deriving
+    // `input_from` from the array index instead of the order value left a
+    // dangling reference whenever a captured record's `order` was not 0,1,2…
+    captureProcessMock.mockResolvedValue({
+      ...structuredClone(SAMPLE_RECORD),
+      steps: [
+        { order: 10, tool: 'http_request', description: 'Fetch', inputTemplate: {}, dependsOn: [] },
+        { order: 20, tool: 'write_file', description: 'Report', inputTemplate: {}, dependsOn: [10] },
+      ],
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    const parsed = JSON.parse(result) as { workflow_id: string };
+    const pipeline = getPipeline(parsed.workflow_id);
+    expect(pipeline!.steps[0]!.id).toBe('step-10');
+    expect(pipeline!.steps[1]!.id).toBe('step-20');
+    // input_from must point at step[0]'s real id (`step-10`), not `step-1`.
+    expect(pipeline!.steps[1]!.input_from).toEqual(['step-10']);
+  });
+
+  it('writes the internal ProcessRecord for lineage (D11) linked to the pipeline', async () => {
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
+    const parsed = JSON.parse(result) as { workflow_id: string };
+
     expect(mockHistory.insertProcess).toHaveBeenCalledOnce();
-  });
-
-  it('should error without currentRunId', async () => {
-    const agent = makeAgent({ currentRunId: undefined }, mockHistory);
-    const result = await captureProcessTool.handler(
-      { name: 'Test' },
-      agent,
-    );
-
-    expect(result).toContain('No active run');
-  });
-
-  it('should error without run history', async () => {
-    const agent = makeAgent({}, null);
-    const result = await captureProcessTool.handler(
-      { name: 'Test' },
-      agent,
-    );
-
-    expect(result).toContain('not available');
-  });
-
-  it('should error when no tool calls found', async () => {
-    mockHistory.getRunToolCalls.mockReturnValue([]);
-    mockHistory.getSessionToolCalls.mockReturnValue([]);
-    const agent = makeAgent({}, mockHistory);
-    const result = await captureProcessTool.handler(
-      { name: 'Test' },
-      agent,
-    );
-
-    expect(result).toContain('No tool calls');
+    const stored = mockHistory.insertProcess.mock.calls[0]![0] as ProcessRecord;
+    // The ProcessRecord records which pipeline it was promoted into.
+    expect(stored.promotedToPipelineId).toBe(parsed.workflow_id);
   });
 
   it('gathers session-wide tool calls, not just the current run', async () => {
-    // currentThreadId resolves the session; capture must read across turns.
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
-    const result = await captureProcessTool.handler(
-      { name: 'Monthly Report' },
-      agent,
-    );
+    await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
 
-    // The session-scoped query is used, the single-run query is not.
     expect(mockHistory.getSessionToolCalls).toHaveBeenCalledWith('thread-1');
     expect(mockHistory.getRunToolCalls).not.toHaveBeenCalled();
-
-    // captureProcess receives the session-wide calls + keeps currentRunId as source.
-    const { captureProcess } = await import('../../core/process-capture.js');
-    expect(captureProcess).toHaveBeenCalledWith(
+    expect(captureProcessMock).toHaveBeenCalledWith(
       'run-abc',
       'Monthly Report',
       SESSION_TOOL_CALLS,
       expect.objectContaining({ apiKey: 'test-key' }),
     );
-
-    const parsed = JSON.parse(result) as { process_id: string };
-    expect(parsed.process_id).toBe('proc-123');
   });
 
   it('falls back to run.session_id when currentThreadId is absent', async () => {
-    // No currentThreadId -> resolve via getRun(currentRunId).session_id.
     const agent = makeAgent({ currentThreadId: undefined }, mockHistory);
-    await captureProcessTool.handler({ name: 'Test' }, agent);
+    await saveWorkflowTool.handler({ name: 'Test' }, agent);
 
     expect(mockHistory.getRun).toHaveBeenCalledWith('run-abc');
     expect(mockHistory.getSessionToolCalls).toHaveBeenCalledWith('thread-1');
@@ -158,92 +161,180 @@ describe('capture_process tool', () => {
   });
 
   it('falls back to single-run scope when no session can be resolved', async () => {
-    // Neither a thread id nor a run.session_id -> legacy current-run behaviour.
     mockHistory.getRun.mockReturnValue({ id: 'run-abc', session_id: '' });
     const agent = makeAgent({ currentThreadId: undefined }, mockHistory);
-    await captureProcessTool.handler({ name: 'Test' }, agent);
+    await saveWorkflowTool.handler({ name: 'Test' }, agent);
 
     expect(mockHistory.getRunToolCalls).toHaveBeenCalledWith('run-abc');
     expect(mockHistory.getSessionToolCalls).not.toHaveBeenCalled();
   });
+
+  it('errors without currentRunId', async () => {
+    const agent = makeAgent({ currentRunId: undefined }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    expect(result).toContain('No active run');
+  });
+
+  it('errors without run history', async () => {
+    const agent = makeAgent({}, null);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    expect(result).toContain('not available');
+  });
+
+  it('errors when no tool calls are found', async () => {
+    mockHistory.getSessionToolCalls.mockReturnValue([]);
+    mockHistory.getRunToolCalls.mockReturnValue([]);
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    expect(result).toContain('Nothing to save');
+  });
+
+  it('reports nothing-to-save when extraction yields zero steps', async () => {
+    captureProcessMock.mockResolvedValue({ ...structuredClone(SAMPLE_RECORD), steps: [] });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    expect(result).toContain('No actionable steps');
+    // No partial state written.
+    expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+  });
 });
 
-describe('promote_process tool', () => {
+// =====================================================================
+// Source A — retryable-error path (Haiku extraction failure)
+// =====================================================================
+
+describe('save_workflow — retryable extraction failure', () => {
   let mockHistory: ReturnType<typeof makeMockRunHistory>;
 
   beforeEach(() => {
     _resetPipelineStore();
     mockHistory = makeMockRunHistory();
+    captureProcessMock.mockReset();
+  });
 
-    // Pre-populate a process
-    const process: ProcessRecord = {
-      id: 'proc-456',
-      name: 'Ad Report',
-      description: 'Monthly ad performance report',
-      sourceRunId: 'run-xyz',
+  it('surfaces a clear retryable error and writes no partial state', async () => {
+    captureProcessMock.mockRejectedValue(new Error('network timeout'));
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Flaky Workflow' }, agent);
+
+    // Error message names the failure and tells the agent it can retry.
+    expect(result).toMatch(/extraction failed/i);
+    expect(result).toMatch(/network timeout/);
+    expect(result).toMatch(/retry/i);
+
+    // Atomicity: no ProcessRecord, no PlannedPipeline written.
+    expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+  });
+});
+
+// =====================================================================
+// Source B — promote an existing plan_task workflow (workflow_id given)
+// =====================================================================
+
+describe('save_workflow — workflow_id source', () => {
+  let mockHistory: ReturnType<typeof makeMockRunHistory>;
+
+  function makePlan(overrides: Partial<PlannedPipeline> = {}): PlannedPipeline {
+    return {
+      id: 'plan-789',
+      name: 'Ad Report Plan',
+      goal: 'Generate the monthly ad report',
       steps: [
-        { order: 0, tool: 'http_request', description: 'Fetch ad data', inputTemplate: { url: '{{api_url}}' } },
-        { order: 1, tool: 'write_file', description: 'Generate report', inputTemplate: { path: 'report.pdf' }, dependsOn: [0] },
+        { id: 'step-0', task: 'Fetch ad data' },
+        { id: 'step-1', task: 'Write report', input_from: ['step-0'] },
       ],
-      parameters: [
-        { name: 'api_url', description: 'API endpoint', type: 'string', defaultValue: 'https://ads.api.com', source: 'user_input' },
-      ],
+      reasoning: 'planned',
+      estimatedCost: 0.01,
       createdAt: '2026-03-21T12:00:00.000Z',
+      executed: true,
+      executionMode: 'orchestrated',
+      template: false,
+      mode: 'autonomous',
+      ...overrides,
     };
-    mockHistory._store.set('proc-456', process);
-    mockHistory.getProcess.mockImplementation((id: string) => mockHistory._store.get(id));
+  }
+
+  beforeEach(() => {
+    _resetPipelineStore();
+    mockHistory = makeMockRunHistory();
+    captureProcessMock.mockReset();
   });
 
-  it('should promote process to pipeline', async () => {
-    const result = await promoteProcessTool.handler(
-      { process_id: 'proc-456' },
-      makeAgent({}, mockHistory),
+  it('promotes a non-template plan into a reusable workflow copy', async () => {
+    storePipeline('plan-789', makePlan());
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler(
+      { name: 'Saved Ad Report', description: 'Reusable monthly report', workflow_id: 'plan-789' },
+      agent,
     );
 
-    const parsed = JSON.parse(result) as { pipeline_id: string; steps: number; parameters: string[] };
-    expect(parsed.pipeline_id).toBeDefined();
+    const parsed = JSON.parse(result) as { workflow_id: string; source: string; steps: number };
+    expect(parsed.source).toBe('workflow_id');
     expect(parsed.steps).toBe(2);
-    expect(parsed.parameters).toEqual(['api_url']);
+    // A new id — the original plan is untouched.
+    expect(parsed.workflow_id).not.toBe('plan-789');
 
-    // Verify pipeline was stored
-    const pipeline = getPipeline(parsed.pipeline_id);
-    expect(pipeline).toBeDefined();
-    expect(pipeline!.name).toBe('Ad Report');
-    expect(pipeline!.steps).toHaveLength(2);
-    expect(pipeline!.steps[1]!.input_from).toEqual(['step-0']);
+    const reusable = getPipeline(parsed.workflow_id);
+    expect(reusable).toBeDefined();
+    expect(reusable!.template).toBe(true);
+    expect(reusable!.name).toBe('Saved Ad Report');
+    expect(reusable!.goal).toBe('Reusable monthly report');
+    expect(reusable!.executed).toBe(false);
 
-    // Verify process was marked as promoted
-    expect(mockHistory.updateProcessPromotion).toHaveBeenCalledWith('proc-456', parsed.pipeline_id);
+    // The original plan stays a non-template, unchanged.
+    expect(getPipeline('plan-789')!.template).toBe(false);
+
+    // The session-capture path is never touched for this source.
+    expect(captureProcessMock).not.toHaveBeenCalled();
+    expect(mockHistory.insertProcess).not.toHaveBeenCalled();
   });
 
-  it('should error for unknown process', async () => {
-    const result = await promoteProcessTool.handler(
-      { process_id: 'nonexistent' },
-      makeAgent({}, mockHistory),
+  it('is idempotent for an already-reusable workflow', async () => {
+    storePipeline('tmpl-1', makePlan({ id: 'tmpl-1', template: true }));
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler(
+      { name: 'Already Saved', workflow_id: 'tmpl-1' },
+      agent,
     );
 
+    const parsed = JSON.parse(result) as { workflow_id: string; already_reusable: boolean };
+    expect(parsed.already_reusable).toBe(true);
+    expect(parsed.workflow_id).toBe('tmpl-1');
+  });
+
+  it('errors for an unknown workflow_id', async () => {
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler(
+      { name: 'X', workflow_id: 'does-not-exist' },
+      agent,
+    );
     expect(result).toContain('not found');
   });
+});
 
-  it('should error for already promoted process', async () => {
-    const process = mockHistory._store.get('proc-456')!;
-    process.promotedToPipelineId = 'existing-pipeline';
-    mockHistory._store.set('proc-456', process);
+// =====================================================================
+// Session-call forwarding
+// =====================================================================
+//
+// The redaction sub-task (PRD §6.2 — value-pattern + high-entropy scanning,
+// redact-then-truncate) lives in `process-capture.ts` and is covered against
+// the real, unmocked sanitizer in `process-capture.test.ts`. Here we only
+// assert that `save_workflow` forwards the session tool-calls verbatim into
+// `captureProcess`, which is the layer that performs the redaction.
 
-    const result = await promoteProcessTool.handler(
-      { process_id: 'proc-456' },
-      makeAgent({}, mockHistory),
+describe('save_workflow — session-call forwarding', () => {
+  it('forwards the raw session tool-calls to captureProcess for redaction', async () => {
+    _resetPipelineStore();
+    captureProcessMock.mockReset();
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
+    const mockHistory = makeMockRunHistory();
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await saveWorkflowTool.handler({ name: 'X' }, agent);
+    expect(captureProcessMock).toHaveBeenCalledWith(
+      'run-abc',
+      'X',
+      SESSION_TOOL_CALLS,
+      expect.anything(),
     );
-
-    expect(result).toContain('already promoted');
-  });
-
-  it('should error without run history', async () => {
-    const result = await promoteProcessTool.handler(
-      { process_id: 'proc-456' },
-      makeAgent({}, null),
-    );
-
-    expect(result).toContain('not available');
   });
 });

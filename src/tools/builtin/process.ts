@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent, ProcessRecord, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { captureProcess } from '../../core/process-capture.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
-import { storePipeline } from './pipeline.js';
+import { storePipeline, getPipeline } from './pipeline.js';
 import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
@@ -9,111 +9,36 @@ import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
-// === capture_process ===
+// === save_workflow ===
+//
+// One atomic call that replaces the former capture_process -> promote_process
+// two-step dance. Two sources (PRD D6):
+//   - implicit "this session" — captures the work just done in this session
+//     and immediately promotes it to a reusable PlannedPipeline template;
+//   - an existing `workflow_id` — takes a `plan_task` pipeline and flips it
+//     into a reusable template.
+// Returns a `workflow_id` either way.
 
-interface CaptureInput {
+interface SaveWorkflowInput {
   name: string;
   description?: string | undefined;
+  /**
+   * Optional. When given, promote an existing plan_task pipeline to a
+   * reusable template. When omitted, capture + promote the current session.
+   */
+  workflow_id?: string | undefined;
 }
 
-export const captureProcessTool: ToolEntry<CaptureInput> = {
-  definition: {
-    name: 'capture_process',
-    description:
-      'Save the work you just completed as a reusable workflow template. ' +
-      'Reads the actual steps from this session and identifies what is fixed vs. variable.',
-    eager_input_streaming: true,
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        name: { type: 'string', description: 'Name for this workflow (e.g., "Monthly Ad Report")' },
-        description: { type: 'string', description: 'Brief description of what this workflow does' },
-      },
-      required: ['name'],
-    },
-  },
-  handler: async (input: CaptureInput, agent: IAgent): Promise<string> => {
-    const _runHistory = agent.toolContext.runHistory;
-    const _config = agent.toolContext.userConfig;
-    if (!_runHistory || !_config) {
-      return 'Error: Process capture not available. Run history is not initialized.';
-    }
-
-    const runId = agent.currentRunId;
-    if (!runId) {
-      return 'Error: No active run. Process capture can only be used during a session.';
-    }
-
-    const apiKey = _config.api_key;
-    if (!apiKey) {
-      return 'Error: API key not configured. Required for process analysis.';
-    }
-
-    try {
-      // A conversation spans many runs (one per turn); `agent.currentRunId` is
-      // the run executing capture_process itself, which holds no prior workflow
-      // tool calls. Resolve the owning session and gather its full tool-call
-      // history so capture sees the actual work the user just did.
-      // Prefer the agent's thread id; fall back to the run's session_id;
-      // fall back again to single-run scope if neither resolves (treats an
-      // empty-string session_id, the column default, as unresolved).
-      const sessionId = agent.currentThreadId
-        || _runHistory.getRun(runId)?.session_id
-        || undefined;
-      const toolCalls = sessionId
-        ? _runHistory.getSessionToolCalls(sessionId)
-        : _runHistory.getRunToolCalls(runId);
-      if (toolCalls.length === 0) {
-        return 'No tool calls found in this session. Nothing to capture.';
-      }
-
-      const record = await captureProcess(runId, input.name, toolCalls, {
-        apiKey,
-        apiBaseURL: _config.api_base_url,
-        description: input.description,
-      });
-
-      _runHistory.insertProcess(record);
-
-      // Format summary for agent to present to user
-      const stepSummary = record.steps.map((s, i) =>
-        `${i + 1}. ${s.description}`,
-      ).join('\n');
-
-      const paramSummary = record.parameters.length > 0
-        ? record.parameters.map(p =>
-            `- ${p.name}: ${p.description} (${p.source}, default: ${p.defaultValue ?? 'none'})`,
-          ).join('\n')
-        : 'None — all values are fixed.';
-
-      return JSON.stringify({
-        process_id: record.id,
-        name: record.name,
-        steps: stepSummary,
-        parameters: paramSummary,
-        step_count: record.steps.length,
-        parameter_count: record.parameters.length,
-      }, null, 2);
-    } catch (err) {
-      logErrorChain('capture_process', err);
-      return `Error capturing process: ${getErrorMessage(err)}`;
-    }
-  },
-};
-
-// === promote_process ===
-
-interface PromoteInput {
-  process_id: string;
-  parameter_values?: Record<string, unknown> | undefined;
-}
-
+/**
+ * Convert a captured ProcessRecord into runnable pipeline steps. Parameter
+ * names referenced by a step's inputTemplate are surfaced as `{{name}}`
+ * placeholders in the step task so the workflow stays re-parameterizable.
+ */
 function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
+  const validOrders = new Set(record.steps.map(s => s.order));
   return record.steps.map(step => {
-    // Build task from description + parameter hints
     const paramHints = record.parameters
       .filter(p => {
-        // Check if this parameter appears in this step's inputTemplate
         const templateStr = JSON.stringify(step.inputTemplate);
         return templateStr.includes(p.name);
       })
@@ -124,12 +49,11 @@ function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
       ? `${step.description}\n\nParameters: ${paramHints}`
       : step.description;
 
-    // Convert dependsOn indices to step IDs
+    // `dependsOn` holds step `order` values — the same space the `step-<order>`
+    // IDs below use. Keep only deps that resolve to a real step so a stale
+    // order can never leave a dangling `input_from` reference.
     const input_from = step.dependsOn?.length
-      ? step.dependsOn.map(idx => {
-          const dep = record.steps[idx];
-          return dep ? `step-${idx}` : undefined;
-        }).filter((id): id is string => id !== undefined)
+      ? step.dependsOn.filter(order => validOrders.has(order)).map(order => `step-${order}`)
       : undefined;
 
     return {
@@ -140,92 +64,192 @@ function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
   });
 }
 
-export const promoteProcessTool: ToolEntry<PromoteInput> = {
+/**
+ * Source A — promote an existing plan_task pipeline to a reusable template.
+ * Atomic: flips `template` on a fresh copy and stores it; no partial state.
+ */
+function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): string {
+  const runHistory = agent.toolContext.runHistory;
+  const existing = getPipeline(input.workflow_id!, runHistory);
+  if (!existing) {
+    return `Error: Workflow "${input.workflow_id}" not found. Pass a workflow_id returned by plan_task, or omit it to save this session's work.`;
+  }
+
+  if (existing.template) {
+    return JSON.stringify({
+      workflow_id: existing.id,
+      name: existing.name,
+      steps: existing.steps.length,
+      already_reusable: true,
+      next: `Workflow "${existing.id}" is already a reusable template. Call run_workflow with this workflow_id to run it.`,
+    }, null, 2);
+  }
+
+  // Store a reusable copy under a new id — keeps the original plan intact.
+  const reusableId = randomUUID();
+  const reusable: PlannedPipeline = {
+    ...existing,
+    id: reusableId,
+    name: input.name,
+    goal: input.description || existing.goal,
+    template: true,
+    executed: false,
+    createdAt: new Date().toISOString(),
+  };
+
+  // Save-time gate — same as plan_task.
+  assertPlannedPipelineIsValid(reusable);
+  storePipeline(reusableId, reusable);
+
+  return JSON.stringify({
+    workflow_id: reusableId,
+    name: reusable.name,
+    steps: reusable.steps.length,
+    source: 'workflow_id',
+    next: `Call run_workflow with workflow_id "${reusableId}" to run this workflow. It is saved and reusable.`,
+  }, null, 2);
+}
+
+/**
+ * Source B — capture this session's finished work and promote it in one go.
+ * Atomic: the internal ProcessRecord is written only after the Haiku
+ * extraction succeeds, and the PlannedPipeline only after that — an
+ * extraction failure leaves no partial state and is safe to retry.
+ */
+async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Promise<string> {
+  const runHistory = agent.toolContext.runHistory;
+  const config = agent.toolContext.userConfig;
+  if (!runHistory || !config) {
+    return 'Error: Workflow capture not available. Run history is not initialized.';
+  }
+
+  const runId = agent.currentRunId;
+  if (!runId) {
+    return 'Error: No active run. save_workflow can only capture work during a session.';
+  }
+
+  const apiKey = config.api_key;
+  if (!apiKey) {
+    return 'Error: API key not configured. Required for workflow analysis.';
+  }
+
+  // A conversation spans many runs (one per turn); `agent.currentRunId` is the
+  // run executing save_workflow itself, which holds no prior workflow tool
+  // calls. Resolve the owning session and gather its full tool-call history so
+  // the capture sees the actual work the user just did. Prefer the thread id;
+  // fall back to the run's session_id; fall back to single-run scope if neither
+  // resolves (an empty-string session_id, the column default, is unresolved).
+  const sessionId = agent.currentThreadId
+    || runHistory.getRun(runId)?.session_id
+    || undefined;
+  const toolCalls = sessionId
+    ? runHistory.getSessionToolCalls(sessionId)
+    : runHistory.getRunToolCalls(runId);
+  if (toolCalls.length === 0) {
+    return 'No tool calls found in this session. Nothing to save as a workflow.';
+  }
+
+  // --- Phase 1: Haiku extraction (the only failure-prone, retryable step) ---
+  let record: ProcessRecord;
+  try {
+    record = await captureProcess(runId, input.name, toolCalls, {
+      apiKey,
+      apiBaseURL: config.api_base_url,
+      description: input.description,
+    });
+  } catch (err) {
+    logErrorChain('save_workflow:extract', err);
+    // Nothing has been persisted yet — safe to retry.
+    return `Error: Workflow extraction failed (${getErrorMessage(err)}). No workflow was saved. This is a transient analysis failure — call save_workflow again to retry.`;
+  }
+
+  // --- Phase 2: build the reusable pipeline from the extracted steps ---
+  const pipelineSteps = processToSteps(record);
+  if (pipelineSteps.length === 0) {
+    // No partial state written yet — bail before touching storage.
+    return 'No actionable steps were found in this session. Nothing to save as a workflow.';
+  }
+
+  try {
+    const pipelineId = randomUUID();
+    const historicalAvg = runHistory.getAvgStepCostByModelTier(30);
+    const costEstimate = estimatePipelineCost(pipelineSteps, historicalAvg);
+
+    const planned: PlannedPipeline = {
+      id: pipelineId,
+      name: record.name,
+      goal: record.description || record.name,
+      steps: pipelineSteps,
+      reasoning: `Saved from session ${runId}`,
+      estimatedCost: costEstimate.totalCostUsd,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'orchestrated',
+      template: true, // Saved workflows are always reusable templates.
+      // Captured sessions don't carry ask_user/ask_secret today; infer the
+      // interaction mode by step inspection so the contract stays honest.
+      mode: inferPipelineMode(pipelineSteps),
+    };
+
+    // Save-time gate — same as plan_task.
+    assertPlannedPipelineIsValid(planned);
+
+    // Commit: store the pipeline, then write the ProcessRecord for
+    // lineage/audit (D11 — internal, never agent-facing). Stamping the
+    // promotion link last keeps the ProcessRecord consistent with the
+    // pipeline that exists.
+    storePipeline(pipelineId, planned);
+    record.promotedToPipelineId = pipelineId;
+    runHistory.insertProcess(record);
+
+    const paramNames = record.parameters.map(p => p.name);
+    return JSON.stringify({
+      workflow_id: pipelineId,
+      name: record.name,
+      steps: pipelineSteps.length,
+      parameters: paramNames,
+      estimated_cost: `$${costEstimate.totalCostUsd.toFixed(4)}`,
+      source: 'session',
+      next: `Call run_workflow with workflow_id "${pipelineId}" to run this workflow. It is saved and reusable.`,
+    }, null, 2);
+  } catch (err) {
+    logErrorChain('save_workflow:promote', err);
+    return `Error: Could not save the workflow (${getErrorMessage(err)}). No workflow was saved.`;
+  }
+}
+
+export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {
   definition: {
-    name: 'promote_process',
+    name: 'save_workflow',
     description:
-      'Convert a captured process into a reusable workflow. ' +
-      'Parameters become configurable inputs that can change between runs.',
+      'Save a multi-step procedure as a reusable workflow in one call. ' +
+      'Omit workflow_id to save the work you just completed in this session ' +
+      '(the actual tool steps are analysed automatically). Pass workflow_id ' +
+      'to turn an existing plan_task plan into a reusable workflow. ' +
+      'Returns a workflow_id you can pass to run_workflow or task_create.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
       properties: {
-        process_id: { type: 'string', description: 'Process ID returned by capture_process' },
-        parameter_values: {
-          type: 'object',
-          description: 'Override default parameter values for the pipeline',
+        name: { type: 'string', description: 'Name for this workflow (e.g., "Monthly Ad Report")' },
+        description: { type: 'string', description: 'Brief description of what this workflow does' },
+        workflow_id: {
+          type: 'string',
+          description: 'Optional. An existing plan_task workflow_id to make reusable. Omit to save this session\'s work.',
         },
       },
-      required: ['process_id'],
+      required: ['name'],
     },
   },
-  handler: async (input: PromoteInput, agent): Promise<string> => {
-    const _runHistory = agent.toolContext.runHistory;
-    if (!_runHistory) {
-      return 'Error: Process storage not available.';
-    }
-
-    const record = _runHistory.getProcess(input.process_id);
-    if (!record) {
-      return `Error: Process "${input.process_id}" not found. Use capture_process first.`;
-    }
-
-    if (record.promotedToPipelineId) {
-      return `This process was already promoted to pipeline "${record.promotedToPipelineId}".`;
-    }
-
+  handler: async (input: SaveWorkflowInput, agent: IAgent): Promise<string> => {
     try {
-      const pipelineSteps = processToSteps(record);
-      if (pipelineSteps.length === 0) {
-        return 'Error: Process has no steps to promote.';
+      if (input.workflow_id) {
+        return promoteExistingWorkflow(input, agent);
       }
-
-      const pipelineId = randomUUID();
-      const historicalAvg = _runHistory.getAvgStepCostByModelTier(30);
-      const costEstimate = estimatePipelineCost(pipelineSteps, historicalAvg);
-
-      // Build context from parameters with defaults or overrides
-      const context: Record<string, unknown> = {};
-      for (const param of record.parameters) {
-        const override = input.parameter_values?.[param.name];
-        context[param.name] = override ?? param.defaultValue ?? null;
-      }
-
-      const planned: PlannedPipeline = {
-        id: pipelineId,
-        name: record.name,
-        goal: record.description || record.name,
-        steps: pipelineSteps,
-        reasoning: `Promoted from captured process ${record.id}`,
-        estimatedCost: costEstimate.totalCostUsd,
-        createdAt: new Date().toISOString(),
-        executed: false,
-        executionMode: 'tracked',
-        template: true, // Promoted processes are always reusable templates
-        // Captured processes don't carry ask_user/ask_secret today; default
-        // by step inspection so a future change keeps the contract honest.
-        mode: inferPipelineMode(pipelineSteps),
-      };
-
-      // Save-time gate — same as plan_task.
-      assertPlannedPipelineIsValid(planned);
-
-      storePipeline(pipelineId, planned);
-      _runHistory.updateProcessPromotion(record.id, pipelineId);
-
-      return JSON.stringify({
-        pipeline_id: pipelineId,
-        name: record.name,
-        steps: pipelineSteps.length,
-        parameters: record.parameters.map(p => p.name),
-        estimated_cost: `$${costEstimate.totalCostUsd.toFixed(4)}`,
-        next: `Call run_workflow with workflow_id "${pipelineId}" to run this workflow.`,
-      }, null, 2);
+      return await saveSessionWorkflow(input, agent);
     } catch (err) {
-      logErrorChain('promote_process', err);
-      return `Error promoting process: ${getErrorMessage(err)}`;
+      logErrorChain('save_workflow', err);
+      return `Error saving workflow: ${getErrorMessage(err)}`;
     }
   },
 };
-
-// State reset no longer needed — dependencies come from ToolContext

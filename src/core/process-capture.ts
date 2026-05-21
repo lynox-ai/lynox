@@ -7,11 +7,19 @@ import type { ToolCallRecord } from './run-history.js';
 /** Tools that are internal bookkeeping — excluded from process capture */
 const INTERNAL_TOOLS = new Set([
   'memory_store', 'memory_recall', 'memory_delete', 'memory_update', 'memory_list', 'memory_promote',
-  'ask_user', 'plan_task', 'capture_process', 'promote_process',
+  'ask_user', 'plan_task', 'save_workflow',
 ]);
 
 const MAX_INPUT_CHARS = 500;
 const MAX_OUTPUT_CHARS = 200;
+
+// Safety pre-cap applied BEFORE redaction so a pathologically large tool
+// output cannot make the regex scan unbounded. Generously sized (50x the
+// final output cap) so any secret near the real truncation boundary is still
+// well inside the redaction window — redact-then-truncate is preserved.
+const MAX_REDACTION_SCAN_CHARS = 10_000;
+
+const REDACTED = '[REDACTED]';
 
 interface CaptureOptions {
   apiKey: string;
@@ -19,14 +27,104 @@ interface CaptureOptions {
   description?: string | undefined;
 }
 
-/** Sanitize tool call for LLM consumption — strip secrets, truncate */
+/**
+ * Value-pattern secret scanners. Key-name redaction alone misses bearer
+ * tokens, OAuth refresh tokens, JWTs and provider tokens that arrive as
+ * bare values inside tool inputs/outputs. These regexes redact the secret
+ * value wherever it appears.
+ */
+const VALUE_SECRET_PATTERNS: RegExp[] = [
+  // Bearer / token auth headers — `Bearer <token>`, `token <token>`.
+  /\b(Bearer|token)\s+[A-Za-z0-9\-._~+/]{12,}=*/gi,
+  // Slack-style tokens — xoxb-, xoxp-, xapp-, xoxa-, xoxr- …
+  /\bxox[abprs]-[A-Za-z0-9-]{8,}/gi,
+  // JWT shape — three base64url segments separated by dots.
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Common provider key prefixes (Anthropic, OpenAI, GitHub, Stripe, Google).
+  /\b(sk-ant-|sk-|ghp_|gho_|ghs_|github_pat_|rk_live_|sk_live_|sk_test_|AIza)[A-Za-z0-9\-_]{12,}/g,
+];
+
+/**
+ * High-entropy bare string detector — catches long random-looking tokens
+ * (API keys, session secrets) that carry no recognizable prefix. Applied to
+ * whitespace/quote-delimited "words" so ordinary prose is not mangled.
+ */
+function shannonEntropy(s: string): number {
+  const freq = new Map<string, number>();
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
+  let entropy = 0;
+  for (const count of freq.values()) {
+    const p = count / s.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+function looksHighEntropy(token: string): boolean {
+  // Long, mixed-charset, and high per-character entropy = likely a secret.
+  // 24-char floor is a deliberate gap: shorter secrets (e.g. 16-char keys)
+  // are not entropy-redacted — lowering it risks mangling legitimate IDs and
+  // hashes in prose. Prefixed/known-shape short secrets are still caught by
+  // the value-pattern scan above.
+  if (token.length < 24) return false;
+  const hasUpper = /[A-Z]/.test(token);
+  const hasLower = /[a-z]/.test(token);
+  const hasDigit = /[0-9]/.test(token);
+  // Require alphanumeric mix; URLs/sentences fail this.
+  if (!((hasUpper || hasLower) && hasDigit)) return false;
+  // Reject anything with spaces — already split into words upstream.
+  return shannonEntropy(token) >= 3.6;
+}
+
+/**
+ * Redact secrets from a serialized tool-call field. Runs key-name redaction,
+ * value-pattern scanning, and high-entropy detection. Must run BEFORE any
+ * length truncation so a secret split across the truncation boundary cannot
+ * evade detection (redact-then-truncate, see PRD §6.2).
+ */
+function redactSecrets(text: string): string {
+  // Safety pre-cap so the scan stays bounded on huge tool outputs. Far larger
+  // than the final truncation cap, so redact-then-truncate still holds.
+  const scoped = text.length > MAX_REDACTION_SCAN_CHARS
+    ? text.slice(0, MAX_REDACTION_SCAN_CHARS)
+    : text;
+  // 1. Key-name redaction — `"api_key": "..."` style JSON pairs. The
+  //    `[a-z0-9_-]*` prefix catches namespaced keys whose name ENDS in a
+  //    sensitive keyword (`db-password`, `csrf_token`, `x_api_key`), not just
+  //    the bare keyword. A keyword buried mid-name is intentionally not matched
+  //    — a trailing wildcard would redact innocuous fields like `token_count`.
+  let redacted = scoped.replace(
+    /"([a-z0-9_-]*(?:api_?key|token|secret|password|authorization|access_token|refresh_token|client_secret))":\s*"[^"]*"/gi,
+    '"$1": "[REDACTED]"',
+  );
+  // 1b. URL-embedded credentials — redact the `user:pass@` userinfo.
+  redacted = redacted.replace(
+    /([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/:@]+@/gi,
+    '$1[REDACTED]@',
+  );
+  // 2. Value-pattern scanning — bearer tokens, xox…, JWT, provider prefixes.
+  for (const pattern of VALUE_SECRET_PATTERNS) {
+    redacted = redacted.replace(pattern, REDACTED);
+  }
+  // 3. High-entropy bare strings — split on quotes/whitespace + `=;&` so a
+  //    secret in `cookie=…;k=…` style runs is isolated, then redact each
+  //    token that looks like a random secret.
+  redacted = redacted.replace(/[^\s"'`,=;&]{24,}/g, match =>
+    looksHighEntropy(match) ? REDACTED : match,
+  );
+  return redacted;
+}
+
+/**
+ * Sanitize tool call for LLM consumption — redact secrets, then truncate.
+ * Ordering is load-bearing: redaction runs on the full string before the
+ * length cap so truncation cannot bisect a secret out of detection range.
+ */
 function sanitizeToolCall(tc: ToolCallRecord): { tool: string; input: string; output: string; order: number } {
-  let input = tc.input_json;
-  // Strip anything that looks like a secret/key/token
-  input = input.replace(/"(api_?key|token|secret|password|authorization)":\s*"[^"]*"/gi, '"$1": "[REDACTED]"');
+  let input = redactSecrets(tc.input_json);
   if (input.length > MAX_INPUT_CHARS) input = input.slice(0, MAX_INPUT_CHARS) + '...';
 
-  let output = tc.output_json;
+  let output = redactSecrets(tc.output_json);
   if (output.length > MAX_OUTPUT_CHARS) output = output.slice(0, MAX_OUTPUT_CHARS) + '...';
 
   return { tool: tc.tool_name, input, output, order: tc.sequence_order };

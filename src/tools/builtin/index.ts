@@ -10,7 +10,7 @@ export { runWorkflowTool } from './pipeline.js';
 export { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 export { planTaskTool } from './plan-task.js';
 export { dataStoreCreateTool, dataStoreInsertTool, dataStoreQueryTool, dataStoreListTool, dataStoreDeleteTool, dataStoreDropTool } from './data-store.js';
-export { captureProcessTool, promoteProcessTool } from './process.js';
+export { saveWorkflowTool } from './process.js';
 export { stepCompleteTool } from './step-complete.js';
 export { apiSetupTool } from './api-setup.js';
 export { artifactSaveTool, artifactListTool, artifactDeleteTool } from './artifact.js';
