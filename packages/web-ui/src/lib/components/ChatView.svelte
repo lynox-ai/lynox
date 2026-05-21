@@ -62,6 +62,7 @@
 	import PipelineProgress from './PipelineProgress.svelte';
 	import PromptAnchor from './PromptAnchor.svelte';
 	import StreamingActivityBar from './StreamingActivityBar.svelte';
+	import AgentPresenceIcon from './AgentPresenceIcon.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -2561,12 +2562,11 @@
 			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 
 			{#if transcribing}
-				<!-- Transcribing state -->
+				<!-- Transcribing state — same animated agent presence as the
+				     streaming bar, so voice processing reads as the agent at
+				     work, not a generic spinner. -->
 				<div class="flex-1 flex items-center gap-2 rounded-2xl md:rounded-[var(--radius-md)] border border-border bg-bg px-3 py-3">
-					<svg class="h-4 w-4 animate-spin text-accent shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-						<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-						<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-					</svg>
+					<AgentPresenceIcon state="transcribing" />
 					<span class="text-sm text-text-subtle">{t('chat.transcribing')}</span>
 				</div>
 				<div class="shrink-0 h-11 w-11"></div>
