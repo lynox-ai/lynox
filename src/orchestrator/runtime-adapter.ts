@@ -11,7 +11,7 @@ import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix } from '../core/prompts.js';
 
-const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_pipeline']);
+const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
 // Core tools sufficient for most pipeline steps — avoids loading ~20 tool definitions (~3000 tokens/turn)
 const INLINE_CORE_TOOLS = new Set([

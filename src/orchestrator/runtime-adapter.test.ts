@@ -86,7 +86,7 @@ describe('spawnInline with role', () => {
     // spawn_agent and recursion tools excluded
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'spawn_agent')).toBeUndefined();
-    expect(tools.find(t => t.definition.name === 'run_pipeline')).toBeUndefined();
+    expect(tools.find(t => t.definition.name === 'run_workflow')).toBeUndefined();
   });
 
   it('applies role model and effort', async () => {

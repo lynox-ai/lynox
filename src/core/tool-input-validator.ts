@@ -108,7 +108,7 @@ function validateObject(
 
   // Free-form object idiom: `{ type: 'object' }` with no `properties` declared
   // means "payload shape is data-driven, not enumerated" (e.g. http_request.headers,
-  // data_store_insert.records[*], run_pipeline.context). Strict-by-default for
+  // data_store_insert.records[*], run_workflow.context). Strict-by-default for
   // these would reject every real call. Caller can still force strict by setting
   // `additionalProperties: false` explicitly.
   const additional = schema['additionalProperties'];

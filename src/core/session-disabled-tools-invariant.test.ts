@@ -152,7 +152,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   askSecretTool: { definition: { name: 'ask_secret' }, handler: vi.fn() },
   batchFilesTool: { definition: { name: 'batch_files' }, handler: vi.fn() },
   httpRequestTool: { definition: { name: 'http_request' }, handler: vi.fn() },
-  runPipelineTool: { definition: { name: 'run_pipeline' }, handler: vi.fn() },
+  runWorkflowTool: { definition: { name: 'run_workflow' }, handler: vi.fn() },
   setPipelineConfig: vi.fn(),
   setPlanTaskConfig: vi.fn(),
   taskCreateTool: { definition: { name: 'task_create' }, handler: vi.fn() },

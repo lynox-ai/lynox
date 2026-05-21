@@ -1,5 +1,5 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler } from '../../types/index.js';
-import { validateManifest } from '../../orchestrator/validate.js';
+import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
@@ -9,7 +9,6 @@ import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
-const MAX_STEPS = 20;
 const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
 
@@ -452,9 +451,9 @@ export async function dispatchOrchestratedPipeline(
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
-  const planned = getPipeline(input.pipeline_id!, deps.runHistory);
+  const planned = getPipeline(input.workflow_id!, deps.runHistory);
   if (!planned) {
-    return `Error: Pipeline "${input.pipeline_id}" not found.`;
+    return `Error: Workflow "${input.workflow_id}" not found.`;
   }
 
   // Interactive pipelines need a live prompt-capable session. Refuse with a
@@ -543,23 +542,23 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   }
 }
 
-// ===== run_pipeline =====
+// ===== run_workflow =====
 
 interface RunPipelineInput {
   name?: string | undefined;
   steps?: InlinePipelineStep[] | undefined;
-  pipeline_id?: string | undefined;
+  workflow_id?: string | undefined;
   on_failure?: 'stop' | 'continue' | 'notify' | undefined;
   context?: Record<string, unknown> | undefined;
   retry?: boolean | undefined;
   modifications?: StepModification[] | undefined;
 }
 
-export const runPipelineTool: ToolEntry<RunPipelineInput> = {
+export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
   definition: {
-    name: 'run_pipeline',
+    name: 'run_workflow',
     description:
-      'Execute a multi-step workflow. Provide steps[] for inline execution, or pipeline_id to run a stored pipeline. ' +
+      'Execute a multi-step workflow. Provide steps[] for inline execution, or workflow_id to run a stored workflow. ' +
       'Steps without dependencies run in parallel automatically.',
     eager_input_streaming: true,
     input_schema: {
@@ -583,7 +582,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
             required: ['id', 'task'],
           },
         },
-        pipeline_id: {
+        workflow_id: {
           type: 'string',
           description: 'ID of a stored workflow to execute (from plan_task or promote_process)',
         },
@@ -598,11 +597,11 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         },
         retry: {
           type: 'boolean',
-          description: 'If true, skip completed steps and re-execute only failed/skipped ones (requires pipeline_id)',
+          description: 'If true, skip completed steps and re-execute only failed/skipped ones (requires workflow_id)',
         },
         modifications: {
           type: 'array',
-          description: 'Modify steps before execution (requires pipeline_id)',
+          description: 'Modify steps before execution (requires workflow_id)',
           items: {
             type: 'object',
             properties: {
@@ -629,17 +628,17 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
       return 'Error: No parent tools available for inline pipeline steps.';
     }
 
-    if (input.steps && input.pipeline_id) {
-      return 'Error: Provide either steps[] or pipeline_id, not both.';
+    if (input.steps && input.workflow_id) {
+      return 'Error: Provide either steps[] or workflow_id, not both.';
     }
 
-    if (!input.steps && !input.pipeline_id) {
-      return 'Error: Provide steps[] for inline execution or pipeline_id for a stored pipeline.';
+    if (!input.steps && !input.workflow_id) {
+      return 'Error: Provide steps[] for inline execution or workflow_id for a stored workflow.';
     }
 
     const pipelineToolContext = agent.toolContext;
 
-    // run_pipeline is always called from a chat session; inherit the parent
+    // run_workflow is always called from a chat session; inherit the parent
     // agent's prompt callbacks so sub-agents can route ask_user/ask_secret
     // back through the live SSE stream. Stored autonomous pipelines that
     // somehow get invoked here will still be rejected at executePipelineById
@@ -653,7 +652,7 @@ export const runPipelineTool: ToolEntry<RunPipelineInput> = {
         }
       : undefined;
 
-    if (input.pipeline_id) {
+    if (input.workflow_id) {
       return executePipelineById(input, {
         config: pipelineConfig,
         tools: pipelineTools,
