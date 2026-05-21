@@ -3,7 +3,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 interface ArtifactSaveInput {
   title: string;
   content: string;
-  type?: 'html' | 'mermaid' | 'svg' | 'markdown' | undefined;
+  type?: 'html' | 'mermaid' | 'svg' | 'markdown' | 'csv' | 'tsv' | 'json' | 'text' | undefined;
   description?: string | undefined;
   id?: string | undefined;
 }
@@ -19,14 +19,14 @@ interface ArtifactDeleteInput {
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
   definition: {
     name: 'artifact_save',
-    description: 'Save or update a persistent artifact. Displays inline in the chat AND persists to the Artifacts gallery. PREFER `type: "markdown"` for comparison tables, tier overviews, recommendations, structured prose — it renders fast, costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view. Reserve `type: "html"` ONLY for genuinely interactive output: clickable prototypes, dashboards with charts, time-series visualizations, mini-apps. Never embed Web Speech API, TTS, audio controls, or media players in HTML artifacts — the chat UI already provides audio output. Use `id` to update an existing artifact.',
+    description: 'Save or update a persistent artifact. Displays inline in the chat AND persists to the Artifacts gallery. PREFER `type: "markdown"` for comparison tables, tier overviews, recommendations, structured prose — it renders fast, costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view. For data the user will want to open in another program, use a data type — `csv` or `tsv` for tabular/spreadsheet data, `json` for structured data, `text` for plain-text files/logs: these render as a downloadable file, so never wrap raw CSV/TSV/JSON in a markdown or html artifact. Reserve `type: "html"` ONLY for genuinely interactive output: clickable prototypes, dashboards with charts, time-series visualizations, mini-apps. Never embed Web Speech API, TTS, audio controls, or media players in HTML artifacts — the chat UI already provides audio output. Use `id` to update an existing artifact.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'Short descriptive title for the artifact' },
-        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html), Mermaid syntax (for type mermaid), or SVG markup (for type svg)' },
-        type: { type: 'string', enum: ['markdown', 'html', 'mermaid', 'svg'], description: 'Artifact type. Default: markdown. Use html only for interactive output (dashboards, prototypes, charts).' },
+        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html), Mermaid syntax (for type mermaid), SVG markup (for type svg), or the raw file body for a data type (csv/tsv/json/text)' },
+        type: { type: 'string', enum: ['markdown', 'html', 'mermaid', 'svg', 'csv', 'tsv', 'json', 'text'], description: 'Artifact type. Default: markdown. Use html only for interactive output (dashboards, prototypes, charts). Use csv/tsv/json/text for data the user will download as a file.' },
         description: { type: 'string', description: 'Optional one-line description' },
         id: { type: 'string', description: 'Existing artifact ID to update. Omit to create new.' },
       },

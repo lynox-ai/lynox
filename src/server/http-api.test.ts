@@ -104,6 +104,16 @@ vi.mock('../core/engine.js', () => ({
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getPromptStore = vi.fn().mockReturnValue(null);
+    this.getArtifactStore = vi.fn().mockReturnValue({
+      save: vi.fn((opts: { title: string; content: string; type?: string }) => ({
+        id: 'a1b2c3d4', title: opts.title, content: opts.content,
+        type: opts.type ?? 'markdown', description: '',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', threadId: '',
+      })),
+      get: vi.fn().mockReturnValue(null),
+      list: vi.fn().mockReturnValue([]),
+      delete: vi.fn().mockReturnValue(false),
+    });
     this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = mockReloadUserConfig;
@@ -2502,6 +2512,32 @@ describe('LynoxHTTPApi', () => {
     it('rejects unauthenticated requests', async () => {
       const res = await fetch(`${baseUrl}/api/privacy/delete-request`, { method: 'POST' });
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe('POST /api/artifacts', () => {
+    it('accepts a csv data-file artifact', async () => {
+      const res = await jsonFetch('/api/artifacts', {
+        method: 'POST',
+        body: JSON.stringify({ title: 'Export', content: 'a,b\n1,2', type: 'csv' }),
+      });
+      expect(res.status).toBe(201);
+    });
+
+    it('accepts a markdown artifact (previously rejected by VALID_TYPES)', async () => {
+      const res = await jsonFetch('/api/artifacts', {
+        method: 'POST',
+        body: JSON.stringify({ title: 'Notes', content: '# Hi', type: 'markdown' }),
+      });
+      expect(res.status).toBe(201);
+    });
+
+    it('rejects an unknown artifact type', async () => {
+      const res = await jsonFetch('/api/artifacts', {
+        method: 'POST',
+        body: JSON.stringify({ title: 'X', content: 'y', type: 'pdf' }),
+      });
+      expect(res.status).toBe(400);
     });
   });
 });

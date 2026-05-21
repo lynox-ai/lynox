@@ -97,6 +97,7 @@
 	function typeIcon(type: string): string {
 		if (type === 'mermaid') return '◇';
 		if (type === 'svg') return '△';
+		if (type === 'csv' || type === 'tsv' || type === 'json' || type === 'text') return '▤';
 		return '⬡';
 	}
 
@@ -104,7 +105,10 @@
 		if (type === 'html') return 'text/html';
 		if (type === 'svg') return 'image/svg+xml';
 		if (type === 'markdown') return 'text/markdown';
-		return 'text/plain'; // mermaid + unknown
+		if (type === 'csv') return 'text/csv';
+		if (type === 'tsv') return 'text/tab-separated-values';
+		if (type === 'json') return 'application/json';
+		return 'text/plain'; // mermaid + text + unknown
 	}
 
 	function extensionFor(type: string): string {
@@ -112,7 +116,10 @@
 		if (type === 'svg') return 'svg';
 		if (type === 'markdown') return 'md';
 		if (type === 'mermaid') return 'mmd';
-		return 'txt';
+		if (type === 'csv') return 'csv';
+		if (type === 'tsv') return 'tsv';
+		if (type === 'json') return 'json';
+		return 'txt'; // text + unknown
 	}
 
 	function exportArtifact(a: Artifact) {
@@ -238,6 +245,13 @@
 					<article class="prose prose-invert max-w-3xl mx-auto">
 						<MarkdownRenderer content={selected.content} />
 					</article>
+				</div>
+			{:else}
+				<!-- Data-file artifacts (csv/tsv/json/text) + any unknown type:
+				     raw text preview. The toolbar Export button downloads the
+				     real file via mimeFor()/extensionFor(). -->
+				<div class="p-6 overflow-auto h-full bg-bg">
+					<pre class="text-xs font-mono text-text-muted whitespace-pre">{selected.content}</pre>
 				</div>
 			{/if}
 		</div>
