@@ -4,6 +4,9 @@
 	interface Props {
 		/** Current activity label resolved from streamingActivity + tool map. */
 		label: string;
+		/** Coarse activity state — drives the state-coupled micro-animation on
+		 *  the status indicator (breathe / ripple / blink). */
+		activity: 'thinking' | 'tool' | 'writing' | 'idle';
 		/** Wall-clock when the currently running tool call began, or null for
 		 *  non-tool activity (writing/thinking). Drives the elapsed counter. */
 		currentToolStartedAt: number | null;
@@ -12,7 +15,7 @@
 		lastEventAt: number | null;
 	}
 
-	let { label, currentToolStartedAt, lastEventAt }: Props = $props();
+	let { label, activity, currentToolStartedAt, lastEventAt }: Props = $props();
 
 	// 1s tick so the elapsed counter updates visibly during long tool calls
 	// (web_crawl, DataForSEO, spawn_agent batch). PromptAnchor's 30s tick is
@@ -52,10 +55,7 @@
 	aria-label={t('chat.activity.bar_aria_label')}
 >
 	<div class="max-w-3xl mx-auto flex items-center gap-2 min-w-0">
-		<span
-			class="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent"
-			aria-hidden="true"
-		></span>
+		<span class="activity-indicator {activity}" aria-hidden="true"></span>
 		<span class="text-xs md:text-sm text-text font-medium truncate min-w-0">
 			{label}
 		</span>
@@ -74,3 +74,55 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* State-coupled micro-animation on the status indicator. Each agent
+	   state gets a distinct, deliberately subtle motion so the user can
+	   read "what is it doing" at a glance without parsing the label. */
+	.activity-indicator {
+		position: relative;
+		display: inline-block;
+		height: 0.5rem;
+		width: 0.5rem;
+		flex-shrink: 0;
+		border-radius: 9999px;
+		background: var(--color-accent);
+		/* The tool ripple intentionally scales past the dot — let it bleed. */
+		overflow: visible;
+	}
+	/* thinking — a slow, calm breathing pulse. */
+	.activity-indicator.thinking {
+		animation: lynox-breathe 1.8s ease-in-out infinite;
+	}
+	/* writing — a steady cursor-like blink. */
+	.activity-indicator.writing {
+		animation: lynox-blink 1s ease-in-out infinite;
+	}
+	/* tool — an outward ripple, the feeling of active work radiating. */
+	.activity-indicator.tool::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		border-radius: 9999px;
+		border: 1px solid var(--color-accent);
+		animation: lynox-ripple 1.4s ease-out infinite;
+	}
+	@keyframes lynox-breathe {
+		0%, 100% { transform: scale(0.72); opacity: 0.55; }
+		50% { transform: scale(1.05); opacity: 1; }
+	}
+	@keyframes lynox-blink {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.25; }
+	}
+	@keyframes lynox-ripple {
+		0% { transform: scale(1); opacity: 0.7; }
+		100% { transform: scale(2.8); opacity: 0; }
+	}
+	/* Accessibility: no motion when the user asked the OS to reduce it. */
+	@media (prefers-reduced-motion: reduce) {
+		.activity-indicator.thinking,
+		.activity-indicator.writing,
+		.activity-indicator.tool::after { animation: none; }
+	}
+</style>
