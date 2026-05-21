@@ -1,6 +1,6 @@
 import { getApiBase } from '../config.svelte.js';
 
-export type ArtifactType = 'html' | 'mermaid' | 'svg' | 'markdown';
+export type ArtifactType = 'html' | 'mermaid' | 'svg' | 'markdown' | 'csv' | 'tsv' | 'json' | 'text';
 
 export interface ArtifactMeta {
 	id: string;

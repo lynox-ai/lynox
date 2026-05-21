@@ -153,8 +153,49 @@
 		</div>`;
 	}
 
+	/** csv/tsv/json/text artifacts are real data files: they render as a
+	 *  labelled code preview with a download button, never an HTML iframe. */
+	const DATA_ARTIFACT_META: Record<string, { ext: string; mime: string; label: string }> = {
+		csv: { ext: 'csv', mime: 'text/csv', label: 'CSV' },
+		tsv: { ext: 'tsv', mime: 'text/tab-separated-values', label: 'TSV' },
+		json: { ext: 'json', mime: 'application/json', label: 'JSON' },
+		text: { ext: 'txt', mime: 'text/plain', label: 'Text' },
+	};
+
+	/** Return the data-artifact type if the fence body is marked as one. */
+	function artifactDataType(code: string): string | null {
+		const m = code.match(/<!--\s*type:\s*(csv|tsv|json|text)\s*-->/i);
+		return m ? m[1]!.toLowerCase() : null;
+	}
+
+	/** Build a data-file artifact: a code preview plus a download button that
+	 *  produces a real Blob with the right extension and MIME type. The full
+	 *  body is embedded as `data-raw` so the download is the exact file, not
+	 *  the truncated preview. */
+	function buildDataArtifact(code: string, type: string): string {
+		const meta = DATA_ARTIFACT_META[type] ?? DATA_ARTIFACT_META['text']!;
+		const { title, clean } = extractTitle(code);
+		// Anchored: only strip the leading marker we ourselves prepended, never
+		// a literal `<!-- type: … -->` that happens to sit inside the data.
+		const body = clean.replace(/^<!--\s*type:\s*\w+\s*-->\s*/i, '').trim();
+		const safeTitle = escapeHtml(title || 'Data');
+		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
+		const lines = body.split('\n');
+		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
+		return `<div class="artifact-container artifact-data" data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}">
+			<div class="artifact-toolbar">
+				<span class="artifact-label">${meta.label}</span>
+				<span class="artifact-md-title">${safeTitle}</span>
+				<button class="artifact-btn" data-action="download-data" title="Download .${meta.ext}">${ICON_DOWNLOAD}</button>
+			</div>
+			<pre class="artifact-data-body"><code>${preview}</code></pre>
+		</div>`;
+	}
+
 	function buildArtifact(code: string): string {
 		if (isMarkdownArtifact(code)) return buildMarkdownArtifact(code);
+		const dataType = artifactDataType(code);
+		if (dataType) return buildDataArtifact(code, dataType);
 		const { title, clean } = extractTitle(code);
 		// PRD-LIGHT-MODE PR 2a — srcdoc is sandboxed; CSS-vars from parent don't
 		// inherit into the iframe document. Read the theme at render time and
@@ -183,6 +224,7 @@
 				<span class="artifact-toggle-hint">Click to open</span>
 				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
 				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>
+				<button class="artifact-btn" data-action="download-html" title="Download .html source">${ICON_CODE}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
@@ -263,6 +305,8 @@
 			else if (action === 'expand') handleArtifactExpand(container);
 			else if (action === 'close') handleArtifactExpand(container);
 			else if (action === 'export') handleArtifactExport(container);
+			else if (action === 'download-html') handleHtmlDownload(container);
+			else if (action === 'download-data') handleDataDownload(container);
 			else if (action === 'download-md') handleMarkdownDownload(container);
 			else if (action === 'print-pdf') handleMarkdownPrint(container);
 			else if (action === 'open-gallery') void handleMarkdownOpenGallery(container);
@@ -287,6 +331,45 @@
 		a.download = filename || 'artifact.md';
 		a.click();
 		URL.revokeObjectURL(a.href);
+	}
+
+	/** Trigger a browser download of `content` as a file. */
+	function downloadBlob(content: string, filename: string, mime: string) {
+		const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		a.download = filename;
+		a.click();
+		URL.revokeObjectURL(a.href);
+	}
+
+	/** Slugify the artifact title into a safe `<base>.<ext>` filename. */
+	function artifactFilename(container: HTMLElement, ext: string): string {
+		const title = container.dataset['title'] ?? 'artifact';
+		const base = title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '');
+		return `${base || 'artifact'}.${ext}`;
+	}
+
+	/** Download a data-file artifact (csv/tsv/json/text) as its real file. */
+	function handleDataDownload(container: HTMLElement) {
+		const encoded = container.dataset['raw'] ?? '';
+		let raw = '';
+		try { raw = encoded ? decodeURIComponent(escape(atob(encoded))) : ''; }
+		catch { raw = ''; }
+		if (!raw) { addToast('Download failed', 'error'); return; }
+		const ext = container.dataset['ext'] ?? 'txt';
+		const mime = container.dataset['mime'] ?? 'text/plain';
+		downloadBlob(raw, artifactFilename(container, ext), mime);
+	}
+
+	/** Download the raw HTML source of an HTML artifact as a .html file. */
+	function handleHtmlDownload(container: HTMLElement) {
+		const encoded = container.dataset['html'] ?? '';
+		let html = '';
+		try { html = encoded ? decodeURIComponent(escape(atob(encoded))) : ''; }
+		catch { html = ''; }
+		if (!html) { addToast('Download failed', 'error'); return; }
+		downloadBlob(html, artifactFilename(container, 'html'), 'text/html');
 	}
 
 	/** Open the rendered markdown in a fresh popup with a print-friendly
@@ -1042,6 +1125,26 @@ window.addEventListener('afterprint', function () { window.close(); });
 	}
 	div :global(.artifact-md-body > :last-child) {
 		margin-bottom: 0;
+	}
+
+	div :global(.artifact-data) {
+		background: var(--color-bg-subtle);
+	}
+	div :global(.artifact-data .artifact-toolbar) {
+		border-bottom: 1px solid var(--color-border);
+	}
+	div :global(.artifact-data .artifact-label) {
+		margin-right: 0;
+	}
+	div :global(.artifact-data-body) {
+		margin: 0;
+		padding: 0.75rem 1rem;
+		max-height: 20rem;
+		overflow: auto;
+		font-size: 0.75rem;
+		line-height: 1.5;
+		white-space: pre;
+		color: var(--color-text-muted);
 	}
 
 	/* Small chip shown under inline markdown-type artifacts so the user

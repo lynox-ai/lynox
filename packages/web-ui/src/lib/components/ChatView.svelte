@@ -293,6 +293,9 @@
 
 	/** Tool calls hidden from inline display (truly redundant or noisy) */
 	const HIDDEN_TOOLS = new Set(['artifact_list', 'data_store_list']);
+	/** Artifact types that carry a `<!-- type: X -->` marker so MarkdownRenderer
+	 *  dispatches them to a non-iframe renderer (markdown prose, data download). */
+	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'csv', 'tsv', 'json', 'text']);
 	/** Tool calls that get special rendering (not grouped with regular tools) */
 	const SPECIAL_TOOLS = new Set(['plan_task', 'step_complete']);
 
@@ -384,8 +387,8 @@
 						if (content) {
 							const title = String(inp?.['title'] ?? 'Artifact');
 							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
-							const header = artifactType === 'markdown'
-								? `<!-- title: ${title} -->\n<!-- type: markdown -->\n`
+							const header = TYPED_ARTIFACT_FENCE.has(artifactType)
+								? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n`
 								: `<!-- title: ${title} -->\n`;
 							result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 						}

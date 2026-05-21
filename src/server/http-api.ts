@@ -2919,7 +2919,7 @@ export class LynoxHTTPApi {
       if (typeof b['title'] !== 'string' || typeof b['content'] !== 'string') {
         errorResponse(res, 400, 'title and content are required'); return;
       }
-      const VALID_TYPES = ['html', 'mermaid', 'svg'] as const;
+      const VALID_TYPES = ['html', 'mermaid', 'svg', 'markdown', 'csv', 'tsv', 'json', 'text'] as const;
       const rawType = typeof b['type'] === 'string' ? b['type'] : undefined;
       if (rawType && !VALID_TYPES.includes(rawType as typeof VALID_TYPES[number])) {
         errorResponse(res, 400, `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}`); return;
@@ -2931,7 +2931,7 @@ export class LynoxHTTPApi {
       const artifact = store.save({
         title: b['title'],
         content: b['content'],
-        ...(rawType ? { type: rawType as 'html' | 'mermaid' | 'svg' } : {}),
+        ...(rawType ? { type: rawType as typeof VALID_TYPES[number] } : {}),
         ...(typeof b['description'] === 'string' ? { description: b['description'] } : {}),
         ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
       });
