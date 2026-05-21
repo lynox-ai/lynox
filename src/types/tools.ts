@@ -78,7 +78,8 @@ export type StreamEvent =
   | { type: 'pipeline_start'; pipelineId: string; name: string;
       steps: Array<{ id: string; task: string; inputFrom?: string[] | undefined }>; agent: string }
   | { type: 'pipeline_progress'; stepId: string; status: 'started' | 'completed' | 'skipped' | 'failed';
-      detail?: string | undefined; durationMs?: number | undefined; elapsed?: number | undefined; agent: string }
+      detail?: string | undefined; durationMs?: number | undefined; elapsed?: number | undefined;
+      summary?: string | undefined; agent: string }
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
   | { type: 'context_budget'; systemTokens?: number; toolTokens?: number; messageTokens?: number;
       totalTokens: number; maxTokens: number; usagePercent: number; agent: string }

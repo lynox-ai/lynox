@@ -795,7 +795,7 @@ export class Agent implements IAgent {
     'api_setup',
     'data_store_create', 'data_store_insert', 'data_store_query',
     'data_store_list', 'data_store_delete', 'data_store_drop',
-    'plan_task', 'run_workflow', 'step_complete',
+    'plan_task', 'run_workflow',
   ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {

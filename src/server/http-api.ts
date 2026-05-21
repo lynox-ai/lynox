@@ -1744,7 +1744,7 @@ export class LynoxHTTPApi {
         res.write(`event: ${event.type}\ndata: ${data}\n\n`);
       };
 
-      // Sync streamHandler to toolContext so plan-tracker events reach the SSE stream
+      // Sync streamHandler to toolContext so workflow progress events reach the SSE stream
       const agent = session.getAgent();
       if (agent?.toolContext) {
         agent.toolContext.streamHandler = session.onStream;

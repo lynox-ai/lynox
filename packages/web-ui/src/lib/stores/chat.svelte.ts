@@ -157,6 +157,8 @@ export interface PipelineStepInfo {
 	status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 	elapsed?: number;
 	durationMs?: number;
+	/** One-line summary of the step's result, shown on the live checklist. */
+	summary?: string;
 }
 
 export interface PipelineInfo {
@@ -1306,6 +1308,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const status = (rawStatus === 'started' ? 'running' : rawStatus) as PipelineStepInfo['status'];
 			const elapsed = data['elapsed'] as number | undefined;
 			const durationMs = data['durationMs'] as number | undefined;
+			// Per-step result summary (orchestrated onStepComplete hook).
+			const summary = typeof data['summary'] === 'string' ? data['summary'] : undefined;
 
 			// Auto-create pipeline if pipeline_start was missed
 			if (!msg.pipeline) {
@@ -1321,6 +1325,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			step.status = status;
 			if (elapsed != null) step.elapsed = elapsed;
 			if (durationMs != null) step.durationMs = durationMs;
+			if (summary) step.summary = summary;
 			break;
 		}
 		case 'done':

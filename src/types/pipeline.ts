@@ -57,7 +57,13 @@ export interface PlannedPipeline {
   estimatedCost: number;
   createdAt: string;
   executed: boolean;
-  /** 'tracked' = agent executes + step_complete, 'orchestrated' = sub-agent per step */
+  /**
+   * Legacy execution-mode marker. Retained on the type (no migration) so old
+   * stored rows still deserialize; new pipelines always run through the
+   * orchestrator and are written `'orchestrated'`. No code branches on this
+   * field anymore — the `'tracked'` path was removed (D9). Legacy rows
+   * carrying `'tracked'` are inert.
+   */
   executionMode: PipelineExecutionMode;
   /** Template pipelines can be re-executed (for scheduling) */
   template: boolean;

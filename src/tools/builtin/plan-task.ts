@@ -1,11 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier, ThinkingHint, EffortLevel } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
-import { storePipeline, getPipeline, dispatchOrchestratedPipeline } from './pipeline.js';
-import { startTrackedPlan } from '../../core/plan-tracker.js';
+import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
-import { shouldRunOrchestrated } from '../../orchestrator/orchestration-routing.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -151,14 +149,12 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
 // --- Pipeline bridge ---
 
 /**
- * Convert approved phases to a stored pipeline, return pipeline_id.
+ * Convert approved phases to a stored pipeline, return workflow_id.
  *
- * The stored `executionMode` is set by the O7 classifier
- * (`shouldRunOrchestrated`): eligible plans (≥3 independent steps OR any
- * cheap-tier step) are stored `'orchestrated'`; everything else stays
- * `'tracked'`. The field is advisory for `run_workflow` (which always uses
- * `runManifest`), but it keeps the persisted pipeline metadata honest and
- * lets the post-approval routing in the handler read back the decision.
+ * Every workflow runs through the orchestrator (`runManifest`) — there is one
+ * execution path (D9). `executionMode` is therefore written to the constant
+ * `'orchestrated'`; the field is retained on the type only for backward
+ * compatibility with legacy stored rows and is otherwise unread.
  */
 function convertToPipeline(summary: string, phases: PlanPhase[], historicalAvg?: Record<string, number>): string {
   const pipelineSteps = phasesToPipelineSteps(phases);
@@ -176,7 +172,7 @@ function convertToPipeline(summary: string, phases: PlanPhase[], historicalAvg?:
     estimatedCost: costEstimate.totalCostUsd,
     createdAt: new Date().toISOString(),
     executed: false,
-    executionMode: shouldRunOrchestrated(pipelineSteps) ? 'orchestrated' : 'tracked',
+    executionMode: 'orchestrated',
     template: false,
     mode: inferPipelineMode(pipelineSteps),
   };
@@ -195,10 +191,11 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
   definition: {
     name: 'plan_task',
     description:
-      'Present a plan before executing complex tasks. Use after understanding the problem. ' +
+      'Present a plan before executing complex, multi-step tasks. Use after understanding the problem. ' +
+      'Steer small or quick work to direct execution — plan_task is for substantial work only. ' +
       'Provide phases for structured plans, or just a summary to auto-generate a plan. ' +
-      'On approval, agent phases are automatically converted to a pipeline. ' +
-      'Returns pipeline_id — call run_workflow with it as workflow_id to run it.',
+      'plan_task NEVER executes — on approval it converts the plan to a stored workflow and ' +
+      'returns { approved: true, workflow_id }. Call run_workflow with that workflow_id to run it.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -309,84 +306,24 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     }
 
     /**
-     * Route an approved phased plan (O7). The O7 classifier already decided
-     * the pipeline's `executionMode` at `convertToPipeline` time:
-     *   - 'orchestrated' → dispatch through the orchestrated runner
-     *     (`dispatchOrchestratedPipeline` → `runManifest`) so each step runs
-     *     as a fresh isolated sub-agent on its own (cheap) per-step model.
-     *     The main turn only dispatches + relays the result; it does NOT
-     *     work the checklist itself, so `startTrackedPlan` is not called.
-     *   - 'tracked' → the unchanged inline path: `startTrackedPlan` arms the
-     *     active plan and the main agent works it via `step_complete`.
+     * Finalize an approved phased plan (D4 — decoupled). `plan_task` NEVER
+     * executes: the phases are already converted to a stored `PlannedPipeline`
+     * by `convertToPipeline`; this just shapes the return JSON. The agent
+     * follows up with `run_workflow(workflow_id)` to actually run it.
      *
      * `includeEstimatedCost` is true only for the non-interactive path to
      * preserve the existing return-JSON contract.
      */
-    const finalizeApprovedPlan = async (
-      pipelineId: string,
+    const finalizeApprovedPlan = (
+      workflowId: string,
       includeEstimatedCost: boolean,
-    ): Promise<string> => {
-      const planned = pipelineId ? getPipeline(pipelineId) : undefined;
+    ): string => {
+      const planned = workflowId ? getPipeline(workflowId) : undefined;
       const userSteps = userPhaseNames.length > 0 ? userPhaseNames : undefined;
 
-      if (planned && planned.executionMode === 'orchestrated') {
-        // Orchestrated: run the plan as isolated sub-agents via runManifest.
-        const ctx = agent.toolContext;
-        const parentPrompt = (agent.promptUser || agent.promptTabs || agent.promptSecret)
-          ? {
-              parentPromptUser: agent.promptUser,
-              parentPromptTabs: agent.promptTabs,
-              parentPromptSecret: agent.promptSecret,
-            }
-          : undefined;
-        const orchestratedResult = await dispatchOrchestratedPipeline(planned, {
-          config: ctx.userConfig,
-          tools: ctx.tools,
-          streamHandler: ctx.streamHandler,
-          runHistory: ctx.runHistory,
-          toolContext: ctx,
-          parentPrompt,
-          userTimezone: agent.userTimezone,
-          sessionCounters: agent.sessionCounters,
-        });
-        // Graceful degradation: a failed orchestrated dispatch returns an
-        // `Error: …` string (e.g. an interactive plan reached in a headless
-        // context, or a validation error). Fall back to the tracked inline
-        // path so the approved plan still runs — never silently no-op a plan
-        // the user just approved.
-        if (orchestratedResult.startsWith('Error:')) {
-          startTrackedPlan(planned, agent.toolContext);
-          return JSON.stringify({
-            approved: true,
-            tracked: true,
-            orchestrated: false,
-            orchestration_fallback: orchestratedResult,
-            pipeline_id: pipelineId || undefined,
-            steps: planned.steps.map(s => ({ id: s.id, task: s.task })),
-            user_steps: userSteps,
-            ...(includeEstimatedCost ? { estimated_cost_usd: estimatedCostUsd } : {}),
-          });
-        }
-        return JSON.stringify({
-          approved: true,
-          tracked: false,
-          orchestrated: true,
-          pipeline_id: pipelineId || undefined,
-          steps: planned.steps.map(s => ({ id: s.id, task: s.task })),
-          user_steps: userSteps,
-          result: orchestratedResult,
-          ...(includeEstimatedCost ? { estimated_cost_usd: estimatedCostUsd } : {}),
-        });
-      }
-
-      // Tracked: unchanged inline path.
-      if (planned) {
-        startTrackedPlan(planned, agent.toolContext);
-      }
       return JSON.stringify({
         approved: true,
-        tracked: true,
-        pipeline_id: pipelineId || undefined,
+        workflow_id: workflowId || undefined,
         steps: planned?.steps.map(s => ({ id: s.id, task: s.task })),
         user_steps: userSteps,
         ...(includeEstimatedCost ? { estimated_cost_usd: estimatedCostUsd } : {}),
@@ -396,8 +333,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     // Auto-approve in non-interactive context
     if (!agent.promptUser) {
       if (hasPhases) {
-        const pipelineId = convertToPipeline(input.summary, phases, historicalAvg);
-        return finalizeApprovedPlan(pipelineId, true);
+        const workflowId = convertToPipeline(input.summary, phases, historicalAvg);
+        return finalizeApprovedPlan(workflowId, true);
       }
       return JSON.stringify({ approved: true });
     }
@@ -408,8 +345,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
 
     if (['proceed', 'y', 'yes'].includes(normalized)) {
       if (hasPhases) {
-        const pipelineId = convertToPipeline(input.summary, phases, historicalAvg);
-        return finalizeApprovedPlan(pipelineId, false);
+        const workflowId = convertToPipeline(input.summary, phases, historicalAvg);
+        return finalizeApprovedPlan(workflowId, false);
       }
       return JSON.stringify({ approved: true });
     }

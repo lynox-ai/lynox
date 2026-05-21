@@ -337,12 +337,12 @@ export class WorkerLoop {
     }
   }
 
-  /** Execute a pipeline task — tracked (via session) or orchestrated (via DAG engine). */
+  /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
   private async executePipeline(task: TaskRecord): Promise<void> {
     const runHistory = this.engine.getRunHistory();
     if (!runHistory || !task.pipeline_id) return;
 
-    // Try to load as a PlannedPipeline first (tracked mode)
+    // Load the PlannedPipeline (if any) to enforce the autonomous-only gate.
     const { getPipeline } = await import('../tools/builtin/pipeline.js');
     const planned = getPipeline(task.pipeline_id, runHistory);
 
@@ -357,12 +357,7 @@ export class WorkerLoop {
       );
     }
 
-    if (planned && planned.executionMode === 'tracked') {
-      await this.executeTrackedPipeline(task, planned);
-      return;
-    }
-
-    // Fallback: orchestrated execution via DAG engine
+    // Orchestrated execution via DAG engine — the single execution path (D9).
     const manifestJson = runHistory.getPipelineRunManifest(task.pipeline_id);
     if (!manifestJson) {
       throw new Error(`Pipeline ${task.pipeline_id} not found`);
@@ -394,51 +389,6 @@ export class WorkerLoop {
       : `Pipeline ${state.status}: ${state.error ?? 'unknown error'}`;
 
     this.recordAndNotify(task, resultSummary, success);
-  }
-
-  /** Execute a tracked pipeline via a headless session (agent executes + step_complete). */
-  private async executeTrackedPipeline(
-    task: TaskRecord,
-    planned: import('../types/index.js').PlannedPipeline,
-  ): Promise<void> {
-    const { startTrackedPlan } = await import('./plan-tracker.js');
-
-    const stepsDescription = planned.steps
-      .map((s, i) => {
-        const deps = s.input_from?.length ? ` (after: ${s.input_from.join(', ')})` : '';
-        return `${String(i + 1)}. [${s.id}] ${s.task}${deps}`;
-      })
-      .join('\n');
-
-    const prompt = `Execute this workflow plan. After completing each step, call step_complete(step_id, summary).
-
-Goal: ${planned.goal}
-
-Steps:
-${stepsDescription}`;
-
-    const session = this.engine.createSession({
-      autonomy: 'autonomous',
-      systemPromptSuffix: WORKER_PROMPT_SUFFIX,
-    });
-    const workerProfile2 = this.engine.getUserConfig().worker_profile;
-    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile2 });
-
-    // Activate tracked plan on the session's toolContext
-    const toolContext = this.engine.getToolContext();
-    startTrackedPlan(planned, toolContext);
-
-    try {
-      const result = await session.run(prompt);
-      const success = toolContext.activePlan === null; // null = finalized successfully
-      const resultSummary = success
-        ? `Tracked workflow completed: ${String(planned.steps.length)} steps`
-        : `Tracked workflow incomplete: ${result.slice(0, 200)}`;
-      this.recordAndNotify(task, resultSummary, success);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.recordAndNotify(task, `Tracked workflow failed: ${msg}`, false);
-    }
   }
 
   private recordAndNotify(task: TaskRecord, resultSummary: string, success: boolean): void {
