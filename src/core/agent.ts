@@ -171,6 +171,17 @@ export class Agent implements IAgent {
   setThinking(mode: ThinkingMode): void { this.thinking = mode; }
   getThinking(): ThinkingMode { return this.thinking; }
 
+  /**
+   * Cumulative cost snapshot from the agent's CostGuard, or null if no
+   * costGuard was configured. Used by the spawn tool to record the child's
+   * actual LLM spend into RunHistory so the daily/monthly cost caps see
+   * spawn spend — without this, a self-hoster's BYOK cap can be drifted
+   * past via fan-out (T2-X1, PRD-HN-LAUNCH-HARDENING).
+   */
+  getCostSnapshot(): import('../types/index.js').CostSnapshot | null {
+    return this.costGuard ? this.costGuard.snapshot() : null;
+  }
+
   constructor(config: AgentConfig) {
     this.name = config.name;
     this.model = config.model;

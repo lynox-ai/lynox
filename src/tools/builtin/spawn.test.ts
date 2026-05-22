@@ -5,12 +5,50 @@ import type { RoleConfig } from '../../core/roles.js';
 // === Mocks ===
 
 const mockSend = vi.fn().mockResolvedValue('sub-agent result');
+/**
+ * Token + cost stub returned by Agent#getCostSnapshot in the mock. Each test
+ * gets a fresh object in beforeEach; the T2-X1 cost-recording test mutates
+ * this to assert the cost flows into RunHistory.updateRun.
+ */
+let mockCostSnapshot: import('../../types/index.js').CostSnapshot | null;
+
+interface MockedAgentShape {
+  send: typeof mockSend;
+  currentRunId?: string | undefined;
+  spawnDepth: number;
+  userTimezone?: string | undefined;
+  // Captured constructor config — used by T2-X1 acceptance tests to assert
+  // toolContext / secretStore / prompt callbacks / currentRunId propagation.
+  toolContext?: unknown;
+  secretStore?: unknown;
+  promptUser?: unknown;
+  promptSecret?: unknown;
+  promptTabs?: unknown;
+  getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
+}
 
 vi.mock('../../core/agent.js', () => ({
-  Agent: vi.fn().mockImplementation(function (this: { send: typeof mockSend; currentRunId?: string | undefined; spawnDepth: number }, config: { spawnDepth?: number | undefined }) {
+  Agent: vi.fn().mockImplementation(function (this: MockedAgentShape, config: {
+    spawnDepth?: number | undefined;
+    currentRunId?: string | undefined;
+    toolContext?: unknown;
+    secretStore?: unknown;
+    promptUser?: unknown;
+    promptSecret?: unknown;
+    promptTabs?: unknown;
+  }) {
     this.send = mockSend;
-    this.currentRunId = undefined;
+    // T2-X1 part 4: ctor now accepts currentRunId — surface it on the instance
+    // so executeThinker's return value (`childRunId: childAgent.currentRunId`)
+    // reflects what spawn.ts minted via insertRun, not undefined.
+    this.currentRunId = config.currentRunId;
     this.spawnDepth = config.spawnDepth ?? 0;
+    this.toolContext = config.toolContext;
+    this.secretStore = config.secretStore;
+    this.promptUser = config.promptUser;
+    this.promptSecret = config.promptSecret;
+    this.promptTabs = config.promptTabs;
+    this.getCostSnapshot = () => mockCostSnapshot;
   }),
 }));
 
@@ -80,6 +118,9 @@ describe('spawn_agent tool', () => {
     vi.clearAllMocks();
     mockSend.mockResolvedValue('sub-agent result');
     mockGetRole.mockReturnValue(undefined);
+    // Default: no cost snapshot — the T2-X1 cost-recording test overrides
+    // this to a concrete value to assert it flows into RunHistory.updateRun.
+    mockCostSnapshot = null;
     testCounters = {
       httpRequests: 0,
       writeBytes: 0,
@@ -794,6 +835,192 @@ describe('spawn_agent tool', () => {
       const sentTask = mockSend.mock.calls[0]?.[0] as string;
       expect(sentTask).toContain('Q4 sales data context');
       expect(sentTask).toContain('<context>');
+    });
+  });
+
+  // === T2-X1 (PRD-HN-LAUNCH-HARDENING): sub-agent ctor wiring ===
+  //
+  // Before this fix, `new Agent({...})` in executeThinker omitted toolContext,
+  // secretStore, the three prompt callbacks, currentRunId, and never recorded
+  // the child's actual LLM cost into RunHistory — so the daily/monthly cost
+  // cap aggregator silently undercounted spawn spend.
+  describe('T2-X1: sub-agent constructor receives parent context', () => {
+    it('shallow-copies parent toolContext (distinct object, shared refs)', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      // Use a sentinel object with multiple keys so we can prove the child
+      // sees the parent's deps. The shape diverges from the real ToolContext
+      // for test isolation — IAgent.toolContext is typed `unknown` here via
+      // the test's cast in makeAgent, so this is safe.
+      const sentinelDataStore = { tag: 'sentinel-ds' };
+      const sentinelRunHistory = { insertRun: vi.fn(), updateRun: vi.fn() };
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        dataStore: sentinelDataStore,
+        runHistory: sentinelRunHistory,
+        knowledgeLayer: null,
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      const agent = makeAgent({ toolContext: parentToolContext });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'inherits', task: 'Use parent ctx' }] },
+        agent,
+      );
+
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { toolContext: Record<string, unknown> };
+      expect(ctorArg.toolContext).toBeDefined();
+      // Distinct object (shallow copy, not the same reference)
+      expect(ctorArg.toolContext).not.toBe(parentToolContext);
+      // Shared refs — the parent's deps are visible to the child
+      expect(ctorArg.toolContext['dataStore']).toBe(sentinelDataStore);
+      expect(ctorArg.toolContext['runHistory']).toBe(sentinelRunHistory);
+    });
+
+    it('shares parent secretStore by reference (child === parent.secretStore)', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const sentinelSecretStore = { maskSecrets: vi.fn() } as unknown as IAgent['secretStore'];
+      const agent = makeAgent({ secretStore: sentinelSecretStore });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'vault-user', task: 'Read a secret' }] },
+        agent,
+      );
+
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: unknown };
+      // Reach delta documented in PR body: a child with the parent's
+      // secretStore will auto-inject oauth2 Bearers in http_request. Intentional.
+      expect(ctorArg.secretStore).toBe(sentinelSecretStore);
+    });
+
+    it('wires all three prompt callbacks (promptUser / promptSecret / promptTabs)', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const promptUser = vi.fn();
+      const promptSecret = vi.fn();
+      const promptTabs = vi.fn();
+      const agent = makeAgent({
+        promptUser: promptUser as unknown as IAgent['promptUser'],
+        promptSecret: promptSecret as unknown as IAgent['promptSecret'],
+        promptTabs: promptTabs as unknown as IAgent['promptTabs'],
+      });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'asker', task: 'Maybe ask the user' }] },
+        agent,
+      );
+
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as {
+        promptUser: unknown;
+        promptSecret: unknown;
+        promptTabs: unknown;
+      };
+      // All three callbacks must reach the child by reference so ask_user /
+      // ask_secret / ask_tabs invoked by the sub-agent surface to the same UI.
+      expect(ctorArg.promptUser).toBe(promptUser);
+      expect(ctorArg.promptSecret).toBe(promptSecret);
+      expect(ctorArg.promptTabs).toBe(promptTabs);
+    });
+
+    it('mints currentRunId via insertRun and passes it to ctor + spawn-parent linkage', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const MINTED_ID = 'run-child-mint-123';
+      const insertRun = vi.fn().mockReturnValue(MINTED_ID);
+      const updateRun = vi.fn();
+      const runHistory = { insertRun, updateRun };
+
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory,
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      const agent = makeAgent({
+        currentRunId: 'parent-run-456',
+        currentThreadId: 'thread-789',
+        toolContext: parentToolContext,
+      });
+
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'tracked', task: 'Work that gets recorded' }] },
+        agent,
+      );
+
+      // insertRun called with spawn-parent linkage
+      expect(insertRun).toHaveBeenCalledTimes(1);
+      const insertArg = insertRun.mock.calls[0]![0] as {
+        sessionId: string;
+        spawnParentId: string;
+        spawnDepth: number;
+        runType: string;
+      };
+      expect(insertArg.sessionId).toBe('thread-789');
+      expect(insertArg.spawnParentId).toBe('parent-run-456');
+      expect(insertArg.spawnDepth).toBe(1);
+      expect(insertArg.runType).toBe('single');
+
+      // The minted id is passed to the Agent constructor as currentRunId
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { currentRunId: string };
+      expect(ctorArg.currentRunId).toBe(MINTED_ID);
+    });
+
+    it('records actual spawn cost into runs table so daily/monthly cap aggregation sees it', async () => {
+      const MINTED_ID = 'run-child-cost-abc';
+      const insertRun = vi.fn().mockReturnValue(MINTED_ID);
+      const updateRun = vi.fn();
+      const runHistory = { insertRun, updateRun };
+
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory,
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      // The child's LLM call "incurred" $0.42 spend (mock CostGuard snapshot).
+      mockCostSnapshot = {
+        inputTokens: 12_345,
+        outputTokens: 6_789,
+        estimatedCostUSD: 0.42,
+        iterationsUsed: 3,
+        budgetPercent: 8,
+      };
+
+      const agent = makeAgent({
+        currentRunId: 'parent-run-cost',
+        toolContext: parentToolContext,
+      });
+
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'spender', task: 'Spend some money' }] },
+        agent,
+      );
+
+      // updateRun called for the same id insertRun returned. costUsd lands
+      // in the runs table → getCostByDay's SUM(cost_usd) → checkPersistentBudget's
+      // todayCost / monthCost → the user's daily / monthly cap sees this spend.
+      expect(updateRun).toHaveBeenCalledTimes(1);
+      const [updatedId, updateArg] = updateRun.mock.calls[0]! as [string, {
+        costUsd: number;
+        tokensIn: number;
+        tokensOut: number;
+        status: string;
+      }];
+      expect(updatedId).toBe(MINTED_ID);
+      expect(updateArg.costUsd).toBe(0.42);
+      expect(updateArg.tokensIn).toBe(12_345);
+      expect(updateArg.tokensOut).toBe(6_789);
+      expect(updateArg.status).toBe('completed');
+    });
+
+    it('falls back cleanly when toolContext has no runHistory (ad-hoc Agent)', async () => {
+      // No runHistory on toolContext — spawn should still succeed, just no
+      // cost recording. Important so unit tests + ad-hoc agent construction
+      // outside a Session don't break.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent(); // default toolContext has no runHistory
+
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'no-history', task: 'Work without persistence' }] },
+        agent,
+      );
+
+      expect(result).toContain('## no-history');
+      // currentRunId on ctor is undefined when no runHistory is wired
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { currentRunId: string | undefined };
+      expect(ctorArg.currentRunId).toBeUndefined();
     });
   });
 });
