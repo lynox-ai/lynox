@@ -1706,18 +1706,47 @@ describe('LynoxHTTPApi', () => {
   describe('saved workflows library', () => {
     it('GET /api/workflows/library lists only template rows', async () => {
       mockHistoryGetPlannedPipelines.mockReturnValue([
-        { id: 'wf-1', manifest_name: 'Monthly Report', manifest_json: JSON.stringify({ template: true, name: 'Monthly Report', goal: 'Compile the monthly report', steps: [{ id: 's1' }, { id: 's2' }] }), step_count: 2, started_at: '2026-05-21T00:00:00Z' },
+        { id: 'wf-1', manifest_name: 'Monthly Report', manifest_json: JSON.stringify({ template: true, name: 'Monthly Report', goal: 'Compile the monthly report', steps: [{ id: 's1', task: 'Gather data' }, { id: 's2', task: 'Write summary' }] }), step_count: 2, started_at: '2026-05-21T00:00:00Z' },
         { id: 'wf-2', manifest_name: 'One-shot plan', manifest_json: JSON.stringify({ template: false, name: 'One-shot plan', goal: 'g', steps: [{ id: 's1' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
         { id: 'wf-3', manifest_name: 'corrupt', manifest_json: 'not json', step_count: 0, started_at: '2026-05-19T00:00:00Z' },
       ]);
       const res = await jsonFetch('/api/workflows/library');
       expect(res.status).toBe(200);
-      const body = await res.json() as { workflows: Array<{ id: string; name: string; description: string; step_count: number }> };
+      const body = await res.json() as { workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }> }> };
       expect(body.workflows).toHaveLength(1);
       expect(body.workflows[0]!.id).toBe('wf-1');
       expect(body.workflows[0]!.name).toBe('Monthly Report');
       expect(body.workflows[0]!.description).toBe('Compile the monthly report');
       expect(body.workflows[0]!.step_count).toBe(2);
+      expect(body.workflows[0]!.steps).toEqual([
+        { id: 's1', task: 'Gather data' },
+        { id: 's2', task: 'Write summary' },
+      ]);
+    });
+
+    it('GET /api/workflows/library drops malformed steps, keeps raw step_count', async () => {
+      mockHistoryGetPlannedPipelines.mockReturnValue([
+        { id: 'wf-m', manifest_name: 'Mixed', manifest_json: JSON.stringify({
+          template: true, name: 'Mixed', goal: 'g',
+          steps: [
+            { id: 's1', task: 'Real step' },
+            { id: 's2' },                      // missing task — dropped by the narrowing
+            'garbage',                         // not an object — dropped
+            { id: 's3', task: 'Another real step' },
+          ],
+        }), step_count: 4, started_at: '2026-05-21T00:00:00Z' },
+      ]);
+      const res = await jsonFetch('/api/workflows/library');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { workflows: Array<{ step_count: number; steps: Array<{ id: string; task: string }> }> };
+      expect(body.workflows).toHaveLength(1);
+      // step_count reflects the raw manifest array length...
+      expect(body.workflows[0]!.step_count).toBe(4);
+      // ...but only well-formed { id, task } entries survive the flatMap narrowing.
+      expect(body.workflows[0]!.steps).toEqual([
+        { id: 's1', task: 'Real step' },
+        { id: 's3', task: 'Another real step' },
+      ]);
     });
 
     it('GET /api/workflows/library returns empty list when none saved', async () => {

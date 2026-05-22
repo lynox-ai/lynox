@@ -10,6 +10,7 @@
 		name: string;
 		description: string;
 		step_count: number;
+		steps: { id: string; task: string }[];
 		created_at: string;
 	}
 
@@ -22,6 +23,13 @@
 	let runningId = $state<string | null>(null);
 	let editingId = $state<string | null>(null);
 	let editName = $state('');
+	let expandedCards = $state<Set<string>>(new Set());
+
+	function toggleCard(id: string): void {
+		const next = new Set(expandedCards);
+		if (next.has(id)) next.delete(id); else next.add(id);
+		expandedCards = next;
+	}
 
 	async function loadWorkflows(): Promise<void> {
 		loading = true;
@@ -137,11 +145,34 @@
 									<p class="text-xs text-text-subtle mt-1 line-clamp-2 break-words">{wf.description}</p>
 								{/if}
 								<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
-									<span class="flex items-center gap-1">
-										<Icon name="workflow" size="xs" />
-										{wf.step_count} {t('workflow_library.steps')}
-									</span>
+									{#if wf.steps.length > 0}
+										<button
+											onclick={() => toggleCard(wf.id)}
+											aria-expanded={expandedCards.has(wf.id)}
+											class="flex items-center gap-1 rounded-[var(--radius-sm)] hover:text-text transition-colors"
+										>
+											<Icon name="workflow" size="xs" />
+											{t(wf.step_count === 1 ? 'workflow_library.steps_one' : 'workflow_library.steps_many').replace('{count}', String(wf.step_count))}
+											<Icon name="chevron_down" size="xs" class="transition-transform {expandedCards.has(wf.id) ? 'rotate-180' : ''}" />
+										</button>
+									{:else}
+										<span class="flex items-center gap-1">
+											<Icon name="workflow" size="xs" />
+											{t(wf.step_count === 1 ? 'workflow_library.steps_one' : 'workflow_library.steps_many').replace('{count}', String(wf.step_count))}
+										</span>
+									{/if}
 								</div>
+								{#if expandedCards.has(wf.id)}
+									<div class="space-y-1 mt-2">
+										{#each wf.steps as step (step.id)}
+											<div class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">
+												<p class="font-mono text-xs text-text-subtle truncate">{step.id}</p>
+												<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-1 mb-0.5">{t('workflow.task')}</p>
+												<p class="text-xs text-text break-words">{step.task}</p>
+											</div>
+										{/each}
+									</div>
+								{/if}
 							{/if}
 						</div>
 						<div class="flex items-center gap-2 shrink-0 mt-0.5">
