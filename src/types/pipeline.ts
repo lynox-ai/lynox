@@ -109,7 +109,7 @@ export interface ProcessRecord {
 
 // === Task Management ===
 
-export type TaskStatus = 'open' | 'in_progress' | 'completed';
+export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
 export interface TaskRecord {

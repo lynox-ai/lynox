@@ -655,6 +655,71 @@ const MIGRATIONS: string[] = [
   // which the UI renders exactly as today (no footer).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (30);
    ALTER TABLE thread_messages ADD COLUMN usage_json TEXT;`,
+
+  // v31: Widen tasks.status CHECK constraint to admit 'failed'.
+  // A one-shot task that fails permanently (no retries remaining) must be
+  // moved to a terminal state OTHER than 'completed' so the user sees it as
+  // failed in the UI. Without this widening, recordTaskRun cannot persist
+  // status='failed' (SQLite CHECK rejects the row) and the runaway-loop fix
+  // would crash instead of doing its job. SQLite cannot ALTER a CHECK
+  // constraint in place — the table must be recreated. Every column, FK,
+  // index, and row from the pre-v31 tasks table is preserved verbatim;
+  // only the CHECK clause changes (adds 'failed' to the enum).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (31);
+
+   CREATE TABLE IF NOT EXISTS tasks_v31 (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','failed')),
+     priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low','medium','high','urgent')),
+     scope_type TEXT NOT NULL DEFAULT 'project',
+     scope_id TEXT NOT NULL DEFAULT '',
+     due_date TEXT,
+     tags TEXT,
+     parent_task_id TEXT REFERENCES tasks_v31(id),
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     completed_at TEXT,
+     assignee TEXT,
+     schedule_cron TEXT,
+     next_run_at TEXT,
+     last_run_at TEXT,
+     last_run_result TEXT,
+     last_run_status TEXT,
+     task_type TEXT NOT NULL DEFAULT 'manual',
+     watch_config TEXT,
+     max_retries INTEGER NOT NULL DEFAULT 0,
+     retry_count INTEGER NOT NULL DEFAULT 0,
+     notification_channel TEXT,
+     pipeline_id TEXT
+   );
+
+   INSERT INTO tasks_v31 (
+     id, title, description, status, priority, scope_type, scope_id,
+     due_date, tags, parent_task_id, created_at, updated_at, completed_at,
+     assignee, schedule_cron, next_run_at, last_run_at, last_run_result,
+     last_run_status, task_type, watch_config, max_retries, retry_count,
+     notification_channel, pipeline_id
+   )
+   SELECT
+     id, title, description, status, priority, scope_type, scope_id,
+     due_date, tags, parent_task_id, created_at, updated_at, completed_at,
+     assignee, schedule_cron, next_run_at, last_run_at, last_run_result,
+     last_run_status, task_type, watch_config, max_retries, retry_count,
+     notification_channel, pipeline_id
+   FROM tasks;
+
+   DROP TABLE tasks;
+   ALTER TABLE tasks_v31 RENAME TO tasks;
+
+   CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+   CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks(scope_type, scope_id);
+   CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+   CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+   CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);
+   CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
+   CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);`,
 ];
 
 export class RunHistory {
@@ -1629,7 +1694,10 @@ export class RunHistory {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
-    nextRunAt?: string | undefined;
+    // `undefined` leaves next_run_at unchanged; `null` clears it.
+    // Clearing is required after a one-shot task reaches a terminal
+    // state, otherwise getDueTasks would re-select it forever.
+    nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
     persistence.updateTaskRunResult(this.db, id, update);

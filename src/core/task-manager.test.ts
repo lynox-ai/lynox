@@ -436,4 +436,95 @@ describe('TaskManager', () => {
       })).toThrow(/'autonomous'/);
     });
   });
+
+  // T1-2 regression — see PRD-HN-LAUNCH-HARDENING §3.
+  describe('recordTaskRun — one-shot failure terminates the task', () => {
+    it("marks a one-shot task 'failed' and clears next_run_at when it permanently fails with no retries", () => {
+      // Simulate the WorkerLoop path: a task assigned to lynox is created
+      // with assignee='lynox' which auto-sets next_run_at = now so the
+      // worker picks it up immediately.
+      const task = tm.create({ title: 'Bad shell command', assignee: 'lynox' });
+      expect(task.next_run_at).toBeTruthy();
+      expect(task.status).toBe('open');
+
+      tm.recordTaskRun(task.id, 'permission denied', 'failed');
+
+      const after = tm.getTask(task.id);
+      expect(after).toBeDefined();
+      expect(after!.status).toBe('failed');
+      // The crux: next_run_at must be cleared, otherwise getDueTasks
+      // would re-select the task every worker tick.
+      expect(after!.next_run_at ?? null).toBeNull();
+      // last_run_status preserves the actual outcome for the UI footer.
+      expect(after!.last_run_status).toBe('failed');
+    });
+
+    it("treats a 'timeout' on a one-shot task the same as 'failed'", () => {
+      const task = tm.create({ title: 'Slow command', assignee: 'lynox' });
+      tm.recordTaskRun(task.id, 'execution exceeded budget', 'timeout');
+
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('failed');
+      expect(after!.next_run_at ?? null).toBeNull();
+      expect(after!.last_run_status).toBe('timeout');
+    });
+
+    it('a failed one-shot task is no longer selected by getDueTasks', () => {
+      const task = tm.create({ title: 'Bad task', assignee: 'lynox' });
+      // Pre-condition: the task is due.
+      expect(tm.getDueTasks().some(t => t.id === task.id)).toBe(true);
+
+      tm.recordTaskRun(task.id, 'boom', 'failed');
+
+      // Post-condition: the task is gone from the worker's queue.
+      expect(tm.getDueTasks().some(t => t.id === task.id)).toBe(false);
+    });
+
+    it('a failed one-shot task is no longer counted as assigned to lynox', () => {
+      const task = tm.create({ title: 'Bad task', assignee: 'lynox' });
+      expect(tm.getAssignedToLynox().some(t => t.id === task.id)).toBe(true);
+
+      tm.recordTaskRun(task.id, 'boom', 'failed');
+
+      expect(tm.getAssignedToLynox().some(t => t.id === task.id)).toBe(false);
+    });
+
+    it('a one-shot task with retries remaining still backs off — does NOT short-circuit to failed', () => {
+      const task = tm.create({
+        title: 'Flaky task',
+        assignee: 'lynox',
+        maxRetries: 3,
+      });
+      tm.recordTaskRun(task.id, 'transient error', 'failed');
+
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('open');           // not failed yet
+      expect(after!.retry_count).toBe(1);
+      expect(after!.next_run_at).toBeTruthy();      // scheduled for retry
+      expect(after!.last_run_status).toBe('failed');
+    });
+
+    it('a recurring cron task that fails still reschedules — does NOT short-circuit to failed', () => {
+      setPipelineModeLookup(() => 'autonomous');
+      const task = tm.createScheduled({
+        title: 'Hourly check',
+        scheduleCron: '0 * * * *',
+      });
+      tm.recordTaskRun(task.id, 'transient error', 'failed');
+
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('open');           // recurring tasks stay open
+      expect(after!.next_run_at).toBeTruthy();      // reschedule fired
+      setPipelineModeLookup(undefined);
+    });
+
+    it('a successful one-shot task is still marked completed (pre-existing happy path)', () => {
+      const task = tm.create({ title: 'Good task', assignee: 'lynox' });
+      tm.recordTaskRun(task.id, 'ok', 'success');
+
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('completed');
+      expect(after!.last_run_status).toBe('success');
+    });
+  });
 });

@@ -191,7 +191,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       type: 'object' as const,
       properties: {
         task_id: { type: 'string', description: 'Task ID (or prefix)' },
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed'], description: 'New status' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed'], description: 'New status. `failed` is a terminal state set by the worker for one-shot tasks whose execution permanently errored (no retries remaining); humans normally use `completed`.' },
         priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'], description: 'New priority' },
         assignee: { type: 'string', description: 'New assignee: "user", "lynox", custom name, or empty string to clear' },
         due_date: { type: 'string', description: 'New due date (YYYY-MM-DD), or empty string to clear' },
@@ -229,7 +229,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       const task = managerRef.update(input.task_id, {
         title: input.title,
         description: input.description,
-        status: input.status as 'open' | 'in_progress' | 'completed' | undefined,
+        status: input.status as 'open' | 'in_progress' | 'completed' | 'failed' | undefined,
         priority: input.priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
         assignee: input.assignee,
         dueDate: input.due_date,
@@ -263,7 +263,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
       type: 'object' as const,
       properties: {
         scope: { type: 'string', description: 'Filter by scope ("client:acme"). Omit for all active scopes.' },
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed'], description: 'Filter by status' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed'], description: 'Filter by status' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },
@@ -305,7 +305,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     }
 
     const tasks = managerRef.list({
-      status: input.status as 'open' | 'in_progress' | 'completed' | undefined,
+      status: input.status as 'open' | 'in_progress' | 'completed' | 'failed' | undefined,
       assignee: input.assignee,
       scope,
     });

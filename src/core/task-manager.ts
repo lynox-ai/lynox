@@ -61,7 +61,7 @@ export interface WeekSummary {
   inProgress: TaskRecord[];
 }
 
-const VALID_STATUSES = new Set<string>(['open', 'in_progress', 'completed']);
+const VALID_STATUSES = new Set<string>(['open', 'in_progress', 'completed', 'failed']);
 const VALID_PRIORITIES = new Set<string>(['low', 'medium', 'high', 'urgent']);
 
 export class TaskManager {
@@ -276,6 +276,10 @@ export class TaskManager {
   }
 
   getAssignedToLynox(scopes?: MemoryScopeRef[]): TaskRecord[] {
+    // Exclude terminal states. `failed` is terminal for one-shot tasks
+    // (no retries remaining) — same as `completed`, it must not count
+    // as active work or get re-surfaced in the briefing.
+    const isActive = (t: TaskRecord) => t.status !== 'completed' && t.status !== 'failed';
     if (scopes && scopes.length > 0) {
       const all: TaskRecord[] = [];
       for (const scope of scopes) {
@@ -284,9 +288,9 @@ export class TaskManager {
           if (!all.some(existing => existing.id === t.id)) all.push(t);
         }
       }
-      return all.filter(t => t.status !== 'completed');
+      return all.filter(isActive);
     }
-    return this.history.getTasks({ assignee: 'lynox' }).filter(t => t.status !== 'completed');
+    return this.history.getTasks({ assignee: 'lynox' }).filter(isActive);
   }
 
   getWeekSummary(scopes?: MemoryScopeRef[]): WeekSummary {
@@ -478,8 +482,11 @@ export class TaskManager {
       ? result.slice(0, MAX_RUN_RESULT_CHARS)
       : result;
 
-    // Determine next_run_at based on task type
-    let nextRunAt: string | undefined;
+    // Determine next_run_at based on task type.
+    // `undefined` = leave column unchanged. `null` = explicitly clear
+    // the column (one-shot task reached a terminal state and must NOT
+    // be re-selected by getDueTasks the next tick).
+    let nextRunAt: string | null | undefined;
     let retryCount: number | undefined;
 
     if (task.schedule_cron) {
@@ -505,6 +512,16 @@ export class TaskManager {
     } else if (status === 'success') {
       // One-shot background task — mark as completed on success
       this.history.updateTask(id, { status: 'completed', completedAt: now.toISOString() });
+    } else {
+      // One-shot task that failed permanently (no max_retries, or
+      // retries exhausted). Without this branch `next_run_at` would
+      // stay set and `getDueTasks` would re-select the task every
+      // worker tick → runaway autonomous LLM spend. Mark it `failed`
+      // and clear `next_run_at` so the worker leaves it alone, while
+      // last_run_status preserves the actual outcome ('failed' vs
+      // 'timeout') for the UI.
+      this.history.updateTask(id, { status: 'failed' });
+      nextRunAt = null;
     }
 
     this.history.updateTaskRunResult(id, {
