@@ -236,6 +236,11 @@
 		return items;
 	});
 
+	// The Chat entry — its expanded thread list grows to fill the sidebar.
+	// nav[0] is always Chat (see the `nav` builder above); kept as a derived
+	// value so the `{#if chatItem}` guard satisfies noUncheckedIndexedAccess.
+	const chatItem = $derived<NavItem | undefined>(nav[0]);
+
 	const isExpandable = (item: NavItem) => item.type === 'threads';
 
 	function isActive(href: string, exact: boolean): boolean {
@@ -379,56 +384,66 @@
 				</button>
 			</div>
 
-			<!-- Nav Items -->
-			<ul class="flex-1 space-y-0.5 px-2 overflow-y-auto scrollbar-none">
-				{#each nav as item}
-					<li>
-						<!-- Parent nav item -->
-						<a
-							href={item.href}
-							onclick={(e) => handleNavClick(item, e)}
-							title={t(item.labelKey)}
-							class="flex items-center gap-2.5 rounded-[var(--radius-sm)] py-2 text-sm transition-all
-							{railExpanded ? 'px-3' : 'md:justify-center md:px-2 px-3'}
-							{isParentActive(item)
-								? 'bg-accent/10 text-accent-text border-l-2 border-accent'
-								: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
-						>
-							<Icon name={item.icon} size="sm" />
-							<div class="flex-1 min-w-0 {railExpanded ? '' : 'md:hidden'}">
-								<span>{t(item.labelKey)}</span>
-							</div>
-							{#if isExpandable(item) && railExpanded}
-								<Icon
-									name="chevron_right"
-									size="xs"
-									class="text-text-subtle transition-transform duration-150 {expandedSection === item.href ? 'rotate-90' : ''}"
-								/>
-							{/if}
-						</a>
+			<!-- Parent nav item markup, shared by both nav groups. Extracted into a
+				 snippet so the Chat/threads group and the pinned leaf group don't
+				 duplicate the active-state / collapse-aware <a> classes. -->
+			{#snippet navParent(item: NavItem)}
+				<a
+					href={item.href}
+					onclick={(e) => handleNavClick(item, e)}
+					title={t(item.labelKey)}
+					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] py-2 text-sm transition-all
+					{railExpanded ? 'px-3' : 'md:justify-center md:px-2 px-3'}
+					{isParentActive(item)
+						? 'bg-accent/10 text-accent-text border-l-2 border-accent'
+						: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+				>
+					<Icon name={item.icon} size="sm" />
+					<div class="flex-1 min-w-0 {railExpanded ? '' : 'md:hidden'}">
+						<span>{t(item.labelKey)}</span>
+					</div>
+					{#if isExpandable(item) && railExpanded}
+						<Icon
+							name="chevron_right"
+							size="xs"
+							class="text-text-subtle transition-transform duration-150 {expandedSection === item.href ? 'rotate-90' : ''}"
+						/>
+					{/if}
+				</a>
+			{/snippet}
 
-						<!-- Sub-items: threads list (Chat only). Only when expanded —
-							 collapsed rail hides the threads dropdown to save space. -->
-						{#if railExpanded && expandedSection === item.href && item.type === 'threads'}
-							<div transition:slide={{ duration: 150 }}>
-								{#if getThreads().length > 0}
-									<!-- Thread search: client-side filter on title. Tiny enough to drop
-										 into the existing sidebar without a sub-component. -->
-									<div class="mx-1 mt-2 mb-1">
-										<input
-											type="search"
-											bind:value={threadQuery}
-											placeholder={t('threads.search_placeholder')}
-											class="w-full px-2 py-1 text-[12px] bg-bg-subtle border border-border rounded-[var(--radius-sm)] text-text placeholder:text-text-subtle focus:border-accent focus:outline-none"
-											aria-label={t('threads.search_placeholder')}
-										/>
-									</div>
-									{@const visibleThreads = filteredThreads()}
-									{#if visibleThreads.length === 0}
-										<p class="px-2 py-2 text-[11px] text-text-subtle">{t('threads.search_empty')}</p>
-									{:else}
-									<ul class="mt-1 space-y-0.5 max-h-72 overflow-y-auto scrollbar-none" aria-label={t('threads.recent')}>
-										{#each visibleThreads as thread (thread.id)}
+			<!-- Chat + threads group. Grows to fill all leftover vertical space
+				 ONLY when the chat section is open on the expanded rail; otherwise
+				 it stays tight (shrink-0) so the pinned group sits flush below.
+				 min-h-0 on every ancestor in this flex chain so the inner thread
+				 <ul> scrolls instead of pushing the pinned group off-screen. -->
+			{#if chatItem}
+				<div class="px-2 flex flex-col min-h-0 {railExpanded && expandedSection === chatItem.href ? 'flex-1' : 'shrink-0'}">
+					<!-- Parent nav item -->
+					{@render navParent(chatItem)}
+
+					<!-- Sub-items: threads list (Chat only). Only when expanded —
+						 collapsed rail hides the threads dropdown to save space. -->
+					{#if railExpanded && expandedSection === chatItem.href && chatItem.type === 'threads'}
+						<div transition:slide={{ duration: 150 }} class="flex-1 flex flex-col min-h-0">
+							{#if getThreads().length > 0}
+								<!-- Thread search: client-side filter on title. Tiny enough to drop
+									 into the existing sidebar without a sub-component. -->
+								<div class="mx-1 mt-2 mb-1 shrink-0">
+									<input
+										type="search"
+										bind:value={threadQuery}
+										placeholder={t('threads.search_placeholder')}
+										class="w-full px-2 py-1 text-[12px] bg-bg-subtle border border-border rounded-[var(--radius-sm)] text-text placeholder:text-text-subtle focus:border-accent focus:outline-none"
+										aria-label={t('threads.search_placeholder')}
+									/>
+								</div>
+								{@const visibleThreads = filteredThreads()}
+								{#if visibleThreads.length === 0}
+									<p class="px-2 py-2 text-[11px] text-text-subtle">{t('threads.search_empty')}</p>
+								{:else}
+								<ul class="mt-1 flex-1 space-y-0.5 min-h-0 overflow-y-auto scrollbar-none" aria-label={t('threads.recent')}>
+									{#each visibleThreads as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
 												<!-- Swipe archive action (mobile). Icon only — the previous full
@@ -510,6 +525,17 @@
 								{/if}
 							</div>
 						{/if}
+					</div>
+				{/if}
+
+				<!-- Other nav items (Inbox/Activity/Automation/Intelligence/Artifacts).
+					 Pinned just above the Settings footer — shrink-0 so they keep
+					 their natural height and never get compressed by the growing
+					 Chat/threads group above. All leaf items: only the parent <a>. -->
+				<ul class="space-y-0.5 px-2 shrink-0">
+					{#each nav.slice(1) as item}
+						<li>
+							{@render navParent(item)}
 						</li>
 					{/each}
 				</ul>
