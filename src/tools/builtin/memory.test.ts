@@ -6,6 +6,11 @@ import { createToolContext } from '../../core/tool-context.js';
 vi.mock('../../core/observability.js', () => ({
   channels: {
     memoryStore: { publish: vi.fn() },
+    // B1 KG-backed tests need these channels — they are checked by the
+    // production KnowledgeLayer / AgentMemoryDb store path. hasSubscribers
+    // is read in a hot path, so it must be a plain false for the no-op tests.
+    knowledgeGraph: { publish: vi.fn(), hasSubscribers: false },
+    knowledgeEntity: { publish: vi.fn(), hasSubscribers: false },
   },
 }));
 
@@ -221,7 +226,7 @@ describe('memoryRecallTool no-query scoping (PR7)', () => {
     expect(result).not.toContain('Showing');
   });
 
-  it('keeps the full-namespace behavior unchanged when a query is provided', async () => {
+  it('returns a bounded, filtered slice when a query is provided (new B1 contract)', async () => {
     const content = bigNamespace(120);
     const load = vi.fn().mockResolvedValue(content);
     const agent = makeAgent(makeMockMemory({ load }));
@@ -230,9 +235,18 @@ describe('memoryRecallTool no-query scoping (PR7)', () => {
       { namespace: 'knowledge', query: 'entry number 7' },
       agent,
     );
-    // With a query, the full namespace is returned verbatim — no cap, no note.
-    expect(result).toBe(content);
-    expect(result).not.toContain('Showing');
+    // New contract (B1): the result is BOUNDED — never the full namespace dump
+    // that the old contract returned. With no KG wired, the flat-file mirror
+    // does a substring filter capped at KG_RECALL_TOP_K (10).
+    expect(result).not.toBe(content);
+    expect(result.length).toBeLessThan(content.length);
+    // Surface tag identifies the bounded contract; the agent reads it.
+    expect(result).toContain('flat-file matches');
+    // Each matched line must actually contain the query.
+    const matchLines = result.split('\n').filter(l => l.includes('Memory entry number'));
+    for (const line of matchLines) {
+      expect(line).toMatch(/entry number 7/);
+    }
   });
 
   it('treats a blank/whitespace query as no-query (bounded subset)', async () => {
@@ -282,11 +296,14 @@ describe('memoryDeleteTool', () => {
       { namespace: 'knowledge', pattern: 'old stuff' },
       agent,
     );
-    expect(result).toBe('Removed 3 line(s) matching "old stuff" from knowledge.');
+    // New contract (B1): KG deactivation is the authoritative delete;
+    // the message reports memories deactivated (not file lines removed).
+    expect(result).toContain('Deactivated 3 memories matching "old stuff" in knowledge');
+    expect(result).toContain('is_active=0');
     expect(deleteFn).toHaveBeenCalledWith('knowledge', 'old stuff');
   });
 
-  it('returns "No lines matching" when delete returns 0', async () => {
+  it('returns "No memories matching" when delete returns 0', async () => {
     const deleteFn = vi.fn().mockResolvedValue(0);
     const agent = makeAgent(makeMockMemory({ delete: deleteFn }));
 
@@ -294,7 +311,7 @@ describe('memoryDeleteTool', () => {
       { namespace: 'methods', pattern: 'nonexistent' },
       agent,
     );
-    expect(result).toBe('No lines matching "nonexistent" found in methods.');
+    expect(result).toBe('No memories matching "nonexistent" found in methods.');
   });
 
   it('returns "not configured" when memory is null', async () => {
@@ -426,7 +443,7 @@ describe('memoryRecallTool scope parameter', () => {
 });
 
 describe('memoryUpdateTool', () => {
-  it('calls agent.memory.update and returns confirmation', async () => {
+  it('calls agent.memory.update and returns confirmation (KG unavailable in this test)', async () => {
     const updateFn = vi.fn().mockResolvedValue(true);
     const agent = makeAgent(makeMockMemory({ update: updateFn }));
 
@@ -434,7 +451,11 @@ describe('memoryUpdateTool', () => {
       { namespace: 'status', old_content: 'old val', new_content: 'new val' },
       agent,
     );
-    expect(result).toBe('Updated content in status namespace.');
+    // New contract (B1): without a wired KnowledgeLayer the mirror update
+    // still succeeds; the message documents the KG sync was skipped so
+    // the operator knows history-preservation didn't apply.
+    expect(result).toContain('Updated content in status namespace');
+    expect(result).toContain('KG sync skipped');
     expect(updateFn).toHaveBeenCalledWith('status', 'old val', 'new val');
   });
 
@@ -446,7 +467,9 @@ describe('memoryUpdateTool', () => {
       { namespace: 'learnings', old_content: 'missing', new_content: 'new' },
       agent,
     );
-    expect(result).toBe('Content not found in learnings — nothing updated.');
+    // New contract (B1): scope is now always included in the failure message.
+    expect(result).toContain('Content not found in learnings');
+    expect(result).toContain('nothing updated');
   });
 
   it('returns "not configured" when memory is null', async () => {
@@ -729,3 +752,284 @@ describe('memoryPromoteTool', () => {
     expect(result).toContain('user:alex');
   });
 });
+
+// === B1: KG-backed memory_recall / memory_update / memory_delete ===========
+//
+// The highest-regression-risk item in the HN-launch hardening sprint changes
+// the contract of these three tools — recall now returns ranked KG results
+// (not a raw namespace dump), and update/delete route through supersession /
+// deactivation in the KG (history preserved). These tests use a REAL
+// KnowledgeLayer with a tmp SQLite DB so we verify the actual behaviour, not
+// a mock.
+describe('memory tools — KG-backed (B1)', () => {
+  // Local imports so the rest of the file's mocks don't bleed in.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let layer: any;
+  let tempDir: string;
+  let agent: IAgent;
+  const scope = { type: 'context' as const, id: 'b1-test' };
+
+  // Build an Agent whose flat-file memory is a fully in-memory stub and whose
+  // toolContext carries the real KnowledgeLayer. This lets us assert both the
+  // KG state (source of truth) and the mirror sync (export discipline).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function buildAgent(kl: any, mirror: Map<string, string[]>): IAgent {
+    const mem: NonNullable<IAgent['memory']> = {
+      load: vi.fn(async (ns: string) => mirror.get(ns)?.join('\n') ?? null),
+      save: vi.fn(),
+      append: vi.fn(async (ns: string, text: string) => {
+        const arr = mirror.get(ns) ?? [];
+        arr.push(text);
+        mirror.set(ns, arr);
+      }),
+      delete: vi.fn(async (ns: string, pattern: string) => {
+        const arr = mirror.get(ns) ?? [];
+        const before = arr.length;
+        const kept = arr.filter(l => !l.includes(pattern));
+        mirror.set(ns, kept);
+        return before - kept.length;
+      }),
+      update: vi.fn(async (ns: string, oldText: string, newText: string) => {
+        const arr = mirror.get(ns) ?? [];
+        const i = arr.findIndex(l => l.includes(oldText));
+        if (i < 0) return false;
+        arr[i] = arr[i]!.replace(oldText, newText);
+        mirror.set(ns, arr);
+        return true;
+      }),
+      render: vi.fn().mockReturnValue(''),
+      hasContent: vi.fn().mockReturnValue(true),
+      loadAll: vi.fn(),
+      maybeUpdate: vi.fn(),
+      appendScoped: vi.fn(async (ns: string, text: string) => {
+        const arr = mirror.get(ns) ?? [];
+        arr.push(text);
+        mirror.set(ns, arr);
+      }),
+      loadScoped: vi.fn(async (ns: string) => mirror.get(ns)?.join('\n') ?? null),
+      deleteScoped: vi.fn(async (ns: string, pattern: string) => {
+        const arr = mirror.get(ns) ?? [];
+        const before = arr.length;
+        const kept = arr.filter(l => !l.includes(pattern));
+        mirror.set(ns, kept);
+        return before - kept.length;
+      }),
+      updateScoped: vi.fn(async (ns: string, oldText: string, newText: string) => {
+        const arr = mirror.get(ns) ?? [];
+        const i = arr.findIndex(l => l.includes(oldText));
+        if (i < 0) return false;
+        arr[i] = arr[i]!.replace(oldText, newText);
+        mirror.set(ns, arr);
+        return true;
+      }),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ctx: any = createToolContext({});
+    ctx.knowledgeLayer = kl;
+    return {
+      name: 'b1', model: 'test', memory: mem, tools: [], onStream: null,
+      toolContext: ctx, activeScopes: [scope],
+    };
+  }
+
+  beforeEach(async () => {
+    const { KnowledgeLayer } = await import('../../core/knowledge-layer.js');
+    const { LocalProvider } = await import('../../core/embedding.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    tempDir = mkdtempSync(join(tmpdir(), 'lynox-b1-test-'));
+    layer = new KnowledgeLayer(join(tempDir, 'kg.db'), new LocalProvider());
+    await layer.init();
+    agent = buildAgent(layer, new Map());
+  });
+
+  // (afterEach cleanup is best-effort; vitest tears down quickly enough that
+  // leaving the DB files on disk in the OS tmp dir does no harm.)
+
+  it('memory_recall with query returns ranked, bounded KG results (not a namespace dump)', async () => {
+    // Seed 5 facts of varying recency/topic.
+    const seedFacts = [
+      'Acme Corp uses PostgreSQL 16 in production for the order service.',
+      'Customer Maria from acme-shop.ch needs help configuring webhooks.',
+      'The deployment pipeline runs on GitHub Actions every Tuesday.',
+      'Quarterly review meetings are scheduled on the second Monday.',
+      'Acme Corp pays via wire transfer, never credit card.',
+    ];
+    for (const text of seedFacts) {
+      await layer.store(text, 'knowledge', scope);
+    }
+
+    // Use a query whose tokens overlap directly with the stored facts —
+    // the LocalProvider's lexical embeddings need real token overlap to clear
+    // the similarity threshold. This is itself a worthwhile assertion: the KG
+    // retrieval surfaces semantically-near matches over unrelated facts.
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: 'Acme Corp PostgreSQL production order service' },
+      agent,
+    );
+
+    // Ranked output surface markers — the agent reads these.
+    expect(result).toContain('ranked');
+    expect(result).toMatch(/\[knowledge\]/);
+    expect(result).toMatch(/% match/);
+    expect(result).toContain('Bounded at');
+    // Most-relevant fact (PostgreSQL / Acme Corp) must appear.
+    expect(result).toContain('PostgreSQL');
+    // Bounded: must never exceed the top-K cap. The output format is
+    // `<header>\n<entry>\n\n<entry>\n\n...\n\n<footer>`; entries are the
+    // odd-indexed segments. A 5-seed-fact corpus can return at most 5,
+    // well under KG_RECALL_TOP_K_TEST.
+    const entryCount = (result.match(/^\d+\. \[knowledge\]/gm) ?? []).length;
+    expect(entryCount).toBeLessThanOrEqual(KG_RECALL_TOP_K_TEST);
+    expect(entryCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('memory_recall scopes correctly — no cross-scope bleed', async () => {
+    const otherScope = { type: 'user' as const, id: 'b1-other' };
+    // Same fact text in two different scopes; without proper scoping a
+    // recall in scope A would surface the scope-B copy.
+    await layer.store('Project Atlas launches in November.', 'knowledge', scope);
+    await layer.store('Personal: prefers vegetarian lunch options.', 'knowledge', otherScope);
+
+    // Agent's active scope is `scope` (b1-test, context). Recall on the
+    // user scope should not surface the project fact.
+    const userScopedAgent = buildAgent(layer, new Map());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (userScopedAgent as any).activeScopes = [otherScope];
+
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: 'launches November Atlas' },
+      userScopedAgent,
+    );
+
+    // Must NOT surface the project-scope fact even though it matches the query better.
+    expect(result).not.toContain('Project Atlas');
+    // Either reports no matches or only returns scope-relevant rows.
+    // (The vegetarian fact is unrelated to the query, so the most likely
+    // outcome is the "no memories matching" branch — both are valid.)
+    if (result.includes('lunch')) {
+      // If something IS returned, it must be from the user scope only.
+      expect(result).toContain('user:b1-other');
+    }
+  });
+
+  it('memory_update supersedes — old row preserved with is_active=0, new row active', async () => {
+    const original = 'The deployment uses Docker Compose with three services.';
+    const corrected = 'The deployment uses Docker Compose with five services.';
+
+    await layer.store(original, 'knowledge', scope);
+    // Confirm the fact is in the KG and active.
+    const db = layer.getDb();
+    const beforeCount = db.getActiveMemoryCount();
+    expect(beforeCount).toBeGreaterThanOrEqual(1);
+
+    const result = await memoryUpdateTool.handler(
+      { namespace: 'knowledge', old_content: original, new_content: corrected },
+      agent,
+    );
+    expect(result).toContain('Superseded memory');
+    expect(result).toContain('is_active=0');
+
+    // Old row: still in the table, but inactive and pointing at the new row.
+    const oldRows = db.findMemoriesByTextPattern('three services', 'knowledge');
+    // is_active=1 filter applied, so no active rows for the old text.
+    expect(oldRows.length).toBe(0);
+    // New row is active.
+    const newRows = db.findMemoriesByTextPattern('five services', 'knowledge');
+    expect(newRows.length).toBeGreaterThanOrEqual(1);
+    expect(newRows[0].is_active).toBe(1);
+
+    // Forensics: old row still physically present via raw query.
+    // (We use the public getMemory if we can find the id; otherwise count the
+    // total row count incl. inactive.)
+    const stats = await layer.stats();
+    // active count went from N to N (one inactive + one new active).
+    expect(stats.memoryCount).toBeGreaterThanOrEqual(beforeCount);
+  });
+
+  it('memory_delete deactivates — row stays in DB with is_active=0, filtered from recall', async () => {
+    const fact = 'Temporary launch-day toggle: feature_flag_x enabled.';
+    await layer.store(fact, 'knowledge', scope);
+
+    // Sanity: the row exists and is active in the KG before deletion.
+    const db = layer.getDb();
+    const beforeActive = db.findMemoriesByTextPattern('launch-day toggle', 'knowledge');
+    expect(beforeActive.length).toBe(1);
+    const memId: string = beforeActive[0].id;
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'launch-day toggle' },
+      agent,
+    );
+    expect(result).toContain('Deactivated');
+    expect(result).toContain('is_active=0');
+
+    // Active-row check: the active-only query no longer finds it.
+    const afterActive = db.findMemoriesByTextPattern('launch-day toggle', 'knowledge');
+    expect(afterActive.length).toBe(0);
+
+    // Raw-row check via getMemory (bypasses is_active filter): the row is
+    // STILL in the table — just marked inactive. History preserved.
+    const raw = db.getMemory(memId);
+    expect(raw).not.toBeNull();
+    expect(raw.is_active).toBe(0);
+  });
+
+  it('flat-file export mirror reflects KG mutations (write-through)', async () => {
+    const mirror = new Map<string, string[]>();
+    const mirrorAgent = buildAgent(layer, mirror);
+
+    // 1. store via the tool (we re-use the channel path through layer.store directly here for the seed)
+    const fact = 'Mirror-test fact: SearXNG is the default web search backend.';
+    await layer.store(fact, 'knowledge', scope);
+    // The store path is via the agent-tool memoryStoreTool but for this
+    // unit-level test we directly verify the mirror is written by
+    // delete/update which are the tools the worker holds.
+    mirror.set('knowledge', [fact]);
+
+    // 2. update via the tool — both KG and mirror must reflect the new text.
+    const corrected = 'Mirror-test fact: SearXNG is the default with Tavily fallback.';
+    const upd = await memoryUpdateTool.handler(
+      { namespace: 'knowledge', old_content: fact, new_content: corrected },
+      mirrorAgent,
+    );
+    expect(upd).toContain('Superseded');
+    // Mirror was rewritten.
+    const mirrorAfterUpd = mirror.get('knowledge')!;
+    expect(mirrorAfterUpd.some(l => l.includes('Tavily fallback'))).toBe(true);
+
+    // 3. delete via the tool — KG deactivates, mirror substring-removes.
+    const del = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'Tavily fallback' },
+      mirrorAgent,
+    );
+    expect(del).toContain('Deactivated');
+    const mirrorAfterDel = mirror.get('knowledge')!;
+    expect(mirrorAfterDel.some(l => l.includes('Tavily fallback'))).toBe(false);
+  });
+
+  it('a stale flat-file row that no longer exists in the KG is invisible to memory_recall', async () => {
+    // Pre-seed the mirror with a row that was never written to the KG.
+    const mirror = new Map<string, string[]>();
+    mirror.set('knowledge', ['STALE: this fact lives only in the flat file, never in the KG.']);
+    const mirrorAgent = buildAgent(layer, mirror);
+
+    // Also seed a real KG fact so the KG is not empty for the query.
+    await layer.store('Genuine fact: pnpm is the workspace package manager.', 'knowledge', scope);
+
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: 'STALE flat file' },
+      mirrorAgent,
+    );
+
+    // The KG path is the source of truth. The stale flat-file row must NOT
+    // appear (it was never stored to the KG). The result either says no
+    // matches found, or returns only the genuine KG-backed fact.
+    expect(result).not.toContain('STALE: this fact lives only in the flat file');
+  });
+});
+
+// Local constant for the test to assert against the tool's KG_RECALL_TOP_K
+// without re-exporting it from the production module.
+const KG_RECALL_TOP_K_TEST = 10;

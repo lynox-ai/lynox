@@ -1,10 +1,25 @@
-import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
+import type {
+  ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef,
+  KnowledgeRetrievalResult,
+} from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
+
+/** Max ranked KG results returned by a query-based memory_recall. */
+const KG_RECALL_TOP_K = 10;
+/** Max recency-ordered KG rows returned by a no-query memory_recall. */
+const KG_NO_QUERY_LIMIT = 20;
+/**
+ * Similarity floor for the recall tool's KG call. Lower than the
+ * `RetrievalEngine` default of 0.55 because the tool already bounds via
+ * `topK` — we'd rather surface a marginally-relevant memory than miss one
+ * the agent actually needs. The MMR re-rank still suppresses obvious noise.
+ */
+const KG_RECALL_THRESHOLD = 0.3;
 
 /**
  * Token budget for a namespace-only (no-query) memory_recall.
@@ -184,10 +199,38 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
   },
 };
 
+/**
+ * Format ranked KG memory rows into the recall tool's structured response.
+ *
+ * Each entry surfaces: namespace, relevance %, confidence %, scope, date, text.
+ * This is the new contract — the agent sees ranked, attributed results instead
+ * of a raw namespace dump.
+ */
+function formatRankedMemories(
+  memories: KnowledgeRetrievalResult['memories'],
+  header: string,
+  footer: string,
+): string {
+  if (memories.length === 0) return '';
+  const lines = memories.map((m, i) => {
+    const date = m.createdAt.slice(0, 10);
+    const scopeLabel = m.scopeType === 'global' ? 'global' : `${m.scopeType}:${m.scopeId}`;
+    const relevancePct = Math.round(m.finalScore * 100);
+    const confidencePct = Math.round(m.score * 100);
+    // finalScore is 0 for the no-query (recency) path — only show relevance for query-based recall.
+    const scoreParts: string[] = [];
+    if (relevancePct > 0) scoreParts.push(`${relevancePct}% match`);
+    if (confidencePct > 0) scoreParts.push(`${confidencePct}% confidence`);
+    const scoreSegment = scoreParts.length > 0 ? ` (${scoreParts.join(', ')})` : '';
+    return `${i + 1}. [${m.namespace}]${scoreSegment} — ${scopeLabel} — ${date}\n   ${m.text}`;
+  });
+  return `${header}\n${lines.join('\n\n')}\n\n${footer}`;
+}
+
 export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
   definition: {
     name: 'memory_recall',
-    description: 'Look up previously saved knowledge by searching for relevant content. Pass a `query` describing what you need — this returns the full set of matching memory. Omitting `query` returns only a bounded, recency-ranked sample of the namespace (not everything), so always prefer passing a query when you know what you are after. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
+    description: 'Look up previously saved knowledge through the structured Knowledge Graph. Returns RANKED results — each entry is attributed with its namespace, relevance score, confidence score, scope, and date. With `query` you get the top relevance-ranked matches via vector + graph retrieval (capped at 10, never a full dump). Without `query` you get the most-recent active memories in the namespace (capped at 20). Results are bounded by design — old/superseded/contradictory entries are filtered out. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions; do not treat them as "what to do next" unless the user has just said so this turn.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -199,11 +242,11 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         },
         query: {
           type: 'string',
-          description: 'What you are looking for. With a query, the full set of matching memory is returned. Omit only when you genuinely want a broad sample — then a bounded recency-ranked subset is returned instead of the whole namespace.',
+          description: 'What you are looking for, in natural language. With a query, the top relevance-ranked matches (max 10) are returned via vector + graph retrieval. Omit only when you want the most-recent entries in the namespace; then a bounded recency-ordered slice (max 20) is returned.',
         },
         scope: {
           type: 'string',
-          description: 'Scope to recall from. Format: "type:id" (e.g., "user:alex", "global"). Default: current project scope.',
+          description: 'Scope to recall from. Format: "type:id" (e.g., "user:alex", "global"). Default: search across all the agent\'s active scopes.',
         },
       },
       required: ['namespace'],
@@ -219,6 +262,68 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
+    const trimmedQuery = input.query?.trim() ?? '';
+    const hasQuery = trimmedQuery.length > 0;
+
+    // === KG path (primary) ===========================================
+    // The flat files are an export mirror; the structured KG is the source
+    // of truth. is_active=0 / superseded rows are filtered server-side.
+    const kl = agent.toolContext.knowledgeLayer;
+    if (kl) {
+      const scopes: MemoryScopeRef[] = scopeRef
+        ? [scopeRef]
+        : (agent.activeScopes ?? []);
+
+      if (scopes.length === 0) {
+        return 'No active scopes available for memory recall.';
+      }
+
+      if (hasQuery) {
+        try {
+          const result = await kl.retrieve(trimmedQuery, scopes, {
+            namespace: input.namespace,
+            topK: KG_RECALL_TOP_K,
+            threshold: KG_RECALL_THRESHOLD,
+            useGraphExpansion: true,
+          });
+          if (result.memories.length === 0) {
+            const scopeNote = scopeRef ? ` (scope: ${input.scope})` : '';
+            return `No memories matching "${trimmedQuery}" found in ${input.namespace}${scopeNote}.`;
+          }
+          return formatRankedMemories(
+            result.memories,
+            `=== ${result.memories.length} ranked ${input.namespace} memories for "${trimmedQuery}" ===`,
+            `[Ranked by relevance + confidence + recency. Older/superseded memories are filtered out. Bounded at ${KG_RECALL_TOP_K} results by design.]`,
+          );
+        } catch {
+          // KG path failed — fall through to flat-file mirror.
+        }
+      } else {
+        // No query: recency-ordered slice from the KG.
+        try {
+          const recent = (kl as { listRecentActive?: (
+            namespace: MemoryNamespace, scopes: MemoryScopeRef[], limit?: number,
+          ) => KnowledgeRetrievalResult['memories'] }).listRecentActive?.(
+            input.namespace, scopes, KG_NO_QUERY_LIMIT,
+          ) ?? [];
+          if (recent.length === 0) {
+            const scopeNote = scopeRef ? ` (scope: ${input.scope})` : '';
+            return `No content found in ${input.namespace} namespace${scopeNote}.`;
+          }
+          return formatRankedMemories(
+            recent,
+            `=== ${recent.length} most-recent active ${input.namespace} memories ===`,
+            `[Recency-ordered (newest first). Bounded at ${KG_NO_QUERY_LIMIT} results. Pass a \`query\` to get relevance-ranked matches instead.]`,
+          );
+        } catch {
+          // KG path failed — fall through to flat-file mirror.
+        }
+      }
+    }
+
+    // === Flat-file mirror fallback ===================================
+    // Used when no KG is wired (e.g., minimal-agent unit tests). The mirror
+    // is best-effort — the KG is the source of truth in production.
     const content = scopeRef
       ? await agent.memory.loadScoped(input.namespace, scopeRef)
       : await agent.memory.load(input.namespace);
@@ -229,20 +334,25 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         : `No content found in ${input.namespace} namespace.`;
     }
 
-    // With a query: keep the full existing behavior — return the whole
-    // namespace so the caller can scan/search it themselves.
-    if (input.query !== undefined && input.query.trim().length > 0) {
-      return content;
+    if (hasQuery) {
+      // No KG and a query: best-effort substring filter from the flat mirror.
+      const matches = content.split('\n')
+        .filter(l => l.trim().length > 0)
+        .filter(l => l.toLowerCase().includes(trimmedQuery.toLowerCase()))
+        .slice(0, KG_RECALL_TOP_K);
+      if (matches.length === 0) {
+        return `No memories matching "${trimmedQuery}" found in ${input.namespace} (flat-file mirror; KG unavailable).`;
+      }
+      return `=== ${matches.length} flat-file matches for "${trimmedQuery}" (KG unavailable) ===\n${matches.join('\n')}`;
     }
 
-    // No-query (namespace-only): a full dump is 15-20K tokens of context bloat.
-    // Return a recency/importance-ranked subset capped at the token budget.
+    // No KG and no query: recency-ranked subset (legacy bounded behaviour).
     const { text, shown, total } = rankNoQueryEntries(content, RECALL_NO_QUERY_TOKEN_BUDGET);
     if (shown === 0) {
-      return content; // nothing to rank (single empty line etc.) — return as-is
+      return content;
     }
     if (shown >= total) {
-      return text; // whole namespace fit within the budget — no truncation note
+      return text;
     }
     return `${text}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
   },
@@ -252,7 +362,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
   destructive: { mode: 'data' },
   definition: {
     name: 'memory_delete',
-    description: 'Remove outdated information from your knowledge base.',
+    description: 'Remove outdated information from your knowledge base. Matching memories are deactivated in the Knowledge Graph (is_active=0) — they stay in the database for audit and are filtered out of all future memory_recall calls. The flat-file export mirror is updated in sync.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -262,7 +372,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
           enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to delete from',
         },
-        pattern: { type: 'string', description: 'Text pattern — lines containing this will be removed' },
+        pattern: { type: 'string', description: 'Text pattern — memories containing this will be deactivated' },
         scope: {
           type: 'string',
           description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
@@ -281,32 +391,42 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
+    // KG deactivation is the authoritative delete (is_active=0). The flat
+    // file is the export mirror and is kept in sync. We prefer the KG count
+    // when available so the user sees the truth, not a side-effect of file
+    // substring matching.
+    const kl = agent.toolContext.knowledgeLayer;
+
     if (scopeRef) {
-      const count = await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef);
-      // Sync: deactivate matching memories in Knowledge Graph
-      if (count > 0 && agent.toolContext.knowledgeLayer) {
-        void agent.toolContext.knowledgeLayer.deactivateByPattern(input.pattern, input.namespace).catch(() => {});
+      const mirrorCount = await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef);
+      let kgCount = 0;
+      if (kl) {
+        try { kgCount = await kl.deactivateByPattern(input.pattern, input.namespace); }
+        catch { /* best-effort */ }
       }
+      const count = Math.max(kgCount, mirrorCount);
       return count > 0
-        ? `Removed ${count} line(s) matching "${input.pattern}" from ${input.namespace} (scope: ${input.scope}).`
-        : `No lines matching "${input.pattern}" found in ${input.namespace} (scope: ${input.scope}).`;
+        ? `Deactivated ${count} memor${count === 1 ? 'y' : 'ies'} matching "${input.pattern}" in ${input.namespace} (scope: ${input.scope}). History preserved via is_active=0.`
+        : `No memories matching "${input.pattern}" found in ${input.namespace} (scope: ${input.scope}).`;
     }
 
-    const count = await agent.memory.delete(input.namespace, input.pattern);
-    // Sync: deactivate matching memories in Knowledge Graph
-    if (count > 0 && agent.toolContext.knowledgeLayer) {
-      void agent.toolContext.knowledgeLayer.deactivateByPattern(input.pattern, input.namespace).catch(() => {});
+    const mirrorCount = await agent.memory.delete(input.namespace, input.pattern);
+    let kgCount = 0;
+    if (kl) {
+      try { kgCount = await kl.deactivateByPattern(input.pattern, input.namespace); }
+      catch { /* best-effort */ }
     }
+    const count = Math.max(kgCount, mirrorCount);
     return count > 0
-      ? `Removed ${count} line(s) matching "${input.pattern}" from ${input.namespace}.`
-      : `No lines matching "${input.pattern}" found in ${input.namespace}.`;
+      ? `Deactivated ${count} memor${count === 1 ? 'y' : 'ies'} matching "${input.pattern}" in ${input.namespace}. History preserved via is_active=0.`
+      : `No memories matching "${input.pattern}" found in ${input.namespace}.`;
   },
 };
 
 export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
   definition: {
     name: 'memory_update',
-    description: 'Correct or refine previously saved knowledge.',
+    description: 'Correct or refine previously saved knowledge. The matching memory is superseded — the old row is preserved (is_active=0, superseded_by=new.id) and a new active row carrying the corrected text is created. History stays intact; memory_recall returns only the active (corrected) row going forward. The flat-file export mirror is updated in sync.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -316,8 +436,8 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to update',
         },
-        old_content: { type: 'string', description: 'Existing text to find' },
-        new_content: { type: 'string', description: 'Replacement text' },
+        old_content: { type: 'string', description: 'Existing memory text to supersede (exact match within the chosen scope).' },
+        new_content: { type: 'string', description: 'Replacement text for the new active memory.' },
         scope: {
           type: 'string',
           description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
@@ -339,26 +459,41 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
-    if (scopeRef) {
-      const success = await agent.memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef);
-      // Sync: update text in Knowledge Graph + re-extract entities
-      if (success && agent.toolContext.knowledgeLayer) {
-        void agent.toolContext.knowledgeLayer.updateMemoryText(input.old_content, input.new_content, input.namespace, scopeRef).catch(() => {});
+    // KG supersession is the authoritative update — old row stays in the
+    // table marked superseded, new row is created active. The flat file is
+    // a mirror and is kept in sync via the existing substring update.
+    const kl = agent.toolContext.knowledgeLayer;
+    const effectiveScope: MemoryScopeRef = scopeRef
+      ?? agent.activeScopes?.[0]
+      ?? { type: 'context', id: '' };
+
+    let kgUpdated = false;
+    if (kl) {
+      try {
+        const newId = await kl.updateMemoryWithSupersession(
+          input.old_content, input.new_content, input.namespace, effectiveScope,
+          { sourceThreadId: agent.currentThreadId },
+        );
+        kgUpdated = newId !== null;
+      } catch {
+        kgUpdated = false;
       }
-      return success
-        ? `Updated content in ${input.namespace} namespace (scope: ${input.scope}).`
-        : `Content not found in ${input.namespace} (scope: ${input.scope}) — nothing updated.`;
     }
 
-    const success = await agent.memory.update(input.namespace, input.old_content, input.new_content);
-    // Sync: update text in Knowledge Graph + re-extract entities
-    if (success && agent.toolContext.knowledgeLayer) {
-      const defaultScope: MemoryScopeRef = agent.activeScopes?.[0] ?? { type: 'context', id: '' };
-      void agent.toolContext.knowledgeLayer.updateMemoryText(input.old_content, input.new_content, input.namespace, defaultScope).catch(() => {});
+    // Mirror the change into the flat file too (substring update).
+    const mirrorOk = scopeRef
+      ? await agent.memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
+      : await agent.memory.update(input.namespace, input.old_content, input.new_content);
+
+    const success = kgUpdated || mirrorOk;
+    const scopeLabel = input.scope ?? formatScopeRef(effectiveScope);
+    if (!success) {
+      return `Content not found in ${input.namespace} (scope: ${scopeLabel}) — nothing updated.`;
     }
-    return success
-      ? `Updated content in ${input.namespace} namespace.`
-      : `Content not found in ${input.namespace} — nothing updated.`;
+    if (kgUpdated) {
+      return `Superseded memory in ${input.namespace} (scope: ${scopeLabel}). Old row preserved (is_active=0, superseded_by=new). Mirror file ${mirrorOk ? 'synced' : 'sync-skipped'}.`;
+    }
+    return `Updated content in ${input.namespace} namespace (scope: ${scopeLabel}). KG sync skipped (no graph attached).`;
   },
 };
 
