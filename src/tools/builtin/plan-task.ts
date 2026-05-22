@@ -4,6 +4,7 @@ import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import type { RunHistory } from '../../core/run-history.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -156,7 +157,7 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
  * `'orchestrated'`; the field is retained on the type only for backward
  * compatibility with legacy stored rows and is otherwise unread.
  */
-function convertToPipeline(summary: string, phases: PlanPhase[], historicalAvg?: Record<string, number>): string {
+function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: RunHistory | null | undefined, historicalAvg?: Record<string, number>): string {
   const pipelineSteps = phasesToPipelineSteps(phases);
   if (pipelineSteps.length === 0) return '';
 
@@ -181,7 +182,12 @@ function convertToPipeline(summary: string, phases: PlanPhase[], historicalAvg?:
   // future Workflows-editor save endpoints should call this gate too.
   assertPlannedPipelineIsValid(planned);
 
+  // Persist to the in-memory store AND pipeline_runs. plan_task is decoupled
+  // from run (D4) — the returned workflow_id must survive an engine restart or
+  // LRU eviction before run_workflow / a scheduled task_create resolves it;
+  // storePipeline alone is volatile (max 10 entries, lost on restart).
   storePipeline(pipelineId, planned);
+  runHistory?.insertPlannedPipeline(planned);
   return pipelineId;
 }
 
@@ -333,7 +339,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     // Auto-approve in non-interactive context
     if (!agent.promptUser) {
       if (hasPhases) {
-        const workflowId = convertToPipeline(input.summary, phases, historicalAvg);
+        const workflowId = convertToPipeline(input.summary, phases, agent.toolContext.runHistory, historicalAvg);
         return finalizeApprovedPlan(workflowId, true);
       }
       return JSON.stringify({ approved: true });
@@ -345,7 +351,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
 
     if (['proceed', 'y', 'yes'].includes(normalized)) {
       if (hasPhases) {
-        const workflowId = convertToPipeline(input.summary, phases, historicalAvg);
+        const workflowId = convertToPipeline(input.summary, phases, agent.toolContext.runHistory, historicalAvg);
         return finalizeApprovedPlan(workflowId, false);
       }
       return JSON.stringify({ approved: true });
