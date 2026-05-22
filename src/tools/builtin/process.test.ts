@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { saveWorkflowTool } from './process.js';
 import { _resetPipelineStore, getPipeline, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
+import { RunHistory } from '../../core/run-history.js';
 import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
@@ -46,6 +50,7 @@ function makeMockRunHistory() {
     }),
     getProcess: vi.fn().mockImplementation((id: string) => processes.get(id)),
     getPlannedPipeline: vi.fn().mockReturnValue(undefined),
+    insertPlannedPipeline: vi.fn(),
     getAvgStepCostByModelTier: vi.fn().mockReturnValue({}),
     _store: processes,
   };
@@ -103,6 +108,8 @@ describe('save_workflow — session source', () => {
     expect(pipeline!.executed).toBe(false);
     expect(pipeline!.steps).toHaveLength(2);
     expect(pipeline!.steps[1]!.input_from).toEqual(['step-0']);
+    // Persisted to pipeline_runs so the Saved Workflows library finds it.
+    expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
   });
 
   it('resolves input_from by step order even when order != array index', async () => {
@@ -287,6 +294,36 @@ describe('save_workflow — workflow_id source', () => {
     // The session-capture path is never touched for this source.
     expect(captureProcessMock).not.toHaveBeenCalled();
     expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+    // The reusable copy is persisted to pipeline_runs (not just the volatile
+    // in-memory store) so the Saved Workflows library finds it.
+    expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression (2026-05-22): save_workflow only did the in-memory storePipeline
+  // and never insertPlannedPipeline, so the Saved Workflows library — which
+  // queries pipeline_runs via getPlannedPipelines — was always empty. This
+  // test exercises the real persistence end-to-end against the library query.
+  it('persists the saved workflow so getPlannedPipelines (the library) finds it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-save-wf-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    try {
+      storePipeline('plan-src', makePlan({ id: 'plan-src', template: false }));
+      const agent = makeAgent({}, history);
+      const result = await saveWorkflowTool.handler(
+        { name: 'Saved WF', description: 'reusable', workflow_id: 'plan-src' },
+        agent,
+      );
+      const parsed = JSON.parse(result) as { workflow_id: string };
+      const rows = history.getPlannedPipelines(50);
+      const saved = rows.find((r) => r.id === parsed.workflow_id);
+      expect(saved).toBeDefined();
+      expect(saved!.manifest_name).toBe('Saved WF');
+      // The library filters on manifest_json.template === true.
+      expect((JSON.parse(saved!.manifest_json) as { template: boolean }).template).toBe(true);
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('is idempotent for an already-reusable workflow', async () => {

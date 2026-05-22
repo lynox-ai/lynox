@@ -70,6 +70,9 @@ function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
  */
 function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): string {
   const runHistory = agent.toolContext.runHistory;
+  if (!runHistory) {
+    return 'Error: Workflow save not available. Run history is not initialized.';
+  }
   const existing = getPipeline(input.workflow_id!, runHistory);
   if (!existing) {
     return `Error: Workflow "${input.workflow_id}" not found. Pass a workflow_id returned by plan_task, or omit it to save this session's work.`;
@@ -99,7 +102,11 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
 
   // Save-time gate — same as plan_task.
   assertPlannedPipelineIsValid(reusable);
+  // Commit: the in-memory store for this session AND the pipeline_runs row
+  // (status='planned') so the Saved Workflows library — which reads SQLite —
+  // actually finds it. storePipeline alone is volatile (LRU, lost on restart).
   storePipeline(reusableId, reusable);
+  runHistory.insertPlannedPipeline(reusable);
 
   return JSON.stringify({
     workflow_id: reusableId,
@@ -194,11 +201,13 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // Save-time gate — same as plan_task.
     assertPlannedPipelineIsValid(planned);
 
-    // Commit: store the pipeline, then write the ProcessRecord for
-    // lineage/audit (D11 — internal, never agent-facing). Stamping the
-    // promotion link last keeps the ProcessRecord consistent with the
-    // pipeline that exists.
+    // Commit: the in-memory store + the pipeline_runs row (status='planned')
+    // so the Saved Workflows library (which reads SQLite) finds it, then the
+    // ProcessRecord for lineage/audit (D11 — internal, never agent-facing).
+    // Stamping the promotion link last keeps the ProcessRecord consistent
+    // with the pipeline that exists.
     storePipeline(pipelineId, planned);
+    runHistory.insertPlannedPipeline(planned);
     record.promotedToPipelineId = pipelineId;
     runHistory.insertProcess(record);
 
