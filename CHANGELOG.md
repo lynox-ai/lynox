@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.7.0 — 2026-05-22
+
+Minor — **Workflow-UX unification + chat-streaming polish + agent-efficiency**. The agent's workflow tool surface is consolidated 8 → 6 with one consistent "workflow" vocabulary across tools, HTTP API and UI, plus a new **Saved Workflows** library tab. The chat stream gains an animated presence indicator, a live activity ticker, interleaved thinking, and an inline compaction marker. Agent-efficiency work lands orchestrated sub-agent routing and non-lossy compaction (a tool-result recall blob store). **Breaking:** the tool renames and the `/api/pipelines*` → `/api/workflows*` endpoint move are a hard cut with no alias — external MCP clients / API scripts must update.
+
+### Breaking
+
+- **Agent tool surface 8 → 6 (#510, #512, #514)** — `run_pipeline` → `run_workflow`; `capture_process` + `promote_process` merged into one `save_workflow`; `step_complete` removed.
+- **HTTP API `/api/pipelines*` → `/api/workflows*` (#511)** — hard rename, no alias.
+
+### Added
+
+- **Saved Workflows library (#513, #520)** — A library tab listing reusable workflows with run / rename / delete, and expandable per-step details.
+- **`save_workflow` tool (#512)** — One call to capture and save a reusable workflow; merges the former `capture_process` + `promote_process`, with redaction hardening.
+- **`plan_task` decoupled (#514)** — Planning never executes; it returns a reusable `workflow_id` that `run_workflow` runs.
+- **Chat streaming presence (#494, #497–#499)** — Animated lynox-icon presence indicator + live activity ticker coupled to run state.
+- **Interleaved thinking (#492)** — Thinking renders interleaved with text and tool calls in chronological order.
+- **Compaction marker (#491)** — A persistent inline marker shows where the conversation was compacted.
+- **Downloadable artifacts (#493)** — Data-file artifact types are downloadable; HTML artifacts offer a source download.
+- **Orchestrated sub-agent routing (#507)** — Eligible multi-step plans dispatch one sub-agent per step.
+- **Non-lossy compaction (#508)** — Large tool results are evicted to a recall blob store at compaction and fetchable on demand via `recall_tool_result`.
+
+### Fixed
+
+- **Main agent no longer auto-downgrades (#517)** — The main conversational agent always runs on the configured tier; the per-turn `_isSimpleTask` heuristic that silently dropped to Haiku is removed.
+- **Deterministic `save_workflow` steps (#521)** — Step extraction preserves the actual action sequence; the LLM only annotates a fixed step list and can no longer merge or drop steps.
+- **Per-message usage footer survives an SSE drop (#518)** — The `done` event echoes the run usage so the footer renders even if the `turn_end` frame is lost.
+- **Per-message LLM usage persists across thread resume (#486)**.
+- **Saved-workflow persistence (#515, #516)** — `save_workflow` and decoupled `plan_task` persist their pipelines so the library and `workflow_id` survive a restart.
+- **Context budget from real API usage (#489)** — Replaces the summed estimate that drifted past 100%.
+- **Truncated `max_tokens` turns continue (#490)** — A turn cut off at the token cap resumes instead of returning empty.
+- **Voice (#488, #495)** — STT glossary no longer rewrites common words to proper nouns; voice messages can't double-submit.
+- **Speak (#503)** — TTS-hostile special characters normalized.
+- **Web UI (#485)** — Mobile nav, chat scroll, artifact deep-links.
+- **`capture_process` reads session-wide tool calls (#505)**.
+- **Operator-channel hallucination (#502)** — The prompt states the real operator channels, stopping Telegram hallucination after the Telegram removal.
+- **Nav chat-history fills the sidebar (#519)** — The thread list grows to fill available height; other nav items pin to the bottom.
+
+### Internal
+
+- **Agent-efficiency measurement (#506, #509)** — Phase-0 measurement protocol + a Tier-1 static cost-regression guard.
+- **perf(memory) (#487)** — A no-query `memory_recall` is bounded to a ranked, capped subset.
+- **Shared `AgentPresenceIcon` (#500)** — Extracted; transcription state animated.
+- **Transcription animation + compaction history block (#501)**.
+- **Telegram references removed from README + bench fixtures (#504)**.
+- **CI: staging-smoke pnpm setup fixed (#496)**.
+
 ## 1.6.0 — 2026-05-19
 
 Minor — **Magic-Link OTP + Settings v3 inline-merge + Stripe-portal stopgap**. Adds passwordless email login as a third auth method alongside passkey + password. Settings v3 sprint lands the capability registry, tier audit, show-all-grayed pattern, Account pages, and inline merge of Advanced into the LLM main page. The broken `control.lynox.cloud/checkout/account` CTA in Account+Billing is replaced with a Stripe-hosted Customer Portal link + `support@` fallback (full engine→CP→Stripe SSO deferred — see `PRD-STRIPE-PORTAL-SSO.md` v3). Light-mode theme ships. Plus a session-cookie hardening pass (`SameSite=Lax` + OTP stale-session guards) and a `http_request` hang-fix that previously could lock a session.
