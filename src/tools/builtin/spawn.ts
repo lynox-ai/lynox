@@ -2,6 +2,7 @@ import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationC
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
+import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
@@ -237,7 +238,7 @@ async function executeThinker(
     }
   }
 
-  const childAgent = new Agent({
+  const agentConfig: AgentConfig = {
     name: spec.name,
     model,
     systemPrompt,
@@ -281,14 +282,21 @@ async function executeThinker(
     // is unwired (toolContext.networkPolicy is always undefined in core).
     // Wiring `childIsolation → networkPolicy` is explicitly post-launch (PRD
     // §6); T2-X1 does NOT claim to close child network isolation.
+    //
+    // Reach delta (intentional, autonomy-inheritance): the shared refs are
+    // also write-reachable — a child can mutate parent state through
+    // dataStore / apiStore / runHistory (e.g. updateRun on the parent's
+    // row). Acceptable because the child IS trusted code, but not hidden.
     toolContext: { ...parentAgent.toolContext },
     // T2-X1 part 2: share the parent's SecretStore so `ask_secret`, vault
     // reads, and tool credential lookups work in the child. Documented
     // reach delta: a child's `http_request` will auto-inject `Bearer` tokens
-    // for any oauth2 api_profile (http.ts:433-448) using the parent's vault.
-    // This is INTENTIONAL — sub-agents inherit the parent's autonomy, and a
-    // researcher spawned to query the user's Stripe/Notion API must be able
-    // to authenticate. Surfaced explicitly in the PR body, not hidden.
+    // for any oauth2 api_profile (http.ts ~415-427) using the parent's
+    // vault, AND the child can WRITE/overwrite the parent's vault entries
+    // via `secretStore.set`. Both are INTENTIONAL — sub-agents inherit the
+    // parent's autonomy, and a researcher spawned to query the user's
+    // Stripe/Notion API must be able to authenticate and persist a refresh
+    // token. Surfaced explicitly in the PR body, not hidden.
     secretStore: parentAgent.secretStore,
     // T2-X1 part 3: pass the three prompt callbacks so an `ask_user`/
     // `ask_secret`/`ask_tabs` invoked by the child surfaces to the same UI
@@ -302,12 +310,20 @@ async function executeThinker(
     // tool-call recording in engine-init's toolEnd subscriber, etc.) can
     // attribute work to this run.
     currentRunId: childRunId,
-  });
+  };
 
-  // Track child for abort propagation
-  activeChildAgents.add(childAgent);
+  // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
+  // failure-marking catches a synchronous ctor throw too (otherwise the row
+  // stays `status='running'` forever and pollutes the history UI). childStart
+  // is captured BEFORE the ctor for symmetric durationMs on either failure.
+  const childStart = Date.now();
+  let childAgent: Agent | undefined;
   try {
-    const childStart = Date.now();
+    childAgent = new Agent(agentConfig);
+    // Track child for abort propagation (added inside try so a ctor throw
+    // doesn't leave a half-constructed agent in the active set).
+    activeChildAgents.add(childAgent);
+
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
 
@@ -339,15 +355,17 @@ async function executeThinker(
     return { result, childRunId: childAgent.currentRunId };
   } catch (err) {
     // Mark the child run failed so the cost cap and history UI don't show
-    // it as still-running. Cost is still recorded for whatever the child
-    // spent before the error (CostGuard tracks per-turn).
+    // it as still-running. Fires for BOTH ctor failures (childAgent
+    // undefined, no spend yet) and send failures (childAgent constructed,
+    // partial spend possible — CostGuard tracks per-turn).
     if (runHistory && childRunId) {
       try {
-        const snap = childAgent.getCostSnapshot();
+        const snap = childAgent?.getCostSnapshot() ?? null;
         runHistory.updateRun(childRunId, {
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
+          durationMs: Date.now() - childStart,
           status: 'failed',
           stopReason: err instanceof Error ? err.message.slice(0, 200) : 'error',
         });
@@ -355,7 +373,7 @@ async function executeThinker(
     }
     throw err;
   } finally {
-    activeChildAgents.delete(childAgent);
+    if (childAgent) activeChildAgents.delete(childAgent);
   }
 }
 

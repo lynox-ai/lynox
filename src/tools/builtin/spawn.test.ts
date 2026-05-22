@@ -1022,5 +1022,71 @@ describe('spawn_agent tool', () => {
       const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { currentRunId: string | undefined };
       expect(ctorArg.currentRunId).toBeUndefined();
     });
+
+    it('records status=failed with partial spend + durationMs when child send throws', async () => {
+      // The success-path test (above) covers the happy path's updateRun.
+      // This is the other half of T2-X1 part 5: when send() rejects, the
+      // catch in executeThinker must still flush an updateRun so the cap
+      // aggregator sees whatever the child spent before the failure AND
+      // the history UI doesn't keep showing a stuck-running row.
+      const MINTED_ID = 'run-child-fail-xyz';
+      const insertRun = vi.fn().mockReturnValue(MINTED_ID);
+      const updateRun = vi.fn();
+      const runHistory = { insertRun, updateRun };
+
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory,
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      // Partial spend before the failure — CostGuard tracks per-turn so
+      // even a child that errored mid-conversation has a recordable snapshot.
+      mockCostSnapshot = {
+        inputTokens: 500,
+        outputTokens: 100,
+        estimatedCostUSD: 0.05,
+        iterationsUsed: 1,
+        budgetPercent: 1,
+      };
+      // First send call (for the only spec) rejects.
+      mockSend.mockRejectedValueOnce(new Error('upstream rate-limit hit'));
+
+      const agent = makeAgent({
+        currentRunId: 'parent-run-fail',
+        toolContext: parentToolContext,
+      });
+
+      // Single-agent spawn that fails → handler throws AggregateError after
+      // executeThinker's catch records the failed-row updateRun. The
+      // updateRun must fire BEFORE the throw, so the assertion is reachable.
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'flaky', task: 'Will fail' }] },
+          agent,
+        ),
+      ).rejects.toThrow(/All sub-agents failed|upstream rate-limit/);
+
+      expect(updateRun).toHaveBeenCalledTimes(1);
+      const [updatedId, updateArg] = updateRun.mock.calls[0]! as [string, {
+        costUsd: number;
+        tokensIn: number;
+        tokensOut: number;
+        status: string;
+        stopReason: string;
+        durationMs?: number;
+      }];
+      expect(updatedId).toBe(MINTED_ID);
+      expect(updateArg.status).toBe('failed');
+      // Partial spend made it into the runs row → cap aggregator sees it.
+      expect(updateArg.costUsd).toBe(0.05);
+      expect(updateArg.tokensIn).toBe(500);
+      expect(updateArg.tokensOut).toBe(100);
+      // Bounded stopReason — never the raw 200+ char error message.
+      expect(updateArg.stopReason).toContain('rate-limit');
+      expect(updateArg.stopReason.length).toBeLessThanOrEqual(200);
+      // Symmetry with the success path: error-path also records duration.
+      expect(typeof updateArg.durationMs).toBe('number');
+      expect(updateArg.durationMs).toBeGreaterThanOrEqual(0);
+    });
   });
 });
