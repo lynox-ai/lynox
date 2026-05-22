@@ -10,6 +10,10 @@ vi.mock('../../core/dag-planner.js', () => ({
 import { planTaskTool, phasesToPipelineSteps } from './plan-task.js';
 import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
+import { RunHistory } from '../../core/run-history.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { IAgent, LynoxUserConfig } from '../../types/index.js';
 
 const mockConfig: LynoxUserConfig = { api_key: 'test-key' };
@@ -207,6 +211,35 @@ describe('planTaskTool', () => {
     expect(pipeline!.goal).toBe('Build quarterly report');
     expect(pipeline!.steps).toHaveLength(2);
     expect(pipeline!.steps[1]!.input_from).toEqual(['fetch-data']);
+  });
+
+  // Regression (2026-05-22): convertToPipeline only did the in-memory
+  // storePipeline — a decoupled plan_task workflow_id was not in pipeline_runs
+  // and would not survive an engine restart / LRU eviction before run_workflow
+  // (or a scheduled task_create) resolved it.
+  it('persists the planned pipeline to pipeline_runs (durable workflow_id)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-plan-persist-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    try {
+      const agent = makeAgent({ promptUser: undefined });
+      agent.toolContext.runHistory = history;
+      const result = await planTaskTool.handler(
+        { summary: 'Durable plan', phases: [{ name: 'Step one', steps: ['Do the thing'] }] },
+        agent,
+      );
+      const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
+      expect(parsed.approved).toBe(true);
+      // The workflow_id must be resolvable from SQLite, not just memory.
+      const persisted = history.getPlannedPipelines(10).find((r) => r.id === parsed.workflow_id);
+      expect(persisted).toBeDefined();
+      const manifest = JSON.parse(persisted!.manifest_json) as { goal: string; template: boolean };
+      expect(manifest.goal).toBe('Durable plan');
+      // A plan_task plan is not a saved-workflow template.
+      expect(manifest.template).toBe(false);
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('should not create a workflow for flat steps', async () => {
