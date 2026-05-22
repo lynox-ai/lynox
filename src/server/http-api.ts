@@ -1952,7 +1952,7 @@ export class LynoxHTTPApi {
           if (csm?.hasChanges()) {
             res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size })}\n\n`);
           }
-          res.write(`event: done\ndata: ${JSON.stringify({ result })}\n\n`);
+          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
           res.end();
         }
       } catch (err: unknown) {

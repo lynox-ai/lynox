@@ -1328,7 +1328,25 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (summary) step.summary = summary;
 			break;
 		}
-		case 'done':
+		case 'done': {
+			// Usage fallback: if the `turn_end` SSE frame was lost in transit
+			// (reconnect, dropped stream), the live message never received its
+			// usage and the footer would show no stats until a reload. The engine
+			// echoes the persisted per-run total on the `done` event — adopt it.
+			// Guarded on `!msg.usage` so a normal `turn_end` (which accumulates
+			// across multi-turn runs) is never overwritten.
+			const doneUsage = data['usage'];
+			if (!msg.usage && doneUsage && typeof doneUsage === 'object') {
+				const u = doneUsage as Record<string, unknown>;
+				msg.usage = {
+					tokensIn: Number(u['tokensIn'] ?? 0),
+					tokensOut: Number(u['tokensOut'] ?? 0),
+					cacheRead: Number(u['cacheRead'] ?? 0),
+					cacheWrite: Number(u['cacheWrite'] ?? 0),
+					costUsd: Number(u['costUsd'] ?? 0),
+					...(typeof u['model'] === 'string' ? { model: u['model'] } : {}),
+				};
+			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
 			// cases where the user never completes a run. Fire-and-forget:
@@ -1338,6 +1356,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				.then(m => m.checkUsageThreshold())
 				.catch(() => { /* ignore — alerting is best-effort */ });
 			break;
+		}
 		case 'retry': {
 			const attempt = data['attempt'] as number;
 			const maxAttempts = data['maxAttempts'] as number;

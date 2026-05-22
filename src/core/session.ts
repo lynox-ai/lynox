@@ -85,6 +85,22 @@ export interface SessionOptions {
 }
 
 /**
+ * Token/cost totals for the most recently completed run, in the UI footer's
+ * convention (`tokensIn` = base input + both cache buckets). Mirrors the
+ * payload `setMessageUsage` persists; exposed via `getLastRunUsage()` so the
+ * HTTP API can echo it in the `done` SSE event — a fallback that lets the
+ * per-message footer render even when the `turn_end` frame is lost.
+ */
+export interface RunUsageSummary {
+  tokensIn: number;
+  tokensOut: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+  model: string;
+}
+
+/**
  * Session — per-conversation state.
  * Holds Agent, messages, mode, callbacks, and run tracking.
  * Created via engine.createSession().
@@ -149,6 +165,9 @@ export class Session {
   private _effort: EffortLevel;
   private _thinking: ThinkingMode | undefined;
   private _maxTokens: number | undefined;
+  /** Token/cost totals of the most recently completed run; null until the
+   *  first run finishes. Echoed in the `done` SSE event — see getLastRunUsage(). */
+  private _lastRunUsage: RunUsageSummary | null = null;
   private _systemPrompt: string | undefined;
 
   readonly usage: AccumulatedUsage = {
@@ -506,6 +525,20 @@ export class Session {
         cache_read_input_tokens: cacheRead,
       });
 
+      // Snapshot this run's usage in the UI footer's convention (tokensIn =
+      // base input + both cache buckets). Stashed for getLastRunUsage() so the
+      // HTTP API can echo it in the `done` event — a fallback that renders the
+      // per-message footer even when the `turn_end` SSE frame is lost.
+      const runUsage: RunUsageSummary = {
+        tokensIn: tokensIn + cacheRead + cacheWrite,
+        tokensOut,
+        cacheRead,
+        cacheWrite,
+        costUsd,
+        model,
+      };
+      this._lastRunUsage = runUsage;
+
       if (runHistory && this.currentRunId) {
         try {
           runHistory.updateRun(this.currentRunId, {
@@ -557,17 +590,8 @@ export class Session {
             threadStore.updateThread(this.sessionId, { title });
           }
           // Stamp this run's token/cost totals onto its final assistant
-          // message so the per-message footer survives a thread resume —
-          // usage was previously in-memory only. `tokensIn` follows the UI
-          // convention: base input + both cache buckets.
-          threadStore.setMessageUsage(this.sessionId, JSON.stringify({
-            tokensIn: tokensIn + cacheRead + cacheWrite,
-            tokensOut,
-            cacheRead,
-            cacheWrite,
-            costUsd,
-            model,
-          }));
+          // message so the per-message footer survives a thread resume.
+          threadStore.setMessageUsage(this.sessionId, JSON.stringify(runUsage));
         } catch { /* fire-and-forget */ }
       }
 
@@ -849,6 +873,13 @@ export class Session {
 
   getModelTier(): ModelTier {
     return this._model;
+  }
+
+  /** Token/cost totals of the most recently completed run, or null if no run
+   *  has finished. The HTTP API echoes this in the `done` SSE event so the
+   *  live per-message footer survives a lost `turn_end` frame. */
+  getLastRunUsage(): RunUsageSummary | null {
+    return this._lastRunUsage;
   }
 
   setEffort(level: EffortLevel): void {

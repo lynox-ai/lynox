@@ -64,6 +64,7 @@ const mockSessionInstance = {
   promptUser: null as unknown,
   getModelTier: vi.fn().mockReturnValue('sonnet'),
   getChangesetManager: vi.fn().mockReturnValue(null),
+  getLastRunUsage: vi.fn().mockReturnValue(null),
   getAgent: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
@@ -720,6 +721,42 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('event: text');
       expect(text).toContain('Hello world');
       expect(text).toContain('event: done');
+    });
+
+    it('echoes the run usage in the done event', async () => {
+      // The done event carries getLastRunUsage() so the per-message footer
+      // survives a lost turn_end frame (PR #518).
+      mockSessionInstance.getLastRunUsage.mockReturnValueOnce({
+        tokensIn: 1234,
+        tokensOut: 56,
+        cacheRead: 800,
+        cacheWrite: 100,
+        costUsd: 0.0042,
+        model: 'claude-sonnet-4-6',
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'hi' }),
+      });
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const doneData = text
+        .split('\n')
+        .find(l => l.startsWith('data:') && l.includes('"usage"'));
+      expect(doneData).toBeDefined();
+      const payload = JSON.parse(doneData!.replace(/^data:\s*/, '')) as {
+        usage?: Record<string, unknown>;
+      };
+      expect(payload.usage).toMatchObject({
+        tokensIn: 1234,
+        tokensOut: 56,
+        cacheRead: 800,
+        cacheWrite: 100,
+        costUsd: 0.0042,
+        model: 'claude-sonnet-4-6',
+      });
     });
 
     it('rejects oversized image upload with 413 and friendly message', async () => {

@@ -451,6 +451,28 @@ describe('Engine + Session (Orchestrator)', () => {
       );
       expect(downgraded).toBe(false);
     });
+
+    it('exposes the completed run usage via getLastRunUsage()', async () => {
+      // Regression (SSE-drop fallback): the `done` event echoes
+      // getLastRunUsage() so the per-message footer survives a lost turn_end
+      // frame. Null before any run; populated with the run summary after.
+      const { session } = await createEngineAndSession();
+      expect(session.getLastRunUsage()).toBeNull();
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('hello');
+
+      const usage = session.getLastRunUsage();
+      expect(usage).not.toBeNull();
+      expect(usage).toMatchObject({
+        tokensIn: expect.any(Number),
+        tokensOut: expect.any(Number),
+        cacheRead: expect.any(Number),
+        cacheWrite: expect.any(Number),
+        costUsd: expect.any(Number),
+        model: 'claude-sonnet-4-6',
+      });
+    });
   });
 
   // -- registerPipelineTools --
