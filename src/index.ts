@@ -64,7 +64,6 @@ export { detectProjectRoot } from './core/project.js';
 export type { ProjectInfo } from './core/project.js';
 export { resolveContext } from './core/context.js';
 export type { LynoxContext, ContextSource } from './types/index.js';
-export { runSetupWizard } from './cli/setup-wizard.js';
 // Telegram integration removed 2026-05-15 (data sovereignty + attack-surface reduction;
 // PWA + Mail/Voice cover every Telegram use case).
 export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools } from './integrations/google/index.js';

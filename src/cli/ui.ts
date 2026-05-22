@@ -7,7 +7,7 @@ import { TOOL_DISPLAY_NAMES } from '../types/index.js';
 const BRAND = 99;
 const brandColor = (text: string) => `\x1b[38;5;${BRAND}m${text}\x1b[0m`;
 
-/** Styled brand name — used by setup-wizard and banner */
+/** Styled brand name — used by the docker installer and banner */
 export function renderGradientArt(): string {
   return `  ${brandColor(BOLD + 'lynox' + RESET)}\n`;
 }
