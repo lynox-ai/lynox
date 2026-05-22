@@ -144,7 +144,6 @@ describe('Agent Security Audit', () => {
       const files = getAllTsFiles(SRC);
       for (const file of files) {
         if (file.endsWith('.test.ts')) continue;
-        if (file.includes('setup-wizard')) continue; // wizard handles API key input
         const content = readFileSync(file, 'utf-8');
         // Check for hardcoded API key patterns
         expect(content, `${file}: no hardcoded API keys`).not.toMatch(/sk-ant-api\d{2}-[A-Za-z0-9]{20,}/);
