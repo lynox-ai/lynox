@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // === Mock dependencies ===
 
@@ -152,6 +155,18 @@ vi.mock('../core/config.js', () => ({
   }),
   saveUserConfig: vi.fn(),
   reloadConfig: vi.fn(),
+  // engine-init.ts (pulled in by http-api.ts for ensureHttpSecret) reads
+  // these from config.js — provide them so the real ensureHttpSecret() can
+  // run in the T1-1 ordering test. getLynoxDir honours LYNOX_DATA_DIR so the
+  // test can point it at a throwaway directory.
+  getLynoxDir: vi.fn(() => process.env['LYNOX_DATA_DIR'] ?? '/tmp/lynox-http-api-test-data'),
+  setVaultApiKeyExists: vi.fn(),
+}));
+
+// Keep _initPushChannel a deterministic no-op — with getLynoxDir now mocked
+// it would otherwise generate VAPID keys on disk during init().
+vi.mock('../integrations/push/web-push-channel.js', () => ({
+  WebPushNotificationChannel: class { /* test no-op */ },
 }));
 
 // POST /api/workflows/:id/run dynamically imports the pipeline tool module.
@@ -288,6 +303,93 @@ describe('LynoxHTTPApi', () => {
         status: 'ok',
         version: expect.any(String),
         uptime_s: expect.any(Number),
+      });
+    });
+  });
+
+  // ── T1-1 · npx/bare-node first run must be authenticatable ───────────────
+  //
+  // The SvelteKit Web UI handler snapshots process.env into
+  // $env/dynamic/private at module-init time (build/handler.js `server.init()`
+  // → `set_private_env`). If LYNOX_HTTP_SECRET is not in process.env when the
+  // handler is import()-ed, the Web UI auth gate sees no secret and disables
+  // itself, while the engine API (which reads process.env live) keeps
+  // enforcing — a fresh npx/bare-node first run then lands on /app with every
+  // /api/* 401ing ("Sitzung abgelaufen" wall) and /login bouncing to /app.
+  // The fix calls ensureHttpSecret() inside _tryLoadWebUiHandler() BEFORE the
+  // handler import(); this test pins that ordering.
+  describe('T1-1 · Web UI handler import vs. ensureHttpSecret ordering', () => {
+    // A stub that mimics the SvelteKit handler: at module-init time it records
+    // whatever LYNOX_HTTP_SECRET is currently in process.env to a sentinel file.
+    function writeStubHandler(path: string): void {
+      writeFileSync(
+        path,
+        `import { writeFileSync } from 'node:fs';\n` +
+          `writeFileSync(process.env.LYNOX_T1_SENTINEL, process.env.LYNOX_HTTP_SECRET ?? '<<unset>>');\n` +
+          `export function handler() { /* test no-op */ }\n`,
+      );
+    }
+
+    /** Run _tryLoadWebUiHandler() with the stub handler + env pinned, then restore. */
+    async function withStubHandler(
+      dataDir: string,
+      env: Record<string, string | undefined>,
+      assert: (api: InstanceType<typeof LynoxHTTPApi>, sentinelPath: string) => void,
+    ): Promise<void> {
+      const sentinelPath = join(dataDir, 'secret-at-import');
+      const stubPath = join(dataDir, 'webui-handler-stub.mjs');
+      writeStubHandler(stubPath);
+      const keys = ['LYNOX_HTTP_SECRET', 'LYNOX_WEBUI_HANDLER', 'LYNOX_DATA_DIR', 'LYNOX_T1_SENTINEL'] as const;
+      const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+      const next = { ...env, LYNOX_WEBUI_HANDLER: stubPath, LYNOX_DATA_DIR: dataDir, LYNOX_T1_SENTINEL: sentinelPath };
+      try {
+        for (const k of keys) {
+          const v = next[k];
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        const api = new LynoxHTTPApi();
+        await (api as unknown as { _tryLoadWebUiHandler(): Promise<void> })._tryLoadWebUiHandler();
+        assert(api, sentinelPath);
+      } finally {
+        for (const k of keys) {
+          const v = prev[k];
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    }
+
+    it('has LYNOX_HTTP_SECRET in process.env before the handler module loads', async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), 'lynox-t1-1-'));
+      // Fresh first run — no secret yet.
+      await withStubHandler(dataDir, { LYNOX_HTTP_SECRET: undefined }, (api, sentinelPath) => {
+        // ensureHttpSecret() generated and persisted a secret …
+        const generated = process.env['LYNOX_HTTP_SECRET'];
+        expect(generated).toBeTruthy();
+        expect(existsSync(join(dataDir, 'http-secret'))).toBe(true);
+        // … the handler was loaded …
+        expect(api.hasWebUi()).toBe(true);
+        // … and crucially the secret was already visible when the handler
+        // module ran its top-level init (the race the bug lost).
+        const seenAtImport = readFileSync(sentinelPath, 'utf-8');
+        expect(seenAtImport).not.toBe('<<unset>>');
+        expect(seenAtImport).toBe(generated);
+      });
+    });
+
+    it('leaves a pre-set LYNOX_HTTP_SECRET untouched (Docker pre-spawn path)', async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), 'lynox-t1-1-preset-'));
+      const presetSecret = 'preset-secret-from-docker-entrypoint';
+      await withStubHandler(dataDir, { LYNOX_HTTP_SECRET: presetSecret }, (api, sentinelPath) => {
+        // ensureHttpSecret() is a no-op — the secret is unchanged …
+        expect(process.env['LYNOX_HTTP_SECRET']).toBe(presetSecret);
+        // … nothing was persisted …
+        expect(existsSync(join(dataDir, 'http-secret'))).toBe(false);
+        // … and the handler still saw the (pre-set) secret at import time.
+        expect(api.hasWebUi()).toBe(true);
+        expect(readFileSync(sentinelPath, 'utf-8')).toBe(presetSecret);
       });
     });
   });

@@ -378,7 +378,10 @@
 			</form>
 
 			<p class="mt-6 text-center text-xs text-text-subtle">
-				{isDE ? 'Token verloren?' : 'Lost it?'} <code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
+				{isDE
+					? 'Token verloren? lynox zeigt beim Start, wo es liegt — im Terminal oder via'
+					: 'Lost it? lynox prints where to find it on startup — in your terminal or via'}
+				<code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
 			</p>
 		{/if}
 	</div>
