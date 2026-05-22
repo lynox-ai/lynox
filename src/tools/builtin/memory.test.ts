@@ -1028,6 +1028,81 @@ describe('memory tools — KG-backed (B1)', () => {
     // matches found, or returns only the genuine KG-backed fact.
     expect(result).not.toContain('STALE: this fact lives only in the flat file');
   });
+
+  // === Regression guards added during /pr-review === //
+
+  it('memory_recall falls through to the flat-file mirror when the KG throws', async () => {
+    // Seed a flat-file mirror row that ONLY exists in the mirror; the KG
+    // throws on every retrieve. Without the fall-through, the tool would
+    // surface "no memories found"; with the fall-through, the mirror
+    // substring filter surfaces the line.
+    const mirror = new Map<string, string[]>();
+    mirror.set('knowledge', ['fallback-row: visible only via mirror substring search']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const throwingKl: any = {
+      retrieve: vi.fn().mockRejectedValue(new Error('kg-down for-test')),
+      // listRecentActive intentionally omitted so the optional-chaining path
+      // does the right thing too.
+    };
+    const fallbackAgent = buildAgent(throwingKl, mirror);
+
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: 'fallback-row' },
+      fallbackAgent,
+    );
+    expect(result).toContain('fallback-row');
+    // The fall-through tags itself so a future regression that silently
+    // misroutes to a KG that doesn't exist is visible in the response.
+    expect(result).toContain('KG unavailable');
+  });
+
+  it('memory_recall surfaces "no active scopes" when scope is omitted and activeScopes is empty', async () => {
+    const noScopeAgent: IAgent = { ...agent, activeScopes: [] };
+    const result = await memoryRecallTool.handler(
+      { namespace: 'knowledge', query: 'anything' },
+      noScopeAgent,
+    );
+    expect(result).toBe('No active scopes available for memory recall.');
+  });
+
+  it('memory_update with KG attached but no matching old_content returns a no-match message', async () => {
+    // Seed only an unrelated row so old_content can't match.
+    await layer.store('Some other fact', 'knowledge', scope);
+    const result = await memoryUpdateTool.handler(
+      {
+        namespace: 'knowledge',
+        old_content: 'a row that was never stored',
+        new_content: 'replacement',
+      },
+      agent,
+    );
+    expect(result).toMatch(/not found|nothing updated/i);
+  });
+
+  // T1-K1 regression: self-supersession cycle. When old_content and
+  // new_content collapse to the same KG row (near-identical text → dedup
+  // returns the existing row's id), the old code would call
+  // `supersedMemory(old.id, old.id)` and deactivate the only active row.
+  // The guard now returns the row id unchanged.
+  it('memory_update with near-identical new_content does not deactivate the existing row', async () => {
+    const original = 'lynox uses pnpm as the workspace package manager.';
+    const storeRes = await layer.store(original, 'knowledge', scope);
+    expect(storeRes.stored).toBe(true);
+    const originalId = storeRes.memoryId;
+
+    // "Update" to identical text → the KG store dedups to the same row →
+    // updateMemoryWithSupersession's self-supersession guard should leave
+    // the row active. Without the guard this would deactivate the only row.
+    await memoryUpdateTool.handler(
+      { namespace: 'knowledge', old_content: original, new_content: original },
+      agent,
+    );
+
+    const rowsActive = layer.db.listActiveMemories('knowledge', [{ type: 'context', id: scope.id }], 50);
+    const stillActive = rowsActive.find((r: { id: string }) => r.id === originalId);
+    expect(stillActive).toBeDefined();
+    expect(stillActive?.text).toBe(original);
+  });
 });
 
 // Local constant for the test to assert against the tool's KG_RECALL_TOP_K

@@ -295,15 +295,21 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
             `=== ${result.memories.length} ranked ${input.namespace} memories for "${trimmedQuery}" ===`,
             `[Ranked by relevance + confidence + recency. Older/superseded memories are filtered out. Bounded at ${KG_RECALL_TOP_K} results by design.]`,
           );
-        } catch {
-          // KG path failed — fall through to flat-file mirror.
+        } catch (err: unknown) {
+          // KG path failed — fall through to flat-file mirror. Log loudly so
+          // a silently-degraded recall (vector search down, agent quietly
+          // running on substring search) shows up in observability instead
+          // of being invisible.
+          process.stderr.write(
+            `[lynox:memory] memory_recall KG path failed; falling back to flat-file mirror (namespace=${input.namespace}, error=${err instanceof Error ? err.message : String(err)})\n`,
+          );
         }
       } else {
-        // No query: recency-ordered slice from the KG.
+        // No query: recency-ordered slice from the KG. `listRecentActive`
+        // is optional on IKnowledgeLayer — test doubles / minimal impls can
+        // omit it; we fall through to the flat-file mirror in that case.
         try {
-          const recent = (kl as { listRecentActive?: (
-            namespace: MemoryNamespace, scopes: MemoryScopeRef[], limit?: number,
-          ) => KnowledgeRetrievalResult['memories'] }).listRecentActive?.(
+          const recent = kl.listRecentActive?.(
             input.namespace, scopes, KG_NO_QUERY_LIMIT,
           ) ?? [];
           if (recent.length === 0) {
@@ -315,8 +321,11 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
             `=== ${recent.length} most-recent active ${input.namespace} memories ===`,
             `[Recency-ordered (newest first). Bounded at ${KG_NO_QUERY_LIMIT} results. Pass a \`query\` to get relevance-ranked matches instead.]`,
           );
-        } catch {
-          // KG path failed — fall through to flat-file mirror.
+        } catch (err: unknown) {
+          // Same fall-through semantics as the query branch above.
+          process.stderr.write(
+            `[lynox:memory] memory_recall KG no-query path failed; falling back to flat-file mirror (namespace=${input.namespace}, error=${err instanceof Error ? err.message : String(err)})\n`,
+          );
         }
       }
     }

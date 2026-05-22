@@ -572,7 +572,12 @@ export class AgentMemoryDb {
     limit = 50,
   ): MemoryRow[] {
     if (scopes.length === 0) return [];
-    const safeLimit = Math.min(Math.max(limit, 1), 500);
+    // Defensive: a non-finite limit (NaN, Infinity) would bind as a
+    // non-integer SQLite parameter and either throw or return garbage. The
+    // caller is hard-coded today (KG_NO_QUERY_LIMIT=20) but harden the boundary.
+    const safeLimit = Number.isFinite(limit)
+      ? Math.min(Math.max(Math.floor(limit), 1), 500)
+      : 50;
     const scopeClauses = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
     const params: unknown[] = [namespace];
     for (const s of scopes) { params.push(s.type, s.id); }

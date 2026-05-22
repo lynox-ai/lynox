@@ -340,7 +340,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       scopeId: r.scope_id,
       score: r.confidence,
       finalScore: 0,
-      source: 'vector' as const,
+      source: 'recency' as const,
       createdAt: r.created_at,
     }));
   }
@@ -508,16 +508,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       skipContradictionCheck: true,
     });
 
-    // If store dedup'd, force-create instead so supersession is meaningful.
-    let newId = storeResult.memoryId;
+    // If store gave us neither a fresh row nor a dedup target we can supersede
+    // to, bail out — no supersession is possible. (Empty text, validation
+    // rejection, etc.) The old row stays active.
+    const newId = storeResult.memoryId;
     if (!storeResult.stored && !storeResult.deduplicated) {
       return null;
     }
-    if (!storeResult.stored && storeResult.deduplicated) {
-      // The new text is near-identical to an existing memory — that existing
-      // memory IS our new active row. Use it as the supersession target.
-      newId = storeResult.memoryId;
-    }
+    // If the new text is near-identical to an existing memory, store() returned
+    // that existing memory's id — we use it as the supersession target.
+
+    // Self-supersession guard: when `newText ≈ oldText`, the dedup branch above
+    // can return `oldRow.id` as the dedup target. Letting the transaction below
+    // run would `supersedMemory(old.id, old.id)` — deactivating the only
+    // active row with no replacement → data loss. Treat as no-op: the existing
+    // row already IS the "new" state.
+    if (newId === oldRow.id) return oldRow.id;
 
     // Atomically mark old as superseded and link to new.
     this.db.transaction(() => {

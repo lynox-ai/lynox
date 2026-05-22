@@ -131,7 +131,10 @@ export interface KnowledgeRetrievalResult {
     scopeId: string;
     score: number;
     finalScore: number;
-    source: 'vector' | 'graph' | 'fts';
+    /** Where this row came from in the retrieval pipeline. `'recency'` is
+     *  used by `KnowledgeLayer.listRecentActive` (no-query memory_recall) —
+     *  these rows are date-ordered, not similarity-ranked. */
+    source: 'vector' | 'graph' | 'fts' | 'recency';
     createdAt: string;
   }>;
   entities: EntityRecord[];
@@ -207,6 +210,15 @@ export interface IKnowledgeLayer {
       namespace?: MemoryNamespace | undefined;
     },
   ): Promise<KnowledgeRetrievalResult>;
+
+  /** Recency-ordered slice for the no-query `memory_recall` path. Optional
+   *  on the interface so non-KnowledgeLayer impls (or test doubles) don't
+   *  have to wire it; the caller falls back gracefully via optional-chaining. */
+  listRecentActive?(
+    namespace: MemoryNamespace,
+    scopes: MemoryScopeRef[],
+    limit?: number,
+  ): KnowledgeRetrievalResult['memories'];
 
   resolveEntity(name: string, scopes: MemoryScopeRef[]): Promise<EntityRecord | null>;
   getEntityRelations(entityId: string, depth?: number | undefined): Promise<RelationRecord[]>;
