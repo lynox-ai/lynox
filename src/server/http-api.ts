@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import { ensureHttpSecret } from '../core/engine-init.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
@@ -616,6 +617,13 @@ export class LynoxHTTPApi {
       try {
         const abs = resolve(candidate);
         accessSync(abs); // fast existence check before dynamic import
+        // The SvelteKit handler snapshots process.env at module-init time
+        // (server.init() → set_private_env). LYNOX_HTTP_SECRET MUST be set
+        // BEFORE the import() below, or the Web UI auth gate sees no secret
+        // and disables itself while the engine API still enforces — the
+        // "Sitzung abgelaufen" wall on a fresh npx first run. Idempotent: a
+        // no-op when the secret is already set (Docker exports it pre-spawn).
+        ensureHttpSecret();
         const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };
         if (typeof mod.handler === 'function') {
           this.webUiHandler = mod.handler as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -973,13 +981,11 @@ export class LynoxHTTPApi {
   async start(port: number): Promise<void> {
     // Web UI mode binds to 0.0.0.0 — without a secret, the engine API would
     // be reachable unauthenticated from any container network neighbour.
-    // Auto-generate one (persisted to ~/.lynox/http-secret) so the bearer
-    // path always gates the API. API-only mode falls through to its
-    // localhost bind without a secret as before.
-    if (this.webUiHandler && !process.env['LYNOX_HTTP_SECRET']) {
-      const { ensureHttpSecret } = await import('../core/engine-init.js');
-      ensureHttpSecret();
-    }
+    // The secret is auto-generated (persisted to ~/.lynox/http-secret) inside
+    // _tryLoadWebUiHandler() — BEFORE the SvelteKit handler is import()-ed —
+    // so the Web UI auth gate and the engine API observe the same secret.
+    // API-only mode loads no handler and keeps its localhost bind without a
+    // secret as before.
     const secret = process.env['LYNOX_HTTP_SECRET'];
 
     const trustProxy = process.env['LYNOX_TRUST_PROXY'] === 'true';
