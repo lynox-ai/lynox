@@ -2,6 +2,7 @@ import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationC
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
+import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
@@ -207,7 +208,37 @@ async function executeThinker(
     maxIterations: maxIterations ?? DEFAULT_SPAWN_MAX_TURNS,
   };
 
-  const childAgent = new Agent({
+  // T2-X1 (PRD-HN-LAUNCH-HARDENING) part 4+5: mint a RunHistory row for the
+  // child BEFORE constructing the Agent so (a) the constructor can stamp
+  // `currentRunId` onto the child, (b) the post-run `updateRun()` below
+  // records actual cost keyed on that id, and (c) the daily/monthly cost-cap
+  // aggregator (`RunHistory.getCostByDay` → `session-budget.checkPersistentBudget`)
+  // sees the spawn spend. Without this, a self-hoster's BYOK cap can drift
+  // past their configured limit via fan-out (spawn-child spend is invisible
+  // to the runs table today). RunHistory comes from the parent's
+  // toolContext — engine-init wires it at startup. Falls back to undefined
+  // when no history is configured (ad-hoc Agent ctor outside Session).
+  const runHistory = parentAgent.toolContext.runHistory;
+  let childRunId: string | undefined;
+  if (runHistory) {
+    try {
+      childRunId = runHistory.insertRun({
+        sessionId: parentAgent.currentThreadId ?? '',
+        taskText: spec.task,
+        modelTier: modelTier as string,
+        modelId: model,
+        runType: 'single',
+        spawnParentId: parentAgent.currentRunId,
+        spawnDepth: childDepth,
+      });
+    } catch {
+      // Persistence failures must never break a spawn. Cost simply won't
+      // be recorded for this child — caps see exactly what they saw pre-fix.
+      childRunId = undefined;
+    }
+  }
+
+  const agentConfig: AgentConfig = {
     name: spec.name,
     model,
     systemPrompt,
@@ -244,16 +275,105 @@ async function executeThinker(
     // Share the recall blob store so a sub-agent's `recall_tool_result` can
     // resolve handles minted by the parent conversation's last compaction.
     toolResultBlobStore: parentAgent.toolResultBlobStore,
-  });
+    // T2-X1 part 1: shallow-copy parent's toolContext so the child sees the
+    // engine's DataStore / RunHistory / ApiStore / KnowledgeLayer / network
+    // policy refs (sub-agents need these to use tools). Shallow copy =
+    // distinct object, shared refs — safe today because `applyNetworkPolicy`
+    // is unwired (toolContext.networkPolicy is always undefined in core).
+    // Wiring `childIsolation → networkPolicy` is explicitly post-launch (PRD
+    // §6); T2-X1 does NOT claim to close child network isolation.
+    //
+    // Reach delta (intentional, autonomy-inheritance): the shared refs are
+    // also write-reachable — a child can mutate parent state through
+    // dataStore / apiStore / runHistory (e.g. updateRun on the parent's
+    // row). Acceptable because the child IS trusted code, but not hidden.
+    toolContext: { ...parentAgent.toolContext },
+    // T2-X1 part 2: share the parent's SecretStore so `ask_secret`, vault
+    // reads, and tool credential lookups work in the child. Documented
+    // reach delta: a child's `http_request` will auto-inject `Bearer` tokens
+    // for any oauth2 api_profile (http.ts ~415-427) using the parent's
+    // vault, AND the child can WRITE/overwrite the parent's vault entries
+    // via `secretStore.set`. Both are INTENTIONAL — sub-agents inherit the
+    // parent's autonomy, and a researcher spawned to query the user's
+    // Stripe/Notion API must be able to authenticate and persist a refresh
+    // token. Surfaced explicitly in the PR body, not hidden.
+    secretStore: parentAgent.secretStore,
+    // T2-X1 part 3: pass the three prompt callbacks so an `ask_user`/
+    // `ask_secret`/`ask_tabs` invoked by the child surfaces to the same UI
+    // the parent uses. Without these, child tool invocations that need user
+    // input silently fail (the prompt callback is undefined).
+    promptUser: parentAgent.promptUser,
+    promptSecret: parentAgent.promptSecret,
+    promptTabs: parentAgent.promptTabs,
+    // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
+    // onto the child and the child's downstream code (memory writes,
+    // tool-call recording in engine-init's toolEnd subscriber, etc.) can
+    // attribute work to this run.
+    currentRunId: childRunId,
+  };
 
-  // Track child for abort propagation
-  activeChildAgents.add(childAgent);
+  // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
+  // failure-marking catches a synchronous ctor throw too (otherwise the row
+  // stays `status='running'` forever and pollutes the history UI). childStart
+  // is captured BEFORE the ctor for symmetric durationMs on either failure.
+  const childStart = Date.now();
+  let childAgent: Agent | undefined;
   try {
+    childAgent = new Agent(agentConfig);
+    // Track child for abort propagation (added inside try so a ctor throw
+    // doesn't leave a half-constructed agent in the active set).
+    activeChildAgents.add(childAgent);
+
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
+
+    // T2-X1 part 5: record the child's actual LLM spend into the same
+    // `runs` table the daily/monthly cost-cap aggregator reads. The
+    // session-budget pre-flight already reserved an *estimate* (see
+    // `estimateSpawnCost` + `checkSessionBudget` in the handler below) —
+    // this final updateRun is the post-hoc truth, and crucially it makes
+    // the spend visible to `getCostByDay` so a self-hoster's $-per-day
+    // cap actually counts spawn work.
+    if (runHistory && childRunId) {
+      try {
+        const snap = childAgent.getCostSnapshot();
+        runHistory.updateRun(childRunId, {
+          responseText: result,
+          tokensIn: snap?.inputTokens ?? 0,
+          tokensOut: snap?.outputTokens ?? 0,
+          costUsd: snap?.estimatedCostUSD ?? 0,
+          durationMs: Date.now() - childStart,
+          status: 'completed',
+          stopReason: 'end_turn',
+        });
+      } catch {
+        // Persistence failure — non-fatal. The child's result still
+        // returns; only the cost-attribution side-effect is missed.
+      }
+    }
+
     return { result, childRunId: childAgent.currentRunId };
+  } catch (err) {
+    // Mark the child run failed so the cost cap and history UI don't show
+    // it as still-running. Fires for BOTH ctor failures (childAgent
+    // undefined, no spend yet) and send failures (childAgent constructed,
+    // partial spend possible — CostGuard tracks per-turn).
+    if (runHistory && childRunId) {
+      try {
+        const snap = childAgent?.getCostSnapshot() ?? null;
+        runHistory.updateRun(childRunId, {
+          tokensIn: snap?.inputTokens ?? 0,
+          tokensOut: snap?.outputTokens ?? 0,
+          costUsd: snap?.estimatedCostUSD ?? 0,
+          durationMs: Date.now() - childStart,
+          status: 'failed',
+          stopReason: err instanceof Error ? err.message.slice(0, 200) : 'error',
+        });
+      } catch { /* swallow */ }
+    }
+    throw err;
   } finally {
-    activeChildAgents.delete(childAgent);
+    if (childAgent) activeChildAgents.delete(childAgent);
   }
 }
 
