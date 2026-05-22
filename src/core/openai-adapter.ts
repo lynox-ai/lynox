@@ -272,6 +272,11 @@ async function* translateStream(
                   input: {},
                 },
               } as unknown as BetaRawContentBlockStartEvent as BetaRawMessageStreamEvent;
+              // Reserve this index for THIS tool — subsequent parallel
+              // tool_calls in the same turn must claim the next slot, or
+              // StreamProcessor.rawInputs (keyed by index) concatenates
+              // their JSON deltas onto this block → JSON.parse throws.
+              blockIndex++;
             }
 
             // Stream tool arguments as input_json_delta
