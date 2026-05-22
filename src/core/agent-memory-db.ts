@@ -532,6 +532,63 @@ export class AgentMemoryDb {
     `).all(`%${pattern}%`) as MemoryRow[];
   }
 
+  /**
+   * Find an active memory by exact text match within an optional namespace and
+   * scope set. Returns the most recent match (created_at DESC). Used by the
+   * supersession-aware update path: equality, not substring — so an "update of
+   * X" only fires on an exact prior X, not on any line that happens to contain X.
+   */
+  findActiveMemoryByExactText(
+    text: string,
+    namespace?: string | undefined,
+    scopes?: Array<{ type: string; id: string }> | undefined,
+  ): MemoryRow | null {
+    const clauses: string[] = ['is_active = 1', 'text = ?'];
+    const params: unknown[] = [text];
+    if (namespace) {
+      clauses.push('namespace = ?');
+      params.push(namespace);
+    }
+    if (scopes && scopes.length > 0) {
+      const scopeClauses = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+      clauses.push(`(${scopeClauses})`);
+      for (const s of scopes) { params.push(s.type, s.id); }
+    }
+    const row = this.db.prepare(
+      `SELECT * FROM memories WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT 1`,
+    ).get(...params) as MemoryRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * List the most recently-created active memories filtered by namespace and a
+   * set of scopes. Returns rows in `created_at DESC` order, capped at `limit`.
+   * Used by `memory_recall` for the no-query path (the query path uses vector
+   * search via `findSimilarMemories`).
+   */
+  listActiveMemories(
+    namespace: string,
+    scopes: Array<{ type: string; id: string }>,
+    limit = 50,
+  ): MemoryRow[] {
+    if (scopes.length === 0) return [];
+    // Defensive: a non-finite limit (NaN, Infinity) would bind as a
+    // non-integer SQLite parameter and either throw or return garbage. The
+    // caller is hard-coded today (KG_NO_QUERY_LIMIT=20) but harden the boundary.
+    const safeLimit = Number.isFinite(limit)
+      ? Math.min(Math.max(Math.floor(limit), 1), 500)
+      : 50;
+    const scopeClauses = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+    const params: unknown[] = [namespace];
+    for (const s of scopes) { params.push(s.type, s.id); }
+    params.push(safeLimit);
+    return this.db.prepare(
+      `SELECT * FROM memories
+       WHERE is_active = 1 AND namespace = ? AND (${scopeClauses})
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params) as MemoryRow[];
+  }
+
   deactivateMemoriesByPattern(pattern: string, namespace?: string | undefined): number {
     if (namespace) {
       const result = this.db.prepare(`

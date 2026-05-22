@@ -317,6 +317,34 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return this.retrievalEngine.retrieve(query, scopes, options);
   }
 
+  /**
+   * List the most-recent active memories for a namespace+scope set, ordered
+   * by `created_at DESC`. Used by `memory_recall` for the no-query path (the
+   * query path uses vector retrieval via `retrieve()`). Returns a thin
+   * `KnowledgeRetrievalResult.memories`-shaped slice so the caller can format
+   * uniformly with ranked recall — `finalScore` is left at 0 (recency-ordered,
+   * not similarity-ranked) and `source` is `'vector'` as a placeholder.
+   */
+  listRecentActive(
+    namespace: MemoryNamespace,
+    scopes: MemoryScopeRef[],
+    limit = 20,
+  ): KnowledgeRetrievalResult['memories'] {
+    const scopeFilters = scopes.map(s => ({ type: s.type, id: s.id }));
+    const rows = this.db.listActiveMemories(namespace, scopeFilters, limit);
+    return rows.map(r => ({
+      id: r.id,
+      text: r.text,
+      namespace: r.namespace as MemoryNamespace,
+      scopeType: r.scope_type as MemoryScopeRef['type'],
+      scopeId: r.scope_id,
+      score: r.confidence,
+      finalScore: 0,
+      source: 'recency' as const,
+      createdAt: r.created_at,
+    }));
+  }
+
   formatRetrievalContext(
     result: KnowledgeRetrievalResult,
     maxChars?: number | undefined,
@@ -449,6 +477,61 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
 
     return true;
+  }
+
+  /**
+   * Supersession-aware memory update. Finds the matching active memory by
+   * exact text within the given namespace/scope set, writes a new active
+   * memory carrying the replacement text, and marks the old row inactive +
+   * `superseded_by` the new id. History is preserved — the old row stays in
+   * the table for audit/forensics; only `memory_recall` (which already filters
+   * `is_active=1`) stops returning it.
+   *
+   * Returns the new memory id, or `null` if no matching active row was found.
+   */
+  async updateMemoryWithSupersession(
+    oldText: string,
+    newText: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    options?: { sourceRunId?: string | undefined; sourceThreadId?: string | undefined } | undefined,
+  ): Promise<string | null> {
+    const oldRow = this.db.findActiveMemoryByExactText(oldText, namespace, [scope]);
+    if (!oldRow) return null;
+
+    // Store the new memory through the full pipeline (embedding, entity
+    // extraction, contradiction detection) but bypass the dedup guard via
+    // contradiction-coexistence: we want the new row regardless.
+    const storeResult = await this.store(newText, namespace, scope, {
+      ...(options?.sourceRunId !== undefined ? { sourceRunId: options.sourceRunId } : {}),
+      ...(options?.sourceThreadId !== undefined ? { sourceThreadId: options.sourceThreadId } : {}),
+      skipContradictionCheck: true,
+    });
+
+    // If store gave us neither a fresh row nor a dedup target we can supersede
+    // to, bail out — no supersession is possible. (Empty text, validation
+    // rejection, etc.) The old row stays active.
+    const newId = storeResult.memoryId;
+    if (!storeResult.stored && !storeResult.deduplicated) {
+      return null;
+    }
+    // If the new text is near-identical to an existing memory, store() returned
+    // that existing memory's id — we use it as the supersession target.
+
+    // Self-supersession guard: when `newText ≈ oldText`, the dedup branch above
+    // can return `oldRow.id` as the dedup target. Letting the transaction below
+    // run would `supersedMemory(old.id, old.id)` — deactivating the only
+    // active row with no replacement → data loss. Treat as no-op: the existing
+    // row already IS the "new" state.
+    if (newId === oldRow.id) return oldRow.id;
+
+    // Atomically mark old as superseded and link to new.
+    this.db.transaction(() => {
+      this.db.supersedMemory(oldRow.id, newId);
+      this.db.createSupersedes(newId, oldRow.id, 'memory_update');
+    });
+
+    return newId;
   }
 
   // === Maintenance ===
