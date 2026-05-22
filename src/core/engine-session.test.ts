@@ -416,6 +416,41 @@ describe('Engine + Session (Orchestrator)', () => {
       const agent = session.getAgent();
       expect(agent).toBeDefined();
     });
+
+    it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {
+      // Regression: the removed _isSimpleTask heuristic downgraded the main
+      // agent to Haiku for any task text < 25 chars. "gemini und search"
+      // (17 chars) is a research follow-up — it must run on the configured tier,
+      // not silently drop to Haiku and then run multi-step web research there.
+      const { session } = await createEngineAndSession();
+      expect(session.getModelTier()).toBe('sonnet');
+
+      vi.mocked(Agent).mockClear();
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('gemini und search');
+
+      expect(session.getModelTier()).toBe('sonnet');
+      // No Agent may be reconstructed with a downgraded Haiku model mid-run.
+      const downgraded = vi.mocked(Agent).mock.calls.some(
+        (call) => call[0]?.model?.includes('haiku') === true,
+      );
+      expect(downgraded).toBe(false);
+    });
+
+    it('keeps the configured tier for short factual-shaped queries', async () => {
+      // The old heuristic also downgraded "zeig …" / "was ist …" lookups < 80 chars.
+      const { session } = await createEngineAndSession();
+
+      vi.mocked(Agent).mockClear();
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('zeig mir die neuesten infos');
+
+      expect(session.getModelTier()).toBe('sonnet');
+      const downgraded = vi.mocked(Agent).mock.calls.some(
+        (call) => call[0]?.model?.includes('haiku') === true,
+      );
+      expect(downgraded).toBe(false);
+    });
   });
 
   // -- registerPipelineTools --
