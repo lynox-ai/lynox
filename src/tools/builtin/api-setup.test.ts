@@ -3,16 +3,33 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+
+// T1-4: http.ts's fetchWithValidatedRedirects (consumed by api_setup) now
+// delegates the actual HTTP socket to fetchPinned (DNS-rebind defense).
+// The vi.spyOn(globalThis, 'fetch') pattern below intercepts the legacy
+// fetch path; we install a pinned-transport seam that captures the pinned
+// IP and delegates to globalThis.fetch (so the existing spies still see the
+// call). We also stub node:dns/promises so fetchPinned's DNS-resolve step
+// returns a public IP and doesn't try the real resolver in CI.
+vi.mock('node:dns/promises', () => ({
+  default: {
+    lookup: vi.fn().mockResolvedValue([{ address: '1.2.3.4', family: 4 }]),
+  },
+}));
+
 import { apiSetupTool, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
 import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
 import * as llmHelper from '../../core/llm-helper.js';
+import { setPinnedTransportForTests } from '../../core/network-guard.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({
   getLynoxDir: () => mockLynoxDir,
 }));
+
+let restorePinnedTransport: (() => void) | undefined;
 
 // Partial-mock the llm-helper module so docs_url bootstrap tests can stub
 // `callForStructuredJson` while keeping the real BudgetError class for
@@ -78,10 +95,23 @@ function createMockAgent(apiStore?: ApiStore | null, secretStore?: unknown) {
 describe('api_setup tool', () => {
   beforeEach(() => {
     mockLynoxDir = createTmpDir();
+    // Install the pinned-transport seam: each test's vi.spyOn(globalThis,
+    // 'fetch').mockResolvedValue(...) keeps working — the transport just
+    // forwards. The DNS-rebind defense itself is unit-tested in
+    // src/core/network-guard.test.ts; this file's tests focus on api-setup
+    // behaviour and treat fetch as a black box.
+    restorePinnedTransport = setPinnedTransportForTests(async (input) => {
+      const init: RequestInit = { method: input.method, headers: input.headers };
+      if (input.body !== undefined) init.body = input.body.toString('utf8');
+      if (input.signal) init.signal = input.signal;
+      return (globalThis.fetch as typeof fetch)(input.url, init);
+    });
   });
 
   afterEach(() => {
     rmSync(mockLynoxDir, { recursive: true, force: true });
+    restorePinnedTransport?.();
+    restorePinnedTransport = undefined;
   });
 
   describe('create', () => {

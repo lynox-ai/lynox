@@ -1,4 +1,4 @@
-import { promises as dns } from 'node:dns';
+import { fetchPinned, isPrivateIP } from '../../core/network-guard.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
 export interface ExtractedContent {
@@ -14,37 +14,14 @@ const DEFAULT_MAX_CHARS = 50_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
 
-// --- SSRF protection (copied from tools/builtin/http.ts) ---
+// --- SSRF protection ---
+//
+// isPrivateIP + the IP-pinning fetch helper come from core/network-guard.ts —
+// see that module for the canonical implementation (decodes IPv4-mapped-IPv6
+// incl. hex form, and pins the http(s) connection to the validated IP to
+// close the DNS-rebinding window between validate + connect).
 
-function isPrivateIP(ip: string): boolean {
-  const mapped = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-  const v4Parts = mapped.split('.');
-  if (v4Parts.length === 4 && v4Parts.every(p => /^\d{1,3}$/.test(p))) {
-    const nums = v4Parts.map(Number);
-    if (nums.some(n => n < 0 || n > 255)) return false;
-    const [a, b, c] = nums as [number, number, number, number];
-    if (a === 127) return true;
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (a === 198 && (b === 18 || b === 19)) return true;
-    if (a === 192 && b === 0 && c === 0) return true;
-    if (a === 0) return true;
-    if (a >= 224) return true;
-  }
-  const normalized = ip.toLowerCase();
-  if (normalized.includes(':')) {
-    if (normalized === '::1' || normalized === '::') return true;
-    if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true;
-    if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true;
-    if (/^ff[0-9a-f]{2}:/.test(normalized)) return true;
-  }
-  return false;
-}
-
-async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promise<void> {
+function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
@@ -80,14 +57,11 @@ async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promi
     }
   }
 
+  // Cheap early-out for literal-IP private targets. fetchPinned catches these
+  // anyway, but rejecting before DNS keeps the error synchronous + matches
+  // the previous behaviour.
   if (isPrivateIP(hostname)) {
     throw new Error(`Blocked: private IP address "${hostname}"`);
-  }
-  const resolved = await dns.lookup(hostname, { all: true, verbatim: true }).catch(() => []);
-  for (const record of resolved) {
-    if (isPrivateIP(record.address)) {
-      throw new Error(`Blocked: "${hostname}" resolves to private IP "${record.address}"`);
-    }
   }
 }
 
@@ -96,9 +70,10 @@ async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promi
 async function fetchWithRedirects(url: string, ctx?: ToolContext | undefined): Promise<Response> {
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    await validateUrl(currentUrl, ctx);
-    const response = await fetch(currentUrl, {
-      redirect: 'manual',
+    applyHostPolicy(currentUrl, ctx);
+    // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
+    // one shot — no rebind window between validate and connect.
+    const response = await fetchPinned(currentUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; Lynox/1.0; +https://lynox.ai)',
         Accept: 'text/html,application/xhtml+xml,*/*',

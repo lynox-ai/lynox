@@ -11,6 +11,16 @@ import { httpRequestTool, detectSecretInContent } from './http.js';
 import { applyHttpRateLimits, createToolContext } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
+import { setPinnedTransportForTests } from '../../core/network-guard.js';
+import type { PinnedTransportInput } from '../../core/network-guard.js';
+
+// fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
+// fetchWithValidatedRedirects. The pinned transport is the seam: tests stub
+// globalThis.fetch as before; this transport adapts the pinned-input back
+// onto the stubbed fetch, and additionally exposes `lastPinnedInputs` so a
+// regression test can assert the IP-pinning happened.
+const lastPinnedInputs: PinnedTransportInput[] = [];
+let restorePinnedTransport: (() => void) | undefined;
 
 const handler = httpRequestTool.handler;
 
@@ -80,6 +90,15 @@ function createMockResponse(options: {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // dns.lookup is a vi.fn() created at module-eval; restoreAllMocks does
+  // NOT reset its queued mockResolvedValueOnce values. Reset it explicitly
+  // AND re-install a sane public default so tests that don't call
+  // mockDnsPublic() still see a public-IP resolution (matches the pre-T1-4
+  // implicit inheritance behaviour that the existing test suite relies on).
+  vi.mocked(dns.lookup).mockReset();
+  vi.mocked(dns.lookup).mockResolvedValue(
+    [{ address: '1.2.3.4', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>,
+  );
   testCtx = createToolContext(TEST_USER_CONFIG);
   testCounters = {
     httpRequests: 0,
@@ -87,6 +106,39 @@ beforeEach(() => {
     approvedOutboundDomains: new Set<string>(),
     pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
+  lastPinnedInputs.length = 0;
+  // Install the test transport: capture the pinned input + delegate to
+  // whatever globalThis.fetch currently is (which existing tests stub via
+  // vi.stubGlobal). This preserves the test contract — we still get to
+  // assert via the fetch stub — AND verifies the pinning code path ran.
+  restorePinnedTransport = setPinnedTransportForTests(async (input) => {
+    lastPinnedInputs.push(input);
+    // Reconstruct an init that matches the original fetch() shape callers used.
+    // The pinned transport receives:
+    //   - headers WITH an auto-added `host` entry (strip before delegating, the
+    //     legacy fetch path didn't expose it)
+    //   - body as Buffer (decode back to string — handler input was a string)
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input.headers)) {
+      if (k.toLowerCase() === 'host') continue;
+      headers[k] = v;
+    }
+    const init: RequestInit = {
+      method: input.method,
+      headers,
+    };
+    if (input.body !== undefined) {
+      init.body = input.body.toString('utf8');
+    }
+    if (input.signal) init.signal = input.signal;
+    // Delegate to fetch — the stubbed mock returns the prepared Response.
+    return (globalThis.fetch as typeof fetch)(input.url, init);
+  });
+});
+
+afterEach(() => {
+  restorePinnedTransport?.();
+  restorePinnedTransport = undefined;
 });
 
 describe('httpRequestTool', () => {
@@ -163,6 +215,47 @@ describe('httpRequestTool', () => {
       mockDnsPrivate('192.168.1.100');
       await expect(handler({ url: 'http://evil.com' }, makeAgent()))
         .rejects.toThrow('internal network');
+    });
+
+    it('blocks DNS-resolved IPv4-mapped-IPv6 hex form (::ffff:7f00:1 == 127.0.0.1)', async () => {
+      // Pre-T1-4: the local isPrivateIP only stripped the dotted form, so the
+      // hex form passed validation. With the canonical isPrivateIP from
+      // network-guard, the hex form decodes to 127.0.0.1 and is rejected.
+      mockDnsIpv6Private('::ffff:7f00:1');
+      await expect(handler({ url: 'http://hex-evil.example.test' }, makeAgent()))
+        .rejects.toThrow('internal network');
+    });
+
+    it('blocks DNS-resolved IPv4-mapped-IPv6 hex form for cloud metadata (::ffff:a9fe:a9fe == 169.254.169.254)', async () => {
+      mockDnsIpv6Private('::ffff:a9fe:a9fe');
+      await expect(handler({ url: 'http://meta.example.test' }, makeAgent()))
+        .rejects.toThrow('internal network');
+    });
+
+    // T1-4 rebind regression: validate-then-fetch flow allowed a re-resolved
+    // address to slip through. fetchPinned closes the window: resolve DNS
+    // ONCE, validate it, pin the connection to that IP. The test transport
+    // (installed in beforeEach) captures the pinned IP so we can assert the
+    // pinning happened and no second DNS lookup leaked through.
+    it('rebind defense: pins to first-resolved (public) IP even if a 2nd resolve would return loopback', async () => {
+      vi.mocked(dns.lookup).mockReset();
+      vi.mocked(dns.lookup)
+        .mockResolvedValueOnce(
+          [{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>,
+        )
+        .mockResolvedValueOnce(
+          [{ address: '127.0.0.1', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>,
+        );
+      const mockResp = createMockResponse({ body: 'ok' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      await handler({ url: 'http://rebind.example.test' }, makeAgent());
+
+      // Only the first DNS resolve happened — no rebind window.
+      expect(vi.mocked(dns.lookup)).toHaveBeenCalledTimes(1);
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.pinnedIp).toBe('93.184.216.34');
+      expect(lastPinnedInputs[0]!.pinnedIp).not.toBe('127.0.0.1');
     });
   });
 
