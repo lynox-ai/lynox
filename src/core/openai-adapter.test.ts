@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { OpenAIAdapter } from './openai-adapter.js';
+import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
-import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type {
+  BetaRawMessageStreamEvent,
+  BetaToolUseBlock,
+} from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -167,6 +171,232 @@ describe('OpenAIAdapter', () => {
         // Stop reason should be tool_use
         const msgDelta = events.find(e => e.type === 'message_delta') as { delta: { stop_reason?: string } };
         expect(msgDelta.delta.stop_reason).toBe('tool_use');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('keeps parallel tool_calls in distinct blocks (regression: blockIndex collision)', async () => {
+      // Regression for T1-3: prior to the fix, blockIndex was incremented only
+      // when a text block closed — never per tool block. Two sequential
+      // tool_calls (or a single chunk carrying two tool_calls) therefore
+      // shared one blockIndex; content_block_start fired twice at the same
+      // index and StreamProcessor.rawInputs (keyed by index) concatenated
+      // both partial_json streams into one buffer → JSON.parse threw and
+      // both inputs collapsed to {}. Affects every non-Anthropic provider
+      // (Mistral / Groq / vLLM / Ollama / OpenAI itself when parallel calls
+      // are enabled).
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        // First chunk opens BOTH tool slots at once (common Mistral/OpenAI shape).
+        res.write(sseChunk({
+          id: 'parallel-1',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              tool_calls: [
+                { index: 0, id: 'call_alpha', type: 'function', function: { name: 'get_weather', arguments: '' } },
+                { index: 1, id: 'call_beta', type: 'function', function: { name: 'get_stock', arguments: '' } },
+              ],
+            },
+            finish_reason: null,
+          }],
+        }));
+        // Stream arguments for tool 0 in two pieces.
+        res.write(sseChunk({
+          id: 'parallel-1',
+          choices: [{
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":' } }] },
+            finish_reason: null,
+          }],
+        }));
+        res.write(sseChunk({
+          id: 'parallel-1',
+          choices: [{
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { arguments: '"Berlin"}' } }] },
+            finish_reason: null,
+          }],
+        }));
+        // Stream arguments for tool 1 — DIFFERENT shape + values, so a
+        // concatenation bug would produce invalid JSON or the wrong object.
+        res.write(sseChunk({
+          id: 'parallel-1',
+          choices: [{
+            index: 0,
+            delta: { tool_calls: [{ index: 1, function: { arguments: '{"ticker":' } }] },
+            finish_reason: null,
+          }],
+        }));
+        res.write(sseChunk({
+          id: 'parallel-1',
+          choices: [{
+            index: 0,
+            delta: { tool_calls: [{ index: 1, function: { arguments: '"AAPL"}' } }] },
+            finish_reason: null,
+          }],
+        }));
+        res.write(sseChunk({
+          id: 'parallel-1',
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          usage: { prompt_tokens: 60, completion_tokens: 30 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100,
+          messages: [{ role: 'user', content: 'Weather and stock?' }],
+        }));
+
+        // ── Layer 1: raw event shape ──────────────────────────────────
+        // Two tool_use content_block_start events at distinct indices.
+        const toolStarts = events
+          .filter(e => e.type === 'content_block_start')
+          .map(e => e as { type: string; index: number; content_block: { type: string; name?: string; id?: string } })
+          .filter(e => e.content_block.type === 'tool_use');
+        expect(toolStarts.length).toBe(2);
+        expect(toolStarts[0]!.index).not.toBe(toolStarts[1]!.index);
+        expect(new Set(toolStarts.map(e => e.index)).size).toBe(2);
+
+        // Each tool's input_json_delta events target its OWN block index.
+        const deltasByIndex = new Map<number, string>();
+        for (const e of events) {
+          if (e.type !== 'content_block_delta') continue;
+          const ev = e as { index: number; delta: { type: string; partial_json?: string } };
+          if (ev.delta.type !== 'input_json_delta') continue;
+          deltasByIndex.set(ev.index, (deltasByIndex.get(ev.index) ?? '') + (ev.delta.partial_json ?? ''));
+        }
+        expect(deltasByIndex.size).toBe(2);
+        // The two assembled JSON strings parse to two DIFFERENT objects.
+        const parsedByIndex = [...deltasByIndex.entries()]
+          .sort(([a], [b]) => a - b)
+          .map(([, json]) => JSON.parse(json) as Record<string, string>);
+        expect(parsedByIndex).toEqual([
+          { city: 'Berlin' },
+          { ticker: 'AAPL' },
+        ]);
+
+        // ── Layer 2: end-to-end through StreamProcessor ───────────────
+        // This is the real consumer that the original bug broke: it keys
+        // its rawInputs map by event.index. Re-stream the same events
+        // through it and assert both tool_use blocks have correctly
+        // parsed, distinct, non-empty inputs.
+        async function* replay(): AsyncIterable<BetaRawMessageStreamEvent> {
+          // StreamProcessor needs a message_start before block events to
+          // pick up usage; the adapter does not emit one, so synthesise.
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'replay', type: 'message', role: 'assistant', model: 'test-model',
+              content: [], stop_reason: null, stop_sequence: null,
+              usage: {
+                input_tokens: 0, output_tokens: 0,
+                cache_creation_input_tokens: null, cache_read_input_tokens: null,
+              },
+            },
+          } as unknown as BetaRawMessageStreamEvent;
+          for (const e of events) yield e;
+        }
+
+        const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
+        const result = await processor.process(replay());
+
+        const toolBlocks = result.content.filter((b): b is BetaToolUseBlock => b.type === 'tool_use');
+        expect(toolBlocks.length).toBe(2);
+        expect(toolBlocks[0]!.name).toBe('get_weather');
+        expect(toolBlocks[0]!.input).toEqual({ city: 'Berlin' });
+        expect(toolBlocks[1]!.name).toBe('get_stock');
+        expect(toolBlocks[1]!.input).toEqual({ ticker: 'AAPL' });
+
+        // Negative assertions that pin the regression: neither input is
+        // empty (pre-fix StreamProcessor caught the parse-throw and set
+        // input={}), and neither is the concatenation of both.
+        expect(toolBlocks[0]!.input).not.toEqual({});
+        expect(toolBlocks[1]!.input).not.toEqual({});
+        expect(Object.keys(toolBlocks[0]!.input as object)).not.toContain('ticker');
+        expect(Object.keys(toolBlocks[1]!.input as object)).not.toContain('city');
+
+        expect(result.stop_reason).toBe('tool_use');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('preserves text-then-tool ordering when a tool follows a text block', async () => {
+      // Off-by-one guard for the T1-3 fix: the text block must close at
+      // index 0, the tool block must open at index 1, and a SECOND tool
+      // (if any) must open at index 2 — no collision with the text-stop.
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'mixed-1',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'Let me check.' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'mixed-1',
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [
+                { index: 0, id: 'call_a', type: 'function', function: { name: 'tool_a', arguments: '{"q":"x"}' } },
+                { index: 1, id: 'call_b', type: 'function', function: { name: 'tool_b', arguments: '{"q":"y"}' } },
+              ],
+            },
+            finish_reason: null,
+          }],
+        }));
+        res.write(sseChunk({
+          id: 'mixed-1',
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100,
+          messages: [{ role: 'user', content: 'Go.' }],
+        }));
+
+        const starts = events
+          .filter(e => e.type === 'content_block_start')
+          .map(e => e as { index: number; content_block: { type: string } });
+        expect(starts.length).toBe(3);
+        expect(starts[0]!.content_block.type).toBe('text');
+        expect(starts[0]!.index).toBe(0);
+        expect(starts[1]!.content_block.type).toBe('tool_use');
+        expect(starts[1]!.index).toBe(1);
+        expect(starts[2]!.content_block.type).toBe('tool_use');
+        expect(starts[2]!.index).toBe(2);
+
+        // The text-block stop must fire at index 0 (not 1, which would
+        // mean we stomped the first tool's start), and the per-tool
+        // stops at the close fire at indices 1 and 2.
+        const stops = events
+          .filter(e => e.type === 'content_block_stop')
+          .map(e => (e as { index: number }).index);
+        expect(stops).toContain(0);
+        expect(stops).toContain(1);
+        expect(stops).toContain(2);
       } finally {
         server.close();
       }
