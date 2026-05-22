@@ -1,11 +1,50 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Mock the orchestrator runner so the pipeline-path tests can drive
+// status/runId outcomes deterministically without spinning up an LLM.
+// `runManifest` is the single execution primitive `runSavedWorkflow`
+// delegates to; mocking it isolates the worker-loop wiring under test
+// from the orchestrator's real behaviour. Real-orchestrator coverage
+// lives in pipeline.test.ts + the orchestrator's own suite.
+const mockRunManifest = vi.fn();
+const mockRetryManifest = vi.fn();
+const mockValidateManifest = vi.fn((m: unknown) => m);
+vi.mock('../orchestrator/runner.js', () => ({
+  runManifest: (...args: unknown[]) => mockRunManifest(...args),
+  retryManifest: (...args: unknown[]) => mockRetryManifest(...args),
+}));
+vi.mock('../orchestrator/validate.js', async (importOriginal) => {
+  // Keep MAX_STEPS + the rest of the module intact; only intercept
+  // validateManifest so we don't have to assemble a fully-valid Manifest
+  // shape in every test setup.
+  const actual = await importOriginal<typeof import('../orchestrator/validate.js')>();
+  return {
+    ...actual,
+    validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
+  };
+});
+
 import { WorkerLoop } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
-import type { TaskRecord } from '../types/index.js';
+import type { TaskRecord, PlannedPipeline } from '../types/index.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
+import type { RunState, AgentOutput } from '../types/orchestration.js';
+
+function makeRunState(overrides?: Partial<RunState>): RunState {
+  return {
+    runId: 'fresh-run-id',
+    manifestName: 'test',
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    status: 'completed',
+    globalContext: {},
+    outputs: new Map<string, AgentOutput>(),
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -525,70 +564,301 @@ describe('WorkerLoop', () => {
     void promptResolve;
   });
 
-  // ---- pipeline path: validateManifest boundary ----
+  // ---- pipeline path: routed through runSavedWorkflow (T1-5) ----
   //
   // Drive executePipeline directly. Routing via tick() → executeTask →
   // fire-and-forget makes the async chain hard to await deterministically
   // (two sequential dynamic imports plus a bugsink capture chain in the
-  // outer catch). Direct invocation locks the new validation contract:
-  // invalid manifests reject with typed errors before reaching
-  // computePhases. The outer catch in executeTask is unchanged and
-  // already exercised by the standard task-failure tests above.
-  it('executePipeline rejects a malformed persisted manifest with a typed error', async () => {
+  // outer catch). Direct invocation locks the new contract: scheduled
+  // pipelines run via `runSavedWorkflow`, which performs the
+  // PlannedPipeline → Manifest conversion correctly AND leaves the
+  // template row untouched so the next tick can fire it again. The outer
+  // catch in executeTask is unchanged and already exercised by the
+  // standard task-failure tests above.
+  it('executePipeline surfaces a non-found pipeline as a typed error', async () => {
     vi.useRealTimers();
     const task = makeTask({
-      id: 'pipe-task-1',
-      pipeline_id: 'pipeline-bad',
+      id: 'pipe-task-missing',
+      pipeline_id: 'pipeline-missing',
       task_type: 'pipeline',
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})),
       getRunHistory: vi.fn(() => ({
-        getPlannedPipeline: vi.fn(() => null),
-        getPipelineRunManifest: vi.fn(() =>
-          JSON.stringify({
-            manifest_version: '1.0',
-            name: 'bad-manifest',
-            triggered_by: 'test',
-            agents: [], // ← rejected by validateManifest's .min(1)
-            gate_points: [],
-            on_failure: 'stop',
-          }),
-        ),
+        // No saved-workflow row, no in-memory entry — runSavedWorkflow
+        // reports "not found", executePipeline rethrows as a typed Error
+        // so the outer catch can record it as a failed task run.
+        getPlannedPipeline: vi.fn(() => undefined),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
 
+    // Reset module-private pipeline store between tests via the public
+    // forget API so an entry from another test cannot satisfy this lookup.
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+
     await expect(
       (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
         .executePipeline(task),
-    ).rejects.toThrow(/agents/i);
+    ).rejects.toThrow(/not found/i);
   });
 
-  it('executePipeline rejects corrupt manifest JSON with a clear error', async () => {
+  it('executePipeline surfaces a non-template pipeline as a typed error', async () => {
     vi.useRealTimers();
     const task = makeTask({
-      id: 'pipe-task-2',
-      pipeline_id: 'pipeline-corrupt',
+      id: 'pipe-task-not-template',
+      pipeline_id: 'pipeline-not-template',
       task_type: 'pipeline',
+    });
+    // A `plan_task`-style row (template:false) cannot be re-fired on a
+    // schedule by definition — runSavedWorkflow refuses it cleanly instead
+    // of crashing deep in validateManifest like the old code path did.
+    const nonTemplatePlanned = JSON.stringify({
+      id: 'pipeline-not-template',
+      name: 'plan-task-style',
+      goal: 'do thing once',
+      steps: [{ id: 's1', task: 'work' }],
+      reasoning: 'plan',
+      estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false,
+      executionMode: 'orchestrated',
+      template: false,
+      mode: 'autonomous',
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})),
       getRunHistory: vi.fn(() => ({
-        getPlannedPipeline: vi.fn(() => null),
-        getPipelineRunManifest: vi.fn(() => '{this is not valid json'),
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-not-template', manifest_json: nonTemplatePlanned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
 
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+
     await expect(
       (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
         .executePipeline(task),
-    ).rejects.toThrow(/manifest JSON is corrupt/);
+    ).rejects.toThrow(/not a saved workflow/i);
+  });
+
+  // T1-5 acceptance test — the actual headline bug:
+  //   a workflow scheduled via task_create(workflow_id, schedule)
+  //   executes on its first WorkerLoop tick AND the template row stays
+  //   byte-identical (no `executed` flip, no manifest_json mutation), so
+  //   the next tick can fire it again.
+  it('executes a scheduled saved workflow and leaves the template row byte-identical', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-monthly', status: 'completed' }));
+
+    // Round-trip through JSON so we capture exactly what SQLite would hold.
+    const templateBefore = JSON.stringify({
+      id: 'saved-monthly-report',
+      name: 'Monthly Report',
+      goal: 'Compile + send the monthly report',
+      steps: [{ id: 'gather', task: 'Gather metrics' }],
+      reasoning: 'saved',
+      estimatedCost: 0.02,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false,
+      executionMode: 'orchestrated',
+      template: true,
+      mode: 'autonomous',
+    });
+
+    // RunHistory stub backed by a mutable record so we can snapshot the
+    // row before AND after the tick and assert deep equality.
+    const stored = { manifest_json: templateBefore };
+    const taskManager = makeTaskManager();
+    const insertedRuns: unknown[] = [];
+
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'saved-monthly-report', manifest_json: stored.manifest_json })),
+        // persistPipelineRun calls these for the FRESH run row (separate id);
+        // they must NOT touch the template row.
+        insertPipelineRun: vi.fn((row: unknown) => { insertedRuns.push(row); }),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    // Reset and prime the pipeline store with the same template so
+    // getPipeline hits the in-memory path; deep-clone so any accidental
+    // mutation by executePipeline shows up against the snapshot.
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    const liveTemplate = JSON.parse(templateBefore) as PlannedPipeline;
+    storePipeline('saved-monthly-report', liveTemplate);
+
+    const task = makeTask({
+      id: 'scheduled-monthly',
+      pipeline_id: 'saved-monthly-report',
+      task_type: 'pipeline',
+      schedule_cron: '0 9 1 * *',
+    });
+
+    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+      .executePipeline(task);
+
+    // 1. The pipeline executed — success was recorded.
+    expect(taskManager.recordTaskRun).toHaveBeenCalledWith(
+      task.id,
+      expect.stringContaining('Pipeline completed') as string,
+      'success',
+    );
+
+    // 2. Byte-identical template — neither the in-memory PlannedPipeline
+    //    nor the would-be SQLite blob have changed. This is the core
+    //    "doesn't consume the template" guarantee that lets the next
+    //    cron tick fire the same workflow again.
+    expect(liveTemplate.executed).toBe(false);
+    expect(JSON.stringify(liveTemplate)).toBe(templateBefore);
+    expect(stored.manifest_json).toBe(templateBefore);
+
+    // 3. The fresh run row is a SEPARATE pipeline_runs entry (its own
+    //    runId), not a mutation of the template row.
+    expect(insertedRuns.length).toBe(1);
+  });
+
+  // Lock the headline cron-fires-N-times guarantee: a scheduled
+  // workflow that fired this minute MUST be eligible to fire again next
+  // minute. The previous code path marked the template `executed=true`
+  // (or threw) on first fire, so a "schedule this workflow daily" task
+  // would either run once and then become a no-op, or fail outright.
+  it('executes a scheduled saved workflow repeatedly across ticks', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest
+      .mockResolvedValueOnce(makeRunState({ runId: 'tick-1', status: 'completed' }))
+      .mockResolvedValueOnce(makeRunState({ runId: 'tick-2', status: 'completed' }))
+      .mockResolvedValueOnce(makeRunState({ runId: 'tick-3', status: 'completed' }));
+
+    const templateJson = JSON.stringify({
+      id: 'recurring-wf',
+      name: 'Recurring',
+      goal: 'fire on cron',
+      steps: [{ id: 's', task: 'do' }],
+      reasoning: 'saved',
+      estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false,
+      executionMode: 'orchestrated',
+      template: true,
+      mode: 'autonomous',
+    });
+
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'recurring-wf', manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    const { _resetPipelineStore, storePipeline, getPipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('recurring-wf', JSON.parse(templateJson) as PlannedPipeline);
+
+    const task = makeTask({
+      id: 'recurring-task',
+      pipeline_id: 'recurring-wf',
+      task_type: 'pipeline',
+      schedule_cron: '* * * * *',
+    });
+
+    const fire = (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> }).executePipeline.bind(loop);
+
+    await fire(task);
+    await fire(task);
+    await fire(task);
+
+    // Three ticks -> three successful records -> three runManifest calls.
+    expect(mockRunManifest).toHaveBeenCalledTimes(3);
+    expect(taskManager.recordTaskRun).toHaveBeenCalledTimes(3);
+    // Template still re-runnable -- `executed` never flipped.
+    expect(getPipeline('recurring-wf')?.executed).toBe(false);
+  });
+
+  // `runSavedWorkflow` returning {ok:true, status:'failed'|'partial'} is a
+  // legit orchestrator outcome (a step errored but the run itself terminated
+  // cleanly). worker-loop's `success = result.status === 'completed'` check
+  // then records the task as failed. Pin that branch so a regression that
+  // collapses non-completed onto 'success' is caught.
+  it('records non-completed orchestrator status as a failed task run', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'partial-1', status: 'failed' }));
+
+    const templateJson = JSON.stringify({
+      id: 'partial-wf',
+      name: 'Partial',
+      goal: 'might fail mid-step',
+      steps: [{ id: 's', task: 'do' }],
+      reasoning: 'saved',
+      estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false,
+      executionMode: 'orchestrated',
+      template: true,
+      mode: 'autonomous',
+    });
+
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'partial-wf', manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('partial-wf', JSON.parse(templateJson) as PlannedPipeline);
+
+    const task = makeTask({
+      id: 'partial-task',
+      pipeline_id: 'partial-wf',
+      task_type: 'pipeline',
+      schedule_cron: '0 9 * * *',
+    });
+
+    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+      .executePipeline(task);
+
+    // Orchestrator succeeded the call but the run ended 'failed' →
+    // worker-loop records the task as failed (not 'success') and the
+    // summary line names the actual status so a /tasks UI watcher sees it.
+    expect(taskManager.recordTaskRun).toHaveBeenCalledWith(
+      task.id,
+      expect.stringMatching(/Pipeline failed/) as string,
+      'failed',
+    );
+    // Template still re-runnable on the next tick even after a failed run.
+    expect(JSON.parse(templateJson).executed).toBe(false);
   });
 
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.

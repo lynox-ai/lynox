@@ -343,7 +343,7 @@ export class WorkerLoop {
     if (!runHistory || !task.pipeline_id) return;
 
     // Load the PlannedPipeline (if any) to enforce the autonomous-only gate.
-    const { getPipeline } = await import('../tools/builtin/pipeline.js');
+    const { getPipeline, runSavedWorkflow } = await import('../tools/builtin/pipeline.js');
     const planned = getPipeline(task.pipeline_id, runHistory);
 
     // Hard gate: WorkerLoop only runs autonomous pipelines. Interactive
@@ -357,36 +357,30 @@ export class WorkerLoop {
       );
     }
 
-    // Orchestrated execution via DAG engine — the single execution path (D9).
-    const manifestJson = runHistory.getPipelineRunManifest(task.pipeline_id);
-    if (!manifestJson) {
-      throw new Error(`Pipeline ${task.pipeline_id} not found`);
-    }
-
-    let rawManifest: unknown;
-    try {
-      rawManifest = JSON.parse(manifestJson);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Pipeline ${task.pipeline_id} manifest JSON is corrupt: ${msg}`);
-    }
+    // Orchestrated execution via the exported saved-workflow entry point.
+    //
+    // `task.pipeline_id` points at the `status='planned'` `pipeline_runs` row
+    // whose `manifest_json` is a `PlannedPipeline`, NOT a `Manifest` — the
+    // previous direct-`getPipelineRunManifest` + `validateManifest` call
+    // therefore threw on every scheduled fire (T1-5). `runSavedWorkflow`
+    // performs the PlannedPipeline→Manifest conversion via the same code
+    // path the Saved-Workflows-library "Run" button uses, and it never
+    // consumes the template row, so the scheduled task can fire on every
+    // subsequent tick instead of being marked `executed` on the first one.
     const config = this.engine.getUserConfig();
+    const result = await runSavedWorkflow(task.pipeline_id, runHistory, config);
 
-    // Defense-in-depth: DB-persisted manifests can be from older schema
-    // versions or partially stored. We revalidate at this WorkerLoop
-    // boundary so a malformed `agents` field surfaces as a typed
-    // validateManifest error and gets routed through Bugsink +
-    // recordTaskRun like any other task failure, instead of crashing deep
-    // in computePhases.
-    const { runManifest, validateManifest } = await import('../orchestrator/runner.js');
-    const manifest = validateManifest(rawManifest);
-    const state = await runManifest(manifest, config, { runHistory });
+    if (!result.ok) {
+      // Surface conversion / validation / not-found / not-template errors as
+      // typed throws so the existing executeTask catch routes them through
+      // Bugsink + recordTaskRun like any other task failure.
+      throw new Error(result.error ?? `Pipeline ${task.pipeline_id} execution failed`);
+    }
 
-    const success = state.status === 'completed';
-    const stepCount = state.outputs.size;
+    const success = result.status === 'completed';
     const resultSummary = success
-      ? `Pipeline completed: ${String(stepCount)} steps`
-      : `Pipeline ${state.status}: ${state.error ?? 'unknown error'}`;
+      ? `Pipeline completed (run ${result.runId ?? 'unknown'})`
+      : `Pipeline ${result.status ?? 'unknown'}`;
 
     this.recordAndNotify(task, resultSummary, success);
   }
