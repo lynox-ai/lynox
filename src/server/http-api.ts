@@ -2856,18 +2856,29 @@ export class LynoxHTTPApi {
       // LIMIT would let non-template planned rows (un-run plans) starve the
       // result. Scan a generous fixed window, then slice to `limit`.
       const rows = history.getPlannedPipelines(500);
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; created_at: string }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; created_at: string }> = [];
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
         try {
           parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
         } catch { continue; } // skip corrupt rows
         if (parsed.template !== true) continue; // app-layer template filter
+        // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
+        // subset the card needs (id + task). Drop malformed entries.
+        const steps = Array.isArray(parsed.steps)
+          ? parsed.steps.flatMap((s) =>
+              s && typeof s === 'object'
+                && typeof (s as { id?: unknown }).id === 'string'
+                && typeof (s as { task?: unknown }).task === 'string'
+                ? [{ id: (s as { id: string }).id, task: (s as { task: string }).task }]
+                : [])
+          : [];
         workflows.push({
           id: row.id,
           name: typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : row.manifest_name,
           description: typeof parsed.goal === 'string' ? parsed.goal : '',
           step_count: Array.isArray(parsed.steps) ? parsed.steps.length : row.step_count,
+          steps,
           created_at: row.started_at,
         });
       }
