@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { captureProcess } from './process-capture.js';
+import {
+  captureProcess,
+  collapseConsecutiveDuplicates,
+  buildCanonicalSteps,
+} from './process-capture.js';
+import type { StepAnnotation } from './process-capture.js';
 import type { ToolCallRecord } from './run-history.js';
 
 // Mock Anthropic SDK (class pattern — see dag-planner.test.ts)
@@ -16,6 +21,10 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
+/**
+ * Mock Haiku response — the model now ANNOTATES a fixed numbered list, so it
+ * returns `{ index, description, inputTemplate, dependsOn }` per call index.
+ */
 function makeMockResponse() {
   return {
     content: [
@@ -24,9 +33,9 @@ function makeMockResponse() {
         name: 'extract_process',
         input: {
           steps: [
-            { order: 0, tool: 'http_request', description: 'Fetch ad data from Google Ads API', inputTemplate: { url: 'https://ads.google.com/api', method: 'GET' }, dependsOn: [] },
-            { order: 1, tool: 'bash', description: 'Parse and clean CSV data', inputTemplate: { command: 'node parse.js' }, dependsOn: [0] },
-            { order: 2, tool: 'write_file', description: 'Generate monthly report', inputTemplate: { path: 'report.pdf' }, dependsOn: [1] },
+            { index: 0, description: 'Fetch ad data from Google Ads API', inputTemplate: { url: 'https://ads.google.com/api', method: 'GET' }, dependsOn: [] },
+            { index: 1, description: 'Parse and clean CSV data', inputTemplate: { command: 'node parse.js' }, dependsOn: [0] },
+            { index: 2, description: 'Generate monthly report', inputTemplate: { path: 'report.pdf' }, dependsOn: [1] },
           ],
           parameters: [
             { name: 'time_range', description: 'Reporting period', type: 'date', defaultValue: 'last month', source: 'relative_date' },
@@ -48,6 +57,11 @@ function makeToolCalls(): ToolCallRecord[] {
   ];
 }
 
+/** Build a ToolCallRecord with sane defaults for the deterministic tests. */
+function call(tool_name: string, input_json: string, order: number): ToolCallRecord {
+  return { id: `tc-${order}`, run_id: 'r', tool_name, input_json, output_json: 'ok', duration_ms: 1, sequence_order: order };
+}
+
 describe('captureProcess', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -59,8 +73,8 @@ describe('captureProcess', () => {
       apiKey: 'test-key',
     });
 
-    // memory_recall and memory_store should be filtered out
-    // Haiku returns 3 steps (from the 3 action tools: http, bash, write_file)
+    // memory_recall and memory_store are filtered out → 3 action calls remain,
+    // and the canonical spine is exactly 3 steps.
     expect(record.steps).toHaveLength(3);
     expect(record.steps[0]!.tool).toBe('http_request');
   });
@@ -90,6 +104,29 @@ describe('captureProcess', () => {
     expect(record.parameters[1]!.source).toBe('user_input');
   });
 
+  it('drops malformed parameters from the Haiku response', async () => {
+    mockCreate.mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'extract_process',
+          input: {
+            steps: [{ index: 0, description: 'step', inputTemplate: {}, dependsOn: [] }],
+            parameters: [
+              { name: 'good', description: 'ok', type: 'string', source: 'user_input' },
+              { name: 'bad_type', description: 'x', type: 'frobnicate', source: 'user_input' }, // unknown type — dropped
+              { description: 'no name', type: 'string', source: 'context' },                   // missing name — dropped
+              { name: 'bad_source', description: 'x', type: 'string', source: 'telepathy' },    // unknown source — dropped
+            ],
+          },
+        },
+      ],
+    });
+    const record = await captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k' });
+    expect(record.parameters).toHaveLength(1);
+    expect(record.parameters[0]!.name).toBe('good');
+  });
+
   it('should detect step dependencies', async () => {
     const record = await captureProcess('run1', 'Report', makeToolCalls(), {
       apiKey: 'test-key',
@@ -98,6 +135,14 @@ describe('captureProcess', () => {
     expect(record.steps[0]!.dependsOn).toEqual([]);
     expect(record.steps[1]!.dependsOn).toEqual([0]);
     expect(record.steps[2]!.dependsOn).toEqual([1]);
+  });
+
+  it('orders steps deterministically by canonical call position', async () => {
+    const record = await captureProcess('run1', 'Report', makeToolCalls(), {
+      apiKey: 'test-key',
+    });
+    expect(record.steps.map(s => s.order)).toEqual([0, 1, 2]);
+    expect(record.steps.map(s => s.tool)).toEqual(['http_request', 'bash', 'write_file']);
   });
 
   it('should return empty steps for no action tool calls', async () => {
@@ -125,6 +170,164 @@ describe('captureProcess', () => {
     const payload = JSON.stringify(mockCreate.mock.calls[0]![0]);
     expect(payload).not.toContain('save_workflow');
     expect(payload).toContain('http_request');
+  });
+
+  it('step count equals the canonical call count regardless of Haiku output', async () => {
+    // Haiku returns only ONE annotation for a 3-action-call session.
+    mockCreate.mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'extract_process',
+          input: {
+            steps: [{ index: 0, description: 'only this one', inputTemplate: {}, dependsOn: [] }],
+            parameters: [],
+          },
+        },
+      ],
+    });
+
+    const record = await captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k' });
+    // Haiku cannot collapse the spine — 3 action calls → 3 steps.
+    expect(record.steps).toHaveLength(3);
+    expect(record.steps[0]!.description).toBe('only this one');
+    // Missing annotations get a fallback description = tool name.
+    expect(record.steps[1]!.description).toBe('bash');
+    expect(record.steps[2]!.description).toBe('write_file');
+  });
+
+  it('collapses identical consecutive action calls before annotation', async () => {
+    // Two literally-identical consecutive http_request calls — a retry.
+    const retried: ToolCallRecord[] = [
+      call('http_request', '{"url":"a"}', 0),
+      call('http_request', '{"url":"a"}', 1),
+      call('write_file', '{"path":"b"}', 2),
+    ];
+    mockCreate.mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'extract_process',
+          input: { steps: [], parameters: [] },
+        },
+      ],
+    });
+    const record = await captureProcess('run1', 'Retry', retried, { apiKey: 'k' });
+    // 3 raw calls → 2 canonical steps.
+    expect(record.steps).toHaveLength(2);
+    expect(record.steps.map(s => s.tool)).toEqual(['http_request', 'write_file']);
+  });
+});
+
+describe('collapseConsecutiveDuplicates', () => {
+  it('keeps two distinct action calls as two', () => {
+    const result = collapseConsecutiveDuplicates([
+      call('http_request', '{"url":"a"}', 0),
+      call('write_file', '{"path":"b"}', 1),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it('collapses identical consecutive calls into one', () => {
+    const result = collapseConsecutiveDuplicates([
+      call('http_request', '{"url":"a"}', 0),
+      call('http_request', '{"url":"a"}', 1),
+      call('http_request', '{"url":"a"}', 2),
+      call('write_file', '{"path":"b"}', 3),
+    ]);
+    expect(result).toHaveLength(2);
+    expect(result[0]!.tool_name).toBe('http_request');
+    expect(result[1]!.tool_name).toBe('write_file');
+  });
+
+  it('does NOT collapse non-consecutive identical calls', () => {
+    const result = collapseConsecutiveDuplicates([
+      call('http_request', '{"url":"a"}', 0),
+      call('write_file', '{"path":"b"}', 1),
+      call('http_request', '{"url":"a"}', 2),
+    ]);
+    expect(result).toHaveLength(3);
+  });
+
+  it('does NOT collapse consecutive same-tool calls with different input', () => {
+    const result = collapseConsecutiveDuplicates([
+      call('http_request', '{"url":"a"}', 0),
+      call('http_request', '{"url":"b"}', 1),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it('returns an empty list for empty input', () => {
+    expect(collapseConsecutiveDuplicates([])).toEqual([]);
+  });
+});
+
+describe('buildCanonicalSteps', () => {
+  const calls: ToolCallRecord[] = [
+    call('http_request', '{"url":"a"}', 0),
+    call('write_file', '{"path":"b"}', 1),
+  ];
+
+  it('builds exactly one step per canonical call, in order', () => {
+    const annotations: StepAnnotation[] = [
+      { index: 0, description: 'Fetch data', inputTemplate: { url: 'a' }, dependsOn: [] },
+      { index: 1, description: 'Write file', inputTemplate: { path: 'b' }, dependsOn: [0] },
+    ];
+    const steps = buildCanonicalSteps(calls, annotations);
+    expect(steps).toHaveLength(2);
+    expect(steps[0]).toEqual({ order: 0, tool: 'http_request', description: 'Fetch data', inputTemplate: { url: 'a' }, dependsOn: [] });
+    expect(steps[1]).toEqual({ order: 1, tool: 'write_file', description: 'Write file', inputTemplate: { path: 'b' }, dependsOn: [0] });
+  });
+
+  it('synthesizes a fallback step when an annotation index is missing', () => {
+    // Haiku omits index 1.
+    const annotations: StepAnnotation[] = [
+      { index: 0, description: 'Fetch data', inputTemplate: { url: 'a' }, dependsOn: [] },
+    ];
+    const steps = buildCanonicalSteps(calls, annotations);
+    expect(steps).toHaveLength(2);
+    expect(steps[1]).toEqual({ order: 1, tool: 'write_file', description: 'write_file', inputTemplate: {}, dependsOn: [] });
+  });
+
+  it('ignores an extra/unknown annotation index — count still matches', () => {
+    const annotations: StepAnnotation[] = [
+      { index: 0, description: 'Fetch data', inputTemplate: {}, dependsOn: [] },
+      { index: 1, description: 'Write file', inputTemplate: {}, dependsOn: [] },
+      { index: 99, description: 'ghost step', inputTemplate: {}, dependsOn: [] },
+    ];
+    const steps = buildCanonicalSteps(calls, annotations);
+    expect(steps).toHaveLength(2);
+    expect(steps.some(s => s.description === 'ghost step')).toBe(false);
+  });
+
+  it('first annotation wins on a duplicate index', () => {
+    const annotations: StepAnnotation[] = [
+      { index: 0, description: 'first', inputTemplate: {}, dependsOn: [] },
+      { index: 0, description: 'second', inputTemplate: {}, dependsOn: [] },
+      { index: 1, description: 'Write file', inputTemplate: {}, dependsOn: [] },
+    ];
+    const steps = buildCanonicalSteps(calls, annotations);
+    expect(steps).toHaveLength(2);
+    expect(steps[0]!.description).toBe('first');
+  });
+
+  it('falls back to tool name when annotation description is empty', () => {
+    const annotations: StepAnnotation[] = [
+      { index: 0, description: '', inputTemplate: {}, dependsOn: [] },
+      { index: 1, description: 'Write file', inputTemplate: {}, dependsOn: [] },
+    ];
+    const steps = buildCanonicalSteps(calls, annotations);
+    expect(steps[0]!.description).toBe('http_request');
+  });
+
+  it('defaults dependsOn to an empty array when the annotation omits it', () => {
+    const annotations: StepAnnotation[] = [
+      { index: 0, description: 'Fetch data', inputTemplate: {} },
+      { index: 1, description: 'Write file', inputTemplate: {} },
+    ];
+    const steps = buildCanonicalSteps(calls, annotations);
+    expect(steps[0]!.dependsOn).toEqual([]);
+    expect(steps[1]!.dependsOn).toEqual([]);
   });
 });
 

@@ -130,46 +130,57 @@ function sanitizeToolCall(tc: ToolCallRecord): { tool: string; input: string; ou
   return { tool: tc.tool_name, input, output, order: tc.sequence_order };
 }
 
-const EXTRACTION_SYSTEM = `You are a process analyst. Given a sequence of tool calls from a completed task, create a reusable process template.
+/**
+ * One annotation entry the Haiku call returns for a canonical call index.
+ * The model annotates a FIXED step list — it never chooses the step set.
+ */
+export interface StepAnnotation {
+  /** Index into the provided canonicalCalls list this annotation describes. */
+  index: number;
+  description: string;
+  inputTemplate: Record<string, unknown>;
+  dependsOn?: number[] | undefined;
+}
 
-For each meaningful step, provide:
-1. A plain-language description of what the step does (for a business user, not a developer)
-2. The tool used
-3. Which input values are likely to CHANGE between runs (parameters) vs stay the same (constants)
-4. Which steps depend on outputs of earlier steps (by step order number)
+const EXTRACTION_SYSTEM = `You are a process analyst. You are given a FIXED, numbered list of tool calls from a completed task. Each entry has an "index". This list IS the step list of the reusable workflow — it is already decided.
 
-For parameters, classify each as:
+Your ONLY job is to ANNOTATE each numbered entry. You must return exactly one annotation per index that is present in the input list — no more, no fewer. Do NOT merge entries, do NOT skip entries, do NOT reorder them, do NOT invent new entries. The "index" you return must match an index from the provided list.
+
+For each numbered call, provide:
+1. "index": the index of the call you are annotating (copied verbatim from the input)
+2. "description": a plain-language description of what this step does (for a business user, not a developer)
+3. "inputTemplate": a JSON object capturing the call's input values, with values likely to change between runs left as placeholders
+4. "dependsOn": the indexes of earlier calls whose output this call depends on (an array, possibly empty)
+
+Also identify the workflow's parameters — input values likely to CHANGE between runs. Classify each as:
 - "user_input": value the user provides each time (e.g., client name, specific query)
 - "relative_date": time-based value that should be relative (e.g., "last month" not "March 2026")
 - "context": value from the environment or previous step output
 
-Merge consecutive tool calls that serve the same logical purpose into one step.
-Skip tool calls that are just reading/exploring without producing useful output.
-
 Return a JSON object with this exact structure:
 {
-  "steps": [{ "order": 0, "tool": "tool_name", "description": "plain language", "inputTemplate": {}, "dependsOn": [] }],
+  "steps": [{ "index": 0, "description": "plain language", "inputTemplate": {}, "dependsOn": [] }],
   "parameters": [{ "name": "param_name", "description": "what this is", "type": "string|number|date", "defaultValue": null, "source": "user_input|relative_date|context" }]
 }`;
 
 const EXTRACT_TOOL = {
   name: 'extract_process',
-  description: 'Extract a reusable process template from the tool call sequence.',
+  description: 'Annotate each numbered tool call in the provided fixed list and identify workflow parameters.',
   input_schema: {
     type: 'object' as const,
     properties: {
       steps: {
         type: 'array' as const,
+        description: 'One annotation per index from the provided call list. Exactly one entry per index — no merging, skipping, or reordering.',
         items: {
           type: 'object' as const,
           properties: {
-            order: { type: 'number' as const },
-            tool: { type: 'string' as const },
+            index: { type: 'number' as const },
             description: { type: 'string' as const },
             inputTemplate: { type: 'object' as const },
             dependsOn: { type: 'array' as const, items: { type: 'number' as const } },
           },
-          required: ['order', 'tool', 'description', 'inputTemplate'],
+          required: ['index', 'description', 'inputTemplate'],
         },
       },
       parameters: {
@@ -192,8 +203,125 @@ const EXTRACT_TOOL = {
 };
 
 /**
+ * Collapse ONLY literally-identical *consecutive* tool calls — same
+ * `tool_name` AND same `input_json` — into one. This models a retried
+ * identical call. It is fully deterministic (no LLM) and never merges calls
+ * that differ in any way or are non-consecutive.
+ *
+ * The result IS the step spine: every entry becomes exactly one ProcessStep.
+ */
+export function collapseConsecutiveDuplicates(actionCalls: ToolCallRecord[]): ToolCallRecord[] {
+  const canonical: ToolCallRecord[] = [];
+  for (const call of actionCalls) {
+    const prev = canonical[canonical.length - 1];
+    if (prev && prev.tool_name === call.tool_name && prev.input_json === call.input_json) {
+      // Identical consecutive call — a retry. Skip; the spine already has it.
+      continue;
+    }
+    canonical.push(call);
+  }
+  return canonical;
+}
+
+/**
+ * Narrow an unknown value from the LLM tool call into a StepAnnotation.
+ * Anything that is not shaped like an annotation (or carries a non-numeric
+ * index) is rejected — the caller falls back to a synthesized step.
+ */
+function asStepAnnotation(value: unknown): StepAnnotation | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.index !== 'number' || !Number.isInteger(obj.index)) return null;
+  const description = typeof obj.description === 'string' ? obj.description : '';
+  const inputTemplate =
+    typeof obj.inputTemplate === 'object' && obj.inputTemplate !== null && !Array.isArray(obj.inputTemplate)
+      ? (obj.inputTemplate as Record<string, unknown>)
+      : {};
+  const dependsOn = Array.isArray(obj.dependsOn)
+    ? obj.dependsOn.filter((d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 0)
+    : undefined;
+  return { index: obj.index, description, inputTemplate, dependsOn };
+}
+
+const PARAM_TYPES = new Set<string>(['string', 'number', 'date']);
+const PARAM_SOURCES = new Set<string>(['user_input', 'relative_date', 'context']);
+
+/**
+ * Narrow an unknown value from the LLM tool call into a ProcessParameter.
+ * Mirrors `asStepAnnotation` — an entry with a missing name or an unknown
+ * type/source is rejected so a malformed parameter cannot reach
+ * `ProcessRecord.parameters` and the downstream param-hint logic.
+ */
+function asProcessParameter(value: unknown): ProcessParameter | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.name !== 'string' || obj.name.length === 0) return null;
+  if (typeof obj.type !== 'string' || !PARAM_TYPES.has(obj.type)) return null;
+  if (typeof obj.source !== 'string' || !PARAM_SOURCES.has(obj.source)) return null;
+  const param: ProcessParameter = {
+    name: obj.name,
+    description: typeof obj.description === 'string' ? obj.description : '',
+    type: obj.type as 'string' | 'number' | 'date',
+    source: obj.source as 'user_input' | 'relative_date' | 'context',
+  };
+  if (obj.defaultValue !== undefined) param.defaultValue = obj.defaultValue;
+  return param;
+}
+
+/**
+ * Build the final, deterministic `ProcessStep[]` from the FIXED canonical call
+ * list plus the LLM's annotations. `canonicalCalls` is the step spine: the
+ * returned array length ALWAYS equals `canonicalCalls.length` — one step per
+ * call, in order. The LLM may only supply description/inputTemplate/dependsOn;
+ * it can never add, drop, merge, or reorder a step.
+ *
+ * For each index `i`:
+ *  - `tool` and `order` come from the canonical call (`tool_name`, `i`).
+ *  - description/inputTemplate/dependsOn come from the annotation whose
+ *    `index === i`. If none matches (LLM omitted it, or returned a duplicate /
+ *    out-of-range index), a fallback is synthesized so no call is ever dropped.
+ */
+export function buildCanonicalSteps(
+  canonicalCalls: ToolCallRecord[],
+  annotations: StepAnnotation[],
+): ProcessStep[] {
+  // Index annotations by their `index`. First wins on duplicates so an extra
+  // colliding entry from the LLM cannot overwrite a legitimate annotation.
+  const byIndex = new Map<number, StepAnnotation>();
+  for (const ann of annotations) {
+    if (!byIndex.has(ann.index)) byIndex.set(ann.index, ann);
+  }
+
+  return canonicalCalls.map((call, i) => {
+    const ann = byIndex.get(i);
+    if (ann) {
+      return {
+        order: i,
+        tool: call.tool_name,
+        description: ann.description || call.tool_name,
+        inputTemplate: ann.inputTemplate,
+        dependsOn: ann.dependsOn ?? [],
+      };
+    }
+    // Fallback — annotation missing for this index. NEVER drop the call.
+    return {
+      order: i,
+      tool: call.tool_name,
+      description: call.tool_name,
+      inputTemplate: {},
+      dependsOn: [],
+    };
+  });
+}
+
+/**
  * Capture a process from run history tool calls.
- * Uses a lightweight Haiku call to name steps and identify parameters.
+ *
+ * The step SET is deterministic: internal-tool filter → consecutive-duplicate
+ * collapse produces a fixed canonical call list. A lightweight Haiku call only
+ * ANNOTATES that fixed list (descriptions, input templates, dependencies) and
+ * identifies parameters — it can never choose, merge, skip, or reorder steps.
+ * The returned `steps.length` always equals the canonical call count.
  */
 export async function captureProcess(
   runId: string,
@@ -216,10 +344,18 @@ export async function captureProcess(
     };
   }
 
-  // Sanitize for LLM consumption
-  const sanitized = actionCalls.map(sanitizeToolCall);
+  // Deterministic step spine — collapse only literally-identical consecutive
+  // calls (retries). This fixed list is what the LLM must annotate 1:1.
+  const canonicalCalls = collapseConsecutiveDuplicates(actionCalls);
 
-  // Call Haiku for step naming + parameter identification
+  // Sanitize for LLM consumption, attaching a stable `index` so the model
+  // annotates a numbered, fixed list rather than choosing the step set.
+  const sanitized = canonicalCalls.map((tc, index) => ({
+    index,
+    ...sanitizeToolCall(tc),
+  }));
+
+  // Call Haiku for step annotation + parameter identification
   const client = createLLMClient({ apiKey: options.apiKey, apiBaseURL: options.apiBaseURL });
   const response = await client.beta.messages.create({
     model: getModelId('haiku', getActiveProvider()),
@@ -229,28 +365,37 @@ export async function captureProcess(
     messages: [
       {
         role: 'user',
-        content: `Task name: "${name}"\n\nTool call sequence:\n${JSON.stringify(sanitized, null, 2)}`,
+        content: `Task name: "${name}"\n\nFixed numbered tool call list (annotate every index, exactly one entry per index):\n${JSON.stringify(sanitized, null, 2)}`,
       },
     ],
     tools: [EXTRACT_TOOL],
     tool_choice: { type: 'tool', name: 'extract_process' },
   });
 
-  // Extract from tool use response
-  let steps: ProcessStep[] = [];
-  let parameters: ProcessParameter[] = [];
+  // Extract annotations + parameters from the tool use response.
+  const annotations: StepAnnotation[] = [];
+  const parameters: ProcessParameter[] = [];
 
   for (const block of response.content) {
     if (block.type === 'tool_use' && block.name === 'extract_process') {
       const input = block.input as { steps?: unknown[]; parameters?: unknown[] };
       if (Array.isArray(input.steps)) {
-        steps = input.steps as ProcessStep[];
+        for (const raw of input.steps) {
+          const ann = asStepAnnotation(raw);
+          if (ann) annotations.push(ann);
+        }
       }
       if (Array.isArray(input.parameters)) {
-        parameters = input.parameters as ProcessParameter[];
+        for (const raw of input.parameters) {
+          const param = asProcessParameter(raw);
+          if (param) parameters.push(param);
+        }
       }
     }
   }
+
+  // Build the final step list deterministically — one step per canonical call.
+  const steps = buildCanonicalSteps(canonicalCalls, annotations);
 
   return {
     id: randomUUID(),
