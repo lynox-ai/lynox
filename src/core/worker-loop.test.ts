@@ -798,6 +798,69 @@ describe('WorkerLoop', () => {
     expect(getPipeline('recurring-wf')?.executed).toBe(false);
   });
 
+  // `runSavedWorkflow` returning {ok:true, status:'failed'|'partial'} is a
+  // legit orchestrator outcome (a step errored but the run itself terminated
+  // cleanly). worker-loop's `success = result.status === 'completed'` check
+  // then records the task as failed. Pin that branch so a regression that
+  // collapses non-completed onto 'success' is caught.
+  it('records non-completed orchestrator status as a failed task run', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'partial-1', status: 'failed' }));
+
+    const templateJson = JSON.stringify({
+      id: 'partial-wf',
+      name: 'Partial',
+      goal: 'might fail mid-step',
+      steps: [{ id: 's', task: 'do' }],
+      reasoning: 'saved',
+      estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false,
+      executionMode: 'orchestrated',
+      template: true,
+      mode: 'autonomous',
+    });
+
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'partial-wf', manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('partial-wf', JSON.parse(templateJson) as PlannedPipeline);
+
+    const task = makeTask({
+      id: 'partial-task',
+      pipeline_id: 'partial-wf',
+      task_type: 'pipeline',
+      schedule_cron: '0 9 * * *',
+    });
+
+    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+      .executePipeline(task);
+
+    // Orchestrator succeeded the call but the run ended 'failed' →
+    // worker-loop records the task as failed (not 'success') and the
+    // summary line names the actual status so a /tasks UI watcher sees it.
+    expect(taskManager.recordTaskRun).toHaveBeenCalledWith(
+      task.id,
+      expect.stringMatching(/Pipeline failed/) as string,
+      'failed',
+    );
+    // Template still re-runnable on the next tick even after a failed run.
+    expect(JSON.parse(templateJson).executed).toBe(false);
+  });
+
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.
   // An interactive pipeline that somehow got onto a schedule (legacy data,
   // sync from another instance) must be rejected at the boundary so it
