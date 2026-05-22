@@ -164,6 +164,7 @@
 
 	const statusLabel: Record<string, string> = {
 		open: 'Offen', in_progress: 'Aktiv', completed: 'Erledigt', done: 'Erledigt',
+		failed: 'Fehlgeschlagen',
 	};
 
 	const statusColor: Record<string, string> = {
@@ -171,6 +172,7 @@
 		in_progress: 'bg-warning/15 text-warning',
 		completed: 'bg-success/15 text-success',
 		done: 'bg-success/15 text-success',
+		failed: 'bg-danger/15 text-danger',
 	};
 
 	$effect(() => { loadTasks(); });

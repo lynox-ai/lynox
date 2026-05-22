@@ -678,11 +678,17 @@ export function getOverdueTasks(db: Database.Database, scopes?: Array<{ type: st
   ).all(now) as TaskRecord[];
 }
 
-/** Get tasks that are due for execution (next_run_at <= now, not completed). */
+/** Get tasks that are due for execution (next_run_at <= now, not in a
+ * terminal status). Terminal = 'completed' or 'failed'. We also clear
+ * next_run_at when a task reaches a terminal state, so each guard is
+ * redundant with the other — but keeping both prevents a failed task
+ * with a stale `next_run_at` (e.g. a row that pre-dates the v31 fix)
+ * from re-firing after migration.
+ */
 export function getDueTasks(db: Database.Database): TaskRecord[] {
   const now = new Date().toISOString();
   return db.prepare(
-    `SELECT * FROM tasks WHERE next_run_at IS NOT NULL AND next_run_at <= ? AND status != 'completed' ORDER BY next_run_at ASC`
+    `SELECT * FROM tasks WHERE next_run_at IS NOT NULL AND next_run_at <= ? AND status NOT IN ('completed','failed') ORDER BY next_run_at ASC`
   ).all(now) as TaskRecord[];
 }
 
@@ -694,7 +700,10 @@ export function updateTaskRunResult(
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
-    nextRunAt?: string | undefined;
+    // `undefined` leaves next_run_at unchanged; `null` clears it
+    // (used when a one-shot task reaches a terminal state — without
+    // this, getDueTasks would keep re-selecting the failed task).
+    nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   },
 ): void {

@@ -1497,5 +1497,101 @@ describe('RunHistory', () => {
       h.close();
     });
   });
+
+  // T1-2 regression — see PRD-HN-LAUNCH-HARDENING §3.
+  // SQLite CHECK constraints cannot be ALTERed away; the v31 migration
+  // recreates the tasks table to widen the status enum from
+  // {open,in_progress,completed} to {open,in_progress,completed,failed}.
+  describe('v31 migration — tasks.status widens to include failed', () => {
+    it('accepts INSERT with status=failed after migration', () => {
+      const h = createHistory();
+      h.insertTask({ id: 'tfail', title: 'Failed task' });
+      // Direct UPDATE through the wrapper (matches the recordTaskRun path)
+      h.updateTask('tfail', { status: 'failed' });
+      const t = h.getTask('tfail');
+      expect(t).toBeDefined();
+      expect(t!.status).toBe('failed');
+      h.close();
+    });
+
+    it('preserves pre-existing tasks across the migration', () => {
+      const h = createHistory();
+      // Create a task in every status the OLD constraint allowed, then
+      // re-open the database. The migration runs again (idempotent) on
+      // the second open and the rows must still be there with their
+      // original status intact.
+      h.insertTask({ id: 'ta', title: 'A', status: 'open' });
+      h.insertTask({ id: 'tb', title: 'B', status: 'in_progress' });
+      h.insertTask({ id: 'tc', title: 'C', status: 'completed' });
+      const dbPath = (h as unknown as { db: { name: string } }).db.name;
+      h.close();
+
+      const h2 = new RunHistory(dbPath);
+      expect(h2.getTask('ta')!.status).toBe('open');
+      expect(h2.getTask('tb')!.status).toBe('in_progress');
+      expect(h2.getTask('tc')!.status).toBe('completed');
+      // And the new status is accepted post-reopen as well.
+      h2.insertTask({ id: 'td', title: 'D' });
+      h2.updateTask('td', { status: 'failed' });
+      expect(h2.getTask('td')!.status).toBe('failed');
+      h2.close();
+    });
+
+    it('still rejects an invalid status value', () => {
+      const h = createHistory();
+      h.insertTask({ id: 'tbad', title: 'Bad' });
+      // 'cancelled' is not in the enum — the recreated CHECK must still
+      // refuse arbitrary strings.
+      expect(() => h.updateTask('tbad', { status: 'cancelled' })).toThrow();
+      h.close();
+    });
+
+    it('preserves indexes — all seven idx_tasks_* recreated post-migration', () => {
+      const h = createHistory();
+      // Direct sqlite_master assertion — a botched migration that dropped
+      // an index would still let getDueTasks return the row on tiny data
+      // (full-scan), so we pin the seven indexes the v31 recreate emits.
+      const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
+      const idxNames = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name LIKE 'idx_tasks_%'`,
+      ).all().map(r => r.name).sort();
+      expect(idxNames).toEqual([
+        'idx_tasks_assignee',
+        'idx_tasks_due_date',
+        'idx_tasks_next_run',
+        'idx_tasks_parent',
+        'idx_tasks_scope',
+        'idx_tasks_status',
+        'idx_tasks_type',
+      ]);
+
+      // Plus the existing functional smoke that getDueTasks works.
+      h.insertTask({
+        id: 'tdue',
+        title: 'Due',
+        nextRunAt: '2020-01-01T00:00:00.000Z',
+      });
+      const due = h.getDueTasks();
+      expect(due.some(t => t.id === 'tdue')).toBe(true);
+      h.close();
+    });
+
+    it('a row written as status=failed is excluded from getDueTasks even with a stale next_run_at', () => {
+      // Defence in depth: recordTaskRun clears next_run_at when it
+      // moves a task to 'failed', but the SELECT also excludes failed
+      // rows so a malformed row (e.g. surfaced by a future bug) cannot
+      // re-introduce the runaway loop.
+      const h = createHistory();
+      h.insertTask({
+        id: 'tstale',
+        title: 'Stale failed',
+        status: 'failed',
+        nextRunAt: '2020-01-01T00:00:00.000Z',
+      });
+      const due = h.getDueTasks();
+      expect(due.some(t => t.id === 'tstale')).toBe(false);
+      h.close();
+    });
+  });
 });
 

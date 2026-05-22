@@ -92,6 +92,9 @@
 		if (tab === 'dashboard') loadDashboard();
 	});
 
+	// `failed` is a terminal status — exclude it from the "open" tally the
+	// same way `completed` is excluded. Only `open` and `in_progress` count
+	// as live work in the hub.
 	const openTasks = $derived(tasks.filter(t => t.status === 'open' || t.status === 'in_progress'));
 	const scheduledTasks = $derived(tasks.filter(t => t.schedule_cron));
 	const totalCost14d = $derived(costDays.reduce((s, d) => s + d.cost_usd, 0));
