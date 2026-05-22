@@ -1546,12 +1546,26 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('preserves indexes — getDueTasks still uses idx_tasks_next_run', () => {
+    it('preserves indexes — all seven idx_tasks_* recreated post-migration', () => {
       const h = createHistory();
-      // Insert a task with a next_run_at in the past, then assert
-      // getDueTasks finds it. The lookup leans on idx_tasks_next_run;
-      // a botched migration that dropped indexes would still pass on
-      // tiny data, so this is more of a smoke than a perf assertion.
+      // Direct sqlite_master assertion — a botched migration that dropped
+      // an index would still let getDueTasks return the row on tiny data
+      // (full-scan), so we pin the seven indexes the v31 recreate emits.
+      const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
+      const idxNames = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name LIKE 'idx_tasks_%'`,
+      ).all().map(r => r.name).sort();
+      expect(idxNames).toEqual([
+        'idx_tasks_assignee',
+        'idx_tasks_due_date',
+        'idx_tasks_next_run',
+        'idx_tasks_parent',
+        'idx_tasks_scope',
+        'idx_tasks_status',
+        'idx_tasks_type',
+      ]);
+
+      // Plus the existing functional smoke that getDueTasks works.
       h.insertTask({
         id: 'tdue',
         title: 'Due',

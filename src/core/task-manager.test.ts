@@ -501,6 +501,9 @@ describe('TaskManager', () => {
       expect(after!.status).toBe('open');           // not failed yet
       expect(after!.retry_count).toBe(1);
       expect(after!.next_run_at).toBeTruthy();      // scheduled for retry
+      // Backoff regression guard: a future-dated next_run_at means the
+      // task waits; a past-dated value would re-introduce the tight loop.
+      expect(new Date(after!.next_run_at!).getTime()).toBeGreaterThan(Date.now());
       expect(after!.last_run_status).toBe('failed');
     });
 

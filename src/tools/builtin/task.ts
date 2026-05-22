@@ -1,4 +1,4 @@
-import type { ToolEntry, IAgent, TaskPriority, MemoryScopeRef } from '../../types/index.js';
+import type { ToolEntry, IAgent, TaskPriority, TaskStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { logErrorChain } from '../../core/utils.js';
 
@@ -229,7 +229,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       const task = managerRef.update(input.task_id, {
         title: input.title,
         description: input.description,
-        status: input.status as 'open' | 'in_progress' | 'completed' | 'failed' | undefined,
+        status: input.status as TaskStatus | undefined,
         priority: input.priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
         assignee: input.assignee,
         dueDate: input.due_date,
@@ -305,7 +305,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     }
 
     const tasks = managerRef.list({
-      status: input.status as 'open' | 'in_progress' | 'completed' | 'failed' | undefined,
+      status: input.status as TaskStatus | undefined,
       assignee: input.assignee,
       scope,
     });
