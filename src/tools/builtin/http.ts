@@ -11,7 +11,7 @@ import { fetchPinned, isPrivateIP } from '../../core/network-guard.js';
 // ToolContext. Engine-init wires them via applyNetworkPolicy() /
 // applyHttpRateLimits() / applyEnforceHttps() in tool-context.ts. The
 // tool handler reads from `agent.toolContext` and threads it into
-// validateUrl() + fetchWithValidatedRedirects().
+// applyHostPolicy() + fetchWithValidatedRedirects().
 //
 // SSRF defense: isPrivateIP (decodes IPv4-mapped-IPv6 incl. hex form) and the
 // IP-pinning fetch helper come from network-guard.ts. fetchWithValidatedRedirects
@@ -266,7 +266,7 @@ function detectGetExfiltration(url: string): string | null {
       return 'base64-like data in URL parameters (possible data exfiltration)';
     }
   } catch {
-    // Invalid URL — will be caught by validateUrl later
+    // Invalid URL — will be caught by applyHostPolicy later
   }
   return null;
 }
@@ -427,7 +427,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           }
         }
       } catch {
-        // Invalid URL — caught by validateUrl below
+        // Invalid URL — caught by applyHostPolicy below
       }
     }
 

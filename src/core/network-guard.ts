@@ -113,13 +113,22 @@ async function resolveAndValidate(hostname: string): Promise<{ address: string; 
     return { address: cleaned, family };
   }
 
-  const resolved = await dns.lookup(cleaned, { all: true, verbatim: true }).catch(() => []);
+  // 5s timeout race — restores parity with the legacy http.ts validateUrl
+  // (a slow / hung resolver would otherwise stall the whole request until
+  // upstream socket timeout). .unref() so the timer doesn't keep the event
+  // loop alive past a faster resolution.
+  const dnsTimeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('DNS timeout')), 5_000).unref();
+  });
+  const resolved = await Promise.race([
+    dns.lookup(cleaned, { all: true, verbatim: true }),
+    dnsTimeout,
+  ]).catch(() => [] as Array<{ address: string; family: number }>);
   if (resolved.length === 0) {
-    // No records — let the connect attempt fail naturally so callers see the
-    // real DNS error (NXDOMAIN, EAI_NODATA, ...) rather than a synthetic one.
-    // We still throw a Blocked error to short-circuit the connect, because
-    // connecting with no resolved IP would re-resolve via the OS and reopen
-    // the rebind window.
+    // No records (or timeout / DNS error) — short-circuit the connect with a
+    // Blocked error rather than letting the OS re-resolve (which would reopen
+    // the rebind window). Callers see "did not resolve" instead of NXDOMAIN
+    // detail — acceptable trade for fail-closed rebind safety.
     throw new Error(`Blocked: hostname "${cleaned}" did not resolve to any IP`);
   }
   for (const record of resolved) {
@@ -277,6 +286,14 @@ let activeTransport: PinnedTransport = defaultTransport;
  * pinned IP arrives at the transport unchanged — which IS the contract.
  */
 export function setPinnedTransportForTests(transport: PinnedTransport): () => void {
+  // Safety guard: the test seam rewires the SSRF transport globally for the
+  // whole process — if a non-test caller (or a supply-chained dep) reached
+  // it, every fetchPinned() would be diverted, silently bypassing the rebind
+  // defense this PR is built to provide. Vitest sets both VITEST and
+  // NODE_ENV='test' by default.
+  if (process.env['NODE_ENV'] !== 'test' && !process.env['VITEST']) {
+    throw new Error('setPinnedTransportForTests is for tests only');
+  }
   activeTransport = transport;
   return () => { activeTransport = defaultTransport; };
 }
