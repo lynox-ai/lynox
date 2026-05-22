@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock dns before importing module
-vi.mock('node:dns', () => ({
-  promises: {
+// Mock dns before importing module. network-guard imports from
+// node:dns/promises — we mock that path so the IP-pinning DNS resolution
+// returns the canned public IP.
+vi.mock('node:dns/promises', () => ({
+  default: {
     lookup: vi.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
   },
 }));
@@ -29,17 +31,41 @@ vi.mock('@mozilla/readability', () => {
 
 const mockFetch = vi.fn();
 
+// Install the pinned-transport shim before importing the module under test.
+// The shim adapts the new fetchPinned contract to the legacy globalThis.fetch
+// stub the existing tests rely on, AND records the pinned input so a
+// dedicated rebind regression test can assert that DNS-pinning happened.
+import {
+  setPinnedTransportForTests,
+} from '../../core/network-guard.js';
+import type { PinnedTransportInput } from '../../core/network-guard.js';
+
+const capturedTransportInputs: PinnedTransportInput[] = [];
+let restorePinnedTransport: (() => void) | undefined;
+
 beforeEach(() => {
   mockFetch.mockReset();
   vi.stubGlobal('fetch', mockFetch);
+  capturedTransportInputs.length = 0;
+  restorePinnedTransport = setPinnedTransportForTests(async (input) => {
+    capturedTransportInputs.push(input);
+    const init: RequestInit = { method: input.method, headers: input.headers };
+    if (input.body !== undefined) init.body = input.body.toString('utf8');
+    if (input.signal) init.signal = input.signal;
+    return mockFetch(input.url, init);
+  });
 });
 
 afterEach(() => {
+  restorePinnedTransport?.();
+  restorePinnedTransport = undefined;
   vi.restoreAllMocks();
 });
 
 // Import after mocks
 const { extractContent } = await import('./content-extractor.js');
+const dnsPromises = await import('node:dns/promises');
+const dnsLookupMock = vi.mocked(dnsPromises.default.lookup);
 
 function htmlResponse(html: string): ReturnType<typeof mockFetch> {
   return mockFetch.mockResolvedValue({
@@ -320,5 +346,39 @@ describe('extractContent', () => {
     const result = await extractContent('https://example.com');
     // Default mock returns "Extracted content from the article." = 5 words
     expect(result.wordCount).toBe(5);
+  });
+
+  // T1-4: DNS-rebinding regression. The legacy validate-then-fetch flow
+  // re-resolved the hostname inside fetch(), so a low-TTL record could flip
+  // public → loopback between validation and connect. The new fetchPinned
+  // resolves DNS exactly once and pins the connection to that IP via the
+  // http(s) Agent.lookup override; the test transport captures the pinned IP
+  // so we can assert it was the FIRST (validated, public) record.
+  it('rebind defense: pins to the first-resolved (public) IP even if a second resolve would return a private IP', async () => {
+    dnsLookupMock.mockReset();
+    dnsLookupMock
+      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }] as never)
+      .mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }] as never);
+    htmlResponse('<html><body>ok</body></html>');
+
+    await extractContent('https://rebind.example.test');
+    // Exactly ONE DNS resolution and the captured pinned IP is the public one.
+    expect(dnsLookupMock).toHaveBeenCalledTimes(1);
+    expect(capturedTransportInputs).toHaveLength(1);
+    expect(capturedTransportInputs[0]!.pinnedIp).toBe('93.184.216.34');
+    expect(capturedTransportInputs[0]!.pinnedIp).not.toBe('127.0.0.1');
+    expect(capturedTransportInputs[0]!.hostname).toBe('rebind.example.test');
+  });
+
+  it('rebind defense: blocks the IPv4-mapped-IPv6 hex form of a private IP (::ffff:7f00:1 == 127.0.0.1)', async () => {
+    // Pre-T1-4, both http.ts and content-extractor.ts only stripped the
+    // dotted form. With the canonical isPrivateIP from network-guard the
+    // hex form is decoded — this resolution must be blocked.
+    dnsLookupMock.mockReset();
+    dnsLookupMock.mockResolvedValueOnce([{ address: '::ffff:7f00:1', family: 6 }] as never);
+    await expect(extractContent('http://hex-evil.example.test/'))
+      .rejects.toThrow(/private IP|blocked/i);
+    // Transport never invoked — the connection was blocked before connect.
+    expect(capturedTransportInputs).toHaveLength(0);
   });
 });

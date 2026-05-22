@@ -1,9 +1,9 @@
-import dns from 'node:dns/promises';
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
+import { fetchPinned, isPrivateIP } from '../../core/network-guard.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -11,40 +11,13 @@ import { isFeatureEnabled } from '../../core/features.js';
 // ToolContext. Engine-init wires them via applyNetworkPolicy() /
 // applyHttpRateLimits() / applyEnforceHttps() in tool-context.ts. The
 // tool handler reads from `agent.toolContext` and threads it into
-// validateUrl() + fetchWithValidatedRedirects().
-
-function isPrivateIP(ip: string): boolean {
-  // Handle IPv4-mapped IPv6 (::ffff:x.x.x.x)
-  const mapped = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-  // IPv4 checks
-  const v4Parts = mapped.split('.');
-  if (v4Parts.length === 4 && v4Parts.every(p => /^\d{1,3}$/.test(p))) {
-    const nums = v4Parts.map(Number);
-    if (nums.some(n => n < 0 || n > 255)) {
-      return false;
-    }
-    const [a, b, c] = nums as [number, number, number, number];
-    if (a === 127) return true;                          // 127.0.0.0/8
-    if (a === 10) return true;                           // 10.0.0.0/8
-    if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;             // 192.168.0.0/16
-    if (a === 169 && b === 254) return true;             // 169.254.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true;   // 100.64.0.0/10 (CGNAT)
-    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 (benchmark)
-    if (a === 192 && b === 0 && c === 0) return true;    // 192.0.0.0/24 (IETF special)
-    if (a === 0) return true;                            // 0.0.0.0/8
-    if (a >= 224) return true;                           // multicast/reserved ranges
-  }
-  // IPv6 checks
-  const normalized = ip.toLowerCase();
-  if (normalized.includes(':')) {
-    if (normalized === '::1' || normalized === '::') return true;
-    if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true; // fe80::/10 link-local
-    if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true; // fc00::/7 unique-local
-    if (/^ff[0-9a-f]{2}:/.test(normalized)) return true;    // ff00::/8 multicast
-  }
-  return false;
-}
+// applyHostPolicy() + fetchWithValidatedRedirects().
+//
+// SSRF defense: isPrivateIP (decodes IPv4-mapped-IPv6 incl. hex form) and the
+// IP-pinning fetch helper come from network-guard.ts. fetchWithValidatedRedirects
+// applies the policy/enforce-https/allow-list checks here and delegates each
+// HTTP hop to fetchPinned(), which resolves DNS once + pins the connection to
+// the validated IP (closes the DNS-rebinding window between validate + connect).
 
 /** Translate technical block reasons into business-friendly messages */
 function friendlyBlockMessage(technical: string): string {
@@ -60,7 +33,18 @@ function friendlyBlockMessage(technical: string): string {
   return technical;
 }
 
-async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promise<void> {
+/**
+ * Apply user-policy checks BEFORE the SSRF / IP-pinning layer:
+ *  - protocol must be http/https
+ *  - enforceHttps: reject plain HTTP unless target is localhost
+ *  - networkPolicy: deny-all / allow-list
+ *  - reject hostname that is itself a private-IP literal (cheap early-out)
+ *
+ * The DNS-resolve + private-IP check + IP-pinning all happen in fetchPinned()
+ * — a single resolve that drives both validation and the socket connect, with
+ * no rebind window in between.
+ */
+function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
@@ -95,18 +79,11 @@ async function validateUrl(rawUrl: string, ctx?: ToolContext | undefined): Promi
     }
   }
 
+  // Cheap early-out for literal-IP private targets — fetchPinned would catch
+  // these anyway, but rejecting before any DNS attempt keeps the error
+  // synchronous + matches the legacy validateUrl flow.
   if (isPrivateIP(hostname)) {
     throw new Error(`Blocked: private IP address "${hostname}"`);
-  }
-  const dnsTimeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('DNS timeout')), 5_000));
-  const resolved = await Promise.race([
-    dns.lookup(hostname, { all: true, verbatim: true }),
-    dnsTimeout,
-  ]).catch(() => [] as Array<{ address: string; family: number }>);
-  for (const record of resolved) {
-    if (isPrivateIP(record.address)) {
-      throw new Error(`Blocked: "${hostname}" resolves to private IP "${record.address}"`);
-    }
   }
 }
 
@@ -125,16 +102,19 @@ export async function fetchWithValidatedRedirects(url: string, init: RequestInit
   let body = init.body;
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    await validateUrl(currentUrl, ctx);
+    applyHostPolicy(currentUrl, ctx);
     const requestInit: RequestInit = {
       ...init,
       method,
-      redirect: 'manual',
     };
     if (body !== undefined) {
       requestInit.body = body;
+    } else {
+      delete (requestInit as { body?: unknown }).body;
     }
-    const response = await fetch(currentUrl, requestInit);
+    // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
+    // one shot — no rebind window between validate and connect.
+    const response = await fetchPinned(currentUrl, requestInit);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
       return response;
@@ -286,7 +266,7 @@ function detectGetExfiltration(url: string): string | null {
       return 'base64-like data in URL parameters (possible data exfiltration)';
     }
   } catch {
-    // Invalid URL — will be caught by validateUrl later
+    // Invalid URL — will be caught by applyHostPolicy later
   }
   return null;
 }
@@ -447,7 +427,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           }
         }
       } catch {
-        // Invalid URL — caught by validateUrl below
+        // Invalid URL — caught by applyHostPolicy below
       }
     }
 

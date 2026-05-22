@@ -1,5 +1,35 @@
-import { describe, it, expect, vi } from 'vitest';
-import { isPrivateIP, assertPublicHost, assertPublicUrl, fetchWithPublicRedirects } from './network-guard.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('node:dns/promises', () => ({
+  default: {
+    lookup: vi.fn(),
+  },
+}));
+
+import dns from 'node:dns/promises';
+import {
+  isPrivateIP,
+  assertPublicHost,
+  assertPublicUrl,
+  fetchPinned,
+  fetchWithPublicRedirects,
+  setPinnedTransportForTests,
+} from './network-guard.js';
+import type { PinnedTransportInput } from './network-guard.js';
+
+function mockDns(records: Array<{ address: string; family: 4 | 6 }>): void {
+  vi.mocked(dns.lookup).mockResolvedValue(
+    records as unknown as Awaited<ReturnType<typeof dns.lookup>>,
+  );
+}
+
+function mockDnsSequence(seqs: Array<Array<{ address: string; family: 4 | 6 }>>): void {
+  const mocked = vi.mocked(dns.lookup);
+  mocked.mockReset();
+  for (const seq of seqs) {
+    mocked.mockResolvedValueOnce(seq as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+  }
+}
 
 describe('isPrivateIP', () => {
   describe('IPv4', () => {
@@ -80,9 +110,10 @@ describe('assertPublicHost', () => {
   });
 
   it('accepts a public hostname (or DNS failure — which is treated as inconclusive, callers must follow up)', async () => {
-    // Use an obviously-non-resolvable hostname so we don't depend on real DNS in CI.
-    // The catch(()=>[]) inside makes "no records" pass the check — DNS failures
-    // are not the SSRF guard's responsibility; the subsequent fetch handles them.
+    // DNS lookup fails / returns no records → assertPublicHost still resolves;
+    // DNS failures are not the SSRF guard's responsibility (the subsequent
+    // fetch / connect will report the real error).
+    vi.mocked(dns.lookup).mockRejectedValueOnce(new Error('ENOTFOUND'));
     await expect(assertPublicHost('this-hostname-does-not-exist.invalid')).resolves.toBeUndefined();
   });
 });
@@ -99,59 +130,132 @@ describe('assertPublicUrl', () => {
   });
 });
 
-describe('fetchWithPublicRedirects', () => {
-  it('rejects an initial private-IP target before fetching', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
-      new Error('fetch should never be called'),
-    );
-    try {
-      await expect(
-        fetchWithPublicRedirects('http://169.254.169.254/latest/meta-data/'),
-      ).rejects.toThrow(/private IP/i);
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-    }
+// fetchPinned + fetchWithPublicRedirects tests use the transport seam — the
+// transport captures the pinned input (so we can assert which IP the
+// connection actually pinned to) and returns a stubbed Response. This is the
+// right contract for the DNS-rebinding defense: validate that the IP the
+// transport receives is the one we resolved (not a re-resolved value).
+describe('fetchPinned / fetchWithPublicRedirects', () => {
+  let captured: PinnedTransportInput[];
+  let transportResponses: Array<Response | (() => Response)>;
+  let restore: () => void;
+
+  beforeEach(() => {
+    vi.mocked(dns.lookup).mockReset();
+    captured = [];
+    transportResponses = [];
+    restore = setPinnedTransportForTests(async (input) => {
+      captured.push(input);
+      const next = transportResponses.shift();
+      if (next === undefined) {
+        throw new Error('test transport: no response queued');
+      }
+      return typeof next === 'function' ? next() : next;
+    });
+  });
+  afterEach(() => {
+    restore();
+    vi.mocked(dns.lookup).mockReset();
   });
 
-  it('rejects a redirect to a private IP', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+  it('fetchPinned: resolves DNS once and pins the connection to that IP', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(new Response('ok', { status: 200 }));
+
+    const res = await fetchPinned('https://example.com/path');
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.pinnedIp).toBe('93.184.216.34');
+    expect(captured[0]!.hostname).toBe('example.com');
+    expect(captured[0]!.headers['host']).toBe('example.com');
+    expect(vi.mocked(dns.lookup)).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetchPinned: rejects a literal private-IP host (no DNS call)', async () => {
+    await expect(fetchPinned('http://169.254.169.254/latest/meta-data/')).rejects.toThrow(/private IP/i);
+    expect(vi.mocked(dns.lookup)).not.toHaveBeenCalled();
+    expect(captured).toHaveLength(0);
+  });
+
+  it('fetchPinned: rejects a hostname that resolves to a private IP', async () => {
+    mockDns([{ address: '10.0.0.5', family: 4 }]);
+    await expect(fetchPinned('http://internal.example.test/')).rejects.toThrow(/private IP/i);
+    expect(captured).toHaveLength(0);
+  });
+
+  it('fetchPinned: rejects a hostname that resolves to the IPv4-mapped-IPv6 hex form of a private IP', async () => {
+    // ::ffff:7f00:1 == 127.0.0.1 — must be caught by the hex-decoding branch
+    // of isPrivateIP, which used to be missing in the legacy http.ts/content-
+    // extractor.ts copies.
+    mockDns([{ address: '::ffff:7f00:1', family: 6 }]);
+    await expect(fetchPinned('http://evil.example.test/')).rejects.toThrow(/private IP/i);
+  });
+
+  it('fetchPinned: blocks DNS-rebinding — pinned IP stays even if a second resolve would return a different IP', async () => {
+    // 1st lookup: public 93.184.216.34 (validation passes)
+    // 2nd lookup: 127.0.0.1 (the rebind — a re-resolving fetch() would
+    //   connect here). Our pinned transport must receive the FIRST IP only.
+    mockDnsSequence([
+      [{ address: '93.184.216.34', family: 4 }],
+      [{ address: '127.0.0.1', family: 4 }],
+    ]);
+    transportResponses.push(new Response('ok', { status: 200 }));
+
+    const res = await fetchPinned('https://rebind.example.test/');
+    expect(res.status).toBe(200);
+    // The DNS-rebind defense: only ONE resolve happened, and the connection
+    // was pinned to the result. A naive `validate → fetch()` flow would have
+    // resolved twice and connected to 127.0.0.1.
+    expect(vi.mocked(dns.lookup)).toHaveBeenCalledTimes(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.pinnedIp).toBe('93.184.216.34');
+    expect(captured[0]!.pinnedIp).not.toBe('127.0.0.1');
+  });
+
+  it('fetchWithPublicRedirects: rejects an initial private-IP target before any transport call', async () => {
+    await expect(
+      fetchWithPublicRedirects('http://169.254.169.254/latest/meta-data/'),
+    ).rejects.toThrow(/private IP/i);
+    expect(captured).toHaveLength(0);
+  });
+
+  it('fetchWithPublicRedirects: rejects a redirect to a private IP', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
       new Response(null, { status: 302, headers: { location: 'http://10.0.0.1/internal' } }),
     );
-    try {
-      await expect(
-        fetchWithPublicRedirects('https://api.fake.test/start'),
-      ).rejects.toThrow(/private IP/i);
-    } finally {
-      fetchSpy.mockRestore();
-    }
+    await expect(
+      fetchWithPublicRedirects('https://api.fake.test/start'),
+    ).rejects.toThrow(/private IP/i);
   });
 
-  it('returns the final response after a public→public redirect', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(
-        new Response(null, { status: 302, headers: { location: 'https://api2.fake.test/final' } }),
-      )
-      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
-    try {
-      const res = await fetchWithPublicRedirects('https://api1.fake.test/start');
-      expect(res.status).toBe(200);
-      expect(await res.text()).toBe('ok');
-    } finally {
-      fetchSpy.mockRestore();
-    }
-  });
-
-  it('honours maxRedirects override', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(null, { status: 302, headers: { location: 'https://b.fake.test/' } }),
+  it('fetchWithPublicRedirects: returns the final response after a public→public redirect, pinning each hop', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
+      new Response(null, { status: 302, headers: { location: 'https://api2.fake.test/final' } }),
+      new Response('ok', { status: 200 }),
     );
-    try {
-      await expect(
-        fetchWithPublicRedirects('https://a.fake.test/', {}, { maxRedirects: 1 }),
-      ).rejects.toThrow(/too many redirects/i);
-    } finally {
-      fetchSpy.mockRestore();
+
+    const res = await fetchWithPublicRedirects('https://api1.fake.test/start');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+    expect(captured).toHaveLength(2);
+    // Each hop is re-resolved + re-pinned (so a redirect to a host with a
+    // private record is caught by the validation, not allowed to slip in).
+    expect(captured[0]!.hostname).toBe('api1.fake.test');
+    expect(captured[1]!.hostname).toBe('api2.fake.test');
+  });
+
+  it('fetchWithPublicRedirects: honours maxRedirects override', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    // Queue 3 redirect responses — but maxRedirects=1 should bail out after 1.
+    for (let i = 0; i < 3; i++) {
+      transportResponses.push(
+        new Response(null, { status: 302, headers: { location: 'https://b.fake.test/' } }),
+      );
     }
+    await expect(
+      fetchWithPublicRedirects('https://a.fake.test/', {}, { maxRedirects: 1 }),
+    ).rejects.toThrow(/too many redirects/i);
   });
 });
