@@ -2693,6 +2693,31 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // T2-P3: cross-field validation for `provider: 'openai'`. The OpenAI-
+      // compatible adapter has no usable default for `api_base_url` or
+      // `openai_model_id`; saving `provider: 'openai'` alone leaves the
+      // engine in a half-configured state that crashes on first inference.
+      // Reject the save with a 400 that names the missing field so the
+      // SetupBanner can surface "API base URL required" instead of a generic
+      // "Save failed" toast. Only applies when `provider` is explicitly
+      // present in the PUT body — partial updates of other fields on an
+      // already-configured `provider: 'openai'` instance must still work.
+      // Runs AFTER the managed lock-gate so a managed-mode `provider:'openai'`
+      // attempt 403s on the security gate rather than 400ing on the cross-
+      // field check (preserves the "managed reject names the field" contract).
+      const incoming = parsed.data as Record<string, unknown>;
+      if (incoming['provider'] === 'openai') {
+        const apiBaseUrl = incoming['api_base_url'];
+        if (typeof apiBaseUrl !== 'string' || apiBaseUrl.trim() === '') {
+          errorResponse(res, 400, "provider:'openai' requires api_base_url");
+          return;
+        }
+        const openaiModelId = incoming['openai_model_id'];
+        if (typeof openaiModelId !== 'string' || openaiModelId.trim() === '') {
+          errorResponse(res, 400, "provider:'openai' requires openai_model_id");
+          return;
+        }
+      }
       // Merge with existing config so partial updates don't lose other fields
       const existing = readUserConfig() as Record<string, unknown>;
       const update = parsed.data as Record<string, unknown>;
