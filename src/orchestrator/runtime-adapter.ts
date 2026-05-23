@@ -22,7 +22,7 @@ const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 // + memory_update + memory_list are read-or-tenant-scoped and safe in the
 // inline sandbox. memory_delete + memory_promote stay opt-in via per-step
 // allowTools because they're destructive / confidence-changing.
-const INLINE_CORE_TOOLS = new Set([
+export const INLINE_CORE_TOOLS = new Set([
   'bash', 'read_file', 'write_file', 'http', 'ask_user',
   'data_store_query', 'data_store_insert',
   'memory_recall', 'memory_store', 'memory_update', 'memory_list',

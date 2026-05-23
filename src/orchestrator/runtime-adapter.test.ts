@@ -21,7 +21,7 @@ vi.mock('../core/roles.js', () => ({
 }));
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, type SubAgentPromptHandles } from './runtime-adapter.js';
+import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from '../types/orchestration.js';
 
@@ -419,5 +419,32 @@ describe('spawnInline + parentPrompt propagation', () => {
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'ask_user')).toBeDefined();
+  });
+});
+
+describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
+  // Pins the inline-step sandbox allowlist so a future "let me trim a few
+  // tools" refactor can't silently break workflows that depend on memory
+  // composition (the bug pattern that shipped pre-PR#548).
+  it('includes the 4 memory_* tools needed for KG-compounding workflows', () => {
+    expect(INLINE_CORE_TOOLS.has('memory_recall')).toBe(true);
+    expect(INLINE_CORE_TOOLS.has('memory_store')).toBe(true);
+    expect(INLINE_CORE_TOOLS.has('memory_update')).toBe(true);
+    expect(INLINE_CORE_TOOLS.has('memory_list')).toBe(true);
+  });
+
+  it('excludes destructive / confidence-changing memory ops (opt-in via per-step allowTools)', () => {
+    expect(INLINE_CORE_TOOLS.has('memory_delete')).toBe(false);
+    expect(INLINE_CORE_TOOLS.has('memory_promote')).toBe(false);
+  });
+
+  it('does NOT include `knowledge_search` (stale pre-B1 API, removed post PR #540)', () => {
+    expect(INLINE_CORE_TOOLS.has('knowledge_search')).toBe(false);
+  });
+
+  it('still includes the foundational core tools', () => {
+    for (const name of ['bash', 'read_file', 'write_file', 'http', 'ask_user', 'data_store_query', 'data_store_insert']) {
+      expect(INLINE_CORE_TOOLS.has(name)).toBe(true);
+    }
   });
 });
