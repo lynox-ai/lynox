@@ -8,6 +8,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import type { IMemory } from '../../types/memory.js';
 
 const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
@@ -372,6 +373,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentPrompt: deps.parentPrompt,
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
+      parentMemory: deps.memory ?? null,
     });
 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
@@ -428,6 +430,18 @@ export interface PipelineDeps {
    * counters object.
    */
   sessionCounters?: import('../../types/agent.js').SessionCounters | undefined;
+  /**
+   * Parent agent's memory backend. Threaded down to sub-agent constructors
+   * (`spawnInline` / `spawnPipeline`) so workflow sub-steps can call
+   * `memory_recall` / `memory_store` / `memory_update` / `memory_list` —
+   * without this, those tool handlers find `agent.memory == null` and
+   * short-circuit with "Memory is not configured for this agent." (caught
+   * live on 2026-05-23 after PR #548 added the tools to INLINE_CORE_TOOLS
+   * but left the backend unwired). Absent for headless callers (worker-loop
+   * scheduled pipelines, unit tests) — those sub-agents simply degrade to
+   * the same "not configured" path the parent saw.
+   */
+  memory?: IMemory | null | undefined;
 }
 
 /**
@@ -484,6 +498,7 @@ export async function dispatchOrchestratedPipeline(
       parentPrompt: deps.parentPrompt,
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
+      parentMemory: deps.memory ?? null,
     });
 
     executedStates.set(planned.id, { manifest, state });
@@ -594,6 +609,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         runHistory: deps.runHistory ?? undefined,
         parentPrompt: deps.parentPrompt,
         parentSessionCounters: deps.sessionCounters,
+        parentMemory: deps.memory ?? null,
       });
 
       executedStates.set(planned.id, { manifest: prev.manifest, state });
@@ -648,6 +664,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentPrompt: deps.parentPrompt,
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
+      parentMemory: deps.memory ?? null,
     });
 
     executedStates.set(planned.id, { manifest, state });
@@ -783,6 +800,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         parentPrompt,
         userTimezone: agent.userTimezone,
         sessionCounters: agent.sessionCounters,
+        memory: agent.memory,
       });
     }
 
@@ -795,6 +813,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         toolContext: pipelineToolContext,
         parentPrompt,
         userTimezone: agent.userTimezone,
+        memory: agent.memory,
       });
   },
 };

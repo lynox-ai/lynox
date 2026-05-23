@@ -5,6 +5,7 @@ import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, To
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
 import type { SessionCounters } from '../types/agent.js';
+import type { IMemory } from '../types/memory.js';
 import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate } from './context.js';
@@ -59,6 +60,19 @@ export interface RunManifestOptions {
    * fresh counters object so cost still has somewhere to land.
    */
   parentSessionCounters?: SessionCounters | undefined;
+  /**
+   * Parent agent's memory backend. Threaded into `spawnInline` /
+   * `spawnPipeline` so the constructed sub-agent's `agent.memory` is
+   * non-null and the memory_* tool handlers can actually read/write. PR
+   * #548 added the tools to the inline allowlist but left this wiring
+   * absent — workflows silently degraded with "Memory is not configured
+   * for this agent." until 2026-05-23 live verification caught it.
+   *
+   * Optional: omitted by headless callers (worker-loop runs without a
+   * parent agent context, ad-hoc validate-and-run paths) and by sub-
+   * pipelines whose parent run had no memory configured to begin with.
+   */
+  parentMemory?: IMemory | null | undefined;
 }
 
 const MAX_PIPELINE_DEPTH = 3;
@@ -289,7 +303,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -302,7 +316,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, 'sonnet');
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {

@@ -422,6 +422,68 @@ describe('spawnInline + parentPrompt propagation', () => {
   });
 });
 
+describe('spawnInline + parentMemory propagation (regression-gate for memory_* in workflows)', () => {
+  // PR #548 added memory_recall/memory_store/memory_update/memory_list to
+  // INLINE_CORE_TOOLS so workflow sub-steps could dispatch them, but the
+  // memory *backend* (`agent.memory`) was not threaded into the sub-agent
+  // constructors — every memory_* handler short-circuits with
+  // "Memory is not configured for this agent." until the parent's IMemory
+  // is forwarded. Live-verified 2026-05-23 on staging via a 2-step
+  // store→recall workflow; this test pins the wiring so a future refactor
+  // can't silently regress it.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('passes parentMemory through to the spawned Agent constructor', async () => {
+    const mockMemory = {
+      append: vi.fn(),
+      load: vi.fn(),
+      appendScoped: vi.fn(),
+      loadScoped: vi.fn(),
+      delete: vi.fn(),
+      deleteScoped: vi.fn(),
+      update: vi.fn(),
+      updateScoped: vi.fn(),
+      maybeUpdate: vi.fn(),
+    } as unknown as Parameters<typeof spawnInline>[9];
+
+    const step: ManifestStep = { id: 'remember', agent: 'remember', runtime: 'inline', task: 'store + recall' };
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined,
+      mockMemory,
+    );
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['memory']).toBe(mockMemory);
+  });
+
+  it('falls back to undefined memory when parent has none (headless caller)', async () => {
+    const step: ManifestStep = { id: 'headless', agent: 'headless', runtime: 'inline', task: 'no memory' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // Agent constructor's `config.memory ?? null` then turns this into
+    // `agent.memory === null` — identical to pre-fix behaviour for the
+    // headless path.
+    expect(agentConfig['memory']).toBeUndefined();
+  });
+
+  it('coerces explicit-null parentMemory to undefined for the Agent constructor', async () => {
+    const step: ManifestStep = { id: 'null-mem', agent: 'null-mem', runtime: 'inline', task: 'null mem' };
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined,
+      null,
+    );
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['memory']).toBeUndefined();
+  });
+});
+
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
   // Pins the inline-step sandbox allowlist so a future "let me trim a few
   // tools" refactor can't silently break workflows that depend on memory
