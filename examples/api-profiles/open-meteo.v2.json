@@ -1,0 +1,46 @@
+{
+  "id": "open-meteo",
+  "name": "Open-Meteo",
+  "base_url": "https://api.open-meteo.com",
+  "description": "Free weather forecast API — no API key, attribution required for commercial use. Returns current weather, hourly/daily forecasts, historical reanalysis. DACH-relevant: native support for any lat/lon, default units metric, timezone-aware. Pair with /v1/geocoding for city-name lookup.",
+  "auth": {
+    "type": "none",
+    "instructions": "No API key required for the free tier (≤10k requests/day, non-commercial). Commercial use must purchase a key and use a separate base URL; for the free public endpoint the request is unauthenticated."
+  },
+  "rate_limit": {
+    "requests_per_second": 5,
+    "requests_per_day": 10000
+  },
+  "concurrency": {
+    "parallel_ok": true
+  },
+  "output_volume": "small",
+  "cost": {
+    "model": "free"
+  },
+  "endpoints": [
+    { "method": "GET", "path": "/v1/forecast",            "description": "Forecast for a lat/lon. Required: latitude, longitude. Common: hourly=temperature_2m,precipitation, daily=weather_code,temperature_2m_max,temperature_2m_min, timezone=auto." },
+    { "method": "GET", "path": "/v1/forecast?current=temperature_2m,wind_speed_10m", "description": "Cheap current-conditions probe — single object, ~200 bytes." },
+    { "method": "GET", "path": "/v1/archive",             "description": "Historical reanalysis (ERA5) from 1940 onwards. Same param shape as /forecast plus start_date + end_date." }
+  ],
+  "guidelines": [
+    "Always pass `timezone=auto` — without it the API returns UTC timestamps, which is rarely what the user wants.",
+    "Resolve city → lat/lon via the separate geocoding endpoint (`https://geocoding-api.open-meteo.com/v1/search?name=Zürich`) once, then cache the coordinates.",
+    "For a one-off 'what's the weather right now' query, prefer `current=` over `hourly=` — it returns ~200 bytes instead of 10–20 KB.",
+    "Include source attribution when surfacing results to end users: 'Weather data: Open-Meteo'."
+  ],
+  "avoid": [
+    "Don't request `hourly=` + 14-day range when you only need today — that's ~40 KB of JSON for no reason.",
+    "Don't poll faster than once per ~15 minutes per lat/lon — the underlying model only updates hourly."
+  ],
+  "notes": [
+    "Free tier is genuinely free for non-commercial + low-volume commercial use, but the terms require attribution and forbid resale.",
+    "DACH-friendly: handles ä/ö/ü/ß in geocoding queries; returns Celsius/km-h by default."
+  ],
+  "provenance": {
+    "source": "manual",
+    "source_url": "https://open-meteo.com/en/docs",
+    "validated_at": "2026-05-23T00:00:00Z",
+    "schema_version": 2
+  }
+}

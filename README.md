@@ -131,7 +131,7 @@ Open [localhost:3000](http://localhost:3000) on your phone and use your browser'
 ## Testing and security
 
 - 4600+ tests across the engine, tools, and orchestrator. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
-- Layered defenses: input-guard, output-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — private-IP block at DNS-resolve time (pre-fetch), URL-validated on each redirect hop.
+- Layered defenses: input-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit, plus tool-result injection scanning. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — DNS resolves once, the connection is pinned to the validated IP at TCP-connect time (rebind-safe), and each redirect hop is re-validated.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 
 ## Who builds this

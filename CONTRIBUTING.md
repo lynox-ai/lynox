@@ -23,7 +23,7 @@ For team members with write access:
 
 `main` is protected: no force push, no direct push without CI passing.
 
-See `pro/docs/internal/release-strategy.md` for the full release process.
+Releases are cut from `main` and tagged `v<major>.<minor>.<patch>`; the release tag pushes both the `@lynox-ai/core` npm package and the `ghcr.io/lynox-ai/lynox:vX.Y.Z` Docker image. See [`CHANGELOG.md`](CHANGELOG.md) for the per-version log.
 
 ## Why No External PRs?
 
