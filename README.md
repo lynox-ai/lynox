@@ -108,7 +108,7 @@ cp .env.example .env       # add your API key
 docker compose up
 ```
 
-See [Docker docs](https://docs.lynox.ai/daily-use/docker/) for encryption and production deployment.
+See [Docker docs](https://docs.lynox.ai/setup/docker/) for encryption and production deployment.
 
 ## Your first run
 
