@@ -400,6 +400,21 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // Egress secret scan over AGENT-SUPPLIED header values (all methods).
+    // Headers are an equally valid exfil channel as bodies — `Authorization:
+    // Bearer sk-ant-…` on a GET to a third-party host hands the credential
+    // over just as plainly as POSTing it in JSON. Run BEFORE the OAuth2
+    // injection below so engine-managed access tokens (which may be JWT-
+    // shaped and would self-trip the scan) are never re-scanned: the
+    // engine-managed Authorization path is the trusted, profile-driven flow
+    // — anything the agent hand-set is what we're trying to catch here.
+    for (const [headerName, headerValue] of Object.entries(headers)) {
+      const headerMatch = detectSecretInContent(headerValue);
+      if (headerMatch) {
+        return `Blocked: request header '${headerName}' appears to contain a ${headerMatch}. Sending secrets to external servers is not allowed.`;
+      }
+    }
+
     // Engine-managed OAuth2 Authorization for matched api_profile.
     // Profile drives — the agent should NOT have to remember which vault key
     // holds the current access_token. Two failure modes this prevents:

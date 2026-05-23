@@ -25,6 +25,33 @@ const ENV_SAFE_PREFIXES = [
 ];
 
 /**
+ * Name-pattern filter for credential-bearing env vars.
+ *
+ * Allow-list-by-prefix alone is insufficient: a var like `NPM_TOKEN`,
+ * `GITHUB_TOKEN`, `DOCKER_AUTH_TOKEN`, or a customer-supplied
+ * `MYBANK_TOKEN` matches one of the allow-listed prefixes (NPM_, GITHUB_,
+ * DOCKER_, or — in the MYBANK case — none, but the agent could plausibly
+ * have it in `process.env` from a parent invocation) yet still carries a
+ * credential. Dropping by prefix alone leaves the credential in the
+ * subprocess env.
+ *
+ * This regex matches case-insensitively on the NAME (not the value) of any
+ * env var that contains TOKEN / KEY / SECRET / PASSWORD as a substring.
+ * Applied AFTER the prefix allow-list and AFTER the explicit
+ * NODE_OPTIONS/NODE_EXTRA_CA_CERTS drops, so even an allow-listed prefix
+ * can't smuggle a credential through.
+ *
+ * Caveat: this is broader than strictly necessary — e.g. a
+ * `LYNOX_KEY_BINDINGS` var would also be filtered. Per PRD-T2-S4 the
+ * mandatory form is the broad regex; legitimate non-secret names
+ * containing these tokens are rare and the false-negative risk of a
+ * leaked credential is the dominant cost. `isolation.envVars` overrides
+ * (set by the caller deliberately, e.g. by spawn_agent) bypass this
+ * filter — that's the explicit scoped path.
+ */
+const CREDENTIAL_NAME_RE = /(TOKEN|KEY|SECRET|PASSWORD)/i;
+
+/**
  * Build the env that subprocesses inherit.
  *
  * Isolation source of truth is the calling agent's `isolation` config:
@@ -56,9 +83,13 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
 
   const safeEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (ENV_SAFE_PREFIXES.some(p => key === p || key.startsWith(p))) {
-      safeEnv[key] = value;
-    }
+    if (!ENV_SAFE_PREFIXES.some(p => key === p || key.startsWith(p))) continue;
+    // Name-pattern credential filter — see CREDENTIAL_NAME_RE comment.
+    // Catches NPM_TOKEN, GITHUB_TOKEN, DOCKER_AUTH_TOKEN, MYBANK_KEY,
+    // STRIPE_SECRET, DB_PASSWORD, etc., regardless of whether their
+    // prefix is allow-listed.
+    if (CREDENTIAL_NAME_RE.test(key)) continue;
+    safeEnv[key] = value;
   }
 
   // Remove dangerous NODE_ vars that could be exploited for code injection
@@ -66,6 +97,10 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
   delete safeEnv.NODE_EXTRA_CA_CERTS;
 
   // Per-spawn env overrides for scoped/sandboxed levels.
+  // These are caller-explicit — spawn_agent / orchestrator deliberately
+  // scoped them for the child, so the credential-name regex does NOT
+  // apply (a caller can legitimately want to forward a single token to a
+  // tightly-scoped child).
   if (isolation?.envVars) {
     for (const [key, value] of Object.entries(isolation.envVars)) {
       safeEnv[key] = value;
