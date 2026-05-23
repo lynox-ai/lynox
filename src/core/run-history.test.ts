@@ -1609,11 +1609,11 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('a row written as status=failed is excluded from getDueTasks even with a stale next_run_at', () => {
+    it('a ONE-SHOT row written as status=failed is excluded from getDueTasks even with a stale next_run_at', () => {
       // Defence in depth: recordTaskRun clears next_run_at when it
-      // moves a task to 'failed', but the SELECT also excludes failed
-      // rows so a malformed row (e.g. surfaced by a future bug) cannot
-      // re-introduce the runaway loop.
+      // moves a one-shot task to 'failed', but the SELECT also excludes
+      // failed one-shot rows so a malformed row (e.g. surfaced by a
+      // future bug) cannot re-introduce the runaway loop.
       const h = createHistory();
       h.insertTask({
         id: 'tstale',
@@ -1623,6 +1623,26 @@ describe('RunHistory', () => {
       });
       const due = h.getDueTasks();
       expect(due.some(t => t.id === 'tstale')).toBe(false);
+      h.close();
+    });
+
+    it('a CRON row with status=failed IS picked up by getDueTasks (recurrence keeps firing)', () => {
+      // Counterpart to the one-shot exclusion above: cron tasks must
+      // survive a transient failure. The SELECT exempts rows where
+      // schedule_cron IS NOT NULL from the failed-status filter so a
+      // failed daily cron (e.g. an API-health probe that 500ed once)
+      // still re-runs tomorrow. recordTaskRun re-derives status from
+      // the next run, so a success flips it back to 'open'.
+      const h = createHistory();
+      h.insertTask({
+        id: 'tcronfail',
+        title: 'Failed daily cron',
+        status: 'failed',
+        scheduleCron: '0 9 * * *',
+        nextRunAt: '2020-01-01T00:00:00.000Z',
+      });
+      const due = h.getDueTasks();
+      expect(due.some(t => t.id === 'tcronfail')).toBe(true);
       h.close();
     });
   });

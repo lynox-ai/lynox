@@ -507,7 +507,14 @@ describe('TaskManager', () => {
       expect(after!.last_run_status).toBe('failed');
     });
 
-    it('a recurring cron task that fails still reschedules — does NOT short-circuit to failed', () => {
+    it('a recurring cron task that fails surfaces status=failed but keeps a future next_run_at', () => {
+      // New semantic (replaces the pre-2026-05-23 "stays open"):
+      //   - status='failed' so the UI can show the cron task is unhealthy
+      //   - next_run_at is still set (cron schedule, not status, drives
+      //     re-runs — getDueTasks was widened to keep cron rows in the
+      //     queue even when status='failed')
+      //   - A subsequent successful run auto-recovers status to 'open'
+      //     (see "auto-recovers" test below)
       setPipelineModeLookup(() => 'autonomous');
       const task = tm.createScheduled({
         title: 'Hourly check',
@@ -516,8 +523,52 @@ describe('TaskManager', () => {
       tm.recordTaskRun(task.id, 'transient error', 'failed');
 
       const after = tm.getTask(task.id);
-      expect(after!.status).toBe('open');           // recurring tasks stay open
-      expect(after!.next_run_at).toBeTruthy();      // reschedule fired
+      expect(after!.status).toBe('failed');         // surface the failure
+      expect(after!.next_run_at).toBeTruthy();      // reschedule still fired
+      expect(after!.last_run_status).toBe('failed');
+      setPipelineModeLookup(undefined);
+    });
+
+    it('a cron task with status=failed is STILL picked up by getDueTasks (recurrence survives)', () => {
+      // Regression guard: if the getDueTasks SELECT ever reverts to
+      // excluding all status='failed' rows, a single transient failure
+      // would permanently freeze a weekly cron — the exact bug this
+      // sprint fixes.
+      setPipelineModeLookup(() => 'autonomous');
+      const task = tm.createScheduled({
+        title: 'Hourly check',
+        scheduleCron: '0 * * * *',
+      });
+      tm.recordTaskRun(task.id, 'boom', 'failed');
+      expect(tm.getTask(task.id)!.status).toBe('failed');
+
+      // Backdate next_run_at via the history layer (tm.update would also
+      // wipe schedule_cron because of the "schedule fields move as a
+      // pair" rule). The point of this test is the getDueTasks SELECT
+      // shape, not the manager API.
+      history.updateTask(task.id, { nextRunAt: '2020-01-01T00:00:00.000Z' });
+      const due = tm.getDueTasks();
+      expect(due.some(t => t.id === task.id)).toBe(true);
+      setPipelineModeLookup(undefined);
+    });
+
+    it('a cron task auto-recovers status=open on the next successful run', () => {
+      // Self-healing: failed → success flips status back without
+      // operator intervention. Matches the "derived from latest run"
+      // design choice (Approach A in the PR description).
+      setPipelineModeLookup(() => 'autonomous');
+      const task = tm.createScheduled({
+        title: 'Hourly check',
+        scheduleCron: '0 * * * *',
+      });
+      tm.recordTaskRun(task.id, 'transient error', 'failed');
+      expect(tm.getTask(task.id)!.status).toBe('failed');
+
+      tm.recordTaskRun(task.id, 'all good', 'success');
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('open');           // auto-recovered
+      expect(after!.last_run_status).toBe('success');
+      expect(after!.next_run_at).toBeTruthy();      // still scheduled
       setPipelineModeLookup(undefined);
     });
 
