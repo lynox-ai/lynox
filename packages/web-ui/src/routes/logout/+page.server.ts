@@ -3,15 +3,17 @@ import { redirect } from '@sveltejs/kit';
 
 export const load: PageServerLoad = async ({ cookies, request }) => {
 	// Two guards: cross-site clicks (CSRF nuisance) AND same-origin SvelteKit
-	// data-prefetches (hovering a logout link triggers __data.json fetch which
-	// runs this load() — would silently log the user out, observed in staging
-	// at 17:29 UTC on 2026-05-23). Only act when this is a real top-level
-	// navigation: sec-fetch-dest === 'document'. Data-loads send 'empty'.
+	// data-loads (`/logout/__data.json` from hover-prefetch OR click intercepted
+	// by the client router — both would silently log the user out without
+	// reaching the redirect). Real top-level navigations send sec-fetch-dest=
+	// 'document'; data-loads send 'empty'. We treat the absent header as a
+	// real navigation (older browsers, curl, server-side fetches) — better to
+	// honour an intended logout than to silently fail one.
 	const fetchSite = request.headers.get('sec-fetch-site');
 	const fetchDest = request.headers.get('sec-fetch-dest');
 	const isCrossSite = fetchSite === 'cross-site';
-	const isTopLevelNavigation = fetchDest === 'document';
-	if (cookies.get('lynox_session') && !isCrossSite && isTopLevelNavigation) {
+	const isDataLoad = fetchDest !== null && fetchDest !== 'document';
+	if (cookies.get('lynox_session') && !isCrossSite && !isDataLoad) {
 		cookies.delete('lynox_session', { path: '/' });
 	}
 	redirect(303, '/login');

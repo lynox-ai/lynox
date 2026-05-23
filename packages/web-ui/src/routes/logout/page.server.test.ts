@@ -58,17 +58,38 @@ describe('logout +page.server load() — cookie-clearing guards', () => {
 		expect(r.redirectedTo).toBe('/login');
 	});
 
-	it('SvelteKit __data.json prefetch (sec-fetch-dest=empty): does NOT delete the cookie', async () => {
-		// Regression: 2026-05-23 — hovering the rail logout link triggered
-		// hover-prefetch (`<body data-sveltekit-preload-data="hover">`), the
-		// /logout/__data.json fetch ran load(), and the user was silently
-		// logged out. Confirmed against staging-engine logs at 17:29 UTC.
+	it('SvelteKit data-load (sec-fetch-dest=empty): does NOT delete the cookie', async () => {
+		// Regression: 2026-05-23 — both hover-prefetch (preload="hover") AND
+		// the SvelteKit client router's click-interception fetch /logout/
+		// __data.json with sec-fetch-dest=empty. The first symptom was hover-
+		// triggered silent logout; the test for the second was Playwright-
+		// verified later the same day. Both must be rejected here.
 		const r = await callLoad({
 			cookie: 'tok.123.abc',
 			sec_fetch_site: 'same-origin',
 			sec_fetch_dest: 'empty',
 		});
 		expect(r.deletes).toEqual([]);
+		expect(r.redirectedTo).toBe('/login');
+	});
+
+	it('same-site top-level nav (e.g. subdomain → app): deletes the cookie', async () => {
+		const r = await callLoad({
+			cookie: 'tok.123.abc',
+			sec_fetch_site: 'same-site',
+			sec_fetch_dest: 'document',
+		});
+		expect(r.deletes).toEqual([{ name: 'lynox_session', opts: { path: '/' } }]);
+		expect(r.redirectedTo).toBe('/login');
+	});
+
+	it('user-typed URL / bookmark (sec-fetch-site=none, dest=document): deletes the cookie', async () => {
+		const r = await callLoad({
+			cookie: 'tok.123.abc',
+			sec_fetch_site: 'none',
+			sec_fetch_dest: 'document',
+		});
+		expect(r.deletes).toEqual([{ name: 'lynox_session', opts: { path: '/' } }]);
 		expect(r.redirectedTo).toBe('/login');
 	});
 
@@ -88,12 +109,19 @@ describe('logout +page.server load() — cookie-clearing guards', () => {
 		expect(r.redirectedTo).toBe('/login');
 	});
 
-	it('missing sec-fetch-dest (older clients/curl): treats as non-document → does NOT delete', async () => {
-		// Conservative default — if a fetch impl doesn't send Sec-Fetch-Dest
-		// we cannot prove it's a real top-level navigation. Better to leave
-		// the cookie intact than to silently log a user out.
+	it('missing sec-fetch-dest entirely (curl, older browsers): deletes the cookie', async () => {
+		// Older clients / non-browser callers may omit Sec-Fetch-Dest. Honour
+		// the intent — if someone hits /logout without the data-load marker,
+		// log them out. Silent no-op would be a worse failure mode than the
+		// theoretical CSRF angle (which the cross-site check already covers).
 		const r = await callLoad({ cookie: 'tok.123.abc' });
-		expect(r.deletes).toEqual([]);
+		expect(r.deletes).toEqual([{ name: 'lynox_session', opts: { path: '/' } }]);
+		expect(r.redirectedTo).toBe('/login');
+	});
+
+	it('document dest without sec-fetch-site (embedded webview): deletes the cookie', async () => {
+		const r = await callLoad({ cookie: 'tok.123.abc', sec_fetch_dest: 'document' });
+		expect(r.deletes).toEqual([{ name: 'lynox_session', opts: { path: '/' } }]);
 		expect(r.redirectedTo).toBe('/login');
 	});
 });
