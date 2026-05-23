@@ -10,7 +10,8 @@
  */
 
 import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { wrapUntrustedData } from './data-boundary.js';
 
 // ── Errors ──
@@ -463,6 +464,92 @@ Maintain these profiles as you learn. If an API call returns an unexpected schem
 or teaches you a new pitfall, update the profile via \`api_setup\` action=refine. For new APIs,
 prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.
 </api_profiles>`;
+  }
+
+  /**
+   * Format the curated "suggested APIs" catalog as a compact system-prompt block.
+   *
+   * The catalog (`data/suggested-apis.json` at the package root) is NOT a set
+   * of pre-loaded profiles — it's a list of free public APIs the agent can
+   * offer to bootstrap on demand via `api_setup` action=bootstrap. The block
+   * also encodes the auth-flow constraints the agent must respect (e.g. no
+   * oauth2 authorization-code redirect flow today) and a do-not-suggest list
+   * (payment providers, infra providers) so the agent doesn't proactively
+   * propose risky setups.
+   *
+   * Returns an empty string when:
+   * - LYNOX_SKIP_SUGGESTED_APIS=1 is set (opt-out)
+   * - the catalog file is missing (silent — e.g. dev tree without data/)
+   * - the catalog JSON is malformed (silent — never throw at boot)
+   */
+  formatSuggestedApisForSystemPrompt(): string {
+    if (process.env['LYNOX_SKIP_SUGGESTED_APIS'] === '1') return '';
+
+    // From src/core/api-store.ts (dev) or dist/core/api-store.js (built),
+    // `../../data/suggested-apis.json` resolves to the package root where
+    // `data/` is shipped via package.json `files`.
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const catalogPath = join(thisDir, '..', '..', 'data', 'suggested-apis.json');
+
+    let raw: string;
+    try {
+      raw = readFileSync(catalogPath, 'utf-8');
+    } catch {
+      return '';
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return '';
+    }
+
+    if (!parsed || typeof parsed !== 'object') return '';
+    const cat = parsed as Record<string, unknown>;
+    const apis = Array.isArray(cat['suggested_apis']) ? cat['suggested_apis'] : [];
+    if (apis.length === 0) return '';
+
+    const supported = Array.isArray(cat['supported_auth_flows']) ? cat['supported_auth_flows'] as unknown[] : [];
+    const notSupported = Array.isArray(cat['not_supported_auth_flows']) ? cat['not_supported_auth_flows'] as unknown[] : [];
+    const doNot = Array.isArray(cat['do_not_proactively_suggest']) ? cat['do_not_proactively_suggest'] as unknown[] : [];
+
+    const lines: string[] = ['<api_bootstrap_hints>'];
+    lines.push('You have the `api_setup` tool to bootstrap external APIs from their docs URL.');
+    lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap.');
+    lines.push('');
+
+    if (supported.length > 0) {
+      lines.push('Supported auth flows:');
+      for (const s of supported) lines.push(`- ${String(s)}`);
+      lines.push('');
+    }
+    if (notSupported.length > 0) {
+      lines.push('NOT supported (cannot be bootstrapped today — do not offer):');
+      for (const s of notSupported) lines.push(`- ${String(s)}`);
+      lines.push('');
+    }
+    if (doNot.length > 0) {
+      lines.push('Do NOT proactively suggest bootstrapping:');
+      for (const s of doNot) lines.push(`- ${String(s)}`);
+      lines.push('');
+    }
+
+    lines.push('Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):');
+    for (const api of apis) {
+      if (!api || typeof api !== 'object') continue;
+      const a = api as Record<string, unknown>;
+      const name = typeof a['name'] === 'string' ? a['name'] : '';
+      const category = typeof a['category'] === 'string' ? a['category'] : '';
+      const auth = typeof a['auth_type'] === 'string' ? a['auth_type'] : '';
+      const valueProp = typeof a['value_prop'] === 'string' ? a['value_prop'] : '';
+      const docsUrl = typeof a['docs_url'] === 'string' ? a['docs_url'] : '';
+      if (!name || !docsUrl) continue;
+      lines.push(`- ${name} (${category}, auth=${auth}) — ${valueProp} Docs: ${docsUrl}`);
+    }
+    lines.push('</api_bootstrap_hints>');
+
+    return lines.join('\n');
   }
 
   /**

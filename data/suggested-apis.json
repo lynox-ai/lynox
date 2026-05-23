@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "$comment": "Lightweight bootstrap-hint catalog. NOT pre-loaded profiles — these are suggestions the agent can offer the user. When the user agrees, the agent calls api_setup action=bootstrap with the docs_url to extract a real profile from the actual docs (not from training knowledge).",
+  "supported_auth_flows": [
+    "none (public, no key)",
+    "api_key in custom header (e.g. X-Api-Key)",
+    "api_key in query parameter",
+    "bearer token in Authorization header",
+    "basic auth (user/pass or pre-encoded base64)",
+    "oauth2 client_credentials grant (server-to-server, no browser redirect)",
+    "oauth2 refresh_token grant (if a refresh token is already held in the vault)"
+  ],
+  "not_supported_auth_flows": [
+    "oauth2 authorization_code grant with browser-redirect / callback-URL (in progress — APIs requiring this flow cannot be bootstrapped today)"
+  ],
+  "do_not_proactively_suggest": [
+    "payment providers (Stripe, PayPal, Adyen, etc.) — require explicit user-initiated setup",
+    "cloud / hosting / infrastructure providers (Hetzner, AWS, GCP, Azure, Cloudflare account API) — destructive-action risk",
+    "any API that mutates production billing, customer records, or live financial state without the user explicitly asking to wire it"
+  ],
+  "suggested_apis": [
+    {
+      "id": "hackernews",
+      "name": "Hacker News (Algolia)",
+      "category": "search / community",
+      "docs_url": "https://hn.algolia.com/api",
+      "auth_type": "none",
+      "value_prop": "Hacker News full-text search across stories + comments. Public API, no key."
+    },
+    {
+      "id": "github",
+      "name": "GitHub REST API (public read)",
+      "category": "code / repos",
+      "docs_url": "https://docs.github.com/en/rest",
+      "auth_type": "none",
+      "value_prop": "Public repos, releases, issues, search. Unauthenticated 60 req/h per IP; a personal-access-token bumps it to 5000/h."
+    },
+    {
+      "id": "npm",
+      "name": "npm Registry",
+      "category": "code / package metadata",
+      "docs_url": "https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md",
+      "auth_type": "none",
+      "value_prop": "Public npm package metadata: versions, latest, dist-tags. No key for read access."
+    },
+    {
+      "id": "wikipedia",
+      "name": "Wikipedia (MediaWiki API)",
+      "category": "knowledge",
+      "docs_url": "https://www.mediawiki.org/wiki/API:Main_page",
+      "auth_type": "none",
+      "value_prop": "Wikipedia article summaries, search, full text. No key. Per-language hosts (en./de./fr./...)."
+    },
+    {
+      "id": "arxiv",
+      "name": "arXiv",
+      "category": "research / papers",
+      "docs_url": "https://info.arxiv.org/help/api/index.html",
+      "auth_type": "none",
+      "value_prop": "arXiv preprint search + metadata. Atom XML responses. No key, ~3-second rate-limit between requests."
+    },
+    {
+      "id": "open-meteo",
+      "name": "Open-Meteo",
+      "category": "weather",
+      "docs_url": "https://open-meteo.com/en/docs",
+      "auth_type": "none",
+      "value_prop": "Free weather forecasts + historical reanalysis. Lat/lon based, metric defaults. No key for non-commercial / low-volume use."
+    },
+    {
+      "id": "frankfurter",
+      "name": "Frankfurter (ECB FX rates)",
+      "category": "currency / finance",
+      "docs_url": "https://frankfurter.dev/",
+      "auth_type": "none",
+      "value_prop": "ECB-sourced foreign-exchange rates, daily + historical timeseries back to 1999. Open-source, no key."
+    },
+    {
+      "id": "restcountries",
+      "name": "REST Countries",
+      "category": "geography / reference",
+      "docs_url": "https://restcountries.com/",
+      "auth_type": "none",
+      "value_prop": "Country metadata: ISO codes, capital, currency, languages, region, neighbors. Community-maintained, no key."
+    },
+    {
+      "id": "nager-date",
+      "name": "Nager.Date (public holidays)",
+      "category": "calendar / scheduling",
+      "docs_url": "https://date.nager.at/Api",
+      "auth_type": "none",
+      "value_prop": "Public-holiday calendar for 100+ countries incl. DACH with per-region (Bundesland / Kanton) granularity. No key. Useful for holiday-aware scheduling + SLA business-day calculations."
+    },
+    {
+      "id": "vatcomply",
+      "name": "VATcomply (EU VAT + IBAN + FX)",
+      "category": "B2B / EU compliance",
+      "docs_url": "https://www.vatcomply.com/documentation",
+      "auth_type": "none",
+      "value_prop": "Validate EU VAT numbers via VIES, decode IBANs, fetch ECB FX rates. No key. DACH/EU-relevant for B2B invoicing flows."
+    }
+  ]
+}

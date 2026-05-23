@@ -552,6 +552,18 @@ export class Engine {
         const apiContext = this._apiStore.formatForSystemPrompt();
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
       }
+      // Inject the curated "bootstrap-suggestion" catalog regardless of how
+      // many user-bootstrapped profiles are already loaded. On a fresh
+      // install (loaded === 0) this is the only API context the agent has;
+      // after the user has wired some APIs it sits alongside, showing what
+      // else they can wire on demand. The catalog is suggestions only —
+      // real profiles are produced at bootstrap time by `api_setup` so the
+      // endpoint schema comes from live docs, not the model's training set.
+      // Opt-out: LYNOX_SKIP_SUGGESTED_APIS=1.
+      const suggestedContext = this._apiStore.formatSuggestedApisForSystemPrompt();
+      if (suggestedContext) {
+        this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
+      }
     } catch {
       this._apiStore = null;
     }
