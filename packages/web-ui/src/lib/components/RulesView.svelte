@@ -8,8 +8,9 @@
 	// here without touching the backend).
 	//
 	// Account picker is a native `<input list>` populated from the mail
-	// accounts endpoint; advanced users can paste a `whatsapp:<id>`
-	// pseudo-account by hand since /api/mail/accounts only knows mail.
+	// accounts endpoint; future non-mail channels (when reintroduced) will
+	// expose their own pseudo-account ids that advanced users could paste
+	// by hand since /api/mail/accounts only knows mail.
 
 	import { onDestroy, onMount } from 'svelte';
 	import { t } from '../i18n.svelte.js';

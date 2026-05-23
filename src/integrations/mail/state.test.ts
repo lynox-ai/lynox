@@ -491,36 +491,21 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     expect(ruleCount.c).toBe(0);
   });
 
-  it('rejects upsertAccount with a reserved channel prefix (whatsapp:)', () => {
-    const base = {
-      displayName: 'Bad',
-      address: 'me@example.com',
-      preset: 'custom' as const,
-      imap: { host: 'i', port: 993, secure: true },
-      smtp: { host: 's', port: 465, secure: true },
-      authType: 'imap' as const,
-      type: 'personal' as const,
-      isDefault: false,
-    };
-    expect(() => db.upsertAccount({ id: 'whatsapp:foo', ...base })).toThrow(/reserved channel prefix/);
-    // Normal ids still pass.
-    expect(() => db.upsertAccount({ id: 'acct-normal', ...base })).not.toThrow();
-  });
-
-  it('accepts an inbox_items row with a non-mail account_id (v9 relaxed FK for WhatsApp pseudo-accounts)', () => {
-    // v9 dropped the FK on inbox_items.account_id; the column is now
-    // polymorphic (mail-account id OR 'whatsapp:<phone>'). Cascade on
-    // mail-account delete is enforced application-side in deleteAccount().
+  it('accepts an inbox_items row with a non-mail account_id (v9 relaxed FK for pseudo-account channels)', () => {
+    // v9 dropped the FK on inbox_items.account_id; the column is polymorphic
+    // to accommodate non-mail pseudo-account ids (currently only email ships,
+    // but the schema preserves the relaxed FK for future channel re-introduction).
+    // Cascade on mail-account delete is enforced application-side in deleteAccount().
     inner(db)
       .prepare(
         `INSERT INTO inbox_items (id, account_id, channel, thread_key, bucket, confidence, reason_de, classified_at, classifier_version)
-         VALUES ('wa1', 'whatsapp:491234567890', 'whatsapp', 'whatsapp:thread:1', 'requires_user', 0.5, 'r', 0, 'v')`,
+         VALUES ('p1', 'pseudo:abc', 'email', 'pseudo:thread:1', 'requires_user', 0.5, 'r', 0, 'v')`,
       )
       .run();
     const row = inner(db)
-      .prepare(`SELECT account_id FROM inbox_items WHERE id = 'wa1'`)
+      .prepare(`SELECT account_id FROM inbox_items WHERE id = 'p1'`)
       .get() as { account_id: string };
-    expect(row.account_id).toBe('whatsapp:491234567890');
+    expect(row.account_id).toBe('pseudo:abc');
   });
 });
 

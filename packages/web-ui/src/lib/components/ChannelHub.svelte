@@ -14,9 +14,6 @@
 		descKey: string;
 	}
 
-	// WhatsApp is wired end-to-end (component + route at `/channels/whatsapp`)
-	// but the marketing / docs surface isn't ready yet. Hidden from the hub
-	// until release; the direct route still works for internal testing.
 	// When a future channel needs tier-gating, reintroduce `hideOnManaged` here
 	// and bring back the `loadManagedStatus` probe (see git history pre-P3-PR-A2
 	// review fixup). Removed eagerly now to drop one /api/config RTT on hub mount.

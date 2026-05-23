@@ -456,23 +456,6 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(401);
     });
 
-    it('lets public WhatsApp paths through without bearer token', async () => {
-      // Meta hits the webhook unauthenticated (it carries its own HMAC signature).
-      // The pre-login UI hits /status to decide whether to render WA surfaces.
-      // All three must reach their handler instead of being 401'd by the auth gate.
-      const status = await fetch(`${baseUrl}/api/whatsapp/status`);
-      expect(status.status).not.toBe(401);
-
-      const webhookGet = await fetch(`${baseUrl}/api/webhooks/whatsapp`);
-      expect(webhookGet.status).not.toBe(401);
-
-      const webhookPost = await fetch(`${baseUrl}/api/webhooks/whatsapp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-      expect(webhookPost.status).not.toBe(401);
-    });
   });
 
   // ── Session-cookie auth (shared with Web UI) ──────────────────────────
@@ -1193,7 +1176,7 @@ describe('LynoxHTTPApi', () => {
   //
   // 2026-05-18 INVERSION: the predicate now fires for the NARROW set of
   // admin-only infrastructure patterns (LYNOX_*, MANAGED_*, MAIL_ACCOUNT_*,
-  // WHATSAPP_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*). Almost all agent-asked
+  // GOOGLE_OAUTH_*, SMTP_*, IMAP_*). Almost all agent-asked
   // secrets — Shopify, Stripe, DataForSEO, Hetzner, arbitrary integration
   // names — pass on managed by default. This realises the lynox core
   // promise: managed customers can connect their own tools without filing
@@ -1246,7 +1229,6 @@ describe('LynoxHTTPApi', () => {
       // These have dedicated integration UIs that own the writes; direct
       // PUT here would race / drift those forms.
       expect(predictManagedBlocked('MAIL_ACCOUNT_STAGING_RULE')).toBe(true);
-      expect(predictManagedBlocked('WHATSAPP_ACCESS_TOKEN')).toBe(true);
       expect(predictManagedBlocked('GOOGLE_OAUTH_REFRESH_TOKEN')).toBe(true);
       expect(predictManagedBlocked('SMTP_PASSWORD')).toBe(true);
       expect(predictManagedBlocked('IMAP_PASSWORD')).toBe(true);
@@ -2523,8 +2505,6 @@ describe('LynoxHTTPApi', () => {
         ['POST',   '/api/migration/chunk'],
         ['POST',   '/api/migration/restore'],
         ['DELETE', '/api/migration'],
-        ['POST',   '/api/whatsapp/credentials'],
-        ['DELETE', '/api/whatsapp/credentials'],
         ['POST',   '/api/kg/cleanup'],
         ['POST',   '/api/backups/some-id/restore'],
         ['POST',   '/api/mail/accounts'],

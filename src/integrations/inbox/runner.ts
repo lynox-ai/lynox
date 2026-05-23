@@ -36,8 +36,8 @@ import type { InboxStateDb, ThreadMessageInput } from './state.js';
  */
 export interface InboxQueuePayload {
   accountId: string;
-  /** Channel discriminator — 'email' or 'whatsapp'. Default 'email' for legacy callers. */
-  channel?: 'email' | 'whatsapp' | undefined;
+  /** Channel discriminator — currently only 'email'. Default 'email' for legacy callers. */
+  channel?: 'email' | undefined;
   threadKey: string;
   classifierInput: ClassifierPromptInput;
   /** Optional single tenant override; falls back to the repository default. */

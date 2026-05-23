@@ -315,8 +315,8 @@
 			: d.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
 	}
 
-	function channelLabel(c: InboxItem['channel']): string {
-		return c === 'whatsapp' ? t('inbox.channel_whatsapp') : t('inbox.channel_email');
+	function channelLabel(_c: InboxItem['channel']): string {
+		return t('inbox.channel_email');
 	}
 
 	const HOUR_MS = 3_600_000;

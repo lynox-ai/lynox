@@ -8,7 +8,7 @@
 // Single-user instances use the literal 'default' tenant_id. Team-inbox lands
 // in Phase 5+ without a schema change.
 
-export type InboxChannel = 'email' | 'whatsapp';
+export type InboxChannel = 'email';
 
 /**
  * Classifier verdict for a thread.
@@ -76,7 +76,7 @@ export interface InboxItem {
   fromAddress: string;
   fromName: string | undefined;
   subject: string;
-  /** envelope.date.getTime() at watcher-hook time. Null for WA items + pre-v11 rows. */
+  /** envelope.date.getTime() at watcher-hook time. Null for pre-v11 rows. */
   mailDate: Date | undefined;
   /** ≤200-char preview from envelope.snippet — cheap card preview without body fetch. */
   snippet: string | undefined;

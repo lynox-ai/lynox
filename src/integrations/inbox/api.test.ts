@@ -946,22 +946,6 @@ describe('handleSendInboxReply', () => {
     expect(r.status).toBe(404);
   });
 
-  it('501 for non-email channels', async () => {
-    const itemId = state.insertItem({
-      accountId: 'whatsapp:default',
-      channel: 'whatsapp',
-      threadKey: 'wa:1',
-      bucket: 'requires_user',
-      confidence: 0.9,
-      reasonDe: 'r',
-      classifiedAt: new Date(),
-      classifierVersion: 'v',
-    });
-    const draftId = createDraftFor(itemId);
-    const r = await handleSendInboxReply({ ...deps, mailContext: fakeMailContext() }, draftId);
-    expect(r.status).toBe(501);
-  });
-
   it('422 + reason="empty_body" when the body is empty after trim', async () => {
     const id = insertItem('imap:<m1@x>');
     const draftId = createDraftFor(id);
@@ -1157,61 +1141,6 @@ describe('handleRefreshItemBody', () => {
     expect(r.status).toBe(404);
   });
 
-  it('503 for WA items when the whatsappStore is not wired', async () => {
-    const id = state.insertItem({
-      accountId: 'whatsapp:default',
-      channel: 'whatsapp',
-      threadKey: 'wa:1',
-      bucket: 'requires_user',
-      confidence: 0.9,
-      reasonDe: 'r',
-      classifiedAt: new Date(),
-      classifierVersion: 'v',
-    });
-    const r = await handleRefreshItemBody({ ...deps, accountResolver }, id);
-    expect(r.status).toBe(503);
-  });
-
-  it('routes WA items through the whatsappStore and overwrites a pre-seeded cache', async () => {
-    const threadKey = 'whatsapp-41700000000';
-    const id = state.insertItem({
-      accountId: 'whatsapp:default',
-      channel: 'whatsapp',
-      threadKey,
-      bucket: 'requires_user',
-      confidence: 0.9,
-      reasonDe: 'r',
-      classifiedAt: new Date(),
-      classifierVersion: 'v',
-    });
-    // Pre-seed a stale classifier snippet so the assertion proves
-    // refresh REPLACES — not just writes when empty.
-    state.saveItemBody(id, 'stale classify-time snippet', 'whatsapp');
-    const whatsappStore = {
-      getMessagesForThread: () => [
-        {
-          id: 'm1',
-          threadId: threadKey,
-          phoneE164: '41700000000',
-          direction: 'inbound' as const,
-          kind: 'text' as const,
-          text: 'Hi, kannst du morgen?',
-          mediaId: null,
-          transcript: null,
-          mimeType: null,
-          timestamp: Math.floor(Date.now() / 1000),
-          isEcho: false,
-          rawJson: '{}',
-        },
-      ],
-    };
-    const r = await handleRefreshItemBody({ ...deps, accountResolver, whatsappStore }, id);
-    expect(r.status).toBe(200);
-    const cached = state.getItemBody(id);
-    expect(cached?.bodyMd).toContain('Hi, kannst du morgen?');
-    expect(cached?.bodyMd).not.toContain('stale classify-time snippet');
-  });
-
   it('422 + reason="not_registered" when the provider is not registered for the account', async () => {
     const id = insertItem('imap:<m1@x>');
     const providerResolver = () => null;
@@ -1271,29 +1200,6 @@ describe('handleGenerateDraft', () => {
     const llm: LLMCaller = vi.fn(async () => 'x');
     const r = await handleGenerateDraft({ ...deps, llm, accountResolver }, 'nope');
     expect(r.status).toBe(404);
-  });
-
-  it('runs channel-agnostically — WA items with a cached body generate successfully', async () => {
-    const id = state.insertItem({
-      accountId: 'whatsapp:default',
-      channel: 'whatsapp',
-      threadKey: 'wa:1',
-      bucket: 'requires_user',
-      confidence: 0.9,
-      reasonDe: 'r',
-      classifiedAt: new Date(),
-      classifierVersion: 'v',
-    });
-    state.saveItemBody(id, 'Long enough cached WA body to pass the min-length gate', 'whatsapp');
-    const waAccountResolver = {
-      resolve: (aid: string) => aid === 'whatsapp:default'
-        ? { address: 'whatsapp:default', displayName: 'WhatsApp' }
-        : null,
-    };
-    const llm: LLMCaller = vi.fn(async () => 'Hi there, sounds good.');
-    const r = await handleGenerateDraft({ ...deps, llm, accountResolver: waAccountResolver }, id);
-    expect(r.status).toBe(200);
-    expect((r.body as { bodyMd: string }).bodyMd).toBe('Hi there, sounds good.');
   });
 
   it('422 when the cached body is missing (predates v10 / sensitive-skip)', async () => {

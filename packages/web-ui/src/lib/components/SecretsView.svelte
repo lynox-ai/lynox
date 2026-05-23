@@ -9,7 +9,7 @@
 	Backend: reuses the existing /api/secrets endpoints already wired for KeysView.
 	Managed-tier policy (inverted 2026-05-18 — see INFRA_ADMIN_ONLY_PATTERNS in
 	http-api.ts): default is USER-WRITABLE. Only a narrow set of infrastructure
-	patterns (LYNOX_*, MAIL_ACCOUNT_*, WHATSAPP_*, GOOGLE_OAUTH_*, SMTP_*,
+	patterns (LYNOX_*, MAIL_ACCOUNT_*, GOOGLE_OAUTH_*, SMTP_*,
 	IMAP_*, MANAGED_*) is admin-only and gets a 403. The managed-tier notice
 	below explains the boundary, not "everything is blocked".
 -->
@@ -29,14 +29,13 @@
 	]);
 
 	// Channel-managed secrets — owned by their own Settings sub-page (Mail
-	// accounts under Integrations → Mail, WhatsApp under .../whatsapp, etc.).
+	// accounts under Integrations → Mail, Google OAuth under .../google, etc.).
 	// Showing them in the generic-keys list confuses operators because the
 	// "Ändern" button here writes to a different code path than the channel's
 	// edit form, races silently, and the names (e.g. MAIL_ACCOUNT_STAGING_RULE)
 	// don't read as "API keys" the way DATAFORSEO_LOGIN does. Filter by prefix.
 	const CHANNEL_MANAGED_PREFIXES: ReadonlyArray<string> = [
 		'MAIL_ACCOUNT_',
-		'WHATSAPP_',
 		'GOOGLE_OAUTH_',
 	];
 	function isChannelManaged(name: string): boolean {
@@ -101,7 +100,7 @@
 	}
 
 	// Generic-keys list = everything that's not a per-provider LLM slot
-	// AND not a channel-managed prefix (mail accounts, WhatsApp BYOK, Google OAuth).
+	// AND not a channel-managed prefix (mail accounts, Google OAuth).
 	const genericNames = $derived(allNames.filter(n => !PROVIDER_SLOTS.has(n) && !isChannelManaged(n)));
 
 	async function saveSecret() {

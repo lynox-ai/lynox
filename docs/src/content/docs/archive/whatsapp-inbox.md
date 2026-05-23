@@ -1,12 +1,14 @@
 ---
-title: WhatsApp Inbox (archived)
-description: WhatsApp Business setup via Meta Coexistence Mode — superseded by the Unified Inbox doc, kept for setup-specific instructions.
+title: WhatsApp Inbox (removed)
+description: WhatsApp Business integration — removed pre-HN-launch pending staging E2E coverage. This doc is kept as a historical reference only.
 sidebar:
   hidden: true
 ---
 
-:::caution[Archived — superseded by the Unified Inbox]
-The general WhatsApp Inbox triage behavior is now covered in [Unified Inbox](/features/unified-inbox/). This page is kept for the WhatsApp-specific setup details (Meta Coexistence Mode, Business Manager linking) and may move into the Unified-Inbox setup section in a later docs sprint. WhatsApp Inbox itself is **available on request** — contact us at [hello@lynox.ai](mailto:hello@lynox.ai).
+:::danger[Removed — not available in this release]
+The WhatsApp Inbox integration was **removed** ahead of the public launch (2026-05-23) because we could not fully verify it end-to-end without a staging Business account. Per the "we don't ship what we can't test" principle, the code, UI, settings page, webhook endpoints (`/api/webhooks/whatsapp`, `/api/whatsapp/*`), and feature flag (`whatsapp-inbox`) have all been removed.
+
+We plan to **reintroduce** WhatsApp once a proper staging-validated Business test account is in place. The setup notes below describe what the integration looked like — they are historical and **do not work today**. For updates on re-introduction, contact us at [hello@lynox.ai](mailto:hello@lynox.ai).
 :::
 
 lynox can read and reply to your WhatsApp Business messages alongside the Mobile App. Voice notes are transcribed automatically; replies can be typed in the lynox Web UI or drafted by the assistant via the `whatsapp` tool.

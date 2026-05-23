@@ -2,7 +2,7 @@
 //
 // Per-channel sub-stores for Settings → Integrations. P3-PR-A1 extracted these
 // from IntegrationsView.svelte; P3-PR-A2 will route each channel to its own
-// page (`/settings/channels/{mail,whatsapp,google,notifications,search}`) and
+// page (`/settings/channels/{mail,google,notifications,search}`) and
 // import only the slice it needs.
 //
 // NOTE: state is module-level — form buffers (apiKey, googleClientId,

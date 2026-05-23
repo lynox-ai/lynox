@@ -1,17 +1,12 @@
-// === Inbox body-refresh adapters — pull the full conversation on demand ===
+// === Inbox body-refresh adapter — pull the full conversation on demand ===
 //
-// Two flavours sharing the same `inbox_item_bodies` cache + truncation:
+//   refreshItemBody — email items: `provider.list({since:30d})`
+//                     then `provider.fetch({uid})` for the matched
+//                     envelope's full text body.
 //
-//   refreshItemBody          — email items: `provider.list({since:30d})`
-//                              then `provider.fetch({uid})` for the matched
-//                              envelope's full text body.
-//   refreshWhatsappItemBody  — WA items: pulls the last N messages of the
-//                              thread from `WhatsAppStateDb` and concatenates
-//                              them as a "Gegenüber:" / "Ich:" transcript.
-//
-// Both paths trim + clamp to `MAX_ITEM_BODY_CHARS` BEFORE handing the
-// body back to `state.saveItemBody` so `bytesWritten` reports what
-// actually hit the cache.
+// Trims + clamps to `MAX_ITEM_BODY_CHARS` BEFORE handing the body back
+// to `state.saveItemBody` so `bytesWritten` reports what actually hit
+// the cache.
 //
 // Why list+fetch instead of fetch-by-id for email: `MailProvider.fetch()`
 // takes a UID, but `inbox_items.thread_key` stores either a provider-set
@@ -24,19 +19,6 @@ import type { MailEnvelope, MailProvider } from '../mail/provider.js';
 import { analyzeSensitiveContent, type SensitiveMode } from './sensitive-content.js';
 import { MAX_ITEM_BODY_CHARS, type InboxStateDb } from './state.js';
 import { resolveThreadKey } from './watcher-hook.js';
-import type { WhatsAppMessage } from '../whatsapp/types.js';
-
-/**
- * Subset of `WhatsAppStateDb` the WA refresh path consumes. Structural
- * dependency so tests can pass a minimal stub instead of standing up
- * the WA state DB + schema migration.
- */
-export interface WhatsAppMessageStore {
-  getMessagesForThread(threadId: string, limit?: number): WhatsAppMessage[];
-}
-
-/** How many recent thread messages we concatenate for the refreshed body. */
-const WA_MESSAGE_FETCH_LIMIT = 50;
 
 /** Window for the provider.list() probe when the item has no `mailDate`. */
 const DEFAULT_LOOKUP_DAYS = 30;
@@ -61,7 +43,7 @@ export interface RefreshItemBodyOptions {
     id: string;
     accountId: string;
     threadKey: string;
-    channel: 'email' | 'whatsapp';
+    channel: 'email';
     /** v11 envelope date — narrows the lookup window from 30d → ±7d around this. */
     mailDate?: Date | undefined;
     /** v11 RFC 5322 Message-ID — used for direct envelope match before falling back to threadKey. */
@@ -190,84 +172,3 @@ export async function refreshItemBody(
   };
 }
 
-export interface RefreshWhatsappItemBodyOptions {
-  waState: WhatsAppMessageStore;
-  state: InboxStateDb;
-  item: {
-    id: string;
-    threadKey: string;
-    channel: 'email' | 'whatsapp';
-    /** See RefreshItemBodyOptions.item.subject — fed to the masker when mode='mask'. */
-    subject?: string | undefined;
-  };
-  /** Override the thread-history depth (mostly for tests). */
-  messageLimit?: number | undefined;
-  /** See RefreshItemBodyOptions.sensitiveMode. */
-  sensitiveMode?: SensitiveMode | undefined;
-}
-
-/**
- * WhatsApp counterpart to `refreshItemBody`. The classifier cached the
- * first-message snippet at classify time; this concatenates the most
- * recent `WA_MESSAGE_FETCH_LIMIT` messages of the same thread (text +
- * voice transcripts) into a single chronological context block.
- *
- * Direction tags `"Gegenüber:"` / `"Ich:"` are hard-coded German
- * because the generator prompt is DE-default. Revisit when the
- * generator gets per-locale prompt branching.
- *
- * The output is plain text — the generator's `<untrusted_data>`
- * wrapping still applies because we plumb the cached body through the
- * same `state.saveItemBody` → generator path.
- */
-export async function refreshWhatsappItemBody(
-  opts: RefreshWhatsappItemBodyOptions,
-): Promise<RefreshItemBodyResult | { ok: false; reason: RefreshBodyFailure }> {
-  let messages: ReadonlyArray<WhatsAppMessage>;
-  try {
-    messages = opts.waState.getMessagesForThread(
-      opts.item.threadKey,
-      opts.messageLimit ?? WA_MESSAGE_FETCH_LIMIT,
-    );
-  } catch {
-    return { ok: false, reason: { kind: 'fetch_failed' } };
-  }
-  if (messages.length === 0) return { ok: false, reason: { kind: 'not_found' } };
-
-  // Inbound messages carry the counterparty's content; outbound ones
-  // are the user's own. Render direction as a prefix so the generator
-  // can tell who said what.
-  const lines: string[] = [];
-  for (const msg of messages) {
-    const content = (msg.text ?? msg.transcript ?? '').trim();
-    if (!content) continue;
-    const tag = msg.direction === 'inbound' ? 'Gegenüber' : 'Ich';
-    lines.push(`${tag}: ${content}`);
-  }
-  const full = lines.join('\n\n').trim();
-  if (full.length === 0) return { ok: false, reason: { kind: 'empty_body' } };
-
-  // The transcript is chronological-ASC; the latest message — the actual
-  // "ask" the generator must answer — sits at the END. When truncating
-  // we drop the oldest context and keep the tail, so the most recent
-  // exchange survives.
-  const truncated = full.length > MAX_ITEM_BODY_CHARS;
-  let body = truncated ? full.slice(full.length - MAX_ITEM_BODY_CHARS) : full;
-
-  // Same mask-mode guarantee as the email path. WA snippets carry OTPs +
-  // 2FA codes more often than mail does (WhatsApp Business templates),
-  // so this is the higher-leverage masker call of the two.
-  if (opts.sensitiveMode === 'mask') {
-    const analysis = analyzeSensitiveContent({ subject: opts.item.subject ?? '', body });
-    if (analysis.isSensitive) body = analysis.masked.body;
-  }
-
-  const persisted = opts.state.saveItemBody(opts.item.id, body, opts.item.channel);
-  return {
-    ok: true,
-    bodyMd: persisted.bodyMd,
-    source: opts.item.channel,
-    bytesWritten: persisted.bytesWritten,
-    truncated: truncated || persisted.clampedAtCacheLayer,
-  };
-}

@@ -37,7 +37,7 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 - `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, Docker installer, setup wizard, watchdog)
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
-- `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, WhatsApp, Web Search (SearXNG default, Tavily fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/integrations/remote-access.md`.)
+- `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, Tavily fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/integrations/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/archive/whatsapp-inbox.md`.)
 - `src/server/` — MCP server (stdio + HTTP SSE), Engine HTTP API (REST + SSE for PWA)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
 

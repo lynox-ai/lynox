@@ -20,7 +20,6 @@ export { default as SecretsView } from './components/SecretsView.svelte';
 export { default as ChannelHub } from './components/ChannelHub.svelte';
 export { default as IntegrationsView } from './components/ChannelHub.svelte';
 export { default as MailSettings } from './components/MailSettings.svelte';
-export { default as WhatsAppSettings } from './components/WhatsAppSettings.svelte';
 export { default as GoogleSettings } from './components/GoogleSettings.svelte';
 export { default as NotificationsSettings } from './components/NotificationsSettings.svelte';
 export { default as SearchSettings } from './components/SearchSettings.svelte';
