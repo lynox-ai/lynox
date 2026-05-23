@@ -19,6 +19,12 @@ export const PUBLIC_EXACT: ReadonlySet<string> = new Set([
 	'/login',
 	'/logout',
 	'/health',
+	// Root route. The +page.server.ts at `/` only ever issues 303 redirects
+	// (/app for authed, /login for anon, or auto-mint + /app for demo-mode
+	// instances) — it never reads or exposes user data. Without this, the
+	// gate redirects `/` to `/login` before the root load() can run, so the
+	// demo-mode short-circuit can't fire. Same access pattern as `/login`.
+	'/',
 	// Magic-link callback — the HMAC token in `?token=…` IS the auth.
 	// Without this, the engine 401s the mail-arrival GET before the
 	// route can validate the token + mint a session cookie. Single GET

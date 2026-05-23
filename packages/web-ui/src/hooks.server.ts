@@ -52,6 +52,17 @@ const handleBuildShaInjection: Handle = async ({ event, resolve }) => {
 	});
 };
 
+// LYNOX_DEMO_LOCALE locks the served `<html lang="…">` for accessibility and
+// screen-reader correctness on demo tenants. Self-hosted / non-demo deployments
+// keep the static `en` fallback in app.html.
+const handleDemoHtmlLang: Handle = async ({ event, resolve }) => {
+	const demoLocale = env['LYNOX_DEMO_LOCALE'] === 'de' ? 'de' : null;
+	if (!demoLocale) return resolve(event);
+	return resolve(event, {
+		transformPageChunk: ({ html }) => html.replace('<html lang="en">', `<html lang="${demoLocale}">`),
+	});
+};
+
 const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event);
 	response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -90,4 +101,4 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	return response;
 };
 
-export const handle = sequence(handleAuth, handleBuildShaInjection, handleSecurityHeaders);
+export const handle = sequence(handleAuth, handleBuildShaInjection, handleDemoHtmlLang, handleSecurityHeaders);
