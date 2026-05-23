@@ -35,13 +35,6 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   google_docs: 'Google Docs',
 };
 
-// === Trigger types (FileTrigger used by watchdog) ===
-
-export interface FileTriggerConfig { type: 'file'; dir: string; glob?: string | undefined; debounceMs?: number | undefined; }
-export interface TriggerEvent { source: string; payload: unknown; timestamp: string; }
-export type TriggerCallback = (event: TriggerEvent) => Promise<void>;
-export interface ITrigger { readonly type: string; start(callback: TriggerCallback): void; stop(): void; }
-
 // === Cost ===
 
 export interface CostGuardConfig {

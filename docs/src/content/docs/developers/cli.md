@@ -1,11 +1,19 @@
 ---
 title: CLI Reference
-description: Terminal interface and command reference.
+description: Installer, HTTP API server, and recovery flags.
 sidebar:
   order: 1
 ---
 
-The CLI is lynox's automation-oriented interface. All interactive features are in the Web UI.
+The `lynox` CLI is the **installer + server entrypoint**. All interactive features
+live in the Web UI. All scripted/agent workflows go through the HTTP API
+(`lynox --http-api`).
+
+Pre-HN-launch we trimmed the power-user CLI modes (single-task invocation,
+file-watch, manifest runner, background-task creator, output redirect). They
+were undocumented in the user-facing surface, had no external callers, and were
+not exercised by CI. We will revisit them once OSS-launch traffic shape tells
+us which (if any) are missed.
 
 ## Entry Modes
 
@@ -15,46 +23,48 @@ The CLI is lynox's automation-oriented interface. All interactive features are i
 npx @lynox-ai/core
 ```
 
-Interactive Docker setup — creates docker-compose.yml, .env, SearXNG config, starts containers, and opens the browser.
+Interactive Docker setup — creates `docker-compose.yml`, `.env`, SearXNG config,
+starts the containers, and opens the browser. Re-run anytime via `lynox init`
+or `lynox --init`.
 
-### One-Shot
-
-```bash
-npx @lynox-ai/core "Summarize the last 5 commits"
-```
-
-Runs a single task, streams the response to stdout, and exits. Great for scripting and CI.
-
-### Piped Input
+### HTTP API Server
 
 ```bash
-cat report.csv | npx @lynox-ai/core "Analyze this data"
+lynox --http-api
 ```
 
-Combines piped input with a task prompt.
+Starts the Engine HTTP API on `LYNOX_HTTP_PORT` (default `3100`). This is the
+production entrypoint used by the bundled Docker image (`entrypoint-webui.sh`
+exec's `node dist/index.js --http-api`). Drive lynox programmatically via the
+REST/SSE endpoints exposed by this server.
 
 ## Flags
 
 | Flag | Description |
 |------|-------------|
-| `--http-api` | Start Engine HTTP API only (no Web UI) |
-| `--manifest <file>` | Run a workflow manifest |
-| `--watch <glob> --on-change "<task>"` | Watch files and run task on change |
-| `--task "<title>"` | Create a background task and exit |
-| `--output <file>` | Save output to file |
-| `--project <dir>` | Set project directory |
+| `--http-api` | Start Engine HTTP API server (Docker entrypoint) |
+| `--init` / `init` | Re-run the Docker installer |
+| `--project <dir>` | Set project directory (loads `.lynox/config.json` if present) |
 | `--data-dir <dir>` | Override data directory (default: `~/.lynox`) |
-| `--init` | Re-run the Docker installer |
-| `--version` | Show version (no API key required) |
-| `--help` | Show help (no API key required) |
+| `--version` / `-v` | Show version (no API key required) |
+| `--help` / `-h` | Show help (no API key required) |
 
-## Model Names
+## Environment
 
-| Name | Model |
-|------|-------|
-| `opus` | Claude Opus (most capable) |
-| `sonnet` | Claude Sonnet (balanced) |
-| `haiku` | Claude Haiku (fastest) |
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (required for the anthropic provider) |
+| `ANTHROPIC_BASE_URL` | Custom API endpoint (for proxies) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `vertex` \| `custom` \| `openai` |
+| `LYNOX_VAULT_KEY` | AES-256 key for the secrets vault (critical — cannot be recovered if lost) |
+| `LYNOX_DATA_DIR` | Override data directory (same as `--data-dir`) |
+| `LYNOX_HTTP_PORT` | HTTP API port (default: `3100`) |
+| `LYNOX_HTTP_SECRET` | HTTP API Bearer token (enables network binding) |
+| `LYNOX_WEBUI_URL` | Web UI URL to open (default: `http://localhost:5173`) |
+| `GCP_PROJECT_ID` | Google Cloud project (for `provider: vertex`) |
+| `CLOUD_ML_REGION` | Vertex AI region (e.g. `europe-west4`, `us-east5`) |
+| `SEARXNG_URL` | SearXNG instance for web search (Docker: `http://searxng:8080`) |
+| `TAVILY_API_KEY` | Enable Tavily web search (fallback when no SearXNG) |
 
 ## Exit Codes
 

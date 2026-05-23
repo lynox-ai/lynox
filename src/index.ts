@@ -119,35 +119,19 @@ export { setTenantWorkspace, ensureContextWorkspace } from './core/workspace.js'
 
 // === CLI ===
 
-import { readSync } from 'node:fs';
-import { stdin, stdout, stderr, argv } from 'node:process';
+import { stdout, stderr, argv } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
 import { existsSync, readFileSync, statSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 
-import { Engine } from './core/engine.js';
-import type { Session } from './core/session.js';
-import type { StreamEvent } from './types/index.js';
-import { getModelId } from './types/index.js';
-import { getActiveProvider } from './core/llm-client.js';
-import { hasApiKey, setDataDir } from './core/config.js';
-import { renderError, BOLD, DIM, BLUE, GREEN, RED, YELLOW, MAGENTA, RESET } from './cli/ui.js';
-import { Watchdog } from './cli/watchdog.js';
+import { setDataDir } from './core/config.js';
+import { DIM, YELLOW, RESET } from './cli/ui.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
-import { writeFileAtomicSync } from './core/atomic-write.js';
 import { getErrorMessage } from './core/utils.js';
-
-import { state, spinner, toolsUsed } from './cli/cli-state.js';
-import { streamHandler as _streamHandler } from './cli/stream-handler.js';
-
-// Wrapped stream handler that binds stdout
-function streamHandler(event: StreamEvent): void {
-  _streamHandler(event, stdout);
-}
 
 /**
  * Load ~/.lynox/.env if it exists and LYNOX_VAULT_KEY is not already set.
@@ -231,21 +215,15 @@ async function runCLI(): Promise<void> {
     stdout.write(`lynox ${pkg.version}
 
 Usage:
-  lynox                         Install lynox via Docker (interactive)
-  lynox "<task>"                Run a single task and exit
-  cat file | lynox "<task>"     Process piped input with a task
-  lynox init                    Run Docker installer
-  lynox --http-api              Start Engine HTTP API server (headless)
-  lynox --watch <glob> --on-change "<task>"   Watch files and run task on change
+  lynox                         Install lynox via Docker (interactive wizard)
+  lynox init                    Re-run the Docker installer
+  lynox --http-api              Start Engine HTTP API server (headless; Docker entrypoint)
 
 Options:
   --help, -h                    Show this help
   --version, -v                 Show version
   --init                        Run Docker installer
-  --project <dir>               Set project directory
-  --manifest <file>             Run a workflow manifest
-  --task "<title>"              Create a background task and exit
-  --output <file>               Save output to file
+  --project <dir>               Set project directory (loads .lynox/config.json)
   --data-dir <dir>              Override data directory (default: ~/.lynox)
 
 Environment:
@@ -261,6 +239,9 @@ Environment:
   CLOUD_ML_REGION               Vertex AI region (e.g. europe-west4, us-east5)
   SEARXNG_URL                   SearXNG instance for web search (Docker: http://searxng:8080)
   TAVILY_API_KEY                Enable Tavily web search (fallback when no SearXNG)
+
+Power-user modes (single-task, --watch, --manifest, --task, --output) were removed
+in favour of the Web UI and HTTP API. Drive lynox via the UI or the HTTP API.
 
 Docs: https://docs.lynox.ai
 `);
@@ -322,230 +303,13 @@ Docs: https://docs.lynox.ai
     return;
   }
 
-  const engine = new Engine({});
-  state.currentModelId = getModelId(engine.config.model ?? 'sonnet', getActiveProvider());
-  const initPromise = engine.init();
-
-  let session: Session;
-  const ensureSession = async (): Promise<Session> => {
-    await initPromise;
-    if (!session) {
-      session = engine.createSession();
-      session.onStream = streamHandler;
-      state.activeSession = session;
-    }
-    return session;
-  };
-
-  // === --manifest flag ===
-  const manifestIdx = args.indexOf('--manifest');
-  const manifestFlag = manifestIdx !== -1 ? args[manifestIdx + 1] : undefined;
-  if (manifestFlag) {
-    session = await ensureSession();
-    const { runManifest: runMf, loadManifestFile: loadMf } = await import('./orchestrator/runner.js');
-    const { LocalGateAdapter: LocalAdapter } = await import('./orchestrator/gates.js');
-    const { loadConfig: getConfig } = await import('./core/config.js');
-    const cfg = getConfig();
-    let gateAdapter: import('./types/orchestration.js').GateAdapter | undefined;
-    if (stdin.isTTY) {
-      const { confirm } = await import('./cli/interactive.js');
-      gateAdapter = new LocalAdapter(async (q: string) => {
-        const approved = await confirm(q);
-        return approved ? 'Yes, approve' : 'No, reject';
-      });
-    }
-    try {
-      const manifest = loadMf(resolve(manifestFlag));
-      stderr.write(`${BLUE}▶${RESET} Running manifest: ${BOLD}${manifest.name}${RESET}\n`);
-      const state = await runMf(manifest, cfg, {
-        gateAdapter,
-        hooks: {
-          onStepStart: (stepId, agentName) => {
-            spinner.start(`${stepId} (${agentName})...`);
-          },
-          onStepComplete: (output) => {
-            spinner.stop();
-            stdout.write(`  ${GREEN}✓${RESET} ${output.stepId} — ${DIM}${output.durationMs}ms, $${output.costUsd.toFixed(4)}${RESET}\n`);
-          },
-          onStepSkipped: (stepId, reason) => {
-            spinner.stop();
-            stdout.write(`  ${DIM}⊘ ${stepId} skipped: ${reason}${RESET}\n`);
-          },
-          onGateSubmit: (stepId, approvalId) => {
-            stdout.write(`  ${MAGENTA}⏳${RESET} Gate pending for ${stepId} (${approvalId})\n`);
-          },
-          onGateDecision: (stepId, decision) => {
-            const icon = decision.status === 'approved' ? `${GREEN}✓` : `${RED}✗`;
-            stdout.write(`  ${icon}${RESET} Gate ${decision.status} for ${stepId}\n`);
-          },
-          onError: (stepId, err) => {
-            spinner.stop();
-            stderr.write(renderError(`${stepId}: ${err.message}`));
-          },
-          onRunComplete: (s) => {
-            const icon = s.status === 'completed' ? `${GREEN}✓` : `${RED}✗`;
-            stdout.write(`${icon}${RESET} Manifest ${s.manifestName} — ${BOLD}${s.status}${RESET}\n`);
-          },
-        },
-      });
-      if (state.status === 'failed' || state.status === 'rejected') process.exit(1);
-    } catch (err: unknown) {
-      spinner.stop();
-      stderr.write(renderError(getErrorMessage(err)));
-      process.exit(1);
-    }
-    await engine.shutdown();
-    process.exit(0);
-  }
-
-  // === Sprint 8b: Pipe detection ===
-  let pipedInput = '';
-  if (!stdin.isTTY) {
-    const chunks: Buffer[] = [];
-    try {
-      const buf = Buffer.alloc(65536);
-      let bytesRead: number;
-      do {
-        bytesRead = readSync(0, buf, 0, buf.length, null);
-        if (bytesRead > 0) {
-          chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
-        }
-      } while (bytesRead > 0);
-    } catch {
-      // no piped input or error reading
-    }
-    if (chunks.length > 0) {
-      pipedInput = Buffer.concat(chunks).toString('utf-8');
-    }
-  }
-
-  // === Single task mode ===
-  const flagsWithValues = new Set(['--project', '--output', '--watch', '--on-change', '--transport', '--manifest', '--task']);
-  const filteredArgs: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i]!.startsWith('--')) {
-      if (flagsWithValues.has(args[i]!)) i++; // skip value
-      continue;
-    }
-    filteredArgs.push(args[i]!);
-  }
-  const singleTask = filteredArgs.join(' ');
-
-  if (singleTask || pipedInput) {
-    if (!hasApiKey()) {
-      stderr.write(`${RED}✗${RESET} No API key configured.\n`);
-      stderr.write(`${DIM}Set ANTHROPIC_API_KEY or run interactively: npx @lynox-ai/core${RESET}\n`);
-      process.exit(1);
-    }
-    session = await ensureSession();
-    stderr.write(`${DIM}model: ${state.currentModelId}${RESET}\n`);
-    state.pipeSummaryEnabled = true;
-    toolsUsed.clear();
-    state.lastUsage = null;
-    state.turnCount = 0;
-    state.hadError = false;
-    const task = pipedInput
-      ? (singleTask ? `${singleTask}\n\n<input>\n${pipedInput}\n</input>` : pipedInput)
-      : singleTask;
-
-    if (!task.trim()) {
-      stderr.write(`${RED}✗${RESET} No input provided. Pass a task as argument or via stdin.\n`);
-      await engine.shutdown();
-      process.exit(1);
-    }
-
-    try {
-      await session.run(task);
-    } finally {
-      // === Pipe-mode JSON summary on stderr ===
-      if (state.pipeSummaryEnabled && state.lastUsage) {
-        const u = state.lastUsage;
-        const inTok = (u['input_tokens'] ?? 0)
-          + (u['cache_creation_input_tokens'] ?? 0)
-          + (u['cache_read_input_tokens'] ?? 0);
-        const cacheRead = u['cache_read_input_tokens'] ?? 0;
-        const summary = {
-          model: state.currentModelId,
-          turns: state.turnCount,
-          tokens_in: inTok,
-          tokens_out: u['output_tokens'] ?? 0,
-          cache_pct: inTok > 0 ? Math.round((cacheRead / inTok) * 100) : 0,
-          tools: [...toolsUsed],
-          error: state.hadError,
-        };
-        stderr.write(`\n__LYNOX_SUMMARY__${JSON.stringify(summary)}\n`);
-      }
-      // === Sprint 8a: --output flag ===
-      const outputIdx = args.indexOf('--output');
-      const outputPath = outputIdx !== -1 ? args[outputIdx + 1] : undefined;
-      if (outputPath && state.lastResponse) {
-        const resolvedOutput = resolve(outputPath);
-        try {
-          writeFileAtomicSync(resolvedOutput, state.lastResponse);
-          stderr.write(`${GREEN}✓${RESET} Output saved to ${resolvedOutput}\n`);
-        } catch (err: unknown) {
-          stderr.write(renderError(getErrorMessage(err)));
-        }
-      }
-      await engine.shutdown();
-    }
-    process.exit(state.hadError ? 1 : 0);
-  }
-
-  // === --task flag: create background task and exit ===
-  const taskIdx = args.indexOf('--task');
-  const taskFlag = taskIdx !== -1 ? args[taskIdx + 1] : undefined;
-  if (taskFlag) {
-    await initPromise;
-    session = await ensureSession();
-    const taskManager = session.getTaskManager();
-    if (taskManager) {
-      const task = taskManager.create({
-        title: taskFlag,
-        description: taskFlag,
-        assignee: 'lynox',
-      });
-      stderr.write(`${GREEN}\u2713${RESET} Background task created: ${task.id}\n`);
-    }
-    await engine.shutdown();
-    process.exit(0);
-  }
-
-  // === --watch mode ===
-  const watchIdx = args.indexOf('--watch');
-  const watchDir = watchIdx !== -1 ? args[watchIdx + 1] : undefined;
-  if (watchDir) {
-    session = await ensureSession();
-    const onChangeIdx = args.indexOf('--on-change');
-    const onChangeTask = onChangeIdx !== -1 && args[onChangeIdx + 1] ? args[onChangeIdx + 1] : 'Review the changed files and suggest improvements';
-    const watchdog = new Watchdog(watchDir, async (files) => {
-      const task = `${onChangeTask}\n\nChanged files: ${files.join(', ')}`;
-      try {
-        spinner.start('Processing changes...');
-        await session.run(task);
-      } catch (err: unknown) {
-        spinner.stop();
-        stderr.write(renderError(getErrorMessage(err)));
-      }
-    });
-    watchdog.start();
-    // Keep process alive
-    await new Promise<void>(() => {});
-    return;
-  }
-
-  // === Default: Docker installer (bare npx) ===
-  if (stdin.isTTY) {
-    const { runDockerInstaller } = await import('./cli/docker-installer.js');
-    await runDockerInstaller();
-    return;
-  }
-
-  // === Fallback: no matching mode ===
-  stderr.write('No input provided. Run "lynox --help" for usage.\n');
-  await engine.shutdown();
-  process.exit(1);
+  // === Default: Docker installer (bare invocation) ===
+  // Power-user CLI modes (single-task, --watch, --manifest, --task, --output)
+  // were removed pre-HN-launch; drive lynox via the Web UI or HTTP API instead.
+  const { runDockerInstaller } = await import('./cli/docker-installer.js');
+  await runDockerInstaller();
 }
+
 
 // Entry point detection
 const isMainModule = (() => {
