@@ -113,16 +113,6 @@ See [Docker docs](https://docs.lynox.ai/setup/docker/) for encryption and produc
 
 `npx @lynox-ai/core` walks you through an interactive installer: provider selection, API key, Docker Compose scaffolding, container pull, health check, and finally it opens the Web UI at [localhost:3000](http://localhost:3000). Save the access token and vault key it prints — the vault key cannot be recovered if lost.
 
-### One-shot mode
-
-With `ANTHROPIC_API_KEY` already in your environment, you can run a single task inline without the Docker path:
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-... npx @lynox-ai/core "Summarize the last 5 commits in this repo"
-```
-
-This starts an in-process engine, runs the task, and exits.
-
 ### Mobile access (PWA)
 
 Open [localhost:3000](http://localhost:3000) on your phone and use your browser's "Add to Home Screen" to install lynox as a PWA. The QR code in Web UI → Settings makes pairing instant — scan it on any device to get a pre-authenticated session.
