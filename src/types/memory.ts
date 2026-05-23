@@ -51,7 +51,7 @@ export interface IMemory {
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
-  deleteScoped(ns: MemoryNamespace, pattern: string, scope: MemoryScopeRef):         Promise<number>;
+  deleteScoped(ns: MemoryNamespace, pattern: string, scope: MemoryScopeRef, options?: { exact?: boolean | undefined } | undefined): Promise<number>;
   updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean>;
   // Phase 3: auto-classification support
   setActiveScopes?(scopes: MemoryScopeRef[]): void;
@@ -131,7 +131,10 @@ export interface KnowledgeRetrievalResult {
     scopeId: string;
     score: number;
     finalScore: number;
-    source: 'vector' | 'graph' | 'fts';
+    /** Where this row came from in the retrieval pipeline. `'recency'` is
+     *  used by `KnowledgeLayer.listRecentActive` (no-query memory_recall) —
+     *  these rows are date-ordered, not similarity-ranked. */
+    source: 'vector' | 'graph' | 'fts' | 'recency';
     createdAt: string;
   }>;
   entities: EntityRecord[];
@@ -208,6 +211,15 @@ export interface IKnowledgeLayer {
     },
   ): Promise<KnowledgeRetrievalResult>;
 
+  /** Recency-ordered slice for the no-query `memory_recall` path. Optional
+   *  on the interface so non-KnowledgeLayer impls (or test doubles) don't
+   *  have to wire it; the caller falls back gracefully via optional-chaining. */
+  listRecentActive?(
+    namespace: MemoryNamespace,
+    scopes: MemoryScopeRef[],
+    limit?: number,
+  ): KnowledgeRetrievalResult['memories'];
+
   resolveEntity(name: string, scopes: MemoryScopeRef[]): Promise<EntityRecord | null>;
   getEntityRelations(entityId: string, depth?: number | undefined): Promise<RelationRecord[]>;
   mergeEntities(sourceId: string, targetId: string): Promise<void>;
@@ -231,6 +243,19 @@ export interface IKnowledgeLayer {
     namespace: MemoryNamespace,
     scope: MemoryScopeRef,
   ): Promise<boolean>;
+
+  /**
+   * Supersession-aware update. Returns the new memory id on success, or `null`
+   * if no exact-text match exists in the given namespace+scope. The old row is
+   * preserved (`is_active=0`, `superseded_by=new.id`); history is intact.
+   */
+  updateMemoryWithSupersession(
+    oldText: string,
+    newText: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    options?: { sourceRunId?: string | undefined; sourceThreadId?: string | undefined } | undefined,
+  ): Promise<string | null>;
 
   gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult>;
   stats(): Promise<KnowledgeGraphStats>;

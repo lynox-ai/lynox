@@ -413,6 +413,53 @@ describe('Memory', () => {
       expect(count).toBe(0);
     });
 
+    // T2-M1 — anchored full-line equality with `{ exact: true }`
+    it('deleteScoped { exact: true } removes only the exact full-line match', async () => {
+      const mem = new Memory(dir);
+      const scope = { type: 'global' as const, id: 'global' };
+      await mem.appendScoped('knowledge', 'Acme: 100', scope);
+      await mem.appendScoped('knowledge', 'Acme Corp: 200', scope);
+
+      // GC-style exact delete — must NOT touch 'Acme Corp: 200'
+      const removed = await mem.deleteScoped('knowledge', 'Acme: 100', scope, { exact: true });
+      expect(removed).toBe(1);
+
+      const content = await mem.loadScoped('knowledge', scope);
+      expect(content).toContain('Acme Corp: 200');
+      expect(content).not.toContain('Acme: 100\n');
+      expect(content?.split('\n').filter(l => l === 'Acme: 100')).toHaveLength(0);
+    });
+
+    // T2-M1 — regression: substring is still the default for user-driven memory_delete
+    it('deleteScoped (default substring) removes every line containing the pattern', async () => {
+      const mem = new Memory(dir);
+      const scope = { type: 'global' as const, id: 'global' };
+      await mem.appendScoped('knowledge', 'Acme: 100', scope);
+      await mem.appendScoped('knowledge', 'Acme Corp: 200', scope);
+
+      const removed = await mem.deleteScoped('knowledge', 'Acme', scope);
+      expect(removed).toBe(2);
+
+      const content = await mem.loadScoped('knowledge', scope);
+      expect(content ?? '').not.toContain('Acme');
+    });
+
+    // T2-M1 — exact mode does not collapse near-matches the way substring would
+    it('deleteScoped { exact: true } leaves substrings alone', async () => {
+      const mem = new Memory(dir);
+      const scope = { type: 'global' as const, id: 'global' };
+      await mem.appendScoped('knowledge', 'value', scope);
+      await mem.appendScoped('knowledge', 'value plus suffix', scope);
+      await mem.appendScoped('knowledge', 'prefix value', scope);
+
+      const removed = await mem.deleteScoped('knowledge', 'value', scope, { exact: true });
+      expect(removed).toBe(1);
+
+      const content = await mem.loadScoped('knowledge', scope);
+      expect(content).toContain('value plus suffix');
+      expect(content).toContain('prefix value');
+    });
+
     it('updateScoped replaces text', async () => {
       const mem = new Memory(dir);
       await mem.appendScoped('knowledge', 'old value', { type: 'user', id: 'alex' });

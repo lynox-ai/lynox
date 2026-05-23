@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ToolRegistry } from './registry.js';
-import type { ToolEntry, MCPServer, ToolScopeConfig } from '../types/index.js';
+import type { ToolEntry, ToolScopeConfig } from '../types/index.js';
 
 function makeTool(name: string): ToolEntry {
   return {
@@ -58,36 +58,6 @@ describe('ToolRegistry', () => {
     it('returns empty array initially', () => {
       const reg = new ToolRegistry();
       expect(reg.getEntries()).toEqual([]);
-    });
-  });
-
-  describe('MCP servers', () => {
-    it('registers and returns MCP servers', () => {
-      const reg = new ToolRegistry();
-      const server: MCPServer = { type: 'url', url: 'http://localhost:3000', name: 'test' };
-      reg.registerMCP(server);
-      const servers = reg.getMCPServers();
-      expect(servers).toHaveLength(1);
-      expect(servers[0]).toEqual(server);
-    });
-
-    it('supports fluent chaining for MCP', () => {
-      const reg = new ToolRegistry();
-      const result = reg.registerMCP({ type: 'url', url: 'http://a', name: 'a' });
-      expect(result).toBe(reg);
-    });
-
-    it('returns copy of servers array', () => {
-      const reg = new ToolRegistry();
-      reg.registerMCP({ type: 'url', url: 'http://a', name: 'a' });
-      const servers = reg.getMCPServers();
-      servers.pop();
-      expect(reg.getMCPServers()).toHaveLength(1);
-    });
-
-    it('returns empty array initially', () => {
-      const reg = new ToolRegistry();
-      expect(reg.getMCPServers()).toEqual([]);
     });
   });
 

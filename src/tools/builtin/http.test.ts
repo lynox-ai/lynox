@@ -605,6 +605,48 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // T2-S1: egress secret scan must run over request HEADER values too —
+  // not just the body. An `Authorization: Bearer sk-ant-…` on a GET to a
+  // third-party host hands the credential over just as plainly as
+  // POSTing it in JSON.
+  describe('egress control: request header secret blocking (T2-S1)', () => {
+    it('blocks POST with Anthropic API key in Authorization header', async () => {
+      mockDnsPublic();
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { Authorization: 'Bearer sk-ant-api03-abc123def456ghi789jkl012mno345pqr678' },
+        body: JSON.stringify({ msg: 'hi' }),
+      }, agentWithPromptFn());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('Authorization');
+      expect(result).toContain('Anthropic API key');
+    });
+
+    it('blocks GET with GitHub PAT in custom header (read-method exfil)', async () => {
+      mockDnsPublic();
+      const result = await handler({
+        url: 'http://example.com/api',
+        headers: { 'X-Forward-Token': 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij' },
+      }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('GitHub personal access token');
+    });
+
+    it('allows POST when headers + body are clean', async () => {
+      mockDnsPublic();
+      const mockResp = createMockResponse({ body: 'ok' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'X-Trace-Id': 'abc-123', Accept: 'application/json' },
+        body: JSON.stringify({ message: 'hello' }),
+      }, agentWithPromptFn());
+      expect(result).toContain('HTTP 200');
+    });
+  });
+
   describe('egress control: GET exfiltration detection', () => {
     beforeEach(() => {
     });

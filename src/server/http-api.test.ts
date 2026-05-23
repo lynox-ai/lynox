@@ -2206,7 +2206,6 @@ describe('LynoxHTTPApi', () => {
         ['max_daily_cost_usd', 1_000_000],
         ['max_monthly_cost_usd', 1_000_000],
         ['max_http_requests_per_hour', 999_999],
-        ['mcp_servers', [{ name: 'evil', url: 'https://attacker.example' }]],
         ['searxng_url', 'https://attacker.example'],
         ['google_client_id', 'attacker-oauth-client'],
         ['google_client_secret', 'attacker-oauth-secret'],
@@ -2296,15 +2295,15 @@ describe('LynoxHTTPApi', () => {
       // Starter (BYOK) — provider/api_base_url/cost-caps are NOT locked.
       // Customer owns their LLM, owns the config. Config-lock gate must
       // skip them entirely.
+      // T2-P3: `provider:'openai'` now requires `api_base_url` +
+      // `openai_model_id` in the same PUT body — must bundle them in
+      // the starter (BYOK) acceptance test or it 400s before reaching
+      // the lock-gate. The mcp_servers row was dropped by #536
+      // (chore/remove-mcp) — field no longer exists on the user config.
       it.each<[string, Record<string, unknown>]>([
-        // T2-P3: `provider:'openai'` now requires `api_base_url` +
-        // `openai_model_id` in the same PUT body — must bundle them in
-        // the starter (BYOK) acceptance test or it 400s before reaching
-        // the lock-gate.
         ['provider', { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-latest' }],
         ['default_tier', { default_tier: 'haiku' }],
         ['max_session_cost_usd', { max_session_cost_usd: 250 }],
-        ['mcp_servers', { mcp_servers: [{ name: 'my-tool', url: 'https://mcp.my-company' }] }],
       ])(
         'PUT /api/config allows %s change in starter (BYOK) mode',
         async (_field, payload) => {

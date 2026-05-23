@@ -120,18 +120,13 @@ vi.mock('./batch-index.js', () => ({
 }));
 
 const mockRegister = vi.fn().mockReturnThis();
-const mockRegisterMCP = vi.fn().mockReturnThis();
 
 vi.mock('../tools/registry.js', () => ({
   ToolRegistry: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
     this.register = mockRegister;
     // @ts-expect-error mock constructor
-    this.registerMCP = mockRegisterMCP;
-    // @ts-expect-error mock constructor
     this.getEntries = vi.fn().mockReturnValue([]);
-    // @ts-expect-error mock constructor
-    this.getMCPServers = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.find = vi.fn();
   }),
@@ -363,7 +358,6 @@ describe('disabled_tools invariant: narrow-only, never widens', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockRegister.mockReturnThis();
-    mockRegisterMCP.mockReturnThis();
     currentUserConfig = {};
   });
 

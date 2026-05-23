@@ -55,8 +55,6 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-large-latest`, `llama3.2`, `gpt-4o`) |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
-| `LYNOX_MCP_SECRET` | Production | MCP HTTP bearer token |
-| `LYNOX_MCP_PORT` | No | MCP port (default: 3042) |
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3000 in Docker, 3100 locally) |
 | `LYNOX_WORKSPACE` | No | Workspace root (default: /workspace) |
 | `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` (default) |
@@ -157,7 +155,7 @@ Both `/health` and `/api/health` work — `/health` is a thin alias for proxies 
 
 ## Engine-Only Mode
 
-For headless setups (MCP server, or API-only):
+For headless / API-only setups:
 
 ```bash
 docker run -d --name lynox \
@@ -165,19 +163,6 @@ docker run -d --name lynox \
   -v ~/.lynox:/home/lynox/.lynox \
   ghcr.io/lynox-ai/lynox:latest
 ```
-
-## MCP Server Mode
-
-To use lynox as an MCP server (for Claude Desktop, Cursor, etc.):
-
-```bash
-docker run -i --rm \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v ~/.lynox:/home/lynox/.lynox \
-  ghcr.io/lynox-ai/lynox:latest --mcp-server
-```
-
-See [MCP Integration](/integrations/mcp/) for IDE setup.
 
 ## Migrating from Local to Docker
 

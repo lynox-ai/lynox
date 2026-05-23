@@ -113,18 +113,13 @@ vi.mock('./batch-index.js', () => ({
 }));
 
 const mockRegister = vi.fn().mockReturnThis();
-const mockRegisterMCP = vi.fn().mockReturnThis();
 
 vi.mock('../tools/registry.js', () => ({
   ToolRegistry: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
     this.register = mockRegister;
     // @ts-expect-error mock constructor
-    this.registerMCP = mockRegisterMCP;
-    // @ts-expect-error mock constructor
     this.getEntries = vi.fn().mockReturnValue([]);
-    // @ts-expect-error mock constructor
-    this.getMCPServers = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.find = vi.fn();
   }),
@@ -336,7 +331,6 @@ describe('Engine + Session (Orchestrator)', () => {
     vi.clearAllMocks();
     mockGetMessages.mockReturnValue([]);
     mockRegister.mockReturnThis();
-    mockRegisterMCP.mockReturnThis();
     // Enable feature flags for tests
     process.env['LYNOX_FEATURE_PLUGINS'] = '1';
     process.env['LYNOX_FEATURE_TRIGGERS'] = '1';
@@ -364,14 +358,6 @@ describe('Engine + Session (Orchestrator)', () => {
       const { engine } = await createEngineAndSession({ memory: false });
 
       expect(engine.getMemory()).toBeNull();
-    });
-
-    it('registers MCP servers when provided', async () => {
-      const server = { type: 'url' as const, url: 'http://localhost:3000', name: 'test-mcp' };
-      const engine = new Engine({ mcpServers: [server] } as import('../types/index.js').LynoxConfig);
-      await engine.init();
-
-      expect(mockRegisterMCP).toHaveBeenCalledWith(server);
     });
 
     it('returns itself for chaining', async () => {

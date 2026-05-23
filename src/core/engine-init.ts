@@ -361,14 +361,6 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       }
 
 
-      // Load MCP secret from vault if not set via env
-      if (!process.env['LYNOX_MCP_SECRET']) {
-        const mcpSecret = vault.get('LYNOX_MCP_SECRET');
-        if (mcpSecret) {
-          process.env['LYNOX_MCP_SECRET'] = mcpSecret;
-        }
-      }
-
       // Mistral API key — BYOK users may store it via Web UI (vault) without
       // exporting an env var. Voice (speak/transcribe) and the llm_mode
       // eu-sovereign override (core/config.ts) read from process.env, so sync
@@ -379,9 +371,6 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
           process.env['MISTRAL_API_KEY'] = mistralKey;
         }
       }
-
-      // Warn if MCP secret is stale (>90 days since last update)
-      _warnStaleMcpSecret(vault);
 
       // Inform config module about vault api_key presence
       setVaultApiKeyExists(vault.has('ANTHROPIC_API_KEY'));
@@ -455,35 +444,6 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     }
   } catch {
     // Best-effort — config file removal is not critical
-  }
-}
-
-const MCP_SECRET_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
-
-/**
- * Warn if the MCP secret in the vault is older than 90 days.
- * Env-only secrets can't be age-checked — we just recommend vault storage.
- */
-function _warnStaleMcpSecret(vault: SecretVault): void {
-  if (!vault.has('LYNOX_MCP_SECRET')) {
-    if (process.env['LYNOX_MCP_SECRET']) {
-      // Secret is env-only — can't track age, just hint
-      // (no warning here, the TLS warning in mcp-server already covers exposure)
-    }
-    return;
-  }
-
-  const entries = vault.list();
-  const mcpEntry = entries.find(e => e.name === 'LYNOX_MCP_SECRET');
-  if (!mcpEntry) return;
-
-  const updatedAt = new Date(mcpEntry.updatedAt).getTime();
-  const ageMs = Date.now() - updatedAt;
-  if (ageMs > MCP_SECRET_MAX_AGE_MS) {
-    const ageDays = Math.round(ageMs / (24 * 60 * 60 * 1000));
-    process.stderr.write(
-      `⚠ MCP secret is ${ageDays} days old — consider rotating: lynox vault set LYNOX_MCP_SECRET <new-secret>\n`,
-    );
   }
 }
 

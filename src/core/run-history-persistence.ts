@@ -423,8 +423,12 @@ export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<
   id: string; manifest_name: string; status: string; total_duration_ms: number;
   total_cost_usd: number; step_count: number; error: string | null; started_at: string;
 }> {
+  // Exclude `status='planned'` rows (T2-W2): saved workflows and not-yet-run
+  // plans share the `pipeline_runs` table with actual runs but represent
+  // templates/plans, not executions. Without this filter, the Workflows
+  // run-history tab leaks every saved-workflow library entry.
   return db.prepare(
-    'SELECT id, manifest_name, status, total_duration_ms, total_cost_usd, step_count, error, started_at FROM pipeline_runs ORDER BY started_at DESC LIMIT ?'
+    "SELECT id, manifest_name, status, total_duration_ms, total_cost_usd, step_count, error, started_at FROM pipeline_runs WHERE status != 'planned' ORDER BY started_at DESC LIMIT ?"
   ).all(limit) as Array<{
     id: string; manifest_name: string; status: string; total_duration_ms: number;
     total_cost_usd: number; step_count: number; error: string | null; started_at: string;

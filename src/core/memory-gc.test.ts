@@ -141,9 +141,10 @@ describe('runMemoryGc', () => {
 
     await runMemoryGc(memory, [projectScope], provider, history);
 
-    // The shorter line should be removed, the longer kept
-    expect(memory.deleteScoped).toHaveBeenCalledWith('knowledge', shortLine, projectScope);
-    expect(memory.deleteScoped).not.toHaveBeenCalledWith('knowledge', longLine, projectScope);
+    // The shorter line should be removed, the longer kept (with anchored
+    // full-line equality — T2-M1).
+    expect(memory.deleteScoped).toHaveBeenCalledWith('knowledge', shortLine, projectScope, { exact: true });
+    expect(memory.deleteScoped).not.toHaveBeenCalledWith('knowledge', longLine, projectScope, { exact: true });
   });
 
   it('prune: removes stale entries from flat file and SQLite', async () => {
@@ -161,7 +162,9 @@ describe('runMemoryGc', () => {
 
     expect(result.pruned).toBe(1);
     expect(history.deleteEmbedding).toHaveBeenCalledWith('emb-1');
-    expect(memory.deleteScoped).toHaveBeenCalledWith('knowledge', staleLine, projectScope);
+    // T2-M1 — GC must pass `{ exact: true }` so anchored full-line equality is
+    // used (no substring bleed into unrelated lines).
+    expect(memory.deleteScoped).toHaveBeenCalledWith('knowledge', staleLine, projectScope, { exact: true });
   });
 
   it('prune: keeps entries that were recently retrieved', async () => {
@@ -416,8 +419,8 @@ describe('runMemoryGc', () => {
     // embed() not called, but dedup still detected via cached vectors
     expect(provider.embed).not.toHaveBeenCalled();
     expect(result.deduplicated).toBe(1);
-    // The shorter line should be removed
-    expect(memory.deleteScoped).toHaveBeenCalledWith('knowledge', line1, projectScope);
+    // The shorter line should be removed (anchored full-line equality — T2-M1)
+    expect(memory.deleteScoped).toHaveBeenCalledWith('knowledge', line1, projectScope, { exact: true });
   });
 
   it('loads embeddings once per scope, not per namespace', async () => {

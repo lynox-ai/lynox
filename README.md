@@ -40,7 +40,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ```
 ┌──────────────────────────────────────┐
 │              You                     │
-│  Web UI · Mobile · CLI · MCP         │
+│  Web UI · Mobile · CLI               │
 └──────────────┬───────────────────────┘
                │
 ┌──────────────▼───────────────────────┐
@@ -69,7 +69,6 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
 - **Mobile Access** — Voice input (Whisper STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
-- **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
 - **Security** — AES-256 encrypted vault, permission guard, input/output scanning, SSRF protection.
@@ -108,7 +107,7 @@ cp .env.example .env       # add your API key
 docker compose up
 ```
 
-See [Docker docs](https://docs.lynox.ai/daily-use/docker/) for encryption and production deployment.
+See [Docker docs](https://docs.lynox.ai/setup/docker/) for encryption and production deployment.
 
 ## Your first run
 
@@ -131,7 +130,7 @@ Open [localhost:3000](http://localhost:3000) on your phone and use your browser'
 ## Testing and security
 
 - 4600+ tests across the engine, tools, and orchestrator. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
-- Layered defenses: input-guard, output-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — private-IP block at DNS-resolve time (pre-fetch), URL-validated on each redirect hop.
+- Layered defenses: input-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit, plus tool-result injection scanning. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — DNS resolves once, the connection is pinned to the validated IP at TCP-connect time (rebind-safe), and each redirect hop is re-validated.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 
 ## Who builds this

@@ -101,8 +101,9 @@ The `web_research` tool supports topic-based search:
 | `general` | (default) | Google, DuckDuckGo, Bing, Wikipedia |
 | `news` | news | Google News, DuckDuckGo News, Bing News |
 | `science` | science | Google Scholar, Semantic Scholar, arXiv |
-| `it` | it | GitHub, StackOverflow, npm, PyPI |
 | `finance` | (general) | Google, DuckDuckGo, Bing + currency engine |
+
+Code/library/API queries (GitHub, npm, PyPI, StackOverflow) are intentionally **not** routed via the SearXNG `it` category — the dedicated code-index engines lack full-text web indices, so filtered queries return zero hits. The general engines surface the same sources reliably; omit `topic` for IT/code searches.
 
 ## Customizing
 
