@@ -3,6 +3,7 @@ import { Agent } from '../core/agent.js';
 import { MODEL_MAP, getModelId, clampTier } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
+import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
 import { getRole, getRoleNames } from '../core/roles.js';
@@ -307,6 +308,7 @@ export async function spawnInline(
   parentToolContext?: ToolContext | undefined,
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
+  parentMemory?: IMemory | null | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -384,6 +386,13 @@ export async function spawnInline(
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
+    // Parent-memory wiring: PR #548 added memory_* to INLINE_CORE_TOOLS but
+    // a sub-agent constructed without `memory:` has `agent.memory === null`,
+    // so every memory_* handler short-circuits with "Memory is not configured
+    // for this agent." (caught 2026-05-23 live verification). Pass-through
+    // null when parent had no memory — that's strictly equivalent to the
+    // previous behaviour and keeps headless callers + ad-hoc tests untouched.
+    memory: parentMemory ?? undefined,
     onStream: (event: StreamEvent) => {
       if (event.type === 'turn_end') {
         tokensIn += event.usage.input_tokens;
@@ -440,6 +449,7 @@ export async function spawnPipeline(
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
   parentSessionCounters?: import('../types/agent.js').SessionCounters | undefined,
+  parentMemory?: IMemory | null | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -482,6 +492,7 @@ export async function spawnPipeline(
     parentPrompt,
     userTimezone,
     parentSessionCounters,
+    parentMemory,
   });
 
   // Aggregate results
