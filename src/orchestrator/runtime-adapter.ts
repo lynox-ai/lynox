@@ -13,10 +13,19 @@ import { withCurrentTimePrefix } from '../core/prompts.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
-// Core tools sufficient for most pipeline steps — avoids loading ~20 tool definitions (~3000 tokens/turn)
+// Core tools sufficient for most pipeline steps — avoids loading ~20 tool
+// definitions (~3000 tokens/turn). `knowledge_search` was the pre-B1 memory
+// API and no longer exists in the tool registry (dropped to flat-file via
+// PR #540); without an explicit memory_* entry here, workflow sub-steps
+// silently degraded with "Tool not available: memory_recall" when a step
+// tried to recall what a previous step stored. memory_recall + memory_store
+// + memory_update + memory_list are read-or-tenant-scoped and safe in the
+// inline sandbox. memory_delete + memory_promote stay opt-in via per-step
+// allowTools because they're destructive / confidence-changing.
 const INLINE_CORE_TOOLS = new Set([
   'bash', 'read_file', 'write_file', 'http', 'ask_user',
-  'data_store_query', 'data_store_insert', 'knowledge_search',
+  'data_store_query', 'data_store_insert',
+  'memory_recall', 'memory_store', 'memory_update', 'memory_list',
 ]);
 
 /**
