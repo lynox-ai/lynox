@@ -349,12 +349,23 @@ export class Memory implements IMemory {
     }
   }
 
-  async deleteScoped(ns: MemoryNamespace, pattern: string, scope: MemoryScopeRef): Promise<number> {
+  async deleteScoped(
+    ns: MemoryNamespace,
+    pattern: string,
+    scope: MemoryScopeRef,
+    options?: { exact?: boolean | undefined } | undefined,
+  ): Promise<number> {
     const current = await this.loadScoped(ns, scope);
     if (!current) return 0;
 
     const lines = current.split('\n');
-    const filtered = lines.filter(line => !line.includes(pattern));
+    // `exact:true` — anchored full-line equality (used by the GC, which knows
+    // the exact line it wrote). Default behaviour is substring match for the
+    // user-driven `memory_delete` tool, where the human supplies a partial
+    // pattern.
+    const filtered = options?.exact
+      ? lines.filter(line => line !== pattern)
+      : lines.filter(line => !line.includes(pattern));
     const removed = lines.length - filtered.length;
 
     if (removed > 0) {

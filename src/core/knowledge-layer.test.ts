@@ -253,4 +253,38 @@ describe('KnowledgeLayer', () => {
     expect(ctx.length).toBeLessThanOrEqual(12_000);
     expect(ctx).toContain('<relevant_context>');
   });
+
+  // --- T2-M2: scope-id-scoped dedup (cross-project bleed regression) ---
+
+  it('does NOT dedup across distinct scope ids of the same scope type', async () => {
+    // Isolated layer for this test so the dedup window is not polluted by
+    // memories from earlier tests above (they all share the default scope id).
+    const isolatedDir = await mkdtemp(join(tmpdir(), 'lynox-kl-scope-bleed-'));
+    const isolated = new KnowledgeLayer(join(isolatedDir, 'test.db'), new LocalProvider());
+    await isolated.init();
+    try {
+      const acmeScope: MemoryScopeRef = { type: 'context', id: 'acme' };
+      const betaScope: MemoryScopeRef = { type: 'context', id: 'beta' };
+
+      // Same text, different scope ids — must NOT be deduped against each other.
+      const text = 'Client uses PostgreSQL as the primary database for analytics workloads.';
+      const r1 = await isolated.store(text, 'knowledge', acmeScope);
+      expect(r1.stored).toBe(true);
+      expect(r1.deduplicated).toBe(false);
+
+      const r2 = await isolated.store(text, 'knowledge', betaScope);
+      // Cross-project bleed would set r2.deduplicated=true and reuse acme's id.
+      expect(r2.deduplicated).toBe(false);
+      expect(r2.stored).toBe(true);
+      expect(r2.memoryId).not.toBe(r1.memoryId);
+
+      // Sanity: storing the same text again in the same scope STILL dedups.
+      const r3 = await isolated.store(text, 'knowledge', betaScope);
+      expect(r3.deduplicated).toBe(true);
+      expect(r3.memoryId).toBe(r2.memoryId);
+    } finally {
+      await isolated.close();
+      await rm(isolatedDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 });
