@@ -47,7 +47,7 @@ Researchers acting in good faith under this policy: we will work with you, credi
 
 ## Security Audit (April 2026)
 
-Independent OWASP Top 10 review of the lynox Core engine and Web UI. No critical or high-severity vulnerabilities found.
+Internal OWASP Top 10 review of the lynox Core engine and Web UI. No critical or high-severity vulnerabilities found.
 
 ### Results by Category
 
