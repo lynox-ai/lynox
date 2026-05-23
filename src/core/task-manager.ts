@@ -494,6 +494,20 @@ export class TaskManager {
       nextRunAt = nextOccurrence(task.schedule_cron, now).toISOString();
       // Reset retry count on success
       if (status === 'success') retryCount = 0;
+      // Surface the latest run outcome in `status` so silently-failing
+      // cron tasks show up in the UI instead of staying 'open' forever.
+      // This is derived state, NOT terminal: the cron schedule (not
+      // status) keeps determining re-runs, and a subsequent successful
+      // run flips status back to 'open' (auto-recovery on next success).
+      // The `getDueTasks` SELECT was widened so cron rows stay in the
+      // worker queue even when status='failed' — see
+      // run-history-persistence.ts `getDueTasks`.
+      // Guard: don't resurrect a cron that was manually marked
+      // 'completed' mid-tick (narrow race between complete() and the
+      // finishing tick).
+      if (task.status !== 'completed') {
+        this.history.updateTask(id, { status: status === 'success' ? 'open' : 'failed' });
+      }
     } else if (task.watch_config) {
       // Watch task — compute next run from interval
       const config = JSON.parse(task.watch_config) as { interval_minutes: number };

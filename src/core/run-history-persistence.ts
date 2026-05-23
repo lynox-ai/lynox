@@ -683,16 +683,28 @@ export function getOverdueTasks(db: Database.Database, scopes?: Array<{ type: st
 }
 
 /** Get tasks that are due for execution (next_run_at <= now, not in a
- * terminal status). Terminal = 'completed' or 'failed'. We also clear
- * next_run_at when a task reaches a terminal state, so each guard is
- * redundant with the other — but keeping both prevents a failed task
- * with a stale `next_run_at` (e.g. a row that pre-dates the v31 fix)
- * from re-firing after migration.
+ * terminal status). Terminal = 'completed', or 'failed' for ONE-SHOT
+ * tasks only. Cron tasks (`schedule_cron IS NOT NULL`) are kept in the
+ * queue even when status='failed' so a single transient failure doesn't
+ * permanently disable a recurring schedule — `recordTaskRun` derives the
+ * cron task's status from the latest run (failed/open) and the cron
+ * schedule itself determines re-fires. See task-manager.ts `recordTaskRun`
+ * cron branch.
+ *
+ * We also clear next_run_at when a ONE-SHOT task reaches a terminal
+ * state, so each guard is redundant with the other for one-shots — but
+ * keeping both prevents a failed task with a stale `next_run_at` (e.g.
+ * a row that pre-dates the v31 fix) from re-firing after migration.
  */
 export function getDueTasks(db: Database.Database): TaskRecord[] {
   const now = new Date().toISOString();
   return db.prepare(
-    `SELECT * FROM tasks WHERE next_run_at IS NOT NULL AND next_run_at <= ? AND status NOT IN ('completed','failed') ORDER BY next_run_at ASC`
+    `SELECT * FROM tasks
+     WHERE next_run_at IS NOT NULL
+       AND next_run_at <= ?
+       AND status != 'completed'
+       AND (status != 'failed' OR schedule_cron IS NOT NULL)
+     ORDER BY next_run_at ASC`
   ).all(now) as TaskRecord[];
 }
 
