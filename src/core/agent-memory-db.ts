@@ -630,6 +630,7 @@ export class AgentMemoryDb {
     filters?: {
       namespace?: string | undefined;
       scopeTypes?: string[] | undefined;
+      scopeIds?: string[] | undefined;
       activeOnly?: boolean | undefined;
     },
   ): ScoredMemoryRow[] {
@@ -644,6 +645,12 @@ export class AgentMemoryDb {
     if (filters?.scopeTypes && filters.scopeTypes.length > 0) {
       clauses.push(`scope_type IN (${filters.scopeTypes.map(() => '?').join(',')})`);
       params.push(...filters.scopeTypes);
+    }
+    // Scope-id filter prevents cross-tenant/cross-project bleed when callers
+    // (e.g. KG dedup) want to scope to a specific scope.id within a scope.type.
+    if (filters?.scopeIds && filters.scopeIds.length > 0) {
+      clauses.push(`scope_id IN (${filters.scopeIds.map(() => '?').join(',')})`);
+      params.push(...filters.scopeIds);
     }
 
     const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';

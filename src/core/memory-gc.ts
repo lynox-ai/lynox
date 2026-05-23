@@ -172,15 +172,17 @@ export async function runMemoryGc(
         }
 
         // Remove lines from flat file via deleteScoped for each removed line.
-        // Process in reverse to avoid reloading between deletes (deleteScoped
-        // uses String.includes internally — exact full-line match is safe when
-        // the line is >=10 chars).
+        // GC knows the exact line it wants to delete, so pass `{ exact: true }`
+        // for anchored full-line equality. The previous substring semantic
+        // could remove unrelated lines that happened to embed the target line
+        // as a prefix/suffix (e.g. deleting "Acme: 100" would also remove
+        // "Acme: 1000" or "Old Acme: 100 note").
         const linesToRemove = [...removeIndices]
           .sort((a, b) => b - a)
           .map(idx => allLines[idx]!)
           .filter(line => line.length > 0);
 
-        await Promise.all(linesToRemove.map(line => memory.deleteScoped(ns, line, scope)));
+        await Promise.all(linesToRemove.map(line => memory.deleteScoped(ns, line, scope, { exact: true })));
       }
 
       if (removeIndices.size > 0 || staleTexts.size > 0) {

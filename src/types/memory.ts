@@ -51,7 +51,7 @@ export interface IMemory {
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
-  deleteScoped(ns: MemoryNamespace, pattern: string, scope: MemoryScopeRef):         Promise<number>;
+  deleteScoped(ns: MemoryNamespace, pattern: string, scope: MemoryScopeRef, options?: { exact?: boolean | undefined } | undefined): Promise<number>;
   updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean>;
   // Phase 3: auto-classification support
   setActiveScopes?(scopes: MemoryScopeRef[]): void;

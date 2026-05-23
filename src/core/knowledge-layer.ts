@@ -111,9 +111,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
 
-    // 2. Dedup check — but bypass dedup when contradiction signals are present
+    // 2. Dedup check — but bypass dedup when contradiction signals are present.
+    // Filter by `scopeIds:[scope.id]` so a `context:acme` memory cannot dedup
+    // against a `context:beta` memory with similar text (cross-project bleed).
     const similar = this.db.findSimilarMemories(embedding, 1, DEDUP_THRESHOLD, {
-      namespace, scopeTypes: [scope.type], activeOnly: true,
+      namespace, scopeTypes: [scope.type], scopeIds: [scope.id], activeOnly: true,
     });
 
     if (similar.length > 0) {
