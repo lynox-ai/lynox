@@ -1,0 +1,49 @@
+{
+  "id": "dummyjson",
+  "name": "DummyJSON",
+  "base_url": "https://dummyjson.com",
+  "description": "Free public REST API with realistic fake e-commerce data (products, carts, users, posts, comments, quotes, recipes). Supports pagination, filtering, sorting, and simulated auth flows. Good fit for prototyping listing/detail UI flows or rate-limit + pagination harness tests.",
+  "auth": {
+    "type": "none",
+    "instructions": "Read endpoints require no authentication. A simulated /auth/login flow returns a JWT for testing bearer-token wiring, but no endpoint enforces the token in production-relevant ways."
+  },
+  "rate_limit": {
+    "requests_per_second": 10
+  },
+  "concurrency": {
+    "parallel_ok": true
+  },
+  "output_volume": "medium",
+  "cost": {
+    "model": "free"
+  },
+  "endpoints": [
+    { "method": "GET",  "path": "/products",                  "description": "List products with pagination. Query: limit, skip, select, sortBy, order." },
+    { "method": "GET",  "path": "/products/{id}",             "description": "Single product by id." },
+    { "method": "GET",  "path": "/products/search?q={query}", "description": "Full-text product search." },
+    { "method": "GET",  "path": "/products/categories",       "description": "List all product categories." },
+    { "method": "GET",  "path": "/users",                     "description": "List 100 fake users (name, address, company, bank, crypto wallet)." },
+    { "method": "GET",  "path": "/posts",                     "description": "List 150 fake posts with tags + reactions." },
+    { "method": "POST", "path": "/auth/login",                "description": "Simulated JWT issue. Body: { username, password }. Returns token but no endpoint truly enforces it." }
+  ],
+  "guidelines": [
+    "Use `limit` + `skip` for pagination; default page size is 30 items.",
+    "Use `select=field1,field2` to keep payloads small — full product objects can be 1-2 KB each.",
+    "For schema-validation tests, the response shapes are stable: `products` returns `{products, total, skip, limit}`.",
+    "Use this when you need a more 'shaped' fake than jsonplaceholder (which only has flat posts/users/todos)."
+  ],
+  "avoid": [
+    "Don't treat the /auth/login JWT as a real security boundary — it is for client-side wiring tests, not server-side auth simulation.",
+    "Don't rely on POST/PUT/DELETE persistence — those endpoints echo back the body but no state is stored across requests."
+  ],
+  "notes": [
+    "Project page: https://dummyjson.com (public, no signup).",
+    "Maintained as an open project on GitHub: https://github.com/Ovi/DummyJSON."
+  ],
+  "provenance": {
+    "source": "manual",
+    "source_url": "https://dummyjson.com/docs",
+    "validated_at": "2026-05-23T00:00:00Z",
+    "schema_version": 2
+  }
+}

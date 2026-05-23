@@ -24,16 +24,6 @@ Go to **Settings → Integrations → Mail**. Click **Add Account** and:
 4. Choose an account type (personal, business, support, etc.)
 5. Test the connection
 
-### Via environment variables
-
-```bash
-# Account credentials are stored in the vault.
-# Use the Web UI for multi-account setup — env vars work for single-account bootstrapping.
-export LYNOX_MAIL_ADDRESS=you@example.com
-export LYNOX_MAIL_PASSWORD=your-app-password
-export LYNOX_MAIL_PRESET=gmail    # gmail | icloud | fastmail | yahoo | outlook | custom
-```
-
 ### App passwords
 
 Most providers require an app-specific password instead of your regular login. This is a security feature — the app password grants only mail access, not full account access.

@@ -1,0 +1,48 @@
+{
+  "id": "jsonplaceholder",
+  "name": "JSONPlaceholder",
+  "base_url": "https://jsonplaceholder.typicode.com",
+  "description": "Free public REST API for prototyping and learning. Returns fake users, posts, comments, todos, albums, photos — all read-only fixtures. No auth, no quota. Useful as a smoke target when wiring api_setup or http_request.",
+  "auth": {
+    "type": "none",
+    "instructions": "No authentication. All endpoints are public; mutating verbs (POST/PUT/PATCH/DELETE) are accepted but no data persists — responses are simulated."
+  },
+  "rate_limit": {
+    "requests_per_second": 10
+  },
+  "concurrency": {
+    "parallel_ok": true
+  },
+  "output_volume": "small",
+  "cost": {
+    "model": "free"
+  },
+  "endpoints": [
+    { "method": "GET",  "path": "/posts",            "description": "List 100 fake posts (id, userId, title, body)." },
+    { "method": "GET",  "path": "/posts/{id}",       "description": "Single post by id (1-100)." },
+    { "method": "GET",  "path": "/posts/{id}/comments", "description": "Comments belonging to a post." },
+    { "method": "GET",  "path": "/users",            "description": "List 10 fake users with address + company + geo." },
+    { "method": "GET",  "path": "/users/{id}",       "description": "Single user by id (1-10)." },
+    { "method": "GET",  "path": "/todos",            "description": "List 200 fake todos (userId, id, title, completed)." },
+    { "method": "POST", "path": "/posts",            "description": "Simulated create — returns body + new id, but is NOT persisted server-side." }
+  ],
+  "guidelines": [
+    "Use as the default no-auth target when verifying http_request, api_setup wiring, or rate-limit handling end-to-end.",
+    "Filter via querystring (e.g. /posts?userId=1) rather than fetching the full list and discarding.",
+    "Treat all responses as deterministic fixtures; the same id always returns the same payload."
+  ],
+  "avoid": [
+    "Don't rely on POST/PUT/DELETE side effects — they are simulated and not persisted across requests.",
+    "Don't use this for production traffic or as a CDN — it is hobby-hosted and not SLA-backed."
+  ],
+  "notes": [
+    "Project page: https://jsonplaceholder.typicode.com (public, no signup).",
+    "Stable since ~2014; widely cached and mirrored across CDNs."
+  ],
+  "provenance": {
+    "source": "manual",
+    "source_url": "https://jsonplaceholder.typicode.com/",
+    "validated_at": "2026-05-23T00:00:00Z",
+    "schema_version": 2
+  }
+}
