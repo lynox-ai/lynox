@@ -512,6 +512,39 @@ describe('RunHistory', () => {
       h.close();
     });
 
+    // PRD-HN-LAUNCH-HARDENING T2-W2 — saved workflows (planned templates)
+    // share the `pipeline_runs` table with actual runs under `status='planned'`
+    // and must NOT surface in the Workflows run-history tab.
+    it('getRecentPipelineRuns excludes status=planned rows (templates / plans)', () => {
+      const h = createHistory();
+      // Two saved-workflow templates living in pipeline_runs as planned rows.
+      h.insertPlannedPipeline({
+        id: 'tpl-a', name: 'Saved A', goal: 'g',
+        steps: [{ id: 's', task: 't' }],
+        reasoning: 'r', estimatedCost: 0.01,
+        createdAt: new Date().toISOString(),
+      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      h.insertPlannedPipeline({
+        id: 'tpl-b', name: 'Saved B', goal: 'g',
+        steps: [{ id: 's', task: 't' }],
+        reasoning: 'r', estimatedCost: 0.01,
+        createdAt: new Date().toISOString(),
+      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      // Two genuine executions.
+      h.insertPipelineRun({
+        id: 'run-1', manifestName: 'real-run-1', status: 'completed', manifestJson: '{}',
+      });
+      h.insertPipelineRun({
+        id: 'run-2', manifestName: 'real-run-2', status: 'failed', manifestJson: '{}',
+      });
+
+      const recent = h.getRecentPipelineRuns(10);
+      expect(recent).toHaveLength(2);
+      expect(recent.every((r) => r.status !== 'planned')).toBe(true);
+      expect(recent.map((r) => r.id).sort()).toEqual(['run-1', 'run-2']);
+      h.close();
+    });
+
     it('getPipelineRun retrieves by full ID', () => {
       const h = createHistory();
       h.insertPipelineRun({
