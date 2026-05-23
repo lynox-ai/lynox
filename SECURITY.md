@@ -2,19 +2,41 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in lynox, please report it responsibly:
+We take security reports seriously and aim to acknowledge within 48 hours.
 
-**Email:** security@lynox.ai
+**Preferred — GitHub Security Advisories:**
+[github.com/lynox-ai/lynox/security/advisories/new](https://github.com/lynox-ai/lynox/security/advisories/new) — private, CVE-numbered, lets us coordinate a release. This is the path we'd like every researcher to use.
 
-Please include:
+**Alternative — Email:** security@lynox.ai — for reporters who can't use GitHub Advisories, or want PGP. The PGP fingerprint will appear here once the key is published; until then use the GitHub Advisory path.
+
+Please include in your report:
 - Description of the vulnerability
 - Steps to reproduce
-- Potential impact
+- Potential impact (data exposure / privilege escalation / etc.)
 - Suggested fix (if any)
+- Your preferred attribution (handle, name, or anonymous)
 
-We will acknowledge your report within 48 hours and aim to provide a fix within 7 days for critical issues.
+We aim to provide a fix within 7 days for critical issues, 14 days for high-severity, 30 days for medium. Lower-severity issues are addressed in the next regular release.
 
 **Do not** open a public GitHub issue for security vulnerabilities.
+
+## Safe Harbor
+
+We will not pursue legal action against researchers who act in good faith. Specifically, you have our authorization to:
+
+- Test any lynox release running on infrastructure you control (self-hosted, your dev box, a fresh `docker compose up`).
+- Perform automated vulnerability scanning against your own self-hosted instance.
+- Probe edge cases in the public Web UI / API of your own self-hosted instance.
+
+This authorization does not extend to:
+
+- The managed hosting service (`control.lynox.cloud`, `*.lynox.cloud` per-tenant instances). Testing there affects other customers' data — out of scope.
+- The website (`lynox.ai`) — out of scope.
+- Social engineering of lynox staff, customers, or contractors.
+- Denial-of-service attacks, even against your own self-hosted instance, when the attack would degrade GitHub / npm / Anthropic / Mistral infrastructure.
+- Physical attacks against infrastructure.
+
+Researchers acting in good faith under this policy: we will work with you, credit you (if you want), and won't notify law enforcement. If you're unsure whether your planned testing is covered, email security@lynox.ai before you start and we'll clarify within 24 hours.
 
 ## Supported Versions
 

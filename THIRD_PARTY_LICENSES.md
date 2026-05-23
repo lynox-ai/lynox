@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-This file lists the licenses of third-party software included in or used by lynox.
+This file lists the licenses of third-party software included in or used by lynox. Coverage updated 2026-05-19. To check the full installed surface run `pnpm licenses list --prod` (engine) or `cd packages/web-ui && pnpm licenses list --prod` (web-ui); only material runtime deps are enumerated here.
 
 ## Apache License 2.0
 
@@ -10,6 +10,8 @@ The full license text is available at: https://www.apache.org/licenses/LICENSE-2
 - **@huggingface/transformers** - Copyright Hugging Face Inc.
 - **@mozilla/readability** - Copyright Mozilla Foundation
 - **dompurify** (dual-licensed MPL-2.0 OR Apache-2.0) - Copyright Dr.-Ing. Mario Heiderich, Cure53
+- **google-auth-library** - Copyright Google LLC (used by Google Workspace OAuth integration)
+- **@anthropic-ai/vertex-sdk** — Copyright Anthropic (dormant; kept for the Vertex provider path documented in CLAUDE.md)
 
 ## MIT License
 
@@ -19,17 +21,27 @@ The following dependencies are licensed under the MIT License.
 - **@modelcontextprotocol/sdk** - Copyright Anthropic
 - **@sentry/node** - Copyright Sentry (used for Bugsink error reporting)
 - **better-sqlite3** - Copyright Joshua Wise
-- **telegraf** - Copyright Vitaly Domnikov
 - **zod** - Copyright Colin McDonnell
 - **linkedom** - Copyright Andrea Giammarchi
 - **html2canvas** - Copyright Niklas von Hertzen
 - **marked** - Copyright Christopher Jeffrey
 - **mermaid** - Copyright Knut Sveidqvist
 - **shiki** - Copyright Pine Wu
+- **nodemailer** - Copyright Andris Reinman (outbound SMTP via the Mail integration)
+- **imapflow** - Copyright Andris Reinman (inbound IMAP via the Mail integration)
+- **email-reply-parser** - Copyright Will Durand / Daniel Spinks (quoting/reply detection on inbound mail)
+- **iconv-lite** - Copyright Alexander Shtuchkin (used for inbound-mail charset conversion)
+
+## MPL 2.0
+
+The following dependency is licensed under the Mozilla Public License 2.0.
+The full license text is available at: https://www.mozilla.org/en-US/MPL/2.0/
+
+- **web-push** - Copyright Web Push contributors (used for Push notifications)
 
 ## ISC License
 
-- **linkedom** - Copyright Andrea Giammarchi
+- **linkedom** - Copyright Andrea Giammarchi (also dual-listed above; ISC is the primary license)
 
 ## External Tools (Docker only)
 
