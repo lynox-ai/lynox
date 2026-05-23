@@ -3,8 +3,41 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KnowledgeLayer } from './knowledge-layer.js';
-import { LocalProvider } from './embedding.js';
+import { LocalProvider, type EmbeddingProvider } from './embedding.js';
 import type { MemoryScopeRef } from '../types/index.js';
+
+/**
+ * Test-only embedding provider with topic-coded vectors.
+ *
+ * The fuzzy-supersession tests need cosine values in known regions (>0.95 for
+ * paraphrases of the same fact, <0.95 for off-topic strings) — LocalProvider's
+ * hash-bucket cosines are universally in the 0.1-0.2 range, which makes it
+ * impossible to assert "this paraphrase matches" vs "this off-topic string
+ * doesn't" without using the real ONNX model (too slow + 100MB download for a
+ * unit test). This provider returns a deterministic vector chosen from a small
+ * topic vocabulary so paraphrases of the same fact land in the same cluster.
+ */
+class TopicEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'topic-test';
+  readonly dimensions = 8;
+
+  async embed(text: string): Promise<number[]> {
+    const t = text.toLowerCase();
+    // 8-dim topic axes: [postgres, postgres-version, backup, frontend, generic, acme, beta, _padding]
+    const v = [0, 0, 0, 0, 0, 0, 0, 0];
+    if (t.includes('postgresql') || t.includes('postgres') || t.includes('database')) v[0] = 1;
+    if (t.includes('16')) v[1] = 1;
+    if (t.includes('17')) v[1] = -1;  // version negation so 16↔17 still cluster but distinguishable
+    if (t.includes('backup') || t.includes('pg_dump')) v[2] = 1;
+    if (t.includes('frontend') || t.includes('svelte')) v[3] = 1;
+    if (t.length > 20) v[4] = 0.3;  // generic-text weight
+    if (t.includes('acme')) v[5] = 1;
+    if (t.includes('beta')) v[6] = 1;
+    // Normalize
+    const mag = Math.sqrt(v.reduce((a, b) => a + b * b, 0)) || 1;
+    return v.map(x => x / mag);
+  }
+}
 
 /**
  * Integration tests for KnowledgeLayer.
@@ -285,6 +318,99 @@ describe('KnowledgeLayer', () => {
     } finally {
       await isolated.close();
       await rm(isolatedDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  // --- Fuzzy supersession (P2-A2 regression, 2026-05-22) ---
+
+  it('memory_update with fuzzy old_content supersedes the prior fact (P2-A2 regression)', async () => {
+    // Use an isolated KG so prior tests don't pollute the recall result.
+    // TopicEmbeddingProvider (above) gives the test predictable cosines:
+    // "Acme uses PostgreSQL 16…" and "Acme database = PostgreSQL 16" land in
+    // the same {postgres, db, 16, acme} cluster (cosine ≈ 0.95+); a generic
+    // "Acme database" string sits below threshold.
+    const supDir = await mkdtemp(join(tmpdir(), 'lynox-kl-fuzzy-sup-'));
+    const supLayer = new KnowledgeLayer(join(supDir, 'test.db'), new TopicEmbeddingProvider());
+    await supLayer.init();
+    const supScope: MemoryScopeRef = { type: 'context', id: 'p2-a2-acme' };
+    try {
+      // 1. Store the original fact.
+      const r1 = await supLayer.store(
+        'Acme uses PostgreSQL 16 as the primary database for the order service.',
+        'knowledge', supScope,
+      );
+      expect(r1.stored).toBe(true);
+
+      // 2. Agent-driven update with NON-byte-exact old_content. Before Fix C
+      //    this returned null (no exact match) and the new fact was simply
+      //    inserted alongside the stale one — `memory_recall` then returned
+      //    both, breaking the "single truth per fact" contract.
+      const newId = await supLayer.updateMemoryWithSupersession(
+        'Acme database = PostgreSQL 16',                // fuzzy paraphrase
+        'Acme migrated to PostgreSQL 17 in 2026.',      // new truth
+        'knowledge', supScope,
+      );
+      expect(newId).not.toBeNull();
+      expect(newId).not.toBe(r1.memoryId);
+
+      // 3. Recall returns ONLY the new fact, not both — the old row was
+      //    marked is_active=0 by the supersession transaction.
+      const result = await supLayer.retrieve('What database does Acme use?', [supScope], {
+        namespace: 'knowledge', topK: 10, threshold: 0.3,
+      });
+      const texts = result.memories.map(m => m.text);
+      expect(texts.some(t => t.includes('PostgreSQL 17'))).toBe(true);
+      expect(texts.some(t => t.includes('PostgreSQL 16'))).toBe(false);
+    } finally {
+      await supLayer.close();
+      await rm(supDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('fuzzy supersession ignores unrelated memories below threshold', async () => {
+    // Guardrail: a paraphrase that happens to share a noun but is semantically
+    // distinct must NOT supersede. Without this guard, `memory_update` would
+    // become a footgun — wiping arbitrary memories that mention the same word.
+    // Same TopicEmbeddingProvider as the regression test (above) so the cosine
+    // math is predictable: "Acme runs nightly pg_dump backups…" lives in
+    // {backup, postgres, acme} but "Acme database" lives in {postgres, acme}
+    // only — cosine falls below the 0.95 fuzzy bar.
+    const guardDir = await mkdtemp(join(tmpdir(), 'lynox-kl-fuzzy-guard-'));
+    const guardLayer = new KnowledgeLayer(join(guardDir, 'test.db'), new TopicEmbeddingProvider());
+    await guardLayer.init();
+    const guardScope: MemoryScopeRef = { type: 'context', id: 'p2-a2-guard' };
+    try {
+      const stored = await guardLayer.store(
+        'Acme runs nightly pg_dump backups of the orders database to S3 at 02:00 UTC.',
+        'knowledge', guardScope,
+      );
+      expect(stored.stored).toBe(true);
+
+      // "Acme database" alone is too generic — cosine vs the backup-schedule
+      // line should fall below the 0.80 fuzzy threshold. The call must
+      // return null (no row to supersede), NOT silently overwrite the backup
+      // fact with a frontend-stack fact.
+      const newId = await guardLayer.updateMemoryWithSupersession(
+        'Acme database',
+        'Acme frontend uses SvelteKit 2.',
+        'knowledge', guardScope,
+      );
+      // Either null (no supersession) or the new row was inserted as a
+      // FRESH memory (since no match). Both outcomes preserve the backup
+      // fact. Failure mode = newId is non-null AND the backup memory is now
+      // is_active=0 — assert the backup is still recall-able.
+      const result = await guardLayer.retrieve('How are Acme backups scheduled?', [guardScope], {
+        namespace: 'knowledge', topK: 10, threshold: 0.3,
+      });
+      const texts = result.memories.map(m => m.text);
+      expect(texts.some(t => t.includes('pg_dump') || t.includes('backups'))).toBe(true);
+      // newId is allowed to be non-null only if a different memory was the
+      // supersede target (here there's only one memory, so newId being non-
+      // null would prove the test failed). Document the expectation:
+      expect(newId).toBeNull();
+    } finally {
+      await guardLayer.close();
+      await rm(guardDir, { recursive: true, force: true }).catch(() => {});
     }
   });
 });

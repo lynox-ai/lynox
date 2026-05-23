@@ -64,10 +64,17 @@ const THREAD_BOOST = 0.10;
  * raw exponential decay takes over (the memory really is old, recency
  * should matter), so the long-tail behavior is unchanged.
  *
- * Calibration: 0.92 was tuned against the bench so that a 60-day-old
- * knowledge memory (`exp(-60/365)≈0.849`) gets clamped UP to 0.92 instead
- * of being scaled down — closing the gap that lets a 1-day distractor
- * dominate. Half-life math is preserved for ages > halfLife.
+ * Calibration: 0.95 was selected from a 6-point sweep
+ * `[0.70, 0.80, 0.85, 0.90, 0.95, 1.00]` (scripts/kg-bench/results/calib/
+ * sweep-recency.csv, 2026-05-23). recall@5 jumped from 0.586 → 0.821 between
+ * 0.90 → 0.95 — the smallest value that put the bench above pass-bar with
+ * non-zero margin. 1.00 (full floor) gives the best raw numbers (0.885) but
+ * is equivalent to disabling within-half-life recency entirely; 0.95
+ * preserves a mild recency tiebreaker for memories at the half-life edge.
+ *
+ * Tunable at runtime via `LYNOX_RETRIEVAL_RECENCY_FLOOR=<0..1>` (out-of-range
+ * values silently fall back to the default — keep calibration honest, don't
+ * crash on a typo).
  */
 const RECENCY_FLOOR_WITHIN_HALFLIFE = (() => {
   const v = Number(process.env.LYNOX_RETRIEVAL_RECENCY_FLOOR);
@@ -81,9 +88,18 @@ const RECENCY_FLOOR_WITHIN_HALFLIFE = (() => {
  * The existing `Math.max(0.5, ...)` floor at 1-year never kicked in for
  * the bench corpus (ages 1-90 days) — we raise the floor so a 60-day-old
  * unconfirmed memory doesn't get unfairly suppressed vs a 1-day distractor.
- * 0.92 keeps a 90-day-old unconfirmed memory at parity with a 1-day-old
- * one (which sits at ~0.997) on the confMult axis, so the vector signal
- * stays decisive.
+ * Calibration: 1.00 was the only passing value in a 6-point sweep
+ * `[0.70, 0.80, 0.85, 0.90, 0.95, 1.00]` at RECENCY=0.95
+ * (scripts/kg-bench/results/calib/sweep-confirm.csv, 2026-05-23) — a
+ * NARROW passing region (flagged in the calibration report). A 2-D sweep
+ * at RECENCY=1.00 widened the region to {0.95, 1.00}. The product of the
+ * two floors is the lever; we pick the largest pair (most permissive on
+ * new/unconfirmed memories) on the theory that the confidence×(1+0.1×count)
+ * term still rewards confirmed memories adequately.
+ *
+ * Tunable via `LYNOX_RETRIEVAL_CONFIRM_FLOOR=<0..1>`. The hard 0.5 floor
+ * at ~1-year still applies via the inner Math.max — long-tail unconfirmed
+ * memories continue to decay even with this set to 1.0.
  */
 const CONFIRM_DECAY_FLOOR = (() => {
   const v = Number(process.env.LYNOX_RETRIEVAL_CONFIRM_FLOOR);

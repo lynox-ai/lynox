@@ -32,6 +32,27 @@ import { channels } from './observability.js';
 const DEDUP_THRESHOLD = 0.95;
 
 /**
+ * Fuzzy-supersession threshold. When `updateMemoryWithSupersession` is called
+ * with an `oldText` that doesn't byte-equal any active row, fall back to a
+ * cosine-similarity match. The agent quite reasonably paraphrases the prior
+ * memory ("Acme database is PostgreSQL 16" instead of the exact stored
+ * "Acme uses PostgreSQL 16 as the primary database for the order service.").
+ *
+ * Phase-2 A2 P1 finding (2026-05-22): exact-text-only match meant every
+ * `memory_update` from the agent silently failed to supersede, leaving stale
+ * facts active. The fuzzy path requires cosine ≥ FUZZY_SUPERSEDE_THRESHOLD so
+ * we don't accidentally supersede an unrelated memory that happens to share
+ * a noun. 0.95 is conservative — only genuine paraphrases match. Lower it
+ * via `LYNOX_KG_FUZZY_SUPERSEDE_THRESHOLD` if real-world agent paraphrases
+ * miss the bar (re-bench after lowering — kg-bench tracks supersession
+ * indirectly via no-match recall).
+ */
+const FUZZY_SUPERSEDE_THRESHOLD = (() => {
+  const v = Number(process.env.LYNOX_KG_FUZZY_SUPERSEDE_THRESHOLD);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.95;
+})();
+
+/**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
@@ -513,7 +534,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       namespace,
       [scope],
       oldEmbedding
-        ? { similarityFallback: { queryEmbedding: oldEmbedding, threshold: 0.95 } }
+        ? { similarityFallback: { queryEmbedding: oldEmbedding, threshold: FUZZY_SUPERSEDE_THRESHOLD } }
         : undefined,
     );
     if (!oldRow) return null;
