@@ -281,6 +281,16 @@
 			config = { ...config, api_base_url: '', openai_model_id: '' };
 		}
 		testResult = null;
+
+		// Auto-save tile-click for curated providers (no free-text required).
+		// Without this, the user clicked the tile, navigated to chat, and the
+		// next message still ran on the previous provider — silent UX miss
+		// caught by HN-launch staging probe 2026-05-23. Custom-endpoint tiles
+		// still defer to the explicit Save button (api_base_url + model id
+		// are required cross-field, server returns 400 if absent).
+		if (!entry.requires_base_url && loaded) {
+			void saveConfig();
+		}
 	}
 
 	// Custom-Endpoint Confirm-Banner (PRD Security Model): the SSRF guard
