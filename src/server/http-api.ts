@@ -207,10 +207,10 @@ function isAdminOnlySecret(name: string): boolean {
 
 /**
  * Config fields a managed-tier user can change via PUT /api/config. Everything
- * else (cost caps, MCP servers, OAuth client ids, search/embedding/backup
- * config, etc.) is CP-managed — letting a customer flip those would allow
- * billing-drain, persistent backdoors via mcp_servers, search/OAuth hijacking,
- * and so on. Allowlist (not blocklist) so future config fields fail closed.
+ * else (cost caps, OAuth client ids, search/embedding/backup config, etc.) is
+ * CP-managed — letting a customer flip those would allow billing-drain,
+ * search/OAuth hijacking, and so on. Allowlist (not blocklist) so future
+ * config fields fail closed.
  */
 const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'display_name',

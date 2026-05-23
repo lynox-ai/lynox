@@ -7,28 +7,6 @@ sidebar:
 
 lynox is designed to be extended without modifying core source code. There are several ways to add functionality.
 
-## Custom MCP Servers
-
-The simplest way to extend lynox is by connecting external MCP servers. These add new tools that lynox can use during conversations.
-
-### Register via CLI
-
-```bash
-/mcp my-server https://my-mcp-server.example.com/sse
-```
-
-### Register via config
-
-```json
-{
-  "mcp_servers": [
-    { "name": "my-server", "url": "https://my-mcp-server.example.com/sse" }
-  ]
-}
-```
-
-Once registered, the tools from the MCP server are available in all sessions. lynox discovers capabilities automatically via the MCP protocol.
-
 ## Plugins
 
 Plugins can extend lynox's functionality at a deeper level. Enable or disable them in your config:

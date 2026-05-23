@@ -7,7 +7,6 @@ import type {
   ToolEntry,
   StreamHandler,
   AgentConfig,
-  MCPServer,
   ThinkingMode,
   EffortLevel,
   AutonomyLevel,
@@ -78,7 +77,6 @@ export class Agent implements IAgent {
   private readonly isCustomProxy: boolean;
   private readonly provider: LLMProvider;
   private readonly systemPrompt: string | undefined;
-  private readonly mcpServers: MCPServer[] | undefined;
   private thinking: ThinkingMode;
   private effort: EffortLevel | undefined;
   private readonly maxTokens: number;
@@ -200,10 +198,9 @@ export class Agent implements IAgent {
     const activeProvider = config.provider ?? getActiveProvider();
     this.provider = activeProvider;
     // isNonDirectAnthropic: strips features not supported outside direct Anthropic API
-    // (top-level cache_control, web_search, MCP, eager_input_streaming)
+    // (top-level cache_control, web_search, eager_input_streaming)
     this.isNonDirectAnthropic = activeProvider !== 'anthropic';
     this.isCustomProxy = activeProvider === 'custom' || activeProvider === 'openai';
-    this.mcpServers = activeProvider === 'anthropic' ? config.mcpServers : undefined;
     const isHaiku = this.model.includes('haiku');
     const requestedThinking = config.thinking ?? { type: 'adaptive' };
     // Haiku 4.5 has no extended-thinking support (manual or adaptive) — sending
@@ -654,12 +651,9 @@ export class Agent implements IAgent {
         });
 
     // Estimate overhead from system prompt + tools so truncation accounts for it.
-    // MCP servers resolve server-side into tool definitions that consume context but
-    // aren't visible client-side. Estimate ~500 tokens per MCP server as buffer.
     const systemTokens = JSON.stringify(systemBlocks).length / CHARS_PER_TOKEN;
     const toolTokens = JSON.stringify(toolsDef).length / CHARS_PER_TOKEN;
-    const mcpOverhead = (this.mcpServers?.length ?? 0) * 500;
-    const overheadTokens = systemTokens + toolTokens + mcpOverhead;
+    const overheadTokens = systemTokens + toolTokens;
     this._truncateHistory(overheadTokens);
 
     // Pre-call context-budget estimate: real prompt size of the last call plus
@@ -700,7 +694,6 @@ export class Agent implements IAgent {
           messages: this.messages,
           ...( this.isCustomProxy ? {} : { betas: getBetasForProvider(this.provider) }),
           tools: toolsDef,
-          ...(this.mcpServers ? { mcp_servers: this.mcpServers } : {}),
         }, { signal });
 
         const handler = this.onStream ?? (() => {});

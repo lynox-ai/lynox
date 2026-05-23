@@ -105,8 +105,6 @@ export const LynoxUserConfigSchema = z.object({
   backup_retention_days:   z.number().min(0).max(365).optional(),
   backup_encrypt:          z.boolean().optional(),
   backup_gdrive:           z.boolean().optional(),
-  mcp_servers:             z.array(z.object({ name: z.string(), url: z.string() })).optional(),
-  mcp_exposed_tools:       z.array(z.string()).optional(),
   experience:              z.enum(['business', 'developer']).optional(),
   max_tool_result_chars:   z.number().min(1_000).max(500_000).optional(),
   tool_result_blob_threshold_chars: z.number().min(256).max(500_000).optional(),

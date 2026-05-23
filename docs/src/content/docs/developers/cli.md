@@ -38,8 +38,6 @@ Combines piped input with a task prompt.
 | Flag | Description |
 |------|-------------|
 | `--http-api` | Start Engine HTTP API only (no Web UI) |
-| `--mcp-server` | Start as MCP server (stdio) |
-| `--mcp-server --transport sse` | Start as MCP server (HTTP/SSE) |
 | `--manifest <file>` | Run a workflow manifest |
 | `--watch <glob> --on-change "<task>"` | Watch files and run task on change |
 | `--task "<title>"` | Create a background task and exit |

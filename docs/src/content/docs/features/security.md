@@ -99,7 +99,7 @@ In the CLI, you get an interactive approval dialog. In the Web UI, a confirmatio
 
 ## Content Scanning (Prompt Injection Defense)
 
-lynox treats all external content as untrusted. When tools fetch data from the web, email, APIs, or MCP servers, that content could contain adversarial prompts trying to manipulate the AI agent.
+lynox treats all external content as untrusted. When tools fetch data from the web, email, or APIs, that content could contain adversarial prompts trying to manipulate the AI agent.
 
 ### 4-layer defense
 
@@ -107,7 +107,7 @@ lynox treats all external content as untrusted. When tools fetch data from the w
 
 2. **Pattern Detection** — Content is scanned for injection patterns: tool invocation language, instruction overrides, role impersonation, prompt structure manipulation (`</system>`, ChatML, Llama tokens), and data exfiltration instructions. Detected patterns trigger a warning prepended to the content.
 
-3. **Tool Result Scanning** — All non-internal tool results are scanned for injection. This covers HTTP responses, web search results, email content, Google Workspace data, MCP tool results, and any custom tools. Only explicitly internal tools (file operations, memory, artifacts) bypass scanning.
+3. **Tool Result Scanning** — All non-internal tool results are scanned for injection. This covers HTTP responses, web search results, email content, Google Workspace data, and any custom tools. Only explicitly internal tools (file operations, memory, artifacts) bypass scanning.
 
 4. **Behavioral Anomaly Detection** — Tool call sequences are monitored for suspicious patterns: reading sensitive files followed by HTTP requests, Google data reads followed by outbound sends, and burst HTTP requests to multiple domains.
 
@@ -119,7 +119,6 @@ lynox treats all external content as untrusted. When tools fetch data from the w
 | Web search results | Yes | Yes | HTML stripped, content extracted |
 | Email content | Yes | Yes | HTML comments and hidden elements removed |
 | Google Drive files | Yes | Yes | Size-limited |
-| MCP tool results | Yes | Yes | All MCP tools scanned by default |
 | Bash output | No | Yes | Pattern-scanned |
 | Internal tools | No | No | File ops, memory, artifacts — trusted |
 

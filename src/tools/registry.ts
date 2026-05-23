@@ -1,8 +1,7 @@
-import type { ToolEntry, MCPServer, ToolScopeConfig } from '../types/index.js';
+import type { ToolEntry, ToolScopeConfig } from '../types/index.js';
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolEntry>();
-  private readonly servers: MCPServer[] = [];
   private _version = 0;
 
   /** Incremented on every tool change — sessions compare this to detect stale tools. */
@@ -14,17 +13,8 @@ export class ToolRegistry {
     return this;
   }
 
-  registerMCP(server: MCPServer): this {
-    this.servers.push(server);
-    return this;
-  }
-
   getEntries(): ToolEntry[] {
     return [...this.tools.values()];
-  }
-
-  getMCPServers(): MCPServer[] {
-    return [...this.servers];
   }
 
   find(name: string): ToolEntry | undefined {
