@@ -64,6 +64,56 @@ describe('StreamProcessor', () => {
       });
     });
 
+    it('emits memory_recall tool_use as a discrete tool_call event (regression: HN trust-debug visibility)', async () => {
+      // memory_recall must surface in the chat UI the same as web_research /
+      // email_send / crm_* so users can SEE when prior memory shaped the
+      // answer. The pipeline is: Claude tool_use block → StreamProcessor
+      // emits `tool_call` → http-api writes SSE → chat store aggregates →
+      // ChatView renders. This test locks in the FIRST hop (the only one
+      // that could plausibly be regressed by tweaking emission rules); the
+      // client-side `tool-call-label.test.ts` covers the labelling layer.
+      const { proc, collected } = createProcessor();
+
+      await proc.process(mockStream([
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool_mem_1', name: 'memory_recall', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"name' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'space":"knowledge","query":"pricing"}' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } },
+      ]) as AsyncIterable<never>);
+
+      const toolCalls = collected.filter(e => e.type === 'tool_call');
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0]).toMatchObject({
+        type: 'tool_call',
+        name: 'memory_recall',
+        input: { namespace: 'knowledge', query: 'pricing' },
+        agent: 'test-agent',
+      });
+    });
+
+    it('emits memory_recall with no-query input (namespace-only recency dump path)', async () => {
+      // The no-query path (recency-ranked subset) is a valid call shape —
+      // see `core/src/tools/builtin/memory.ts`. Confirm it still surfaces
+      // as a tool_call so the user sees the namespace being explored.
+      const { proc, collected } = createProcessor();
+
+      await proc.process(mockStream([
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool_mem_2', name: 'memory_recall', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"namespace":"status"}' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } },
+      ]) as AsyncIterable<never>);
+
+      const toolCalls = collected.filter(e => e.type === 'tool_call');
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0]).toMatchObject({
+        type: 'tool_call',
+        name: 'memory_recall',
+        input: { namespace: 'status' },
+      });
+    });
+
     it('emits error for malformed JSON and sets empty input', async () => {
       const { proc, collected } = createProcessor();
 
