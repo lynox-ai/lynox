@@ -14,6 +14,7 @@ import {
   fetchPinned,
   fetchWithPublicRedirects,
   setPinnedTransportForTests,
+  __pinnedAgentForTests,
 } from './network-guard.js';
 import type { PinnedTransportInput } from './network-guard.js';
 
@@ -257,5 +258,118 @@ describe('fetchPinned / fetchWithPublicRedirects', () => {
     await expect(
       fetchWithPublicRedirects('https://a.fake.test/', {}, { maxRedirects: 1 }),
     ).rejects.toThrow(/too many redirects/i);
+  });
+});
+
+// Regression for the 2026-05-23 staging bug where web_research action=read
+// failed universally with `ERR_INVALID_IP_ADDRESS: Invalid IP address:
+// undefined` on every URL. pinnedAgent's lookup callback used the legacy
+// 3-arg signature `cb(null, address, family)`, but Node 22's
+// `net.Socket.connect` (via `lookupAndConnectMultiple`) always invokes
+// lookup with `{ all: true }` and iterates the 2nd callback arg as an
+// addresses array. With a plain string the iteration produces `undefined`
+// records and throws before connect. The stub-transport tests above bypass
+// pinnedAgent entirely, so they could not have caught this. The seam
+// (__pinnedAgentForTests) exists to assert the lookup-callback shape
+// directly without spinning up a socket — node:net's internal call-shape
+// is the contract we lock in.
+describe('pinnedAgent.lookup callback shape (Node 22 staging-fail regression)', () => {
+  type LookupFn = (
+    hostname: string,
+    options: { all?: boolean | undefined } | undefined,
+    cb: (err: NodeJS.ErrnoException | null, ...rest: unknown[]) => void,
+  ) => void;
+  // node:http.Agent stores the lookup we passed at construction time. Centralise
+  // the unsafe cast so individual tests stay readable. `unknown` here avoids
+  // pulling node:http / node:https types into the test file just for this.
+  const getAgentLookup = (agent: unknown): LookupFn =>
+    (agent as { options: { lookup: LookupFn } }).options.lookup;
+
+  it('emits an addresses array when called with { all: true } (the shape Node 22 connect uses)', async () => {
+    const agent = __pinnedAgentForTests('https:', '93.184.216.34', 4);
+    const lookup = getAgentLookup(agent);
+    expect(typeof lookup).toBe('function');
+
+    const received: unknown[] = await new Promise((resolve) => {
+      lookup('example.com', { all: true }, (_err, ...rest) => resolve(rest));
+    });
+    // { all: true } → callback gets ONE addresses-array arg.
+    expect(received).toHaveLength(1);
+    expect(Array.isArray(received[0])).toBe(true);
+    const records = received[0] as Array<{ address: string; family: number }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.address).toBe('93.184.216.34');
+    expect(records[0]!.family).toBe(4);
+    agent.destroy();
+  });
+
+  it('emits (address, family) when called with { all: false } (legacy single-result signature, still supported by Node)', async () => {
+    const agent = __pinnedAgentForTests('http:', '93.184.216.34', 4);
+    const lookup = getAgentLookup(agent);
+    const received: unknown[] = await new Promise((resolve) => {
+      lookup('example.com', { all: false }, (_err, ...rest) => resolve(rest));
+    });
+    // { all: false } → callback gets (address, family) — two args.
+    expect(received).toHaveLength(2);
+    expect(received[0]).toBe('93.184.216.34');
+    expect(received[1]).toBe(4);
+    agent.destroy();
+  });
+
+  it('emits the legacy tuple when options/all are undefined (production callers omit options)', async () => {
+    // Defense against a future "tighten this to require options.all explicitly"
+    // refactor — Node's default-behaviour contract is `{ all: false }` when
+    // the caller omits the option, and a fair number of legacy node:net call
+    // sites rely on the tuple form.
+    const agent = __pinnedAgentForTests('http:', '93.184.216.34', 4);
+    const lookup = getAgentLookup(agent);
+    const received: unknown[] = await new Promise((resolve) => {
+      lookup('example.com', undefined, (_err, ...rest) => resolve(rest));
+    });
+    expect(received).toHaveLength(2);
+    expect(received[0]).toBe('93.184.216.34');
+    expect(received[1]).toBe(4);
+    agent.destroy();
+  });
+
+  it('does not crash net.Socket.connect with ERR_INVALID_IP_ADDRESS (replays the staging-fail scenario)', async () => {
+    // Replay the exact code path that broke staging: build the agent and
+    // launch an http.request via it. The buggy lookup threw
+    // ERR_INVALID_IP_ADDRESS *before* the network round-trip, so any other
+    // error (ECONNREFUSED / EACCES / socket hang up) proves the fix.
+    const http = await import('node:http');
+    const agent = __pinnedAgentForTests('http:', '127.0.0.1', 4);
+    const err: NodeJS.ErrnoException | undefined = await new Promise((resolve) => {
+      // Port 65000 is unprivileged + almost certainly unbound, so the connect
+      // fails fast without privilege-related EACCES masking the assertion.
+      const req = http.request(
+        { hostname: 'example.com', port: 65000, agent, method: 'HEAD', path: '/', timeout: 2000 },
+        () => resolve(undefined),
+      );
+      req.on('error', (e: NodeJS.ErrnoException) => resolve(e));
+      req.on('timeout', () => { req.destroy(); resolve(undefined); });
+      req.end();
+    });
+    agent.destroy();
+    if (err) {
+      expect(err.code).not.toBe('ERR_INVALID_IP_ADDRESS');
+      expect(err.message).not.toMatch(/Invalid IP address/);
+    }
+  });
+});
+
+describe('resolveAndValidate defense-in-depth', () => {
+  beforeEach(() => {
+    vi.mocked(dns.lookup).mockReset();
+  });
+
+  it('throws a clear "Blocked: ..." error if DNS returns a record with an empty address (rather than feeding undefined into the connect path)', async () => {
+    // Production should never see this — dns.lookup always sets address — but
+    // we used to silently propagate this all the way to net.Socket.connect,
+    // which threw `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined` (the
+    // exact symptom of the staging bug). Make sure we now fail closed with a
+    // message an operator can act on.
+    mockDns([{ address: '' as unknown as string, family: 4 }]);
+    await expect(fetchPinned('https://example.test/')).rejects.toThrow(/Blocked: DNS returned a record without an address/);
   });
 });

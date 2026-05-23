@@ -137,6 +137,13 @@ async function resolveAndValidate(hostname: string): Promise<{ address: string; 
     }
   }
   const first = resolved[0]!;
+  // Defense-in-depth: a record without an `address` would silently produce a
+  // broken pin (Node 22 surfaces this downstream as the cryptic
+  // `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`). Fail closed with
+  // an explicit message so the caller / operator sees the real problem.
+  if (typeof first.address !== 'string' || first.address.length === 0) {
+    throw new Error(`Blocked: DNS returned a record without an address for "${cleaned}"`);
+  }
   const family: 4 | 6 = first.family === 6 ? 6 : 4;
   return { address: first.address, family };
 }
@@ -145,14 +152,48 @@ async function resolveAndValidate(hostname: string): Promise<{ address: string; 
  * Build an http(s) Agent whose `lookup` always returns `pinnedIp` — closes the
  * DNS-rebinding window between validation and connect. The Agent is single-use
  * (`keepAlive:false`) so a long-lived process doesn't cache a stale pin.
+ *
+ * Node's lookup callback has TWO signatures depending on `options.all`:
+ *  - `all === false` (legacy):  `callback(err, address, family)`
+ *  - `all === true`  (Node 18+): `callback(err, [{ address, family }, ...])`
+ *
+ * Node 22's `net.Socket.connect` path (via `lookupAndConnectMultiple`) ALWAYS
+ * sets `{ all: true }` — if we hand it back a plain string as the 2nd arg, it
+ * iterates the string character-by-character looking for `record.address`,
+ * pulls `undefined`, and throws `ERR_INVALID_IP_ADDRESS: Invalid IP address:
+ * undefined` on the connect attempt. This silently broke every fetchPinned()
+ * call on staging (caught 2026-05-23 in HN-launch smoke: web_research read
+ * universal-fail).
+ *
+ * We branch on `options.all` so the same agent works whether the caller asks
+ * for one-shot or all-records resolution. Both branches return the SAME pinned
+ * IP — the rebind defense is preserved.
  */
+export function __pinnedAgentForTests(protocol: 'http:' | 'https:', pinnedIp: string, family: 4 | 6): http.Agent | https.Agent {
+  return pinnedAgent(protocol, pinnedIp, family);
+}
+
 function pinnedAgent(protocol: 'http:' | 'https:', pinnedIp: string, family: 4 | 6): http.Agent | https.Agent {
-  const lookup: (
-    hostname: string,
-    options: object,
-    callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
-  ) => void = (_hostname, _options, callback) => {
-    callback(null, pinnedIp, family);
+  type LookupOptions = { all?: boolean | undefined } | undefined;
+  type LookupAllCallback = (
+    err: NodeJS.ErrnoException | null,
+    addresses: Array<{ address: string; family: number }>,
+  ) => void;
+  type LookupSingleCallback = (
+    err: NodeJS.ErrnoException | null,
+    address: string,
+    family: number,
+  ) => void;
+  const lookup = (
+    _hostname: string,
+    options: LookupOptions,
+    callback: LookupAllCallback | LookupSingleCallback,
+  ): void => {
+    if (options?.all === true) {
+      (callback as LookupAllCallback)(null, [{ address: pinnedIp, family }]);
+    } else {
+      (callback as LookupSingleCallback)(null, pinnedIp, family);
+    }
   };
   const opts = { keepAlive: false, lookup };
   return protocol === 'https:' ? new https.Agent(opts) : new http.Agent(opts);
