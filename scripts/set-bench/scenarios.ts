@@ -98,7 +98,10 @@ export const SCENARIO_MULTI_TURN_LOOP: SetBenchScenario = {
           } catch { return []; }
         }),
     );
-    const citedUrls = finalText.match(/https?:\/\/[^\s)]+/g) ?? [];
+    // Strip trailing prose-punctuation so a sentence-ending URL doesn't
+    // report as fabricated when it's actually in the tool trace.
+    const citedUrls = (finalText.match(/https?:\/\/[^\s)]+/g) ?? [])
+      .map((u) => u.replace(/[.,;:!?]+$/, ''));
     const fabricated = citedUrls.filter((u) => !searchUrls.has(u));
     if (fabricated.length > 0) {
       return { pass: false, reason: `${fabricated.length} fabricated URL(s) not in tool trace: ${fabricated[0]}` };
@@ -238,7 +241,8 @@ export const SCENARIO_WORKFLOW_COMPOSITION: SetBenchScenario = {
     if (!/STATUS:\s*ok/i.test(finalText)) {
       return { pass: false, reason: 'STATUS not ok' };
     }
-    if (!/TEMP_C:\s*18\.4/.test(finalText)) {
+    // Anchored dot + word boundary so "18X4" or "184" don't pass.
+    if (!/TEMP_C:\s*18\.4\b/.test(finalText)) {
       return { pass: false, reason: 'TEMP_C not 18.4 (mock-fixture value)' };
     }
     return { pass: true };
@@ -289,7 +293,10 @@ export const SCENARIO_LONG_CONTEXT: SetBenchScenario = {
 
     const a3 = finalText.match(/A3:\s*BLEU=([\d.]+)/i);
     if (!a3) return { pass: false, reason: 'missing A3 line' };
-    if (a3[1] !== '28.4') return { pass: false, reason: `A3 BLEU: ${a3[1]} (want 28.4)` };
+    const bleu = parseFloat(a3[1]!);
+    if (!Number.isFinite(bleu) || Math.abs(bleu - 28.4) > 0.01) {
+      return { pass: false, reason: `A3 BLEU: ${a3[1]} (want 28.4)` };
+    }
 
     return { pass: true };
   },
@@ -362,7 +369,8 @@ export const SCENARIO_CRON_COLD_START: SetBenchScenario = {
     if (stores.length === 0) return { pass: false, reason: 'never called memory_store' };
     const persisted = inspectMemory('today_dow');
     if (!persisted) return { pass: false, reason: 'memory note "today_dow" not stored' };
-    if (!persisted.includes('1')) return { pass: false, reason: `stored value "${persisted}" missing "1"` };
+    // Word-boundary "1" so "11" / "2026-05-25" / "Monday" alone don't pass.
+    if (!/\b1\b/.test(persisted)) return { pass: false, reason: `stored value "${persisted}" missing the literal "1"` };
     if (!/DOW:\s*1\b/.test(finalText)) return { pass: false, reason: 'DOW not 1' };
     if (!/STORED:\s*ok/i.test(finalText)) return { pass: false, reason: 'STORED not ok' };
     return { pass: true };
@@ -401,21 +409,29 @@ export const SCENARIO_REAL_WORLD_GROUNDED: SetBenchScenario = {
     if (!/RECOMMENDATIONS:/i.test(finalText)) {
       return { pass: false, reason: 'missing RECOMMENDATIONS: header' };
     }
-    // Count "1.", "2.", "3." numbered items.
-    const items = finalText.match(/^\s*[123]\.\s+/gm) ?? [];
-    if (items.length < 3) {
-      return { pass: false, reason: `only ${items.length} numbered items (need 3)` };
-    }
-    // Seed values from mock-tools.ts CSV_FIXTURES. At least 3 must
-    // appear verbatim in the strategy text.
+    // Require ordered "1.", "2.", "3." headers — not just three [123].
+    // (Without ordering, "1.\n1.\n1." would pass since [123] is OR.)
+    if (!/^\s*1\.\s+/m.test(finalText)) return { pass: false, reason: 'missing "1." item' };
+    if (!/^\s*2\.\s+/m.test(finalText)) return { pass: false, reason: 'missing "2." item' };
+    if (!/^\s*3\.\s+/m.test(finalText)) return { pass: false, reason: 'missing "3." item' };
+    // Seed values from mock-tools.ts CSV_FIXTURES. Drop single/double-digit
+    // tokens (they trivially appear in any prose) — keep only tokens that
+    // unambiguously identify the seed (≥3 chars, decimal, or 4+ digit int).
     const seedNumbers = [
       '49500', '3200', '8100', '720',           // keywords.csv monthly_searches
       '12.40', '4.80', '2.30', '1.10',           // keywords.csv cpc_usd
       '4200', '4850', '5310', '5790',            // mrr.csv mrr_usd
-      '3.2', '2.8', '4.1', '2.6',                // mrr.csv churn_pct
-      '7', '9', '8', '11',                       // mrr.csv new_customers
+      '3.2', '2.8', '4.1', '2.6',                // mrr.csv churn_pct (decimals, distinctive)
     ];
-    const cited = seedNumbers.filter((n) => finalText.includes(n));
+    // Strip thousands-separator commas before matching (the model
+    // legitimately writes "49,500 monthly searches" but the seed value
+    // is "49500"). Then use a number-boundary regex so "8" doesn't fire
+    // on every random "8" in the strategy.
+    const cleanText = finalText.replace(/(\d),(\d)/g, '$1$2');
+    const cited = seedNumbers.filter((n) => {
+      const escaped = n.replace(/\./g, '\\.');
+      return new RegExp(`(^|[^\\d.])${escaped}(?![\\d.])`).test(cleanText);
+    });
     if (cited.length < 3) {
       return { pass: false, reason: `only ${cited.length} seed numbers cited (need ≥3)` };
     }

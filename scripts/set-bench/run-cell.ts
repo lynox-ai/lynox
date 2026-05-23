@@ -137,18 +137,24 @@ function buildSystem(
   scenario: SetBenchScenario,
   provider: SetBenchCell['provider'],
 ): string | readonly BetaTextBlockParam[] {
-  if (!scenario.inlineContext) return SYSTEM_PREAMBLE;
   if (provider !== 'anthropic') {
-    // Flat string for openai-compat — Mistral can't cache anyway.
+    // Flat string for openai-compat — Mistral has no native prompt cache.
+    if (!scenario.inlineContext) return SYSTEM_PREAMBLE;
     return `${SYSTEM_PREAMBLE}\n\n---\n\n${scenario.inlineContext}`;
   }
+  // Anthropic: mark the preamble with cache_control=ephemeral so cache_read
+  // populates across n=10 sequential runs of the same scenario AND across
+  // multi-turn iterations within a single run. Without this, only the
+  // long-context axis (which has an inlineContext block we cache below)
+  // would ever exercise cache; all other axes would silently report
+  // cache_read=0 and the "cache pays back on multi-turn loops" headline
+  // claim wouldn't show in the data.
+  if (!scenario.inlineContext) {
+    return [{ type: 'text', text: SYSTEM_PREAMBLE, cache_control: { type: 'ephemeral' } }];
+  }
   return [
-    { type: 'text', text: SYSTEM_PREAMBLE },
-    {
-      type: 'text',
-      text: scenario.inlineContext,
-      cache_control: { type: 'ephemeral' },
-    },
+    { type: 'text', text: SYSTEM_PREAMBLE, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: scenario.inlineContext, cache_control: { type: 'ephemeral' } },
   ];
 }
 
@@ -162,6 +168,7 @@ export async function runCell(
   if (!apiKey) {
     return {
       cellLabel: cell.label,
+      axis: cell.axis,
       scenarioId: scenario.id,
       pass: false,
       reason: `missing env ${cell.apiKeyEnv}`,
@@ -203,7 +210,7 @@ export async function runCell(
       if (Date.now() > deadline) {
         const c = computeCosts(cell, tokensIn, tokensOut, cacheReadTokens, cacheCreationTokens);
         return {
-          cellLabel: cell.label, scenarioId: scenario.id,
+          cellLabel: cell.label, axis: cell.axis, scenarioId: scenario.id,
           pass: false, reason: `timeout after ${iterations - 1} iterations`,
           tokensIn, tokensOut,
           cacheReadTokens, cacheCreationTokens,
@@ -290,7 +297,7 @@ export async function runCell(
     const c = computeCosts(cell, tokensIn, tokensOut, cacheReadTokens, cacheCreationTokens);
     if (reachedCap && toolCalls.length > 0 && finalText === '') {
       return {
-        cellLabel: cell.label, scenarioId: scenario.id,
+        cellLabel: cell.label, axis: cell.axis, scenarioId: scenario.id,
         pass: false, reason: `hit max ${scenario.maxIterations} iterations without final answer`,
         tokensIn, tokensOut,
         cacheReadTokens, cacheCreationTokens,
@@ -301,7 +308,7 @@ export async function runCell(
 
     const result = scenario.passCheck(finalText, toolCalls);
     return {
-      cellLabel: cell.label, scenarioId: scenario.id,
+      cellLabel: cell.label, axis: cell.axis, scenarioId: scenario.id,
       pass: result.pass,
       ...(result.reason !== undefined ? { reason: result.reason } : {}),
       tokensIn, tokensOut,
@@ -313,7 +320,7 @@ export async function runCell(
     const msg = err instanceof Error ? err.message : String(err);
     const c = computeCosts(cell, tokensIn, tokensOut, cacheReadTokens, cacheCreationTokens);
     return {
-      cellLabel: cell.label, scenarioId: scenario.id,
+      cellLabel: cell.label, axis: cell.axis, scenarioId: scenario.id,
       pass: false, reason: `error: ${msg}`,
       tokensIn, tokensOut,
       cacheReadTokens, cacheCreationTokens,

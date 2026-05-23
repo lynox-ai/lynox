@@ -16,6 +16,7 @@
  *     "best cost-vs-quality tradeoff" answer is one glance away.
  */
 
+import { ALL_AXES } from './types.js';
 import type { BenchReport, CellRun, SetBenchAxis, SetBenchCell } from './types.js';
 
 /**
@@ -34,24 +35,25 @@ export function percentile(sortedAsc: readonly number[], p: number): number {
 }
 
 export function buildReport(runs: readonly CellRun[], cells: readonly SetBenchCell[]): BenchReport {
-  const cellsByLabel = new Map(cells.map((c) => [c.label, c] as const));
-  // Group runs by (cellLabel, axis) — every cell × axis combination is its
-  // own row (a model that runs ALL 8 axes shows up as 8 distinct rows).
+  // Index cells by (axis, label) — NOT by label alone, because the v4
+  // matrix uses ONE label per model spread across 8 axes, so a label-only
+  // Map collapses 64 cells to 8 entries and every group misattributes
+  // the axis. Use a string sentinel that can never appear in a label.
+  const SEP = '\x1f';
+  const cellsByKey = new Map(cells.map((c) => [`${c.axis}${SEP}${c.label}`, c] as const));
+
   const grouped = new Map<string, CellRun[]>();
   for (const run of runs) {
-    const cell = cellsByLabel.get(run.cellLabel);
-    if (!cell) continue;
-    const key = `${cell.axis}::${run.cellLabel}`;
+    const key = `${run.axis}${SEP}${run.cellLabel}`;
     const arr = grouped.get(key) ?? [];
     arr.push(run);
     grouped.set(key, arr);
   }
 
   const summary: BenchReport['summary'] = [...grouped.entries()].flatMap(([key, cellRuns]) => {
-    const [axisStr, label] = key.split('::', 2);
-    if (!axisStr || !label) return [];
-    const cell = cellsByLabel.get(label);
+    const cell = cellsByKey.get(key);
     if (!cell) return [];
+    const label = cell.label;
     const passCount = cellRuns.filter((r) => r.pass).length;
     const passRate = cellRuns.length === 0 ? 0 : passCount / cellRuns.length;
     const avgCostColdUsd = cellRuns.reduce((acc, r) => acc + r.costUsdCold, 0) / Math.max(1, cellRuns.length);
@@ -63,7 +65,7 @@ export function buildReport(runs: readonly CellRun[], cells: readonly SetBenchCe
     const avgDurationMs = cellRuns.reduce((acc, r) => acc + r.durationMs, 0) / Math.max(1, cellRuns.length);
     const durations = cellRuns.map((r) => r.durationMs).sort((a, b) => a - b);
     return [{
-      axis: axisStr as SetBenchAxis,
+      axis: cell.axis,
       cellLabel: label,
       passRate,
       avgCostColdUsd,
@@ -95,16 +97,7 @@ const AXIS_DISPLAY: Record<SetBenchAxis, string> = {
   'real-world-grounded-strategy': 'Real-world grounded strategy',
 };
 
-const AXIS_ORDER: readonly SetBenchAxis[] = [
-  'multi-turn-loop-completion',
-  'sub-agent-spawn-orchestration',
-  'memory-grounded-reasoning',
-  'workflow-composition',
-  'long-context-with-tools',
-  'tool-chain-with-backtrack',
-  'cron-task-cold-start',
-  'real-world-grounded-strategy',
-];
+const AXIS_ORDER: readonly SetBenchAxis[] = ALL_AXES;
 
 export function formatReportMarkdown(report: BenchReport): string {
   const lines: string[] = [];

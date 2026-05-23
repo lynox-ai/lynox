@@ -11,6 +11,10 @@ import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/message
 
 // ── Per-run mutable state ──────────────────────────────────────
 // Initialized via `resetMockState()` at the start of every cell run.
+// WARNING: this is a module-level singleton. The runner calls `runCell`
+// sequentially, so cells never contend for `state`. If runCell is ever
+// parallelised (e.g. via `Promise.all`), state will leak across cells
+// silently. Move to a per-call context object before that change.
 
 interface MockState {
   /** key → value memory note store, used by memory_store / memory_recall. */

@@ -132,6 +132,7 @@ export interface SetBenchCell {
 
 export interface CellRun {
   readonly cellLabel: string;
+  readonly axis: SetBenchAxis;
   readonly scenarioId: string;
   readonly pass: boolean;
   readonly reason?: string;

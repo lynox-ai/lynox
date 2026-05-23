@@ -21,9 +21,14 @@
  * cache rates are left undefined (warm = cold for those cells).
  */
 
+import { ALL_AXES } from './types.js';
 import type { SetBenchCell } from './types.js';
 
 export const MISTRAL = 'https://api.mistral.ai/v1';
+
+// Mistral's openai-compat API rejects parallel tool_use on large/magistral
+// (Phase 2 finding) — keep this off for every Mistral cell.
+const MISTRAL_PROVIDER_EXTRAS = { parallel_tool_calls: false } as const;
 
 const ANTHROPIC_KEY = 'ANTHROPIC_API_KEY';
 const MISTRAL_KEY = 'MISTRAL_API_KEY';
@@ -50,18 +55,6 @@ const PRICE_MINISTRAL_3B_2410 = { inputPerMillion: 0.04, outputPerMillion: 0.04 
 const PRICE_MINISTRAL_8B_2410 = { inputPerMillion: 0.10, outputPerMillion: 0.10 } as const;
 const PRICE_MISTRAL_LARGE_2512 = { inputPerMillion: 2, outputPerMillion: 6 } as const;
 const PRICE_MAGISTRAL_MEDIUM_2509 = { inputPerMillion: 2, outputPerMillion: 5 } as const;
-
-// All 8 axes the v4 bench covers — every model runs every axis.
-const AXES = [
-  'multi-turn-loop-completion',
-  'sub-agent-spawn-orchestration',
-  'memory-grounded-reasoning',
-  'workflow-composition',
-  'long-context-with-tools',
-  'tool-chain-with-backtrack',
-  'cron-task-cold-start',
-  'real-world-grounded-strategy',
-] as const;
 
 type CellTemplate = Omit<SetBenchCell, 'axis'>;
 
@@ -100,6 +93,7 @@ const MINISTRAL_3B: CellTemplate = {
   apiKeyEnv: MISTRAL_KEY,
   pricing: PRICE_MINISTRAL_3B_2410,
   pinned: true,
+  providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
 const MINISTRAL_8B: CellTemplate = {
@@ -110,6 +104,7 @@ const MINISTRAL_8B: CellTemplate = {
   apiKeyEnv: MISTRAL_KEY,
   pricing: PRICE_MINISTRAL_8B_2410,
   pinned: true,
+  providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
 const MISTRAL_LARGE_LATEST: CellTemplate = {
@@ -120,6 +115,7 @@ const MISTRAL_LARGE_LATEST: CellTemplate = {
   apiKeyEnv: MISTRAL_KEY,
   pricing: PRICE_MISTRAL_LARGE_2512,
   pinned: false,
+  providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
 const MISTRAL_LARGE_2512: CellTemplate = {
@@ -130,6 +126,7 @@ const MISTRAL_LARGE_2512: CellTemplate = {
   apiKeyEnv: MISTRAL_KEY,
   pricing: PRICE_MISTRAL_LARGE_2512,
   pinned: true,
+  providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
 const MAGISTRAL_MEDIUM: CellTemplate = {
@@ -140,6 +137,7 @@ const MAGISTRAL_MEDIUM: CellTemplate = {
   apiKeyEnv: MISTRAL_KEY,
   pricing: PRICE_MAGISTRAL_MEDIUM_2509,
   pinned: true,
+  providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
 const ALL_MODELS: readonly CellTemplate[] = [
@@ -158,6 +156,6 @@ const ALL_MODELS: readonly CellTemplate[] = [
  * runs every axis once per --runs N. Default n=10 → 640 model calls
  * per full matrix. Ballpark spend with the seeded scenarios: ~$5.
  */
-export const ALL_CELLS: readonly SetBenchCell[] = AXES.flatMap((axis) =>
+export const ALL_CELLS: readonly SetBenchCell[] = ALL_AXES.flatMap((axis) =>
   ALL_MODELS.map((m): SetBenchCell => ({ ...m, axis })),
 );
