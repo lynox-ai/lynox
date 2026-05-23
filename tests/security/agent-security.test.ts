@@ -67,10 +67,9 @@ describe('Agent Security Audit', () => {
       expect(agentContent).toContain('session_briefing');
     });
 
-    it('MCP user_context is wrapped as untrusted data', () => {
-      const mcpContent = readFileSync(join(SRC, 'server/mcp-server.ts'), 'utf-8');
-      expect(mcpContent).toContain('wrapUntrustedData');
-    });
+    // MCP server removal 2026-05-23 — see PRD-HN-LAUNCH-HARDENING §8 ("Both
+    // MCP surfaces removed for the launch"); the user_context wrapping test
+    // is moot because the surface no longer exists.
 
     // Telegram voice transcription test removed 2026-05-15 with the
     // Telegram integration kill — see feedback_telegram_not_gated memory.

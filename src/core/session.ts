@@ -5,7 +5,6 @@ import { LynoxError } from './errors.js';
 import type {
   LynoxUserConfig,
   ToolEntry,
-  MCPServer,
   BatchRequest,
   BatchResult,
   StreamHandler,
@@ -949,7 +948,6 @@ export class Session {
     toolContext.streamHandler = this.onStream ?? null;
 
     const model = getModelId(this._model, getActiveProvider());
-    const mcpServers = registry.getMCPServers();
     const entries = registry.getEntries();
     const tools = pluginManager
       ? entries.map(entry => ({
@@ -1030,7 +1028,6 @@ export class Session {
       model,
       systemPrompt,
       tools: effectiveTools,
-      mcpServers: mcpServers.length > 0 ? mcpServers : undefined,
       thinking: this._thinking,
       effort: this._effort,
       maxTokens: this._maxTokens,
@@ -1135,10 +1132,6 @@ export class Session {
   registerHooks(hooks: LynoxHooks): void { this.engine.registerHooks(hooks); }
   addTool<T>(entry: ToolEntry<T>): void {
     this.engine.addTool(entry);
-    this._createAgent();
-  }
-  addMCP(server: MCPServer): void {
-    this.engine.addMCP(server);
     this._createAgent();
   }
 

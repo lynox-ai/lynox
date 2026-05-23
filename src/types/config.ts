@@ -1,4 +1,4 @@
-// === 4.6 AgentConfig & MCPServer ===
+// === 4.6 AgentConfig ===
 
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
@@ -15,7 +15,6 @@ export interface AgentConfig {
   model:            string;
   systemPrompt?:    string | undefined;
   tools?:           ToolEntry[] | undefined;
-  mcpServers?:      MCPServer[] | undefined;
   thinking?:        ThinkingMode | undefined;
   effort?:          EffortLevel | undefined;
   maxTokens?:       number | undefined;
@@ -118,12 +117,6 @@ export interface PreApproveAuditLike {
   }): void;
 }
 
-export interface MCPServer {
-  type: 'url';
-  url:  string;
-  name: string;
-}
-
 // === 4.7 Beta Headers ===
 
 /** Beta flags used by lynox. Vertex AI + Anthropic Direct both support extended cache TTL. */
@@ -165,7 +158,6 @@ export interface LynoxConfig {
   thinking?:       ThinkingMode | undefined;
   effort?:         EffortLevel | undefined;
   maxTokens?:      number | undefined;
-  mcpServers?:     MCPServer[] | undefined;
   memory?:         boolean | undefined;
   promptUser?:     ((question: string, options?: string[]) => Promise<string>) | undefined;
   promptTabs?:     ((questions: TabQuestion[]) => Promise<string[]>) | undefined;
@@ -303,10 +295,6 @@ export interface LynoxUserConfig {
   backup_encrypt?: boolean | undefined;
   /** Upload backups to Google Drive. Default: true when Google auth is configured with drive.file scope. */
   backup_gdrive?: boolean | undefined;
-  /** Persistent MCP server connections. Loaded on every Engine.init(). */
-  mcp_servers?: Array<{ name: string; url: string }> | undefined;
-  /** Whitelist of MCP tool names to expose. When set, only listed tools are registered. Default: all tools. */
-  mcp_exposed_tools?: string[] | undefined;
   /** Experience level: controls output style. 'business' (default) = UI-focused, no CLI/env hints. 'developer' (experimental) = technical details, CLI commands, config snippets. */
   experience?: 'business' | 'developer' | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). Required when provider is 'openai'. */

@@ -2206,7 +2206,6 @@ describe('LynoxHTTPApi', () => {
         ['max_daily_cost_usd', 1_000_000],
         ['max_monthly_cost_usd', 1_000_000],
         ['max_http_requests_per_hour', 999_999],
-        ['mcp_servers', [{ name: 'evil', url: 'https://attacker.example' }]],
         ['searxng_url', 'https://attacker.example'],
         ['google_client_id', 'attacker-oauth-client'],
         ['google_client_secret', 'attacker-oauth-secret'],
@@ -2300,7 +2299,6 @@ describe('LynoxHTTPApi', () => {
         ['provider', 'openai'],
         ['default_tier', 'haiku'],
         ['max_session_cost_usd', 250],
-        ['mcp_servers', [{ name: 'my-tool', url: 'https://mcp.my-company' }]],
       ])(
         'PUT /api/config allows %s change in starter (BYOK) mode',
         async (field, value) => {

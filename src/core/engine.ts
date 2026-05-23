@@ -6,7 +6,6 @@ import type {
   LynoxConfig,
   LynoxUserConfig,
   ToolEntry,
-  MCPServer,
   BatchRequest,
   BatchResult,
   ModelTier,
@@ -879,21 +878,6 @@ export class Engine {
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
 
-    if (this.config.mcpServers) {
-      for (const server of this.config.mcpServers) {
-        this.registry.registerMCP(server);
-      }
-    }
-
-    // Load persistent MCP servers from user config
-    if (this.userConfig.mcp_servers) {
-      for (const server of this.userConfig.mcp_servers) {
-        if (server.name && server.url) {
-          this.registry.registerMCP({ type: 'url', name: server.name, url: server.url });
-        }
-      }
-    }
-
     // Load plugins (best-effort — never fail init, gated behind feature flag)
     if (isFeatureEnabled('plugins')) {
       try {
@@ -1045,10 +1029,6 @@ export class Engine {
   /** Register a tool without recreating agents */
   registerTool<T>(entry: ToolEntry<T>): void {
     this.registry.register(entry);
-  }
-
-  addMCP(server: MCPServer): void {
-    this.registry.registerMCP(server);
   }
 
   // ── Getters ──

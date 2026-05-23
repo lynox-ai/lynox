@@ -154,15 +154,11 @@ When `enforce_https` is `true`, all outbound HTTP requests from tools are blocke
 ```json
 {
   "agents_dir": "./agents",
-  "manifests_dir": "./workflows",
-  "mcp_servers": [
-    { "name": "my-server", "url": "https://my-mcp-server.example.com/sse" }
-  ],
-  "mcp_exposed_tools": ["lynox_run", "lynox_memory"]
+  "manifests_dir": "./workflows"
 }
 ```
 
-See [Extension Points](/developers/extension-points/) and [MCP](/integrations/mcp/) for details.
+See [Extension Points](/developers/extension-points/) for details.
 
 ### Experience Mode
 
@@ -227,8 +223,6 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `LYNOX_HTTP_PORT` | HTTP API port (default: `3000` in Docker, `3100` locally) |
 | `LYNOX_HTTP_SECRET` | Bearer token for HTTP API authentication |
 | `LYNOX_WEBUI_URL` | Web UI URL (default: `http://localhost:5173`) |
-| `LYNOX_MCP_PORT` | MCP server port (default: `3042`) |
-| `LYNOX_MCP_SECRET` | Bearer token for MCP server authentication |
 
 ### Security & Storage
 

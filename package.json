@@ -18,8 +18,6 @@
     "claude",
     "autonomous",
     "business-automation",
-    "mcp",
-    "telegram-bot",
     "pipeline",
     "memory",
     "self-hosted"
@@ -59,7 +57,6 @@
     "coverage": "vitest run --coverage",
     "bench": "vitest bench --config vitest.bench.config.ts",
     "bench:online": "vitest bench --config vitest.bench.config.ts tests/performance/online/",
-    "smoke:manual": "bash scripts/smoke-manual.sh",
     "smoke:local": "bash scripts/smoke-local.sh",
     "test:watch": "vitest",
     "postinstall": "node -e \"const f='scripts/postinstall.cjs';require('node:fs').existsSync(f)&&require('node:child_process').spawnSync(process.execPath,[f],{stdio:'inherit'})\"",
@@ -72,7 +69,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.96.0",
     "@huggingface/transformers": "^4.2.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
     "@mozilla/readability": "^0.6.0",
     "@rolldown/binding-darwin-arm64": "1.0.1",
     "@sentry/node": "^10.46.0",

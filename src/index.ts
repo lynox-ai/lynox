@@ -30,7 +30,6 @@ export { SessionStore } from './core/session-store.js';
 export { channels, measureTool } from './core/observability.js';
 export { initDebugSubscriber, shutdownDebugSubscriber, parseDebugFilter } from './core/debug-subscriber.js';
 export { ToolRegistry } from './tools/registry.js';
-export { LynoxMCPServer } from './server/mcp-server.js';
 export { CostGuard } from './core/cost-guard.js';
 export { loadConfig, saveUserConfig, hasApiKey, getLynoxDir, ensureLynoxDir, setDataDir } from './core/config.js';
 export { RunHistory, hashTask } from './core/run-history.js';
@@ -237,8 +236,6 @@ Usage:
   cat file | lynox "<task>"     Process piped input with a task
   lynox init                    Run Docker installer
   lynox --http-api              Start Engine HTTP API server (headless)
-  lynox --mcp-server            Start as MCP server (stdio)
-  lynox --mcp-server --transport sse   Start as MCP server (HTTP/SSE)
   lynox --watch <glob> --on-change "<task>"   Watch files and run task on change
 
 Options:
@@ -324,22 +321,6 @@ Docs: https://docs.lynox.ai
     await runDockerInstaller();
     return;
   }
-
-  // === MCP Server mode ===
-  if (args.includes('--mcp-server')) {
-    const { LynoxMCPServer } = await import('./server/mcp-server.js');
-    const mcpServer = new LynoxMCPServer({});
-    await mcpServer.init();
-    const transportIdx = args.indexOf('--transport');
-    if (transportIdx !== -1 && args[transportIdx + 1] === 'sse') {
-      const port = parseInt(process.env['LYNOX_MCP_PORT'] ?? '3042', 10);
-      await mcpServer.startHTTP(port);
-    } else {
-      await mcpServer.startStdio();
-    }
-    return;
-  }
-
 
   const engine = new Engine({});
   state.currentModelId = getModelId(engine.config.model ?? 'sonnet', getActiveProvider());

@@ -40,7 +40,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ```
 ┌──────────────────────────────────────┐
 │              You                     │
-│  Web UI · Mobile · CLI · MCP         │
+│  Web UI · Mobile · CLI               │
 └──────────────┬───────────────────────┘
                │
 ┌──────────────▼───────────────────────┐
@@ -69,7 +69,6 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
 - **Mobile Access** — Voice input (Whisper STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
-- **MCP Server** — Connect to Claude Desktop, Cursor, or any MCP client via stdio or HTTP.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
 - **Security** — AES-256 encrypted vault, permission guard, input/output scanning, SSRF protection.
