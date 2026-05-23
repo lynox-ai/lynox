@@ -2384,22 +2384,33 @@ export class LynoxHTTPApi {
       const names = new Set(store.listNames());
       const userConfig = engine.getUserConfig();
       const provider = userConfig.provider ?? 'anthropic';
-      // Provider-aware LLM configured check (BYOK)
+      // Provider-aware LLM configured check (BYOK). Delegate the api-key check
+      // to resolveProviderApiKey() so the env > vault > legacy-config fallback
+      // ladder lives in one place (provider-keys.ts) — pre-fix this handler
+      // open-coded the Anthropic branch and read `userConfig.api_key` for
+      // openai/custom, which always returned `false` because config.ts only
+      // populates `api_key` from ANTHROPIC_API_KEY. Net effect: Mistral /
+      // OpenAI-compat installs landed in the SetupBanner wizard on first
+      // login even with MISTRAL_API_KEY / OPENAI_API_KEY set (HN-launch
+      // installer regression caught 2026-05-23).
       let llmConfigured: boolean;
       if (provider === 'vertex') {
         // Vertex needs GCP project + service account creds
         llmConfigured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
       } else if (provider === 'custom') {
-        // Custom needs api_base_url configured
-        llmConfigured = !!(userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL']);
+        // Custom needs api_base_url configured + a key in the CUSTOM_API_KEY slot
+        const customBase = userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL'];
+        const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        llmConfigured = !!customBase && !!customKey;
       } else if (provider === 'openai') {
-        // OpenAI-compatible needs api_base_url + api_key + model id
-        llmConfigured = !!(userConfig.api_base_url && userConfig.api_key && userConfig.openai_model_id);
+        // OpenAI-compatible needs api_base_url + a key (env MISTRAL_API_KEY /
+        // OPENAI_API_KEY or vault) + model id
+        const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        llmConfigured = !!userConfig.api_base_url && !!openaiKey && !!userConfig.openai_model_id;
       } else {
-        // Anthropic direct — needs API key
-        llmConfigured = names.has('ANTHROPIC_API_KEY')
-          || !!process.env['ANTHROPIC_API_KEY']
-          || !!(userConfig as Record<string, unknown>)['api_key'];
+        // Anthropic direct — needs API key (env, vault, or legacy config.api_key)
+        const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        llmConfigured = !!anthropicKey;
       }
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {

@@ -18,6 +18,11 @@ const mockMemoryDelete = vi.fn().mockResolvedValue(2);
 const mockSecretListNames = vi.fn().mockReturnValue(['ANTHROPIC_API_KEY']);
 const mockSecretSet = vi.fn();
 const mockSecretDelete = vi.fn().mockReturnValue(true);
+// Hoisted so /api/secrets/status regression tests can swap userConfig per-case
+// (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
+// returned config to vary without re-instantiating the Engine mock).
+const mockGetUserConfig = vi.fn().mockReturnValue({});
+const mockSecretResolve = vi.fn().mockReturnValue(null);
 const mockSetApiKey = vi.fn();
 // v1.5.2: hoisted so tests can pin "all BYOK slots trigger reloadCredentials".
 // reloadCredentials is the vault-only hot-reload path; reloadUserConfig is
@@ -93,7 +98,7 @@ vi.mock('../core/engine.js', () => ({
       set: mockSecretSet,
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
-      resolve: vi.fn().mockReturnValue(null),
+      resolve: mockSecretResolve,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -129,7 +134,7 @@ vi.mock('../core/engine.js', () => ({
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = mockReloadUserConfig;
     this.reloadCredentials = mockReloadCredentials;
-    this.getUserConfig = vi.fn().mockReturnValue({});
+    this.getUserConfig = mockGetUserConfig;
     this.setApiKey = mockSetApiKey;
     return this;
   }),
@@ -261,6 +266,8 @@ beforeEach(() => {
   mockSessionRun.mockResolvedValue('Agent response');
   mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY']);
   mockSecretDelete.mockReturnValue(true);
+  mockSecretResolve.mockReturnValue(null);
+  mockGetUserConfig.mockReturnValue({});
   mockHistoryGetRecentRuns.mockReturnValue([{ id: 'run-1', task_text: 'test', status: 'completed' }]);
   mockHistoryGetRun.mockReturnValue({ id: 'run-1', task_text: 'test' });
   mockHistoryGetStats.mockReturnValue({ total_runs: 5 });
@@ -1911,12 +1918,109 @@ describe('LynoxHTTPApi', () => {
   describe('secrets/status', () => {
     it('GET /api/secrets/status returns category booleans', async () => {
       mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY']);
+      // Post-fix the handler uses resolveProviderApiKey() which consults
+      // store.resolve(), so the mock has to actually return a value when the
+      // slot is listed (pre-fix the handler just trusted names.has(slot)).
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null));
       const res = await jsonFetch('/api/secrets/status');
       expect(res.status).toBe(200);
       const body = await res.json() as { configured: Record<string, boolean>; count: number };
       expect(body.configured.api_key).toBe(true);
       expect(body.configured.search).toBe(false);
       expect(body.count).toBe(1);
+    });
+
+    // Regression: HN-launch installer bug (2026-05-23). When the npx wizard
+    // wrote MISTRAL_API_KEY / OPENAI_API_KEY into .env for a non-Anthropic
+    // provider, config.ts didn't populate userConfig.api_key (it only loads
+    // ANTHROPIC_API_KEY), so the pre-fix handler open-coded
+    // `userConfig.api_key && ...` and returned configured.api_key=false,
+    // re-triggering the SetupBanner wizard on first login. The fix delegates
+    // to resolveProviderApiKey() so the MISTRAL_API_KEY / OPENAI_API_KEY env
+    // slot is honoured for provider=openai (+ CUSTOM_API_KEY for custom).
+    it('GET /api/secrets/status reports configured.api_key=true when MISTRAL_API_KEY env is set for provider=openai', async () => {
+      mockSecretListNames.mockReturnValue([]);
+      // Simulate the broken state: userConfig.api_key is EMPTY (config.ts
+      // never populates it for non-Anthropic), but env + base_url + model are
+      // present from the installer.
+      mockGetUserConfig.mockReturnValue({
+        provider: 'openai',
+        api_base_url: 'https://api.mistral.ai/v1',
+        openai_model_id: 'mistral-large-latest',
+        // NOTE: deliberately no api_key — that's the whole bug.
+      });
+      vi.stubEnv('MISTRAL_API_KEY', 'test-mistral-key');
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { provider: string; configured: Record<string, boolean> };
+        expect(body.provider).toBe('openai');
+        // The bug: pre-fix this asserted false because userConfig.api_key was empty.
+        expect(body.configured.api_key).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('GET /api/secrets/status reports configured.api_key=true when OPENAI_API_KEY env (SDK alias) is set for provider=openai', async () => {
+      mockSecretListNames.mockReturnValue([]);
+      mockGetUserConfig.mockReturnValue({
+        provider: 'openai',
+        api_base_url: 'http://localhost:11434/v1',
+        openai_model_id: 'llama3.2',
+      });
+      vi.stubEnv('OPENAI_API_KEY', 'sk-openai-test');
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('GET /api/secrets/status reports configured.api_key=false for provider=openai when no key is set anywhere', async () => {
+      mockSecretListNames.mockReturnValue([]);
+      mockGetUserConfig.mockReturnValue({
+        provider: 'openai',
+        api_base_url: 'https://api.mistral.ai/v1',
+        openai_model_id: 'mistral-large-latest',
+      });
+      // Defensive: dev shells frequently have OPENAI_API_KEY exported.
+      vi.stubEnv('MISTRAL_API_KEY', '');
+      vi.stubEnv('OPENAI_API_KEY', '');
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
+    it('GET /api/secrets/status reports configured.api_key=true when MISTRAL_API_KEY is in the vault (no env) for provider=openai', async () => {
+      mockSecretListNames.mockReturnValue(['MISTRAL_API_KEY']);
+      mockSecretResolve.mockImplementation((name: string) => (name === 'MISTRAL_API_KEY' ? 'vault-mistral-key' : null));
+      mockGetUserConfig.mockReturnValue({
+        provider: 'openai',
+        api_base_url: 'https://api.mistral.ai/v1',
+        openai_model_id: 'mistral-large-latest',
+      });
+      const res = await jsonFetch('/api/secrets/status');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { configured: Record<string, boolean> };
+      expect(body.configured.api_key).toBe(true);
     });
   });
 
