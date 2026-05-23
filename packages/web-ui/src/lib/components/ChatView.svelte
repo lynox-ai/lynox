@@ -57,6 +57,7 @@
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
+	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -292,36 +293,18 @@
 		return result;
 	}
 
-	/** Tool calls hidden from inline display (truly redundant or noisy) */
-	const HIDDEN_TOOLS = new Set(['artifact_list', 'data_store_list']);
 	/** Artifact types that carry a `<!-- type: X -->` marker so MarkdownRenderer
 	 *  dispatches them to a non-iframe renderer (markdown prose, data download). */
 	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'csv', 'tsv', 'json', 'text']);
 	/** Tool calls that get special rendering (not grouped with regular tools) */
 	const SPECIAL_TOOLS = new Set(['plan_task']);
 
-	/** Tool call label: returns { action, subject } or null if hidden */
+	/** Tool call label: returns { action, subject } or null if hidden.
+	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
+	 *  (especially memory_recall's query/namespace fallback) are unit-tested
+	 *  outside this component. */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
-		if (HIDDEN_TOOLS.has(tc.name)) return null;
-		const inp = tc.input as Record<string, unknown> | undefined;
-		switch (tc.name) {
-			case 'data_store_query': return { action: t('tool.data_queried'), subject: String(inp?.['collection'] ?? '') };
-			case 'data_store_insert': return { action: t('tool.data_stored'), subject: String(inp?.['collection'] ?? '') };
-			case 'data_store_create': return { action: t('tool.table_created'), subject: String(inp?.['collection'] ?? '') };
-			case 'memory_store': return { action: t('tool.remembered'), subject: String(inp?.['content'] ?? '').slice(0, 50) };
-			case 'memory_recall': return { action: t('tool.knowledge_recalled'), subject: String(inp?.['query'] ?? '') };
-			case 'memory_update': return { action: t('tool.knowledge_updated'), subject: '' };
-			case 'write_file': return { action: t('tool.file_written'), subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
-			case 'read_file': return { action: t('tool.file_read'), subject: String(inp?.['path'] ?? '').split('/').pop() ?? '' };
-			case 'bash': return { action: t('tool.command'), subject: String(inp?.['command'] ?? '').slice(0, 60) };
-			case 'http_request': return { action: t('tool.api_request'), subject: `${String(inp?.['method'] ?? 'GET')} ${String(inp?.['url'] ?? '')}` };
-			case 'web_research': return { action: t('tool.web_search'), subject: String(inp?.['query'] ?? '') };
-			case 'run_workflow': return { action: t('tool.pipeline'), subject: String(inp?.['name'] ?? '') };
-			case 'spawn_agent': return { action: t('tool.delegated'), subject: String(inp?.['task'] ?? '').slice(0, 50) };
-			case 'artifact_save': return { action: t('tool.artifact_saved'), subject: String(inp?.['title'] ?? '') };
-			case 'task_create': return { action: t('tool.task_created'), subject: String(inp?.['title'] ?? '') };
-			default: return { action: tc.name, subject: '' };
-		}
+		return resolveToolCallLabel(tc.name, tc.input, t);
 	}
 
 	type GroupedBlock =
