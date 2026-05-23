@@ -142,8 +142,8 @@
 		<div class="mb-8 flex flex-col items-center gap-4">
 			<!-- Two <img> elements + CSS visibility-switch keeps SSR fully
 			     static (no flash) while letting [data-theme] flip the variant. -->
-			<img src="/logo-dark.svg" alt="lynox" class="h-20 logo-theme-dark" />
-			<img src="/logo-light.svg" alt="lynox" class="h-20 logo-theme-light" />
+			<img src="/logo-brand-dark.svg" alt="lynox" class="h-20 logo-theme-dark" />
+			<img src="/logo-brand-light.svg" alt="lynox" class="h-20 logo-theme-light" />
 			{#if data.isManaged}
 				<p class="text-sm text-text-muted">
 					{isDE ? 'Mit deiner E-Mail-Adresse anmelden.' : 'Sign in with your email.'}
