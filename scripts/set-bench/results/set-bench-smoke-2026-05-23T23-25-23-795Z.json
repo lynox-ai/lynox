@@ -1,0 +1,286 @@
+{
+  "generatedAt": "2026-05-23T23:25:23.794Z",
+  "cells": [
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "multi-turn-loop-completion.oss-llm-serving",
+      "pass": true,
+      "tokensIn": 4198,
+      "tokensOut": 216,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.00017656,
+      "costUsdWarm": 0.00017656,
+      "durationMs": 1756,
+      "iterations": 3,
+      "finalText": "FRAMEWORKS:\n- vLLM\n- TGI\n- SGLang\n\nNUMERIC_CLAIMS:\n- 24x higher throughput than HuggingFace Transformers on llama-2-7B at batch size 64\n- ~14 tokens/sec sustained on a single NVIDIA A10G\n- Up to 5x throughput vs vLLM on llama-3 8B\n\nURLS:\n- https://docs.vllm.ai/en/latest/performance/benchmarks.html\n- https://huggingface.co/docs/text-generation-inference/conceptual/streaming\n- https://lmsys.org/blog/2024-07-25-sglang-llama3/",
+      "toolCalls": [
+        {
+          "name": "web_search",
+          "input": {
+            "query": "oss llm serving frameworks"
+          },
+          "output": "[{\"title\":\"vLLM — A high-throughput and memory-efficient inference engine for LLMs\",\"url\":\"https://docs.vllm.ai/en/latest/\",\"snippet\":\"vLLM is a fast and easy-to-use library for LLM inference. Up to 24x higher throughput than HuggingFace Transformers.\"},{\"title\":\"TGI — Text Generation Inference by Hugging Face\",\"url\":\"https://huggingface.co/docs/text-generation-inference/index\",\"snippet\":\"Production-ready LLM serving with continuous batching, token streaming, tensor parallelism. ~14 tokens/sec on a single A10G.\"},{\"title\":\"SGLang — Structured Generation Language for LLMs\",\"url\":\"https://docs.sglang.ai/\",\"snippet\":\"SGLang is a fast serving framework for large language models and vision language models. Reports up to 5x throughput vs vLLM on llama-3 8B.\"}]"
+        },
+        {
+          "name": "web_search",
+          "input": {
+            "query": "vllm throughput claims"
+          },
+          "output": "[{\"title\":\"vLLM Benchmarks\",\"url\":\"https://docs.vllm.ai/en/latest/performance/benchmarks.html\",\"snippet\":\"vLLM achieves up to 24x higher throughput than HuggingFace Transformers on llama-2-7B at batch size 64.\"}]"
+        },
+        {
+          "name": "web_search",
+          "input": {
+            "query": "tgi throughput claims"
+          },
+          "output": "[{\"title\":\"TGI performance docs\",\"url\":\"https://huggingface.co/docs/text-generation-inference/conceptual/streaming\",\"snippet\":\"TGI delivers ~14 tokens/sec sustained on a single NVIDIA A10G with continuous batching.\"}]"
+        },
+        {
+          "name": "web_search",
+          "input": {
+            "query": "sglang throughput claims"
+          },
+          "output": "[{\"title\":\"SGLang Benchmarks\",\"url\":\"https://lmsys.org/blog/2024-07-25-sglang-llama3/\",\"snippet\":\"SGLang reports up to 5x throughput vs vLLM on llama-3 8B with RadixAttention.\"}]"
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "sub-agent-spawn-orchestration.transformer-paper",
+      "pass": true,
+      "tokensIn": 2663,
+      "tokensOut": 241,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.00011616,
+      "costUsdWarm": 0.00011616,
+      "durationMs": 1849,
+      "iterations": 2,
+      "finalText": "AUTHORS: Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin\nMETHODOLOGY: The Transformer replaces recurrent/convolutional encoders-decoders with stacked self-attention and position-wise feed-forward layers.\nRESULTS: 28.4 BLEU (WMT 2014 EN-DE)",
+      "toolCalls": [
+        {
+          "name": "spawn_agent",
+          "input": {
+            "task": "Research the authors of the original Transformer paper ('Attention Is All You Need', 2017).",
+            "topic": "authors"
+          },
+          "output": "The paper \"Attention Is All You Need\" was authored by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin (Google Brain / Google Research / U. Toronto, 2017)."
+        },
+        {
+          "name": "spawn_agent",
+          "input": {
+            "task": "Research the core architectural innovation introduced in the Transformer paper ('Attention Is All You Need', 2017).",
+            "topic": "methodology"
+          },
+          "output": "The paper introduces the Transformer, a sequence-transduction architecture based solely on attention mechanisms — dispensing with recurrence and convolutions entirely. The encoder-decoder structure uses 6 stacked self-attention + position-wise feed-forward layers each."
+        },
+        {
+          "name": "spawn_agent",
+          "input": {
+            "task": "Research the headline BLEU score on WMT 2014 EN-DE reported in the original Transformer paper ('Attention Is All You Need', 2017).",
+            "topic": "results"
+          },
+          "output": "The Transformer achieves 28.4 BLEU on WMT 2014 English-to-German translation, improving over the previous best ensemble by 2.0 BLEU. On English-to-French, the single-model big-Transformer scores 41.0 BLEU after 3.5 days of training on 8 GPUs."
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "memory-grounded-reasoning.acme-db",
+      "pass": true,
+      "tokensIn": 3374,
+      "tokensOut": 36,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.0001364,
+      "costUsdWarm": 0.0001364,
+      "durationMs": 747,
+      "iterations": 3,
+      "finalText": "DB: PostgreSQL 17",
+      "toolCalls": [
+        {
+          "name": "memory_recall",
+          "input": {
+            "key": "acme_db"
+          },
+          "output": "PostgreSQL 17"
+        },
+        {
+          "name": "memory_recall",
+          "input": {
+            "key": "acme_database"
+          },
+          "output": "NOT_FOUND"
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "workflow-composition.morning-weather-note",
+      "pass": true,
+      "tokensIn": 6635,
+      "tokensOut": 179,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.00027256,
+      "costUsdWarm": 0.00027256,
+      "durationMs": 1622,
+      "iterations": 5,
+      "finalText": "WORKFLOW: morning-weather-note\nSTATUS: ok\nTEMP_C: 18.4",
+      "toolCalls": [
+        {
+          "name": "workflow_create",
+          "input": {
+            "name": "morning-weather-note",
+            "definition": "1. Fetch current weather data for Zurich from Open-Meteo using lat=47.37, lon=8.55, parameters: current=temperature_2m,weather_code, timezone=auto. 2. Store the result as a one-line note under key 'todays_weather'."
+          },
+          "output": "Workflow \"morning-weather-note\" saved."
+        },
+        {
+          "name": "workflow_run",
+          "input": {
+            "name": "morning-weather-note"
+          },
+          "output": "{\"ranSteps\":[\"http_fetch open-meteo\",\"memory_store weather note\"],\"result\":{\"temperature_2m\":18.4,\"weather_code\":3,\"location\":\"Zurich\"},\"memoryWritten\":\"todays_weather\"}"
+        },
+        {
+          "name": "memory_store",
+          "input": {
+            "key": "todays_weather",
+            "value": "Zurich: 18.4°C, code=3"
+          },
+          "output": "Stored memory note \"todays_weather\"."
+        },
+        {
+          "name": "workflow_run",
+          "input": {
+            "name": "morning-weather-note"
+          },
+          "output": "{\"ranSteps\":[\"http_fetch open-meteo\",\"memory_store weather note\"],\"result\":{\"temperature_2m\":18.4,\"weather_code\":3,\"location\":\"Zurich\"},\"memoryWritten\":\"todays_weather\"}"
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "long-context-with-tools.transformer-paper",
+      "pass": true,
+      "tokensIn": 6577,
+      "tokensOut": 58,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.0002654,
+      "costUsdWarm": 0.0002654,
+      "durationMs": 505,
+      "iterations": 1,
+      "finalText": "A1: first=Ashish Vaswani, count=8\nA2: The core architectural innovation is replacing recurrent and convolutional layers with a stack of multi-head self-attention layers in an encoder-decoder architecture.\nA3: BLEU=28.4",
+      "toolCalls": []
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "tool-chain-with-backtrack.flaky-billing",
+      "pass": true,
+      "tokensIn": 4674,
+      "tokensOut": 72,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.00018984,
+      "costUsdWarm": 0.00018984,
+      "durationMs": 970,
+      "iterations": 4,
+      "finalText": "  PERIOD: 2026-05\n  TOTAL_USD: 1247.5\n  STATUS: paid",
+      "toolCalls": [
+        {
+          "name": "flaky_api",
+          "input": {
+            "endpoint": "billing"
+          },
+          "output": "ERROR 500: upstream service temporarily unavailable. Attempt 1/3."
+        },
+        {
+          "name": "flaky_api",
+          "input": {
+            "endpoint": "billing"
+          },
+          "output": "ERROR 500: upstream service temporarily unavailable. Attempt 2/3."
+        },
+        {
+          "name": "flaky_api",
+          "input": {
+            "endpoint": "billing"
+          },
+          "output": "{\"period\":\"2026-05\",\"total_usd\":1247.5,\"invoices\":8,\"status\":\"paid\"}"
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "cron-task-cold-start.daily-note",
+      "pass": true,
+      "tokensIn": 2273,
+      "tokensOut": 33,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.00009223999999999998,
+      "costUsdWarm": 0.00009223999999999998,
+      "durationMs": 393,
+      "iterations": 2,
+      "finalText": "  DOW: 1\n  STORED: ok",
+      "toolCalls": [
+        {
+          "name": "memory_store",
+          "input": {
+            "key": "today_dow",
+            "value": "1"
+          },
+          "output": "Stored memory note \"today_dow\"."
+        }
+      ]
+    },
+    {
+      "cellLabel": "mistral-ministral-3b-2410",
+      "scenarioId": "real-world-grounded-strategy.gtm-from-csvs",
+      "pass": true,
+      "tokensIn": 2430,
+      "tokensOut": 170,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 0,
+      "costUsdCold": 0.000104,
+      "costUsdWarm": 0.000104,
+      "durationMs": 932,
+      "iterations": 2,
+      "finalText": "RECOMMENDATIONS:\n1. Allocate resources to expand project management software, targeting its **49,500 monthly searches** with a focus on competitive pricing at **$12.40 CPC** to capture high-intent users.\n\n2. Launch a targeted campaign for self-hosted business automation, leveraging its **720 monthly searches** and low competition to optimize **$1.10 CPC** for cost-efficient conversions.\n\n3. Prioritize AI agent framework growth by monitoring **$2.30 CPC** and scaling efforts during **March’s 4.1% churn spike** to retain users and drive **8 new customers** in that month.",
+      "toolCalls": [
+        {
+          "name": "read_csv",
+          "input": {
+            "filename": "keywords.csv"
+          },
+          "output": "keyword,monthly_searches,competition,cpc_usd\nproject management software,49500,high,12.40\nopen source crm,3200,medium,4.80\nai agent framework,8100,low,2.30\nself hosted business automation,720,low,1.10"
+        },
+        {
+          "name": "read_csv",
+          "input": {
+            "filename": "mrr.csv"
+          },
+          "output": "month,mrr_usd,churn_pct,new_customers\n2026-01,4200,3.2,7\n2026-02,4850,2.8,9\n2026-03,5310,4.1,8\n2026-04,5790,2.6,11"
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "axis": "real-world-grounded-strategy",
+      "cellLabel": "mistral-ministral-3b-2410",
+      "passRate": 1,
+      "avgCostColdUsd": 0.00016914499999999997,
+      "avgCostWarmUsd": 0.00016914499999999997,
+      "avgCacheReadTokens": 0,
+      "cacheHitRate": 0,
+      "avgDurationMs": 1096.75,
+      "p50DurationMs": 951,
+      "p95DurationMs": 1816.4499999999998,
+      "pinned": true
+    }
+  ]
+}

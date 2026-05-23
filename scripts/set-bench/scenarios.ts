@@ -1,1167 +1,439 @@
 /**
- * Set-Bench scenarios — narrow set, deterministic mock-tools, regex-pinned
- * pass-checks. Each scenario maps to one of the two axes (tool-chain /
- * orchestration) so the report can group results without re-tagging.
+ * Set-Bench v4 scenarios — one per axis, deterministic mock-tools,
+ * regex-pinned pass-checks. Mirrors the 8 axes documented on
+ * lynox.ai/bench (axis IDs are the same strings used in the page's
+ * `axes` array so the report can cross-reference).
  *
  * Mock-tool design rationale: the bench has to be reproducible across
  * runs and CI. Real `web_search` + real sub-agents would introduce
- * network-dependent flake AND charge real money on every CI tick. Each
- * scenario ships a real-tool variant (for the headline report) plus a
- * mocked-tool variant (for nightly regression). The mock-vs-real toggle
- * lives in the runner, not the scenario file.
+ * network-dependent flake AND charge real money on every CI tick. Tools
+ * live in `mock-tools.ts` with deterministic outputs and per-run-reset
+ * state for cross-call effects (memory, workflows, counter API).
  */
 
-import type { SetBenchScenario, PassResult, ToolCallTrace } from './types.js';
+import type { PassResult, SetBenchScenario, ToolCallTrace } from './types.js';
+import { inspectFlakyAttempts, inspectMemory, inspectWorkflow, seedMemory } from './mock-tools.js';
 
-// ── TOOL_CHAIN: lookup + compute, deterministic answer ─────────
-// Mirrors the live mistral-demo smoke (Zurich population doubled). The
-// mock `lookup_population` returns a frozen value, so we get a single
-// correct final answer regardless of when the bench runs.
+// Bind the inline arXiv-paper context for long-context-with-tools. We
+// inline a high-density excerpt of "Attention Is All You Need" — large
+// enough to exercise cache-read (~60-70k tokens when repeated for the
+// scenario) without depending on a live arXiv fetch.
+const ATTENTION_PAPER_EXCERPT = [
+  '# Attention Is All You Need',
+  '',
+  'Authors: Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin.',
+  '',
+  '## Abstract',
+  'The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train.',
+  '',
+  '## Methodology',
+  'The Transformer follows an encoder-decoder structure using stacked self-attention and position-wise fully-connected feed-forward layers, both for the encoder and decoder. The encoder is composed of a stack of N = 6 identical layers; each layer has two sub-layers: multi-head self-attention and a position-wise feed-forward network. Layer normalization is applied around each sub-layer with residual connections.',
+  '',
+  'Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this; multi-head attention uses h = 8 parallel heads.',
+  '',
+  '## Results',
+  'On the WMT 2014 English-to-German translation task, our big Transformer model achieves 28.4 BLEU on the test set (newstest2014), improving over the existing best results, including ensembles, by over 2.0 BLEU.',
+  'On the WMT 2014 English-to-French translation task, our big model achieves a new state-of-the-art BLEU score of 41.0, outperforming all previously published single models, after training for 3.5 days on 8 GPUs — a small fraction of the training cost of the best competing models.',
+  '',
+  '## Conclusion',
+  'In this work, we presented the Transformer, the first sequence transduction model based entirely on attention, replacing the recurrent layers most commonly used in encoder-decoder architectures with multi-headed self-attention.',
+].join('\n');
 
-const ZURICH_POPULATION = 436_551;
-const ZURICH_X2 = ZURICH_POPULATION * 2;
+// Inline the excerpt N times to drive token count into the 30-50k range —
+// enough that prompt-caching pays back meaningfully on Anthropic, but
+// short enough that the bench runs in seconds-not-minutes.
+const PADDED_PAPER = Array.from({ length: 12 }, () => ATTENTION_PAPER_EXCERPT).join('\n\n---\n\n');
 
-export const TOOL_CHAIN_ZURICH_X2: SetBenchScenario = {
-  id: 'tool-chain.zurich-x2',
-  axis: 'tool-chain',
-  description: 'Two-tool agent loop: lookup_population("Zurich") then compute the result times 2. Regex-checked final answer.',
+// ── 1. multi-turn-loop-completion ──────────────────────────────
+// Research-prompt with built-in follow-ups. Agent uses web_search +
+// http_fetch across the loop, refines its understanding turn by turn.
+
+export const SCENARIO_MULTI_TURN_LOOP: SetBenchScenario = {
+  id: 'multi-turn-loop-completion.oss-llm-serving',
+  axis: 'multi-turn-loop-completion',
+  description: 'Multi-turn research loop: find 3 OSS LLM serving frameworks, compare throughput claims, summarise. Tests cache replay across 6+ refining turns.',
   prompt: [
-    'Use the lookup_population tool to find the population of Zurich.',
-    'Then use the compute tool to multiply that number by 2.',
-    'Reply with exactly: ZURICH_X2=<number>',
-    'Do not add anything else. Do not call lookup_population more than once.',
+    'Research task with three sub-steps. Use the web_search tool throughout.',
+    '',
+    'Step 1: Search for "oss llm serving frameworks". Read the results.',
+    'Step 2: For EACH framework you find (target: 3), run a follow-up web_search like "<framework name> throughput claims" to gather a specific numeric throughput claim.',
+    'Step 3: Write a final summary with this EXACT structure (the harness greps for these markers):',
+    '',
+    'FRAMEWORKS:',
+    '- <name 1>',
+    '- <name 2>',
+    '- <name 3>',
+    '',
+    'NUMERIC_CLAIMS:',
+    '- <claim 1>',
+    '- <claim 2>',
+    '',
+    'URLS:',
+    '- <url 1>',
+    '- <url 2>',
+    '- <url 3>',
+    '',
+    'Reply only with the structured summary. Do not narrate your reasoning.',
   ].join('\n'),
   passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
-    // Both tools must be called. A model that hallucinates the
-    // multiplication without calling compute passes the textual regex but
-    // silently fails the routing claim, so it should fail here too.
-    const lookups = toolCalls.filter((t) => t.name === 'lookup_population');
-    const computes = toolCalls.filter((t) => t.name === 'compute');
-    if (lookups.length === 0) return { pass: false, reason: 'never called lookup_population' };
-    if (computes.length === 0) return { pass: false, reason: 'never called compute' };
-    if (lookups.length > 3) return { pass: false, reason: `called lookup_population ${lookups.length}x (loop)` };
-    const match = finalText.match(/ZURICH_X2=(\d+)/);
-    if (!match) return { pass: false, reason: 'final answer missing ZURICH_X2=<n>' };
-    const got = parseInt(match[1]!, 10);
-    if (got !== ZURICH_X2) return { pass: false, reason: `wrong number: got ${got}, want ${ZURICH_X2}` };
+    const lowerText = finalText.toLowerCase();
+    const frameworks = ['vllm', 'tgi', 'sglang'];
+    const namedCount = frameworks.filter((f) => lowerText.includes(f)).length;
+    if (namedCount < 3) {
+      return { pass: false, reason: `only ${namedCount}/3 frameworks named (need vllm + tgi + sglang)` };
+    }
+    // Require at least 2 numeric claims (e.g. "24x", "14 tokens", "5x").
+    const numericClaims = (finalText.match(/\d+(?:\.\d+)?\s?(x|tokens|%)/gi) ?? []).length;
+    if (numericClaims < 2) {
+      return { pass: false, reason: `only ${numericClaims} numeric throughput claims (need ≥2)` };
+    }
+    // Every cited URL must appear in the web_search tool trace.
+    const searchUrls = new Set(
+      toolCalls
+        .filter((t) => t.name === 'web_search')
+        .flatMap((t) => {
+          try {
+            const hits = JSON.parse(t.output) as Array<{ url?: string }>;
+            return hits.map((h) => h.url ?? '');
+          } catch { return []; }
+        }),
+    );
+    const citedUrls = finalText.match(/https?:\/\/[^\s)]+/g) ?? [];
+    const fabricated = citedUrls.filter((u) => !searchUrls.has(u));
+    if (fabricated.length > 0) {
+      return { pass: false, reason: `${fabricated.length} fabricated URL(s) not in tool trace: ${fabricated[0]}` };
+    }
+    const searchCount = toolCalls.filter((t) => t.name === 'web_search').length;
+    if (searchCount < 2) {
+      return { pass: false, reason: `only ${searchCount} web_search calls (need ≥2 to refine)` };
+    }
+    return { pass: true };
+  },
+  maxIterations: 12,
+  timeoutMs: 180_000,
+};
+
+// ── 2. sub-agent-spawn-orchestration ───────────────────────────
+// Parent fans out 3 spawn_agent calls to gather research on the
+// Transformer paper's authors / methodology / results.
+
+export const SCENARIO_SUB_AGENT_SPAWN: SetBenchScenario = {
+  id: 'sub-agent-spawn-orchestration.transformer-paper',
+  axis: 'sub-agent-spawn-orchestration',
+  description: 'Fan-out: parent spawns 3 sub-agents (authors / methodology / results) about the Transformer paper, then merges findings.',
+  prompt: [
+    'You have the spawn_agent tool. Use it to research 3 aspects of the original Transformer paper ("Attention Is All You Need", 2017):',
+    '  1. Authors',
+    '  2. Methodology (core architectural innovation)',
+    '  3. Results (headline BLEU score on WMT 2014 EN-DE)',
+    '',
+    'Spawn one sub-agent per aspect (3 spawn_agent calls total). Pass each sub-agent a focused task + the topic tag.',
+    '',
+    'After all sub-agents return, write a final 3-line summary with this exact structure:',
+    '',
+    'AUTHORS: <list of authors>',
+    'METHODOLOGY: <one-sentence summary>',
+    'RESULTS: <BLEU score>',
+    '',
+    'Reply only with the 3-line summary.',
+  ].join('\n'),
+  passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
+    const spawns = toolCalls.filter((t) => t.name === 'spawn_agent');
+    if (spawns.length < 3) {
+      return { pass: false, reason: `only ${spawns.length}/3 spawn_agent calls` };
+    }
+    if (spawns.length > 6) {
+      return { pass: false, reason: `${spawns.length} spawn_agent calls (>6 = excessive)` };
+    }
+    if (!/AUTHORS:/i.test(finalText)) return { pass: false, reason: 'missing AUTHORS: line' };
+    if (!/METHODOLOGY:/i.test(finalText)) return { pass: false, reason: 'missing METHODOLOGY: line' };
+    if (!/RESULTS:/i.test(finalText)) return { pass: false, reason: 'missing RESULTS: line' };
+    if (!/vaswani/i.test(finalText)) return { pass: false, reason: 'authors missing Vaswani' };
+    if (!/(attention|transformer)/i.test(finalText)) return { pass: false, reason: 'methodology missing attention/transformer' };
+    if (!/28\.4/.test(finalText)) return { pass: false, reason: 'results missing 28.4 BLEU' };
+    return { pass: true };
+  },
+  maxIterations: 10,
+  timeoutMs: 180_000,
+};
+
+// ── 3. memory-grounded-reasoning ───────────────────────────────
+// Thread A has previously stored "Acme uses PostgreSQL 17". Thread B
+// (this run) asks what database Acme uses — agent must call
+// memory_recall, not hallucinate.
+
+export const SCENARIO_MEMORY_GROUNDED: SetBenchScenario = {
+  id: 'memory-grounded-reasoning.acme-db',
+  axis: 'memory-grounded-reasoning',
+  description: 'Cross-thread memory recall: thread A stored "Acme uses PostgreSQL 17", thread B asks "what DB does Acme use?". Must dispatch memory_recall, not hallucinate.',
+  prompt: [
+    'A previous thread (Thread A) has stored notes in memory. This is a new thread (Thread B) with no chat history.',
+    '',
+    'Question: what database does Acme use in production?',
+    '',
+    'Use the memory_recall tool to look this up. Try keys like "acme_db" or "acme_database".',
+    '',
+    'Reply with this exact format:',
+    '  DB: <database name and version>',
+    '',
+    'Do not guess. If memory_recall returns NOT_FOUND on every key you try, reply: DB: UNKNOWN',
+  ].join('\n'),
+  passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
+    const recalls = toolCalls.filter((t) => t.name === 'memory_recall');
+    if (recalls.length === 0) {
+      return { pass: false, reason: 'never called memory_recall — would have hallucinated' };
+    }
+    const match = finalText.match(/DB:\s*(.+)/i);
+    if (!match) return { pass: false, reason: 'missing DB: line' };
+    const answer = match[1]!.trim().toLowerCase();
+    if (!answer.includes('postgresql') && !answer.includes('postgres')) {
+      return { pass: false, reason: `wrong DB: "${answer}" (want PostgreSQL 17)` };
+    }
+    if (!answer.includes('17')) {
+      return { pass: false, reason: `missing version: "${answer}" (want PostgreSQL 17)` };
+    }
+    return { pass: true };
+  },
+  maxIterations: 6,
+  timeoutMs: 60_000,
+  setup: () => {
+    seedMemory('acme_db', 'PostgreSQL 17');
+  },
+};
+
+// ── 4. workflow-composition ────────────────────────────────────
+// Agent builds + saves + runs a workflow: fetch Open-Meteo Zurich
+// weather, store it as a memory note.
+
+export const SCENARIO_WORKFLOW_COMPOSITION: SetBenchScenario = {
+  id: 'workflow-composition.morning-weather-note',
+  axis: 'workflow-composition',
+  description: 'Build → save → run a workflow that fetches Open-Meteo Zurich weather and stores it as a memory note.',
+  prompt: [
+    'Build a workflow called "morning-weather-note" that performs these steps:',
+    '  1. http_fetch Open-Meteo for Zurich current weather (lat=47.37, lon=8.55, current=temperature_2m,weather_code, timezone=auto)',
+    '  2. memory_store the result as a one-line note under key "todays_weather"',
+    '',
+    'Then:',
+    '  - Create the workflow via workflow_create (name="morning-weather-note", definition=<short text describing the steps>)',
+    '  - Run it via workflow_run',
+    '',
+    'After the run completes, reply with this exact format:',
+    '  WORKFLOW: morning-weather-note',
+    '  STATUS: <ok|fail>',
+    '  TEMP_C: <temperature>',
+    '',
+    'Do not narrate. Just the 3-line summary.',
+  ].join('\n'),
+  passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
+    const creates = toolCalls.filter((t) => t.name === 'workflow_create');
+    const runs = toolCalls.filter((t) => t.name === 'workflow_run');
+    if (creates.length === 0) return { pass: false, reason: 'never called workflow_create' };
+    if (runs.length === 0) return { pass: false, reason: 'never called workflow_run' };
+    const saved = inspectWorkflow('morning-weather-note');
+    if (!saved) return { pass: false, reason: 'workflow not saved under expected name "morning-weather-note"' };
+    if (!/WORKFLOW:\s*morning-weather-note/i.test(finalText)) {
+      return { pass: false, reason: 'final answer missing WORKFLOW: morning-weather-note line' };
+    }
+    if (!/STATUS:\s*ok/i.test(finalText)) {
+      return { pass: false, reason: 'STATUS not ok' };
+    }
+    if (!/TEMP_C:\s*18\.4/.test(finalText)) {
+      return { pass: false, reason: 'TEMP_C not 18.4 (mock-fixture value)' };
+    }
     return { pass: true };
   },
   maxIterations: 10,
   timeoutMs: 120_000,
 };
 
-// ── ORCHESTRATION: email classification batch ──────
-// Tests the haiku-replacement claim. The classifier runs on the same model
-// (sub-agent inherits the parent's model in lynox unless overridden), so
-// we are measuring orchestration plus classification jointly.
+// ── 5. long-context-with-tools ─────────────────────────────────
+// Real Transformer paper (excerpt × 12, ~30-40k tokens) prepended as
+// inline context. Agent answers 3 deterministic questions.
 
-const EMAILS = [
-  'Hi! When is the next product update? - Anna',
-  'I want to unsubscribe from all your emails. Please.',
-  'Can you confirm my payment was received? Order #4521.',
-  'I love your product! 5 stars on Trustpilot - Marc',
-  'You charged me twice this month. Refund please. URGENT.',
-];
-
-const EXPECTED_LABELS = ['question', 'unsubscribe', 'support', 'praise', 'complaint'];
-
-export const ORCHESTRATION_EMAIL_TRIAGE: SetBenchScenario = {
-  id: 'orchestration.email-triage',
-  axis: 'orchestration',
-  description: 'Classify 5 short emails into {question, unsubscribe, support, praise, complaint}. Tests batch orchestration on small models.',
+export const SCENARIO_LONG_CONTEXT: SetBenchScenario = {
+  id: 'long-context-with-tools.transformer-paper',
+  axis: 'long-context-with-tools',
+  description: 'Real arXiv paper excerpt (~40k tokens) handed in as inline context. Extract authors + methodology + BLEU. Cache-hit-rate reported per provider.',
+  inlineContext: PADDED_PAPER,
   prompt: [
-    'Below are 5 short customer emails. For each one, output exactly one label from',
-    'this set: {question, unsubscribe, support, praise, complaint}.',
+    'The system context contains the Transformer paper ("Attention Is All You Need", repeated for token padding). Read it.',
     '',
-    'Reply with exactly 5 lines, formatted as:',
-    '  email1: <label>',
-    '  email2: <label>',
-    '  email3: <label>',
-    '  email4: <label>',
-    '  email5: <label>',
+    'Answer these 3 questions in this exact format:',
     '',
-    'Do not add commentary, do not call any tools, do not invent extra emails.',
+    'Q1 (authors): name the first author and the total count of authors.',
+    'Q2 (methodology): in one sentence, what is the core architectural innovation?',
+    'Q3 (results): what BLEU score does the big Transformer achieve on WMT 2014 English-to-German?',
     '',
-    ...EMAILS.map((e, i) => `email${i + 1}: ${e}`),
+    'Reply with:',
+    '  A1: first=<name>, count=<n>',
+    '  A2: <one sentence>',
+    '  A3: BLEU=<number>',
+    '',
+    'You may use the read_paper_section tool for confirmation, but the context already has the paper.',
   ].join('\n'),
   passCheck: (finalText: string, _toolCalls: readonly ToolCallTrace[]): PassResult => {
-    // Parse one label per line. Tolerant of leading/trailing whitespace and
-    // markdown bold formatting (small models love **unsubscribe**).
-    const labels: string[] = [];
-    for (let i = 1; i <= 5; i++) {
-      const line = new RegExp(`email${i}:\\s*\\**\\s*([a-z]+)\\s*\\**`, 'i').exec(finalText);
-      if (!line) return { pass: false, reason: `missing or malformed line for email${i}` };
-      labels.push(line[1]!.toLowerCase());
+    const a1 = finalText.match(/A1:\s*first=([^,\n]+),\s*count=(\d+)/i);
+    if (!a1) return { pass: false, reason: 'missing A1 line' };
+    if (!/vaswani/i.test(a1[1]!)) {
+      return { pass: false, reason: `A1 first author wrong: "${a1[1]!.trim()}"` };
     }
-    let correct = 0;
-    for (let i = 0; i < 5; i++) {
-      if (labels[i] === EXPECTED_LABELS[i]) correct++;
+    const count = parseInt(a1[2]!, 10);
+    if (count !== 8) return { pass: false, reason: `A1 count: ${count} (want 8)` };
+
+    const a2 = finalText.match(/A2:\s*(.+)/i);
+    if (!a2) return { pass: false, reason: 'missing A2 line' };
+    if (!/(attention|transformer|self.attention)/i.test(a2[1]!)) {
+      return { pass: false, reason: 'A2 missing attention/transformer keywords' };
     }
-    // Pass-bar: 4/5 correct. Email classification has ambiguity (e.g.
-    // "complaint" vs "support" for the double-charge case), and strict
-    // 5/5 would fail Anthropic Haiku ~20% of the time too, masking the
-    // replacement-candidate signal we care about.
-    if (correct < 4) return { pass: false, reason: `${correct}/5 correct: ${labels.join(', ')}` };
+
+    const a3 = finalText.match(/A3:\s*BLEU=([\d.]+)/i);
+    if (!a3) return { pass: false, reason: 'missing A3 line' };
+    if (a3[1] !== '28.4') return { pass: false, reason: `A3 BLEU: ${a3[1]} (want 28.4)` };
+
     return { pass: true };
   },
-  maxIterations: 3,
-  timeoutMs: 60_000,
+  maxIterations: 8,
+  timeoutMs: 180_000,
 };
 
-// ── KG_EXTRACTION: named-entity extraction into structured JSON ──────
-// Probes haiku-tier capability — lynox `entity-extractor-v2.ts` runs on
-// Haiku by default. PassCheck parses JSON (tolerant of ```json fences)
-// and asserts >=7/8 known entities present with correct type. Tier bar:
-// Haiku 4.5.
+// ── 6. tool-chain-with-backtrack ───────────────────────────────
+// Mock flaky API returns 500 twice, then 200. Agent must retry +
+// succeed within ≤3 attempts.
 
-const KG_PARAGRAPH = [
-  'Maria Sanchez, the CTO of Acme Robotics, announced at the Berlin Tech Summit',
-  'that her team will partner with Northwind Logistics on a pilot launching in Munich.',
-  'The partnership was negotiated by Liam OConnor, head of operations at Northwind,',
-  'after a kickoff meeting at the Acme office in Zurich. Funding comes from the',
-  'Helios Ventures fund, whose managing partner Priya Kapoor signed the term sheet',
-  'last week. Maria noted that the rollout will reach Hamburg by Q3.',
-].join(' ');
-
-interface KgEntity {
-  readonly name: string;
-  /** Lowercase aliases the model might emit. */
-  readonly aliases: readonly string[];
-  readonly type: 'person' | 'organization' | 'location';
-}
-
-const KG_EXPECTED: readonly KgEntity[] = [
-  { name: 'Maria Sanchez', aliases: ['maria sanchez', 'maria'], type: 'person' },
-  { name: 'Liam OConnor', aliases: ["liam oconnor", "liam o'connor", 'liam'], type: 'person' },
-  { name: 'Priya Kapoor', aliases: ['priya kapoor', 'priya'], type: 'person' },
-  { name: 'Acme Robotics', aliases: ['acme robotics', 'acme'], type: 'organization' },
-  { name: 'Northwind Logistics', aliases: ['northwind logistics', 'northwind'], type: 'organization' },
-  { name: 'Helios Ventures', aliases: ['helios ventures', 'helios'], type: 'organization' },
-  { name: 'Berlin', aliases: ['berlin', 'berlin tech summit'], type: 'location' },
-  { name: 'Munich', aliases: ['munich', 'münchen'], type: 'location' },
-];
-
-/**
- * Strip ```json / ``` fences and pull the first JSON array out of a
- * model response. Pure string ops — no eval, no Function. Returns null
- * when no parseable array is found so the passCheck can report it
- * explicitly rather than throw.
- */
-export function extractJsonArray(text: string): unknown[] | null {
-  // Drop common fence shapes the model might wrap output in.
-  const stripped = text
-    .replace(/```json\s*/gi, '')
-    .replace(/```\s*/g, '')
-    .trim();
-  // Find the first `[` and walk to its matching `]` with depth-1 string
-  // awareness — handles `[` inside string values without exploding.
-  const start = stripped.indexOf('[');
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < stripped.length; i++) {
-    const ch = stripped[i]!;
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (ch === '\\') {
-      escape = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === '[') depth++;
-    else if (ch === ']') {
-      depth--;
-      if (depth === 0) {
-        const candidate = stripped.slice(start, i + 1);
-        try {
-          const parsed: unknown = JSON.parse(candidate);
-          if (Array.isArray(parsed)) return parsed;
-          return null;
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function kgEntityMatches(actual: { name?: unknown; type?: unknown }, expected: KgEntity): boolean {
-  const name = String(actual.name ?? '').trim().toLowerCase();
-  const type = String(actual.type ?? '').trim().toLowerCase();
-  if (!name) return false;
-  // Match on canonical name OR any alias; tolerate substring (model often
-  // includes a title like "CTO Maria Sanchez").
-  const nameHit = expected.aliases.some((alias) => name.includes(alias));
-  if (!nameHit) return false;
-  // Type may come back as "person"/"people"/"PER" — accept the singular
-  // canonical token only; bench is about adherence, not synonym resolution.
-  if (!type.includes(expected.type)) return false;
-  return true;
-}
-
-export const KG_EXTRACTION_ENTITIES: SetBenchScenario = {
-  id: 'kg-extraction.entities',
-  axis: 'kg-extraction',
-  description: 'Extract 8 named entities (people / organizations / locations) from a fixed paragraph into a JSON array. Tests the haiku-tier KG-extractor replacement claim.',
+export const SCENARIO_TOOL_CHAIN_BACKTRACK: SetBenchScenario = {
+  id: 'tool-chain-with-backtrack.flaky-billing',
+  axis: 'tool-chain-with-backtrack',
+  description: 'Flaky billing API returns 500 first 2 calls, 200 on the 3rd. Agent must retry + recover within ≤3 attempts.',
   prompt: [
-    'Read the paragraph below and extract every named entity that appears.',
-    'Output a JSON array. Each item has exactly two fields:',
-    '  - name (string, the canonical surface form)',
-    '  - type (string, one of: person, organization, location)',
+    'Use the flaky_api tool to fetch the billing summary (endpoint="billing").',
     '',
-    'Output ONLY the JSON array — no prose, no markdown fences, no commentary.',
+    'The API is known to fail intermittently. If you receive a 500, RETRY. Do not give up after the first error — retry up to 3 times total.',
     '',
-    'Paragraph:',
-    KG_PARAGRAPH,
+    'After you receive a successful response, reply with this exact format:',
+    '  PERIOD: <period>',
+    '  TOTAL_USD: <number>',
+    '  STATUS: <status>',
+    '',
+    'If you exhaust 3 attempts without success, reply:',
+    '  STATUS: FAILED_AFTER_RETRIES',
   ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const arr = extractJsonArray(finalText);
-    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
-    // Track claimed arr indices so a single hallucinated item ("Acme Helios
-    // Robotics") can't satisfy two expected entries (Acme AND Helios).
-    // Each expected entity must bind to a distinct actual item.
-    const claimed = new Set<number>();
-    let matched = 0;
-    const missing: string[] = [];
-    for (const expected of KG_EXPECTED) {
-      const idx = arr.findIndex((item, i) => !claimed.has(i) && typeof item === 'object' && item !== null && kgEntityMatches(item as { name?: unknown; type?: unknown }, expected));
-      if (idx >= 0) {
-        claimed.add(idx);
-        matched++;
-      } else {
-        missing.push(expected.name);
-      }
+  passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
+    const calls = toolCalls.filter((t) => t.name === 'flaky_api');
+    if (calls.length < 2) {
+      return { pass: false, reason: `flaky_api called only ${calls.length}x — needed to retry after 500` };
     }
-    if (matched < 7) return { pass: false, reason: `only ${matched}/8 entities matched; missing: ${missing.join(', ')}` };
+    if (calls.length > 4) {
+      return { pass: false, reason: `flaky_api called ${calls.length}x (loop)` };
+    }
+    if (inspectFlakyAttempts() < 3) {
+      return { pass: false, reason: 'never reached the 3rd attempt that succeeds' };
+    }
+    if (!/PERIOD:\s*2026-05/.test(finalText)) return { pass: false, reason: 'missing PERIOD: 2026-05' };
+    if (!/TOTAL_USD:\s*1247\.5/.test(finalText)) return { pass: false, reason: 'missing TOTAL_USD: 1247.5' };
+    if (!/STATUS:\s*paid/i.test(finalText)) return { pass: false, reason: 'STATUS not "paid"' };
     return { pass: true };
   },
-  maxIterations: 3,
-  timeoutMs: 60_000,
-};
-
-// ── DAG_PLANNING: topologically valid step graph ──────
-// Probes haiku-tier capability — lynox `dag-planner.ts` builds plan
-// graphs on Haiku. PassCheck parses JSON, asserts the 3 known steps are
-// present with valid depends_on arrays that form a DAG (no cycles).
-// Tier bar: Haiku 4.5.
-
-const DAG_STEPS_EXPECTED: readonly { id: string; mustDependOn: readonly string[] }[] = [
-  // `cut_tag` is the root, has no required upstream.
-  { id: 'cut_tag', mustDependOn: [] },
-  // `run_tests` must depend on cut_tag (we tag, then run the tests on the tagged commit).
-  { id: 'run_tests', mustDependOn: ['cut_tag'] },
-  // `deploy` must depend on run_tests (deployment gated by green tests).
-  { id: 'deploy', mustDependOn: ['run_tests'] },
-];
-
-interface DagStep {
-  readonly id: string;
-  readonly depends_on: readonly string[];
-}
-
-function parseDagSteps(arr: unknown[]): DagStep[] | null {
-  const out: DagStep[] = [];
-  for (const item of arr) {
-    if (typeof item !== 'object' || item === null) return null;
-    const rec = item as { id?: unknown; depends_on?: unknown };
-    if (typeof rec.id !== 'string') return null;
-    const deps = rec.depends_on;
-    if (!Array.isArray(deps)) return null;
-    const depStrings: string[] = [];
-    for (const d of deps) {
-      if (typeof d !== 'string') return null;
-      depStrings.push(d);
-    }
-    out.push({ id: rec.id, depends_on: depStrings });
-  }
-  return out;
-}
-
-/**
- * Topological-sort check via Kahn's algorithm. Returns true if every
- * node's depends_on resolves AND no cycle exists. Exported so the test
- * suite can pin the contract directly (cycle detection is the silent
- * failure mode we worry about).
- */
-export function isValidDag(steps: readonly DagStep[]): boolean {
-  const byId = new Map(steps.map((s) => [s.id, s] as const));
-  // Every dependency must point to a known node.
-  for (const step of steps) {
-    for (const dep of step.depends_on) {
-      if (!byId.has(dep)) return false;
-    }
-  }
-  const indegree = new Map<string, number>();
-  for (const s of steps) indegree.set(s.id, s.depends_on.length);
-  const queue: string[] = [];
-  for (const [id, deg] of indegree) if (deg === 0) queue.push(id);
-  let visited = 0;
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    visited++;
-    for (const s of steps) {
-      if (s.depends_on.includes(id)) {
-        const next = (indegree.get(s.id) ?? 0) - 1;
-        indegree.set(s.id, next);
-        if (next === 0) queue.push(s.id);
-      }
-    }
-  }
-  return visited === steps.length;
-}
-
-export const DAG_PLANNING_RELEASE: SetBenchScenario = {
-  id: 'dag-planning.release',
-  axis: 'dag-planning',
-  description: 'Plan a 3-step release pipeline (cut_tag → run_tests → deploy) as a topologically valid JSON DAG. Tests the haiku-tier DAG-planner replacement claim.',
-  prompt: [
-    'Plan a small release pipeline as a directed acyclic graph (DAG).',
-    'The pipeline has exactly these 3 steps:',
-    '  - cut_tag    — cut a release tag from main',
-    '  - run_tests  — run the test suite against the tagged commit',
-    '  - deploy     — deploy the tagged build to production',
-    '',
-    'Output a JSON array. Each item has exactly two fields:',
-    '  - id (string, one of the step names above)',
-    '  - depends_on (array of strings — step ids this step waits on)',
-    '',
-    'Constraints:',
-    '  - run_tests must wait on cut_tag.',
-    '  - deploy must wait on run_tests.',
-    '  - The graph MUST be acyclic.',
-    '',
-    'Output ONLY the JSON array — no prose, no markdown fences, no commentary.',
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const arr = extractJsonArray(finalText);
-    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
-    const steps = parseDagSteps(arr);
-    if (steps === null) return { pass: false, reason: 'steps did not match {id: string, depends_on: string[]} shape' };
-    if (!isValidDag(steps)) return { pass: false, reason: 'graph is not a valid DAG (cycle or unresolved dependency)' };
-    // Each canonical step must be present with at least the required upstream.
-    for (const expected of DAG_STEPS_EXPECTED) {
-      const step = steps.find((s) => s.id === expected.id);
-      if (!step) return { pass: false, reason: `missing required step: ${expected.id}` };
-      for (const required of expected.mustDependOn) {
-        if (!step.depends_on.includes(required)) {
-          return { pass: false, reason: `step '${expected.id}' must depend on '${required}'` };
-        }
-      }
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 60_000,
-};
-
-// ── MEMORY_EXTRACTION: pull memorable facts from a chat snippet ──────
-// Probes haiku-tier capability — lynox `memory.ts` extraction runs on
-// Haiku. PassCheck parses JSON array, asserts >=3/4 known anchor facts
-// are present via string-contains match. Tier bar: Haiku 4.5.
-
-const MEMORY_CHAT = [
-  'user: Hi, my name is Jordan and I run a small bakery in Vienna.',
-  'assistant: Nice to meet you, Jordan. What do you bake?',
-  'user: Mostly sourdough and rye. I prefer email over phone for any updates.',
-  'assistant: Got it — I will reach out by email then.',
-  'user: Thanks. Also, my partner Sam handles the wholesale orders.',
-].join('\n');
-
-interface MemoryFact {
-  readonly anchor: string;
-  /** Lowercase substrings — at least one must be present in some fact field. */
-  readonly mustContain: readonly string[];
-}
-
-const MEMORY_EXPECTED: readonly MemoryFact[] = [
-  { anchor: 'name is Jordan', mustContain: ['jordan'] },
-  { anchor: 'runs a bakery in Vienna', mustContain: ['bakery', 'vienna'] },
-  { anchor: 'prefers email over phone', mustContain: ['email'] },
-  { anchor: 'partner Sam handles wholesale', mustContain: ['sam'] },
-];
-
-/**
- * Flatten any nested fact value to a single lowercase string for
- * substring matching. Tolerates string facts, {key, value} objects, and
- * arrays of strings — the model formats memory facts differently from
- * run to run.
- */
-function flattenFact(item: unknown): string {
-  if (typeof item === 'string') return item.toLowerCase();
-  if (typeof item !== 'object' || item === null) return '';
-  const parts: string[] = [];
-  for (const value of Object.values(item as Record<string, unknown>)) {
-    if (typeof value === 'string') parts.push(value);
-    else if (Array.isArray(value)) {
-      // Stringify non-string array items (e.g. `mentions: [{name: 'Sam'}]`)
-      // instead of dropping them — models legitimately emit structured
-      // sub-objects and the substring anchor match should still see the
-      // canonical names inside.
-      for (const v of value) {
-        if (typeof v === 'string') parts.push(v);
-        else if (v !== null && v !== undefined) parts.push(JSON.stringify(v));
-      }
-    } else if (typeof value === 'object' && value !== null) {
-      parts.push(JSON.stringify(value));
-    } else if (value !== null && value !== undefined) {
-      parts.push(String(value));
-    }
-  }
-  return parts.join(' ').toLowerCase();
-}
-
-export const MEMORY_EXTRACTION_CHAT: SetBenchScenario = {
-  id: 'memory-extraction.chat',
-  axis: 'memory-extraction',
-  description: 'Extract memorable facts (name, role, preferences, relationships) from a 5-line chat snippet into a JSON array. Tests the haiku-tier memory-extractor replacement claim.',
-  prompt: [
-    'Below is a short chat between a user and an assistant. Extract the',
-    'memorable facts about the user — things worth remembering for future',
-    'conversations. Things like name, location, role, preferences, and',
-    'people they mention.',
-    '',
-    'Output a JSON array of fact objects. The exact shape is up to you,',
-    'but each fact should be self-contained and human-readable when rendered.',
-    '',
-    'Output ONLY the JSON array — no prose, no markdown fences, no commentary.',
-    '',
-    'Chat:',
-    MEMORY_CHAT,
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const arr = extractJsonArray(finalText);
-    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
-    const flattened = arr.map(flattenFact);
-    let matched = 0;
-    const missing: string[] = [];
-    for (const fact of MEMORY_EXPECTED) {
-      const hit = flattened.some((joined) => fact.mustContain.every((needle) => joined.includes(needle)));
-      if (hit) matched++;
-      else missing.push(fact.anchor);
-    }
-    // Bar: >=3/4. Memory extraction has natural variance — the model
-    // might collapse "partner Sam" and "wholesale orders" into one fact
-    // or skip the email preference if it deems it transient. 3/4 is the
-    // tier-bar minimum that Haiku reliably clears.
-    if (matched < 3) return { pass: false, reason: `only ${matched}/4 facts matched; missing: ${missing.join('; ')}` };
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 60_000,
-};
-
-// ── LONG_CONTEXT: 5-bullet summary of a synthetic spec document ──────
-// Probes sonnet-tier capability — lynox `summarize` tool runs on Sonnet
-// for long-context jobs (200K-window models). PassCheck asserts exactly
-// 5 bullets and >=4/5 contain a known anchor phrase from the corpus.
-// Tier bar: Sonnet 4.6.
-
-const LONG_DOC = [
-  '# Helios Edge Gateway 2.0 — Product Specification',
-  '',
-  '## 1. Overview',
-  'The Helios Edge Gateway 2.0 is an on-premises networking appliance designed for industrial sites that operate without reliable cloud connectivity. The unit ships in a half-rack form factor weighing 4.2 kilograms and draws a maximum of 65 watts under peak load. Mounting hardware supports both DIN-rail and standard 19-inch rack configurations. The gateway is built around a custom ARM-based system-on-chip with eight cores running at 1.8 gigahertz and 16 gigabytes of error-correcting memory. Storage is provided by dual 512-gigabyte NVMe drives configured in a mirrored layout for fault tolerance. Each unit ships with a five-year warranty and a software support contract for the same period.',
-  '',
-  '## 2. Connectivity',
-  'On the network side, the gateway exposes four 2.5-gigabit Ethernet ports and two SFP+ cages capable of 10-gigabit fiber links. Wireless connectivity includes Wi-Fi 6E with tri-band radios and an optional cellular module supporting LTE Cat 18 and 5G sub-6. The cellular module is field-replaceable without removing the main chassis. For legacy industrial protocols, the unit includes two RS-485 serial ports, one CAN bus interface, and a Modbus TCP gateway service that runs on the embedded operating system. A dedicated out-of-band management port provides isolated administrative access on a separate physical interface from production traffic.',
-  '',
-  '## 3. Security model',
-  'The security model is built around a hardware root of trust. Each unit ships with a unique device certificate burned into the security chip at the factory, and the bootloader verifies every stage of the boot chain against this root. Firmware updates require both a vendor signature and a customer counter-signature, eliminating the risk of a single compromised signing key enabling unauthorized rollouts. All persistent storage is encrypted at rest using AES-256-XTS with keys derived from the device certificate. Network traffic between the gateway and the central management plane uses mutual TLS with rotating client certificates issued by the customer’s internal certificate authority. There is no remote management backdoor and no factory-default password.',
-  '',
-  '## 4. Software',
-  'The gateway runs a hardened Linux distribution based on a minimal Yocto image. The container runtime is a stripped-down version of Podman configured to run only signed OCI images. The management plane uses a declarative configuration model: operators push a configuration bundle that the gateway either fully applies or atomically rolls back. There is no imperative configuration mode. The unit exposes a Prometheus-compatible metrics endpoint covering CPU, memory, disk, network throughput, and per-container resource use. Logs are streamed to a syslog endpoint over TLS with a configurable spool size for offline operation.',
-  '',
-  '## 5. Operating environment',
-  'The Helios Edge Gateway 2.0 is rated for operation between minus 20 degrees Celsius and plus 65 degrees Celsius without active cooling. The chassis is rated IP54 against dust and splashing water and has passed shock and vibration testing per the IEC 60068 standard. The unit is certified for industrial use in the European Union under the CE mark and in North America under FCC Part 15B. RoHS 3 compliance is documented for all materials. The expected mean-time-between-failures is 350,000 hours under typical industrial conditions.',
-].join('\n');
-
-/**
- * Anchor phrases — each summary bullet should mention something
- * specific to the corpus rather than a generic platitude. We require 4
- * of 5 bullets to hit at least one anchor; a fully generic summary
- * ("the device is rugged and secure") fails the bar.
- */
-// Anchor list is compiled to word-boundary regexes — substring `.includes`
-// would let short tokens like `arm`, `aes`, `lte`, `5g` falsely satisfy
-// generic filler ("alarm", "aesthetic", "alteration", "no 5g coverage").
-// The bench is testing whether the model picked up *these specific*
-// corpus tokens, not whether English happens to spell them.
-const LONG_DOC_ANCHOR_PATTERNS: readonly RegExp[] = [
-  /\barm\b/i,                       // SoC reference, not "alarm"
-  /\bethernet\b/i,
-  /\bsfp\+/i,
-  /\bmodbus\b/i,
-  /\bcellular\b/i,
-  /\blte\b/i,
-  /\b5g\b/i,
-  /hardware root of trust/i,
-  /mutual tls/i,
-  /\baes\b/i,
-  /\bpodman\b/i,
-  /\byocto\b/i,
-  /\bprometheus\b/i,
-  /\bsyslog\b/i,
-  /\bip54\b/i,
-  /\bce mark\b/i,
-  /\bfcc\b/i,
-  /\brohs\b/i,
-  /mean-time-between-failures/i,
-  /350,000\s*hours/i,
-  /65\s*watts/i,
-  /din-rail/i,
-];
-
-/**
- * Pull bullet lines from a markdown response. Accepts `-`, `*`, `+`
- * markers and numbered `1.` style. Strips the marker and surrounding
- * whitespace. Empty bullets (whitespace-only after the marker) are
- * dropped — a model occasionally emits a trailing blank bullet.
- */
-export function extractBullets(text: string): string[] {
-  const lines = text.split(/\r?\n/);
-  const out: string[] = [];
-  for (const raw of lines) {
-    const match = raw.match(/^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$/);
-    if (match) out.push(match[1]!);
-  }
-  return out;
-}
-
-export const LONG_CONTEXT_SPEC_SUMMARY: SetBenchScenario = {
-  id: 'long-context.spec-summary',
-  axis: 'long-context',
-  description: 'Summarize a fixed ~3.5K-token product specification document into exactly 5 bullet points. Tests the sonnet-tier long-context summarizer replacement claim.',
-  prompt: [
-    'Summarize the product specification document below into EXACTLY 5 bullet',
-    'points. Each bullet must capture a distinct aspect of the product (not',
-    'a paraphrase of the same point). Aim for one bullet per major section.',
-    '',
-    'Format requirements:',
-    '  - Use a dash ("-") marker for each bullet, one per line.',
-    '  - Exactly 5 bullets — no fewer, no more.',
-    '  - No preamble, no closing remark, no markdown headings.',
-    '',
-    'Document:',
-    LONG_DOC,
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const bullets = extractBullets(finalText);
-    if (bullets.length !== 5) return { pass: false, reason: `expected exactly 5 bullets, got ${bullets.length}` };
-    let anchored = 0;
-    for (const bullet of bullets) {
-      if (LONG_DOC_ANCHOR_PATTERNS.some((re) => re.test(bullet))) anchored++;
-    }
-    if (anchored < 4) {
-      return { pass: false, reason: `only ${anchored}/5 bullets contained a corpus-specific anchor phrase` };
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 90_000,
-};
-
-// ── CODE_REVIEW: spot 2 planted bugs in a TS diff ──────
-// Probes sonnet-tier capability — code review prompts target Sonnet in
-// lynox. PassCheck asserts BOTH bug-class keywords (null-deref / SQL
-// injection) appear AND BOTH planted line refs (±2 lines tolerance) are
-// flagged. Tier bar: Sonnet 4.6.
-
-// Diff is embedded as a single string with stable line numbers. Bug 1
-// (null deref) is at line 7; bug 2 (SQL injection) is at line 13. The
-// passCheck accepts any line in [5..9] and [11..15] respectively.
-const CODE_REVIEW_DIFF = [
-  '// File: src/api/user-handler.ts',
-  '// Line 1',
-  'import { db } from "../db.js";',
-  '// Line 3',
-  'export async function getUserDisplayName(userId: string | null): Promise<string> {',
-  '  // Line 5',
-  '  const trimmed = userId.trim();',
-  '  const row = await db.queryOne(',
-  '    `SELECT name FROM users WHERE id = ${trimmed}`,',
-  '  );',
-  '  return row?.name ?? "anonymous";',
-  '}',
-  '// Line 12',
-  'export async function searchUsers(query: string): Promise<unknown[]> {',
-  '  const sql = "SELECT * FROM users WHERE name LIKE \'%" + query + "%\'";',
-  '  return db.queryAll(sql);',
-  '}',
-].join('\n');
-
-interface CodeBugClaim {
-  /** Substrings (any one must match, case-insensitive) describing the bug class. */
-  readonly classMatchers: readonly string[];
-  /** Acceptable planted-line range; the model should flag a line in this window. */
-  readonly lineWindow: readonly number[];
-  /** Human-readable label for the failure reason. */
-  readonly label: string;
-}
-
-const CODE_REVIEW_BUGS: readonly CodeBugClaim[] = [
-  {
-    label: 'null-deref on userId',
-    classMatchers: ['null', 'undefined', 'nullable', 'null-deref', 'null reference', 'nullish'],
-    // Bug 1 is at line 7 (`userId.trim()` on a possibly-null arg). Accept
-    // 5..9 to absorb the model counting from the function signature.
-    lineWindow: [5, 6, 7, 8, 9],
-  },
-  {
-    label: 'SQL injection on query / id',
-    classMatchers: ['sql injection', 'sql-injection', 'sqli', 'string concatenation', 'template literal', 'parameterized', 'prepared statement'],
-    // Bug 2 (SQL injection) has TWO planted sites: line 9 (template
-    // literal in id query) and line 15 (concatenation in searchUsers).
-    // Each site gets ±2 tolerance; the union excludes line 12, which is
-    // the `// Line 12` structural anchor inside the diff itself — a model
-    // echoing prose like "line 12 looks fine" would otherwise hand us a
-    // free false-positive. Also dropped the lone word "injection" from
-    // classMatchers: "SQL injection" / "sqli" / "sql-injection" already
-    // cover real flags without firing on generic prose.
-    lineWindow: [7, 8, 9, 10, 11, 13, 14, 15, 16, 17],
-  },
-];
-
-/**
- * Scan the model's final text for line refs (line N, L7, :13:, etc) and
- * return them as numbers. Strict-ish — we want to match "line 7" but
- * not the literal "5/5" used for grading. Code-fence content is stripped
- * first so a model echoing the diff back (which contains `// Line N`
- * anchors) can't leak structural-anchor numbers into the ref pool.
- */
-export function extractLineRefs(text: string): number[] {
-  const out: number[] = [];
-  // Strip fenced code blocks BEFORE matching so echoed `// Line N`
-  // anchors don't pollute the line-ref set. Real model review prose
-  // lives outside fences; the planted-bug `lineWindow` test is about
-  // what the model *claims*, not what it pasted back.
-  const noCode = text.replace(/```[\s\S]*?```/g, ' ');
-  const lower = noCode.toLowerCase();
-  // Pattern 1: "line 7", "lines 7-9", "line: 7"
-  for (const m of lower.matchAll(/line[s]?\s*[:\-]?\s*(\d+)(?:\s*[-,]\s*(\d+))?/g)) {
-    out.push(parseInt(m[1]!, 10));
-    if (m[2]) out.push(parseInt(m[2], 10));
-  }
-  // Pattern 2: "L7" / "L13"
-  for (const m of lower.matchAll(/\bl(\d+)\b/g)) {
-    out.push(parseInt(m[1]!, 10));
-  }
-  // Pattern 3: ":7:" / ":13:" gitblame-style refs (avoid matching "5/5" grading).
-  for (const m of lower.matchAll(/:\s*(\d+)\s*:/g)) {
-    out.push(parseInt(m[1]!, 10));
-  }
-  return out;
-}
-
-export const CODE_REVIEW_PLANTED_BUGS: SetBenchScenario = {
-  id: 'code-review.planted-bugs',
-  axis: 'code-review',
-  description: 'Spot both planted bugs (null-deref + SQL injection) in a 16-line TS diff with file:line refs. Tests the sonnet-tier code-review replacement claim.',
-  prompt: [
-    'Review the TypeScript code below for security and correctness bugs.',
-    'For EACH bug you find, output one line in this exact format:',
-    '  BUG: <bug class> at line <N> — <one-sentence explanation>',
-    '',
-    'Use only the bug-class names you see fit (e.g. "null dereference",',
-    '"SQL injection"). Use the line numbers from the inline `// Line N`',
-    'comments — those are the authoritative line numbers.',
-    '',
-    'Do not output anything besides the BUG: lines.',
-    '',
-    'Code:',
-    CODE_REVIEW_DIFF,
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const lower = finalText.toLowerCase();
-    const lines = extractLineRefs(finalText);
-    const flagged: string[] = [];
-    for (const bug of CODE_REVIEW_BUGS) {
-      const classHit = bug.classMatchers.some((m) => lower.includes(m));
-      const lineHit = lines.some((n) => bug.lineWindow.includes(n));
-      if (classHit && lineHit) flagged.push(bug.label);
-    }
-    if (flagged.length < 2) {
-      const missing = CODE_REVIEW_BUGS.filter((b) => !flagged.includes(b.label)).map((b) => b.label);
-      return { pass: false, reason: `only flagged ${flagged.length}/2 planted bugs; missing: ${missing.join(', ')}` };
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 90_000,
-};
-
-// ── MULTI_STEP_REASONING: chained-math word problem ──────
-// Probes opus / sonnet+thinking tier capability — adaptive thinking
-// kicks in for multi-step calculations in lynox. PassCheck asserts
-// ANSWER=<integer-cents> matches the known-good value within ±100 cents
-// tolerance (the model occasionally rounds compounded interest a
-// fraction of a percent off). Tier bar: Opus 4 / Sonnet 4.6 + thinking.
-
-/**
- * Reference compound-interest calculation, computed in cents to keep
- * the test machine-checkable. Scenario: deposit 10000.00 EUR at 6%
- * annual interest compounded annually. After year 1, withdraw 2000.00.
- * Then let the remainder compound for two more years.
- *
- *   Year 1: 10000.00 * 1.06 = 10600.00
- *   After withdrawal: 10600.00 - 2000.00 = 8600.00
- *   Year 2: 8600.00 * 1.06 = 9116.00
- *   Year 3: 9116.00 * 1.06 = 9662.96
- *
- * Final balance: 9662.96 EUR = 966296 cents.
- */
-const MULTI_STEP_ANSWER_CENTS = 966_296;
-const MULTI_STEP_TOLERANCE_CENTS = 100;
-
-export const MULTI_STEP_REASONING_INTEREST: SetBenchScenario = {
-  id: 'multi-step-reasoning.compound-interest',
-  axis: 'multi-step-reasoning',
-  description: '3-step chained math: compound interest year 1 → mid-period withdrawal → compound years 2 and 3. Tests the opus / sonnet+thinking tier reasoning claim.',
-  prompt: [
-    'Solve the following problem step by step, then output the final answer.',
-    '',
-    'A customer deposits 10000.00 EUR into an account that earns 6% annual',
-    'interest, compounded annually at the end of each year.',
-    '',
-    'Year 1: interest is applied to the full balance.',
-    'At the START of Year 2 (immediately after the Year 1 interest is credited),',
-    'the customer withdraws exactly 2000.00 EUR. The remainder continues to',
-    'earn 6% annually for two more full years.',
-    '',
-    'What is the account balance at the end of Year 3, in EUR?',
-    '',
-    'Reply with the calculation steps, then on a final line write EXACTLY:',
-    '  ANSWER=<value>',
-    'where <value> is the balance in EUR cents (no decimal point — multiply',
-    'the EUR amount by 100 and round to the nearest cent). For example,',
-    '5000.50 EUR would be written ANSWER=500050.',
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    // Pick the LAST `ANSWER=<n>` occurrence — models sometimes echo the
-    // template line ("write ANSWER=<value>") before emitting the real
-    // answer. We want the final commitment.
-    const matches = [...finalText.matchAll(/ANSWER\s*=\s*(\d+)/gi)];
-    if (matches.length === 0) return { pass: false, reason: 'final answer missing ANSWER=<n>' };
-    const last = matches[matches.length - 1]!;
-    const got = parseInt(last[1]!, 10);
-    const delta = Math.abs(got - MULTI_STEP_ANSWER_CENTS);
-    if (delta > MULTI_STEP_TOLERANCE_CENTS) {
-      return { pass: false, reason: `wrong answer: got ${got} cents, want ${MULTI_STEP_ANSWER_CENTS} (±${MULTI_STEP_TOLERANCE_CENTS})` };
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
+  maxIterations: 8,
   timeoutMs: 120_000,
 };
 
-// ──────────────────────────────────────────────────────────────
-// Phase 3 PR C — DE twin scenarios
-//
-// Native German prompts + fixtures for each PR-B EN scenario. The
-// `axis` is a routing concept, not a language concept — twins reuse
-// the same axis as their EN counterpart. Pass-check semantics are
-// preserved; matchers extend with DE bug-class synonyms where needed.
-//
-// Identifier names stay English (lynox primary-English convention);
-// only `description`'s parenthetical hint, prompts, and fixture text
-// are German.
-// ──────────────────────────────────────────────────────────────
+// ── 7. cron-task-cold-start ────────────────────────────────────
+// Single short turn, no turn-to-turn cache. Agent must complete AND
+// persist a memory note for tomorrow.
 
-// ── KG_EXTRACTION (DE) ──────
-// German entity list — corporate names mirror DACH conventions
-// (GmbH, AG, "Werk", "Logistik"). Personennamen sind alltägliche
-// DACH-Namen, ohne Bezug zu echten Kunden.
-
-const KG_PARAGRAPH_DE = [
-  'Maria Schmidt, Geschäftsführerin der Bayer-Müller Logistik AG, kündigte auf dem Berliner Tech-Gipfel an,',
-  'dass ihr Team mit dem Holzwerk Stuttgart eine gemeinsame Pilotstudie in Frankfurt starten wird.',
-  'Die Partnerschaft wurde von Stefan Weber, Betriebsleiter beim Holzwerk Stuttgart, verhandelt,',
-  'nachdem ein Auftaktgespräch im Bayer-Müller-Büro in München stattgefunden hatte. Die Finanzierung kommt vom',
-  'Helios-Kapital-Fonds, dessen geschäftsführende Partnerin Priya Kapoor letzte Woche das Term Sheet unterzeichnete.',
-  'Maria erwähnte, dass der Rollout bis zum dritten Quartal auch Hamburg erreichen wird.',
-].join(' ');
-
-const KG_EXPECTED_DE: readonly KgEntity[] = [
-  { name: 'Maria Schmidt', aliases: ['maria schmidt', 'maria'], type: 'person' },
-  { name: 'Stefan Weber', aliases: ['stefan weber', 'stefan'], type: 'person' },
-  { name: 'Priya Kapoor', aliases: ['priya kapoor', 'priya'], type: 'person' },
-  { name: 'Bayer-Müller Logistik AG', aliases: ['bayer-müller', 'bayer müller', 'bayer-mueller', 'bayer mueller'], type: 'organization' },
-  { name: 'Holzwerk Stuttgart', aliases: ['holzwerk stuttgart', 'holzwerk'], type: 'organization' },
-  { name: 'Helios-Kapital', aliases: ['helios-kapital', 'helios kapital', 'helios'], type: 'organization' },
-  { name: 'Berlin', aliases: ['berlin', 'berliner tech-gipfel', 'berliner tech gipfel'], type: 'location' },
-  { name: 'München', aliases: ['münchen', 'muenchen', 'munich'], type: 'location' },
-];
-
-export const KG_EXTRACTION_ENTITIES_DE: SetBenchScenario = {
-  id: 'kg-extraction.entities-de',
-  axis: 'kg-extraction',
-  description: 'German-language KG extraction: extract 8 named entities (Personen / Organisationen / Orte) with German names + DACH company conventions from a fixed paragraph into a JSON array. (DE variant)',
+export const SCENARIO_CRON_COLD_START: SetBenchScenario = {
+  id: 'cron-task-cold-start.daily-note',
+  axis: 'cron-task-cold-start',
+  description: 'Single-turn cron task. Agent must complete the goal AND persist a memory note. Tests cold-cache behaviour.',
   prompt: [
-    'Lies den folgenden Absatz und extrahiere jede benannte Entität, die darin vorkommt.',
-    'Gib ein JSON-Array zurück. Jedes Element hat genau zwei Felder:',
-    '  - name (String, die kanonische Schreibweise)',
-    '  - type (String, einer der Werte: person, organization, location)',
+    'You are running as a daily cron task. No history, no cache, single shot.',
     '',
-    'Gib AUSSCHLIESSLICH das JSON-Array aus — keine Fließtexte, keine Markdown-Codeblöcke, keine Kommentare.',
+    'Your goal: compute today\'s "day of week index" (Monday=1 through Sunday=7) for 2026-05-25 and store it as a memory note under key "today_dow".',
     '',
-    'Absatz:',
-    KG_PARAGRAPH_DE,
+    '2026-05-25 is a Monday, so the answer is 1.',
+    '',
+    'Use memory_store to persist the note. Then reply with this exact format:',
+    '  DOW: <number>',
+    '  STORED: <ok|fail>',
   ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const arr = extractJsonArray(finalText);
-    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
-    // Same claimed-index discipline as the EN twin — a hallucinated
-    // multi-name item must not satisfy two expected entries.
-    const claimed = new Set<number>();
-    let matched = 0;
-    const missing: string[] = [];
-    for (const expected of KG_EXPECTED_DE) {
-      const idx = arr.findIndex((item, i) => !claimed.has(i) && typeof item === 'object' && item !== null && kgEntityMatches(item as { name?: unknown; type?: unknown }, expected));
-      if (idx >= 0) {
-        claimed.add(idx);
-        matched++;
-      } else {
-        missing.push(expected.name);
-      }
-    }
-    if (matched < 7) return { pass: false, reason: `only ${matched}/8 entities matched; missing: ${missing.join(', ')}` };
+  passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
+    const stores = toolCalls.filter((t) => t.name === 'memory_store');
+    if (stores.length === 0) return { pass: false, reason: 'never called memory_store' };
+    const persisted = inspectMemory('today_dow');
+    if (!persisted) return { pass: false, reason: 'memory note "today_dow" not stored' };
+    if (!persisted.includes('1')) return { pass: false, reason: `stored value "${persisted}" missing "1"` };
+    if (!/DOW:\s*1\b/.test(finalText)) return { pass: false, reason: 'DOW not 1' };
+    if (!/STORED:\s*ok/i.test(finalText)) return { pass: false, reason: 'STORED not ok' };
     return { pass: true };
   },
-  maxIterations: 3,
+  maxIterations: 4,
   timeoutMs: 60_000,
 };
 
-// ── DAG_PLANNING (DE) ──────
-// Step IDs stay English — they are API-shape, not natural language.
-// The prompt describes the same release pipeline in German.
+// ── 8. real-world-grounded-strategy ────────────────────────────
+// 2 mock CSVs + GTM strategy. Pass-check: regex extract numeric
+// claims from CSV seed.
 
-export const DAG_PLANNING_RELEASE_DE: SetBenchScenario = {
-  id: 'dag-planning.release-de',
-  axis: 'dag-planning',
-  description: 'German-language DAG planning: same 3-step release pipeline as the EN twin (cut_tag → run_tests → deploy) but the natural-language framing is German. Step IDs remain English (API shape). (DE variant)',
+export const SCENARIO_REAL_WORLD_GROUNDED: SetBenchScenario = {
+  id: 'real-world-grounded-strategy.gtm-from-csvs',
+  axis: 'real-world-grounded-strategy',
+  description: 'Two mock CSVs (keyword data + MRR). Agent writes a 3-recommendation GTM strategy that cites real numbers from the seed.',
   prompt: [
-    'Plane eine Release-Pipeline als gerichteten azyklischen Graphen (DAG).',
-    'Die Pipeline besteht aus genau diesen 3 Schritten:',
-    '  - cut_tag    — einen Release-Tag von main schneiden',
-    '  - run_tests  — die Testsuite gegen den getaggten Commit ausführen',
-    '  - deploy     — den getaggten Build in die Produktion ausrollen',
+    'Use the read_csv tool to read keywords.csv and mrr.csv. Then write a GTM strategy with EXACTLY 3 numbered recommendations.',
     '',
-    'Gib ein JSON-Array zurück. Jedes Element hat genau zwei Felder:',
-    '  - id (String, einer der oben genannten Schrittnamen)',
-    '  - depends_on (Array von Strings — IDs der Schritte, auf die dieser wartet)',
+    'Every recommendation must cite at least one specific number from the seed data (e.g. "49500 monthly searches", "4.1% churn", "$5790 MRR"). Do not invent or round.',
     '',
-    'Anforderungen:',
-    '  - run_tests muss auf cut_tag warten.',
-    '  - deploy muss auf run_tests warten.',
-    '  - Der Graph MUSS azyklisch sein.',
+    'Reply with this exact format:',
     '',
-    'Gib AUSSCHLIESSLICH das JSON-Array aus — keine Fließtexte, keine Markdown-Codeblöcke, keine Kommentare.',
+    'RECOMMENDATIONS:',
+    '1. <recommendation>',
+    '2. <recommendation>',
+    '3. <recommendation>',
+    '',
+    'Nothing else.',
   ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const arr = extractJsonArray(finalText);
-    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
-    const steps = parseDagSteps(arr);
-    if (steps === null) return { pass: false, reason: 'steps did not match {id: string, depends_on: string[]} shape' };
-    if (!isValidDag(steps)) return { pass: false, reason: 'graph is not a valid DAG (cycle or unresolved dependency)' };
-    for (const expected of DAG_STEPS_EXPECTED) {
-      const step = steps.find((s) => s.id === expected.id);
-      if (!step) return { pass: false, reason: `missing required step: ${expected.id}` };
-      for (const required of expected.mustDependOn) {
-        if (!step.depends_on.includes(required)) {
-          return { pass: false, reason: `step '${expected.id}' must depend on '${required}'` };
-        }
-      }
+  passCheck: (finalText: string, toolCalls: readonly ToolCallTrace[]): PassResult => {
+    const reads = toolCalls.filter((t) => t.name === 'read_csv');
+    if (reads.length < 2) {
+      return { pass: false, reason: `only ${reads.length} read_csv calls (need both CSVs)` };
+    }
+    if (!/RECOMMENDATIONS:/i.test(finalText)) {
+      return { pass: false, reason: 'missing RECOMMENDATIONS: header' };
+    }
+    // Count "1.", "2.", "3." numbered items.
+    const items = finalText.match(/^\s*[123]\.\s+/gm) ?? [];
+    if (items.length < 3) {
+      return { pass: false, reason: `only ${items.length} numbered items (need 3)` };
+    }
+    // Seed values from mock-tools.ts CSV_FIXTURES. At least 3 must
+    // appear verbatim in the strategy text.
+    const seedNumbers = [
+      '49500', '3200', '8100', '720',           // keywords.csv monthly_searches
+      '12.40', '4.80', '2.30', '1.10',           // keywords.csv cpc_usd
+      '4200', '4850', '5310', '5790',            // mrr.csv mrr_usd
+      '3.2', '2.8', '4.1', '2.6',                // mrr.csv churn_pct
+      '7', '9', '8', '11',                       // mrr.csv new_customers
+    ];
+    const cited = seedNumbers.filter((n) => finalText.includes(n));
+    if (cited.length < 3) {
+      return { pass: false, reason: `only ${cited.length} seed numbers cited (need ≥3)` };
     }
     return { pass: true };
   },
-  maxIterations: 3,
-  timeoutMs: 60_000,
-};
-
-// ── MEMORY_EXTRACTION (DE) ──────
-// Chat snippet in German between Nutzer + Assistent, with 4 known
-// facts mirroring the EN structure (Name, Beruf+Ort, Kommunikations-
-// präferenz, Partner-Beziehung).
-
-const MEMORY_CHAT_DE = [
-  'nutzer: Hallo, ich heiße Jordan und betreibe eine kleine Bäckerei in Wien.',
-  'assistent: Schön, Sie kennenzulernen, Jordan. Was backen Sie?',
-  'nutzer: Hauptsächlich Sauerteig und Roggenbrot. Für Aktualisierungen bevorzuge ich E-Mail statt Telefon.',
-  'assistent: Verstanden — ich melde mich dann per E-Mail.',
-  'nutzer: Danke. Übrigens, meine Partnerin Sam kümmert sich um die Großhandelsbestellungen.',
-].join('\n');
-
-const MEMORY_EXPECTED_DE: readonly MemoryFact[] = [
-  { anchor: 'Name ist Jordan', mustContain: ['jordan'] },
-  // Mirror EN's conjunctive bar: both location AND business-class required.
-  // Lowercased substring match handles "Bäckerei"/"baeckerei" naturally.
-  { anchor: 'betreibt eine Bäckerei in Wien', mustContain: ['wien', 'bäckerei'] },
-  // "e-mail" not bare "mail" — "mail" would also match "Voicemail" / "Mailbox".
-  { anchor: 'bevorzugt E-Mail statt Telefon', mustContain: ['e-mail'] },
-  { anchor: 'Partnerin Sam macht Großhandel', mustContain: ['sam'] },
-];
-
-export const MEMORY_EXTRACTION_CHAT_DE: SetBenchScenario = {
-  id: 'memory-extraction.chat-de',
-  axis: 'memory-extraction',
-  description: 'German-language memory extraction: pull memorable facts (Name, Beruf, Präferenzen, Beziehungen) from a 5-line German chat snippet into a JSON array. (DE variant)',
-  prompt: [
-    'Unten siehst du einen kurzen Chat zwischen einem Nutzer und einem Assistenten. Extrahiere die',
-    'merkenswerten Fakten über den Nutzer — Dinge, die für künftige Gespräche relevant sind.',
-    'Zum Beispiel Name, Wohnort, Beruf, Präferenzen und Personen, die er erwähnt.',
-    '',
-    'Gib ein JSON-Array mit Fakten-Objekten zurück. Die genaue Form bleibt dir überlassen,',
-    'aber jeder Fakt sollte für sich verständlich und gut lesbar sein.',
-    '',
-    'Gib AUSSCHLIESSLICH das JSON-Array aus — keine Fließtexte, keine Markdown-Codeblöcke, keine Kommentare.',
-    '',
-    'Chat:',
-    MEMORY_CHAT_DE,
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const arr = extractJsonArray(finalText);
-    if (arr === null) return { pass: false, reason: 'final output did not contain a parseable JSON array' };
-    const flattened = arr.map(flattenFact);
-    let matched = 0;
-    const missing: string[] = [];
-    for (const fact of MEMORY_EXPECTED_DE) {
-      const hit = flattened.some((joined) => fact.mustContain.every((needle) => joined.includes(needle)));
-      if (hit) matched++;
-      else missing.push(fact.anchor);
-    }
-    if (matched < 3) return { pass: false, reason: `only ${matched}/4 facts matched; missing: ${missing.join('; ')}` };
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 60_000,
-};
-
-// ── LONG_CONTEXT (DE) ──────
-// DE-native Produktspezifikation für ein Industrie-Gateway. Anchors
-// sind deutsche Fachtermini sowie sprachunabhängige Token (ARM, IP54,
-// AES, SFP+) — diese gelten in beiden Sprachen.
-
-const LONG_DOC_DE = [
-  '# MERIDIAN-IG3 Industrie-Gateway — Produktspezifikation',
-  '',
-  '## 1. Überblick',
-  'Das MERIDIAN-IG3 ist eine On-Premises-Netzwerk-Appliance für Industriestandorte, die ohne zuverlässige Cloud-Anbindung betrieben werden. Das Gerät wird in einem halbhohen 19-Zoll-Gehäuse mit einem Gewicht von 4,2 Kilogramm ausgeliefert und nimmt unter Volllast maximal 65 Watt auf. Die Montagegarnitur unterstützt sowohl Hutschiene als auch klassische 19-Zoll-Schränke. Das Gateway basiert auf einem kundenspezifischen ARM-SoC mit acht Kernen bei 1,8 Gigahertz und 16 Gigabyte fehlerkorrigierendem Arbeitsspeicher. Als Datenspeicher dienen zwei 512-Gigabyte-NVMe-Laufwerke, die als gespiegelter Verbund für Ausfallsicherheit konfiguriert sind. Jedes Gerät wird mit fünf Jahren Garantie und einem Software-Wartungsvertrag über denselben Zeitraum ausgeliefert.',
-  '',
-  '## 2. Konnektivität',
-  'Auf der Netzwerkseite stellt das Gateway vier 2,5-Gigabit-Ethernet-Ports sowie zwei SFP+-Käfige bereit, die 10-Gigabit-Glasfaserverbindungen ermöglichen. Die drahtlose Anbindung umfasst Wi-Fi 6E mit Tri-Band-Funk und ein optionales Mobilfunkmodul, das LTE Cat 18 und 5G sub-6 unterstützt. Das Mobilfunkmodul lässt sich austauschen, ohne das Hauptgehäuse zu öffnen. Für klassische Industrieprotokolle stehen zwei RS-485-Schnittstellen, ein CAN-Bus-Anschluss sowie ein Modbus-TCP-Gateway-Dienst im eingebetteten Betriebssystem bereit. Ein dedizierter Out-of-Band-Management-Port bietet isolierten administrativen Zugriff auf einer separaten physikalischen Schnittstelle, getrennt vom Produktiv-Datenverkehr.',
-  '',
-  '## 3. Sicherheitsmodell',
-  'Das Sicherheitsmodell ist um einen Hardware-Vertrauensanker (Hardware Root of Trust) aufgebaut. Jedes Gerät wird mit einem einzigartigen Gerätezertifikat ausgeliefert, das ab Werk in den Sicherheitsbaustein eingebrannt ist; der Bootloader prüft jede Stufe der Boot-Kette gegen diesen Anker. Firmware-Updates erfordern sowohl eine Hersteller-Signatur als auch eine kundenseitige Gegensignatur — ein einzelner kompromittierter Signaturschlüssel reicht damit nicht für unautorisierte Rollouts. Sämtliche persistenten Daten werden mit AES-256-XTS verschlüsselt; die Schlüssel werden aus dem Gerätezertifikat abgeleitet. Der Netzwerk-Datenverkehr zwischen Gateway und zentraler Management-Ebene nutzt Mutual TLS mit rotierenden Client-Zertifikaten, die von der internen Zertifizierungsstelle des Kunden ausgestellt werden. Es existieren weder Remote-Backdoors noch Werks-Standardpasswörter.',
-  '',
-  '## 4. Software',
-  'Das Gateway läuft auf einer gehärteten Linux-Distribution, die auf einem minimalen Yocto-Linux-Image basiert. Die Container-Laufzeit ist eine abgespeckte Variante von Podman, die ausschließlich signierte OCI-Images akzeptiert. Die Management-Ebene folgt einem deklarativen Konfigurationsmodell: Operatoren übertragen ein Konfigurationsbündel, das vom Gateway entweder vollständig übernommen oder atomar zurückgerollt wird. Einen imperativen Konfigurationsmodus gibt es nicht. Das Gerät stellt einen Prometheus-kompatiblen Metrik-Endpunkt bereit, der CPU, Arbeitsspeicher, Datenträger, Netzwerk-Durchsatz und Container-Ressourcen abdeckt. Logs werden per Syslog über TLS gestreamt, mit konfigurierbarer Puffergröße für den Offline-Betrieb.',
-  '',
-  '## 5. Betriebsumgebung',
-  'Das MERIDIAN-IG3 ist für den Betrieb zwischen minus 20 Grad Celsius und plus 65 Grad Celsius ohne aktive Kühlung ausgelegt. Das Gehäuse ist nach IP54 gegen Staub und Spritzwasser geschützt und hat Schock- und Vibrationsprüfungen gemäß IEC 60068 bestanden. Das Gerät ist für den industriellen Einsatz in der Europäischen Union mit dem CE-Zeichen zertifiziert und in Nordamerika nach FCC Part 15B zugelassen. Die RoHS-3-Konformität ist für alle Materialien dokumentiert. Die erwartete mittlere Betriebsdauer zwischen Ausfällen (MTBF) liegt unter typischen Industriebedingungen bei 350.000 Stunden.',
-].join('\n');
-
-/**
- * DE anchor patterns — German technical terms PLUS the universal
- * tokens (ARM, IP54, AES, SFP+) that read the same in both
- * languages. Word-boundary regex prevents `arm`/`aes`/`lte`/`5g` from
- * matching inside generic prose like "alarm" or "aesthetic".
- */
-const LONG_DOC_DE_ANCHOR_PATTERNS: readonly RegExp[] = [
-  /\barm\b/i,                       // standalone "ARM" reference, not "Alarm"; also covers "ARM-SoC" via word boundary
-  /\bethernet\b/i,
-  /\bsfp\+/i,
-  /\bmodbus\b/i,
-  /mobilfunk/i,
-  /\blte\b/i,
-  /\b5g\b/i,
-  /hardware[- ]?(vertrauensanker|root of trust)/i,
-  /mutual tls/i,
-  /\baes\b/i,
-  /\bpodman\b/i,
-  /\byocto\b/i,
-  /\bprometheus\b/i,
-  /\bsyslog\b/i,
-  /\bip54\b/i,
-  /ce-?zeichen/i,
-  /\bfcc\b/i,
-  /\brohs\b/i,
-  /\bmtbf\b/i,
-  /mittlere betriebsdauer/i,
-  /350\.000\s*stunden/i,
-  /65\s*watt/i,
-  /hutschiene/i,
-  /container-laufzeit/i,
-];
-
-export const LONG_CONTEXT_SPEC_SUMMARY_DE: SetBenchScenario = {
-  id: 'long-context.spec-summary-de',
-  axis: 'long-context',
-  description: 'German-language long-context summary: condense a fixed ~3.5K-token Industrie-Gateway-Spezifikation into exactly 5 bullets, each anchored to DE technical terms or universal tokens (ARM, IP54, MTBF). (DE variant)',
-  prompt: [
-    'Fasse die unten stehende Produktspezifikation in GENAU 5 Stichpunkten zusammen.',
-    'Jeder Stichpunkt muss einen eigenständigen Aspekt des Produkts erfassen (keine',
-    'Umformulierung desselben Punkts). Strebe einen Stichpunkt pro Hauptabschnitt an.',
-    '',
-    'Format:',
-    '  - Bindestrich ("-") als Marker je Stichpunkt, einer pro Zeile.',
-    '  - Genau 5 Stichpunkte — nicht weniger, nicht mehr.',
-    '  - Keine Einleitung, kein Schlusssatz, keine Markdown-Überschriften.',
-    '',
-    'Dokument:',
-    LONG_DOC_DE,
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const bullets = extractBullets(finalText);
-    if (bullets.length !== 5) return { pass: false, reason: `expected exactly 5 bullets, got ${bullets.length}` };
-    let anchored = 0;
-    for (const bullet of bullets) {
-      if (LONG_DOC_DE_ANCHOR_PATTERNS.some((re) => re.test(bullet))) anchored++;
-    }
-    if (anchored < 4) {
-      return { pass: false, reason: `only ${anchored}/5 bullets contained a corpus-specific anchor phrase` };
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 90_000,
-};
-
-// ── CODE_REVIEW (DE) ──────
-// Code, Variablennamen und Inline-Kommentare bleiben Englisch (das
-// ist Codebasis-Realität). Die Aufgabe + die zu nutzenden Bug-Klassen
-// werden auf Deutsch gestellt. classMatchers erweitern um deutsche
-// Synonyme (Nullzeiger, SQL-Injektion, parametrisierte Abfrage,
-// Vorbereitete Anweisung).
-
-const CODE_REVIEW_BUGS_DE: readonly CodeBugClaim[] = [
-  {
-    label: 'null-deref on userId',
-    classMatchers: [
-      // EN matchers retained — DE prompts still leak EN technical terms.
-      'null', 'undefined', 'nullable', 'null-deref', 'null reference', 'nullish',
-      // DE synonyms — `null` already covered above as substring; these
-      // catch the canonical DE phrasings that small models emit when
-      // asked to respond in German.
-      'nullzeiger', 'nullreferenz', 'null-referenz', 'nullwert',
-    ],
-    lineWindow: [5, 6, 7, 8, 9],
-  },
-  {
-    label: 'SQL injection on query / id',
-    classMatchers: [
-      'sql injection', 'sql-injection', 'sqli', 'string concatenation', 'template literal', 'parameterized', 'prepared statement',
-      // DE synonyms covering the same bug-class.
-      'sql-injektion', 'sql injektion', 'parametrisierte abfrage', 'vorbereitete anweisung', 'vorbereiteten anweisung', 'zeichenketten-verkettung', 'zeichenkettenverkettung', 'string-verkettung',
-    ],
-    lineWindow: [7, 8, 9, 10, 11, 13, 14, 15, 16, 17],
-  },
-];
-
-export const CODE_REVIEW_PLANTED_BUGS_DE: SetBenchScenario = {
-  id: 'code-review.planted-bugs-de',
-  axis: 'code-review',
-  description: 'German-language code review: same 16-line TS diff with the same 2 planted bugs (null-deref + SQL injection); model is asked to respond in German. classMatchers extended with DE synonyms. (DE variant)',
-  prompt: [
-    'Prüfe den unten stehenden TypeScript-Code auf Sicherheits- und Korrektheitsfehler.',
-    'Gib für JEDEN gefundenen Fehler eine Zeile in genau diesem Format aus:',
-    '  BUG: <Fehlerklasse> at line <N> — <ein-Satz-Erklärung>',
-    '',
-    'Verwende treffende Fehlerklassen-Namen (z. B. "Nullzeiger", "SQL-Injektion",',
-    '"parametrisierte Abfrage"). Nutze die Zeilennummern aus den inline `// Line N`',
-    'Kommentaren — das sind die maßgeblichen Zeilennummern.',
-    '',
-    'Gib AUSSCHLIESSLICH die BUG:-Zeilen aus, keinen weiteren Text.',
-    '',
-    'Code:',
-    CODE_REVIEW_DIFF,
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    const lower = finalText.toLowerCase();
-    const lines = extractLineRefs(finalText);
-    const flagged: string[] = [];
-    for (const bug of CODE_REVIEW_BUGS_DE) {
-      const classHit = bug.classMatchers.some((m) => lower.includes(m));
-      const lineHit = lines.some((n) => bug.lineWindow.includes(n));
-      if (classHit && lineHit) flagged.push(bug.label);
-    }
-    if (flagged.length < 2) {
-      const missing = CODE_REVIEW_BUGS_DE.filter((b) => !flagged.includes(b.label)).map((b) => b.label);
-      return { pass: false, reason: `only flagged ${flagged.length}/2 planted bugs; missing: ${missing.join(', ')}` };
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
-  timeoutMs: 90_000,
-};
-
-// ── MULTI_STEP_REASONING (DE) ──────
-// Same compound-interest scenario as the EN twin — numbers and the
-// canonical ANSWER= value are identical so the bench's cross-language
-// signal stays coherent. Only the prose framing is German.
-
-export const MULTI_STEP_REASONING_COMPOUND_INTEREST_DE: SetBenchScenario = {
-  id: 'multi-step-reasoning.compound-interest-de',
-  axis: 'multi-step-reasoning',
-  description: 'German-language multi-step reasoning: same 3-step Zinseszins-Rechnung as the EN twin (10000 EUR @ 6% p.a., Zwischenentnahme 2000 EUR, 2 weitere Jahre). Identical numbers → identical canonical ANSWER=966296. (DE variant)',
-  prompt: [
-    'Löse die folgende Aufgabe Schritt für Schritt und gib am Ende das Ergebnis aus.',
-    '',
-    'Ein Kunde zahlt 10000,00 EUR auf ein Konto ein, das jährlich 6 % Zinsen abwirft,',
-    'die am Jahresende kapitalisiert werden (Zinseszins).',
-    '',
-    'Jahr 1: Die Zinsen werden auf den gesamten Betrag aufgeschlagen.',
-    'Zum BEGINN von Jahr 2 (unmittelbar nachdem die Zinsen für Jahr 1 gutgeschrieben',
-    'wurden) entnimmt der Kunde genau 2000,00 EUR. Der verbleibende Betrag verzinst',
-    'sich für zwei weitere volle Jahre zu jeweils 6 %.',
-    '',
-    'Wie hoch ist der Kontostand am Ende von Jahr 3 in EUR?',
-    '',
-    'Gib zuerst die Rechenschritte aus und schreibe dann in einer letzten Zeile GENAU:',
-    '  ANSWER=<Wert>',
-    'wobei <Wert> der Saldo in EUR-Cent ist (ohne Dezimalpunkt — den EUR-Betrag mit',
-    '100 multiplizieren und auf den nächsten Cent runden). Beispiel: 5000,50 EUR',
-    'würden als ANSWER=500050 geschrieben.',
-  ].join('\n'),
-  passCheck: (finalText, _toolCalls): PassResult => {
-    // Same last-match policy as the EN twin — models echo template lines.
-    const matches = [...finalText.matchAll(/ANSWER\s*=\s*(\d+)/gi)];
-    if (matches.length === 0) return { pass: false, reason: 'final answer missing ANSWER=<n>' };
-    const last = matches[matches.length - 1]!;
-    const got = parseInt(last[1]!, 10);
-    const delta = Math.abs(got - MULTI_STEP_ANSWER_CENTS);
-    if (delta > MULTI_STEP_TOLERANCE_CENTS) {
-      return { pass: false, reason: `wrong answer: got ${got} cents, want ${MULTI_STEP_ANSWER_CENTS} (±${MULTI_STEP_TOLERANCE_CENTS})` };
-    }
-    return { pass: true };
-  },
-  maxIterations: 3,
+  maxIterations: 8,
   timeoutMs: 120_000,
 };
+
+// ── registry ──────────────────────────────────────────────────
 
 export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
-  TOOL_CHAIN_ZURICH_X2,
-  ORCHESTRATION_EMAIL_TRIAGE,
-  KG_EXTRACTION_ENTITIES,
-  DAG_PLANNING_RELEASE,
-  MEMORY_EXTRACTION_CHAT,
-  LONG_CONTEXT_SPEC_SUMMARY,
-  CODE_REVIEW_PLANTED_BUGS,
-  MULTI_STEP_REASONING_INTEREST,
-  // DE twins — same axes, native German prompts + fixtures.
-  KG_EXTRACTION_ENTITIES_DE,
-  DAG_PLANNING_RELEASE_DE,
-  MEMORY_EXTRACTION_CHAT_DE,
-  LONG_CONTEXT_SPEC_SUMMARY_DE,
-  CODE_REVIEW_PLANTED_BUGS_DE,
-  MULTI_STEP_REASONING_COMPOUND_INTEREST_DE,
+  SCENARIO_MULTI_TURN_LOOP,
+  SCENARIO_SUB_AGENT_SPAWN,
+  SCENARIO_MEMORY_GROUNDED,
+  SCENARIO_WORKFLOW_COMPOSITION,
+  SCENARIO_LONG_CONTEXT,
+  SCENARIO_TOOL_CHAIN_BACKTRACK,
+  SCENARIO_CRON_COLD_START,
+  SCENARIO_REAL_WORLD_GROUNDED,
 ];
-
-/** Frozen Zurich population — exposed for the mocked-tool variant. */
-export const ZURICH_POPULATION_PINNED = ZURICH_POPULATION;

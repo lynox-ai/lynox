@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-05-23T23:26:28.559Z",
+  "cells": [
+    {
+      "cellLabel": "anthropic-haiku-4-5",
+      "scenarioId": "long-context-with-tools.transformer-paper",
+      "pass": true,
+      "tokensIn": 489,
+      "tokensOut": 280,
+      "cacheReadTokens": 0,
+      "cacheCreationTokens": 7320,
+      "costUsdCold": 0.009209,
+      "costUsdWarm": 0.011039,
+      "durationMs": 2555,
+      "iterations": 1,
+      "finalText": "I'll extract the required information from the paper context provided.\n\nFrom the paper text in the context:\n\n**Q1 (authors):** The first author is Ashish Vaswani. Counting all authors: Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin = 8 authors total.\n\n**Q2 (methodology):** The core architectural innovation is stated in the Methodology section: The Transformer uses stacked self-attention and position-wise fully-connected feed-forward layers, replacing recurrent neural networks entirely.\n\n**Q3 (results):** From the Results section, on WMT 2014 English-to-German translation task, the big Transformer achieves 28.4 BLEU.\n\n**Answer:**\n\nA1: first=Ashish Vaswani, count=8\nA2: The Transformer replaces recurrent and convolutional layers with stacked multi-head self-attention and position-wise feed-forward networks in an encoder-decoder architecture.\nA3: BLEU=28.4",
+      "toolCalls": []
+    },
+    {
+      "cellLabel": "anthropic-haiku-4-5",
+      "scenarioId": "long-context-with-tools.transformer-paper",
+      "pass": true,
+      "tokensIn": 936,
+      "tokensOut": 210,
+      "cacheReadTokens": 14640,
+      "cacheCreationTokens": 486,
+      "costUsdCold": 0.017112,
+      "costUsdWarm": 0.0040575,
+      "durationMs": 2522,
+      "iterations": 2,
+      "finalText": "A1: first=Ashish Vaswani, count=8\nA2: The core architectural innovation is a new network architecture based solely on attention mechanisms (multi-head self-attention), dispensing with recurrence and convolutions entirely.\nA3: BLEU=28.4",
+      "toolCalls": [
+        {
+          "name": "read_paper_section",
+          "input": {
+            "section": "authors"
+          },
+          "output": "Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, Illia Polosukhin."
+        },
+        {
+          "name": "read_paper_section",
+          "input": {
+            "section": "methodology"
+          },
+          "output": "The Transformer follows an encoder-decoder structure using stacked self-attention and position-wise fully-connected feed-forward layers, both for the encoder and decoder. The encoder has 6 identical layers; each has multi-head self-attention + a position-wise feed-forward network."
+        },
+        {
+          "name": "read_paper_section",
+          "input": {
+            "section": "results"
+          },
+          "output": "On the WMT 2014 English-to-German translation task, our big Transformer model achieves 28.4 BLEU, improving over the existing best results by 2.0 BLEU. The single-model big Transformer also achieves a new state-of-the-art 41.0 BLEU on WMT 2014 English-to-French."
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "axis": "long-context-with-tools",
+      "cellLabel": "anthropic-haiku-4-5",
+      "passRate": 1,
+      "avgCostColdUsd": 0.013160499999999999,
+      "avgCostWarmUsd": 0.00754825,
+      "avgCacheReadTokens": 7320,
+      "cacheHitRate": 0.911297852474323,
+      "avgDurationMs": 2538.5,
+      "p50DurationMs": 2538.5,
+      "p95DurationMs": 2553.35,
+      "pinned": true
+    }
+  ]
+}

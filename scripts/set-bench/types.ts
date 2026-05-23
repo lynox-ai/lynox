@@ -1,41 +1,49 @@
 /**
- * Set-Bench Phase 2 — Mistral exploration along two axes:
+ * Set-Bench v4 — lynox-real-world agent axes shipped on lynox.ai/bench
+ * 2026-05-23. Each scenario maps to one of the 8 axes the page describes;
+ * the harness runs the agent loop (Anthropic SDK / OpenAIAdapter + a
+ * deterministic set of mock tools) and checks the final output + tool-call
+ * trace against a regex-pinned ground truth.
  *
- *   1. **TOOL_CHAIN** (sonnet-tier work): can this model drive a multi-tool
- *      agent loop end-to-end? Bar = Anthropic Sonnet 4.6. Candidates =
- *      Mistral Large family + Magistral (pinned + latest snapshots).
+ * Drift is a first-class concern: every Mistral cell ships in two
+ * flavours — pinned dated snapshot (what we recommend) and `*-latest`
+ * (what an inattentive operator might wire up). The pass-rate gap
+ * surfaces whether Mistral's silent model-roll changes behaviour
+ * mid-billing-period.
  *
- *   2. **ORCHESTRATION** (haiku-tier work): can this small/cheap model
- *      replace Haiku for high-volume orchestration (spawn sub-agents to
- *      classify a batch of emails)? Bar = Anthropic Haiku 4.5. Candidates =
- *      Mistral Small + Ministral + open-mistral-nemo.
- *
- * Drift is a first-class concern: every Mistral cell ships in two flavours
- * — pinned dated snapshot (what we recommend) and `*-latest` (what an
- * inattentive operator might wire up). The pass-rate gap surfaces whether
- * Mistral's silent model-roll changes behaviour mid-billing-period.
+ * Cache treatment: Anthropic's `cache_read_input_tokens` +
+ * `cache_creation_input_tokens` are read from `usage` and used to compute
+ * warm-effective cost. Mistral exposes no native cache field; warm cost
+ * equals cold cost for those cells (the report flags this explicitly so a
+ * reader doesn't misinterpret "0% cache hit" as a model failure).
  */
 
 import type { LLMProvider } from '../../src/types/index.js';
 
 /**
- * Which axis of the lynox routing claim this scenario probes.
- *
- * Phase 3 widens the surface beyond tool-chain + orchestration to cover
- * every tier-driven workflow in lynox: KG extraction (haiku), DAG
- * planning (haiku), memory extraction (haiku), long-context summary
- * (sonnet), code review (sonnet), multi-step reasoning (opus / thinking).
- * Each axis is graded against a known-good Anthropic baseline.
+ * The 8 lynox-real-world axes documented on lynox.ai/bench.
+ * Each is a multi-turn agent loop with a deterministic pass/fail check.
  */
 export type SetBenchAxis =
-  | 'tool-chain'
-  | 'orchestration'
-  | 'kg-extraction'
-  | 'dag-planning'
-  | 'memory-extraction'
-  | 'long-context'
-  | 'code-review'
-  | 'multi-step-reasoning';
+  | 'multi-turn-loop-completion'
+  | 'sub-agent-spawn-orchestration'
+  | 'memory-grounded-reasoning'
+  | 'workflow-composition'
+  | 'long-context-with-tools'
+  | 'tool-chain-with-backtrack'
+  | 'cron-task-cold-start'
+  | 'real-world-grounded-strategy';
+
+export const ALL_AXES: readonly SetBenchAxis[] = [
+  'multi-turn-loop-completion',
+  'sub-agent-spawn-orchestration',
+  'memory-grounded-reasoning',
+  'workflow-composition',
+  'long-context-with-tools',
+  'tool-chain-with-backtrack',
+  'cron-task-cold-start',
+  'real-world-grounded-strategy',
+];
 
 export interface SetBenchScenario {
   readonly id: string;
@@ -54,6 +62,20 @@ export interface SetBenchScenario {
   readonly maxIterations: number;
   /** Per-cell wall-clock budget (ms). */
   readonly timeoutMs: number;
+  /**
+   * Optional inline-context the harness prepends to the system prompt
+   * (e.g. an arXiv paper body for the long-context axis). Kept separate
+   * from `prompt` so cache analysis can attribute "cacheable system block"
+   * tokens vs "user turn" tokens accurately.
+   */
+  readonly inlineContext?: string;
+  /**
+   * Optional pre-prompt hook for seeding mock-tool state (e.g. memory-
+   * grounded-reasoning seeds a "thread A already stored X" entry before
+   * the agent prompt fires). Called after `resetMockState()`, before the
+   * first model turn.
+   */
+  readonly setup?: () => void;
 }
 
 export interface PassResult {
@@ -80,14 +102,25 @@ export interface SetBenchCell {
   /** The model id sent in `params.model` to the API. */
   readonly modelId: string;
   /**
-   * Base URL for `openai`-provider cells. Omitted for Anthropic-native.
-   * Engine reads it from `userConfig.api_base_url`.
+   * Base URL for `openai`-provider cells. Omitted for Anthropic-native and
+   * Mistral-native (Mistral uses the openai-compat adapter pointed at
+   * api.mistral.ai/v1).
    */
   readonly apiBaseURL?: string;
   /** Env var name to source the API key from at run time. */
   readonly apiKeyEnv: string;
   /** Headline pricing per million tokens — used to compute cell cost. */
-  readonly pricing: { inputPerMillion: number; outputPerMillion: number };
+  readonly pricing: {
+    inputPerMillion: number;
+    outputPerMillion: number;
+    /**
+     * Optional per-million rates for prompt cache. Defaults: cacheRead =
+     * 10% of input, cacheWrite = 125% of input (Anthropic's published
+     * multipliers). Cells override when the provider differs.
+     */
+    cacheReadPerMillion?: number;
+    cacheWritePerMillion?: number;
+  };
   /**
    * Tag the cell as a `*-latest` alias vs a pinned dated snapshot.
    * Powers the pinned-vs-latest drift report.
@@ -104,7 +137,21 @@ export interface CellRun {
   readonly reason?: string;
   readonly tokensIn: number;
   readonly tokensOut: number;
-  readonly costUsd: number;
+  /**
+   * Anthropic-native: `usage.cache_read_input_tokens` (tokens served from
+   * the prompt cache, billed at the cache-read rate). Mistral / openai-
+   * compat without cache: 0.
+   */
+  readonly cacheReadTokens: number;
+  /**
+   * Anthropic-native: `usage.cache_creation_input_tokens` (tokens written
+   * to the prompt cache, billed at the cache-write rate). 0 elsewhere.
+   */
+  readonly cacheCreationTokens: number;
+  /** Cost computed cold (no cache discount applied). */
+  readonly costUsdCold: number;
+  /** Cost computed warm (cache_read tokens billed at cache-read rate). */
+  readonly costUsdWarm: number;
   readonly durationMs: number;
   readonly iterations: number;
   readonly finalText: string;
@@ -125,7 +172,10 @@ export interface BenchReport {
     readonly axis: SetBenchAxis;
     readonly cellLabel: string;
     readonly passRate: number;
-    readonly avgCostUsd: number;
+    readonly avgCostColdUsd: number;
+    readonly avgCostWarmUsd: number;
+    readonly avgCacheReadTokens: number;
+    readonly cacheHitRate: number;
     readonly avgDurationMs: number;
     readonly p50DurationMs: number;
     readonly p95DurationMs: number;
