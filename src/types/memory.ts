@@ -244,19 +244,6 @@ export interface IKnowledgeLayer {
     scope: MemoryScopeRef,
   ): Promise<boolean>;
 
-  /**
-   * Supersession-aware update. Returns the new memory id on success, or `null`
-   * if no exact-text match exists in the given namespace+scope. The old row is
-   * preserved (`is_active=0`, `superseded_by=new.id`); history is intact.
-   */
-  updateMemoryWithSupersession(
-    oldText: string,
-    newText: string,
-    namespace: MemoryNamespace,
-    scope: MemoryScopeRef,
-    options?: { sourceRunId?: string | undefined; sourceThreadId?: string | undefined } | undefined,
-  ): Promise<string | null>;
-
   gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult>;
   stats(): Promise<KnowledgeGraphStats>;
 
