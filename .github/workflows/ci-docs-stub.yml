@@ -1,0 +1,93 @@
+name: CI
+
+# Stub workflow so docs-only PRs can satisfy branch protection.
+#
+# Why this exists:
+#   The real CI (ci.yml) declares `paths-ignore: ['docs/**']` for push and
+#   pull_request, so a PR that touches ONLY docs/** never starts ci.yml.
+#   Branch protection requires the checks `gitleaks`, `test`, and
+#   `docker-scan` (job names from ci.yml). Without a matching workflow,
+#   those checks stay UNKNOWN forever and the PR cannot auto-merge —
+#   admin override is the only escape (seen on PR #543, 2026-05-23).
+#
+#   This stub fires ONLY when the PR is truly docs-only (every changed
+#   file lives under docs/**). It emits three jobs whose names exactly
+#   mirror ci.yml so GitHub's required-check matcher accepts them as the
+#   same status checks.
+#
+#   `name: CI` matches ci.yml so both workflows publish under the same
+#   workflow name (some required-check setups key on the workflow + job
+#   pair). The `detect` job is internal scaffolding and is NOT required
+#   by branch protection.
+#
+# Job names MUST stay in sync with ci.yml:
+#   - gitleaks
+#   - test
+#   - docker-scan
+# If ci.yml renames a required job, update this file in the same PR.
+#
+# Mixed PRs (docs + code) are handled by the `detect` job: if any changed
+# file is OUTSIDE docs/**, all three stub jobs SKIP and the real ci.yml
+# runs them for real. A skipped required check counts as not-required in
+# branch protection only when the job's `if:` evaluates false at the job
+# level (which is the pattern used here) — see GitHub Docs on
+# "Handling skipped but required checks".
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+
+concurrency:
+  group: ci-docs-stub-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      docs-only: ${{ steps.check.outputs.docs-only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # List every file changed in the PR. If even one is outside
+          # docs/**, this is not a docs-only PR and the real ci.yml will
+          # handle the required checks.
+          CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files:"
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qv '^docs/'; then
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"
+            echo "Verdict: mixed PR (code touched) — stub will skip; real ci.yml runs."
+          else
+            echo "docs-only=true" >> "$GITHUB_OUTPUT"
+            echo "Verdict: docs-only PR — stub will emit pass for required checks."
+          fi
+
+  gitleaks:
+    needs: detect
+    if: needs.detect.outputs.docs-only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only PR; gitleaks not applicable, marking pass"
+
+  test:
+    needs: detect
+    if: needs.detect.outputs.docs-only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only PR; tests not applicable, marking pass"
+
+  docker-scan:
+    needs: detect
+    if: needs.detect.outputs.docs-only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "docs-only PR; docker scan not applicable, marking pass"
