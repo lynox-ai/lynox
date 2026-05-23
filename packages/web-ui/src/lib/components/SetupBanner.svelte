@@ -136,7 +136,22 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(providerConfig),
 			});
-			if (!configRes.ok) throw new Error('Failed to save config');
+			// T2-P3: surface the 400 body's `error` field so the user sees
+			// "provider:'openai' requires api_base_url" instead of a generic
+			// "Save failed" toast (the legacy throw + swallowed-error catch
+			// below dropped the server reason on the floor — saveCredentials
+			// was the worst-offender entry point because the cross-field
+			// validation for the OpenAI-compat provider lives there).
+			if (!configRes.ok) {
+				let serverMsg = '';
+				try {
+					const body = (await configRes.json()) as { error?: unknown };
+					if (typeof body.error === 'string') serverMsg = body.error;
+				} catch {
+					// non-JSON body — fall back to generic text
+				}
+				throw new Error(serverMsg || `Failed to save config (HTTP ${configRes.status})`);
+			}
 
 			// 2. Save credentials to vault
 			if (selectedProvider === 'anthropic') {
@@ -153,8 +168,14 @@
 			localStorage.removeItem('lynox-setup-dismissed');
 			// Reload after short delay so the engine picks up the new credentials
 			setTimeout(() => { window.location.reload(); }, 1500);
-		} catch {
-			saveError = t('setup.save_error');
+		} catch (err) {
+			// T2-P3: surface the actual error message (server validation
+			// hint, network failure, etc.) instead of the generic i18n
+			// fallback. Pre-fix, every failure looked identical to the
+			// user — including the OpenAI cross-field validation case
+			// that has a precise field-naming reason.
+			const msg = err instanceof Error ? err.message : '';
+			saveError = msg || t('setup.save_error');
 		}
 		saving = false;
 	}

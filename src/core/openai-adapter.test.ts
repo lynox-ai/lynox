@@ -565,6 +565,120 @@ describe('OpenAIAdapter', () => {
     });
   });
 
+  // T2-P1: OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
+  // Anthropic event spec uses 'max_tokens'. Without the translation the
+  // downstream Agent loop silently drops the truncated turn.
+  describe('finish_reason translation (T2-P1)', () => {
+    it("maps OpenAI 'length' finish_reason to Anthropic 'max_tokens' stop_reason", async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'len-1',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'Truncated...' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'len-1',
+          choices: [{ index: 0, delta: {}, finish_reason: 'length' }],
+          usage: { prompt_tokens: 8, completion_tokens: 100 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+
+        const types = events.map(e => e.type);
+        expect(types).toContain('message_delta');
+        expect(types).toContain('message_stop');
+
+        const msgDelta = events.find(e => e.type === 'message_delta') as { delta: { stop_reason?: string } };
+        expect(msgDelta.delta.stop_reason).toBe('max_tokens');
+        // Negative: pre-fix the raw 'length' string leaked through.
+        expect(msgDelta.delta.stop_reason).not.toBe('length');
+      } finally {
+        server.close();
+      }
+    });
+  });
+
+  // T2-P2: tool_choice was ignored — forced tool-use (llm-helper /
+  // dag-planner / process-capture / entity-extractor-v2) was silently
+  // downgraded to "auto", breaking structured-extraction contracts.
+  describe('tool_choice translation (T2-P2)', () => {
+    async function captureRequestBody(toolChoice: unknown): Promise<{ tool_choice?: unknown }> {
+      let captured = '';
+      const server = await createMockServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        req.on('end', () => {
+          captured = body;
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write(sseChunk({
+            id: 'tc-1', choices: [{ index: 0, delta: { content: 'OK' }, finish_reason: 'stop' }],
+          }));
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'key',
+          modelId: 'm',
+        });
+        const tools: Anthropic.Tool[] = [{
+          name: 'extract',
+          description: 'Forced tool',
+          input_schema: { type: 'object' as const, properties: { x: { type: 'string' } }, required: ['x'] },
+        }];
+        await collectEvents(adapter.beta.messages.stream({
+          model: 'm', max_tokens: 100,
+          messages: [{ role: 'user', content: 'Go.' }],
+          tools,
+          tool_choice: toolChoice,
+        } as unknown as Parameters<typeof adapter.beta.messages.stream>[0]));
+      } finally {
+        server.close();
+      }
+      return JSON.parse(captured) as { tool_choice?: unknown };
+    }
+
+    it("translates Anthropic {type:'auto'} to OpenAI 'auto'", async () => {
+      const body = await captureRequestBody({ type: 'auto' });
+      expect(body.tool_choice).toBe('auto');
+    });
+
+    it("translates Anthropic {type:'any'} to OpenAI 'required'", async () => {
+      const body = await captureRequestBody({ type: 'any' });
+      expect(body.tool_choice).toBe('required');
+    });
+
+    it("translates Anthropic {type:'tool', name:'X'} to OpenAI {type:'function', function:{name:'X'}}", async () => {
+      const body = await captureRequestBody({ type: 'tool', name: 'extract' });
+      expect(body.tool_choice).toEqual({ type: 'function', function: { name: 'extract' } });
+    });
+
+    it("defaults to 'auto' when no tool_choice is provided (back-compat)", async () => {
+      const body = await captureRequestBody(undefined);
+      expect(body.tool_choice).toBe('auto');
+    });
+
+    it("defaults to 'auto' on malformed/unknown tool_choice shape (fail-soft)", async () => {
+      const body = await captureRequestBody({ type: 'gibberish' });
+      expect(body.tool_choice).toBe('auto');
+    });
+  });
+
   describe('system prompt blocks', () => {
     it('handles array-of-blocks system prompt (Anthropic format)', async () => {
       let capturedBody = '';

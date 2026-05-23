@@ -56,6 +56,36 @@ interface OpenAIStreamChunk {
 
 // ── Request Translation ─────────────────────────────────────────
 
+/**
+ * Translate Anthropic-shape `tool_choice` to the OpenAI request body field.
+ *
+ * Anthropic shapes:
+ *   - { type: 'auto' }            → 'auto'         (model decides)
+ *   - { type: 'any'  }            → 'required'     (must call one of the tools)
+ *   - { type: 'tool', name: 'X' } → { type: 'function', function: { name: 'X' } }
+ *
+ * Returns `undefined` for malformed/unknown shapes so the caller leaves the
+ * default ('auto') in place rather than sending a bogus field. T2-P2 — without
+ * this map, every llm-helper / dag-planner / process-capture call that *forces*
+ * a specific tool was silently downgraded to "auto", letting the model wander
+ * off into freeform text and breaking the structured-extraction contract.
+ */
+function translateToolChoice(
+  choice: unknown,
+): string | { type: 'function'; function: { name: string } } | undefined {
+  if (!choice || typeof choice !== 'object') return undefined;
+  const c = choice as { type?: unknown; name?: unknown };
+  if (c.type === 'auto') return 'auto';
+  if (c.type === 'any') return 'required';
+  if (c.type === 'tool' && typeof c.name === 'string' && c.name.length > 0) {
+    return { type: 'function', function: { name: c.name } };
+  }
+  // 'none' is not in the Anthropic tool_choice union but is a valid OpenAI
+  // value; pass it through if a caller ever sends the OpenAI literal directly.
+  if (c.type === 'none') return 'none';
+  return undefined;
+}
+
 function translateTools(tools: Anthropic.Tool[]): OpenAITool[] {
   return tools
     .filter((t): t is Anthropic.Tool & { name: string; input_schema: Record<string, unknown> } =>
@@ -303,8 +333,14 @@ async function* translateStream(
             yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
           }
 
+          // OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
+          // Anthropic stream-event spec uses 'max_tokens'. Without this map
+          // the downstream StreamProcessor treats 'length' as an unknown
+          // stop_reason and the calling Agent loop silently drops the
+          // truncated turn (no continuation, no user-visible error). T2-P1.
           const stopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
             : choice.finish_reason === 'stop' ? 'end_turn'
+            : choice.finish_reason === 'length' ? 'max_tokens'
             : choice.finish_reason;
 
           yield {
@@ -487,7 +523,11 @@ export class OpenAIAdapter {
     };
     if (openaiTools?.length) {
       body.tools = openaiTools;
-      body.tool_choice = 'auto';
+      // T2-P2: honour caller-provided tool_choice. Anthropic shapes
+      // ({type:'auto'|'any'|'tool'}) → OpenAI shapes ('auto'|'required'|object).
+      // Default to 'auto' when unset or malformed.
+      const translated = translateToolChoice(params['tool_choice']);
+      body.tool_choice = translated ?? 'auto';
     }
 
     const apiKey = await this.resolveApiKey();

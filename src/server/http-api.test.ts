@@ -2295,19 +2295,24 @@ describe('LynoxHTTPApi', () => {
       // Starter (BYOK) — provider/api_base_url/cost-caps are NOT locked.
       // Customer owns their LLM, owns the config. Config-lock gate must
       // skip them entirely.
-      it.each([
-        ['provider', 'openai'],
-        ['default_tier', 'haiku'],
-        ['max_session_cost_usd', 250],
+      // T2-P3: `provider:'openai'` now requires `api_base_url` +
+      // `openai_model_id` in the same PUT body — must bundle them in
+      // the starter (BYOK) acceptance test or it 400s before reaching
+      // the lock-gate. The mcp_servers row was dropped by #536
+      // (chore/remove-mcp) — field no longer exists on the user config.
+      it.each<[string, Record<string, unknown>]>([
+        ['provider', { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-latest' }],
+        ['default_tier', { default_tier: 'haiku' }],
+        ['max_session_cost_usd', { max_session_cost_usd: 250 }],
       ])(
         'PUT /api/config allows %s change in starter (BYOK) mode',
-        async (field, value) => {
+        async (_field, payload) => {
           vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
           vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
           try {
             const res = await jsonFetch('/api/config', {
               method: 'PUT',
-              body: JSON.stringify({ [field]: value }),
+              body: JSON.stringify(payload),
             });
             expect(res.status).toBe(200);
           } finally {
@@ -2316,6 +2321,79 @@ describe('LynoxHTTPApi', () => {
           }
         },
       );
+
+      // T2-P3: `provider:'openai'` requires both `api_base_url` and
+      // `openai_model_id` in the same PUT body. Pre-fix, sending bare
+      // `{provider:'openai'}` succeeded server-side and the engine then
+      // crashed on first inference because the OpenAI adapter has no
+      // usable default for either field.
+      it("PUT /api/config rejects provider:'openai' without api_base_url (T2-P3)", async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'openai', openai_model_id: 'mistral-large-latest' }),
+          });
+          expect(res.status).toBe(400);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('api_base_url');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it("PUT /api/config rejects provider:'openai' without openai_model_id (T2-P3)", async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' }),
+          });
+          expect(res.status).toBe(400);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('openai_model_id');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it("PUT /api/config rejects provider:'openai' with empty-string api_base_url (T2-P3)", async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'openai', api_base_url: '', openai_model_id: 'm' }),
+          });
+          expect(res.status).toBe(400);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('api_base_url');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it("PUT /api/config accepts provider change to anthropic without OpenAI fields (T2-P3 no-regress)", async () => {
+        // Sanity: cross-field validation only triggers on provider:'openai'.
+        // `provider:'anthropic'` must save cleanly with no extra requirements.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'anthropic' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
     });
 
     // Audit S1: backup restore calls process.exit() — must be admin-gated
