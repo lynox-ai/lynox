@@ -502,7 +502,12 @@ export class TaskManager {
       // The `getDueTasks` SELECT was widened so cron rows stay in the
       // worker queue even when status='failed' — see
       // run-history-persistence.ts `getDueTasks`.
-      this.history.updateTask(id, { status: status === 'success' ? 'open' : 'failed' });
+      // Guard: don't resurrect a cron that was manually marked
+      // 'completed' mid-tick (narrow race between complete() and the
+      // finishing tick).
+      if (task.status !== 'completed') {
+        this.history.updateTask(id, { status: status === 'success' ? 'open' : 'failed' });
+      }
     } else if (task.watch_config) {
       // Watch task — compute next run from interval
       const config = JSON.parse(task.watch_config) as { interval_minutes: number };

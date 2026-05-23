@@ -524,7 +524,45 @@ describe('TaskManager', () => {
 
       const after = tm.getTask(task.id);
       expect(after!.status).toBe('failed');         // surface the failure
-      expect(after!.next_run_at).toBeTruthy();      // reschedule still fired
+      // Stricter than toBeTruthy: ensure the rescheduled timestamp is
+      // genuinely in the future, so a regression that re-emits a stale
+      // backdated next_run_at would fail this test.
+      expect(new Date(after!.next_run_at!).getTime()).toBeGreaterThan(Date.now() - 1000);
+      expect(after!.last_run_status).toBe('failed');
+      setPipelineModeLookup(undefined);
+    });
+
+    it('a cron task with status=timeout also surfaces status=failed', () => {
+      // The derivation `status === 'success' ? 'open' : 'failed'` lumps
+      // 'timeout' into 'failed' (a timed-out probe is unhealthy from the
+      // operator's perspective). Guards a future "only 'failed' triggers
+      // the flip" optimization that would mask timeouts.
+      setPipelineModeLookup(() => 'autonomous');
+      const task = tm.createScheduled({
+        title: 'Hourly check',
+        scheduleCron: '0 * * * *',
+      });
+      tm.recordTaskRun(task.id, 'timed out', 'timeout');
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('failed');
+      expect(after!.last_run_status).toBe('timeout');
+      setPipelineModeLookup(undefined);
+    });
+
+    it('a cron task that fails twice in a row stays status=failed (no flap)', () => {
+      // Steady-state guard: a future "only flip status on transition"
+      // optimization would mask chronic failures. Two failures in a row
+      // must keep status pinned at 'failed' (not flap open/failed).
+      setPipelineModeLookup(() => 'autonomous');
+      const task = tm.createScheduled({
+        title: 'Hourly check',
+        scheduleCron: '0 * * * *',
+      });
+      tm.recordTaskRun(task.id, 'boom 1', 'failed');
+      expect(tm.getTask(task.id)!.status).toBe('failed');
+      tm.recordTaskRun(task.id, 'boom 2', 'failed');
+      const after = tm.getTask(task.id);
+      expect(after!.status).toBe('failed');
       expect(after!.last_run_status).toBe('failed');
       setPipelineModeLookup(undefined);
     });
