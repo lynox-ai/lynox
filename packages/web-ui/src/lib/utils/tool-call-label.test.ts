@@ -69,6 +69,45 @@ describe('toolCallLabel', () => {
       expect(toolCallLabel('data_store_list', {}, tk)).toBeNull();
     });
 
+    it('HIDDEN_TOOLS positive membership (symmetry guard)', () => {
+      // Counterpart to the memory-tools-NOT-hidden guard above — pins
+      // which tools are deliberately suppressed so a future "unhide
+      // everything" change has to delete this assertion intentionally.
+      expect(HIDDEN_TOOLS.has('artifact_list')).toBe(true);
+      expect(HIDDEN_TOOLS.has('data_store_list')).toBe(true);
+    });
+
+    it('truncates bash command at 60 chars', () => {
+      // bash uses .slice(0, 60); the memory_store test above covers the
+      // 50-char slice. Both lengths live in the helper as magic numbers.
+      const long = 'x'.repeat(120);
+      const out = toolCallLabel('bash', { command: long }, tk);
+      expect(out?.subject.length).toBe(60);
+    });
+
+    it('truncates spawn_agent task at 50 chars', () => {
+      const long = 'y'.repeat(120);
+      const out = toolCallLabel('spawn_agent', { task: long }, tk);
+      expect(out?.subject.length).toBe(50);
+    });
+
+    it('coerces non-string collection input via strOrEmpty (locks the contract)', () => {
+      // strOrEmpty falls through to String(value) for non-string inputs;
+      // this pins the coercion behaviour so a future "stricter type" pass
+      // doesn't silently turn numeric collections into empty bubbles.
+      const out = toolCallLabel('data_store_query', { collection: 42 }, tk);
+      expect(out).toEqual({ action: 'tool.data_queried', subject: '42' });
+    });
+
+    it('returns empty subject for read/write_file with empty path', () => {
+      // Edge: an LLM that emits `{ path: "" }` should render an empty
+      // subject, not crash and not produce undefined.
+      const read = toolCallLabel('read_file', { path: '' }, tk);
+      expect(read?.subject).toBe('');
+      const write = toolCallLabel('write_file', { path: '' }, tk);
+      expect(write?.subject).toBe('');
+    });
+
     it('falls back to the tool name as action for unknown tools', () => {
       // Unknown / future tools still surface — never silently dropped.
       const out = toolCallLabel('mystery_tool', { foo: 'bar' }, tk);
