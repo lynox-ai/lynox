@@ -586,6 +586,8 @@
 					</button>
 					<a
 						href="/logout"
+						data-sveltekit-preload-data="off"
+						data-sveltekit-reload
 						class="flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
 						aria-label={t('nav.logout')}
 						title={t('nav.logout')}

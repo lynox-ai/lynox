@@ -2,17 +2,18 @@ import type { PageServerLoad } from './$types.js';
 import { redirect } from '@sveltejs/kit';
 
 export const load: PageServerLoad = async ({ cookies, request }) => {
-	// Only delete if the cookie was actually sent. Under SameSite=Lax, a
-	// malicious cross-site link to /logout WOULD now carry the cookie (top-
-	// level GET nav), so this no longer blocks CSRF-forced logout on its own
-	// — accept the trade-off because forced-logout is only a nuisance (user
-	// re-logins), not a security breach. Belt-and-braces: cross-site link
-	// clicks generally set a non-same-origin Referer or Sec-Fetch-Site=
-	// cross-site; reject obviously cross-site triggers when the header is
-	// trustworthy. Same-app navigation (Sec-Fetch-Site=same-origin) passes.
+	// Two guards: cross-site clicks (CSRF nuisance) AND same-origin SvelteKit
+	// data-loads (`/logout/__data.json` from hover-prefetch OR click intercepted
+	// by the client router — both would silently log the user out without
+	// reaching the redirect). Real top-level navigations send sec-fetch-dest=
+	// 'document'; data-loads send 'empty'. We treat the absent header as a
+	// real navigation (older browsers, curl, server-side fetches) — better to
+	// honour an intended logout than to silently fail one.
 	const fetchSite = request.headers.get('sec-fetch-site');
+	const fetchDest = request.headers.get('sec-fetch-dest');
 	const isCrossSite = fetchSite === 'cross-site';
-	if (cookies.get('lynox_session') && !isCrossSite) {
+	const isDataLoad = fetchDest !== null && fetchDest !== 'document';
+	if (cookies.get('lynox_session') && !isCrossSite && !isDataLoad) {
 		cookies.delete('lynox_session', { path: '/' });
 	}
 	redirect(303, '/login');
