@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execSync } from 'node:child_process';
 import { bashTool, buildSafeEnv } from './bash.js';
 
@@ -171,5 +171,58 @@ describe('buildSafeEnv', () => {
     } finally {
       delete process.env['LYNOX_WORKSPACE'];
     }
+  });
+
+  // T2-S4: name-pattern filter catches credential-bearing env vars whose
+  // prefix may be allow-listed (NPM_TOKEN, GITHUB_TOKEN, DOCKER_AUTH_TOKEN)
+  // or whose name is custom (MYBANK_TOKEN, MY_SECRET, DB_PASSWORD). The
+  // legacy "drop known prefixes" pass missed all of these.
+  describe('T2-S4 credential-name filter', () => {
+    const SAMPLE_CREDENTIAL_NAMES = [
+      'MYBANK_TOKEN',     // custom prefix, no allow-list match (and even if it had one)
+      'STRIPE_KEY',        // custom prefix
+      'MY_SECRET',         // custom prefix
+      'DB_PASSWORD',       // custom prefix
+      'NPM_TOKEN',         // NPM_ prefix IS allow-listed — must still be filtered
+      'GITHUB_TOKEN',      // GITHUB_ prefix IS allow-listed — must still be filtered
+      'DOCKER_AUTH_TOKEN', // DOCKER_ prefix IS allow-listed — must still be filtered
+      'lowercase_token',   // case-insensitive
+    ];
+
+    afterEach(() => {
+      for (const name of SAMPLE_CREDENTIAL_NAMES) {
+        delete process.env[name];
+      }
+    });
+
+    it('filters credential-named env vars regardless of allow-listed prefix', () => {
+      for (const name of SAMPLE_CREDENTIAL_NAMES) {
+        process.env[name] = 'sensitive-value';
+      }
+      const env = buildSafeEnv();
+      for (const name of SAMPLE_CREDENTIAL_NAMES) {
+        expect(env[name], `${name} must be filtered`).toBeUndefined();
+      }
+    });
+
+    it('still passes legitimate non-credential env vars through', () => {
+      const env = buildSafeEnv();
+      expect(env['PATH']).toBe(process.env['PATH']);
+      expect(env['HOME']).toBe(process.env['HOME']);
+      if (process.env['LANG']) {
+        expect(env['LANG']).toBe(process.env['LANG']);
+      }
+    });
+
+    it('does NOT filter caller-explicit isolation.envVars (scoped path)', () => {
+      // spawn_agent may deliberately forward a single scoped token to a
+      // child — that's the explicit-opt-in path, not the inherited-env
+      // path, so the regex filter does not apply here.
+      const env = buildSafeEnv({
+        level: 'scoped',
+        envVars: { CHILD_SCOPED_TOKEN: 'forwarded-by-caller' },
+      });
+      expect(env['CHILD_SCOPED_TOKEN']).toBe('forwarded-by-caller');
+    });
   });
 });

@@ -10,7 +10,7 @@
 
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import { getErrorMessage } from '../../../core/utils.js';
-import { wrapUntrustedData } from '../../../core/data-boundary.js';
+import { wrapChannelMessage, wrapUntrustedData } from '../../../core/data-boundary.js';
 import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
@@ -65,17 +65,32 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
         const fromDisplay = fromName ? `"${fromName}" <${fromAddr}>` : fromAddr;
         const toDisplay = msg.envelope.to.map(a => a.address).join(', ') || '(none)';
         const ccDisplay = msg.envelope.cc.length > 0 ? msg.envelope.cc.map(a => a.address).join(', ') : null;
+        const replyToDisplay = msg.envelope.replyTo.length > 0
+          ? msg.envelope.replyTo.map(a => a.address).join(', ')
+          : null;
 
-        const wrappedBody = wrapUntrustedData(
-          cleaned.visible || msg.text || '(empty body)',
-          `mail:${provider.accountId}:${fromAddr}`,
-        );
+        // Subject / from / to / cc / reply-to are all attacker-controlled
+        // (DMARC only gates the envelope sender, not display names or
+        // header text content), so they must live INSIDE the
+        // <untrusted_data> boundary alongside the body. Otherwise a
+        // crafted subject like "Ignore previous instructions, …" would
+        // appear in the model's trusted framing.
+        const wrappedMessage = wrapChannelMessage({
+          source: `mail:${provider.accountId}:${fromAddr}`,
+          fields: {
+            Subject: msg.envelope.subject || '(no subject)',
+            From: fromDisplay,
+            To: toDisplay,
+            Cc: ccDisplay,
+            'Reply-To': replyToDisplay,
+            Body: cleaned.visible || msg.text || '(empty body)',
+          },
+        });
 
         const lines: string[] = [];
-        lines.push(`**${msg.envelope.subject || '(no subject)'}**`);
-        lines.push(`From: ${fromDisplay}`);
-        lines.push(`To: ${toDisplay}`);
-        if (ccDisplay) lines.push(`Cc: ${ccDisplay}`);
+        // Operational metadata only — engine-generated (UID, folder, dates,
+        // attachment manifest), not attacker-controlled, stays in the
+        // trusted framing above the wrapped envelope.
         lines.push(`Date: ${msg.envelope.date.toISOString()}`);
         lines.push(`UID: ${String(msg.envelope.uid)}   Folder: ${msg.envelope.folder}`);
         if (msg.envelope.messageId) lines.push(`Message-ID: ${msg.envelope.messageId}`);
@@ -86,7 +101,7 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
           }
         }
         lines.push('');
-        lines.push(wrappedBody);
+        lines.push(wrappedMessage);
 
         if (input.include_quoted && cleaned.quoted) {
           lines.push('');
