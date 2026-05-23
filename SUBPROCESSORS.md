@@ -1,0 +1,43 @@
+# lynox Sub-processors
+
+**Last reviewed: 2026-05-23**
+
+This file is the canonical, repo-checked-in list of sub-processors engaged for the **lynox Managed Hosting** service (`engine.lynox.cloud` / `*.lynox.cloud` tenant instances).
+
+The **self-hosted lynox software** (`@lynox-ai/core` and `@lynox-ai/web-ui`) engages **no sub-processors** — when you run lynox on your own infrastructure, the software only communicates with the LLM provider whose API key you configure. This list applies only to lynox AI's managed offering.
+
+The website page <https://lynox.ai/subprocessors> mirrors this file for non-engineering audiences. If the two ever diverge, this file is authoritative.
+
+| Sub-processor | Purpose | Location | Transfer mechanism |
+|---|---|---|---|
+| Anthropic, PBC | Primary LLM inference (Claude family, direct API) | United States | EU-US Data Privacy Framework + SCCs (Module 2/3, 2021/914); zero-retention contractual commitment |
+| Mistral AI SAS | LLM inference for secondary and background tasks, and as fallback provider (Mistral Large family, direct API) | France (EU) | EU; zero-retention contractual commitment |
+| OpenAI, L.L.C. | LLM inference — engaged only if the customer enables the OpenAI-compatible provider via BYOK | United States | SCCs (Module 2/3, 2021/914); subject to OpenAI's own DPA |
+| Stripe, Inc. | Payment processing and subscription billing | United States / EU | EU-US Data Privacy Framework + SCCs |
+| Hetzner Online GmbH | Server infrastructure — shared tenant hosts (isolated container per customer); dedicated VPS available as Enterprise upgrade | Germany (EU) | EU |
+| Brevo (Sendinblue SAS) | Transactional email delivery (SMTP relay) and contact list management | EU (France/Germany) | EU |
+| Cloudflare, Inc. | DNS, CDN, DDoS protection, tunnel relay | United States / EU (edge network) | EU-US Data Privacy Framework + SCCs |
+| Plausible Insights OÜ | Anonymous website analytics (no personal data) | EU (Estonia) | EU |
+| Self-hosted (Bugsink) | Error reporting (always active for managed instances) | EU (self-hosted on lynox infrastructure) | No third-party transfer |
+
+## Notes
+
+- **OpenAI** is engaged only if the customer enables the OpenAI-compatible provider via BYOK (e.g. picking `openai` in the setup wizard with their own key). The default managed setup uses Anthropic + Mistral.
+- **Google Analytics 4 / Google Ads** are website-only and require explicit consent; they do not process Managed Hosting customer data.
+- All sub-processor changes are notified to managed customers at least 30 days in advance per the DPA.
+
+## Where this list is duplicated
+
+The same sub-processor inventory appears on the lynox website in two places:
+
+- <https://lynox.ai/privacy> — section 5 (third-party services)
+- <https://lynox.ai/dpa> — section 9 (sub-processors)
+
+The DE counterparts (`/de/datenschutz/`, `/de/avv/`) mirror these.
+
+This `SUBPROCESSORS.md` file is the engineering-visible source of truth; the web pages are updated in the same change.
+
+## Contact
+
+For questions about sub-processors or to object to a sub-processor change:
+<privacy@lynox.ai> · EU representative: <https://app.prighter.com/portal/13646667120>

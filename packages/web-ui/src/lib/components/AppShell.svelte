@@ -12,6 +12,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
+	import PublicDemoBanner from './PublicDemoBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
 	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
@@ -695,6 +696,13 @@
 					{/if}
 				</div>
 			</header>
+
+			<!-- HN-launch public-demo banner (engine.lynox.cloud only;
+				controlled by LYNOX_PUBLIC_DEMO env on the engine). Sits ABOVE
+				SetupBanner so the "shared instance, no real data" warning is the
+				very first thing visible — beats the API-key wizard prompt to the
+				visual hierarchy. -->
+			<PublicDemoBanner />
 
 			<!-- Setup warnings -->
 			<SetupBanner />

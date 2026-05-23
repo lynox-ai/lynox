@@ -519,6 +519,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'banner.api_key_missing': { de: 'Kein LLM-Provider konfiguriert — KI-Antworten sind deaktiviert.', en: 'No LLM provider configured — AI responses are disabled.' },
 	'banner.api_key_action': { de: 'Einrichten', en: 'Set up' },
 	'banner.dismiss': { de: 'Ausblenden', en: 'Dismiss' },
+	// Public-demo banner — shown on engine.lynox.cloud during HackerNews launch
+	// week when LYNOX_PUBLIC_DEMO=true is set on the engine container. Wording
+	// is written natively per language (not translated). Dismissible, sticky in
+	// localStorage. See PRD-HN-LAUNCH-HARDENING tier-1 item 5.
+	'banner.public_demo': {
+		de: '**Öffentliche Demo.** Diese Instanz wird gemeinsam genutzt und von lynox für die HackerNews-Launchwoche betrieben. Eingaben — Chats, Dateien, Mailbox-Verbindungen — können für Betreiber und Mitnutzer sichtbar sein. Keine echten Personendaten, Kundendaten oder Produktiv-Zugänge eintippen. [In 5 Min selbst hosten](https://github.com/lynox-ai/lynox) · [Sub-Auftragsverarbeiter](https://lynox.ai/privacy#sub-processors)',
+		en: '**Public demo.** This instance is shared and operated by lynox for HackerNews launch week. Anything you type — chats, files, mailbox connections — may be visible to operators and other testers. Don\'t enter real personal data, customer info, or production credentials. [Self-host in 5 min](https://github.com/lynox-ai/lynox) · [Sub-processor status](https://lynox.ai/privacy#sub-processors)',
+	},
 	'setup.title': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
 	'setup.subtitle': { de: 'Um die KI-Funktionen zu nutzen, gib deinen Anthropic API-Schlüssel ein.', en: 'Enter your Anthropic API key to start using the AI features.' },
 	'setup.subtitle_mistral': { de: 'Hol dir einen Mistral API Key und wähle dein Modell.', en: 'Pick a Mistral model and paste your API key.' },
