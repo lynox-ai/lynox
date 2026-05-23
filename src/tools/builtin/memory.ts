@@ -1,7 +1,4 @@
-import type {
-  ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef,
-  KnowledgeRetrievalResult,
-} from '../../types/index.js';
+import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific } from '../../core/scope-resolver.js';
@@ -9,30 +6,22 @@ import { estimateTokens } from '../../core/llm-helper.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
-/** Max ranked KG results returned by a query-based memory_recall. */
-const KG_RECALL_TOP_K = 10;
-/** Max recency-ordered KG rows returned by a no-query memory_recall. */
-const KG_NO_QUERY_LIMIT = 20;
 /**
- * Similarity floor for the recall tool's KG call. Lower than the
- * `RetrievalEngine` default of 0.55 because the tool already bounds via
- * `topK` — we'd rather surface a marginally-relevant memory than miss one
- * the agent actually needs. The MMR re-rank still suppresses obvious noise.
- */
-const KG_RECALL_THRESHOLD = 0.3;
-
-/**
- * Token budget for a namespace-only (no-query) memory_recall.
+ * Token budget for memory_recall responses (applied to BOTH paths).
  *
- * A no-query recall used to return the ENTIRE namespace file into context
- * (commonly 15-20K tokens), which then gets re-cached on every subsequent
- * turn -- pure cost + context bloat. When the caller gives no query we cannot
- * relevance-rank, so instead we return a recency/importance-ranked subset
- * capped at this budget. ~5K tokens keeps the most relevant memory available
- * while leaving the bulk of the context window for the actual conversation.
- * A recall WITH a query is unaffected and still returns the full namespace.
+ * A full namespace dump (~15-20K tokens) thrashes the agent context window
+ * and re-caches on every subsequent turn — pure cost + bloat. Cap both
+ * paths at ~20K tokens (well below model output limits):
+ *  - No-query path: recency/importance-ranked subset of the namespace.
+ *  - Query path: substring-filtered subset over the namespace.
+ *
+ * Pre-#529 the no-query path was capped at 5K and the query path was
+ * unbounded. This revert raises the no-query cap to 20K (matching the
+ * query path) so the agent gets a more useful chunk of memory by default
+ * while still keeping the contract bounded.
  */
-const RECALL_NO_QUERY_TOKEN_BUDGET = 5_000;
+const RECALL_NO_QUERY_TOKEN_BUDGET = 20_000;
+const RECALL_QUERY_TOKEN_BUDGET = 20_000;
 
 interface MemoryStoreInput {
   namespace: MemoryNamespace;
@@ -127,6 +116,96 @@ function rankNoQueryEntries(content: string, tokenBudget: number): {
   return { text, shown: selected.size, total };
 }
 
+/**
+ * Cap a substring-filtered query result at `tokenBudget` tokens. Returns the
+ * most-recent matches (file order — appends are newest-last) that fit, plus
+ * the count of total matches for the tail-note.
+ *
+ * Pre-#529 the query path returned the WHOLE namespace dump unbounded once
+ * any match was found, which defeats the no-query cap (a 20K-line namespace
+ * with one match still flooded the context). Now both paths are bounded.
+ */
+function boundQueryMatches(matches: string[], tokenBudget: number): {
+  text: string;
+  shown: number;
+  total: number;
+} {
+  const total = matches.length;
+  if (total === 0) return { text: '', shown: 0, total: 0 };
+
+  // Walk newest-first (last line in the file is the most recent append)
+  // and accumulate until the budget is hit.
+  let usedTokens = 0;
+  const selected: string[] = [];
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const line = matches[i]!;
+    const cost = estimateTokens(line) + 1;
+    if (usedTokens + cost > tokenBudget && selected.length > 0) {
+      break;
+    }
+    selected.push(line);
+    usedTokens += cost;
+    if (usedTokens >= tokenBudget) break;
+  }
+  // Re-reverse to chronological order (oldest -> newest) so the agent reads
+  // the slice as a timeline.
+  selected.reverse();
+  return { text: selected.join('\n'), shown: selected.length, total };
+}
+
+/**
+ * Stop-word list for the fuzzy supersession heuristic in memory_update.
+ * Kept tiny and English-only — the heuristic is intentionally simple and
+ * the fallback is "append the new line", not "drop on the floor".
+ */
+const SUPERSEDE_STOP_WORDS = new Set([
+  'the', 'a', 'is', 'are', 'of', 'in', 'and', 'or', 'to', 'for',
+]);
+
+/** Token a line for the supersession heuristic: lowercase, alphanumeric, no stop-words. */
+function tokeniseForSupersede(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(t => t.length > 0 && !SUPERSEDE_STOP_WORDS.has(t)),
+  );
+}
+
+/**
+ * Find lines in a namespace file that share at least 40% of `oldText`'s
+ * significant tokens. Used as the FALLBACK heuristic when an exact-substring
+ * match fails — the agent passed a non-exact substring (most common: a full
+ * sentence). Returns up to 3 candidates; 0 candidates means "no signal at
+ * all, just append".
+ *
+ * NOT embedding-based: real-world ONNX cosines for distinct-but-related
+ * sentences are unreliable below ~0.95 (we learned this the hard way on
+ * the B1 sprint). Token-overlap is dumb but deterministic.
+ */
+function findFuzzySupersedeCandidates(lines: string[], oldText: string): number[] {
+  const oldTokens = tokeniseForSupersede(oldText);
+  if (oldTokens.size === 0) return [];
+
+  const scored: Array<{ index: number; ratio: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim().length === 0) continue;
+    const lineTokens = tokeniseForSupersede(line);
+    if (lineTokens.size === 0) continue;
+    let overlap = 0;
+    for (const t of oldTokens) {
+      if (lineTokens.has(t)) overlap++;
+    }
+    const ratio = overlap / oldTokens.size;
+    if (ratio >= 0.4) scored.push({ index: i, ratio });
+  }
+
+  // Highest overlap wins; cap at 3 so we don't mass-supersede.
+  scored.sort((a, b) => b.ratio - a.ratio);
+  return scored.slice(0, 3).map(s => s.index);
+}
+
 interface MemoryDeleteInput {
   namespace: MemoryNamespace;
   pattern: string;
@@ -199,38 +278,10 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
   },
 };
 
-/**
- * Format ranked KG memory rows into the recall tool's structured response.
- *
- * Each entry surfaces: namespace, relevance %, confidence %, scope, date, text.
- * This is the new contract — the agent sees ranked, attributed results instead
- * of a raw namespace dump.
- */
-function formatRankedMemories(
-  memories: KnowledgeRetrievalResult['memories'],
-  header: string,
-  footer: string,
-): string {
-  if (memories.length === 0) return '';
-  const lines = memories.map((m, i) => {
-    const date = m.createdAt.slice(0, 10);
-    const scopeLabel = m.scopeType === 'global' ? 'global' : `${m.scopeType}:${m.scopeId}`;
-    const relevancePct = Math.round(m.finalScore * 100);
-    const confidencePct = Math.round(m.score * 100);
-    // finalScore is 0 for the no-query (recency) path — only show relevance for query-based recall.
-    const scoreParts: string[] = [];
-    if (relevancePct > 0) scoreParts.push(`${relevancePct}% match`);
-    if (confidencePct > 0) scoreParts.push(`${confidencePct}% confidence`);
-    const scoreSegment = scoreParts.length > 0 ? ` (${scoreParts.join(', ')})` : '';
-    return `${i + 1}. [${m.namespace}]${scoreSegment} — ${scopeLabel} — ${date}\n   ${m.text}`;
-  });
-  return `${header}\n${lines.join('\n\n')}\n\n${footer}`;
-}
-
 export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
   definition: {
     name: 'memory_recall',
-    description: 'Look up previously saved knowledge through the structured Knowledge Graph. Returns RANKED results — each entry is attributed with its namespace, relevance score, confidence score, scope, and date. With `query` you get the top relevance-ranked matches via vector + graph retrieval (capped at 10, never a full dump). Without `query` you get the most-recent active memories in the namespace (capped at 20). Results are bounded by design — old/superseded/contradictory entries are filtered out. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions; do not treat them as "what to do next" unless the user has just said so this turn.',
+    description: 'Look up previously saved knowledge by searching for relevant content. Pass a `query` describing what you need — this returns the matching memory lines (bounded by a token budget so the most recent matches are preferred when there are many). Omitting `query` returns only a bounded, recency-ranked sample of the namespace (not everything), so always prefer passing a query when you know what you are after. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -242,11 +293,11 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         },
         query: {
           type: 'string',
-          description: 'What you are looking for, in natural language. With a query, the top relevance-ranked matches (max 10) are returned via vector + graph retrieval. Omit only when you want the most-recent entries in the namespace; then a bounded recency-ordered slice (max 20) is returned.',
+          description: 'What you are looking for. With a query, the matching memory lines are returned, capped at the response token budget (newest matches preferred). Omit only when you genuinely want a broad sample — then a bounded recency-ranked subset is returned instead of the whole namespace.',
         },
         scope: {
           type: 'string',
-          description: 'Scope to recall from. Format: "type:id" (e.g., "user:alex", "global"). Default: search across all the agent\'s active scopes.',
+          description: 'Scope to recall from. Format: "type:id" (e.g., "user:alex", "global"). Default: current project scope.',
         },
       },
       required: ['namespace'],
@@ -262,77 +313,6 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
-    const trimmedQuery = input.query?.trim() ?? '';
-    const hasQuery = trimmedQuery.length > 0;
-
-    // === KG path (primary) ===========================================
-    // The flat files are an export mirror; the structured KG is the source
-    // of truth. is_active=0 / superseded rows are filtered server-side.
-    const kl = agent.toolContext.knowledgeLayer;
-    if (kl) {
-      const scopes: MemoryScopeRef[] = scopeRef
-        ? [scopeRef]
-        : (agent.activeScopes ?? []);
-
-      if (scopes.length === 0) {
-        return 'No active scopes available for memory recall.';
-      }
-
-      if (hasQuery) {
-        try {
-          const result = await kl.retrieve(trimmedQuery, scopes, {
-            namespace: input.namespace,
-            topK: KG_RECALL_TOP_K,
-            threshold: KG_RECALL_THRESHOLD,
-            useGraphExpansion: true,
-          });
-          if (result.memories.length === 0) {
-            const scopeNote = scopeRef ? ` (scope: ${input.scope})` : '';
-            return `No memories matching "${trimmedQuery}" found in ${input.namespace}${scopeNote}.`;
-          }
-          return formatRankedMemories(
-            result.memories,
-            `=== ${result.memories.length} ranked ${input.namespace} memories for "${trimmedQuery}" ===`,
-            `[Ranked by relevance + confidence + recency. Older/superseded memories are filtered out. Bounded at ${KG_RECALL_TOP_K} results by design.]`,
-          );
-        } catch (err: unknown) {
-          // KG path failed — fall through to flat-file mirror. Log loudly so
-          // a silently-degraded recall (vector search down, agent quietly
-          // running on substring search) shows up in observability instead
-          // of being invisible.
-          process.stderr.write(
-            `[lynox:memory] memory_recall KG path failed; falling back to flat-file mirror (namespace=${input.namespace}, error=${err instanceof Error ? err.message : String(err)})\n`,
-          );
-        }
-      } else {
-        // No query: recency-ordered slice from the KG. `listRecentActive`
-        // is optional on IKnowledgeLayer — test doubles / minimal impls can
-        // omit it; we fall through to the flat-file mirror in that case.
-        try {
-          const recent = kl.listRecentActive?.(
-            input.namespace, scopes, KG_NO_QUERY_LIMIT,
-          ) ?? [];
-          if (recent.length === 0) {
-            const scopeNote = scopeRef ? ` (scope: ${input.scope})` : '';
-            return `No content found in ${input.namespace} namespace${scopeNote}.`;
-          }
-          return formatRankedMemories(
-            recent,
-            `=== ${recent.length} most-recent active ${input.namespace} memories ===`,
-            `[Recency-ordered (newest first). Bounded at ${KG_NO_QUERY_LIMIT} results. Pass a \`query\` to get relevance-ranked matches instead.]`,
-          );
-        } catch (err: unknown) {
-          // Same fall-through semantics as the query branch above.
-          process.stderr.write(
-            `[lynox:memory] memory_recall KG no-query path failed; falling back to flat-file mirror (namespace=${input.namespace}, error=${err instanceof Error ? err.message : String(err)})\n`,
-          );
-        }
-      }
-    }
-
-    // === Flat-file mirror fallback ===================================
-    // Used when no KG is wired (e.g., minimal-agent unit tests). The mirror
-    // is best-effort — the KG is the source of truth in production.
     const content = scopeRef
       ? await agent.memory.loadScoped(input.namespace, scopeRef)
       : await agent.memory.load(input.namespace);
@@ -343,25 +323,33 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         : `No content found in ${input.namespace} namespace.`;
     }
 
-    if (hasQuery) {
-      // No KG and a query: best-effort substring filter from the flat mirror.
-      const matches = content.split('\n')
+    // With a query: substring-filter, then cap at the response token budget
+    // so a 20K-line namespace with a thousand matches doesn't flood context.
+    // Newest matches are preferred (file order = append order = chronology).
+    if (input.query !== undefined && input.query.trim().length > 0) {
+      const queryLower = input.query.toLowerCase();
+      const matches = content
+        .split('\n')
         .filter(l => l.trim().length > 0)
-        .filter(l => l.toLowerCase().includes(trimmedQuery.toLowerCase()))
-        .slice(0, KG_RECALL_TOP_K);
+        .filter(l => l.toLowerCase().includes(queryLower));
       if (matches.length === 0) {
-        return `No memories matching "${trimmedQuery}" found in ${input.namespace} (flat-file mirror; KG unavailable).`;
+        return content; // no matches — return the whole namespace as before
       }
-      return `=== ${matches.length} flat-file matches for "${trimmedQuery}" (KG unavailable) ===\n${matches.join('\n')}`;
+      const { text, shown, total } = boundQueryMatches(matches, RECALL_QUERY_TOKEN_BUDGET);
+      if (shown >= total) {
+        return text;
+      }
+      return `${text}\n\n[Showing ${shown} of ${total} matching ${input.namespace} entries — most recent first, capped to keep context lean.]`;
     }
 
-    // No KG and no query: recency-ranked subset (legacy bounded behaviour).
+    // No-query (namespace-only): a full dump is 15-20K tokens of context bloat.
+    // Return a recency/importance-ranked subset capped at the token budget.
     const { text, shown, total } = rankNoQueryEntries(content, RECALL_NO_QUERY_TOKEN_BUDGET);
     if (shown === 0) {
-      return content;
+      return content; // nothing to rank (single empty line etc.) — return as-is
     }
     if (shown >= total) {
-      return text;
+      return text; // whole namespace fit within the budget — no truncation note
     }
     return `${text}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
   },
@@ -371,7 +359,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
   destructive: { mode: 'data' },
   definition: {
     name: 'memory_delete',
-    description: 'Remove outdated information from your knowledge base. Matching memories are deactivated in the Knowledge Graph (is_active=0) — they stay in the database for audit and are filtered out of all future memory_recall calls. The flat-file export mirror is updated in sync.',
+    description: 'Remove outdated information from your knowledge base.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -381,7 +369,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
           enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to delete from',
         },
-        pattern: { type: 'string', description: 'Text pattern — memories containing this will be deactivated' },
+        pattern: { type: 'string', description: 'Text pattern — lines containing this will be removed' },
         scope: {
           type: 'string',
           description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
@@ -400,42 +388,32 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
-    // KG deactivation is the authoritative delete (is_active=0). The flat
-    // file is the export mirror and is kept in sync. We prefer the KG count
-    // when available so the user sees the truth, not a side-effect of file
-    // substring matching.
-    const kl = agent.toolContext.knowledgeLayer;
-
     if (scopeRef) {
-      const mirrorCount = await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef);
-      let kgCount = 0;
-      if (kl) {
-        try { kgCount = await kl.deactivateByPattern(input.pattern, input.namespace); }
-        catch { /* best-effort */ }
+      const count = await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef);
+      // Sync: deactivate matching memories in Knowledge Graph
+      if (count > 0 && agent.toolContext.knowledgeLayer) {
+        void agent.toolContext.knowledgeLayer.deactivateByPattern(input.pattern, input.namespace).catch(() => {});
       }
-      const count = Math.max(kgCount, mirrorCount);
       return count > 0
-        ? `Deactivated ${count} memor${count === 1 ? 'y' : 'ies'} matching "${input.pattern}" in ${input.namespace} (scope: ${input.scope}). History preserved via is_active=0.`
-        : `No memories matching "${input.pattern}" found in ${input.namespace} (scope: ${input.scope}).`;
+        ? `Removed ${count} line(s) matching "${input.pattern}" from ${input.namespace} (scope: ${input.scope}).`
+        : `No lines matching "${input.pattern}" found in ${input.namespace} (scope: ${input.scope}).`;
     }
 
-    const mirrorCount = await agent.memory.delete(input.namespace, input.pattern);
-    let kgCount = 0;
-    if (kl) {
-      try { kgCount = await kl.deactivateByPattern(input.pattern, input.namespace); }
-      catch { /* best-effort */ }
+    const count = await agent.memory.delete(input.namespace, input.pattern);
+    // Sync: deactivate matching memories in Knowledge Graph
+    if (count > 0 && agent.toolContext.knowledgeLayer) {
+      void agent.toolContext.knowledgeLayer.deactivateByPattern(input.pattern, input.namespace).catch(() => {});
     }
-    const count = Math.max(kgCount, mirrorCount);
     return count > 0
-      ? `Deactivated ${count} memor${count === 1 ? 'y' : 'ies'} matching "${input.pattern}" in ${input.namespace}. History preserved via is_active=0.`
-      : `No memories matching "${input.pattern}" found in ${input.namespace}.`;
+      ? `Removed ${count} line(s) matching "${input.pattern}" from ${input.namespace}.`
+      : `No lines matching "${input.pattern}" found in ${input.namespace}.`;
   },
 };
 
 export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
   definition: {
     name: 'memory_update',
-    description: 'Correct or refine previously saved knowledge. The matching memory is superseded — the old row is preserved (is_active=0, superseded_by=new.id) and a new active row carrying the corrected text is created. History stays intact; memory_recall returns only the active (corrected) row going forward. The flat-file export mirror is updated in sync.',
+    description: 'Correct or refine previously saved knowledge. Tries an exact substring match first; if no line contains `old_content`, the closest matching lines (by token overlap) are marked `[SUPERSEDED YYYY-MM-DD]` and `new_content` is appended as a new line — so the new knowledge is never silently lost.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -445,8 +423,11 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           enum: ['knowledge', 'methods', 'status', 'learnings'],
           description: 'Category to update',
         },
-        old_content: { type: 'string', description: 'Existing memory text to supersede (exact match within the chosen scope).' },
-        new_content: { type: 'string', description: 'Replacement text for the new active memory.' },
+        old_content: {
+          type: 'string',
+          description: "A unique substring from the prior memory line you want to supersede. Best to pass an unambiguous span (e.g. 'PostgreSQL 16' rather than a full sentence) so the fuzzy matching finds the right line.",
+        },
+        new_content: { type: 'string', description: 'Replacement text' },
         scope: {
           type: 'string',
           description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
@@ -468,41 +449,96 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
-    // KG supersession is the authoritative update — old row stays in the
-    // table marked superseded, new row is created active. The flat file is
-    // a mirror and is kept in sync via the existing substring update.
-    const kl = agent.toolContext.knowledgeLayer;
-    const effectiveScope: MemoryScopeRef = scopeRef
-      ?? agent.activeScopes?.[0]
-      ?? { type: 'context', id: '' };
-
-    let kgUpdated = false;
-    if (kl) {
-      try {
-        const newId = await kl.updateMemoryWithSupersession(
-          input.old_content, input.new_content, input.namespace, effectiveScope,
-          { sourceThreadId: agent.currentThreadId },
-        );
-        kgUpdated = newId !== null;
-      } catch {
-        kgUpdated = false;
-      }
-    }
-
-    // Mirror the change into the flat file too (substring update).
-    const mirrorOk = scopeRef
+    // Try the exact substring path first (pre-#529 behaviour). When that
+    // succeeds, KG mirror sync runs as before.
+    const exactOk = scopeRef
       ? await agent.memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
       : await agent.memory.update(input.namespace, input.old_content, input.new_content);
 
-    const success = kgUpdated || mirrorOk;
-    const scopeLabel = input.scope ?? formatScopeRef(effectiveScope);
-    if (!success) {
-      return `Content not found in ${input.namespace} (scope: ${scopeLabel}) — nothing updated.`;
+    if (exactOk) {
+      // Mirror to KG so entity re-extraction picks up the corrected text.
+      if (agent.toolContext.knowledgeLayer) {
+        const defaultScope: MemoryScopeRef = scopeRef
+          ?? agent.activeScopes?.[0]
+          ?? { type: 'context', id: '' };
+        void agent.toolContext.knowledgeLayer.updateMemoryText(
+          input.old_content, input.new_content, input.namespace, defaultScope,
+        ).catch(() => {});
+      }
+      return scopeRef
+        ? `Updated content in ${input.namespace} namespace (scope: ${input.scope}).`
+        : `Updated content in ${input.namespace} namespace.`;
     }
-    if (kgUpdated) {
-      return `Superseded memory in ${input.namespace} (scope: ${scopeLabel}). Old row preserved (is_active=0, superseded_by=new). Mirror file ${mirrorOk ? 'synced' : 'sync-skipped'}.`;
+
+    // === Fallback: [SUPERSEDED YYYY-MM-DD] marker ===
+    // Pre-#529 returned "not found" here and the new knowledge was lost.
+    // Now we mark the closest matching prior lines and append the new content
+    // as a fresh line — the agent is never silently dropping data.
+    const content = scopeRef
+      ? await agent.memory.loadScoped(input.namespace, scopeRef)
+      : await agent.memory.load(input.namespace);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const supersededMarker = `[SUPERSEDED ${today}] `;
+    const lines = (content ?? '').split('\n');
+    const candidates = findFuzzySupersedeCandidates(lines, input.old_content);
+    let marked = 0;
+
+    // Mark candidate lines in-memory; we'll persist via delete+append below.
+    const linesToRewrite: Array<{ originalLine: string; markedLine: string }> = [];
+    for (const idx of candidates) {
+      const line = lines[idx]!;
+      if (line.startsWith('[SUPERSEDED ')) continue; // don't double-prefix
+      const markedLine = supersededMarker + line;
+      linesToRewrite.push({ originalLine: line, markedLine });
+      marked++;
     }
-    return `Updated content in ${input.namespace} namespace (scope: ${scopeLabel}). KG sync skipped (no graph attached).`;
+
+    // Persist via the same scoped/unscoped path the memory abstraction uses.
+    // The IMemory interface doesn't expose a bulk "save" for scoped writes,
+    // so we use deleteScoped({exact:true}) + appendScoped to swap each line
+    // in place. The exact:true option (kept from T2-M1) is critical here so
+    // substring matches don't bulk-delete unrelated lines.
+    if (scopeRef) {
+      for (const { originalLine, markedLine } of linesToRewrite) {
+        await agent.memory.deleteScoped(
+          input.namespace, originalLine, scopeRef, { exact: true },
+        );
+        await agent.memory.appendScoped(input.namespace, markedLine, scopeRef);
+      }
+      await agent.memory.appendScoped(input.namespace, input.new_content, scopeRef);
+    } else {
+      // Unscoped path: IMemory.delete has no {exact} option, so we use
+      // substring delete. The originalLine is a full line so substring
+      // collision is unlikely; if it happens, the duplicate marker on the
+      // re-append still records the intent.
+      for (const { originalLine, markedLine } of linesToRewrite) {
+        await agent.memory.delete(input.namespace, originalLine);
+        await agent.memory.append(input.namespace, markedLine);
+      }
+      await agent.memory.append(input.namespace, input.new_content);
+    }
+
+    // Mirror new content to KG via the same channel store uses — the
+    // subscription in engine-init.ts will pick this up and create the
+    // KG row + entity extraction.
+    if (agent.toolContext.knowledgeLayer) {
+      const defaultScope: MemoryScopeRef = scopeRef
+        ?? agent.activeScopes?.[0]
+        ?? { type: 'context', id: '' };
+      channels.memoryStore.publish({
+        namespace: input.namespace,
+        content: input.new_content,
+        scopeType: defaultScope.type,
+        scopeId: defaultScope.id,
+        sourceThreadId: agent.currentThreadId,
+      });
+    }
+
+    if (marked > 0) {
+      return `Superseded ${marked} memor${marked === 1 ? 'y' : 'ies'} and added new content to ${input.namespace}${scopeRef ? ` (scope: ${input.scope})` : ''}.`;
+    }
+    return `Appended new content to ${input.namespace}${scopeRef ? ` (scope: ${input.scope})` : ''} (no prior memory matched the old_content pattern).`;
   },
 };
 
