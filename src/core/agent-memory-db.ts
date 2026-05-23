@@ -537,11 +537,26 @@ export class AgentMemoryDb {
    * scope set. Returns the most recent match (created_at DESC). Used by the
    * supersession-aware update path: equality, not substring — so an "update of
    * X" only fires on an exact prior X, not on any line that happens to contain X.
+   *
+   * **Similarity fallback (opt-in via `options.similarityFallback`):** if no
+   * exact-text match exists, run a cosine-similarity search against memories
+   * in the same namespace+scope and return the closest match above the
+   * threshold (default 0.95). This unblocks LLM-driven `memory_update` calls
+   * where the agent paraphrases the stored text instead of byte-quoting it —
+   * the KG-recall Phase 1 bench (2026-05-23) tied a Phase-2 A2 supersession
+   * miss to exactly this gap. The exact-text fast path is preserved for the
+   * unit tests that assert byte-equal supersession semantics.
    */
   findActiveMemoryByExactText(
     text: string,
     namespace?: string | undefined,
     scopes?: Array<{ type: string; id: string }> | undefined,
+    options?: {
+      similarityFallback?: {
+        queryEmbedding: number[];
+        threshold?: number | undefined;
+      } | undefined;
+    } | undefined,
   ): MemoryRow | null {
     const clauses: string[] = ['is_active = 1', 'text = ?'];
     const params: unknown[] = [text];
@@ -557,7 +572,32 @@ export class AgentMemoryDb {
     const row = this.db.prepare(
       `SELECT * FROM memories WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT 1`,
     ).get(...params) as MemoryRow | undefined;
-    return row ?? null;
+    if (row) return row;
+
+    // Similarity-fallback path (opt-in). Only runs when the exact-text query
+    // returned nothing — preserves byte-equal-match semantics for callers that
+    // don't pass the option.
+    const fallback = options?.similarityFallback;
+    if (!fallback) return null;
+    const threshold = fallback.threshold ?? 0.95;
+    const similarFilter: {
+      namespace?: string | undefined;
+      scopeTypes?: string[] | undefined;
+      scopeIds?: string[] | undefined;
+      activeOnly: boolean;
+    } = { activeOnly: true };
+    if (namespace) similarFilter.namespace = namespace;
+    if (scopes && scopes.length > 0) {
+      similarFilter.scopeTypes = [...new Set(scopes.map(s => s.type))];
+      similarFilter.scopeIds = [...new Set(scopes.map(s => s.id))];
+    }
+    const matches = this.findSimilarMemories(
+      fallback.queryEmbedding,
+      1,
+      threshold,
+      similarFilter,
+    );
+    return matches.length > 0 ? matches[0]! : null;
   }
 
   /**

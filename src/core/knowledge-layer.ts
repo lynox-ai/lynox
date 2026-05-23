@@ -498,7 +498,24 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     scope: MemoryScopeRef,
     options?: { sourceRunId?: string | undefined; sourceThreadId?: string | undefined } | undefined,
   ): Promise<string | null> {
-    const oldRow = this.db.findActiveMemoryByExactText(oldText, namespace, [scope]);
+    // Exact-text match first (preserves byte-equal supersession semantics).
+    // If that misses, fall back to cosine-similarity match — LLM-driven
+    // `memory_update` calls almost never byte-quote the stored text, and
+    // without the fallback the new row just coexists with the old one
+    // (KG-recall Phase 1 + Phase 2 A2 finding, 2026-05-23). Threshold 0.95
+    // is high enough that only genuine paraphrases match.
+    const trimmedOldText = oldText.trim();
+    const oldEmbedding = trimmedOldText.length > 0
+      ? await this.embeddingProvider.embed(trimmedOldText)
+      : null;
+    const oldRow = this.db.findActiveMemoryByExactText(
+      oldText,
+      namespace,
+      [scope],
+      oldEmbedding
+        ? { similarityFallback: { queryEmbedding: oldEmbedding, threshold: 0.95 } }
+        : undefined,
+    );
     if (!oldRow) return null;
 
     // Store the new memory through the full pipeline (embedding, entity

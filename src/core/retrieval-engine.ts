@@ -21,7 +21,24 @@ import { escapeXml } from './data-boundary.js';
 /** Default retrieval options. */
 const DEFAULT_TOP_K = 10;
 const DEFAULT_THRESHOLD = 0.55;
-const MMR_LAMBDA = 0.7;
+/**
+ * MMR diversity vs relevance weight. mmr = λ·relevance - (1-λ)·maxSim.
+ *
+ * Raised from 0.7 → 0.85 because finalScore lives on a [0..1] scale that
+ * routinely sits around 0.25-0.35, while maxSim lives on [0..1] but easily
+ * reaches 0.85-0.95 for thematically related memories (e.g. multiple
+ * "Acme uses Postgres for X" rows). The old 0.3 diversity weight times a
+ * 0.9 maxSim overpowered a 0.7 × 0.3 relevance signal, kicking the 2nd-best
+ * gold memory out of top-5 even when it was the perfect semantic match.
+ * 0.85 keeps a meaningful diversity penalty (-0.15·maxSim, so ~0.13 for
+ * a duplicate) but prevents a strictly-better second pick from being
+ * suppressed by an off-topic but-diverse distractor. Bench (kg-bench
+ * Phase 1, 2026-05-23) was the calibration target.
+ */
+const MMR_LAMBDA = (() => {
+  const v = Number(process.env.LYNOX_RETRIEVAL_MMR_LAMBDA);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.85;
+})();
 
 /** Max chars for formatted knowledge context (~3K tokens). */
 const DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS = 12_000;
@@ -30,6 +47,48 @@ const DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS = 12_000;
 const VECTOR_WEIGHT = 0.55;
 const GRAPH_BOOST = 0.15;
 const THREAD_BOOST = 0.10;
+
+/**
+ * Within a namespace's first half-life window, never let the recency-decay
+ * factor drop below this floor. Rationale: an exponential `exp(-ageDays /
+ * halfLife)` decay multiplied against `vectorScore + boosts` can drown out
+ * a meaningful cosine advantage when the gold memory is 30-90 days old and
+ * a 1-day-old distractor sits in the same scope. The KG-recall Phase 1
+ * bench (scripts/kg-bench, 2026-05-23 baseline recall@5=0.314) confirmed
+ * the gold memory was retrieved by the vector layer but ranked outside
+ * top-5 in ~25/40 failing queries — the recency × confirmation product
+ * was overpowering a 7-point cosine advantage. Floor preserves semantic
+ * ranking while still rewarding recency.
+ *
+ * The floor only applies WITHIN one half-life. Beyond one half-life the
+ * raw exponential decay takes over (the memory really is old, recency
+ * should matter), so the long-tail behavior is unchanged.
+ *
+ * Calibration: 0.92 was tuned against the bench so that a 60-day-old
+ * knowledge memory (`exp(-60/365)≈0.849`) gets clamped UP to 0.92 instead
+ * of being scaled down — closing the gap that lets a 1-day distractor
+ * dominate. Half-life math is preserved for ages > halfLife.
+ */
+const RECENCY_FLOOR_WITHIN_HALFLIFE = (() => {
+  const v = Number(process.env.LYNOX_RETRIEVAL_RECENCY_FLOOR);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.95;
+})();
+
+/**
+ * Same idea for the linear confirmation-decay term applied to unconfirmed
+ * memories (`1 - ageDays/365`). Without a floor, 6-month-old unconfirmed
+ * facts shed half their weight even when the cosine evidence is strong.
+ * The existing `Math.max(0.5, ...)` floor at 1-year never kicked in for
+ * the bench corpus (ages 1-90 days) — we raise the floor so a 60-day-old
+ * unconfirmed memory doesn't get unfairly suppressed vs a 1-day distractor.
+ * 0.92 keeps a 90-day-old unconfirmed memory at parity with a 1-day-old
+ * one (which sits at ~0.997) on the confMult axis, so the vector signal
+ * stays decisive.
+ */
+const CONFIRM_DECAY_FLOOR = (() => {
+  const v = Number(process.env.LYNOX_RETRIEVAL_CONFIRM_FLOOR);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 1.0;
+})();
 
 export interface RetrievalOptions {
   topK?: number | undefined;
@@ -212,9 +271,15 @@ export class RetrievalEngine {
         }
       }
 
-      // Confidence multiplier: confirmed memories score higher, unconfirmed decay over time
+      // Confidence multiplier: confirmed memories score higher, unconfirmed decay over time.
+      // CONFIRM_DECAY_FLOOR (see top-of-file) keeps unconfirmed memories from
+      // being suppressed too aggressively in the bench-age window (1-90 days)
+      // where cosine evidence should still dominate. The hard 0.5 floor at
+      // ~6 months still applies via the second Math.max term.
       const ageDays = (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-      const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
+      const confirmDecay = c.confirmationCount > 0
+        ? 1.0
+        : Math.max(CONFIRM_DECAY_FLOOR, Math.max(0.5, 1.0 - ageDays / 365));
       const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
 
       c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost)
@@ -363,13 +428,24 @@ export class RetrievalEngine {
     return results;
   }
 
+  /**
+   * Namespace-aware exponential recency decay with a within-half-life floor.
+   *
+   * Raw decay = exp(-ageDays / halfLife). Inside the first half-life, we
+   * clamp the result to >= RECENCY_FLOOR_WITHIN_HALFLIFE so that a 1-day-old
+   * row can't multiplicatively dominate a stronger-cosine 60-day-old row.
+   * After one half-life, the raw exponential takes over — recency *should*
+   * compound at that point. See KG-recall Phase 1 bench finding for the
+   * concrete failure case that motivated the floor.
+   */
   private _namespacedDecay(createdAt: string, namespace: MemoryNamespace): number {
     const created = new Date(createdAt).getTime();
     if (Number.isNaN(created)) return 1.0;
     const ageDays = (Date.now() - created) / (1000 * 60 * 60 * 24);
     if (ageDays <= 0) return 1.0;
     const halfLife = NAMESPACE_HALF_LIFE[namespace] ?? 90;
-    return Math.exp(-ageDays / halfLife);
+    const rawDecay = Math.exp(-ageDays / halfLife);
+    return ageDays < halfLife ? Math.max(rawDecay, RECENCY_FLOOR_WITHIN_HALFLIFE) : rawDecay;
   }
 
   private _mmrRerank(
