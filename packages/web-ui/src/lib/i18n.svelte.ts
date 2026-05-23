@@ -438,6 +438,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'mobile.new_code': { de: 'Neuen Code generieren', en: 'Generate new code' },
 	'mobile.fallback': { de: 'Kamera geht nicht? Link kopieren', en: 'Camera not working? Copy link' },
 	'mobile.fallback_hint': { de: 'Link im Handy-Browser \u00f6ffnen. Einmal-Link, 5 Minuten g\u00fcltig.', en: 'Open link in phone browser. One-time link, valid 5 minutes.' },
+	'mobile.lan_only_title': { de: 'Funktioniert nur im selben Netzwerk', en: 'Works only on the same network' },
+	'mobile.lan_only_body': { de: 'Der QR-Code zeigt auf localhost \u2014 dein Handy kann das nicht erreichen. Verbinde dein Handy mit demselben WLAN wie diesen Server und ersetze "localhost" in der URL durch die LAN-IP dieses Rechners (z.\u202fB. 192.168.x.x).', en: 'The QR code points at localhost \u2014 your phone cannot reach that. Connect your phone to the same Wi-Fi as this server, then replace "localhost" in the URL with this machine\u2019s LAN IP (e.g. 192.168.x.x).' },
 	'backups.no_backups': { de: 'Keine Backups. Erstelle dein erstes Backup.', en: 'No backups. Create your first backup.' },
 	'backups.create': { de: 'Backup erstellen', en: 'Create backup' },
 	'backups.creating': { de: 'Erstelle Backup...', en: 'Creating backup...' },

@@ -14,6 +14,16 @@
 			: ''
 	);
 
+	// On self-host the engine's origin is typically http://localhost:3000.
+	// A phone scanning that QR opens its OWN localhost (= itself) → load fails.
+	// Detect this and surface a clear warning instead of letting the user
+	// blame the QR / lynox / their phone. README claim was: "scan it on any
+	// device to get a pre-authenticated session" — that only works on a LAN.
+	const isLocalhostOrigin = $derived(
+		typeof window !== 'undefined' &&
+			/^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?$/.test(window.location.host)
+	);
+
 	const qrMatrix = $derived(loginUrl ? encode(loginUrl, { ecc: 'M', border: 2 }) : null);
 
 	// Silent expiration after 5 minutes
@@ -75,6 +85,16 @@
 							{/each}
 						{/each}
 					</svg>
+				</div>
+			{/if}
+
+			{#if isLocalhostOrigin}
+				<!-- Self-host LAN warning (item 21): the QR encodes localhost
+				     which the phone can't reach across the network. Tell the
+				     user explicitly + give them an actionable next step. -->
+				<div class="w-full rounded-[var(--radius-md)] border border-warning/30 bg-warning/5 p-3 text-xs text-text-muted">
+					<p class="font-medium text-warning mb-1">{t('mobile.lan_only_title')}</p>
+					<p>{t('mobile.lan_only_body')}</p>
 				</div>
 			{/if}
 
