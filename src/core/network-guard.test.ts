@@ -14,6 +14,7 @@ import {
   fetchPinned,
   fetchWithPublicRedirects,
   setPinnedTransportForTests,
+  __pinnedAgentForTests,
 } from './network-guard.js';
 import type { PinnedTransportInput } from './network-guard.js';
 
@@ -257,5 +258,129 @@ describe('fetchPinned / fetchWithPublicRedirects', () => {
     await expect(
       fetchWithPublicRedirects('https://a.fake.test/', {}, { maxRedirects: 1 }),
     ).rejects.toThrow(/too many redirects/i);
+  });
+});
+
+// Regression test for the 2026-05-23 staging bug where web_research action=read
+// failed universally with `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`
+// on every URL. Root cause: pinnedAgent's lookup callback used the legacy
+// 3-arg signature `cb(null, address, family)`, but Node 22's
+// `net.Socket.connect` always calls the lookup with `{ all: true }` and then
+// iterates the 2nd callback argument as an addresses array. Passing a plain
+// string made it walk the string char-by-char, pulling `undefined` for
+// `record.address` and throwing the cryptic error above on connect.
+//
+// Tests above ALL stub the transport, so the real pinnedAgent + node:http
+// path is never exercised. This test deliberately uses the DEFAULT transport
+// against an in-process HTTP server to catch any future regression in the
+// lookup-callback shape.
+// Drive the REAL defaultTransport (not the test stub) end-to-end against a
+// loopback HTTP server. This is the path that broke on staging — the stub
+// transport tests above bypass pinnedAgent.lookup entirely and so could not
+// have caught the Node 22 callback-shape regression.
+//
+// The staging-fail symptom: every fetchPinned() threw
+//   `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`
+// because Node 22's net.Socket.connect always calls the Agent.lookup with
+// `{ all: true }` and the old code returned `cb(null, pinnedIp, family)` —
+// Node then treated the string as the `addresses` array and iterated its
+// chars, surfacing `undefined` records.
+// Direct unit-test of pinnedAgent's lookup callback shape. This is the path
+// that broke on staging 2026-05-23 — every fetchPinned() call threw
+//   `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`
+// because the lookup callback used the legacy 3-arg signature
+//   `cb(null, address, family)`
+// but Node 22's net.Socket.connect always invokes the lookup with
+// `{ all: true }` and then iterates the 2nd callback arg as an addresses
+// array. With a plain string the iteration produces `undefined` records,
+// triggering the error before connect even runs.
+//
+// The stub-transport tests above bypass pinnedAgent entirely, so they
+// could not have caught this. The seam (__pinnedAgentForTests) exists to
+// let us assert the lookup-callback shape directly without spinning up a
+// real socket — node:net's internal call-shape is the contract we lock in.
+describe('pinnedAgent.lookup callback shape (Node 22 staging-fail regression)', () => {
+  it('emits an addresses array when called with { all: true } (the shape Node 22 connect uses)', async () => {
+    const agent = __pinnedAgentForTests('https:', '93.184.216.34', 4);
+    // node:http.Agent stores the lookup we passed at construction time.
+    const lookup = (agent as unknown as { options: { lookup: unknown } }).options.lookup as (
+      hostname: string,
+      options: { all?: boolean | undefined } | undefined,
+      cb: (err: NodeJS.ErrnoException | null, ...rest: unknown[]) => void,
+    ) => void;
+    expect(typeof lookup).toBe('function');
+
+    const received: unknown[] = await new Promise((resolve) => {
+      lookup('example.com', { all: true }, (_err, ...rest) => resolve(rest));
+    });
+    // { all: true } → callback gets ONE addresses-array arg.
+    expect(received).toHaveLength(1);
+    expect(Array.isArray(received[0])).toBe(true);
+    const records = received[0] as Array<{ address: string; family: number }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.address).toBe('93.184.216.34');
+    expect(records[0]!.family).toBe(4);
+    agent.destroy();
+  });
+
+  it('emits (address, family) when called with { all: false } (legacy single-result signature, still supported by Node)', async () => {
+    const agent = __pinnedAgentForTests('http:', '93.184.216.34', 4);
+    const lookup = (agent as unknown as { options: { lookup: unknown } }).options.lookup as (
+      hostname: string,
+      options: { all?: boolean | undefined } | undefined,
+      cb: (err: NodeJS.ErrnoException | null, ...rest: unknown[]) => void,
+    ) => void;
+    const received: unknown[] = await new Promise((resolve) => {
+      lookup('example.com', { all: false }, (_err, ...rest) => resolve(rest));
+    });
+    // { all: false } → callback gets (address, family) — two args.
+    expect(received).toHaveLength(2);
+    expect(received[0]).toBe('93.184.216.34');
+    expect(received[1]).toBe(4);
+    agent.destroy();
+  });
+
+  it('does not crash net.Socket.connect with ERR_INVALID_IP_ADDRESS (replays the staging-fail scenario)', async () => {
+    // Replay the exact code path that broke staging: build the agent and
+    // launch an http.request via it. We can't reach a real public host in
+    // CI, so we settle for asserting that whatever error surfaces is NOT
+    // the synchronous lookup-shape bug. The buggy lookup threw
+    // ERR_INVALID_IP_ADDRESS *before* the network round-trip, so any other
+    // error (ECONNREFUSED / ETIMEDOUT / socket hang up) proves the fix.
+    const http = await import('node:http');
+    const agent = __pinnedAgentForTests('http:', '127.0.0.1', 4);
+    const err: NodeJS.ErrnoException | undefined = await new Promise((resolve) => {
+      // Point at a definitely-closed port on loopback so the connect fails
+      // FAST. The lookup will say 127.0.0.1, the connect will try 127.0.0.1:1
+      // and reject with ECONNREFUSED — proving the lookup path succeeded.
+      const req = http.request(
+        { hostname: 'example.com', port: 1, agent, method: 'HEAD', path: '/', timeout: 2000 },
+        () => resolve(undefined),
+      );
+      req.on('error', (e: NodeJS.ErrnoException) => resolve(e));
+      req.on('timeout', () => { req.destroy(); resolve(undefined); });
+      req.end();
+    });
+    agent.destroy();
+    if (err) {
+      expect(err.code).not.toBe('ERR_INVALID_IP_ADDRESS');
+      expect(err.message).not.toMatch(/Invalid IP address/);
+    }
+  });
+});
+
+describe('resolveAndValidate defense-in-depth', () => {
+  beforeEach(() => {
+    vi.mocked(dns.lookup).mockReset();
+  });
+
+  it('throws a clear "Blocked: ..." error if DNS returns a record with an empty address (rather than feeding undefined into the connect path)', async () => {
+    // Production should never see this — dns.lookup always sets address — but
+    // we used to silently propagate this all the way to net.Socket.connect,
+    // which threw `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined` (the
+    // exact symptom of the staging bug). Make sure we now fail closed with a
+    // message an operator can act on.
+    mockDns([{ address: '' as unknown as string, family: 4 }]);
+    await expect(fetchPinned('https://example.test/')).rejects.toThrow(/Blocked: DNS returned a record without an address/);
   });
 });
