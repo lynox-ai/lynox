@@ -4,6 +4,7 @@ import {
 	createSessionToken,
 	verifySessionToken,
 	secretEquals,
+	isHttpsRequest,
 	SESSION_MAX_AGE_S,
 } from './auth.js';
 
@@ -156,5 +157,85 @@ describe('secretEquals', () => {
 
 	it('returns false for inputs of different lengths (no length oracle)', () => {
 		expect(secretEquals('short', SECRET)).toBe(false);
+	});
+});
+
+describe('isHttpsRequest', () => {
+	function mkRequest(xfp?: string): Request {
+		const headers = new Headers();
+		if (xfp !== undefined) headers.set('x-forwarded-proto', xfp);
+		return new Request('http://internal', { headers });
+	}
+
+	it('returns true when url.protocol is https (direct TLS, no proxy)', () => {
+		const url = new URL('https://acme.lynox.cloud/login');
+		expect(isHttpsRequest(url, mkRequest())).toBe(true);
+	});
+
+	it('returns true when proxy sets x-forwarded-proto=https on an http inner hop', () => {
+		// The actual managed-deployment case: Traefik/CF terminates TLS, the
+		// inner Node sees http:. Without the XFP fallback the Secure flag
+		// would silently drop on managed instances.
+		const url = new URL('http://internal-traefik/login');
+		expect(isHttpsRequest(url, mkRequest('https'))).toBe(true);
+	});
+
+	it('returns false on plain http with no proxy header (self-hosted LAN)', () => {
+		const url = new URL('http://my-lynox.local:3000/login');
+		expect(isHttpsRequest(url, mkRequest())).toBe(false);
+	});
+
+	it('takes the first entry of a comma-separated XFP chain', () => {
+		// XFP can stack `client-protocol, proxy-protocol, ...` — only the
+		// first is the originating client.
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('https, http'))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('http, https'))).toBe(false);
+	});
+
+	it('is case-insensitive on the XFP scheme', () => {
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('HTTPS'))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('Https'))).toBe(true);
+	});
+
+	it('trims surrounding whitespace before comparing', () => {
+		// Some proxies emit `x-forwarded-proto:  https` with leading spaces;
+		// the trim() must normalize before strict-equality. Lock this in.
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest(' https'))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('https '))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('  https  '))).toBe(true);
+	});
+
+	it('returns false for unexpected XFP values', () => {
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('ws'))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest(''))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest('  '))).toBe(false);
+	});
+
+	it('rejects header-smuggled scheme strings (lock against loose-match refactor)', () => {
+		// Strict-equality compare today makes these all safe; the test
+		// guards against a future "startsWith" or "includes" refactor
+		// that would silently accept attacker-crafted values.
+		const url = new URL('http://internal/login');
+		expect(isHttpsRequest(url, mkRequest('javascript:'))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest('https://attacker.example'))).toBe(false);
+		expect(isHttpsRequest(url, mkRequest('<script>https</script>'))).toBe(false);
+	});
+
+	it.each([
+		['https://acme.lynox.cloud:8443/login'],
+		['https://acme.lynox.cloud/login?next=%2Fapp'],
+		['https://[::1]:3000/login'],
+		['https://127.0.0.1/login'],
+	])('honours url.protocol short-circuit on %s regardless of XFP', (rawUrl) => {
+		const url = new URL(rawUrl);
+		// XFP is intentionally not 'https' — the url.protocol short-circuit
+		// should still return true because we already terminated TLS at the
+		// app boundary.
+		expect(isHttpsRequest(url, mkRequest(''))).toBe(true);
+		expect(isHttpsRequest(url, mkRequest('http'))).toBe(true);
 	});
 });
