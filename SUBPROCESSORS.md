@@ -18,12 +18,13 @@ The website page <https://lynox.ai/subprocessors> mirrors this file for non-engi
 | Brevo (Sendinblue SAS) | Transactional email delivery (SMTP relay) and contact list management | EU (France/Germany) | EU |
 | Cloudflare, Inc. | DNS, CDN, DDoS protection, tunnel relay | United States / EU (edge network) | EU-US Data Privacy Framework + SCCs |
 | Plausible Insights OÜ | Anonymous website analytics (no personal data) | EU (Estonia) | EU |
+| Google LLC | Marketing measurement on lynox.ai only — Google Analytics 4 + Google Tag Manager (Consent Mode v2; fires only with marketing consent via Klaro). Not engaged inside Managed Hosting. | United States | EU-US Data Privacy Framework + SCCs (Module 2/3, 2021/914) |
 | Self-hosted (Bugsink) | Error reporting (always active for managed instances) | EU (self-hosted on lynox infrastructure) | No third-party transfer |
 
 ## Notes
 
 - **OpenAI** is engaged only if the customer enables the OpenAI-compatible provider via BYOK (e.g. picking `openai` in the setup wizard with their own key). The default managed setup uses Anthropic + Mistral.
-- **Google Analytics 4 / Google Ads** are website-only and require explicit consent; they do not process Managed Hosting customer data.
+- **Google LLC** sub-processor scope is intentionally narrow — only `lynox.ai` marketing measurement (GA4 + Tag Manager, gated by Klaro Consent Mode v2). Managed Hosting tenant data never crosses Google's systems unless the customer separately enables a Google integration (Calendar OAuth, BYOK Gemini); those are customer-controlled and disclosed inline in the Privacy Policy where applicable.
 - All sub-processor changes are notified to managed customers at least 30 days in advance per the DPA.
 
 ## Where this list is duplicated
