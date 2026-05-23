@@ -158,7 +158,6 @@ export class Engine {
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _scheduledSendPoller: import('../integrations/mail/mail-scheduled-poller.js').ScheduledSendPoller | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
-  private _whatsappContext: import('../integrations/whatsapp/context.js').WhatsAppContext | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -645,7 +644,7 @@ export class Engine {
     }
   }
 
-  /** Web search provider, Google Workspace, Mail (IMAP/SMTP + OAuth-Gmail), Inbox classifier (Phase 1a), WhatsApp Business Cloud (Coexistence Mode). Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
+  /** Web search provider, Google Workspace, Mail (IMAP/SMTP + OAuth-Gmail), Inbox classifier (Phase 1a). Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
   private async _initIntegrations(): Promise<void> {
 
     // Web search tool (conditional)
@@ -821,7 +820,7 @@ export class Engine {
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
         // the MailContext is null — the runtime is still alive and the
-        // hook can be invoked manually (e.g. via the WhatsApp bridge).
+        // hook can be invoked manually by other inbound-channel adapters.
         if (this._mailContext) {
           this._mailContext.hooks.onInboundMail = runtime.hook;
           // Auto-trigger backfill on account-connect. The adapter gates
@@ -837,40 +836,6 @@ export class Engine {
       }
     }
 
-    // WhatsApp Business Cloud API integration (Coexistence Mode, BYOK Phase 0).
-    // Gated behind the `whatsapp-inbox` feature flag (LYNOX_FEATURE_WHATSAPP_INBOX=1).
-    // State DB initialized whenever a vault exists AND the flag is on — tools are
-    // registered and report "not configured" until the user saves credentials.
-    if (isFeatureEnabled('whatsapp-inbox')) {
-      try {
-        const { WhatsAppContext } = await import('../integrations/whatsapp/context.js');
-        const { WhatsAppStateDb } = await import('../integrations/whatsapp/state.js');
-        if (this.secretVault) {
-          const waState = new WhatsAppStateDb();
-          const waCtx = new WhatsAppContext(waState, this.secretVault);
-          for (const tool of waCtx.tools()) {
-            this.registry.register(tool);
-          }
-          this._whatsappContext = waCtx;
-          // Bridge WhatsApp -> Inbox when both subsystems are up. The adapter
-          // filters non-inbound / non-text kinds; the inbox hook handles
-          // rule / sensitive / classifier routing the same as for email.
-          if (this._inboxRuntime) {
-            const { waMessageToInboxInput } = await import('../integrations/inbox/whatsapp-adapter.js');
-            const inboxHook = this._inboxRuntime.hook;
-            waCtx.setInboxBridge(async (event) => {
-              if (event.type !== 'message') return;
-              const phoneNumberId = waCtx.getClient()?.phoneNumberId ?? 'default';
-              const adapted = waMessageToInboxInput(event.msg, event.contact, { phoneNumberId });
-              if (!adapted) return;
-              await inboxHook(adapted.accountId, adapted.envelope);
-            });
-          }
-        }
-      } catch {
-        // WhatsApp init failed — non-critical, continue without it
-      }
-    }
   }
 
   /** Pipeline tools, MCP servers, plugins, CRM, backup manager, version-change auto-backup, Google Drive uploader, plugin session start, managed-hosting hook, orchestrator lifecycle hooks. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -1068,7 +1033,6 @@ export class Engine {
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
-  getWhatsAppContext(): import('../integrations/whatsapp/context.js').WhatsAppContext | null { return this._whatsappContext; }
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {

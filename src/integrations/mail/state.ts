@@ -24,9 +24,10 @@ function defaultDbPath(): string {
  * Reserved id prefixes that must not appear in `mail_accounts.id`. The
  * inbox tables (v9+) treat the same string as a polymorphic discriminator
  * (channel detection in `inbox/watcher-hook.ts`), so a mail account with
- * a reserved prefix would silently misclassify its items.
+ * a reserved prefix would silently misclassify its items. Currently empty
+ * — re-add channel prefixes here when reintroducing non-email channels.
  */
-const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = ['whatsapp:'];
+const RESERVED_ACCOUNT_PREFIXES: ReadonlyArray<string> = [];
 
 const MIGRATIONS: string[] = [
   // v1: Initial schema — Message-ID dedup table
@@ -227,10 +228,12 @@ const MIGRATIONS: string[] = [
      ON inbox_items(tenant_id, account_id, thread_key);`,
 
   // v9: Relax inbox_items.account_id + inbox_rules.account_id FK on
-  // mail_accounts so the same tables can host WhatsApp items (account_id
-  // becomes a polymorphic string: real mail-account ids OR pseudo-account
-  // ids like 'whatsapp:<phoneNumberId>'). SQLite cannot drop a FK in
-  // place, so we use the canonical table-rebuild dance.
+  // mail_accounts so the same tables can host non-mail pseudo-account
+  // channels (account_id becomes a polymorphic string). SQLite cannot
+  // drop a FK in place, so we use the canonical table-rebuild dance.
+  // Historical note: this was originally added for the WhatsApp channel,
+  // which was removed pre-HN-launch; the relaxed FK is retained for
+  // future channel re-introductions.
   //
   // CASCADE on mail_account delete is now an application invariant: the
   // owning module is responsible for issuing the cleanup queries
@@ -308,7 +311,7 @@ const MIGRATIONS: string[] = [
   // inbox_items delete keeps the row from outliving the item.
   //
   // `source` mirrors the channel that produced the body ('imap',
-  // 'gmail', 'whatsapp'). It is informational — the generator reads
+  // 'gmail'). It is informational — the generator reads
   // body_md and does not branch on source — but it gives audit + a
   // future invalidation knob (e.g. refetch when Gmail sync resumes).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (10);
@@ -956,9 +959,10 @@ export class MailStateDb {
 
   /**
    * Insert or update a mail account. Idempotent on the id. Reserved
-   * channel prefixes (`whatsapp:`, `telegram:`) are rejected — those
-   * namespaces belong to inbox_items polymorphic account_id values
-   * introduced in migration v9 and must not collide with real mail
+   * channel prefixes (currently empty — see RESERVED_ACCOUNT_PREFIXES)
+   * are rejected — those namespaces belong to inbox_items polymorphic
+   * account_id values introduced in migration v9 and must not collide
+   * with real mail
    * account ids.
    * Returns the persisted shape.
    */
@@ -1043,8 +1047,8 @@ export class MailStateDb {
   /**
    * Remove an account row plus its dependent inbox rows. The v9 migration
    * dropped the FK from inbox_items / inbox_rules onto mail_accounts to
-   * accommodate WhatsApp pseudo-accounts; cascade is now an application
-   * invariant we enforce here. Dedup state (processed_mail_messages,
+   * accommodate non-mail pseudo-account channels; cascade is now an
+   * application invariant we enforce here. Dedup state (processed_mail_messages,
    * mail_followups) is left intact — caller decides whether to forget it.
    */
   deleteAccount(id: string): boolean {

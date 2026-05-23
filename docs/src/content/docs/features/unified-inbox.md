@@ -7,7 +7,7 @@ sidebar:
 
 The **Unified Inbox** (`/app/inbox`) is lynox's primary email surface. Instead of a flat "all mail" list, every incoming message is classified into one of three zones the moment it arrives, so the inbox you open already reflects what needs you, what doesn't, and what's waiting for a reply.
 
-WhatsApp Business messages join the same inbox when the WhatsApp integration is connected — same zones, same drafts, same reminders. The "Unified" in the name is about merging channels under one triage model, not about a separate WhatsApp UI.
+Currently the Unified Inbox only ships the email channel. The "Unified" in the name refers to the classifier-driven triage model itself — additional channels are under evaluation and will rejoin the inbox under the same zones/drafts/reminders model once their end-to-end test coverage is in place.
 
 :::tip[Default off — flip the flag]
 The Unified Inbox is gated behind a feature flag while the classifier graduates. Set `LYNOX_FEATURE_UNIFIED_INBOX=true` (or flip it in `~/.lynox/config.json`) to enable. Self-hosted users see no UI changes until then; mail still lands in the legacy mail view.

@@ -1,7 +1,8 @@
-// Account ids are either mail-account cuids or `whatsapp:<phoneNumberId>`
-// pseudo-ids set by the WA adapter. Both are opaque to the UI — the trailing
-// segment after a colon gives enough visual disambiguation for the inbox
-// surfaces; the full id stays available as a `title` attribute / tooltip.
+// Account ids are mail-account cuids today; future non-mail channels
+// (when reintroduced) carry a `<channel>:<id>` prefix. Both are opaque
+// to the UI — the trailing segment after a colon gives enough visual
+// disambiguation for the inbox surfaces; the full id stays available
+// as a `title` attribute / tooltip.
 
 export function accountShortLabel(accountId: string): string {
 	const colonIdx = accountId.indexOf(':');

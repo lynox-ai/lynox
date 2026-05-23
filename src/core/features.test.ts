@@ -1,13 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './features.js';
-import type { FeatureFlag } from './features.js';
 
 describe('features', () => {
   const savedEnv: Record<string, string | undefined> = {};
   const envVars = [
     'LYNOX_FEATURE_TRIGGERS',
     'LYNOX_FEATURE_PLUGINS',
-    'LYNOX_FEATURE_WHATSAPP_INBOX',
     'LYNOX_FEATURE_CUSTOM',
   ];
 
@@ -52,12 +50,6 @@ describe('features', () => {
 
     it('returns false for unknown flag', () => {
       expect(isFeatureEnabled('nonexistent')).toBe(false);
-    });
-
-    it('whatsapp-inbox defaults off (Phase 0 pilot gating)', () => {
-      expect(isFeatureEnabled('whatsapp-inbox')).toBe(false);
-      process.env['LYNOX_FEATURE_WHATSAPP_INBOX'] = '1';
-      expect(isFeatureEnabled('whatsapp-inbox')).toBe(true);
     });
   });
 

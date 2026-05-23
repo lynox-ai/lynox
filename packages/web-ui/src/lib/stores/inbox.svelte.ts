@@ -35,7 +35,7 @@ export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
  * over all buckets. Phase 4 replaces this with first-class `pending`.
  */
 export type InboxZone = InboxBucket | 'snoozed';
-export type InboxChannel = 'email' | 'whatsapp';
+export type InboxChannel = 'email';
 export type InboxUserAction = 'archived' | 'replied' | 'snoozed' | 'unhandled';
 
 export interface InboxItem {

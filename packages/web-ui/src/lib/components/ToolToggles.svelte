@@ -34,7 +34,6 @@
 	// first; falls through to 'other' for tools the registry adds later.
 	const CATEGORY_RULES: Array<{ match: (n: string) => boolean; key: string; labelKey: string }> = [
 		{ match: (n) => n.startsWith('mail_'),                key: 'communication',  labelKey: 'tools.category.communication' },
-		{ match: (n) => n === 'whatsapp',                     key: 'communication',  labelKey: 'tools.category.communication' },
 		{ match: (n) => n.startsWith('google_'),              key: 'google',         labelKey: 'tools.category.google' },
 		{ match: (n) => n === 'web_research' || n === 'http_request', key: 'web',   labelKey: 'tools.category.web' },
 		{ match: (n) => n === 'read_file' || n === 'write_file' || n === 'batch_files', key: 'files', labelKey: 'tools.category.files' },

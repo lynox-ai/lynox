@@ -19,7 +19,6 @@ describe('assertChannelTarget', () => {
       '/app/settings/channels',
       '/app/settings/channels/mail',
       '/app/settings/channels/mail/rules',
-      '/app/settings/channels/whatsapp',
       '/app/settings/channels/google',
       '/app/settings/channels/notifications',
       '/app/settings/channels/search',

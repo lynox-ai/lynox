@@ -14,7 +14,7 @@ The Web UI is where you interact with lynox day-to-day. It runs at [localhost:30
 The left side of the screen is an **icon rail**. Each icon opens a hub:
 
 - **Chat** — the conversation surface (default view)
-- **Inbox** — the [Unified Inbox](/features/unified-inbox/) for mail and WhatsApp triage
+- **Inbox** — the [Unified Inbox](/features/unified-inbox/) for email triage (additional channels under evaluation)
 - **Automation** — workflows, scheduled reminders, and the AutomationHub tab
 - **Intelligence** — memory, knowledge graph, CRM contacts and deals
 - **Artefakte** — files, code, and other outputs lynox has produced
@@ -113,7 +113,7 @@ Access via the gear icon or navigate to `/app/settings/`.
 | **Mobile Access** | QR code to connect your phone — scan once, auto-login |
 | **Config** | Model selection, cost limits, greeting, memory settings |
 | **Keys** | Manage your encrypted vault — API keys and secrets. Secrets can also be added via the secure `ask_secret` dialog in chat |
-| **Integrations** | Connect Mail (IMAP/SMTP), Google Workspace, WhatsApp |
+| **Integrations** | Connect Mail (IMAP/SMTP), Google Workspace |
 | **APIs** | REST API profiles for external services |
 | **Data** | Browse structured data collections |
 | **Tasks** | Manage scheduled background tasks |

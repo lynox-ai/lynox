@@ -50,12 +50,6 @@ export interface InboxApiDeps {
    */
   providerResolver?: ((accountId: string) => import('../mail/provider.js').MailProvider | null) | undefined;
   /**
-   * WhatsApp message store. Used by `handleRefreshItemBody` to
-   * concatenate recent thread messages for WA items. Absent when the
-   * `whatsapp-inbox` flag is off — handler then returns 503 for WA.
-   */
-  whatsappStore?: import('./body-refresh.js').WhatsAppMessageStore | undefined;
-  /**
    * Full mail context — `handleSendInboxReply` needs the registry +
    * follow-up state-db that `sendMail` reaches through. Absent on
    * instances without a vault/mail account; send then 503s.
@@ -1072,9 +1066,8 @@ export async function handleGenerateDraft(
 /**
  * Pull the full mail body from the provider and overwrite the cached
  * snippet for an item. Does NOT touch the draft — generation/edit
- * proceeds normally afterward, just with richer context. Routes
- * on `item.channel`: email → MailProvider list+fetch, whatsapp →
- * WhatsAppStateDb thread-message concat.
+ * proceeds normally afterward, just with richer context. Email only —
+ * other channels (when reintroduced) need their own refresh adapter.
  */
 export async function handleRefreshItemBody(
   deps: InboxApiDeps,
@@ -1082,44 +1075,28 @@ export async function handleRefreshItemBody(
 ): Promise<ApiResponse> {
   const item = deps.state.getItem(itemId);
   if (!item) return notFound('item');
-  const { refreshItemBody, refreshWhatsappItemBody } = await import('./body-refresh.js');
-  let result;
-  if (item.channel === 'email') {
-    if (!deps.providerResolver) return unavailable('mail provider registry not wired');
-    const provider = deps.providerResolver(item.accountId);
-    if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
-    result = await refreshItemBody({
-      provider,
-      state: deps.state,
-      item: {
-        id: item.id,
-        accountId: item.accountId,
-        threadKey: item.threadKey,
-        channel: item.channel,
-        // v11 metadata narrows the IMAP search to ±7d around the known date
-        // and lets us match the envelope by Message-ID directly instead of
-        // reconstructing the threadKey across providers.
-        ...(item.mailDate !== undefined ? { mailDate: item.mailDate } : {}),
-        ...(item.messageId !== undefined && item.messageId !== '' ? { messageId: item.messageId } : {}),
-        // Subject feeds the sensitive-content masker (OTP keyword detection).
-        ...(item.subject !== undefined && item.subject !== '' ? { subject: item.subject } : {}),
-      },
-      ...(deps.sensitiveMode !== undefined ? { sensitiveMode: deps.sensitiveMode } : {}),
-    });
-  } else {
-    if (!deps.whatsappStore) return unavailable('whatsapp message store not wired');
-    result = await refreshWhatsappItemBody({
-      waState: deps.whatsappStore,
-      state: deps.state,
-      item: {
-        id: item.id,
-        threadKey: item.threadKey,
-        channel: item.channel,
-        ...(item.subject !== undefined && item.subject !== '' ? { subject: item.subject } : {}),
-      },
-      ...(deps.sensitiveMode !== undefined ? { sensitiveMode: deps.sensitiveMode } : {}),
-    });
-  }
+  const { refreshItemBody } = await import('./body-refresh.js');
+  if (!deps.providerResolver) return unavailable('mail provider registry not wired');
+  const provider = deps.providerResolver(item.accountId);
+  if (!provider) return unprocessable('mail provider not registered for this account', 'not_registered');
+  const result = await refreshItemBody({
+    provider,
+    state: deps.state,
+    item: {
+      id: item.id,
+      accountId: item.accountId,
+      threadKey: item.threadKey,
+      channel: item.channel,
+      // v11 metadata narrows the IMAP search to ±7d around the known date
+      // and lets us match the envelope by Message-ID directly instead of
+      // reconstructing the threadKey across providers.
+      ...(item.mailDate !== undefined ? { mailDate: item.mailDate } : {}),
+      ...(item.messageId !== undefined && item.messageId !== '' ? { messageId: item.messageId } : {}),
+      // Subject feeds the sensitive-content masker (OTP keyword detection).
+      ...(item.subject !== undefined && item.subject !== '' ? { subject: item.subject } : {}),
+    },
+    ...(deps.sensitiveMode !== undefined ? { sensitiveMode: deps.sensitiveMode } : {}),
+  });
   if (!result.ok) {
     switch (result.reason.kind) {
       case 'not_found':
@@ -1149,9 +1126,8 @@ export async function handleRefreshItemBody(
  * the user confirmation; no agent.promptUser modal — the textarea
  * already showed the body for review.
  *
- * Routes only the email channel. WhatsApp send is a follow-up slice
- * (needs the WA provider's own outbound API + recipient-from-phone
- * resolution).
+ * Email channel only. Additional inbound channels (when reintroduced)
+ * will need their own outbound adapter.
  */
 export interface SendInboxReplyBody {
   /**

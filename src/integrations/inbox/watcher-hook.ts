@@ -26,12 +26,11 @@ import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from
 import { envelopeToItemInputFields, type InboxStateDb, type ThreadMessageInput } from './state.js';
 
 /**
- * Pseudo-accounts for non-mail channels carry an `<channel>:<id>` prefix
- * in their accountId (e.g. `whatsapp:default`). Real mail account ids
- * never start with `<channel>:` so the prefix check is unambiguous.
+ * Channel discriminator. Currently only `email` ships — other channels
+ * (when reintroduced) will be pseudo-accounts with a `<channel>:<id>` prefix
+ * and this helper will route them accordingly.
  */
-function channelFromAccountId(accountId: string): InboxChannel {
-  if (accountId.startsWith('whatsapp:')) return 'whatsapp';
+function channelFromAccountId(_accountId: string): InboxChannel {
   return 'email';
 }
 

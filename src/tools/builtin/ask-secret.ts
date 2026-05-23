@@ -63,7 +63,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       case 'managed_blocked':
         // Post-2026-05-18 inversion: this outcome now ONLY fires for the
         // narrow set of admin-only infrastructure secrets (LYNOX_*, MAIL_
-        // ACCOUNT_*, WHATSAPP_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*, etc.) —
+        // ACCOUNT_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_*, etc.) —
         // generic integration keys (SHOPIFY_*, STRIPE_*, etc.) are now
         // user-writable on managed by default. So the agent should
         // explain "this specific name maps to engine/channel infrastructure

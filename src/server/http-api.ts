@@ -184,7 +184,6 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  *  - `MANAGED_*`      CP-managed control-plane secrets
  *  - `MAIL_ACCOUNT_*` channel-managed via Mail settings UI (writes race the
  *                     dedicated mail-account form — they have their own path)
- *  - `WHATSAPP_*`     channel-managed via WhatsApp integration
  *  - `GOOGLE_OAUTH_*` channel-managed via Google OAuth flow
  *  - `SMTP_*`/`IMAP_*` engine in/outbound mail server credentials
  *
@@ -195,7 +194,6 @@ const INFRA_ADMIN_ONLY_PATTERNS: ReadonlyArray<RegExp> = [
   /^LYNOX_/,
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
-  /^WHATSAPP_/,
   /^GOOGLE_OAUTH_/,
   /^SMTP_/,
   /^IMAP_/,
@@ -336,7 +334,7 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
  * Predict whether an ask_secret call for the given name will be rejected by
  * the vault PUT (managed tier + name matches an admin-only infrastructure
  * pattern). Almost all agent-issued secrets pass — the predicate now fires
- * only for the narrow set of LYNOX_/MANAGED_/MAIL_ACCOUNT_/WHATSAPP_/
+ * only for the narrow set of LYNOX_/MANAGED_/MAIL_ACCOUNT_/
  * GOOGLE_OAUTH_/SMTP_/IMAP_ infrastructure names.
  *
  * Exported so the session.promptSecret wire can short-circuit the UI prompt
@@ -1205,16 +1203,8 @@ export class LynoxHTTPApi {
     // Two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
     // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
     // Migration endpoints accept X-Migration-Token as alternative auth (admin scope).
-    //
-    // Public routes carry their own auth (HMAC signature for webhooks) or expose
-    // no sensitive data (status probes hit before login). Skipping the bearer
-    // requirement for them is the only way Meta + the pre-auth UI can reach them.
-    const isPublicWhatsAppPath =
-      (method === 'GET'  && pathname === '/api/whatsapp/status')   ||
-      (method === 'GET'  && pathname === '/api/webhooks/whatsapp') ||
-      (method === 'POST' && pathname === '/api/webhooks/whatsapp');
     let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
-    if (secret && !isPublicWhatsAppPath) {
+    if (secret) {
       // Migration token auth — grants admin scope for /api/migration/* endpoints only
       const migrationToken = req.headers['x-migration-token'];
       const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';
@@ -3495,237 +3485,6 @@ export class LynoxHTTPApi {
       res.end();
     });
 
-    // ── WhatsApp Business Cloud API (Coexistence Mode, BYOK Phase 0) ──
-
-    // Meta webhook verification GET:
-    //   GET /api/webhooks/whatsapp?hub.mode=subscribe&hub.challenge=X&hub.verify_token=Y
-    // Respond with hub.challenge as plain text if verify_token matches what the
-    // customer configured in their Meta App webhook setup.
-    // Returns 404 when the `whatsapp-inbox` feature flag is off (waCtx is null).
-    this.addStatic('user', 'GET /api/webhooks/whatsapp', async (req, res) => {
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-      if (!waCtx.isConfigured()) {
-        errorResponse(res, 503, 'WhatsApp not configured');
-        return;
-      }
-      const url = new URL(req.url ?? '', 'http://localhost');
-      const mode = url.searchParams.get('hub.mode');
-      const token = url.searchParams.get('hub.verify_token');
-      const challenge = url.searchParams.get('hub.challenge');
-      const expected = waCtx.getWebhookVerifyToken();
-      if (mode !== 'subscribe' || !token || !challenge || token !== expected) {
-        errorResponse(res, 403, 'Verify token mismatch');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(challenge);
-    });
-
-    // Meta webhook event POST — HMAC-verified raw body, dispatched to context.
-    this.addStatic('user', 'POST /api/webhooks/whatsapp', async (req, res, _params, body) => {
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-      if (!waCtx.isConfigured()) {
-        errorResponse(res, 503, 'WhatsApp not configured');
-        return;
-      }
-      const appSecret = waCtx.getAppSecret();
-      if (!appSecret) { errorResponse(res, 503, 'WhatsApp app secret missing'); return; }
-
-      const raw = (req as IncomingMessage & { rawBody?: string }).rawBody ?? '';
-      const signature = (req.headers['x-hub-signature-256'] as string | undefined) ?? null;
-      const { verifySignature } = await import('../integrations/whatsapp/signature.js');
-      if (!verifySignature(raw, signature, appSecret)) {
-        errorResponse(res, 401, 'Invalid signature');
-        return;
-      }
-
-      try {
-        const { dispatchWebhook } = await import('../integrations/whatsapp/webhook.js');
-        const result = dispatchWebhook(waCtx, body);
-        jsonResponse(res, 200, { ok: true, ...result });
-      } catch (err) {
-        // Return 200 anyway — Meta retries on non-2xx and we don't want a
-        // poison payload to spam us. Internal error is logged server-side.
-        console.error('[whatsapp] webhook dispatch failed:', err);
-        jsonResponse(res, 200, { ok: false });
-      }
-    });
-
-    // Settings API — status snapshot for the UI.
-    // `featureEnabled` = the `whatsapp-inbox` feature flag is on in this instance.
-    // `available` = the backend context initialized (flag on AND vault present).
-    // When featureEnabled is false, the UI hides all WhatsApp surfaces entirely.
-    this.addStatic('user', 'GET /api/whatsapp/status', async (_req, res) => {
-      const { isFeatureEnabled } = await import('../core/features.js');
-      const featureEnabled = isFeatureEnabled('whatsapp-inbox');
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { jsonResponse(res, 200, { featureEnabled, available: false, configured: false }); return; }
-      jsonResponse(res, 200, {
-        featureEnabled,
-        available: true,
-        configured: waCtx.isConfigured(),
-      });
-    });
-
-    // Save BYOK credentials (admin-scope in requiresAdmin() — see below).
-    this.addStatic('admin', 'POST /api/whatsapp/credentials', async (_req, res, _params, body) => {
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-      const b = body as Record<string, unknown> | null;
-      if (!b) { errorResponse(res, 400, 'Body required'); return; }
-      const accessToken = typeof b['accessToken'] === 'string' ? b['accessToken'].trim() : '';
-      const wabaId = typeof b['wabaId'] === 'string' ? b['wabaId'].trim() : '';
-      const phoneNumberId = typeof b['phoneNumberId'] === 'string' ? b['phoneNumberId'].trim() : '';
-      const appSecret = typeof b['appSecret'] === 'string' ? b['appSecret'].trim() : '';
-      const webhookVerifyToken = typeof b['webhookVerifyToken'] === 'string' ? b['webhookVerifyToken'].trim() : '';
-      if (!accessToken || !wabaId || !phoneNumberId || !appSecret || !webhookVerifyToken) {
-        errorResponse(res, 400, 'All fields required: accessToken, wabaId, phoneNumberId, appSecret, webhookVerifyToken');
-        return;
-      }
-      try {
-        waCtx.saveCredentials({ accessToken, wabaId, phoneNumberId, appSecret, webhookVerifyToken });
-      } catch (err) {
-        errorResponse(res, 500, err instanceof Error ? err.message : 'Failed to save credentials');
-        return;
-      }
-      // Probe Meta for a sanity check (not fatal — network hiccups shouldn't block save).
-      const client = waCtx.getClient();
-      let verified: { displayPhoneNumber: string; verifiedName: string | null } | null = null;
-      let probeError: string | null = null;
-      if (client) {
-        try {
-          verified = await client.verifyCredentials();
-        } catch (err) {
-          probeError = err instanceof Error ? err.message : String(err);
-        }
-      }
-      jsonResponse(res, 200, { saved: true, verified, probeError });
-    });
-
-    this.addStatic('admin', 'DELETE /api/whatsapp/credentials', async (_req, res) => {
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-      waCtx.clearCredentials();
-      jsonResponse(res, 200, { cleared: true });
-    });
-
-    // Inbox API — for the Web UI inbox view.
-    this.addStatic('user', 'GET /api/whatsapp/threads', async (req, res) => {
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-      const url = new URL(req.url ?? '', 'http://localhost');
-      const limitParam = parseInt(url.searchParams.get('limit') ?? '50', 10);
-      const limit = Number.isFinite(limitParam) ? Math.max(1, Math.min(limitParam, 200)) : 50;
-      const threads = waCtx.getStateDb().listThreadSummaries(limit);
-      jsonResponse(res, 200, { threads });
-    });
-
-    this.dynamicRoutes.push({
-      method: 'GET',
-      scope: 'user',
-      pattern: /^\/api\/whatsapp\/threads\/([^/]+)$/,
-      paramNames: ['threadId'],
-      handler: async (_req, res, params) => {
-        const waCtx = this.engine?.getWhatsAppContext();
-        if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-        const threadId = params['threadId'] ?? '';
-        const messages = waCtx.getStateDb().getMessagesForThread(threadId, 200);
-        const phone = threadId.replace(/^whatsapp-/, '');
-        const contact = waCtx.getStateDb().getContact(phone);
-        jsonResponse(res, 200, { threadId, contact, messages });
-      },
-    });
-
-    this.dynamicRoutes.push({
-      method: 'POST',
-      scope: 'user',
-      pattern: /^\/api\/whatsapp\/threads\/([^/]+)\/read$/,
-      paramNames: ['threadId'],
-      handler: async (_req, res, params) => {
-        const waCtx = this.engine?.getWhatsAppContext();
-        if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-        if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
-        const threadId = params['threadId'] ?? '';
-        waCtx.getStateDb().markThreadRead(threadId);
-        jsonResponse(res, 200, { ok: true });
-      },
-    });
-
-    // Send a message — UI calls this after user approves a draft. No engine-
-    // level approval gate here because the UI IS the approval UI; the engine
-    // tool handler enforces it for LLM-initiated sends.
-    // Optional `replyTo` carries the wa_id of the message being quoted — Meta
-    // renders it as a tappable preview above the reply for the recipient.
-    this.addStatic('user', 'POST /api/whatsapp/send', async (_req, res, _params, body) => {
-      const waCtx = this.engine?.getWhatsAppContext();
-      if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-      if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
-      const b = body as Record<string, unknown> | null;
-      const to = b && typeof b['to'] === 'string' ? b['to'].replace(/[^0-9]/g, '') : '';
-      const bodyText = b && typeof b['body'] === 'string' ? b['body'].trim() : '';
-      const replyTo = b && typeof b['replyTo'] === 'string' ? b['replyTo'].trim() : '';
-      if (!to || !bodyText) { errorResponse(res, 400, 'Fields "to" and "body" required'); return; }
-      const client = waCtx.getClient();
-      if (!client) { errorResponse(res, 503, 'WhatsApp client not initialized'); return; }
-      try {
-        const { threadIdForPhone } = await import('../integrations/whatsapp/webhook-parser.js');
-        const result = await client.sendText(to, bodyText, replyTo || undefined);
-        waCtx.getStateDb().upsertMessage({
-          id: result.messageId,
-          threadId: threadIdForPhone(to),
-          phoneE164: to,
-          direction: 'outbound',
-          kind: 'text',
-          text: bodyText,
-          mediaId: null,
-          transcript: null,
-          mimeType: null,
-          timestamp: Math.floor(Date.now() / 1000),
-          isEcho: false,
-          rawJson: JSON.stringify({ source: 'lynox-ui', messageId: result.messageId }),
-        });
-        jsonResponse(res, 200, { messageId: result.messageId });
-      } catch (err) {
-        errorResponse(res, 502, err instanceof Error ? err.message : 'Send failed');
-      }
-    });
-
-    // Media passthrough for voice-note playback in the UI.
-    // Meta media URLs expire after ~5 min; this endpoint re-resolves the
-    // current URL via the access token and streams the audio bytes. Only the
-    // message must exist locally AND have a media-id — the message ID is
-    // guessed-resistant (Meta's wa_id is a long opaque string).
-    this.dynamicRoutes.push({
-      method: 'GET',
-      scope: 'user',
-      pattern: /^\/api\/whatsapp\/media\/([^/]+)$/,
-      paramNames: ['messageId'],
-      handler: async (_req, res, params) => {
-        const waCtx = this.engine?.getWhatsAppContext();
-        if (!waCtx) { errorResponse(res, 404, 'Not found'); return; }
-        if (!waCtx.isConfigured()) { errorResponse(res, 503, 'WhatsApp not configured'); return; }
-        const messageId = params['messageId'] ?? '';
-        const msg = waCtx.getStateDb().getMessageById(messageId);
-        if (!msg || !msg.mediaId) { errorResponse(res, 404, 'Media not found'); return; }
-        const client = waCtx.getClient();
-        if (!client) { errorResponse(res, 503, 'WhatsApp client not initialized'); return; }
-        try {
-          const { buffer, mimeType } = await client.fetchMedia(msg.mediaId);
-          res.writeHead(200, {
-            'Content-Type': mimeType,
-            'Content-Length': buffer.byteLength,
-            // Media-id URLs are short-lived; don't cache client-side past the session.
-            'Cache-Control': 'private, max-age=300',
-          });
-          res.end(buffer);
-        } catch (err) {
-          errorResponse(res, 502, err instanceof Error ? err.message : 'Media fetch failed');
-        }
-      },
-    });
-
     // ── Push Notifications ──
 
     this.addStatic('user', 'GET /api/push/vapid-key', async (_req, res) => {
@@ -4308,18 +4067,11 @@ export class LynoxHTTPApi {
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       // Mail provider lookup for the body-refresh handler. The mail
-      // context exposes the registry; when absent (WA-only instances
-      // or pre-vault startup), refresh returns 503 for email items.
+      // context exposes the registry; when absent (pre-vault startup),
+      // refresh returns 503 for email items.
       const mailCtx = engine.getMailContext();
       if (mailCtx !== null) {
         deps.providerResolver = (accountId: string) => mailCtx.registry.get(accountId);
-      }
-      // WhatsApp message store for WA body refresh. Absent on
-      // instances without the `whatsapp-inbox` flag — refresh then
-      // 503s for WA items.
-      const waCtx = engine.getWhatsAppContext();
-      if (waCtx !== null) {
-        deps.whatsappStore = waCtx.getStateDb();
       }
       // MailContext for handleSendInboxReply — exposes registry +
       // follow-up state DB to the shared sendMail pipeline.
