@@ -450,7 +450,13 @@ export async function dispatchOrchestratedPipeline(
     return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
-  if (planned.executed) {
+  // Saved workflows (`template:true`) are reusable by definition — never
+  // mark them executed (T2-W1). Without this guard, dispatching a saved
+  // template through the orchestrated runner consumed the template after
+  // the first run.
+  const isTemplate = planned.template === true;
+
+  if (!isTemplate && planned.executed) {
     return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
@@ -467,7 +473,7 @@ export async function dispatchOrchestratedPipeline(
   try {
     const manifest = buildManifest(planned.name, steps, 'stop');
     validateManifest(manifest);
-    planned.executed = true;
+    if (!isTemplate) planned.executed = true;
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const state = await runManifest(manifest, deps.config, {
@@ -482,11 +488,13 @@ export async function dispatchOrchestratedPipeline(
 
     executedStates.set(planned.id, { manifest, state });
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
-    try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
+    if (!isTemplate) {
+      try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
+    }
 
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
-    planned.executed = false; // Allow retry on validation errors
+    if (!isTemplate) planned.executed = false; // Allow retry on validation errors
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
@@ -596,7 +604,12 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
   }
 
-  if (planned.executed) {
+  // Saved workflows (`template:true`) are reusable by definition — skip the
+  // executed-guard, the executed=true write, and the markPipelineExecuted
+  // call (T2-W1). Mirrors the guard `runSavedWorkflow` already enforces.
+  const isTemplate = planned.template === true;
+
+  if (!isTemplate && planned.executed) {
     return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
@@ -624,7 +637,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     );
 
     validateManifest(manifest);
-    planned.executed = true;
+    if (!isTemplate) planned.executed = true;
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const state = await runManifest(manifest, deps.config, {
@@ -639,11 +652,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     executedStates.set(planned.id, { manifest, state });
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
-    try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
+    if (!isTemplate) {
+      try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
+    }
 
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
-    planned.executed = false; // Allow retry on validation errors
+    if (!isTemplate) planned.executed = false; // Allow retry on validation errors
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }

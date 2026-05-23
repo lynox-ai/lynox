@@ -29,12 +29,14 @@ import {
   storePipeline,
   getPipeline,
   runSavedWorkflow,
+  dispatchOrchestratedPipeline,
   forgetPipeline,
   _resetPipelineStore,
   _summarizeStepOutput,
 } from './pipeline.js';
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
+import type { RunHistory } from '../../core/run-history.js';
 
 const mockConfig: LynoxUserConfig = {
   api_key: 'test-key',
@@ -873,5 +875,150 @@ describe('_summarizeStepOutput', () => {
     const summary = _summarizeStepOutput(long);
     expect(summary.length).toBe(160);
     expect(summary.endsWith('…')).toBe(true);
+  });
+});
+
+// PRD-HN-LAUNCH-HARDENING T2-W1 — saved-workflow templates must never be
+// consumed by `executePipelineById` (the `run_workflow workflow_id:` path)
+// or by `dispatchOrchestratedPipeline` (the plan_task O7 auto-trigger).
+// `runSavedWorkflow` is already guarded; see the dedicated suite above.
+describe('template-integrity guard (T2-W1)', () => {
+  const markExecutedSpy = vi.fn();
+  const fakeRunHistory = {
+    getPlannedPipeline: () => undefined,
+    insertPipelineRun: vi.fn(),
+    insertPipelineStepResult: vi.fn(),
+    markPipelineExecuted: markExecutedSpy,
+  };
+
+  function seedTemplate(id = 'tpl-1'): string {
+    storePipeline(id, {
+      id,
+      name: 'Saved Template',
+      goal: 'reusable workflow',
+      steps: [{ id: 'one', task: 'do one thing' }],
+      reasoning: 'saved',
+      estimatedCost: 0.01,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'orchestrated',
+      template: true,
+      mode: 'autonomous',
+    });
+    return id;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  function makeAgentWithRunHistory(): IAgent {
+    const agent = makePipelineAgent();
+    (agent.toolContext as Record<string, unknown>)['runHistory'] =
+      fakeRunHistory as unknown as RunHistory | null;
+    return agent;
+  }
+
+  describe('executePipelineById (run_workflow workflow_id:)', () => {
+    it('does NOT mark a template as executed', async () => {
+      const agent = makeAgentWithRunHistory();
+      const id = seedTemplate();
+      mockRunManifest.mockResolvedValue(makeRunState());
+
+      // First run via the run_workflow tool.
+      const first = await runWorkflowTool.handler({ workflow_id: id }, agent);
+      expect(first).not.toMatch(/Error/);
+      // Three-part invariant: in-memory flag stays false, markPipelineExecuted
+      // was NOT called, and a second run is still permitted (no "already
+      // executed" error).
+      expect(getPipeline(id)?.executed).toBe(false);
+      expect(markExecutedSpy).not.toHaveBeenCalled();
+
+      const second = await runWorkflowTool.handler({ workflow_id: id }, agent);
+      expect(second).not.toMatch(/already been executed/);
+      expect(getPipeline(id)?.executed).toBe(false);
+      expect(markExecutedSpy).not.toHaveBeenCalled();
+    });
+
+    it('still marks a non-template (regular planned pipeline) executed', async () => {
+      const agent = makeAgentWithRunHistory();
+      const id = seedStoredPipeline(); // template: false
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+      const first = await runWorkflowTool.handler({ workflow_id: id }, agent);
+      expect(first).not.toMatch(/Error/);
+      expect(getPipeline(id)?.executed).toBe(true);
+      expect(markExecutedSpy).toHaveBeenCalledTimes(1);
+
+      // Second run is now refused — proves the guard only relaxes for templates.
+      const second = await runWorkflowTool.handler({ workflow_id: id }, agent);
+      expect(second).toMatch(/already been executed/);
+    });
+  });
+
+  describe('dispatchOrchestratedPipeline (plan_task O7 auto-trigger)', () => {
+    it('does NOT mark a template as executed', async () => {
+      const id = seedTemplate('tpl-disp-1');
+      const planned = getPipeline(id)!;
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+      const result = await dispatchOrchestratedPipeline(planned, {
+        config: mockConfig,
+        tools: mockTools,
+        streamHandler: null,
+        runHistory: fakeRunHistory as never,
+      });
+      expect(result).not.toMatch(/Error/);
+      expect(planned.executed).toBe(false);
+      expect(markExecutedSpy).not.toHaveBeenCalled();
+
+      // Re-dispatching the same template must not be blocked.
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      const second = await dispatchOrchestratedPipeline(planned, {
+        config: mockConfig,
+        tools: mockTools,
+        streamHandler: null,
+        runHistory: fakeRunHistory as never,
+      });
+      expect(second).not.toMatch(/already been executed/);
+    });
+
+    it('still marks a non-template planned pipeline executed', async () => {
+      const id = 'disp-regular';
+      storePipeline(id, {
+        id,
+        name: 'regular',
+        goal: 'g',
+        steps: [{ id: 's', task: 't' }],
+        reasoning: 'r',
+        estimatedCost: 0,
+        createdAt: new Date().toISOString(),
+        executed: false,
+        executionMode: 'orchestrated',
+        template: false,
+        mode: 'autonomous',
+      });
+      const planned = getPipeline(id)!;
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+      await dispatchOrchestratedPipeline(planned, {
+        config: mockConfig,
+        tools: mockTools,
+        streamHandler: null,
+        runHistory: fakeRunHistory as never,
+      });
+      expect(planned.executed).toBe(true);
+      expect(markExecutedSpy).toHaveBeenCalledTimes(1);
+
+      const second = await dispatchOrchestratedPipeline(planned, {
+        config: mockConfig,
+        tools: mockTools,
+        streamHandler: null,
+        runHistory: fakeRunHistory as never,
+      });
+      expect(second).toMatch(/already been executed/);
+    });
   });
 });
