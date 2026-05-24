@@ -9,6 +9,11 @@
  * OpenAI-compatible endpoint and translates the SSE response on the fly.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { randomUUID, randomBytes } from 'node:crypto';
+
 import type {
   BetaRawMessageStreamEvent,
   BetaRawContentBlockStartEvent,
@@ -16,6 +21,81 @@ import type {
   BetaRawMessageDeltaEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type Anthropic from '@anthropic-ai/sdk';
+
+// ── Per-tenant cache-key salt ───────────────────────────────────
+//
+// Mistral's prompt_cache_key is a tenant-side routing hint. Without a
+// salt, two tenants sharing one MISTRAL_MANAGED_API_KEY (managed-tier
+// reality) and using the same logical key (e.g. "bench-x-y") would
+// route to the same cache partition → cross-tenant key collision.
+//
+// Salt source: persistent UUID at ${LYNOX_DIR}/.cache-salt. Per-tenant
+// because LYNOX_DIR is per-tenant (managed: /var/lib/lynox/<id>;
+// self-host: ~/.lynox). 16 hex chars → 64-bit collision space.
+// Fallback for read-only-FS: in-memory crypto.randomBytes (still
+// cross-tenant-safe, just loses cache benefit across restarts).
+//
+// Salt only appears in outgoing request bodies to api.mistral.ai —
+// no console.log/debug-trace prints it.
+
+// Module-scoped salt: one process = one tenant = one salt
+// (per feedback_one_engine_per_tenant). Never refactor into an instance
+// field — adapter instances per tenant don't exist in lynox's architecture.
+let _cacheKeySaltMemo: string | undefined;
+let _cacheSaltWarnedReadonly = false;
+const SALT_HEX_RE = /^[0-9a-f]{16}$/;
+
+export function getCacheKeySalt(): string {
+  if (_cacheKeySaltMemo) return _cacheKeySaltMemo;
+  const lynoxDir = process.env['LYNOX_DIR'] ?? path.join(os.homedir(), '.lynox');
+  const saltPath = path.join(lynoxDir, '.cache-salt');
+  try {
+    if (fs.existsSync(saltPath)) {
+      const content = fs.readFileSync(saltPath, 'utf-8').trim();
+      // Validate format — manual edit/corruption could otherwise leak
+      // arbitrary bytes into the outgoing Mistral routing key.
+      if (SALT_HEX_RE.test(content)) {
+        _cacheKeySaltMemo = content;
+        return _cacheKeySaltMemo;
+      }
+      // Bad content → fall through to regenerate.
+    }
+    fs.mkdirSync(lynoxDir, { recursive: true });
+    const newSalt = randomUUID().replace(/-/g, '').slice(0, 16);
+    try {
+      // `wx` = exclusive-create. If a concurrent first-caller wins the
+      // race, re-read their salt instead of overwriting → memo stays in
+      // sync with disk for the whole process.
+      fs.writeFileSync(saltPath, newSalt, { mode: 0o600, flag: 'wx' });
+      _cacheKeySaltMemo = newSalt;
+    } catch (writeErr) {
+      const code = (writeErr as { code?: string }).code;
+      if (code === 'EEXIST') {
+        const content = fs.readFileSync(saltPath, 'utf-8').trim();
+        if (SALT_HEX_RE.test(content)) {
+          _cacheKeySaltMemo = content;
+          return _cacheKeySaltMemo;
+        }
+      }
+      throw writeErr;
+    }
+    return _cacheKeySaltMemo;
+  } catch {
+    if (!_cacheSaltWarnedReadonly) {
+      // eslint-disable-next-line no-console
+      console.warn('[openai-adapter] cache-salt persist failed (read-only FS?); using in-memory salt — cache benefit lost on restart.');
+      _cacheSaltWarnedReadonly = true;
+    }
+    _cacheKeySaltMemo = randomBytes(8).toString('hex');
+    return _cacheKeySaltMemo;
+  }
+}
+
+/** @internal Test-only reset. */
+export function _resetCacheKeySaltMemo(): void {
+  _cacheKeySaltMemo = undefined;
+  _cacheSaltWarnedReadonly = false;
+}
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -51,7 +131,11 @@ interface OpenAIStreamChunk {
     };
     finish_reason?: string | null | undefined;
   }>;
-  usage?: { prompt_tokens?: number | undefined; completion_tokens?: number | undefined } | undefined;
+  usage?: {
+    prompt_tokens?: number | undefined;
+    completion_tokens?: number | undefined;
+    prompt_tokens_details?: { cached_tokens?: number | undefined } | undefined;
+  } | undefined;
 }
 
 // ── Request Translation ─────────────────────────────────────────
@@ -236,6 +320,7 @@ async function* translateStream(
   const toolBlockMap = new Map<number, number>();
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let totalCachedTokens = 0;
 
   try {
     while (true) {
@@ -258,6 +343,7 @@ async function* translateStream(
         if (chunk.usage) {
           totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
           totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
+          totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
         }
 
         const choice = chunk.choices[0];
@@ -347,10 +433,12 @@ async function* translateStream(
             type: 'message_delta',
             delta: { stop_reason: stopReason, stop_sequence: null },
             usage: {
-              input_tokens: totalInputTokens,
+              // Anthropic semantics: input_tokens excludes cached.
+              // Mistral SSE returns prompt_tokens including cached → subtract.
+              input_tokens: Math.max(0, totalInputTokens - totalCachedTokens),
               output_tokens: totalOutputTokens,
               cache_creation_input_tokens: null,
-              cache_read_input_tokens: null,
+              cache_read_input_tokens: totalCachedTokens || null,
             },
           } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
 
@@ -372,11 +460,19 @@ export class OpenAIAdapter {
   private baseURL: string;
   private apiKeyProvider: ApiKeyProvider;
   private modelId: string;
+  // Precomputed once at construction — Mistral is the only OpenAI-compat
+  // endpoint we forward `prompt_cache_key` to. Hostname-gate is case-
+  // insensitive (DNS is); exact-match prevents subdomain attacks like
+  // `api.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
+  private readonly _isMistralHost: boolean;
 
   constructor(opts: { baseURL: string; apiKey: ApiKeyProvider; modelId: string }) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
     this.apiKeyProvider = opts.apiKey;
     this.modelId = opts.modelId;
+    let isMistral = false;
+    try { isMistral = new URL(this.baseURL).hostname.toLowerCase() === 'api.mistral.ai'; } catch { /* malformed baseURL → gate stays closed */ }
+    this._isMistralHost = isMistral;
   }
 
   private async resolveApiKey(): Promise<string> {
@@ -402,7 +498,7 @@ export class OpenAIAdapter {
           [key: string]: unknown;
         },
         options?: { signal?: AbortSignal | undefined },
-      ): AsyncIterable<BetaRawMessageStreamEvent> & { finalMessage: () => Promise<{ content: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }>; stop_reason: string; usage: { input_tokens: number; output_tokens: number } }> } => {
+      ): AsyncIterable<BetaRawMessageStreamEvent> & { finalMessage: () => Promise<{ content: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }>; stop_reason: string; usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null } }> } => {
         const iterable = this._stream(params, options);
         return {
           [Symbol.asyncIterator]: iterable[Symbol.asyncIterator].bind(iterable),
@@ -413,6 +509,7 @@ export class OpenAIAdapter {
             let stopReason = 'end_turn';
             let inputTokens = 0;
             let outputTokens = 0;
+            let cacheReadTokens: number | null = null;
 
             for await (const event of iterable) {
               if (event.type === 'content_block_start') {
@@ -439,14 +536,17 @@ export class OpenAIAdapter {
                   try { block.input = JSON.parse(json); } catch { block.input = {}; }
                 }
               } else if (event.type === 'message_delta') {
-                const e = event as { delta: { stop_reason?: string }; usage?: { input_tokens?: number; output_tokens?: number } };
+                const e = event as { delta: { stop_reason?: string }; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null } };
                 if (e.delta.stop_reason) stopReason = e.delta.stop_reason;
                 if (e.usage?.input_tokens) inputTokens = e.usage.input_tokens;
                 if (e.usage?.output_tokens) outputTokens = e.usage.output_tokens;
+                if (e.usage?.cache_read_input_tokens !== undefined && e.usage.cache_read_input_tokens !== null) {
+                  cacheReadTokens = e.usage.cache_read_input_tokens;
+                }
               }
             }
 
-            return { content, stop_reason: stopReason, usage: { input_tokens: inputTokens, output_tokens: outputTokens } };
+            return { content, stop_reason: stopReason, usage: { input_tokens: inputTokens, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens } };
           },
         };
       },
@@ -528,6 +628,24 @@ export class OpenAIAdapter {
       // Default to 'auto' when unset or malformed.
       const translated = translateToolChoice(params['tool_choice']);
       body.tool_choice = translated ?? 'auto';
+    }
+
+    // Mistral-native prompt cache: forward prompt_cache_key when caller sets
+    // it AND outgoing endpoint is api.mistral.ai. Hostname-gate keeps the
+    // Mistral-shaped key from leaking into other OpenAI-compat endpoints
+    // (future PRD-OPENAI-NATIVE native cells, etc.). Salt-prefix ensures
+    // cross-tenant safety on shared MISTRAL_MANAGED_API_KEY.
+    //
+    // Length cap + charset gate: prevent runaway keys (Mistral validator
+    // rejects unknown shapes and surfaces them in error logs unredacted)
+    // and avoid bytes that could break JSON/url-encoded paths anywhere
+    // downstream. ASCII alnum + `_-:` is the conservative intersection of
+    // what Mistral docs allow and what's safe across log pipelines.
+    if (this._isMistralHost && typeof params['prompt_cache_key'] === 'string') {
+      const rawKey = params['prompt_cache_key'];
+      if (rawKey.length > 0 && rawKey.length <= 128 && /^[A-Za-z0-9_:-]+$/.test(rawKey)) {
+        body['prompt_cache_key'] = `${getCacheKeySalt()}:${rawKey}`;
+      }
     }
 
     const apiKey = await this.resolveApiKey();

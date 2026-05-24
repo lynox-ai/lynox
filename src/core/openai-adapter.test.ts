@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { OpenAIAdapter } from './openai-adapter.js';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo } from './openai-adapter.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
@@ -716,6 +719,240 @@ describe('OpenAIAdapter', () => {
         expect(parsed.messages[0]!.content).toContain('Block 2');
       } finally {
         server.close();
+      }
+    });
+  });
+
+  // ── Mistral native prompt cache surface ───────────────────────
+  // Spec'd by PRD-MISTRAL-CACHE-SURFACE 2026-05-24. Anthropic-shape semantic
+  // (cache_read_input_tokens as a subset of input_tokens) is shared with
+  // PRD-OPENAI-NATIVE §G1 — keep these assertions identical across both
+  // test surfaces so they cannot drift.
+  describe('mistral prompt cache surface', () => {
+    it('extracts cached_tokens from prompt_tokens_details and applies subset-not-additive semantics', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'cache-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'cache-1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 2000, completion_tokens: 50,
+            prompt_tokens_details: { cached_tokens: 1500 },
+          },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`, apiKey: 'test', modelId: 'm',
+        });
+        const stream = adapter.beta.messages.stream({
+          model: 'm', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }],
+        });
+        const msg = await stream.finalMessage();
+        // Anthropic shape: input_tokens excludes cached, cache_read_input_tokens carries the cached count.
+        expect(msg.usage.input_tokens).toBe(500);
+        expect(msg.usage.cache_read_input_tokens).toBe(1500);
+        expect(msg.usage.output_tokens).toBe(50);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('returns null cache_read_input_tokens when prompt_tokens_details is empty object', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'empty-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'empty-1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: {} },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`, apiKey: 'test', modelId: 'm',
+        });
+        const msg = await adapter.beta.messages.stream({
+          model: 'm', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }],
+        }).finalMessage();
+        expect(msg.usage.input_tokens).toBe(100);
+        expect(msg.usage.cache_read_input_tokens).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('returns null cache_read_input_tokens when prompt_tokens_details missing (backward compat)', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'nc-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'nc-1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 100, completion_tokens: 20 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`, apiKey: 'test', modelId: 'm',
+        });
+        const msg = await adapter.beta.messages.stream({
+          model: 'm', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }],
+        }).finalMessage();
+        expect(msg.usage.input_tokens).toBe(100);
+        expect(msg.usage.cache_read_input_tokens).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('forwards salted prompt_cache_key when outgoing host is api.mistral.ai', async () => {
+      // We can't actually hit api.mistral.ai. Validate the gate via the
+      // helper-exported salt + the request-body builder by spying on fetch.
+      let capturedBody = '';
+      const originalFetch = global.fetch;
+      global.fetch = (async (url: string | URL, init?: { body?: string }) => {
+        capturedBody = (init?.body as string) ?? '';
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              const enc = new TextEncoder();
+              controller.enqueue(enc.encode(sseChunk({
+                id: 'p-1', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 5, completion_tokens: 1 },
+              })));
+              controller.enqueue(enc.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        );
+        void url;
+      }) as typeof global.fetch;
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: 'https://api.mistral.ai/v1', apiKey: 'test', modelId: 'mistral-large-2512',
+        });
+        await adapter.beta.messages.stream({
+          model: 'mistral-large-2512', max_tokens: 50,
+          messages: [{ role: 'user', content: 'x' }],
+          prompt_cache_key: 'bench-test-1',
+        } as Parameters<typeof adapter.beta.messages.stream>[0]).finalMessage();
+        const parsed = JSON.parse(capturedBody) as { prompt_cache_key?: string };
+        expect(parsed.prompt_cache_key).toBeDefined();
+        expect(parsed.prompt_cache_key).toMatch(/^[0-9a-f]{16}:bench-test-1$/);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it('does NOT forward prompt_cache_key when outgoing host is not api.mistral.ai', async () => {
+      let capturedBody = '';
+      const originalFetch = global.fetch;
+      global.fetch = (async (url: string | URL, init?: { body?: string }) => {
+        capturedBody = (init?.body as string) ?? '';
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              const enc = new TextEncoder();
+              controller.enqueue(enc.encode(sseChunk({
+                id: 'p-2', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 5, completion_tokens: 1 },
+              })));
+              controller.enqueue(enc.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        );
+        void url;
+      }) as typeof global.fetch;
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: 'https://api.openai.com/v1', apiKey: 'test', modelId: 'gpt-4',
+        });
+        await adapter.beta.messages.stream({
+          model: 'gpt-4', max_tokens: 50,
+          messages: [{ role: 'user', content: 'x' }],
+          prompt_cache_key: 'bench-test-2',
+        } as Parameters<typeof adapter.beta.messages.stream>[0]).finalMessage();
+        const parsed = JSON.parse(capturedBody) as { prompt_cache_key?: string };
+        expect(parsed.prompt_cache_key).toBeUndefined();
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+  });
+
+  describe('cache-key salt persistence', () => {
+    let tmpLynoxDir: string;
+    let originalLynoxDir: string | undefined;
+
+    beforeEach(() => {
+      _resetCacheKeySaltMemo();
+      tmpLynoxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lynox-test-'));
+      originalLynoxDir = process.env['LYNOX_DIR'];
+      process.env['LYNOX_DIR'] = tmpLynoxDir;
+    });
+
+    afterEach(() => {
+      _resetCacheKeySaltMemo();
+      if (originalLynoxDir === undefined) {
+        delete process.env['LYNOX_DIR'];
+      } else {
+        process.env['LYNOX_DIR'] = originalLynoxDir;
+      }
+      try { fs.rmSync(tmpLynoxDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    it('creates a 16-hex-char salt file with 0600 perms on first call', () => {
+      const salt = getCacheKeySalt();
+      expect(salt).toMatch(/^[0-9a-f]{16}$/);
+      const saltPath = path.join(tmpLynoxDir, '.cache-salt');
+      expect(fs.existsSync(saltPath)).toBe(true);
+      const stat = fs.statSync(saltPath);
+      // On POSIX, mode includes file-type bits; mask with 0o777 for perms.
+      expect(stat.mode & 0o777).toBe(0o600);
+    });
+
+    it('returns a stable salt across calls in the same process (memoized)', () => {
+      const a = getCacheKeySalt();
+      const b = getCacheKeySalt();
+      expect(a).toBe(b);
+    });
+
+    // POSIX-only: ENOTDIR semantics under "file as directory" differ on
+    // Windows. Engine README pins Node 22+ on macOS+Linux so this is fine.
+    it('falls back to in-memory salt when filesystem write fails', () => {
+      // Point LYNOX_DIR at a path where a regular file exists in place of
+      // the directory — mkdirSync fails with ENOTDIR, exercising the
+      // catch-block / in-memory fallback path. ESM module namespaces can't
+      // be spied on (vi.spyOn limitation), so we force the failure via
+      // real fs state instead of a mock.
+      const conflictPath = path.join(tmpLynoxDir, 'not-a-dir');
+      fs.writeFileSync(conflictPath, 'placeholder');
+      process.env['LYNOX_DIR'] = path.join(conflictPath, 'cannot-mkdir-here');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const salt = getCacheKeySalt();
+        // randomBytes(8) → 16 hex chars in the fallback path.
+        expect(salt).toMatch(/^[0-9a-f]{16}$/);
+        expect(warnSpy).toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
       }
     });
   });
