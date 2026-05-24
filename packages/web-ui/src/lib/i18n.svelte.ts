@@ -341,7 +341,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.advanced.subtitle':              { de: 'Wie gründlich der Agent arbeitet und wie viel Kontext er pro Anfrage lädt.',   en: 'How thoroughly the agent works and how much context it loads per request.' },
 	'llm.advanced.expand_label':          { de: 'Erweiterte Einstellungen',                                                     en: 'Advanced settings' },
 	'llm.advanced.reasoning_heading':     { de: 'Denkstil',                                                                     en: 'Reasoning style' },
-	'llm.advanced.experience_heading':    { de: 'Kommunikation',                                                                en: 'Communication' },
+	'llm.advanced.experience_heading':    { de: 'Wissen & Embeddings',                                                          en: 'Knowledge & Embeddings' },
 	// Settings v3 PR 3 (Item 8) — show-all-grayed tooltips
 	'llm.advanced.embedding_provider_managed_tooltip': { de: 'Auf Managed-Plänen vom CP verwaltet — lokale ONNX-Einbettung bleibt aktiv.', en: 'CP-managed on Managed plans — local ONNX embedding stays active.' },
 

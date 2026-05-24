@@ -310,20 +310,13 @@
 		<section aria-labelledby="adv-experience-heading" class="space-y-4 border-t border-border pt-6">
 			<h2 id="adv-experience-heading" class="text-lg font-medium">{t('llm.advanced.experience_heading')}</h2>
 
-			<label class="block">
-				<span class="block text-sm font-medium mb-1">{t('config.experience')}</span>
-				<span class="block text-xs text-text-muted mb-1">{t('config.experience_desc')}</span>
-				<!-- 2026-05-24 UX-fix: removed duplicate "Standard (vom Modell)"
-				     option. Engine semantics (session.ts:1007): only 'developer'
-				     triggers special behavior — undefined and 'business' are
-				     identical. Defaulting the dropdown to 'business' makes the
-				     UI honest about what's actually happening. -->
-				<select bind:value={config.experience} disabled={!loaded}
-					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-					<option value="business">{t('config.experience_business')}</option>
-					<option value="developer">{t('config.experience_developer')}</option>
-				</select>
-			</label>
+			<!-- 2026-05-24 UX-hide: Business/Developer experience toggle hidden
+			     pre-HN-launch. The 'developer' mode appends DEVELOPER_PROMPT_SUFFIX
+			     (CLI commands, env vars, JSON schemas) at session.ts:1007 — wired
+			     but functionally untested. Hiding the UI reduces HN bug-report
+			     surface; the engine code stays so power-users can set
+			     `experience: 'developer'` directly in ~/.lynox/config.json. The
+			     diff-based save() preserves any existing user value untouched. -->
 
 			<!-- embedding_provider is not in MANAGED_USER_WRITABLE_CONFIG (http-api.ts) —
 			     Item 8 (show-all-grayed, 2026-05-19): rendered disabled with a tooltip
