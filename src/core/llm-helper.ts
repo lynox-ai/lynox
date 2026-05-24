@@ -16,7 +16,8 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
-import { modelCapability } from '../types/models.js';
+import { MODEL_MAP, modelCapability } from '../types/models.js';
+import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -44,9 +45,11 @@ export interface CallForStructuredJsonOptions {
   maxInputTokens?: number;
   /** Hard cap on total USD per call (pre-flight estimate). Default 0.50. */
   budgetUsd?: number;
-  /** Model id. Default `claude-sonnet-4-6` (engine-wide default); overridable
-   *  via `LYNOX_LLM_HELPER_MODEL` env var (the public-demo container sets
-   *  this to a Haiku id to keep the daily cost-cap healthy). */
+  /** Model id. When omitted, resolved provider-aware: for `openai` provider
+   *  takes `agent.getProviderConfig().openaiModelId` (e.g. Mistral large);
+   *  for Anthropic/Vertex/custom takes the Sonnet tier from `MODEL_MAP`.
+   *  Overridable via `LYNOX_LLM_HELPER_MODEL` env var (the public-demo
+   *  container sets this to a Haiku id to keep the daily cost-cap healthy). */
   model?: string;
   /**
    * Anthropic client. If omitted, a fresh client is constructed via the active
@@ -54,6 +57,18 @@ export interface CallForStructuredJsonOptions {
    * + auth (the Agent class already holds one).
    */
   client?: Anthropic;
+  /**
+   * Calling agent. When provided AND `client` is omitted, the helper resolves
+   * provider + credentials from `agent.getProviderConfig()` so the call goes
+   * through the same provider the user picked at runtime (Anthropic, Mistral
+   * via openai-compat, Vertex, etc.). Without this, a Mistral user's
+   * docs-bootstrap call previously hit `createLLMClient()` with no opts,
+   * which either threw "OpenAI provider requires apiBaseURL" or silently
+   * fell back to a stale module-global provider.
+   *
+   * The snapshot carries credentials — never log / serialise it.
+   */
+  agent?: IAgent;
   /** Max output tokens. Default 4000. */
   maxOutputTokens?: number;
 }
@@ -93,12 +108,39 @@ const DEFAULT_MAX_INPUT_TOKENS = 100_000;
 const DEFAULT_BUDGET_USD = 0.50;
 const DEFAULT_MAX_OUTPUT_TOKENS = 4_000;
 /**
- * Default model. Sonnet matches the engine-wide primary client (per the
- * bench-verdict baseline). Public-demo containers override this to Haiku
- * via `LYNOX_LLM_HELPER_MODEL` to fit the daily cost-cap of the anonymous
- * sandbox — see `pro/packages/deploy/demo/docker-compose.yml`.
+ * Default Anthropic-tier model. Sonnet matches the engine-wide primary client
+ * (per the bench-verdict baseline) for Anthropic / Vertex / custom proxy.
+ * Public-demo containers override this to Haiku via `LYNOX_LLM_HELPER_MODEL`
+ * to fit the daily cost-cap of the anonymous sandbox — see
+ * `pro/packages/deploy/demo/docker-compose.yml`.
+ *
+ * For `openai` provider (Mistral / Gemini / etc.) we never hardcode an
+ * Anthropic id — see `resolveModel()`.
  */
-const DEFAULT_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? 'claude-sonnet-4-6';
+const DEFAULT_ANTHROPIC_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? MODEL_MAP.sonnet;
+
+/**
+ * Resolve the model id to send in the API call. Provider-aware:
+ *   - openai (Mistral/Gemini/etc.): use the configured `openaiModelId` so the
+ *     request hits a model the OpenAI-compatible endpoint actually serves.
+ *     `LYNOX_LLM_HELPER_MODEL` overrides this only when its value looks
+ *     non-Anthropic (so the public-demo Haiku override doesn't accidentally
+ *     route Mistral traffic to a claude id the endpoint will 404 on).
+ *   - everything else: stick with the Sonnet default (or `LYNOX_LLM_HELPER_MODEL`).
+ *
+ * Returns `DEFAULT_ANTHROPIC_MODEL` when no provider info is available
+ * (legacy callers passing a `client` directly), preserving prior behaviour.
+ */
+function resolveModel(provider: ProviderConfigSnapshot | undefined): string {
+  if (provider?.provider === 'openai') {
+    const envOverride = process.env['LYNOX_LLM_HELPER_MODEL'];
+    // Only honour the env override if it's NOT a claude-* id — otherwise the
+    // public-demo override would 404 against Mistral / Gemini endpoints.
+    if (envOverride && !envOverride.startsWith('claude-')) return envOverride;
+    if (provider.openaiModelId) return provider.openaiModelId;
+  }
+  return DEFAULT_ANTHROPIC_MODEL;
+}
 
 /** Rough char→token estimate. English ~3.5 chars/token; over-estimates for
  *  non-Latin scripts (safer for budget gates). */
@@ -123,7 +165,7 @@ export function estimateTokens(text: string): number {
 export function estimateCostUsd(
   inputTokens: number,
   maxOutputTokens: number = DEFAULT_MAX_OUTPUT_TOKENS,
-  model: string = DEFAULT_MODEL,
+  model: string = DEFAULT_ANTHROPIC_MODEL,
 ): number {
   const estimatedOutput = Math.min(Math.ceil(inputTokens * 0.25), maxOutputTokens);
   const p = pricingFor(model);
@@ -227,13 +269,21 @@ function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: str
 export async function callForStructuredJson<T = unknown>(
   opts: CallForStructuredJsonOptions,
 ): Promise<StructuredJsonResult<T>> {
+  // Defensive typeof-check tolerates legacy IAgent mocks without the
+  // method (older test helpers); we fall through to the legacy module-
+  // global provider in that case — same path PR #568 took for spawn.ts.
+  const providerSnapshot: ProviderConfigSnapshot | undefined = opts.agent
+    && typeof (opts.agent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
+    ? opts.agent.getProviderConfig()
+    : undefined;
+
   const {
     system,
     user,
     schema,
     maxInputTokens = DEFAULT_MAX_INPUT_TOKENS,
     budgetUsd = DEFAULT_BUDGET_USD,
-    model = DEFAULT_MODEL,
+    model = resolveModel(providerSnapshot),
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
   } = opts;
 
@@ -253,7 +303,22 @@ export async function callForStructuredJson<T = unknown>(
     );
   }
 
-  const client = opts.client ?? createLLMClient();
+  // Construct a provider-aware client so a Mistral user's call doesn't fall
+  // back to a stale module-global ANTHROPIC_API_KEY. When `client` is supplied
+  // explicitly (test seam, Agent re-using its own connection), we trust the
+  // caller. When `agent` is supplied, mirror its provider snapshot into the
+  // factory so the SDK construction matches the engine's primary client.
+  const client = opts.client ?? createLLMClient(
+    providerSnapshot
+      ? {
+          provider: providerSnapshot.provider,
+          apiKey: providerSnapshot.apiKey,
+          apiBaseURL: providerSnapshot.apiBaseURL,
+          openaiModelId: providerSnapshot.openaiModelId,
+          openaiAuth: providerSnapshot.openaiAuth,
+        }
+      : {},
+  );
   const response = await client.messages.create({
     model,
     max_tokens: maxOutputTokens,
