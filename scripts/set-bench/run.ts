@@ -126,6 +126,13 @@ async function main(): Promise<void> {
   const cells = pickCells(args);
   if (cells.length === 0) throw new Error('no cells selected');
 
+  // Stable identifier for this matrix run. Used as a prefix in
+  // Mistral prompt_cache_key (`bench-${runId}-…`) so parallel dev
+  // runs don't pollute each other's cold-cache baselines. Format is
+  // YYYYMMDD-hhmmss (UTC, no separators) → human-greppable in logs.
+  const runId = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+  process.stdout.write(`# runId=${runId}\n`);
+
   if (args.smoke) {
     process.stdout.write(`# Smoke mode — 1 cell × 1 run per axis (${cells.length} cells)\n\n`);
   } else {
@@ -145,7 +152,7 @@ async function main(): Promise<void> {
         : `[${cell.axis} / ${cell.label} ${i + 1}/${args.runsPerCell}]`;
       process.stdout.write(`${tag} running... `);
       const t0 = Date.now();
-      const result = await runCell(cell, scenario);
+      const result = await runCell(cell, scenario, runId);
       const dt = ((Date.now() - t0) / 1000).toFixed(1);
       process.stdout.write(`${result.pass ? 'PASS' : 'FAIL'} (${dt}s, cold=$${result.costUsdCold.toFixed(5)}, warm=$${result.costUsdWarm.toFixed(5)}, cache_read=${result.cacheReadTokens})`);
       if (!result.pass) process.stdout.write(` — ${result.reason ?? ''}`);

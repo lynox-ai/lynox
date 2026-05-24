@@ -103,7 +103,7 @@ export function formatReportMarkdown(report: BenchReport): string {
   const lines: string[] = [];
   lines.push(`# Set-Bench v4 report — ${report.generatedAt}`);
   lines.push('');
-  lines.push('Cost columns: **cold** = no cache discount, **warm** = cache_read tokens billed at the published cache-read rate. Mistral cells expose no native prompt-cache field; warm == cold for those.');
+  lines.push('Cost columns: **cold** = no cache discount, **warm** = cache_read tokens billed at the published cache-read rate. Anthropic cells use `cache_control` block markers; Mistral cells use `prompt_cache_key` routing (request body) — both surface as `cache_read_input_tokens` in the SSE response.');
   lines.push('');
 
   for (const axis of AXIS_ORDER) {

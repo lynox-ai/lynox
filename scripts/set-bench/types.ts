@@ -158,6 +158,15 @@ export interface CellRun {
   readonly finalText: string;
   readonly toolCalls: ToolCallTrace[];
   readonly error?: string;
+  /**
+   * True when the run explicitly routed `prompt_cache_key` to the provider
+   * (currently: openai-provider cells targeting api.mistral.ai). False for
+   * Anthropic-native cells (which use `cache_control` block markers instead)
+   * and for cells where cache-key routing is intentionally omitted (e.g.
+   * smoke-bucket cells that reject the field). Surfaces the §4.5 mixed-
+   * coverage distinction on the bench page.
+   */
+  readonly routedCacheKey: boolean;
 }
 
 export interface BenchReport {

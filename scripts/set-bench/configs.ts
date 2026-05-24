@@ -50,11 +50,22 @@ const PRICE_OPUS_4_7 = {
 } as const;
 
 // ── Mistral pricing (per million tokens, USD) ───────────────────
-// No prompt-cache field exposed → cacheRead/Write unset, warm == cold.
-const PRICE_MINISTRAL_3B_2410 = { inputPerMillion: 0.04, outputPerMillion: 0.04 } as const;
-const PRICE_MINISTRAL_8B_2410 = { inputPerMillion: 0.10, outputPerMillion: 0.10 } as const;
-const PRICE_MISTRAL_LARGE_2512 = { inputPerMillion: 2, outputPerMillion: 6 } as const;
-const PRICE_MAGISTRAL_MEDIUM_2509 = { inputPerMillion: 2, outputPerMillion: 5 } as const;
+// Mistral exposes native prompt cache via `prompt_tokens_details.cached_tokens`
+// in the SSE stream; cached input is billed at 10% of the input rate
+// (per Mistral pricing docs 2026-05-24). Write cost is implicit/automatic — no
+// separate cacheWritePerMillion field needed.
+const PRICE_MINISTRAL_3B_2410 = {
+  inputPerMillion: 0.04, outputPerMillion: 0.04, cacheReadPerMillion: 0.004,
+} as const;
+const PRICE_MINISTRAL_8B_2410 = {
+  inputPerMillion: 0.10, outputPerMillion: 0.10, cacheReadPerMillion: 0.010,
+} as const;
+const PRICE_MISTRAL_LARGE_2512 = {
+  inputPerMillion: 2, outputPerMillion: 6, cacheReadPerMillion: 0.2,
+} as const;
+const PRICE_MAGISTRAL_MEDIUM_2509 = {
+  inputPerMillion: 2, outputPerMillion: 5, cacheReadPerMillion: 0.2,
+} as const;
 
 type CellTemplate = Omit<SetBenchCell, 'axis'>;
 

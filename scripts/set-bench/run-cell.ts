@@ -161,10 +161,17 @@ function buildSystem(
 export async function runCell(
   cell: SetBenchCell,
   scenario: SetBenchScenario,
+  runId: string,
 ): Promise<CellRun> {
   const start = Date.now();
   const apiKey = process.env[cell.apiKeyEnv];
   const zeroCosts = computeCosts(cell, 0, 0, 0, 0);
+  // openai-provider cells targeting api.mistral.ai get an explicit
+  // prompt_cache_key. Anthropic-native cells use cache_control markers
+  // (already set on the system block above) — no key needed.
+  const willRouteCacheKey = cell.provider === 'openai'
+    && typeof cell.apiBaseURL === 'string'
+    && cell.apiBaseURL.includes('api.mistral.ai');
   if (!apiKey) {
     return {
       cellLabel: cell.label,
@@ -183,6 +190,7 @@ export async function runCell(
       finalText: '',
       toolCalls: [],
       error: `missing env ${cell.apiKeyEnv}`,
+      routedCacheKey: false,
     };
   }
 
@@ -216,6 +224,7 @@ export async function runCell(
           cacheReadTokens, cacheCreationTokens,
           costUsdCold: c.cold, costUsdWarm: c.warm,
           durationMs: Date.now() - start, iterations, finalText, toolCalls,
+          routedCacheKey: willRouteCacheKey,
         };
       }
 
@@ -232,8 +241,15 @@ export async function runCell(
             system,
             messages,
             tools: SET_BENCH_TOOLS as BetaTool[],
+            // Mistral native prompt cache: `${runId}` prefix prevents
+            // parallel-dev-run cross-pollution; within a single run, calls
+            // 2+ of the same scenario hit the warm cache. Adapter further
+            // salts with per-tenant UUID + hostname-gates to api.mistral.ai.
+            ...(willRouteCacheKey
+              ? { prompt_cache_key: `bench-${runId}-${cell.label}-${scenario.id}` }
+              : {}),
             ...(cell.providerExtras ?? {}),
-          });
+          } as unknown as Parameters<typeof client.beta.messages.stream>[0]);
           msg = await stream.finalMessage();
           break;
         } catch (err) {
@@ -303,6 +319,7 @@ export async function runCell(
         cacheReadTokens, cacheCreationTokens,
         costUsdCold: c.cold, costUsdWarm: c.warm,
         durationMs: Date.now() - start, iterations, finalText, toolCalls,
+        routedCacheKey: willRouteCacheKey,
       };
     }
 
@@ -315,6 +332,7 @@ export async function runCell(
       cacheReadTokens, cacheCreationTokens,
       costUsdCold: c.cold, costUsdWarm: c.warm,
       durationMs: Date.now() - start, iterations, finalText, toolCalls,
+      routedCacheKey: willRouteCacheKey,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -327,6 +345,7 @@ export async function runCell(
       costUsdCold: c.cold, costUsdWarm: c.warm,
       durationMs: Date.now() - start, iterations, finalText, toolCalls,
       error: msg,
+      routedCacheKey: willRouteCacheKey,
     };
   }
 }
