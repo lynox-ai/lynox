@@ -29,12 +29,19 @@
 		checkSearxng,
 		saveSearxng,
 		removeSearxng,
+		getRerankerCapability,
+		loadRerankerCapability,
 	} from '../stores/integrations/search.svelte.js';
 
 	$effect(() => {
 		void loadManagedStatus();
 		void loadSecretStatuses();
+		void loadRerankerCapability();
 	});
+
+	// Reactive snapshot — Svelte 5 forbids `{@const}` at the top level of the
+	// template, so we compute it once here and read it from the markup below.
+	const rerankerCap = $derived(getRerankerCapability());
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
@@ -129,6 +136,32 @@
 						{isSearxngSaving() ? t('settings.saving') : t('settings.save')}
 					</button>
 				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- Reranker capability surface. Read-only — toggle is still env-var driven
+	     (LYNOX_SEARCH_RERANK=true). This card exists so users on Mistral / a
+	     custom OpenAI-compat proxy see *why* their reranker isn't running
+	     instead of guessing. The runtime guard sits in
+	     src/integrations/search/search-reranker.ts. -->
+	{#if rerankerCap}
+		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+			<div class="flex items-center justify-between mb-2">
+				<div>
+					<h2 class="font-medium">{t('integrations.reranker_title')}</h2>
+					<p class="text-xs text-text-muted mt-1">{t('integrations.reranker_desc')}</p>
+				</div>
+				{#if !rerankerCap.supported}
+					<span class="text-xs text-text-subtle">{t('integrations.reranker_unsupported')}</span>
+				{:else if rerankerCap.enabled}
+					<span class="text-xs text-success">{t('integrations.reranker_active')}</span>
+				{:else}
+					<span class="text-xs text-text-subtle">{t('integrations.reranker_available_off')}</span>
+				{/if}
+			</div>
+			{#if !rerankerCap.supported}
+				<p class="text-xs text-text-muted mt-2">{t('integrations.reranker_unsupported_hint')}</p>
 			{/if}
 		</div>
 	{/if}

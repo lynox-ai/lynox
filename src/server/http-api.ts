@@ -21,6 +21,7 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { getActiveProvider } from '../core/llm-client.js';
+import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
@@ -2560,6 +2561,15 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { healthy: false });
       }
+    });
+
+    // Search reranker capability probe — read-time provider snapshot so the
+    // Settings → Search page can surface "Reranker is Anthropic-only" instead
+    // of letting users toggle LYNOX_SEARCH_RERANK=true on Mistral and get a
+    // silent no-op. The runtime guard in search-reranker.ts is unchanged;
+    // this just mirrors it for the UI. No DB row, no settings flag.
+    this.addStatic('user', 'GET /api/search/reranker/capability', async (_req, res) => {
+      jsonResponse(res, 200, getRerankerCapability());
     });
 
     // ── Config ──

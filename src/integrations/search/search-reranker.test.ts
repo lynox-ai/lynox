@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { rerankSearchResults } from './search-reranker.js';
+import { rerankSearchResults, getRerankerCapability } from './search-reranker.js';
+import { initLLMProvider } from '../../core/llm-client.js';
 import type { SearchResult } from './search-provider.js';
 
 // Match the pattern used by process-capture.test.ts: a hoisted mock for
@@ -165,5 +166,68 @@ describe('rerankSearchResults', () => {
     expect(call['tool_choice']).toEqual({ type: 'tool', name: 'score_results' });
     expect((call['system'] as string)).toMatch(/relevance scorer/i);
     expect(Array.isArray(call['tools'])).toBe(true);
+  });
+});
+
+// The capability surface is what `/api/search/reranker/capability` returns
+// and is the SSoT for the SearchSettings UI card. Keep these tests aligned
+// with the runtime guard in `rerankSearchResults` — if a future Mistral
+// native reranker lands, both flip together.
+describe('getRerankerCapability', () => {
+  // Snapshot + restore so tests don't leak state into each other or into
+  // the rerankSearchResults suite below.
+  let savedProvider: 'anthropic' | 'vertex' | 'custom' | 'openai';
+
+  beforeEach(() => {
+    savedProvider = 'anthropic';
+    delete process.env['LYNOX_SEARCH_RERANK'];
+  });
+
+  afterEach(async () => {
+    delete process.env['LYNOX_SEARCH_RERANK'];
+    // Reset to anthropic so other suites observe the default.
+    await initLLMProvider(savedProvider);
+  });
+
+  it('reports supported + disabled when active provider is anthropic and env unset', async () => {
+    await initLLMProvider('anthropic');
+    const cap = getRerankerCapability();
+    expect(cap).toEqual({
+      supported: true,
+      enabled: false,
+      provider: 'anthropic',
+      reason: 'disabled-by-env',
+    });
+  });
+
+  it('reports supported + enabled when LYNOX_SEARCH_RERANK=true on anthropic', async () => {
+    await initLLMProvider('anthropic');
+    process.env['LYNOX_SEARCH_RERANK'] = 'true';
+    const cap = getRerankerCapability();
+    expect(cap.supported).toBe(true);
+    expect(cap.enabled).toBe(true);
+    expect(cap.provider).toBe('anthropic');
+    expect(cap.reason).toBeUndefined();
+  });
+
+  it('reports unsupported on openai provider (Mistral / OpenAI-compat) even with env on', async () => {
+    await initLLMProvider('openai');
+    process.env['LYNOX_SEARCH_RERANK'] = 'true';
+    const cap = getRerankerCapability();
+    // The UI key — `supported=false` is the signal that flips the card to
+    // "Reranker is currently Anthropic-only". `enabled` still reflects the
+    // user's env intent so the UI can say "you tried to enable it, but…".
+    expect(cap.supported).toBe(false);
+    expect(cap.enabled).toBe(true);
+    expect(cap.provider).toBe('openai');
+    expect(cap.reason).toBe('provider-unsupported');
+  });
+
+  it('reports unsupported on custom provider', async () => {
+    await initLLMProvider('custom');
+    const cap = getRerankerCapability();
+    expect(cap.supported).toBe(false);
+    expect(cap.reason).toBe('provider-unsupported');
+    expect(cap.provider).toBe('custom');
   });
 });
