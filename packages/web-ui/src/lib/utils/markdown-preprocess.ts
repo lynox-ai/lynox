@@ -33,7 +33,16 @@ export function fixMarkdownPreprocessing(md: string): string {
 			if (line.includes('|')) return line; // table row
 			let fixed = line.replace(/^(#{1,6})(?=[^#\s])/, '$1 ');
 			fixed = fixed.replace(/^ {1,3}(#{1,6} )/, '$1');
-			return fixed.replace(/(?<!\b[a-zäöüA-ZÄÖÜ]{1,2})([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2');
+			// Sentence-split rule. Two skip-lookbehinds:
+			//   1. `\b[a-zäöüA-ZÄÖÜ]{1,2}` — short abbreviations (z.B., d.h., U.S.)
+			//   2. `[A-ZÄÖÜ][a-zäöü]+` — compound proper nouns (Nager.Date,
+			//      Open.AI, React.Component) — 2026-05-25 (#55): CamelCase
+			//      word-before-period is almost certainly a compound name, not
+			//      a missing-space run-on. Tradeoff: "Hello.World" (lowercase
+			//      sentence-end + capital sentence-start) now also stays as one
+			//      token. Acceptable because run-ons typically start with
+			//      lowercase or non-CamelCase capitalized words anyway.
+			return fixed.replace(/(?<!\b[a-zäöüA-ZÄÖÜ]{1,2})(?<![A-ZÄÖÜ][a-zäöü]+)([.!?])([A-ZÄÖÜ])/g, '$1\n\n$2');
 		}).join('\n');
 	}).join('');
 }
