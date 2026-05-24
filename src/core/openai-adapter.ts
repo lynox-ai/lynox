@@ -38,8 +38,12 @@ import type Anthropic from '@anthropic-ai/sdk';
 // Salt only appears in outgoing request bodies to api.mistral.ai —
 // no console.log/debug-trace prints it.
 
+// Module-scoped salt: one process = one tenant = one salt
+// (per feedback_one_engine_per_tenant). Never refactor into an instance
+// field — adapter instances per tenant don't exist in lynox's architecture.
 let _cacheKeySaltMemo: string | undefined;
 let _cacheSaltWarnedReadonly = false;
+const SALT_HEX_RE = /^[0-9a-f]{16}$/;
 
 export function getCacheKeySalt(): string {
   if (_cacheKeySaltMemo) return _cacheKeySaltMemo;
@@ -48,15 +52,33 @@ export function getCacheKeySalt(): string {
   try {
     if (fs.existsSync(saltPath)) {
       const content = fs.readFileSync(saltPath, 'utf-8').trim();
-      if (content.length >= 16) {
-        _cacheKeySaltMemo = content.slice(0, 16);
+      // Validate format — manual edit/corruption could otherwise leak
+      // arbitrary bytes into the outgoing Mistral routing key.
+      if (SALT_HEX_RE.test(content)) {
+        _cacheKeySaltMemo = content;
         return _cacheKeySaltMemo;
       }
+      // Bad content → fall through to regenerate.
     }
     fs.mkdirSync(lynoxDir, { recursive: true });
     const newSalt = randomUUID().replace(/-/g, '').slice(0, 16);
-    fs.writeFileSync(saltPath, newSalt, { mode: 0o600 });
-    _cacheKeySaltMemo = newSalt;
+    try {
+      // `wx` = exclusive-create. If a concurrent first-caller wins the
+      // race, re-read their salt instead of overwriting → memo stays in
+      // sync with disk for the whole process.
+      fs.writeFileSync(saltPath, newSalt, { mode: 0o600, flag: 'wx' });
+      _cacheKeySaltMemo = newSalt;
+    } catch (writeErr) {
+      const code = (writeErr as { code?: string }).code;
+      if (code === 'EEXIST') {
+        const content = fs.readFileSync(saltPath, 'utf-8').trim();
+        if (SALT_HEX_RE.test(content)) {
+          _cacheKeySaltMemo = content;
+          return _cacheKeySaltMemo;
+        }
+      }
+      throw writeErr;
+    }
     return _cacheKeySaltMemo;
   } catch {
     if (!_cacheSaltWarnedReadonly) {
@@ -69,7 +91,7 @@ export function getCacheKeySalt(): string {
   }
 }
 
-/** Test-only reset for unit tests. */
+/** @internal Test-only reset. */
 export function _resetCacheKeySaltMemo(): void {
   _cacheKeySaltMemo = undefined;
   _cacheSaltWarnedReadonly = false;
@@ -438,11 +460,19 @@ export class OpenAIAdapter {
   private baseURL: string;
   private apiKeyProvider: ApiKeyProvider;
   private modelId: string;
+  // Precomputed once at construction — Mistral is the only OpenAI-compat
+  // endpoint we forward `prompt_cache_key` to. Hostname-gate is case-
+  // insensitive (DNS is); exact-match prevents subdomain attacks like
+  // `api.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
+  private readonly _isMistralHost: boolean;
 
   constructor(opts: { baseURL: string; apiKey: ApiKeyProvider; modelId: string }) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
     this.apiKeyProvider = opts.apiKey;
     this.modelId = opts.modelId;
+    let isMistral = false;
+    try { isMistral = new URL(this.baseURL).hostname.toLowerCase() === 'api.mistral.ai'; } catch { /* malformed baseURL → gate stays closed */ }
+    this._isMistralHost = isMistral;
   }
 
   private async resolveApiKey(): Promise<string> {
@@ -605,13 +635,16 @@ export class OpenAIAdapter {
     // Mistral-shaped key from leaking into other OpenAI-compat endpoints
     // (future PRD-OPENAI-NATIVE native cells, etc.). Salt-prefix ensures
     // cross-tenant safety on shared MISTRAL_MANAGED_API_KEY.
-    if (typeof params['prompt_cache_key'] === 'string') {
-      let isMistralHost = false;
-      try {
-        isMistralHost = new URL(this.baseURL).hostname === 'api.mistral.ai';
-      } catch { /* malformed baseURL → leave gate closed */ }
-      if (isMistralHost) {
-        body['prompt_cache_key'] = `${getCacheKeySalt()}:${params['prompt_cache_key']}`;
+    //
+    // Length cap + charset gate: prevent runaway keys (Mistral validator
+    // rejects unknown shapes and surfaces them in error logs unredacted)
+    // and avoid bytes that could break JSON/url-encoded paths anywhere
+    // downstream. ASCII alnum + `_-:` is the conservative intersection of
+    // what Mistral docs allow and what's safe across log pipelines.
+    if (this._isMistralHost && typeof params['prompt_cache_key'] === 'string') {
+      const rawKey = params['prompt_cache_key'];
+      if (rawKey.length > 0 && rawKey.length <= 128 && /^[A-Za-z0-9_:-]+$/.test(rawKey)) {
+        body['prompt_cache_key'] = `${getCacheKeySalt()}:${rawKey}`;
       }
     }
 

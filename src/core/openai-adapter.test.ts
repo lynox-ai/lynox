@@ -762,6 +762,33 @@ describe('OpenAIAdapter', () => {
       }
     });
 
+    it('returns null cache_read_input_tokens when prompt_tokens_details is empty object', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'empty-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'empty-1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: {} },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`, apiKey: 'test', modelId: 'm',
+        });
+        const msg = await adapter.beta.messages.stream({
+          model: 'm', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }],
+        }).finalMessage();
+        expect(msg.usage.input_tokens).toBe(100);
+        expect(msg.usage.cache_read_input_tokens).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
     it('returns null cache_read_input_tokens when prompt_tokens_details missing (backward compat)', async () => {
       const server = await createMockServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -906,6 +933,8 @@ describe('OpenAIAdapter', () => {
       expect(a).toBe(b);
     });
 
+    // POSIX-only: ENOTDIR semantics under "file as directory" differ on
+    // Windows. Engine README pins Node 22+ on macOS+Linux so this is fine.
     it('falls back to in-memory salt when filesystem write fails', () => {
       // Point LYNOX_DIR at a path where a regular file exists in place of
       // the directory — mkdirSync fails with ENOTDIR, exercising the

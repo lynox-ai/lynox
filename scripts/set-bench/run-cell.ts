@@ -245,8 +245,11 @@ export async function runCell(
             // parallel-dev-run cross-pollution; within a single run, calls
             // 2+ of the same scenario hit the warm cache. Adapter further
             // salts with per-tenant UUID + hostname-gates to api.mistral.ai.
+            // Charset-sanitize each part — cell.label / scenario.id can
+            // contain dots, slashes etc. that violate the adapter's
+            // `^[A-Za-z0-9_:-]+$` validator (key would silently drop).
             ...(willRouteCacheKey
-              ? { prompt_cache_key: `bench-${runId}-${cell.label}-${scenario.id}` }
+              ? { prompt_cache_key: `bench-${runId}-${cell.label.replace(/[^A-Za-z0-9_-]/g, '_')}-${scenario.id.replace(/[^A-Za-z0-9_-]/g, '_')}` }
               : {}),
             ...(cell.providerExtras ?? {}),
           } as unknown as Parameters<typeof client.beta.messages.stream>[0]);
