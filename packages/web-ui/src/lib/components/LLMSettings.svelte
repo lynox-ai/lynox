@@ -767,7 +767,13 @@
 			</summary>
 			<div class="mt-4 px-1">
 				{#if advancedOpen}
-					<LLMAdvancedView embedded={true} />
+					<!-- Pass the *pending* provider selection so the embedded
+					     Advanced view's provider-aware sections (e.g. Nachdenken
+					     visibility — Anthropic-only) re-render the moment the
+					     user clicks a Provider Tile above, instead of waiting
+					     for save+restart to update the persisted activeModel.
+					     Per user-feedback 2026-05-25. -->
+					<LLMAdvancedView embedded={true} pendingProvider={activeProvider} />
 				{/if}
 			</div>
 		</details>

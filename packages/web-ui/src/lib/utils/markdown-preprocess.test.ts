@@ -50,14 +50,23 @@ describe('fixMarkdownPreprocessing', () => {
 	});
 
 	describe('sentence spacing', () => {
-		it('splits run-on sentences with capital letter after period', () => {
-			expect(fixMarkdownPreprocessing('Hello.World')).toBe('Hello.\n\nWorld');
+		it('splits run-on sentences (lowercase word + period + capital)', () => {
+			// Lowercase-ending words before the period are real run-ons.
+			expect(fixMarkdownPreprocessing('test.This')).toBe('test.\n\nThis');
 		});
 
 		it('preserves abbreviations (≤2-letter stem before period)', () => {
 			expect(fixMarkdownPreprocessing('z.B. Tests')).toBe('z.B. Tests');
 			expect(fixMarkdownPreprocessing('U.S. Customs')).toBe('U.S. Customs');
 			expect(fixMarkdownPreprocessing('d.h. Hauptthema')).toBe('d.h. Hauptthema');
+		});
+
+		it('preserves compound proper nouns (#55 — CamelCase word before period)', () => {
+			expect(fixMarkdownPreprocessing('Nager.Date')).toBe('Nager.Date');
+			expect(fixMarkdownPreprocessing('Open.AI')).toBe('Open.AI');
+			expect(fixMarkdownPreprocessing('React.Component')).toBe('React.Component');
+			// Even with prose around it.
+			expect(fixMarkdownPreprocessing('I use Nager.Date for holidays.')).toBe('I use Nager.Date for holidays.');
 		});
 
 		it('does not split table rows', () => {

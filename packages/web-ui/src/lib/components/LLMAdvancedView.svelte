@@ -36,7 +36,19 @@
 	// (back-link + h1 + subtitle) so this component can render inline inside
 	// LLMSettings.svelte as an expandable section. Standalone /llm/advanced
 	// page keeps `embedded=false` (default) for back-compat with deep links.
-	let { embedded = false }: { embedded?: boolean } = $props();
+	// `pendingProvider` (2026-05-25, user feedback): when embedded inside
+	// LLMSettings, the parent passes its in-flight tile selection so the
+	// provider-aware sections (Nachdenken visibility, etc.) re-render the
+	// moment the user clicks a tile — without waiting for save+restart.
+	// Standalone (not embedded) leaves it undefined and the persisted
+	// activeModel is the source of truth.
+	let {
+		embedded = false,
+		pendingProvider = undefined,
+	}: {
+		embedded?: boolean;
+		pendingProvider?: 'anthropic' | 'vertex' | 'openai' | 'custom' | null | undefined;
+	} = $props();
 
 	interface UserConfig {
 		experience?: 'business' | 'developer';
@@ -172,6 +184,18 @@
 	const providerLocked = $derived(!!locks.provider);
 	const isManaged = $derived(managed === true);
 
+	// Form-reactive provider-aware gating (2026-05-25, #51).
+	// When embedded in LLMSettings, the parent passes its in-flight tile
+	// selection so we can preview the gate result BEFORE save+restart.
+	// Falls back to the persisted activeModel.features when no pending
+	// state is available (standalone mode, or before parent first selects).
+	// `vertex` ≡ Anthropic in capability terms (same Claude features).
+	const effectiveExtendedThinking = $derived.by(() => {
+		if (pendingProvider === 'anthropic' || pendingProvider === 'vertex') return true;
+		if (pendingProvider === 'openai' || pendingProvider === 'custom') return false;
+		return activeModel?.features?.extendedThinking ?? false;
+	});
+
 	$effect(() => { void load(); });
 
 	// Context-window radio options — final canonical home for the
@@ -271,7 +295,7 @@
 			     thinking blocks aren't part of the OpenAI-compat wire format).
 			     Hide the dropdown there so the UI doesn't suggest a choice
 			     the user doesn't actually have. -->
-			{#if activeModel?.features?.extendedThinking}
+			{#if effectiveExtendedThinking}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('config.thinking')}</span>
 					<span class="block text-xs text-text-muted mb-1">{t('config.thinking_desc')}</span>
@@ -281,7 +305,7 @@
 						<option value="adaptive">{t('config.thinking_adaptive')}</option>
 					</select>
 				</label>
-			{:else if activeModel}
+			{:else if activeModel || pendingProvider}
 				<div class="text-xs text-text-muted italic px-2 py-1 border border-dashed border-border rounded">
 					{t('config.thinking')}: {t('config.anthropic_only_hint')}
 				</div>
