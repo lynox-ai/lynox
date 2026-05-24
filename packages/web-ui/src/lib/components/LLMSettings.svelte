@@ -773,7 +773,7 @@
 					     user clicks a Provider Tile above, instead of waiting
 					     for save+restart to update the persisted activeModel.
 					     Per user-feedback 2026-05-25. -->
-					<LLMAdvancedView embedded={true} pendingProvider={activeProvider} pendingApiBaseURL={config.api_base_url} />
+					<LLMAdvancedView embedded={true} pendingProvider={activeProvider} />
 				{/if}
 			</div>
 		</details>

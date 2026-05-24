@@ -36,20 +36,18 @@
 	// (back-link + h1 + subtitle) so this component can render inline inside
 	// LLMSettings.svelte as an expandable section. Standalone /llm/advanced
 	// page keeps `embedded=false` (default) for back-compat with deep links.
-	// `pendingProvider` + `pendingApiBaseURL` (2026-05-25, user feedback): when
-	// embedded inside LLMSettings, the parent passes its in-flight tile
-	// selection so the provider-aware sections (Nachdenken visibility, etc.)
-	// re-render the moment the user clicks a tile — without waiting for
-	// save+restart. Standalone (not embedded) leaves them undefined and the
-	// persisted activeModel is the source of truth.
+	// `pendingProvider` (2026-05-25, user feedback): when embedded inside
+	// LLMSettings, the parent passes its in-flight tile selection so the
+	// provider-aware sections (Nachdenken visibility, etc.) re-render the
+	// moment the user clicks a tile — without waiting for save+restart.
+	// Standalone (not embedded) leaves it undefined and the persisted
+	// activeModel is the source of truth.
 	let {
 		embedded = false,
 		pendingProvider = undefined,
-		pendingApiBaseURL = undefined,
 	}: {
 		embedded?: boolean;
 		pendingProvider?: 'anthropic' | 'vertex' | 'openai' | 'custom' | null | undefined;
-		pendingApiBaseURL?: string | undefined;
 	} = $props();
 
 	interface UserConfig {
