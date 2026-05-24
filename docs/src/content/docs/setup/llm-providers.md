@@ -74,13 +74,13 @@ The wizard (npx installer or in-product **Settings → Provider**) prefills the 
 
 ### Mistral (France, EU)
 
-lynox's official Claude fallback. ~6× cheaper than Claude on cached workloads; near-Claude tool-calling quality; French company (no US CLOUD Act exposure).
+First-class Sonnet replacement. 7/8 axes at 100% pass on the lynox agent-loop bench; ~6× cheaper than Claude on cached workloads; French company (no US CLOUD Act exposure).
 
 ```json
 {
   "provider": "openai",
   "api_base_url": "https://api.mistral.ai/v1",
-  "openai_model_id": "mistral-large-latest"
+  "openai_model_id": "mistral-large-2512"
 }
 ```
 
@@ -88,13 +88,18 @@ lynox's official Claude fallback. ~6× cheaper than Claude on cached workloads; 
 LYNOX_LLM_PROVIDER=openai
 ANTHROPIC_BASE_URL=https://api.mistral.ai/v1
 ANTHROPIC_API_KEY=<your-mistral-key>          # var name is intentionally generic
-OPENAI_MODEL_ID=mistral-large-latest
+OPENAI_MODEL_ID=mistral-large-2512
 ```
 
 - **Key**: console.mistral.ai → API Keys
-- **Models**: `mistral-large-latest` (flagship), `mistral-medium-latest`, `codestral-latest` (code-focused)
-- **Pricing**: $0.50 / $1.50 per MTok input/output (Large)
-- **Tool calling**: tested near-Claude quality on the lynox agent-loop bench (internal); the most polished non-Claude option today
+- **Models**:
+  - `mistral-large-2512` (recommended — pinned Sonnet-class flagship)
+  - `mistral-large-latest` (floating tag — may drift between snapshots, prefer the pinned form in production)
+  - `ministral-8b-2512` (low-cost orchestration; 100% pass on all 8 bench axes)
+  - `magistral-medium-2509` (reasoning specialist — batch / deep analysis only; tool-routing reliability lower than chat-tier)
+  - `codestral-latest` (code-focused)
+- **Pricing**: $0.50 / $1.50 per MTok input/output (Large 3); $0.15 / $0.15 (Ministral 8B)
+- **Tool calling**: bench-verified near-Sonnet quality on Large 3; the pinned snapshot is what we ship.
 
 ### Ollama (local, no auth)
 
@@ -202,7 +207,7 @@ Use named profiles to run different models for different tasks. Claude handles y
       "provider": "openai",
       "api_base_url": "https://api.mistral.ai/v1",
       "api_key": "your-mistral-key",
-      "model_id": "mistral-large-latest"
+      "model_id": "mistral-large-2512"
     },
     "gemini-research": {
       "provider": "openai",
