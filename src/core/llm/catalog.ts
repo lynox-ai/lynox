@@ -164,7 +164,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 0.15, output: 0.15 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended haiku-tier default. 100% pass on all 8 bench axes (only model to do so) at $0.00006–$0.00038 warm per loop.',
+    notes: 'Recommended haiku-tier default. 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
   },
 ];
 

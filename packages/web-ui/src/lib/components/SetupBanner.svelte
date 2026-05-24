@@ -299,9 +299,9 @@
 									bind:value={mistralModel}
 									class={inputClass}
 								>
-									<option value="mistral-large-2512">mistral-large-2512 (recommended — Sonnet-class)</option>
-									<option value="ministral-8b-2512">ministral-8b-2512 (Haiku-class — 100% pass on all bench axes)</option>
-										<option value="magistral-medium-2509">magistral-medium-2509 (reasoning specialist)</option>
+									<option value="mistral-large-2512">mistral-large-2512 (recommended)</option>
+									<option value="ministral-8b-2512">ministral-8b-2512 (low-cost orchestration)</option>
+									<option value="magistral-medium-2509">magistral-medium-2509 (reasoning specialist)</option>
 									<option value="codestral-latest">codestral-latest (code-focused)</option>
 								</select>
 							</div>

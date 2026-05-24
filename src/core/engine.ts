@@ -131,8 +131,9 @@ const INTELLIGENCE_INTERVAL = 10; // Run pattern detection + KPIs every N runs
  * always defaulted to 'us' (Anthropic) regardless of the UI choice,
  * leaking mail snippets + reply-draft bodies to Anthropic-US.
  *
- * Extracted to a pure function so it's directly unit-testable without
- * spinning up the whole engine.
+ * Hostname-strict match (URL().hostname === 'api.mistral.ai') — a naive
+ * substring would let an attacker-controlled `api.mistral.ai.evil.com`
+ * misclassify as EU residency.
  */
 export function resolveInboxLlmRegion(opts: {
   envOverride: string | undefined;
@@ -141,9 +142,14 @@ export function resolveInboxLlmRegion(opts: {
 }): 'us' | 'eu' {
   if (opts.envOverride === 'eu') return 'eu';
   if (opts.envOverride === 'us') return 'us';
-  const providerImpliesEu = opts.provider === 'openai'
-    && (opts.apiBaseURL?.includes('api.mistral.ai') ?? false);
-  return providerImpliesEu ? 'eu' : 'us';
+  if (opts.provider !== 'openai' || !opts.apiBaseURL) return 'us';
+  let hostname: string;
+  try {
+    hostname = new URL(opts.apiBaseURL).hostname.toLowerCase();
+  } catch {
+    return 'us';
+  }
+  return hostname === 'api.mistral.ai' ? 'eu' : 'us';
 }
 
 /**
@@ -362,17 +368,18 @@ export class Engine {
       gcpRegion,
       openaiModelId: this.userConfig.openai_model_id,
     });
-    // GDPR / EU-residency: a UI provider-switch (Anthropic ↔ Mistral)
-    // must propagate to every subsystem that embeds user content into an
-    // LLM call. Without this, Memory consolidation + KG entity-extraction
-    // + HyDE retrieval keep the OLD provider's client by reference and
-    // leak mail/customer text to the old provider until container
-    // restart. Setters are no-op-safe when the subsystem hasn't been
-    // initialized yet (e.g. early reloadCredentials before `_initMemoryAndKnowledge`).
     this._propagateProviderSwitch(apiKey);
   }
 
-  /** Push the freshly created LLM client into Memory + KnowledgeLayer so a runtime provider-switch propagates instead of leaving stale clients on the old provider (EU-residency leak path). */
+  /**
+   * Push the freshly created LLM client into Memory + KnowledgeLayer so
+   * any client recreation (UI provider-switch, BYOK key rotation, vault
+   * reload) propagates instead of leaving stale clients on the old
+   * provider — a GDPR / EU-residency leak path: Memory consolidation +
+   * KG entity-extraction + HyDE retrieval all embed user content in LLM
+   * prompts. Setters are null-guarded for the pre-init case (early
+   * reloadCredentials before `_initMemoryAndKnowledge`).
+   */
   private _propagateProviderSwitch(apiKey: string | undefined): void {
     if (this.memory) {
       this.memory.setClient({

@@ -55,11 +55,35 @@ describe('resolveInboxLlmRegion — EU residency from user provider choice', () 
     })).toBe('us');
   });
 
-  it('honors invalid env values as no-override (falls back to provider inference)', () => {
+  it('treats empty-string envOverride as no-override', () => {
     expect(resolveInboxLlmRegion({
-      envOverride: 'EU', // uppercase: not 'eu' exactly → treated as no-override
+      envOverride: '',
+      provider: 'anthropic',
+      apiBaseURL: undefined,
+    })).toBe('us');
+  });
+
+  it('treats uppercase EU as no-override (strict-match contract)', () => {
+    expect(resolveInboxLlmRegion({
+      envOverride: 'EU',
+      provider: 'anthropic',
+      apiBaseURL: undefined,
+    })).toBe('us');
+  });
+
+  it('rejects attacker-controlled subdomain that substring-matches mistral hostname', () => {
+    expect(resolveInboxLlmRegion({
+      envOverride: undefined,
       provider: 'openai',
-      apiBaseURL: 'https://api.mistral.ai/v1',
-    })).toBe('eu'); // falls through to provider inference, which is EU
+      apiBaseURL: 'https://api.mistral.ai.attacker.com/v1',
+    })).toBe('us');
+  });
+
+  it('falls back to US on malformed baseURL string', () => {
+    expect(resolveInboxLlmRegion({
+      envOverride: undefined,
+      provider: 'openai',
+      apiBaseURL: 'not-a-url',
+    })).toBe('us');
   });
 });

@@ -500,8 +500,8 @@ export async function runDockerInstaller(): Promise<void> {
       stdout.write(`\n  ${BOLD}Mistral${RESET}  ${DIM}console.mistral.ai → API Keys${RESET}\n`);
 
       const modelChoice = await select([
-        { label: 'mistral-large-2512', value: 'mistral-large-2512', hint: 'recommended — pinned Sonnet-class' },
-        { label: 'ministral-8b-2512', value: 'ministral-8b-2512', hint: 'Haiku-class — 100% pass on all bench axes' },
+        { label: 'mistral-large-2512', value: 'mistral-large-2512', hint: 'recommended — pinned snapshot' },
+        { label: 'ministral-8b-2512', value: 'ministral-8b-2512', hint: 'low-cost orchestration' },
         { label: 'magistral-medium-2509', value: 'magistral-medium-2509', hint: 'reasoning specialist' },
         { label: 'codestral-latest', value: 'codestral-latest', hint: 'code-focused' },
       ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'mistral-large-2512';

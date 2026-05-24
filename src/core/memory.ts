@@ -121,6 +121,10 @@ export class Memory implements IMemory {
    * provider-switch from Anthropic → Mistral would leave consolidation
    * (which embeds mail/customer text in the prompt) calling the OLD
    * provider until full container restart — a GDPR / EU-residency leak.
+   *
+   * Clears the in-memory consolidation cache: cache keys are prompt-hash
+   * only (not provider-aware), so cross-provider re-use of cached output
+   * would surface the prior provider's answer for the new request.
    */
   setClient(opts: {
     apiKey: string | undefined;
@@ -131,6 +135,7 @@ export class Memory implements IMemory {
     this.client = createLLMClient(opts);
     this.apiKey = opts.apiKey;
     this.apiBaseURL = opts.apiBaseURL;
+    this.cache.clear();
   }
 
   setActiveScopes(scopes: MemoryScopeRef[]): void {
