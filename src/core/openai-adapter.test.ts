@@ -404,6 +404,131 @@ describe('OpenAIAdapter', () => {
         server.close();
       }
     });
+
+    it('does not leak [object Object] into text channel when delta.content is non-string (regression: Mistral spawn bracket leak)', async () => {
+      // Regression for issue #37: on Mistral, the spawn-sub-agent reply
+      // contained `[object Object]` prefix + runaway `}] }] }] }]` tail.
+      // Root cause: the SSE chunk's `choice.delta.content` was non-string
+      // (e.g. legacy multimodal array shape, or stray object during the
+      // tool-call → tool-result transition). The adapter forwarded the
+      // object straight into `text_delta.text`; StreamProcessor's
+      // `text += textDelta.text` coerced it via Object.prototype.toString
+      // → "[object Object]" got baked into the assistant message text.
+      // That corrupted text then went back into history; Mistral, seeing
+      // its own malformed prior turn, hallucinated the runaway `}] }] }]`
+      // tail as it tried to "close" the broken JSON brackets it imagined.
+      //
+      // The fix is defense-in-depth at the adapter boundary: only emit a
+      // text_delta when `delta.content` is a real string. Non-string
+      // shapes (objects, arrays without text parts, numbers, booleans)
+      // are skipped — never coerced.
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        // Chunk 1: legitimate text — the adapter must still emit this.
+        res.write(sseChunk({
+          id: 'leak-1',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'Spawning helper. ' }, finish_reason: null }],
+        }));
+        // Chunk 2: malformed — content is an OBJECT (the exact shape that
+        // caused the leak in the wild). Pre-fix this stringified to
+        // "[object Object]" inside the assistant text block.
+        res.write(sseChunk({
+          id: 'leak-1',
+          choices: [{ index: 0, delta: { content: { partial: 'oops' } }, finish_reason: null }],
+        }));
+        // Chunk 3: another legitimate text chunk after the malformed one —
+        // the adapter must continue cleanly.
+        res.write(sseChunk({
+          id: 'leak-1',
+          choices: [{ index: 0, delta: { content: 'Done.' }, finish_reason: null }],
+        }));
+        res.write(sseChunk({
+          id: 'leak-1',
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const stream = adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Spawn.' }],
+        });
+        const msg = await stream.finalMessage();
+
+        // The assembled assistant text must NOT contain "[object Object]".
+        const text = msg.content
+          .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && typeof b.text === 'string')
+          .map(b => b.text)
+          .join('');
+        expect(text).not.toContain('[object Object]');
+        // Legitimate text chunks must still flow through.
+        expect(text).toContain('Spawning helper.');
+        expect(text).toContain('Done.');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('extracts text from array-shaped delta.content (OpenAI multimodal content parts)', async () => {
+      // Some OpenAI-compatible servers emit `delta.content` as an array of
+      // content parts (the post-2024 multimodal shape):
+      //   [{ type: 'text', text: '...' }, { type: 'image_url', ... }]
+      // The adapter should pull the `text` parts out so legitimate text
+      // still streams through, rather than dropping the whole chunk.
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'multi-1',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              content: [
+                { type: 'text', text: 'Hello ' },
+                { type: 'text', text: 'world' },
+              ],
+            },
+            finish_reason: null,
+          }],
+        }));
+        res.write(sseChunk({
+          id: 'multi-1',
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 5, completion_tokens: 2 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const msg = await adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }).finalMessage();
+
+        const text = msg.content
+          .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && typeof b.text === 'string')
+          .map(b => b.text)
+          .join('');
+        expect(text).toBe('Hello world');
+        expect(text).not.toContain('[object Object]');
+      } finally {
+        server.close();
+      }
+    });
   });
 
   describe('request translation', () => {

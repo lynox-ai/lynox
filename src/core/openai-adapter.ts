@@ -121,7 +121,12 @@ interface OpenAIStreamChunk {
     index: number;
     delta: {
       role?: string | undefined;
-      content?: string | null | undefined;
+      // Typed as `unknown` (not `string | null`) on purpose: real OpenAI-
+      // compat servers diverge from the spec — Mistral can drop a stray
+      // object here during tool-call transitions, and multimodal endpoints
+      // use an array of content parts. Narrowing happens at the read site
+      // via `extractDeltaText` to keep the leak guard at one boundary.
+      content?: unknown;
       tool_calls?: Array<{
         index: number;
         id?: string | undefined;
@@ -278,6 +283,47 @@ function translateMessages(
 
 // ── Response Stream Translation ─────────────────────────────────
 
+/**
+ * Coerce the OpenAI-compat `delta.content` field to a safe string for the
+ * text channel. The OpenAI spec types this as `string | null`, but real
+ * servers diverge:
+ *
+ *  - Mistral occasionally emits a stray object during the tool-call →
+ *    tool-result transition (root cause of issue #37 spawn-bracket leak).
+ *  - Post-2024 multimodal OpenAI shapes use `Array<{type:'text',text:string}>`.
+ *
+ * Returns the empty string for anything that isn't safe to forward —
+ * callers should treat `''` as "no text in this chunk". Crucially, we
+ * NEVER fall through to JS coercion: an object reaching `text += value`
+ * downstream becomes the literal "[object Object]" baked into history,
+ * which the model then "completes" with hallucinated bracket-tails.
+ */
+function extractDeltaText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (content === null || content === undefined) return '';
+  if (Array.isArray(content)) {
+    // Multimodal content parts shape. Only `text` parts contribute to the
+    // text channel; image/audio parts are ignored here (the adapter has
+    // no image-block emission today). Each part's `text` must itself be
+    // a string — never coerce.
+    let out = '';
+    for (const part of content) {
+      if (
+        part !== null &&
+        typeof part === 'object' &&
+        (part as { type?: unknown }).type === 'text' &&
+        typeof (part as { text?: unknown }).text === 'string'
+      ) {
+        out += (part as { text: string }).text;
+      }
+    }
+    return out;
+  }
+  // Object/number/boolean/etc. — drop silently. The pre-fix behaviour
+  // (`String(value)` via `+=` coercion) is what caused the leak.
+  return '';
+}
+
 async function* translateStream(
   response: Response,
 ): AsyncIterable<BetaRawMessageStreamEvent> {
@@ -349,8 +395,19 @@ async function* translateStream(
         const choice = chunk.choices[0];
         if (!choice) continue;
 
-        // Text content
-        if (choice.delta.content) {
+        // Text content. The OpenAI spec types `delta.content` as
+        // `string | null`, but in practice some servers (notably Mistral
+        // during the tool-call → tool-result transition) occasionally emit
+        // an object/array shape there. Without a string-guard we forward
+        // the non-string straight into `text_delta.text`; downstream
+        // `text += textDelta.text` then coerces via Object.prototype
+        // .toString → "[object Object]" gets baked into the assistant
+        // text block. That corrupted text re-enters history and the model
+        // hallucinates runaway bracket tails (`}] }] }] }]`) trying to
+        // "close" the malformed prefix it sees in its own prior turn.
+        // Regression for issue #37 (Mistral spawn-bracket leak).
+        const textPart = extractDeltaText(choice.delta.content);
+        if (textPart) {
           if (!activeTextBlock) {
             activeTextBlock = true;
             yield {
@@ -362,7 +419,7 @@ async function* translateStream(
           yield {
             type: 'content_block_delta',
             index: blockIndex,
-            delta: { type: 'text_delta', text: choice.delta.content },
+            delta: { type: 'text_delta', text: textPart },
           } as unknown as BetaRawContentBlockDeltaEvent as BetaRawMessageStreamEvent;
         }
 
