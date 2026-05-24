@@ -541,47 +541,40 @@
 					{/each}
 				</ul>
 
-			<!-- Bottom: Settings + Sign out. Two-up row so both stay in the same
-				 visual zone but Sign out gets its own icon target (was previously
-				 in the chat header bar, an awkward spot for an account action).
+			<!-- Bottom: Settings on its own row, then a small utility row with
+				 pin/unpin + sign-out. Two-row layout (vs. the prior single-row
+				 flex-shared-with-chevron) gives Settings more visual weight —
+				 it's the main item in the bottom zone, not a peer of the
+				 utility icons. Bottom-pin per user-feedback 2026-05-24.
 				 We deliberately do NOT pad to `env(safe-area-inset-bottom)` —
 				 it produced ~34px of empty space on iPhone below the row that
 				 the user perceived as a layout bug. The Home Indicator zone is
 				 reserved for system gestures but not off-limits; the Settings
-				 link's tap target still sits above the indicator bar.
-
-				 Bottom-row height is locked to MATCH the ChatView input bar
-				 height (border-t + py-2 + h-11 button = 61px content). This
-				 keeps the sidebar's Settings row visually flush with the
-				 chat composer above the page-wide StatusBar. Updates to the
-				 ChatView input bar height must update the `py-2` here too. -->
-			<div class="border-t border-border px-2 py-2">
-				<div class="flex items-center gap-1 {railExpanded ? '' : 'md:flex-col md:gap-0.5'}">
-					<a
-						href="/app/settings"
-						onclick={() => { sidebarOpen = false; expandedSection = null; }}
-						title={t('nav.settings')}
-						class="flex flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] h-11 text-sm transition-all
-						{railExpanded ? 'px-3' : 'md:flex-none md:justify-center md:px-2 md:w-11 px-3'}
-						{isActive('/app/settings', false)
-							? 'bg-accent/10 text-accent-text border-l-2 border-accent'
-							: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
-					>
-						<Icon name="settings" size="sm" />
-						<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.settings')}</span>
-					</a>
-					<!-- Pin/unpin rail (desktop only). chevron-double-right when
-						 collapsed (= "expand to lock open"), chevron-double-left
-						 when pinned (= "collapse"). Hamburger/thumbtack was
-						 ambiguous — the hamburger looks like a "menu" trigger
-						 on a row that's already a menu. -->
+				 link's tap target still sits above the indicator bar. -->
+			<div class="border-t border-border px-2 py-2 space-y-1">
+				<a
+					href="/app/settings"
+					onclick={() => { sidebarOpen = false; expandedSection = null; }}
+					title={t('nav.settings')}
+					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] h-11 text-sm transition-all
+					{railExpanded ? 'px-3' : 'md:justify-center md:px-2 px-3'}
+					{isActive('/app/settings', false)
+						? 'bg-accent/10 text-accent-text border-l-2 border-accent'
+						: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+				>
+					<Icon name="settings" size="sm" />
+					<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.settings')}</span>
+				</a>
+				<!-- Utility row: pin/unpin (desktop only) + sign-out. Smaller h-9
+					 so it reads as secondary to the Settings row above. -->
+				<div class="flex items-center gap-1 {railExpanded ? 'justify-end' : 'md:justify-center'}">
 					<button
 						type="button"
 						onclick={togglePin}
 						title={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
 						aria-label={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
 						aria-pressed={railPinned}
-						class="hidden md:flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
+						class="hidden md:flex items-center justify-center h-9 w-9 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
 					>
 						<Icon name={railPinned ? 'chevron_double_left' : 'chevron_double_right'} size="sm" />
 					</button>
@@ -589,7 +582,7 @@
 						href="/logout"
 						data-sveltekit-preload-data="off"
 						data-sveltekit-reload
-						class="flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
+						class="flex items-center justify-center h-9 w-9 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
 						aria-label={t('nav.logout')}
 						title={t('nav.logout')}
 					>

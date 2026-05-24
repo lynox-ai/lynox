@@ -233,34 +233,17 @@
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('cost_limits.loading')}</p>
 	{:else}
-		<!-- LLM mode (capability-gated, hidden on managed where it's admin-only). -->
-		{#if mistralAvailable && !providerLocked}
-			<fieldset class="space-y-2 border border-border rounded p-3">
-				<legend class="px-1 text-xs font-medium uppercase tracking-wider text-text-muted">{t('config.llm_mode')}</legend>
-				<p class="text-xs text-text-muted">{t('config.llm_mode_desc')}</p>
-				<label class="flex items-start gap-3 p-2 rounded border border-border bg-bg cursor-pointer">
-					<input type="radio" name="llm-mode" value="standard"
-						checked={(config.llm_mode ?? 'standard') === 'standard'}
-						onchange={() => { config.llm_mode = 'standard'; }}
-						class="mt-1 accent-accent shrink-0" />
-					<span class="text-sm">
-						<span class="font-medium block">{t('config.llm_mode_standard')}</span>
-						<span class="text-xs text-text-muted">{t('config.llm_mode_standard_desc')}</span>
-					</span>
-				</label>
-				<label class="flex items-start gap-3 p-2 rounded border border-border bg-bg cursor-pointer">
-					<input type="radio" name="llm-mode" value="eu-sovereign"
-						checked={config.llm_mode === 'eu-sovereign'}
-						onchange={() => { config.llm_mode = 'eu-sovereign'; }}
-						class="mt-1 accent-accent shrink-0" />
-					<span class="text-sm">
-						<span class="font-medium block">{t('config.llm_mode_eu_sovereign')}</span>
-						<span class="text-xs text-text-muted">{t('config.llm_mode_eu_sovereign_desc')}</span>
-					</span>
-				</label>
-				<p class="text-xs text-text-muted italic">{t('config.llm_mode_restart_required')}</p>
-			</fieldset>
-		{/if}
+		<!-- 2026-05-24 UX-fix: removed LLM-MODE radio fieldset (Standard /
+		     EU-Sovereign). It was a functional duplicate of the Provider tile
+		     picker on the main LLM Settings page — both wrote to overlapping
+		     state (`provider` + `llm_mode`) and on managed instances the user
+		     saw two parallel controls for the same choice. The Provider tile
+		     picker is now the single source. `llm_mode` config field stays
+		     intact: managed-CP bootstrap reads it from env, and the engine
+		     derives `provider`/`api_key`/`api_base_url` from it
+		     (config.ts:190). Power-users can still set `llm_mode` directly
+		     in ~/.lynox/config.json. -->
+
 
 		<section aria-labelledby="adv-reasoning-heading" class="space-y-4">
 			<h2 id="adv-reasoning-heading" class="text-lg font-medium">{t('llm.advanced.reasoning_heading')}</h2>

@@ -69,6 +69,37 @@ describe('fixMarkdownPreprocessing', () => {
 			expect(fixMarkdownPreprocessing(input)).toBe(input);
 		});
 	});
+
+	// Pre-launch regression-pin 2026-05-24: terse numeric-period replies
+	// like "4." (Mistral's compact answer for "What is 2+2?") were being
+	// interpreted by marked as an empty <ol start="4"><li></li></ol>,
+	// rendering as a giant blank list.
+	describe('bare numeric-period escape (ol-start guard)', () => {
+		it('escapes a lone "4." so it renders as prose, not ol-start', () => {
+			expect(fixMarkdownPreprocessing('4.')).toBe('4\\.');
+		});
+
+		it('escapes multi-digit "42."', () => {
+			expect(fixMarkdownPreprocessing('42.')).toBe('42\\.');
+		});
+
+		it('preserves surrounding whitespace', () => {
+			expect(fixMarkdownPreprocessing('  4.  ')).toBe('  4\\.  ');
+		});
+
+		it('does NOT escape "The answer is 4." (period at end of prose)', () => {
+			expect(fixMarkdownPreprocessing('The answer is 4.')).toBe('The answer is 4.');
+		});
+
+		it('does NOT escape multi-line lists ("1.\\n2.\\n3.")', () => {
+			const input = '1.\n2.\n3.';
+			expect(fixMarkdownPreprocessing(input)).toBe(input);
+		});
+
+		it('does NOT escape "4" without a period', () => {
+			expect(fixMarkdownPreprocessing('4')).toBe('4');
+		});
+	});
 });
 
 describe('repairCodeFences', () => {
