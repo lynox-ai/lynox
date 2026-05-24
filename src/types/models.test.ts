@@ -64,7 +64,7 @@ describe('Mistral tier-set', () => {
   it('exposes pinned snapshot IDs (not the auto-rolling -latest alias)', () => {
     // Reproducibility guarantee for managed-EU tenants — Mistral rolls
     // `*-latest` silently which would change behaviour mid-billing-period.
-    expect(MISTRAL_MODEL_MAP.haiku).toBe('mistral-small-2603');
+    expect(MISTRAL_MODEL_MAP.haiku).toBe('ministral-8b-2512');
     expect(MISTRAL_MODEL_MAP.sonnet).toBe('mistral-large-2512');
     expect(MISTRAL_MODEL_MAP.opus).toBe('magistral-medium-2509');
     expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
@@ -104,9 +104,14 @@ describe('Mistral tier-set', () => {
   });
 
   it('Mistral context-windows + max-tokens + max-continuations registered', () => {
+    // mistral-small-2603 deprecated 2025-12; kept in registry for cost-guard legacy
     expect(getContextWindow('mistral-small-2603')).toBe(32_000);
-    expect(getContextWindow('mistral-large-2512')).toBe(131_072);
+    // Mistral Large 3 (Dec 2025) has 256k ctx (was 131k as Large 2)
+    expect(getContextWindow('mistral-large-2512')).toBe(256_000);
     expect(getContextWindow('magistral-medium-2509')).toBe(131_072);
+    // Gen-3 ministrals replace -2410: 256k context
+    expect(getContextWindow('ministral-3b-2512')).toBe(262_144);
+    expect(getContextWindow('ministral-8b-2512')).toBe(262_144);
     expect(getDefaultMaxTokens('mistral-small-2603')).toBe(8_192);
     expect(getDefaultMaxTokens('mistral-large-2512')).toBe(16_000);
     expect(getDefaultMaxTokens('magistral-medium-2509')).toBe(32_000);
@@ -134,7 +139,7 @@ describe('getModelId for openai provider', () => {
 
   it('returns Mistral tier-set when the mistral map is registered', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
-    expect(getModelId('haiku', 'openai')).toBe('mistral-small-2603');
+    expect(getModelId('haiku', 'openai')).toBe('ministral-8b-2512');
     expect(getModelId('sonnet', 'openai')).toBe('mistral-large-2512');
     expect(getModelId('opus', 'openai')).toBe('magistral-medium-2509');
   });
@@ -252,7 +257,9 @@ describe('ModelCapability registry', () => {
       'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
       'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]',
-      'mistral-small-2603', 'mistral-large-2512', 'magistral-medium-2509',
+      'mistral-large-2512', 'magistral-medium-2509',
+      // Gen-3 ministrals replaced mistral-small-2603 in the haiku slot 2026-05-24
+      'ministral-3b-2512', 'ministral-8b-2512',
     ];
     for (const id of routedIds) {
       const cap = MODEL_CAPABILITIES[id];
@@ -282,6 +289,7 @@ describe('ModelCapability registry', () => {
     }
     expect(MODEL_CAPABILITIES['claude-haiku-4-5']!.provider).toBe('vertex');
     for (const id of ['mistral-small-2603', 'mistral-large-2512', 'magistral-medium-2509',
+                      'ministral-3b-2512', 'ministral-8b-2512',
                       'ministral-8b-2410', 'ministral-3b-2410', 'open-mistral-nemo',
                       'mistral-medium-2508', 'codestral-2508', 'magistral-small-2509']) {
       expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('openai');

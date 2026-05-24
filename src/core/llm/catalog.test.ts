@@ -59,23 +59,28 @@ describe('LLM_CATALOG', () => {
     // Pinned to dated snapshots — mirrors MISTRAL_MODEL_MAP. The previous
     // catalog shipped `*-latest` aliases which auto-roll at Mistral's
     // discretion, silently shifting cost + behaviour mid-billing-period.
+    // Updated 2026-05-24: mistral-small-2603 retired, replaced by gen-3
+    // ministrals in haiku slot; Large 3 ctx 256k + new $0.50/$1.50 pricing.
     expect(entry.models.map((m) => m.id)).toEqual([
       'mistral-large-2512',
       'magistral-medium-2509',
-      'mistral-small-2603',
+      'ministral-3b-2512',
+      'ministral-8b-2512',
     ]);
     expect(entry.default_residency).toContain('EU-Paris');
     expect(entry.base_url_default).toBe('https://api.mistral.ai/v1');
     expect(entry.preset_id).toBe('mistral');
     expect(entry.provider).toBe('openai');
-    // Tier mapping (small ↔ haiku, large ↔ sonnet, magistral ↔ opus) — kept
-    // in sync with MISTRAL_MODEL_MAP so the engine's tier router and the UI
-    // model dropdown stay coherent.
-    const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
-    expect(byTier['haiku']?.id).toBe('mistral-small-2603');
-    expect(byTier['sonnet']?.id).toBe('mistral-large-2512');
-    expect(byTier['opus']?.id).toBe('magistral-medium-2509');
-    expect(byTier['sonnet']?.pricing).toEqual({ input: 2, output: 6 });
+    // Tier mapping (ministrals ↔ haiku, large ↔ sonnet, magistral ↔ opus)
+    // — kept in sync with MISTRAL_MODEL_MAP. Two ministrals share the haiku
+    // tier; assert by-id rather than by-tier for unique mapping.
+    const byId = Object.fromEntries(entry.models.map((m) => [m.id, m]));
+    expect(byId['ministral-3b-2512']?.tier).toBe('haiku');
+    expect(byId['ministral-8b-2512']?.tier).toBe('haiku');
+    expect(byId['mistral-large-2512']?.tier).toBe('sonnet');
+    expect(byId['magistral-medium-2509']?.tier).toBe('opus');
+    // Mistral Large 3 pricing — 75% cut vs Large 2
+    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
   });
 
   it('generic OpenAI-compatible preset accepts free-text model + base URL', () => {

@@ -54,14 +54,20 @@ const PRICE_OPUS_4_7 = {
 // in the SSE stream; cached input is billed at 10% of the input rate
 // (per Mistral pricing docs 2026-05-24). Write cost is implicit/automatic — no
 // separate cacheWritePerMillion field needed.
-const PRICE_MINISTRAL_3B_2410 = {
-  inputPerMillion: 0.04, outputPerMillion: 0.04, cacheReadPerMillion: 0.004,
-} as const;
-const PRICE_MINISTRAL_8B_2410 = {
+//
+// Models 2410 → 2512: Mistral retired ministral-3b/8b-2410 on 2025-12-31;
+// replacement gen 3 models (-2512) have multimodal input + larger context
+// (256k vs 128k). Pricing went up modestly (3b: +150%, 8b: +50%) for the
+// gen-3 capabilities.
+// Mistral Large 3 (Dec 2025): 75% price cut vs Large 2. Was $2/$6, now $0.50/$1.50.
+const PRICE_MINISTRAL_3B_2512 = {
   inputPerMillion: 0.10, outputPerMillion: 0.10, cacheReadPerMillion: 0.010,
 } as const;
+const PRICE_MINISTRAL_8B_2512 = {
+  inputPerMillion: 0.15, outputPerMillion: 0.15, cacheReadPerMillion: 0.015,
+} as const;
 const PRICE_MISTRAL_LARGE_2512 = {
-  inputPerMillion: 2, outputPerMillion: 6, cacheReadPerMillion: 0.2,
+  inputPerMillion: 0.50, outputPerMillion: 1.50, cacheReadPerMillion: 0.05,
 } as const;
 const PRICE_MAGISTRAL_MEDIUM_2509 = {
   inputPerMillion: 2, outputPerMillion: 5, cacheReadPerMillion: 0.2,
@@ -97,23 +103,23 @@ const OPUS_4_7: CellTemplate = {
 };
 
 const MINISTRAL_3B: CellTemplate = {
-  label: 'mistral-ministral-3b-2410',
+  label: 'mistral-ministral-3b-2512',
   provider: 'openai',
-  modelId: 'ministral-3b-2410',
+  modelId: 'ministral-3b-2512',
   apiBaseURL: MISTRAL,
   apiKeyEnv: MISTRAL_KEY,
-  pricing: PRICE_MINISTRAL_3B_2410,
+  pricing: PRICE_MINISTRAL_3B_2512,
   pinned: true,
   providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
 const MINISTRAL_8B: CellTemplate = {
-  label: 'mistral-ministral-8b-2410',
+  label: 'mistral-ministral-8b-2512',
   provider: 'openai',
-  modelId: 'ministral-8b-2410',
+  modelId: 'ministral-8b-2512',
   apiBaseURL: MISTRAL,
   apiKeyEnv: MISTRAL_KEY,
-  pricing: PRICE_MINISTRAL_8B_2410,
+  pricing: PRICE_MINISTRAL_8B_2512,
   pinned: true,
   providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
