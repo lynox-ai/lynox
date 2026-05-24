@@ -42,7 +42,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly embeddingProvider: EmbeddingProvider;
   private readonly entityResolver: EntityResolver;
   private readonly retrievalEngine: RetrievalEngine;
-  private readonly anthropicClient: Anthropic | undefined;
+  private anthropicClient: Anthropic | undefined;
   private readonly patternEngine: PatternEngine | null;
   private readonly runHistory: RunHistory | null;
   /** Tool-call extractor (Haiku + strict schema). Default since v1.3.4; opt-out via LYNOX_KG_EXTRACTOR=v1. */
@@ -65,6 +65,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.runHistory = runHistory ?? null;
     this.patternEngine = runHistory ? new PatternEngine(runHistory, this.db) : null;
     this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] !== 'v1';
+  }
+
+  /**
+   * Replace the LLM client after a runtime provider switch. KG entity
+   * extraction + HyDE retrieval both embed user content (mail, memory
+   * text, customer data) in LLM prompts. Without this setter a UI
+   * provider-switch leaves these calls hitting the old provider until
+   * container restart — a GDPR / EU-residency leak.
+   *
+   * Also propagates to the RetrievalEngine which holds its own client
+   * reference (for HyDE).
+   */
+  setAnthropicClient(client: Anthropic | undefined): void {
+    this.anthropicClient = client;
+    this.retrievalEngine.setAnthropicClient(client);
   }
 
   // === Lifecycle ===

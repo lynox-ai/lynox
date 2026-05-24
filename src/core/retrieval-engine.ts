@@ -96,12 +96,17 @@ export class RetrievalEngine {
     private readonly db: AgentMemoryDb,
     private readonly embeddingProvider: EmbeddingProvider,
     private readonly entityResolver: EntityResolver,
-    private readonly anthropicClient?: Anthropic | undefined,
+    private anthropicClient?: Anthropic | undefined,
     private readonly runHistory?: RunHistory | undefined,
   ) {}
 
   setDataStoreBridge(bridge: DataStoreBridge): void {
     this.dataStoreBridge = bridge;
+  }
+
+  /** Propagate provider switch from KnowledgeLayer.setAnthropicClient(). */
+  setAnthropicClient(client: Anthropic | undefined): void {
+    this.anthropicClient = client;
   }
 
   async retrieve(

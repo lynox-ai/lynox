@@ -123,6 +123,30 @@ const AUTO_GC_INTERVAL = 50; // Run GC every N runs
 const INTELLIGENCE_INTERVAL = 10; // Run pattern detection + KPIs every N runs
 
 /**
+ * Default the inbox classifier's LLM region from the user's main provider
+ * choice. Env override `LYNOX_INBOX_LLM_REGION` always wins (explicit
+ * override path for managed-EU tenants who want hard-pinning regardless
+ * of UI). When the user picked Mistral in Settings (api.mistral.ai), the
+ * classifier inherits 'eu' automatically — pre-this-fix the classifier
+ * always defaulted to 'us' (Anthropic) regardless of the UI choice,
+ * leaking mail snippets + reply-draft bodies to Anthropic-US.
+ *
+ * Extracted to a pure function so it's directly unit-testable without
+ * spinning up the whole engine.
+ */
+export function resolveInboxLlmRegion(opts: {
+  envOverride: string | undefined;
+  provider: import('../types/index.js').LLMProvider | undefined;
+  apiBaseURL: string | undefined;
+}): 'us' | 'eu' {
+  if (opts.envOverride === 'eu') return 'eu';
+  if (opts.envOverride === 'us') return 'us';
+  const providerImpliesEu = opts.provider === 'openai'
+    && (opts.apiBaseURL?.includes('api.mistral.ai') ?? false);
+  return providerImpliesEu ? 'eu' : 'us';
+}
+
+/**
  * Engine — shared singleton per process.
  * Owns all expensive, long-lived resources (KG, Memory, DataStore, Secrets, Config).
  * Creates lightweight Sessions for per-conversation state.
@@ -338,6 +362,29 @@ export class Engine {
       gcpRegion,
       openaiModelId: this.userConfig.openai_model_id,
     });
+    // GDPR / EU-residency: a UI provider-switch (Anthropic ↔ Mistral)
+    // must propagate to every subsystem that embeds user content into an
+    // LLM call. Without this, Memory consolidation + KG entity-extraction
+    // + HyDE retrieval keep the OLD provider's client by reference and
+    // leak mail/customer text to the old provider until container
+    // restart. Setters are no-op-safe when the subsystem hasn't been
+    // initialized yet (e.g. early reloadCredentials before `_initMemoryAndKnowledge`).
+    this._propagateProviderSwitch(apiKey);
+  }
+
+  /** Push the freshly created LLM client into Memory + KnowledgeLayer so a runtime provider-switch propagates instead of leaving stale clients on the old provider (EU-residency leak path). */
+  private _propagateProviderSwitch(apiKey: string | undefined): void {
+    if (this.memory) {
+      this.memory.setClient({
+        apiKey,
+        apiBaseURL: this.userConfig.api_base_url,
+        provider: this.userConfig.provider,
+        openaiModelId: this.userConfig.openai_model_id,
+      });
+    }
+    if (this.knowledgeLayer) {
+      this.knowledgeLayer.setAnthropicClient(this.client);
+    }
   }
 
   async init(): Promise<this> {
@@ -802,12 +849,27 @@ export class Engine {
         // entirely (only safe with a strict DPA / self-hosted LLM).
         const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
         const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-        // EU residency: when LYNOX_INBOX_LLM_REGION=eu the runtime
-        // routes via Mistral (api.mistral.ai, EU-resident) instead of
-        // Haiku/Anthropic-US. Requires LYNOX_INBOX_MISTRAL_API_KEY
-        // (or MISTRAL_API_KEY) — bootstrap throws if missing so the
-        // operator can't accidentally fall back to a non-EU provider.
-        const llmRegion = process.env['LYNOX_INBOX_LLM_REGION'] === 'eu' ? 'eu' : 'us';
+        // EU residency: default the inbox classifier provider from the
+        // user's chosen main provider. When the user picked Mistral in
+        // Settings (`userConfig.provider === 'openai'` against
+        // api.mistral.ai), the classifier inherits that choice and uses
+        // Mistral (EU-resident) automatically — no env var required.
+        //
+        // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
+        // managed-EU tenants who want hard-pinning regardless of the UI
+        // choice, or self-hosted Anthropic users who set `LYNOX_INBOX_LLM_REGION=eu`
+        // to route just the classifier through Mistral while their chat
+        // stays on Anthropic).
+        //
+        // Bug rationale: pre-this-fix the classifier always defaulted to
+        // 'us' (Anthropic-Haiku) regardless of `userConfig.provider`, so
+        // a user who switched to Mistral in Settings for EU-residency was
+        // STILL leaking mail snippets + draft bodies to Anthropic-US.
+        const llmRegion = resolveInboxLlmRegion({
+          envOverride: process.env['LYNOX_INBOX_LLM_REGION'],
+          provider: this.userConfig.provider,
+          apiBaseURL: this.userConfig.api_base_url,
+        });
         const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
           ?? this.secretStore?.resolve('MISTRAL_API_KEY')
           ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']

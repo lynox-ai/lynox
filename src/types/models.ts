@@ -16,7 +16,7 @@ export interface ModelProfile {
   api_key: string;
   /** Authentication mode. 'static' (default) uses api_key as-is. 'google-vertex' generates OAuth tokens from GOOGLE_APPLICATION_CREDENTIALS. */
   auth?: 'static' | 'google-vertex' | undefined;
-  /** Model ID to send in requests (e.g. 'mistral-large-latest'). */
+  /** Model ID to send in requests (e.g. 'mistral-large-2512'). */
   model_id: string;
   /** Context window size in tokens. Default: 200000. */
   context_window?: number | undefined;
