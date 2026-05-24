@@ -8,6 +8,7 @@ import {
   BudgetError,
   type ExtractSchema,
 } from './llm-helper.js';
+import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 
 const SCHEMA: ExtractSchema = {
   type: 'object',
@@ -285,5 +286,135 @@ describe('callForStructuredJson', () => {
       toolInput: { name: 'foo', count: 1, level: 'invalid' },
     });
     await expect(callForStructuredJson({ ...BASE_OPTS, client })).rejects.toThrow(/not in enum/);
+  });
+});
+
+/**
+ * Provider-aware model resolution — the EU-residency-audit fix (2026-05-24).
+ * Before this fix, a Mistral user calling `callForStructuredJson` got the
+ * hardcoded `claude-sonnet-4-6` model id sent to `api.mistral.ai`, which
+ * either 404'd or — worse — silently fell back to a stale ANTHROPIC_API_KEY
+ * in `process.env`, leaking the call to Anthropic.
+ *
+ * The fix threads `agent.getProviderConfig()` through so the model id +
+ * client construction match the user's runtime provider.
+ */
+describe('callForStructuredJson — provider-aware model resolution', () => {
+  /** Capture the `model` the SDK is asked to invoke + the create-call payload. */
+  function captureClient(toolInput: unknown): {
+    client: Anthropic;
+    lastCall: { model?: string };
+  } {
+    const lastCall: { model?: string } = {};
+    const client = {
+      messages: {
+        create: async (req: { model: string }) => {
+          lastCall.model = req.model;
+          return {
+            id: 'msg_test',
+            type: 'message',
+            role: 'assistant',
+            model: req.model,
+            content: [{
+              type: 'tool_use',
+              id: 'toolu_1',
+              name: 'extract',
+              input: toolInput,
+            }] as Anthropic.ContentBlock[],
+            stop_reason: 'tool_use',
+            stop_sequence: null,
+            usage: { input_tokens: 100, output_tokens: 50 },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+    return { client, lastCall };
+  }
+
+  function stubAgent(snapshot: ProviderConfigSnapshot): IAgent {
+    return {
+      getProviderConfig: () => snapshot,
+    } as unknown as IAgent;
+  }
+
+  it('Mistral user routes to mistral-large-2512, NOT claude-sonnet-4-6', async () => {
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+    const agent = stubAgent({
+      provider: 'openai',
+      apiKey: 'mistral-key',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'mistral-large-2512',
+      openaiAuth: 'static',
+    });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      agent,
+      // `client` short-circuits createLLMClient(); the model-resolution path
+      // is still exercised because that runs BEFORE the client is constructed.
+      client,
+    });
+
+    expect(lastCall.model).toBe('mistral-large-2512');
+    expect(lastCall.model).not.toBe('claude-sonnet-4-6');
+    expect(lastCall.model?.startsWith('claude-')).toBe(false);
+  });
+
+  it('Anthropic user keeps the Sonnet default', async () => {
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+    const agent = stubAgent({
+      provider: 'anthropic',
+      apiKey: 'sk-ant-test',
+      apiBaseURL: undefined,
+      openaiModelId: undefined,
+      openaiAuth: undefined,
+    });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      agent,
+      client,
+    });
+
+    expect(lastCall.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('explicit `model` opt still overrides provider resolution', async () => {
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+    const agent = stubAgent({
+      provider: 'openai',
+      apiKey: 'mistral-key',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'mistral-large-2512',
+      openaiAuth: 'static',
+    });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      agent,
+      client,
+      model: 'ministral-8b-2512',
+    });
+
+    expect(lastCall.model).toBe('ministral-8b-2512');
+  });
+
+  it('legacy caller without `agent` keeps the Anthropic Sonnet default', async () => {
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      client,
+    });
+
+    expect(lastCall.model).toBe('claude-sonnet-4-6');
   });
 });

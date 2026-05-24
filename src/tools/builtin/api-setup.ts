@@ -753,6 +753,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       user: `Docs URL: ${docsUrl}\n\n---\n\n${sanitizeBody(docsText)}${linkedBlobs}`,
       schema: DOCS_EXTRACT_SCHEMA,
       budgetUsd: DOCS_EXTRACT_BUDGET_USD,
+      // Inherit the parent agent's provider snapshot so a Mistral / OpenAI
+      // user's docs-bootstrap call hits the same endpoint they configured
+      // (avoids the stale-global `_activeProvider` + ANTHROPIC_API_KEY
+      // leak path in `createLLMClient()` — see PR #568 for the analogous
+      // spawn.ts fix).
+      agent,
     });
     extracted = result.data;
     costUsd = result.costUsd;
