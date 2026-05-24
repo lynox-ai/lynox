@@ -72,6 +72,12 @@
 	}
 
 	let config = $state<UserConfig>({});
+	// Snapshot of the raw server config at load-time — used by save() to
+	// diff against `config` so the auto-populated engine-default values
+	// (effort='high', thinking='adaptive', experience='business') aren't
+	// silently written back to the server when the user touches an
+	// unrelated field. Only fields the user actually changed get staged.
+	let origConfig = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let managed = $state<boolean | null>(null);
 	let mistralAvailable = $state<boolean>(false);
@@ -97,6 +103,19 @@
 			// (agent.ts:278). Both align with the "(empfohlen)" UI label.
 			// Untouched configs are not auto-saved — values only persist when
 			// the user hits Save.
+			// Raw server values — used by save() to diff and only persist
+			// fields the user actually touched.
+			origConfig = {
+				experience: body.experience,
+				effort_level: body.effort_level,
+				thinking_mode: body.thinking_mode,
+				embedding_provider: body.embedding_provider,
+				llm_mode: body.llm_mode,
+				max_context_window_tokens: body.max_context_window_tokens,
+			};
+			// Displayed state — coalesce unset fields to the engine's actual
+			// defaults so the dropdowns always have a matching selection that
+			// matches the "(empfohlen)" labels.
 			config = {
 				experience: body.experience ?? 'business',
 				effort_level: body.effort_level ?? 'high',
@@ -119,18 +138,23 @@
 		if (!loaded) return;
 		saving = true;
 		try {
-			// Per-field staging — `undefined` is a meaningful value for
-			// max_context_window_tokens (= model default), so we send the field
-			// whenever the key is present on `config` (the radio has been touched).
+			// Diff-based staging — only persist fields the user actually
+			// changed since load. The displayed `config` state coalesces
+			// unset fields to engine defaults (so dropdowns render correctly),
+			// but those auto-populated values must NOT be written back to
+			// the server on unrelated saves, otherwise:
+			//   - the user's stored config silently gains keys they never set
+			//   - future engine default changes won't propagate to them
+			// 2026-05-24 fix per /pr-review #578 N1.
 			const update: UserConfig = {};
-			if (config.experience) update.experience = config.experience;
-			if (config.effort_level) update.effort_level = config.effort_level;
-			if (config.thinking_mode) update.thinking_mode = config.thinking_mode;
+			if (config.experience !== origConfig.experience) update.experience = config.experience;
+			if (config.effort_level !== origConfig.effort_level) update.effort_level = config.effort_level;
+			if (config.thinking_mode !== origConfig.thinking_mode) update.thinking_mode = config.thinking_mode;
 			// llm_mode and embedding_provider are provider-bound — only stage
 			// when the UI was allowed to render them (lock + capability gates).
-			if (config.llm_mode && !providerLocked) update.llm_mode = config.llm_mode;
-			if (config.embedding_provider && !isManaged) update.embedding_provider = config.embedding_provider;
-			if ('max_context_window_tokens' in config) {
+			if (config.llm_mode !== origConfig.llm_mode && !providerLocked) update.llm_mode = config.llm_mode;
+			if (config.embedding_provider !== origConfig.embedding_provider && !isManaged) update.embedding_provider = config.embedding_provider;
+			if (config.max_context_window_tokens !== origConfig.max_context_window_tokens) {
 				update.max_context_window_tokens = config.max_context_window_tokens;
 			}
 			const res = await fetch(`${getApiBase()}/config`, {
