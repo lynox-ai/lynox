@@ -21,6 +21,16 @@
 	type Indicator = 'none' | 'minor' | 'major' | 'critical' | 'unknown';
 	interface ProviderEntry { indicator: Indicator; description: string; provider: string }
 
+	// Hoisted out of the 30s poll loop so we don't re-allocate the literal on
+	// every tick. Severity ranking: critical > major > minor > unknown > none.
+	const INDICATOR_RANK: Record<Indicator, number> = {
+		none: 0,
+		unknown: 1,
+		minor: 2,
+		major: 3,
+		critical: 4,
+	};
+
 	let engineOk = $state<boolean | null>(null);
 	let engineVersion = $state<string | null>(null);
 	let apiStatus = $state<Indicator | null>(null);
@@ -100,26 +110,31 @@
 				// Aggregate worst-state across ALL configured providers — when one
 				// provider (e.g. Mistral with an expired key) is failing, the bar
 				// must reflect that even if the primary (Anthropic) is healthy.
-				// Severity order: critical > major > minor > unknown > none.
 				// Pre-fix this read only providers[0], so a failing Mistral was
 				// invisible while the status bar misled with "OpenAI-compatible
 				// · API OK" (the prod symptom that triggered this fix).
-				const rank: Record<Indicator, number> = {
-					none: 0,
-					unknown: 1,
-					minor: 2,
-					major: 3,
-					critical: 4,
-				};
-				let worst: Indicator = 'unknown';
-				let worstDescription = '';
-				let worstProvider = '';
-				for (const p of providers) {
+				//
+				// Seed from primary (providers[0]) so the all-healthy `none`
+				// case lands on green "API OK". Seeding from `unknown` would
+				// lock out `none` since the loop's strict-greater check can
+				// never step DOWN in severity. Strict `>` (not `>=`) makes the
+				// FIRST failing provider win ties — keeps tooltip selection
+				// stable across polls.
+				let worst: Indicator = primary
+					? (primary.indicator === 'none' || primary.indicator === 'minor'
+						|| primary.indicator === 'major' || primary.indicator === 'critical'
+						? primary.indicator
+						: 'unknown')
+					: 'none';
+				let worstDescription = primary?.description ?? '';
+				let worstProvider = primary?.provider ?? '';
+				for (let i = 1; i < providers.length; i++) {
+					const p = providers[i]!;
 					const ind: Indicator = p.indicator === 'none' || p.indicator === 'minor'
 						|| p.indicator === 'major' || p.indicator === 'critical'
 						? p.indicator
 						: 'unknown';
-					if (rank[ind] >= rank[worst]) {
+					if (INDICATOR_RANK[ind] > INDICATOR_RANK[worst]) {
 						worst = ind;
 						worstDescription = p.description ?? '';
 						worstProvider = p.provider ?? '';
