@@ -89,10 +89,18 @@
 				capabilities?: { mistral_available?: boolean };
 				active_model?: ActiveModel;
 			};
+			// UX-fix 2026-05-24: when effort_level / thinking_mode are unset in
+			// stored config, prefer the engine's actual defaults so the dropdowns
+			// don't display a phantom "default" option that the user can't
+			// re-select. effort engine-default: 'high' on non-Haiku, non-custom
+			// (agent.ts:271). thinking engine-default: 'adaptive' on Anthropic
+			// (agent.ts:278). Both align with the "(empfohlen)" UI label.
+			// Untouched configs are not auto-saved — values only persist when
+			// the user hits Save.
 			config = {
-				experience: body.experience,
-				effort_level: body.effort_level,
-				thinking_mode: body.thinking_mode,
+				experience: body.experience ?? 'business',
+				effort_level: body.effort_level ?? 'high',
+				thinking_mode: body.thinking_mode ?? 'adaptive',
 				embedding_provider: body.embedding_provider,
 				llm_mode: body.llm_mode,
 				max_context_window_tokens: body.max_context_window_tokens,
@@ -236,12 +244,16 @@
 			<label class="block">
 				<span class="block text-sm font-medium mb-1">{t('config.effort')}</span>
 				<span class="block text-xs text-text-muted mb-1">{t('config.effort_desc')}</span>
-				<!-- v1.6.0 fix (rafael QA 2026-05-19): "Default" option as first
-				     entry so unset config doesn't render as "low" / "Schnell"
-				     (= minimum quality) as if the user had explicitly picked it. -->
+				<!-- 2026-05-24 UX-fix: removed the duplicate "Standard (vom Modell)"
+				     option. It was identical-behavior to 'high' on chat (engine
+				     default in agent.ts:271) but the UI suggested it was a
+				     model-aware option, which the engine never actually was.
+				     Default-selected is now 'high' so the dropdown matches the
+				     (empfohlen) label. The pre-2026-05-24 "v1.6.0 fix" of
+				     putting undefined first to guard against rendering as 'low'
+				     is no longer needed — 'high' is now the explicit default. -->
 				<select bind:value={config.effort_level} disabled={!loaded}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-					<option value={undefined}>{t('config.effort_default')}</option>
 					<option value="low">{t('config.effort_low')}</option>
 					<option value="medium">{t('config.effort_medium')}</option>
 					<option value="high">{t('config.effort_high')}</option>
@@ -249,16 +261,26 @@
 				</select>
 			</label>
 
-			<label class="block">
-				<span class="block text-sm font-medium mb-1">{t('config.thinking')}</span>
-				<span class="block text-xs text-text-muted mb-1">{t('config.thinking_desc')}</span>
-				<select bind:value={config.thinking_mode} disabled={!loaded}
-					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-					<option value={undefined}>{t('config.thinking_default')}</option>
-					<option value="disabled">{t('config.thinking_disabled')}</option>
-					<option value="adaptive">{t('config.thinking_adaptive')}</option>
-				</select>
-			</label>
+			<!-- Thinking is Anthropic-only today. On Mistral / OpenAI-compat
+			     providers the engine silently ignores the toggle (extended
+			     thinking blocks aren't part of the OpenAI-compat wire format).
+			     Hide the dropdown there so the UI doesn't suggest a choice
+			     the user doesn't actually have. -->
+			{#if activeModel?.features?.extendedThinking}
+				<label class="block">
+					<span class="block text-sm font-medium mb-1">{t('config.thinking')}</span>
+					<span class="block text-xs text-text-muted mb-1">{t('config.thinking_desc')}</span>
+					<select bind:value={config.thinking_mode} disabled={!loaded}
+						class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+						<option value="disabled">{t('config.thinking_disabled')}</option>
+						<option value="adaptive">{t('config.thinking_adaptive')}</option>
+					</select>
+				</label>
+			{:else if activeModel}
+				<div class="text-xs text-text-muted italic px-2 py-1 border border-dashed border-border rounded">
+					{t('config.thinking')}: {t('config.anthropic_only_hint')}
+				</div>
+			{/if}
 		</section>
 
 		<section aria-labelledby="adv-experience-heading" class="space-y-4 border-t border-border pt-6">
@@ -267,9 +289,13 @@
 			<label class="block">
 				<span class="block text-sm font-medium mb-1">{t('config.experience')}</span>
 				<span class="block text-xs text-text-muted mb-1">{t('config.experience_desc')}</span>
+				<!-- 2026-05-24 UX-fix: removed duplicate "Standard (vom Modell)"
+				     option. Engine semantics (session.ts:1007): only 'developer'
+				     triggers special behavior — undefined and 'business' are
+				     identical. Defaulting the dropdown to 'business' makes the
+				     UI honest about what's actually happening. -->
 				<select bind:value={config.experience} disabled={!loaded}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-					<option value={undefined}>{t('config.experience_default')}</option>
 					<option value="business">{t('config.experience_business')}</option>
 					<option value="developer">{t('config.experience_developer')}</option>
 				</select>

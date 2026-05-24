@@ -247,7 +247,11 @@ export async function spawnViaAgent(
     systemPrompt: agentDef.systemPrompt,
     tools,
     thinking,
-    effort: step.effort ?? config.effort_level ?? 'medium',
+    // Default 'high' matches agent.ts:271 main-agent default (non-Haiku,
+    // non-custom-proxy). Pre-2026-05-24 the orchestrator defaulted to 'medium'
+    // here while the main-agent defaulted to 'high' — silent split that
+    // contradicted the "Gründlich (empfohlen)" UI label.
+    effort: step.effort ?? config.effort_level ?? 'high',
     maxIterations: 10,
     excludeTools: disabledTools,
     maxContextWindowTokens: config.max_context_window_tokens,
@@ -357,7 +361,8 @@ export async function spawnInline(
   } else {
     thinking = { type: 'adaptive' };
   }
-  const effort = step.effort ?? resolved?.effort ?? config.effort_level ?? 'medium';
+  // Parity with agent.ts:271 main-agent default (non-Haiku, non-custom-proxy).
+  const effort = step.effort ?? resolved?.effort ?? config.effort_level ?? 'high';
   const maxIter = 10;
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
