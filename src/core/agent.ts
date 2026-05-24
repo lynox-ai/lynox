@@ -9,6 +9,7 @@ import type {
   AgentConfig,
   ThinkingMode,
   AgentWarning,
+  ProviderConfigSnapshot,
   EffortLevel,
   AutonomyLevel,
   PreApprovalSet,
@@ -197,14 +198,11 @@ export class Agent implements IAgent {
    * these to construct child Agents using the SAME provider as the parent,
    * avoiding the stale-config-json bug on managed-tier where UI provider-
    * switch isn't reflected in `~/.lynox/config.json`.
+   *
+   * **DO NOT LOG** — `apiKey` is plaintext credential. Pipe only to
+   * AgentConfig; never to telemetry, error-report, or stdout.
    */
-  getProviderConfig(): {
-    provider: LLMProvider;
-    apiKey: string | undefined;
-    apiBaseURL: string | undefined;
-    openaiModelId: string | undefined;
-    openaiAuth: 'static' | 'google-vertex' | undefined;
-  } {
+  getProviderConfig(): ProviderConfigSnapshot {
     return {
       provider: this.provider,
       apiKey: this.inheritedApiKey,

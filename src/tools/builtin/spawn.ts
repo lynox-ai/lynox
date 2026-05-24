@@ -1,4 +1,4 @@
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, LLMProvider } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot } from '../../types/index.js';
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
@@ -271,7 +271,7 @@ async function executeThinker(
     // method (older test helpers); the field-spread is a no-op then.
     ...(() => {
       const parentProv = typeof (parentAgent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
-        ? (parentAgent as { getProviderConfig: () => { provider: LLMProvider; apiKey?: string; apiBaseURL?: string; openaiModelId?: string; openaiAuth?: 'static' | 'google-vertex' } }).getProviderConfig()
+        ? (parentAgent as { getProviderConfig: () => ProviderConfigSnapshot }).getProviderConfig()
         : null;
       return {
         apiKey: profile?.api_key ?? parentProv?.apiKey ?? userConfig.api_key,
