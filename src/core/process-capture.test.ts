@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   captureProcess,
   collapseConsecutiveDuplicates,
@@ -6,9 +6,11 @@ import {
 } from './process-capture.js';
 import type { StepAnnotation } from './process-capture.js';
 import type { ToolCallRecord } from './run-history.js';
+import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/models.js';
 
 // Mock Anthropic SDK (class pattern — see dag-planner.test.ts)
 const mockCreate = vi.fn();
+const anthropicCtorCalls: Array<Record<string, unknown>> = [];
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
@@ -17,7 +19,30 @@ vi.mock('@anthropic-ai/sdk', () => ({
         create: (...args: unknown[]) => mockCreate(...args),
       },
     };
-    constructor(..._args: unknown[]) { /* accept any args */ }
+    constructor(opts: Record<string, unknown> = {}) {
+      anthropicCtorCalls.push(opts);
+    }
+  },
+}));
+
+// Mock OpenAIAdapter so we can assert how captureProcess wires provider='openai'.
+const mockOpenAICreate = vi.fn();
+const openaiCtorCalls: Array<Record<string, unknown>> = [];
+
+vi.mock('./openai-adapter.js', () => ({
+  OpenAIAdapter: class MockOpenAIAdapter {
+    baseURL: string;
+    modelId: string;
+    beta = {
+      messages: {
+        create: (...args: unknown[]) => mockOpenAICreate(...args),
+      },
+    };
+    constructor(opts: { baseURL: string; apiKey: unknown; modelId: string }) {
+      openaiCtorCalls.push(opts as unknown as Record<string, unknown>);
+      this.baseURL = opts.baseURL;
+      this.modelId = opts.modelId;
+    }
   },
 }));
 
@@ -442,5 +467,86 @@ describe('captureProcess — secret redaction', () => {
     ];
     await captureProcess('r', 'X', calls, { apiKey: 'k' });
     expect(sentPayload()).not.toContain('s3cretPwd9');
+  });
+});
+
+/**
+ * Provider plumbing — regression guard for the EU-residency bug where
+ * captureProcess constructed an Anthropic client + `claude-haiku-…` model id
+ * regardless of the caller's actual provider, so a Mistral user's
+ * `save_workflow` call routed to api.anthropic.com (or 4xx'd on Mistral with
+ * an unknown model). Without this test, the silent regression resurfaces the
+ * next time someone refactors the client construction.
+ */
+describe('captureProcess — provider plumbing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    anthropicCtorCalls.length = 0;
+    openaiCtorCalls.length = 0;
+    // Mirror engine bootstrap for a Mistral-hosted tenant — without this,
+    // `getModelId('haiku', 'openai')` falls back to the Anthropic id and
+    // the assertion below would only catch the client-routing bug, not
+    // the model-id bug. Reset to null in afterEach so other tests aren't
+    // affected.
+    setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP, fallbackModelId: null });
+    mockOpenAICreate.mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'extract_process',
+          input: {
+            steps: [{ index: 0, description: 'do thing', inputTemplate: {}, dependsOn: [] }],
+            parameters: [],
+          },
+        },
+      ],
+    });
+    mockCreate.mockResolvedValue(makeMockResponse());
+  });
+
+  afterEach(() => {
+    setOpenAIModelResolver({ map: null, fallbackModelId: null });
+  });
+
+  it('routes workflow-save to api.mistral.ai with a Mistral model id when provider=openai', async () => {
+    const calls: ToolCallRecord[] = [
+      call('http_request', '{"url":"https://example.com"}', 0),
+    ];
+    await captureProcess('run1', 'Mistral Workflow', calls, {
+      apiKey: 'mistral-key',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      provider: 'openai',
+      openaiModelId: 'ministral-8b-2512',
+    });
+
+    // OpenAIAdapter was constructed (not the Anthropic SDK).
+    expect(openaiCtorCalls).toHaveLength(1);
+    expect(openaiCtorCalls[0]!.baseURL).toBe('https://api.mistral.ai/v1');
+    expect(openaiCtorCalls[0]!.modelId).toBe('ministral-8b-2512');
+    expect(anthropicCtorCalls).toHaveLength(0);
+
+    // The model id sent on the request is a Mistral one, never claude-*.
+    expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
+    const body = mockOpenAICreate.mock.calls[0]![0] as { model: string; betas?: unknown };
+    expect(body.model).toBe('ministral-8b-2512');
+    expect(body.model.startsWith('claude-')).toBe(false);
+    // `betas` is an Anthropic-only header; openai-compat must omit it so the
+    // Mistral endpoint doesn't get a stray field it doesn't understand.
+    expect(body.betas).toBeUndefined();
+  });
+
+  it('preserves legacy Anthropic path when provider is omitted', async () => {
+    const calls: ToolCallRecord[] = [
+      call('http_request', '{"url":"https://example.com"}', 0),
+    ];
+    await captureProcess('run1', 'Anthropic Workflow', calls, {
+      apiKey: 'sk-ant-test',
+    });
+
+    // No OpenAIAdapter constructed — legacy callers untouched.
+    expect(openaiCtorCalls).toHaveLength(0);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const body = mockCreate.mock.calls[0]![0] as { model: string };
+    expect(body.model.startsWith('claude-haiku')).toBe(true);
   });
 });
