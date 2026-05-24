@@ -89,6 +89,45 @@ export async function saveSearxng(): Promise<void> {
 	searxngSaving = false;
 }
 
+// ---------------------------------------------------------------------------
+// Reranker capability
+// ---------------------------------------------------------------------------
+//
+// Mirrors the runtime guard in `src/integrations/search/search-reranker.ts`:
+// the reranker uses Anthropic Haiku and silently no-ops on `custom` / `openai`
+// (Mistral) providers. We surface that state here so the SearchSettings page
+// can show "Reranker is currently Anthropic-only" instead of letting a user
+// flip LYNOX_SEARCH_RERANK=true and wonder why nothing changes.
+
+export interface RerankerCapabilityState {
+	supported: boolean;
+	enabled: boolean;
+	provider: 'anthropic' | 'vertex' | 'custom' | 'openai';
+	reason?: 'provider-unsupported' | 'disabled-by-env';
+}
+
+let rerankerCapability = $state<RerankerCapabilityState | null>(null);
+let rerankerCapabilityLoading = $state(false);
+
+export function getRerankerCapability(): RerankerCapabilityState | null {
+	return rerankerCapability;
+}
+export function isRerankerCapabilityLoading(): boolean {
+	return rerankerCapabilityLoading;
+}
+
+export async function loadRerankerCapability(): Promise<void> {
+	rerankerCapabilityLoading = true;
+	try {
+		const res = await fetch(`${getApiBase()}/search/reranker/capability`);
+		if (!res.ok) throw new Error();
+		rerankerCapability = (await res.json()) as RerankerCapabilityState;
+	} catch {
+		rerankerCapability = null;
+	}
+	rerankerCapabilityLoading = false;
+}
+
 export async function removeSearxng(): Promise<void> {
 	searxngSaving = true;
 	try {

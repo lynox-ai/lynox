@@ -1756,6 +1756,56 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // The Settings → Search page reads this endpoint to decide whether to show
+  // "Reranker is currently Anthropic-only". If `supported` ever drifts from
+  // the runtime guard in search-reranker.ts, users will toggle the env var
+  // and silently get nothing — so we lock both shapes from one place.
+  describe('search reranker capability', () => {
+    it('GET /api/search/reranker/capability returns supported=true on the default anthropic provider', async () => {
+      const { initLLMProvider } = await import('../core/llm-client.js');
+      await initLLMProvider('anthropic');
+      delete process.env['LYNOX_SEARCH_RERANK'];
+
+      const res = await jsonFetch('/api/search/reranker/capability');
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        supported: boolean;
+        enabled: boolean;
+        provider: string;
+        reason?: string;
+      };
+      expect(body.supported).toBe(true);
+      expect(body.enabled).toBe(false);
+      expect(body.provider).toBe('anthropic');
+      expect(body.reason).toBe('disabled-by-env');
+    });
+
+    it('GET /api/search/reranker/capability returns supported=false on Mistral / openai-compat', async () => {
+      const { initLLMProvider } = await import('../core/llm-client.js');
+      await initLLMProvider('openai');
+      try {
+        process.env['LYNOX_SEARCH_RERANK'] = 'true';
+        const res = await jsonFetch('/api/search/reranker/capability');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          supported: boolean;
+          enabled: boolean;
+          provider: string;
+          reason?: string;
+        };
+        // The whole point of the endpoint: even with the env on, openai-compat
+        // providers (Mistral et al.) report unsupported so the UI can warn.
+        expect(body.supported).toBe(false);
+        expect(body.enabled).toBe(true);
+        expect(body.provider).toBe('openai');
+        expect(body.reason).toBe('provider-unsupported');
+      } finally {
+        delete process.env['LYNOX_SEARCH_RERANK'];
+        await initLLMProvider('anthropic');
+      }
+    });
+  });
+
   describe('history', () => {
     it('GET /api/history/runs returns recent runs', async () => {
       const res = await jsonFetch('/api/history/runs');

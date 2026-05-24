@@ -18,6 +18,7 @@
 import type { SearchResult } from './search-provider.js';
 import { createLLMClient, getActiveProvider, isCustomProvider } from '../../core/llm-client.js';
 import { getModelId, getBetasForProvider } from '../../types/index.js';
+import type { LLMProvider } from '../../types/index.js';
 
 export interface RerankOptions {
   /** Score threshold 0-10 for keeping a result. Default: 4. */
@@ -70,6 +71,40 @@ function isEnabled(opts: RerankOptions): boolean {
   if (opts.enabled !== undefined) return opts.enabled;
   const envVal = process.env['LYNOX_SEARCH_RERANK'];
   return envVal === 'true' || envVal === '1';
+}
+
+/**
+ * Why isCustomProvider() can't be reached from the UI: the toggle/env-var
+ * decision happens server-side at search time. Without this surface, users
+ * who flip LYNOX_SEARCH_RERANK=true on Mistral / a custom proxy get a
+ * silent no-op (skipReason: 'provider-unsupported' in the outcome, but
+ * outcomes aren't surfaced in the UI). The capability snapshot is read at
+ * request time so it always reflects the live provider — no DB row, no
+ * settings flag, no migration needed.
+ */
+export interface RerankerCapability {
+  supported: boolean;
+  enabled: boolean;
+  provider: LLMProvider;
+  /** Stable machine-readable reason. Present when supported=false OR enabled=false. */
+  reason?: 'provider-unsupported' | 'disabled-by-env';
+}
+
+export function getRerankerCapability(): RerankerCapability {
+  const provider = getActiveProvider();
+  const envVal = process.env['LYNOX_SEARCH_RERANK'];
+  const enabled = envVal === 'true' || envVal === '1';
+
+  // Provider-capability mirror of the runtime guard in rerankSearchResults().
+  // Keep these in lockstep — if a future Mistral-native reranker lands, both
+  // gates flip together.
+  if (isCustomProvider()) {
+    return { supported: false, enabled, provider, reason: 'provider-unsupported' };
+  }
+  if (!enabled) {
+    return { supported: true, enabled: false, provider, reason: 'disabled-by-env' };
+  }
+  return { supported: true, enabled: true, provider };
 }
 
 export async function rerankSearchResults(

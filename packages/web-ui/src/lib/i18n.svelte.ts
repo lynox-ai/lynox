@@ -1308,6 +1308,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.searxng_check_failed': { de: 'Nicht erreichbar — URL prüfen', en: 'Unreachable — check URL' },
 	'integrations.searxng_remove': { de: 'Entfernen', en: 'Remove' },
 
+	// Reranker (post-search relevance scorer; Anthropic-only today)
+	'integrations.reranker_title': { de: 'Relevanz-Reranker', en: 'Relevance reranker' },
+	'integrations.reranker_desc': { de: 'Bewertet Suchtreffer per Haiku gegen die Suchintention und verwirft Off-Topic-Treffer. Opt-in via LYNOX_SEARCH_RERANK=true.', en: 'Scores search results against query intent via Haiku and drops off-topic hits. Opt-in via LYNOX_SEARCH_RERANK=true.' },
+	'integrations.reranker_active': { de: 'Aktiv (Anthropic Haiku)', en: 'Active (Anthropic Haiku)' },
+	'integrations.reranker_available_off': { de: 'Verfügbar — setze LYNOX_SEARCH_RERANK=true zum Aktivieren', en: 'Available — set LYNOX_SEARCH_RERANK=true to enable' },
+	'integrations.reranker_unsupported': { de: 'Aktuell nur mit Anthropic verfügbar', en: 'Currently available with Anthropic only' },
+	'integrations.reranker_unsupported_hint': { de: 'Der Reranker ruft Anthropic Haiku auf und wird für den aktiven Provider übersprungen. Web-Suche funktioniert weiterhin — nur der Post-Filter ist deaktiviert.', en: 'The reranker calls Anthropic Haiku and is skipped for the active provider. Web search still works — only the post-filter is disabled.' },
+
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
 	'memory.no_entries': { de: 'Keine Einträge in', en: 'No entries in' },
