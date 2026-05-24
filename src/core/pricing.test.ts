@@ -131,7 +131,8 @@ describe('Pricing', () => {
     });
 
     it('charges cache reads at 10% of input rate (Mistral native prompt-cache)', () => {
-      // Mistral docs: `prompt_cache_key` enables transparent prompt caching;
+      // Mistral docs (https://docs.mistral.ai/api/endpoint/chat — 2026-05-24):
+      // `prompt_cache_key` enables transparent prompt caching;
       // cached input is billed at 10% of standard input rate.
       // Large 3 input = $0.50/M → cached = $0.05/M → 1M cached = $0.05.
       const cost = calculateCost('mistral-large-2512', {

@@ -1333,7 +1333,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// Code-based dispatch lets us i18n the title/body; modelId is interpolated text-safe
 			// (Svelte default-escapes via `{...}`, addToast takes a plain string).
 			const code = String(data['code'] ?? '');
-			const modelId = String(data['modelId'] ?? 'unknown');
+			// Defensive cap on modelId: server-controlled enum today, but slice prevents
+			// a future leak/spam scenario from rendering megabyte strings in the toast UI.
+			const modelId = String(data['modelId'] ?? 'unknown').slice(0, 64);
 			if (code === 'thinking_not_supported_on_model') {
 				// addToast accepts 'success' | 'error' | 'info'; use 'info' for soft
 				// degrades (thinking silently dropped). 'error' would be misleading —

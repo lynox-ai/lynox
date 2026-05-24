@@ -86,6 +86,56 @@ const SCENARIOS: Scenario[] = [
     expectFinalThinkingType: 'disabled',
   },
   {
+    name: 'Mistral provider + thinking=adaptive + mistral-large-2512 (default mode)',
+    config: {
+      model: 'mistral-large-2512',
+      provider: 'openai',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      apiKey: 'test-stub',
+      openaiModelId: 'mistral-large-2512',
+      thinking: { type: 'adaptive' },
+      systemPrompt: 'test',
+      memory: noopMemory,
+      tools: emptyTools,
+    },
+    expectWarningCode: null, // guard only fires on type === 'enabled'
+    expectFinalThinkingType: 'disabled',
+  },
+  {
+    name: 'Mistral provider + thinking=enabled + ministral-3b-2512 (prefix-match guard)',
+    config: {
+      model: 'ministral-3b-2512',
+      provider: 'openai',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      apiKey: 'test-stub',
+      openaiModelId: 'ministral-3b-2512',
+      thinking: { type: 'enabled', budget_tokens: 2048 },
+      systemPrompt: 'test',
+      memory: noopMemory,
+      tools: emptyTools,
+    },
+    // Verifies startsWith('magistral-') doesn't accidentally match 'ministral-'.
+    expectWarningCode: 'thinking_not_supported_on_model',
+    expectFinalThinkingType: 'disabled',
+  },
+  {
+    name: 'OpenRouter (openai-compat) + thinking=enabled + non-magistral (hostname-gate)',
+    config: {
+      model: 'meta-llama/llama-3.1-70b-instruct',
+      provider: 'openai',
+      apiBaseURL: 'https://openrouter.ai/api/v1',
+      apiKey: 'test-stub',
+      openaiModelId: 'meta-llama/llama-3.1-70b-instruct',
+      thinking: { type: 'enabled', budget_tokens: 2048 },
+      systemPrompt: 'test',
+      memory: noopMemory,
+      tools: emptyTools,
+    },
+    // Non-Mistral openai-compat must NOT get the Mistral-specific warning.
+    expectWarningCode: null,
+    expectFinalThinkingType: 'disabled',
+  },
+  {
     name: 'Anthropic provider + thinking=enabled + claude-sonnet-4-6',
     config: {
       model: 'claude-sonnet-4-6',

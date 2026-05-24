@@ -4,6 +4,7 @@ import type { ToolEntry, StreamHandler } from './tools.js';
 import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
+import type { AgentWarning } from './models.js';
 
 export interface TabQuestion {
   question: string;
@@ -96,6 +97,8 @@ export interface IAgent {
   getExcludedToolNames(): readonly string[];
   /** User-preferred max context window — propagate to sub-agents so the cap applies tree-wide. */
   getMaxContextWindowTokens(): number | undefined;
+  /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Engine surface for HTTP-API SSE toast events. Returns empty array when no warnings. */
+  getWarnings(): readonly AgentWarning[];
   onStream:        StreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;

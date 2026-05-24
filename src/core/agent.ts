@@ -215,13 +215,15 @@ export class Agent implements IAgent {
     const isHaiku = this.model.includes('haiku');
     const requestedThinking = config.thinking ?? { type: 'adaptive' };
     // Mistral thinking-flag guard (per PRD-MISTRAL-AS-ANTHROPIC-ALTERNATIVE §4.4):
-    // when a customer opts into thinking on a non-reasoning Mistral model,
-    // the silent-disable below would otherwise drop the flag without surface.
-    // Emit a structured warning so the HTTP-API can stream it to the UI as
-    // a toast — honest degrade, not silent drop. Magistral is the only
-    // Mistral model with native reasoning; everything else gets the warning.
-    // Anthropic + custom-proxy without Mistral aren't affected.
-    if (this.isCustomProxy && requestedThinking.type === 'enabled' && !this.model.startsWith('magistral-')) {
+    // Hostname-gate to api.mistral.ai — a user on OpenRouter / llama.cpp /
+    // Together via `provider: 'openai'` would otherwise receive a Mistral-
+    // specific warning that doesn't apply to their provider. Same hostname-
+    // gate pattern as the cache-key forward in openai-adapter.ts.
+    const isMistralHost = (() => {
+      try { return config.apiBaseURL ? new URL(config.apiBaseURL).hostname.toLowerCase() === 'api.mistral.ai' : false; }
+      catch { return false; }
+    })();
+    if (isMistralHost && requestedThinking.type === 'enabled' && !this.model.startsWith('magistral-')) {
       this.warnings.push({
         code: 'thinking_not_supported_on_model',
         modelId: this.model,
