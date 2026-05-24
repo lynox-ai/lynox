@@ -121,8 +121,9 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
  * cost predictability + behaviour-drift in managed-EU tenants.
  *
  * Tier mapping (updated 2026-05-24): ministral-3b/8b ↔ haiku,
- * mistral-large-3 ↔ sonnet, magistral-medium ↔ opus.
- * mistral-small-2603 retired from catalog in favor of Ministral gen 3.
+ * mistral-large-3 ↔ sonnet, magistral-medium ↔ opus. mistral-small-2603
+ * retired from catalog 2026-05-24 in favor of Ministral gen 3 (replacement
+ * for Mistral's own retired ministral-3b/8b-2410 effective 2025-12).
  */
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
@@ -191,7 +192,7 @@ export const LLM_CATALOG: LLMCatalog = [
     requires_region: false,
     base_url_default: 'https://api.mistral.ai/v1',
     default_residency: 'EU-Paris (Mistral SAS; DPA + GDPR)',
-    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: small / large / magistral picked from the model dropdown.',
+    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large / magistral picked from the model dropdown.',
   },
   {
     provider: 'openai',
