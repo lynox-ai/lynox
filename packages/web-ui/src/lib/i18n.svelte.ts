@@ -399,6 +399,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'kg.showing': { de: 'Zeige', en: 'Showing' },
 	'kg.list_view': { de: 'Liste', en: 'List' },
 	'kg.graph_view': { de: 'Graph', en: 'Graph' },
+	'kg.view_toggle_label': { de: 'Ansichtsmodus', en: 'View mode' },
 
 	// Insights
 	'insights.title': { de: 'Memory Insights', en: 'Memory Insights' },
