@@ -530,7 +530,7 @@
 				{/if}
 
 				<!-- Other nav items (Inbox/Activity/Automation/Intelligence/Artifacts).
-					 Pinned just above the Settings footer — shrink-0 so they keep
+					 Pinned RIGHT BELOW the Chat section — shrink-0 so they keep
 					 their natural height and never get compressed by the growing
 					 Chat/threads group above. All leaf items: only the parent <a>. -->
 				<ul class="space-y-0.5 px-2 shrink-0">
@@ -540,6 +540,15 @@
 						</li>
 					{/each}
 				</ul>
+
+				<!-- Flexible whitespace spacer: pushes the Settings + utility footer
+					 to the actual bottom of the rail when the chat thread-list isn't
+					 expanded. When threads ARE expanded, the chat-section's flex-1
+					 reclaims this space first (its content has visible items;
+					 this spacer is empty). Per user feedback 2026-05-25 — without
+					 this spacer the bottom group floated directly under the pinned
+					 icons in the middle of the rail. -->
+				<div class="flex-1" aria-hidden="true"></div>
 
 			<!-- Bottom: Settings on its own row, then a small utility row with
 				 pin/unpin + sign-out. Two-row layout (vs. the prior single-row
