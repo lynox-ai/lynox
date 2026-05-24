@@ -9,6 +9,7 @@ import type {
   AgentConfig,
   ThinkingMode,
   AgentWarning,
+  ProviderConfigSnapshot,
   EffortLevel,
   AutonomyLevel,
   PreApprovalSet,
@@ -87,6 +88,19 @@ export class Agent implements IAgent {
    * construction.
    */
   private readonly warnings: AgentWarning[] = [];
+  /**
+   * Provider config retained so spawn.ts can inherit it on sub-agent
+   * construction. Without this, `spawn.ts` reads from `loadConfig()` (the
+   * config.json file), which on managed-tier engines is stale after the
+   * user switches provider via the LLM Settings UI — sub-agent gets
+   * undefined apiBaseURL → llm-client throws "OpenAI provider requires
+   * apiBaseURL and openaiModelId" → spawn fails. Per [[bug 2026-05-24
+   * staging-walk Case 26]].
+   */
+  private readonly inheritedApiKey: string | undefined;
+  private readonly inheritedApiBaseURL: string | undefined;
+  private readonly inheritedOpenaiModelId: string | undefined;
+  private readonly inheritedOpenaiAuth: 'static' | 'google-vertex' | undefined;
   private effort: EffortLevel | undefined;
   private readonly maxTokens: number;
   private readonly workerPool: IWorkerPool | null;
@@ -179,6 +193,24 @@ export class Agent implements IAgent {
   getThinking(): ThinkingMode { return this.thinking; }
   /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Stream to UI as toast events. */
   getWarnings(): readonly AgentWarning[] { return this.warnings; }
+  /**
+   * Provider config snapshot for sub-agent inheritance. spawn.ts reads
+   * these to construct child Agents using the SAME provider as the parent,
+   * avoiding the stale-config-json bug on managed-tier where UI provider-
+   * switch isn't reflected in `~/.lynox/config.json`.
+   *
+   * **DO NOT LOG** — `apiKey` is plaintext credential. Pipe only to
+   * AgentConfig; never to telemetry, error-report, or stdout.
+   */
+  getProviderConfig(): ProviderConfigSnapshot {
+    return {
+      provider: this.provider,
+      apiKey: this.inheritedApiKey,
+      apiBaseURL: this.inheritedApiBaseURL,
+      openaiModelId: this.inheritedOpenaiModelId,
+      openaiAuth: this.inheritedOpenaiAuth,
+    };
+  }
 
   /**
    * Cumulative cost snapshot from the agent's CostGuard, or null if no
@@ -258,6 +290,15 @@ export class Agent implements IAgent {
     this.userId = config.userId;
     this.activeScopes = config.activeScopes;
     this.isolation = config.isolation;
+    // Retain provider-config so spawn.ts can inherit on sub-agent ctor —
+    // sub-agents on Mistral provider were 401-ing because spawn.ts's
+    // loadConfig() reads ~/.lynox/config.json which is stale on managed-tier
+    // after UI provider-switch. Inheriting from parent agent's RUNTIME
+    // config closes the gap.
+    this.inheritedApiKey = config.apiKey;
+    this.inheritedApiBaseURL = config.apiBaseURL;
+    this.inheritedOpenaiModelId = config.openaiModelId;
+    this.inheritedOpenaiAuth = config.openaiAuth;
     this.toolContext = config.toolContext ?? createToolContext({});
     this.sessionCounters = config.sessionCounters ?? {
       httpRequests: 0,

@@ -86,6 +86,19 @@ export interface SessionCounters {
   pendingOutboundPrompts: Map<string, Promise<boolean>>;
 }
 
+/**
+ * Snapshot of an Agent's provider config — returned by `IAgent.getProviderConfig()`
+ * for sub-agent inheritance in spawn.ts. Carries credentials, so callers must
+ * pipe directly to AgentConfig and never log / serialize / send to telemetry.
+ */
+export interface ProviderConfigSnapshot {
+  readonly provider: import('./models.js').LLMProvider;
+  readonly apiKey: string | undefined;
+  readonly apiBaseURL: string | undefined;
+  readonly openaiModelId: string | undefined;
+  readonly openaiAuth: 'static' | 'google-vertex' | undefined;
+}
+
 export interface IAgent {
   readonly name:   string;
   readonly model:  string;
@@ -99,6 +112,14 @@ export interface IAgent {
   getMaxContextWindowTokens(): number | undefined;
   /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Engine surface for HTTP-API SSE toast events. Returns empty array when no warnings. */
   getWarnings(): readonly AgentWarning[];
+  /**
+   * Provider config snapshot for sub-agent inheritance (spawn.ts). Closes the
+   * gap where managed-tier UI provider-switch wasn't reflected in `loadConfig()`.
+   *
+   * **DO NOT LOG** — returned `apiKey` is plaintext. Pipe only to AgentConfig
+   * construction; never to telemetry, error-report, or stdout.
+   */
+  getProviderConfig(): ProviderConfigSnapshot;
   onStream:        StreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
