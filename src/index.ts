@@ -204,6 +204,28 @@ function loadDotEnv(): void {
   }
 }
 
+/**
+ * Resolve the default ORIGIN env var for `--http-api` boot.
+ *
+ * Mirrors entrypoint-webui.sh:135-144 so the source/npx path doesn't 403 on
+ * SvelteKit form POSTs ("Cross-site POST form submissions are forbidden").
+ *
+ * @returns The value to set on `process.env.ORIGIN`, or `undefined` if the
+ *   operator already provided one (no override).
+ */
+export function resolveDefaultOrigin(opts: {
+  origin: string | undefined;
+  allowedOrigins: string | undefined;
+  tlsCert: string | undefined;
+  port: number;
+}): string | undefined {
+  if (opts.origin && opts.origin.length > 0) return undefined; // operator override wins
+  const first = opts.allowedOrigins?.split(',')[0]?.trim();
+  if (first && first.length > 0) return first;
+  const scheme = opts.tlsCert && opts.tlsCert.length > 0 ? 'https' : 'http';
+  return `${scheme}://localhost:${opts.port}`;
+}
+
 async function runCLI(): Promise<void> {
   const args = argv.slice(2);
 
@@ -278,6 +300,22 @@ Docs: https://docs.lynox.ai
     const { LynoxHTTPApi } = await import('./server/http-api.js');
     const rawPort = parseInt(process.env['LYNOX_HTTP_PORT'] ?? '3100', 10);
     const port = Number.isFinite(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : 3100;
+
+    // SvelteKit (adapter-node) rejects same-origin POSTs with 403 "Cross-site POST
+    // form submissions are forbidden" unless ORIGIN matches the browser's Origin
+    // header. The Docker entrypoint (entrypoint-webui.sh) sets this before launch;
+    // mirror that here so `npx @lynox-ai/core --http-api` / `node dist/index.js
+    // --http-api` boots work out of the box. Operator override always wins.
+    const resolved = resolveDefaultOrigin({
+      origin: process.env['ORIGIN'],
+      allowedOrigins: process.env['LYNOX_ALLOWED_ORIGINS'],
+      tlsCert: process.env['LYNOX_TLS_CERT'],
+      port,
+    });
+    if (resolved !== undefined) {
+      process.env['ORIGIN'] = resolved;
+    }
+
     const api = new LynoxHTTPApi();
     await api.init();
     await api.start(port);
