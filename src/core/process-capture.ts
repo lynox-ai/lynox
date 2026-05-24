@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getBetasForProvider, getModelId } from '../types/index.js';
-import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
-import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
+import { createLLMClient, getActiveProvider } from './llm-client.js';
+import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 
 /** Tools that are internal bookkeeping — excluded from process capture */
@@ -25,6 +25,19 @@ interface CaptureOptions {
   apiKey: string;
   apiBaseURL?: string | undefined;
   description?: string | undefined;
+  /**
+   * LLM provider for the Haiku-tier annotation call. Defaults to the
+   * process-wide active provider (`getActiveProvider()`). Plumb the
+   * caller's actual provider here so a Mistral/OpenAI-compat user's
+   * workflow-save call routes to the right endpoint with the right
+   * model id — without this, `getModelId('haiku', 'anthropic')` returns
+   * `claude-haiku-…` which Mistral rejects with 4xx.
+   */
+  provider?: LLMProvider | undefined;
+  /** Model ID for OpenAI-compatible providers (e.g. 'ministral-8b-2512'). */
+  openaiModelId?: string | undefined;
+  /** Auth mode for 'openai' provider. Default 'static'. */
+  openaiAuth?: 'static' | 'google-vertex' | undefined;
 }
 
 /**
@@ -355,12 +368,25 @@ export async function captureProcess(
     ...sanitizeToolCall(tc),
   }));
 
-  // Call Haiku for step annotation + parameter identification
-  const client = createLLMClient({ apiKey: options.apiKey, apiBaseURL: options.apiBaseURL });
+  // Call Haiku for step annotation + parameter identification. The caller's
+  // provider drives BOTH the client construction AND the tier→model lookup —
+  // without that pairing, a Mistral user's workflow-save would build an
+  // OpenAIAdapter pointing at api.mistral.ai but try to send a `claude-haiku-…`
+  // model id, which Mistral rejects with 4xx. Fall back to the process-wide
+  // active provider so legacy callers that don't pass `provider` still work.
+  const provider: LLMProvider = options.provider ?? getActiveProvider();
+  const isOpenAICompat = provider === 'custom' || provider === 'openai';
+  const client = createLLMClient({
+    provider,
+    apiKey: options.apiKey,
+    apiBaseURL: options.apiBaseURL,
+    openaiModelId: options.openaiModelId,
+    openaiAuth: options.openaiAuth,
+  });
   const response = await client.beta.messages.create({
-    model: getModelId('haiku', getActiveProvider()),
+    model: getModelId('haiku', provider),
     max_tokens: 4096,
-    ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
+    ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
     system: EXTRACTION_SYSTEM,
     messages: [
       {

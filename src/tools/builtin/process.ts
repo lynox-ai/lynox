@@ -1,4 +1,4 @@
-import type { ToolEntry, IAgent, ProcessRecord, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
+import type { ToolEntry, IAgent, ProcessRecord, InlinePipelineStep, PlannedPipeline, ProviderConfigSnapshot } from '../../types/index.js';
 import { captureProcess } from '../../core/process-capture.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
@@ -135,10 +135,24 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     return 'Error: No active run. save_workflow can only capture work during a session.';
   }
 
-  const apiKey = config.api_key;
+  // Provider config: prefer the live agent snapshot over loadConfig() so a
+  // UI provider-switch on managed-tier isn't masked by stale config.json
+  // (same gap PR #568 closed for sub-agent spawn). Defensive typeof-check
+  // tolerates IAgent mocks/older test helpers that don't implement
+  // getProviderConfig — falls back to userConfig in that path.
+  const parentProv: ProviderConfigSnapshot | null =
+    typeof (agent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
+      ? (agent as { getProviderConfig: () => ProviderConfigSnapshot }).getProviderConfig()
+      : null;
+
+  const apiKey = parentProv?.apiKey ?? config.api_key;
   if (!apiKey) {
     return 'Error: API key not configured. Required for workflow analysis.';
   }
+  const provider = parentProv?.provider ?? config.provider;
+  const apiBaseURL = parentProv?.apiBaseURL ?? config.api_base_url;
+  const openaiModelId = parentProv?.openaiModelId ?? config.openai_model_id;
+  const openaiAuth = parentProv?.openaiAuth;
 
   // A conversation spans many runs (one per turn); `agent.currentRunId` is the
   // run executing save_workflow itself, which holds no prior workflow tool
@@ -161,7 +175,10 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
   try {
     record = await captureProcess(runId, input.name, toolCalls, {
       apiKey,
-      apiBaseURL: config.api_base_url,
+      apiBaseURL,
+      provider,
+      openaiModelId,
+      openaiAuth,
       description: input.description,
     });
   } catch (err) {
