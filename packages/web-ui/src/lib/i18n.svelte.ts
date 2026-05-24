@@ -953,18 +953,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.managed_eu_provider_info': { de: 'Das LLM wird von lynox bereitgestellt. Standard: Claude Sonnet 4.6 (Anthropic, US, GDPR-DPA). Optional: EU-Sovereign-Modus mit Mistral Large 3 in Paris.', en: 'The LLM is provided by lynox. Default: Claude Sonnet 4.6 (Anthropic, US, GDPR DPA). Optional: EU Sovereign mode with Mistral Large 3 in Paris.' },
 	'config.managed_eu_model_locked': { de: 'Das Modell wird von lynox verwaltet und ist im Managed-Tarif nicht änderbar.', en: 'The model is managed by lynox and cannot be changed on Managed plans.' },
 
-	// LLM Mode toggle (managed instances) — switches main LLM between Anthropic Claude and Mistral
-	'config.llm_mode': { de: 'LLM-Modus', en: 'LLM Mode' },
-	'config.llm_mode_desc': { de: 'Welches LLM verwendet wird. Wechseln erfordert einen Engine-Neustart.', en: 'Which LLM is used. Switching requires an engine restart.' },
-	'config.llm_mode_standard': { de: 'Standard — Claude Sonnet 4.6 (Anthropic Direct)', en: 'Standard — Claude Sonnet 4.6 (Anthropic Direct)' },
-	'config.llm_mode_standard_desc': { de: 'Höchste Qualität, Extended Thinking, 1h Prompt-Cache. Anthropic verarbeitet Prompts in den USA unter DPA und DSGVO.', en: 'Highest quality, Extended Thinking, 1h prompt cache. Anthropic processes prompts in the US under DPA and GDPR.' },
-	'config.llm_mode_eu_sovereign': { de: 'EU Sovereign — Mistral Large 3 (Paris)', en: 'EU Sovereign — Mistral Large 3 (Paris)' },
-	'config.llm_mode_eu_sovereign_desc': { de: 'Volle EU-Datensouveränität, kein CLOUD Act, kein US-Anbieter im Datenpfad. Kompromiss: kein Extended Thinking, kein 1h-Cache, ~3% weniger Tool-Calling-Qualität.', en: 'Full EU data sovereignty, no CLOUD Act, no US provider in the data path. Trade-off: no Extended Thinking, no 1h cache, ~3% less tool calling quality.' },
-	'config.llm_mode_restart_required': { de: 'LLM-Wechsel erfordert einen Engine-Neustart, um wirksam zu werden.', en: 'Switching the LLM requires an engine restart to take effect.' },
+	// LLM Mode toggle keys (config.llm_mode, _desc, _standard, _standard_desc,
+	// _eu_sovereign, _eu_sovereign_desc, _restart_required) removed in PR #579 —
+	// the LLMAdvancedView radio fieldset was a functional duplicate of the
+	// Provider tile picker on LLMSettings.svelte and got dropped. The engine
+	// config field `llm_mode` is still read at config.ts:190 (managed-CP
+	// auto-promote), and llm-config-update.ts:140 still writes it on
+	// provider-tile changes — but the UI no longer surfaces these strings.
 
 	// Compliance & Privacy tab (Phase 0 skeleton)
 	'config.compliance_intro': { de: 'Wohin fließen deine Daten und welche Datenverarbeitungen sind aktiv.', en: 'Where your data flows and which data-processing features are active.' },
-	'config.see_compliance_for_llm_mode': { de: 'LLM-Modus umschalten (Datenschutz & Compliance)', en: 'Switch LLM mode (Compliance & Privacy)' },
 	'config.residency_title': { de: 'Datenresidenz', en: 'Data residency' },
 	'config.residency_llm': { de: 'LLM (Chat)', en: 'LLM (chat)' },
 	'config.residency_voice_in': { de: 'Spracheingabe', en: 'Voice input' },

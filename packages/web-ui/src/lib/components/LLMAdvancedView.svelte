@@ -80,7 +80,6 @@
 	let origConfig = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let managed = $state<boolean | null>(null);
-	let mistralAvailable = $state<boolean>(false);
 	let activeModel = $state<ActiveModel | null>(null);
 	let loaded = $state(false);
 	let saving = $state(false);
@@ -126,7 +125,6 @@
 			};
 			locks = body.locks ?? {};
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
-			mistralAvailable = body.capabilities?.mistral_available === true;
 			activeModel = body.active_model ?? null;
 			loaded = true;
 		} catch (e) {
