@@ -541,49 +541,41 @@
 					{/each}
 				</ul>
 
-				<!-- Flexible whitespace spacer: pushes the Settings + utility footer
-					 to the actual bottom of the rail when the chat thread-list isn't
-					 expanded. When threads ARE expanded, the chat-section's flex-1
-					 reclaims this space first (its content has visible items;
-					 this spacer is empty). Per user feedback 2026-05-25 — without
-					 this spacer the bottom group floated directly under the pinned
-					 icons in the middle of the rail. -->
-				<div class="flex-1" aria-hidden="true"></div>
-
-			<!-- Bottom: Settings on its own row, then a small utility row with
-				 pin/unpin + sign-out. Two-row layout (vs. the prior single-row
-				 flex-shared-with-chevron) gives Settings more visual weight —
-				 it's the main item in the bottom zone, not a peer of the
-				 utility icons. Bottom-pin per user-feedback 2026-05-24.
-				 We deliberately do NOT pad to `env(safe-area-inset-bottom)` —
-				 it produced ~34px of empty space on iPhone below the row that
-				 the user perceived as a layout bug. The Home Indicator zone is
-				 reserved for system gestures but not off-limits; the Settings
-				 link's tap target still sits above the indicator bar. -->
-			<div class="border-t border-border px-2 py-2 space-y-1">
-				<a
-					href="/app/settings"
-					onclick={() => { sidebarOpen = false; expandedSection = null; }}
-					title={t('nav.settings')}
-					class="flex items-center gap-2.5 rounded-[var(--radius-sm)] h-11 text-sm transition-all
-					{railExpanded ? 'px-3' : 'md:justify-center md:px-2 px-3'}
-					{isActive('/app/settings', false)
-						? 'bg-accent/10 text-accent-text border-l-2 border-accent'
-						: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
-				>
-					<Icon name="settings" size="sm" />
-					<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.settings')}</span>
-				</a>
-				<!-- Utility row: pin/unpin (desktop only) + sign-out. Smaller h-9
-					 so it reads as secondary to the Settings row above. -->
-				<div class="flex items-center gap-1 {railExpanded ? 'justify-end' : 'md:justify-center'}">
+			<!-- Bottom: Settings + pin/unpin + sign-out all on ONE row, anchored
+				 to the actual bottom via `mt-auto`. 2026-05-25 final shape:
+				 - Single-row layout per pre-#579 (user reverted the two-row
+				   split — both visual rows + flex-1 spacer caused chat-history
+				   expansion to flicker because spacer competed with the
+				   chat-section's own flex-1).
+				 - `mt-auto` pushes the row down WITHOUT claiming flex-1 grow,
+				   so when chat-history IS expanded its flex-1 takes the space
+				   uncontested.
+				 - We deliberately do NOT pad to `env(safe-area-inset-bottom)` —
+				   it produced ~34px of empty space on iPhone below the row that
+				   the user perceived as a layout bug. The Home Indicator zone
+				   is reserved for system gestures but not off-limits. -->
+			<div class="mt-auto border-t border-border px-2 py-2">
+				<div class="flex items-center gap-1 {railExpanded ? '' : 'md:flex-col md:gap-0.5'}">
+					<a
+						href="/app/settings"
+						onclick={() => { sidebarOpen = false; expandedSection = null; }}
+						title={t('nav.settings')}
+						class="flex flex-1 items-center gap-2.5 rounded-[var(--radius-sm)] h-11 text-sm transition-all
+						{railExpanded ? 'px-3' : 'md:flex-none md:justify-center md:px-2 md:w-11 px-3'}
+						{isActive('/app/settings', false)
+							? 'bg-accent/10 text-accent-text border-l-2 border-accent'
+							: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+					>
+						<Icon name="settings" size="sm" />
+						<span class="{railExpanded ? '' : 'md:hidden'}">{t('nav.settings')}</span>
+					</a>
 					<button
 						type="button"
 						onclick={togglePin}
 						title={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
 						aria-label={railPinned ? t('nav.rail_unpin') : t('nav.rail_pin')}
 						aria-pressed={railPinned}
-						class="hidden md:flex items-center justify-center h-9 w-9 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
+						class="hidden md:flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] {railPinned ? 'text-accent-text bg-accent/10' : 'text-text-subtle hover:text-text hover:bg-bg-muted'} transition-colors"
 					>
 						<Icon name={railPinned ? 'chevron_double_left' : 'chevron_double_right'} size="sm" />
 					</button>
@@ -591,7 +583,7 @@
 						href="/logout"
 						data-sveltekit-preload-data="off"
 						data-sveltekit-reload
-						class="flex items-center justify-center h-9 w-9 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
+						class="flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
 						aria-label={t('nav.logout')}
 						title={t('nav.logout')}
 					>
