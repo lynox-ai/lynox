@@ -1,4 +1,4 @@
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, LLMProvider } from '../../types/index.js';
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
@@ -260,14 +260,29 @@ async function executeThinker(
     // Inherit the user's context-window cap so a spawned researcher running
     // on a 1M-native model still respects the user's 200k preference.
     maxContextWindowTokens: parentAgent.getMaxContextWindowTokens(),
-    // Profile overrides provider credentials
-    apiKey: profile?.api_key ?? userConfig.api_key,
-    apiBaseURL: profile?.api_base_url ?? userConfig.api_base_url,
-    provider: profile?.provider ?? userConfig.provider,
+    // Profile overrides provider credentials; otherwise INHERIT from parent
+    // agent (runtime config), not from loadConfig() (config.json file).
+    // Closes the staging bug where managed-tier UI provider-switch isn't
+    // reflected in config.json — sub-agent got undefined apiBaseURL and
+    // llm-client threw "OpenAI provider requires apiBaseURL". Profile +
+    // userConfig.* preserved as fallback for self-host paths where the
+    // parent might not have set its provider config explicitly.
+    // Defensive typeof-check tolerates legacy IAgent mocks without the
+    // method (older test helpers); the field-spread is a no-op then.
+    ...(() => {
+      const parentProv = typeof (parentAgent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
+        ? (parentAgent as { getProviderConfig: () => { provider: LLMProvider; apiKey?: string; apiBaseURL?: string; openaiModelId?: string; openaiAuth?: 'static' | 'google-vertex' } }).getProviderConfig()
+        : null;
+      return {
+        apiKey: profile?.api_key ?? parentProv?.apiKey ?? userConfig.api_key,
+        apiBaseURL: profile?.api_base_url ?? parentProv?.apiBaseURL ?? userConfig.api_base_url,
+        provider: profile?.provider ?? parentProv?.provider ?? userConfig.provider,
+        openaiModelId: profile?.model_id ?? parentProv?.openaiModelId,
+        openaiAuth: profile?.auth ?? parentProv?.openaiAuth,
+      };
+    })(),
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
-    openaiModelId: profile?.model_id,
-    openaiAuth: profile?.auth,
     userTimezone: parentAgent.userTimezone,
     // Share the parent's Session counters so one conversation accumulates
     // a single http/write budget across the main agent + all sub-agents.

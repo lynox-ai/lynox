@@ -99,6 +99,14 @@ export interface IAgent {
   getMaxContextWindowTokens(): number | undefined;
   /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Engine surface for HTTP-API SSE toast events. Returns empty array when no warnings. */
   getWarnings(): readonly AgentWarning[];
+  /** Provider config snapshot for sub-agent inheritance (spawn.ts). Closes the gap where managed-tier UI provider-switch wasn't reflected in `loadConfig()`. */
+  getProviderConfig(): {
+    provider: import('./models.js').LLMProvider;
+    apiKey: string | undefined;
+    apiBaseURL: string | undefined;
+    openaiModelId: string | undefined;
+    openaiAuth: 'static' | 'google-vertex' | undefined;
+  };
   onStream:        StreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
