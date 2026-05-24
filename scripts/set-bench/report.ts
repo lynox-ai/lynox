@@ -1,25 +1,26 @@
 /**
- * Set-Bench report aggregator — turns a flat `CellRun[]` into a structured
+ * Set-Bench v4 report aggregator — turns a flat `CellRun[]` into a structured
  * `BenchReport` plus a markdown-friendly summary. Per-axis tables surface
- * the headline claim ("Mistral Small at $0.20/M matches Haiku 4.5 at
- * $1.00/M on orchestration") AND the pinned-vs-latest drift gap.
+ * the headline cost / pass-rate / cache-hit tradeoff AND the pinned-vs-
+ * latest drift gap.
  *
- * Phase 3 additions:
- *   - p50 / p95 latency per cell — exposes burst-throttle tail behaviour
- *     that the avg alone hides on Mistral cells under RPM pressure.
+ * v4 additions:
+ *   - Cache-aware cost columns: cold (no cache discount) vs warm
+ *     (cache_read tokens at the published cache-read rate). Mistral cells
+ *     report warm == cold (no native cache field).
+ *   - cache-hit-rate per cell — input tokens served from cache /
+ *     (input + cache_read). Honesty discipline: this is what the page
+ *     promises to report when the long-context axis runs.
+ *   - p50 / p95 latency per cell — exposes burst-throttle tail behaviour.
  *   - Pareto frontier section per axis — drops dominated cells so the
  *     "best cost-vs-quality tradeoff" answer is one glance away.
  */
 
+import { ALL_AXES } from './types.js';
 import type { BenchReport, CellRun, SetBenchAxis, SetBenchCell } from './types.js';
 
 /**
  * Linear-interpolation percentile (R-7 method, the numpy/pandas default).
- * Stable across small n: at n=1 it returns the single value, at n=2 the
- * weighted average. Input MUST be sorted ascending.
- *
- * Exported for direct test coverage so the bench-grade statistic doesn't
- * silently drift if someone swaps in nearest-rank semantics later.
  */
 export function percentile(sortedAsc: readonly number[], p: number): number {
   const n = sortedAsc.length;
@@ -34,37 +35,48 @@ export function percentile(sortedAsc: readonly number[], p: number): number {
 }
 
 export function buildReport(runs: readonly CellRun[], cells: readonly SetBenchCell[]): BenchReport {
-  const cellsByLabel = new Map(cells.map((c) => [c.label, c] as const));
-  // Group runs by cellLabel — each cell runs the scenario for its own axis.
+  // Index cells by (axis, label) — NOT by label alone, because the v4
+  // matrix uses ONE label per model spread across 8 axes, so a label-only
+  // Map collapses 64 cells to 8 entries and every group misattributes
+  // the axis. Use a string sentinel that can never appear in a label.
+  const SEP = '\x1f';
+  const cellsByKey = new Map(cells.map((c) => [`${c.axis}${SEP}${c.label}`, c] as const));
+
   const grouped = new Map<string, CellRun[]>();
   for (const run of runs) {
-    const arr = grouped.get(run.cellLabel) ?? [];
+    const key = `${run.axis}${SEP}${run.cellLabel}`;
+    const arr = grouped.get(key) ?? [];
     arr.push(run);
-    grouped.set(run.cellLabel, arr);
+    grouped.set(key, arr);
   }
 
-  // Orphan-run guard: if a CellRun references a label that's not in `cells`,
-  // skip it. This shouldn't happen in normal use (runs are produced from
-  // the same cell list passed here), but the silent contract drift would
-  // surface as a TypeError on `.axis` access — keep the report robust.
-  const summary: BenchReport['summary'] = [...grouped.entries()].flatMap(([label, cellRuns]) => {
-    const cell = cellsByLabel.get(label);
+  const summary: BenchReport['summary'] = [...grouped.entries()].flatMap(([key, cellRuns]) => {
+    const cell = cellsByKey.get(key);
     if (!cell) return [];
+    const label = cell.label;
     const passCount = cellRuns.filter((r) => r.pass).length;
     const passRate = cellRuns.length === 0 ? 0 : passCount / cellRuns.length;
-    const avgCostUsd = cellRuns.reduce((acc, r) => acc + r.costUsd, 0) / Math.max(1, cellRuns.length);
+    const avgCostColdUsd = cellRuns.reduce((acc, r) => acc + r.costUsdCold, 0) / Math.max(1, cellRuns.length);
+    const avgCostWarmUsd = cellRuns.reduce((acc, r) => acc + r.costUsdWarm, 0) / Math.max(1, cellRuns.length);
+    const avgCacheReadTokens = cellRuns.reduce((acc, r) => acc + r.cacheReadTokens, 0) / Math.max(1, cellRuns.length);
+    const totalIn = cellRuns.reduce((acc, r) => acc + r.tokensIn + r.cacheReadTokens, 0);
+    const totalCacheRead = cellRuns.reduce((acc, r) => acc + r.cacheReadTokens, 0);
+    const cacheHitRate = totalIn === 0 ? 0 : totalCacheRead / totalIn;
     const avgDurationMs = cellRuns.reduce((acc, r) => acc + r.durationMs, 0) / Math.max(1, cellRuns.length);
     const durations = cellRuns.map((r) => r.durationMs).sort((a, b) => a - b);
-    return {
+    return [{
       axis: cell.axis,
       cellLabel: label,
       passRate,
-      avgCostUsd,
+      avgCostColdUsd,
+      avgCostWarmUsd,
+      avgCacheReadTokens,
+      cacheHitRate,
       avgDurationMs,
       p50DurationMs: percentile(durations, 50),
       p95DurationMs: percentile(durations, 95),
       pinned: cell.pinned,
-    };
+    }];
   });
 
   return {
@@ -74,70 +86,58 @@ export function buildReport(runs: readonly CellRun[], cells: readonly SetBenchCe
   };
 }
 
-/**
- * Markdown summary keyed off the BenchReport.summary entries. Per axis
- * we emit a sorted table (descending pass-rate, then ascending cost), a
- * Pareto-frontier section listing only non-dominated cells, and a
- * pinned-vs-latest drift row when both flavours of the same base model
- * are present.
- */
+const AXIS_DISPLAY: Record<SetBenchAxis, string> = {
+  'multi-turn-loop-completion': 'Multi-turn loop completion',
+  'sub-agent-spawn-orchestration': 'Sub-agent spawn / orchestration',
+  'memory-grounded-reasoning': 'Memory-grounded reasoning',
+  'workflow-composition': 'Workflow composition',
+  'long-context-with-tools': 'Long-context with tools',
+  'tool-chain-with-backtrack': 'Tool-chain with back-track',
+  'cron-task-cold-start': 'Cron task / cold-start',
+  'real-world-grounded-strategy': 'Real-world grounded strategy',
+};
+
+const AXIS_ORDER: readonly SetBenchAxis[] = ALL_AXES;
+
 export function formatReportMarkdown(report: BenchReport): string {
   const lines: string[] = [];
-  lines.push(`# Set-Bench report — ${report.generatedAt}`);
+  lines.push(`# Set-Bench v4 report — ${report.generatedAt}`);
+  lines.push('');
+  lines.push('Cost columns: **cold** = no cache discount, **warm** = cache_read tokens billed at the published cache-read rate. Mistral cells expose no native prompt-cache field; warm == cold for those.');
   lines.push('');
 
-  // Ordering: keep tool-chain + orchestration first (carry-over from
-  // Phase 2 so existing report consumers see the familiar header order),
-  // then the six Phase 3 axes in haiku-tier → sonnet-tier → opus-tier
-  // ascending order.
-  const AXES: readonly SetBenchAxis[] = [
-    'tool-chain',
-    'orchestration',
-    'kg-extraction',
-    'dag-planning',
-    'memory-extraction',
-    'long-context',
-    'code-review',
-    'multi-step-reasoning',
-  ];
-  for (const axis of AXES) {
+  for (const axis of AXIS_ORDER) {
     const axisRows = report.summary.filter((s) => s.axis === axis);
     if (axisRows.length === 0) continue;
-    lines.push(`## ${axisLabel(axis)}`);
+    lines.push(`## ${AXIS_DISPLAY[axis]}`);
     lines.push('');
-    lines.push('| Cell | Pinned | Pass-rate | Avg cost | p50 | p95 |');
-    lines.push('|---|---|---|---|---|---|');
+    lines.push('| Cell | Pinned | Pass | Cost (cold) | Cost (warm) | Cache hit | p50 | p95 |');
+    lines.push('|---|---|---|---|---|---|---|---|');
     const sorted = [...axisRows].sort((a, b) => {
       if (a.passRate !== b.passRate) return b.passRate - a.passRate;
-      return a.avgCostUsd - b.avgCostUsd;
+      return a.avgCostColdUsd - b.avgCostColdUsd;
     });
     for (const r of sorted) {
       lines.push(
-        `| \`${r.cellLabel}\` | ${r.pinned ? 'pinned' : 'latest'} | ${(r.passRate * 100).toFixed(0)}% | $${r.avgCostUsd.toFixed(5)} | ${(r.p50DurationMs / 1000).toFixed(1)}s | ${(r.p95DurationMs / 1000).toFixed(1)}s |`,
+        `| \`${r.cellLabel}\` | ${r.pinned ? 'pinned' : 'latest'} | ${(r.passRate * 100).toFixed(0)}% | $${r.avgCostColdUsd.toFixed(5)} | $${r.avgCostWarmUsd.toFixed(5)} | ${(r.cacheHitRate * 100).toFixed(0)}% | ${(r.p50DurationMs / 1000).toFixed(1)}s | ${(r.p95DurationMs / 1000).toFixed(1)}s |`,
       );
     }
     lines.push('');
 
-    // Pareto frontier: keep cells where no other cell beats them on BOTH
-    // pass-rate (higher) AND cost (lower). These are the "no-regret"
-    // tradeoffs — anything off the frontier is dominated by something on
-    // it. Sorted by cost ascending for left-to-right cost-quality reading.
     const pareto = computeParetoFrontier(axisRows);
     if (pareto.length > 0) {
-      lines.push('### Pareto frontier (cost vs pass-rate)');
+      lines.push('### Pareto frontier (warm cost vs pass-rate)');
       lines.push('');
-      lines.push('Cells where no other cell beats them on BOTH cost and pass-rate. Sorted cheapest → most expensive — read left-to-right as "what does an extra dollar of spend buy in pass-rate?".');
+      lines.push('Cells where no other cell beats them on BOTH warm cost and pass-rate. Sorted cheapest → most expensive.');
       lines.push('');
-      lines.push('| Cell | Pinned | Cost | Pass-rate |');
+      lines.push('| Cell | Pinned | Cost (warm) | Pass-rate |');
       lines.push('|---|---|---|---|');
       for (const r of pareto) {
-        lines.push(`| \`${r.cellLabel}\` | ${r.pinned ? 'pinned' : 'latest'} | $${r.avgCostUsd.toFixed(5)} | ${(r.passRate * 100).toFixed(0)}% |`);
+        lines.push(`| \`${r.cellLabel}\` | ${r.pinned ? 'pinned' : 'latest'} | $${r.avgCostWarmUsd.toFixed(5)} | ${(r.passRate * 100).toFixed(0)}% |`);
       }
       lines.push('');
     }
 
-    // Pinned-vs-latest drift: pair entries whose labels match modulo the
-    // -2YYMM date suffix vs the -latest suffix.
     const drift = computeDrift(axisRows);
     if (drift.length > 0) {
       lines.push('### Pinned vs latest drift');
@@ -155,44 +155,12 @@ export function formatReportMarkdown(report: BenchReport): string {
   return lines.join('\n');
 }
 
-function axisLabel(axis: SetBenchAxis): string {
-  switch (axis) {
-    case 'tool-chain':
-      return 'TOOL_CHAIN axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
-    case 'orchestration':
-      return 'ORCHESTRATION axis (haiku-tier bar: Anthropic Haiku 4.5)';
-    case 'kg-extraction':
-      return 'KG_EXTRACTION axis (haiku-tier bar: Anthropic Haiku 4.5)';
-    case 'dag-planning':
-      return 'DAG_PLANNING axis (haiku-tier bar: Anthropic Haiku 4.5)';
-    case 'memory-extraction':
-      return 'MEMORY_EXTRACTION axis (haiku-tier bar: Anthropic Haiku 4.5)';
-    case 'long-context':
-      return 'LONG_CONTEXT axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
-    case 'code-review':
-      return 'CODE_REVIEW axis (sonnet-tier bar: Anthropic Sonnet 4.6)';
-    case 'multi-step-reasoning':
-      return 'MULTI_STEP_REASONING axis (opus-tier bar: Anthropic Opus 4 / Sonnet 4.6 + thinking)';
-  }
-}
-
 interface DriftRow {
   readonly baseName: string;
   readonly pinnedPassRate: number;
   readonly latestPassRate: number;
 }
 
-/**
- * Pareto-frontier filter on (cost, pass-rate). A cell `a` is dominated by
- * cell `b` iff b.cost <= a.cost AND b.passRate >= a.passRate AND at least
- * one of those is strict. The frontier is the non-dominated set, sorted
- * cheapest → most expensive. Ties (same cost AND same pass-rate) keep
- * the first occurrence to avoid duplicate rows in the rendered table.
- *
- * Exported so the test suite can pin the dominance semantics — it's
- * subtle enough that a reviewer could quietly flip strict/non-strict
- * and only notice when an HN reader complains the chart looks off.
- */
 export function computeParetoFrontier(
   rows: ReadonlyArray<BenchReport['summary'][number]>,
 ): ReadonlyArray<BenchReport['summary'][number]> {
@@ -202,36 +170,28 @@ export function computeParetoFrontier(
     let dominated = false;
     for (const b of rows) {
       if (a === b) continue;
-      const beats = b.avgCostUsd <= a.avgCostUsd && b.passRate >= a.passRate;
-      const strict = b.avgCostUsd < a.avgCostUsd || b.passRate > a.passRate;
+      const beats = b.avgCostWarmUsd <= a.avgCostWarmUsd && b.passRate >= a.passRate;
+      const strict = b.avgCostWarmUsd < a.avgCostWarmUsd || b.passRate > a.passRate;
       if (beats && strict) {
         dominated = true;
         break;
       }
     }
     if (dominated) continue;
-    // Dedupe exact-tie cells (rare, but happens when two cells produce
-    // the same n=5 trace). Key on the (cost, passRate) pair at full
-    // numeric precision — Number.toString() round-trips losslessly for
-    // JS numbers, so $1e-9 and $1.0000001e-9 won't collapse even though
-    // both formatted-to-8-decimals would.
-    const key = `${a.avgCostUsd}:${a.passRate}`;
+    const key = `${a.avgCostWarmUsd}:${a.passRate}`;
     if (seen.has(key)) continue;
     seen.add(key);
     frontier.push(a);
   }
-  frontier.sort((a, b) => a.avgCostUsd - b.avgCostUsd);
+  frontier.sort((a, b) => a.avgCostWarmUsd - b.avgCostWarmUsd);
   return frontier;
 }
 
 function computeDrift(rows: ReadonlyArray<BenchReport['summary'][number]>): DriftRow[] {
   const byBase = new Map<string, { pinned?: number; latest?: number }>();
   for (const r of rows) {
-    // Strip the trailing -YYMM dated snapshot OR -latest alias to recover
-    // the base name. mistral-large-2512 -> mistral-large; mistral-large-latest
-    // -> mistral-large.
     const baseName = r.cellLabel.replace(/-(latest|\d{4})$/, '');
-    if (baseName === r.cellLabel) continue; // anthropic baseline etc. — no drift pair
+    if (baseName === r.cellLabel) continue;
     const entry = byBase.get(baseName) ?? {};
     if (r.pinned) entry.pinned = r.passRate;
     else entry.latest = r.passRate;
