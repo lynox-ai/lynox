@@ -1397,7 +1397,18 @@ export class LynoxHTTPApi {
 
     // Custom + OpenAI providers have no public status page — rely solely on run history
     if (provider === 'custom' || provider === 'openai') {
-      const label = provider === 'openai' ? 'OpenAI-compatible' : 'Custom';
+      // Hostname-aware label: detect the well-known managed-EU preset (Mistral)
+      // so the status bar reads 'Mistral' instead of the wire-format-internal
+      // 'OpenAI-compatible'. Other openai-compat endpoints (Ollama, LiteLLM,
+      // etc.) keep the generic label.
+      const apiBaseURL = this.engine?.getUserConfig().api_base_url;
+      let label = provider === 'openai' ? 'OpenAI-compatible' : 'Custom';
+      if (provider === 'openai' && apiBaseURL) {
+        try {
+          const hostname = new URL(apiBaseURL).hostname.toLowerCase();
+          if (hostname === 'api.mistral.ai') label = 'Mistral';
+        } catch { /* malformed baseURL — fall through to generic label */ }
+      }
       const data = this.getRunBasedStatus(now, label);
       this.providerStatusCache = { data, expiresAt: now + 60_000 };
       return data;

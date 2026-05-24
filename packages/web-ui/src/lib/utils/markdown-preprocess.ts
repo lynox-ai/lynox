@@ -17,6 +17,15 @@
  * are skipped to avoid breaking aligned columns.
  */
 export function fixMarkdownPreprocessing(md: string): string {
+	// Bare numeric-period replies ("4.", "42.", potentially with trailing
+	// whitespace) get parsed by marked as an ordered-list start —
+	// `<ol start="4"><li></li></ol>` — rendering as a giant blank list with
+	// no content. Backslash-escape the period so it renders as plain prose.
+	// Only applies when the entire trimmed input matches the pattern; partial
+	// matches (e.g. "The answer is 4.") aren't list starts and don't need it.
+	if (/^\s*\d+\.\s*$/.test(md)) {
+		return md.replace(/^(\s*)(\d+)\.(\s*)$/, '$1$2\\.$3');
+	}
 	const parts = md.split(/(```[\s\S]*?```)/g);
 	return parts.map((part, i) => {
 		if (i % 2 !== 0) return part; // inside code block — leave alone
