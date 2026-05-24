@@ -500,10 +500,11 @@ export async function runDockerInstaller(): Promise<void> {
       stdout.write(`\n  ${BOLD}Mistral${RESET}  ${DIM}console.mistral.ai → API Keys${RESET}\n`);
 
       const modelChoice = await select([
-        { label: 'mistral-large-latest', value: 'mistral-large-latest', hint: 'recommended' },
-        { label: 'mistral-medium-latest', value: 'mistral-medium-latest' },
+        { label: 'mistral-large-2512', value: 'mistral-large-2512', hint: 'recommended — pinned snapshot' },
+        { label: 'ministral-8b-2512', value: 'ministral-8b-2512', hint: 'low-cost orchestration' },
+        { label: 'magistral-medium-2509', value: 'magistral-medium-2509', hint: 'reasoning specialist' },
         { label: 'codestral-latest', value: 'codestral-latest', hint: 'code-focused' },
-      ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'mistral-large-latest';
+      ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'mistral-large-2512';
       envVars['OPENAI_MODEL_ID'] = modelChoice;
       stdout.write(`  ${GREEN}✓${RESET} Model: ${modelChoice}\n`);
 

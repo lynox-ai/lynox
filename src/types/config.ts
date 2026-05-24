@@ -59,7 +59,7 @@ export interface AgentConfig {
   changesetManager?:   ChangesetManagerLike | undefined;
   /** Shared tool context — replaces closure-based module-level setters. */
   toolContext?:        import('../core/tool-context.js').ToolContext | undefined;
-  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). Used with provider: 'openai'. */
+  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-2512'). Used with provider: 'openai'. */
   openaiModelId?:      string | undefined;
   /** Auth mode for OpenAI provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. */
   openaiAuth?:         'static' | 'google-vertex' | undefined;
@@ -300,7 +300,7 @@ export interface LynoxUserConfig {
   backup_gdrive?: boolean | undefined;
   /** Experience level: controls output style. 'business' (default) = UI-focused, no CLI/env hints. 'developer' (experimental) = technical details, CLI commands, config snippets. */
   experience?: 'business' | 'developer' | undefined;
-  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). Required when provider is 'openai'. */
+  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-2512'). Required when provider is 'openai'. */
   openai_model_id?: string | undefined;
   /** Named model profiles for non-Claude providers (Mistral, Gemini, Grok, etc.). */
   model_profiles?: Record<string, ModelProfile> | undefined;

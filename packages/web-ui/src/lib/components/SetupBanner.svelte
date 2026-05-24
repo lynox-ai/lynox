@@ -20,7 +20,7 @@
 	// Credential fields
 	let anthropicKey = $state('');
 	let mistralKey = $state('');
-	let mistralModel = $state('mistral-large-latest');
+	let mistralModel = $state('mistral-large-2512');
 	let openaiUrl = $state('');
 	let openaiKey = $state('');
 	let openaiModel = $state('llama3.2');
@@ -124,7 +124,7 @@
 			const providerConfig: Record<string, unknown> = { provider: persistedProvider };
 			if (selectedProvider === 'mistral') {
 				providerConfig['api_base_url'] = 'https://api.mistral.ai/v1';
-				providerConfig['openai_model_id'] = mistralModel.trim() || 'mistral-large-latest';
+				providerConfig['openai_model_id'] = mistralModel.trim() || 'mistral-large-2512';
 			}
 			if (selectedProvider === 'openai') {
 				providerConfig['api_base_url'] = openaiUrl.trim();
@@ -299,8 +299,9 @@
 									bind:value={mistralModel}
 									class={inputClass}
 								>
-									<option value="mistral-large-latest">mistral-large-latest (recommended)</option>
-									<option value="mistral-medium-latest">mistral-medium-latest</option>
+									<option value="mistral-large-2512">mistral-large-2512 (recommended)</option>
+									<option value="ministral-8b-2512">ministral-8b-2512 (low-cost orchestration)</option>
+									<option value="magistral-medium-2509">magistral-medium-2509 (reasoning specialist)</option>
 									<option value="codestral-latest">codestral-latest (code-focused)</option>
 								</select>
 							</div>

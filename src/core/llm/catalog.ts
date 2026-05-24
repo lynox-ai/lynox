@@ -144,7 +144,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 2, output: 5 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Reasoning specialist — native reasoning chains, ~30-40s typical latency. Opus-tier quality at 60% lower output cost. Best for batch / deep analysis, not interactive chat.',
+    notes: 'Reasoning specialist — native reasoning chains, ~30-40s typical latency. Best for batch / deep analysis. Tool-routing reliability is lower than the chat-tier (5/8 bench axes had failures including 70% pass on workflow-composition); not a Sonnet/Opus replacement for interactive chat.',
   },
   {
     id: 'ministral-3b-2512',
@@ -164,7 +164,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 0.15, output: 0.15 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended haiku-tier default. Stronger orchestration model with multimodal input.',
+    notes: 'Recommended haiku-tier default. 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
   },
 ];
 

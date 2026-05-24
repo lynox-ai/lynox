@@ -50,7 +50,7 @@ export interface LLMClientOptions {
   gcpProjectId?: string | undefined;
   /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */
   gcpRegion?: string | undefined;
-  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-latest'). */
+  /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-2512'). */
   openaiModelId?: string | undefined;
   /** Auth mode for 'openai' provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. Default: 'static'. */
   openaiAuth?: 'static' | 'google-vertex' | undefined;

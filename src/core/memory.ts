@@ -76,13 +76,13 @@ function parseExtractionJson(raw: string): unknown {
 }
 
 export class Memory implements IMemory {
-  private readonly client: Anthropic;
+  private client: Anthropic;
   private readonly cache = new Map<string, string>();
   private readonly baseDir: string;
   private readonly contextId: string | null;
   private readonly maskFn: ((text: string) => string) | null;
-  private readonly apiKey: string | undefined;
-  private readonly apiBaseURL: string | undefined;
+  private apiKey: string | undefined;
+  private apiBaseURL: string | undefined;
   private readonly _flatFileEnabled: boolean;
   private _activeScopes: MemoryScopeRef[] = [];
   private _autoScope = true;
@@ -113,6 +113,29 @@ export class Memory implements IMemory {
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
     this._flatFileEnabled = flatFileEnabled ?? true;
+  }
+
+  /**
+   * Replace the LLM client after a runtime provider switch. The Memory
+   * instance is built once at engine init; without this setter a UI
+   * provider-switch from Anthropic → Mistral would leave consolidation
+   * (which embeds mail/customer text in the prompt) calling the OLD
+   * provider until full container restart — a GDPR / EU-residency leak.
+   *
+   * Clears the in-memory consolidation cache: cache keys are prompt-hash
+   * only (not provider-aware), so cross-provider re-use of cached output
+   * would surface the prior provider's answer for the new request.
+   */
+  setClient(opts: {
+    apiKey: string | undefined;
+    apiBaseURL: string | undefined;
+    provider: import('../types/index.js').LLMProvider | undefined;
+    openaiModelId: string | undefined;
+  }): void {
+    this.client = createLLMClient(opts);
+    this.apiKey = opts.apiKey;
+    this.apiBaseURL = opts.apiBaseURL;
+    this.cache.clear();
   }
 
   setActiveScopes(scopes: MemoryScopeRef[]): void {
