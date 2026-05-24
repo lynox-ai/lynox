@@ -1366,9 +1366,28 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'error': {
 			retryStatus = null;
 			// Agent sends { message: '...' }, http-api catch sends { error: '...' }
+			// Upstream LLM provider errors (e.g. Mistral 401 unauthorized) arrive here
+			// once the SSE stream is open — without explicit UI surfacing the user
+			// previously saw their own bubble and then nothing (silent fail).
 			const rawErr = String(data['error'] ?? data['message'] ?? 'Unknown error');
 			chatErrorDetail = rawErr;
 			chatError = mapApiError(0, rawErr);
+			// Stop the spinner so a stale `streamingActivity` indicator doesn't
+			// keep ticking after the engine has already emitted the failure event.
+			// The outer finally block also clears these once the SSE stream closes,
+			// but the engine sometimes keeps the stream open briefly after `error`
+			// (heartbeat trailing), and we want the UI to react immediately.
+			isStreaming = false;
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			streamingToolPhase = null;
+			currentToolStartedAt = null;
+			// Toast notification — surfaces the failure even when the user has
+			// scrolled the chat error banner off-screen (mobile + long threads).
+			// Truncate the raw upstream string so a paragraph-long stack from a
+			// noisy provider doesn't blow up the toast layout.
+			const detailSnippet = rawErr.length > 140 ? `${rawErr.slice(0, 140)}…` : rawErr;
+			addToast(`${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
 			// Remove empty assistant message and mark user message as failed
 			if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
 			if (messages[userIdx]) messages[userIdx]!.failed = true;
