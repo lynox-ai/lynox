@@ -424,4 +424,79 @@ describe('ApiStore', () => {
       expect(out).not.toContain('Bearer');
     });
   });
+
+  describe('formatSuggestedApisForSystemPrompt', () => {
+    beforeEach(() => { store = new ApiStore(); });
+
+    it('renders the shipped data/suggested-apis.json catalog with auth-constraint sections', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+
+      // Wrapper tags so the agent can locate the block.
+      expect(out).toContain('<api_bootstrap_hints>');
+      expect(out).toContain('</api_bootstrap_hints>');
+
+      // Capability + constraint sections.
+      expect(out).toContain('api_setup');
+      expect(out).toContain('Supported auth flows');
+      expect(out).toContain('NOT supported');
+      expect(out).toContain('Do NOT proactively suggest');
+
+      // Concrete auth constraints derived from api-store.ts ApiAuth.type:
+      // oauth2 authorization_code is NOT in the union, so the agent must
+      // know it cannot bootstrap browser-redirect-callback OAuth APIs.
+      expect(out.toLowerCase()).toContain('authorization_code');
+
+      // Don't-suggest list must include payment + infra providers.
+      expect(out.toLowerCase()).toContain('payment');
+      expect(out.toLowerCase()).toContain('hosting');
+
+      // At least one curated API entry renders with its docs URL.
+      expect(out).toContain('Open-Meteo');
+      expect(out).toContain('https://open-meteo.com/en/docs');
+    });
+
+    it('returns empty string when LYNOX_SKIP_SUGGESTED_APIS=1', () => {
+      const prior = process.env['LYNOX_SKIP_SUGGESTED_APIS'];
+      process.env['LYNOX_SKIP_SUGGESTED_APIS'] = '1';
+      try {
+        expect(store.formatSuggestedApisForSystemPrompt()).toBe('');
+      } finally {
+        if (prior === undefined) delete process.env['LYNOX_SKIP_SUGGESTED_APIS'];
+        else process.env['LYNOX_SKIP_SUGGESTED_APIS'] = prior;
+      }
+    });
+
+    it('catalog JSON validates: every suggested_apis entry has id + name + docs_url + auth_type + value_prop', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const catalogPath = resolve(here, '../../data/suggested-apis.json');
+      const raw = readFileSync(catalogPath, 'utf-8');
+      const parsed = JSON.parse(raw) as {
+        schema_version: number;
+        supported_auth_flows: string[];
+        not_supported_auth_flows: string[];
+        do_not_proactively_suggest: string[];
+        suggested_apis: Array<{
+          id: string; name: string; category: string;
+          docs_url: string; auth_type: string; value_prop: string;
+        }>;
+      };
+
+      expect(parsed.schema_version).toBe(1);
+      expect(parsed.supported_auth_flows.length).toBeGreaterThan(0);
+      expect(parsed.do_not_proactively_suggest.length).toBeGreaterThan(0);
+      expect(parsed.suggested_apis.length).toBeGreaterThan(0);
+
+      const ids = new Set<string>();
+      for (const api of parsed.suggested_apis) {
+        expect(api.id).toMatch(/^[a-z0-9][a-z0-9_-]{0,63}$/);
+        expect(api.name).toBeTruthy();
+        expect(api.category).toBeTruthy();
+        expect(api.docs_url).toMatch(/^https:\/\//);
+        expect(api.auth_type).toBeTruthy();
+        expect(api.value_prop).toBeTruthy();
+        expect(ids.has(api.id)).toBe(false);
+        ids.add(api.id);
+      }
+    });
+  });
 });
