@@ -149,6 +149,14 @@ export class Engine {
   private activeScopes: MemoryScopeRef[] = [];
   private _pipelinesEnabled = false;
   private _dataStoreEnabled = false;
+  /** Tracks which web-search provider (if any) is wired into the registry.
+   *  - 'configured' — SearXNG registered (sidecar or self-hosted URL), full quality.
+   *  - 'fallback'   — embedded DuckDuckGo HTML-scrape fallback (best-effort).
+   *  - 'none'       — no provider registered; `web_research` tool absent.
+   *  Session reads this to append the right honesty-fallback prompt suffix
+   *  so the agent doesn't silently fabricate search results when search
+   *  is unavailable. */
+  private _webSearchStatus: 'configured' | 'fallback' | 'none' = 'none';
   private _dataStore: DataStore | null = null;
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
   private _hooks: LynoxHooks[] = [];
@@ -647,17 +655,18 @@ export class Engine {
   private async _initIntegrations(): Promise<void> {
 
     // Web search tool (conditional)
-    // Priority: explicit search_provider > SearXNG URL (if configured) > Tavily API key > none
-    // Rationale: SearXNG requires intentional setup (Docker + URL), so when present it's the default.
-    // Users who prefer Tavily despite having SearXNG can set search_provider: 'tavily'.
-    const searchKey = this.secretStore?.resolve('TAVILY_API_KEY')
-      ?? this.secretStore?.resolve('SEARCH_API_KEY')
-      ?? process.env['TAVILY_API_KEY']
-      ?? this.userConfig.search_api_key;
+    // Provider priority: SearXNG (sidecar or self-hosted URL) > DDG HTML-scrape fallback.
+    // Tavily was removed 2026-05-24 — the UI hadn't surfaced it for months,
+    // and keeping a dead env-var path was misleading. SearXNG is the only
+    // supported full-quality backend; DDG is the no-config honesty fallback.
     const searxngUrl = process.env['SEARXNG_URL'] ?? this.userConfig.searxng_url;
-    const explicitProvider = this.userConfig.search_provider;
-    const useSearxng = explicitProvider === 'searxng' || (searxngUrl && explicitProvider !== 'tavily');
-    if (useSearxng && searxngUrl) {
+    // Default to 'none' — flipped to 'configured' / 'fallback' below
+    // depending on which provider lands in the registry. Session reads
+    // this via `getWebSearchStatus()` to append the honesty-fallback or
+    // fallback-quality prompt suffix so the agent never silently
+    // fabricates search results when search is unavailable.
+    this._webSearchStatus = 'none';
+    if (searxngUrl) {
       try {
         const { SearXNGProvider, createWebSearchTool } = await import('../integrations/search/index.js');
         const searxng = new SearXNGProvider(searxngUrl);
@@ -672,22 +681,31 @@ export class Engine {
         }
         if (healthy) {
           this.registry.register(createWebSearchTool(searxng));
+          this._webSearchStatus = 'configured';
         } else {
-          process.stderr.write(`[lynox] SearXNG not reachable at ${searxngUrl} — web_research tool disabled. Check if SearXNG is running.\n`);
+          process.stderr.write(`[lynox] SearXNG not reachable at ${searxngUrl} — falling back to DuckDuckGo HTML scrape. Check if SearXNG is running.\n`);
         }
       } catch (err) {
         process.stderr.write(`[lynox] SearXNG init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
-    } else if (searchKey) {
+    }
+
+    // Embedded DuckDuckGo HTML-scrape fallback. Wired ONLY when SearXNG
+    // didn't land — fixes the "agent silently fabricates arxiv IDs"
+    // failure mode by giving the model a real (if best-effort) search
+    // backend instead of nothing. The agent gets a separate
+    // `WEB_SEARCH_FALLBACK_PROMPT_SUFFIX` so it knows to caveat results
+    // and recommend SearXNG for high-stakes research.
+    if (this._webSearchStatus === 'none') {
       try {
-        const { createSearchProvider, createWebSearchTool } = await import('../integrations/search/index.js');
-        const searchProvider = createSearchProvider('tavily', searchKey);
-        this.registry.register(createWebSearchTool(searchProvider));
-      } catch {
-        // Web search init failed — non-critical, continue without it
+        const { DuckDuckGoProvider, createWebSearchTool } = await import('../integrations/search/index.js');
+        this.registry.register(createWebSearchTool(new DuckDuckGoProvider()));
+        this._webSearchStatus = 'fallback';
+        process.stderr.write('[lynox] No SearXNG configured — using DuckDuckGo HTML-scrape fallback (best-effort). Set SEARXNG_URL or run via `docker compose up` for higher-quality results.\n');
+      } catch (err) {
+        process.stderr.write(`[lynox] DuckDuckGo fallback init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write('[lynox] No web search configured. Use docker-compose for built-in SearXNG, or set SEARXNG_URL.\n');
       }
-    } else if (!searchKey && !searxngUrl) {
-      process.stderr.write('[lynox] No web search configured. Use docker-compose for built-in SearXNG, or set SEARXNG_URL / TAVILY_API_KEY.\n');
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
@@ -1062,6 +1080,13 @@ export class Engine {
   getHooks(): LynoxHooks[] { return this._hooks; }
   getPipelinesEnabled(): boolean { return this._pipelinesEnabled; }
   getDataStoreEnabled(): boolean { return this._dataStoreEnabled; }
+  /** Status of the registered web-search provider:
+   *  - 'configured' — SearXNG wired up (sidecar or self-hosted URL), full quality.
+   *  - 'fallback'   — embedded DuckDuckGo HTML-scrape (best-effort, no key).
+   *  - 'none'       — `web_research` tool not registered; agent will be
+   *                   told to refuse search and ask for SEARXNG_URL.
+   *  Drives the honesty-fallback / fallback-quality prompt suffixes. */
+  getWebSearchStatus(): 'configured' | 'fallback' | 'none' { return this._webSearchStatus; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }

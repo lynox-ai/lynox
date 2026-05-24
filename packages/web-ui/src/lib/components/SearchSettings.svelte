@@ -2,11 +2,12 @@
 	// === Web Search channel card ===
 	//
 	// Extracted from IntegrationsView.svelte during PRD-IA-V2 P3-PR-A2.
-	// SearXNG is the only surfaced provider: free, self-hosted, no third-party
-	// quota. Tavily backend support still exists in the engine for backward-
-	// compat with TAVILY_API_KEY env var, but is no longer surfaced in the UI
-	// (P3-FOLLOWUP-HOTFIX). Hidden entirely on managed (SearXNG is a
-	// pre-configured sidecar there).
+	// SearXNG is the only supported full-quality provider: free, self-hosted,
+	// no third-party quota. The Tavily backend was retired entirely on
+	// 2026-05-24. When SearXNG isn't configured, the engine falls back to a
+	// best-effort DuckDuckGo HTML-scrape so `web_research` always returns
+	// real results instead of letting the agent fabricate. Hidden entirely
+	// on managed (SearXNG is a pre-configured sidecar there).
 	//
 	// State lives in `stores/integrations/search.svelte.ts` (P3-PR-A1).
 

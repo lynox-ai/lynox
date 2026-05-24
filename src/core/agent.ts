@@ -628,7 +628,7 @@ export class Agent implements IAgent {
     const thinkingEnabled = this.thinking.type !== 'disabled';
     const thinkingConfig: BetaThinkingConfigParam = this.thinking as BetaThinkingConfigParam;
     // web_search is an Anthropic-direct-only server-side tool — not supported on Vertex AI or custom.
-    // Disabled when web_research (SearXNG/Tavily) is registered to avoid redundant search tools.
+    // Disabled when web_research (SearXNG / DDG fallback) is registered to avoid redundant search tools.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]

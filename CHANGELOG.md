@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- **Tavily web-search backend retired.** The `TAVILY_API_KEY` env var, `search_provider: 'tavily'` config value, and the `TavilyProvider` class are gone. The UI hadn't surfaced Tavily for months; keeping a dead env-var path was misleading. SearXNG (sidecar via `docker compose up`, or any `SEARXNG_URL` you host) is the supported full-quality backend.
+- Legacy `search_provider: 'tavily'` values in `config.json` are silently coerced to `undefined` on load — existing configs still validate without manual cleanup. Vault entries named `TAVILY_API_KEY` or `SEARCH_API_KEY` are left in place (untouched) but no longer resolved as a search credential.
+
+### Added
+
+- **Honesty-fallback when `web_research` is not configured.** Previously the agent silently fabricated search results (made-up arXiv IDs, prices, "recent X") when no search backend was wired up. Now the agent gets explicit "no search available — DO NOT fabricate" instructions in its system prompt, and tells the user how to enable search instead.
+- **Embedded DuckDuckGo HTML-scrape fallback** for `web_research` when SearXNG isn't configured. Best-effort (no JSON API, no time-range filter, susceptible to rate-limits) — `web_research` always exists so the agent never has to invent results, but the agent receives a "fallback quality" prompt suffix so it caveats findings and surfaces the SearXNG upgrade path.
+
 ## 1.7.0 — 2026-05-22
 
 Minor — **Workflow-UX unification + chat-streaming polish + agent-efficiency**. The agent's workflow tool surface is consolidated 8 → 6 with one consistent "workflow" vocabulary across tools, HTTP API and UI, plus a new **Saved Workflows** library tab. The chat stream gains an animated presence indicator, a live activity ticker, interleaved thinking, and an inline compaction marker. Agent-efficiency work lands orchestrated sub-agent routing and non-lossy compaction (a tool-result recall blob store). **Breaking:** the tool renames and the `/api/pipelines*` → `/api/workflows*` endpoint move are a hard cut with no alias — external MCP clients / API scripts must update.

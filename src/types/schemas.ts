@@ -65,8 +65,14 @@ export const LynoxUserConfigSchema = z.object({
   changeset_review:     z.boolean().optional(),
   memory_auto_scope:    z.boolean().optional(),
   greeting:             z.boolean().optional(),
+  // search_api_key / search_provider retained for migration compatibility
+  // with older config.json snapshots (Tavily backend retired 2026-05-24).
+  // The legacy `'tavily'` value is silently coerced to `undefined` so old
+  // configs still validate — the engine never reads either field now.
   search_api_key:       z.string().optional(),
-  search_provider:      z.enum(['tavily', 'searxng']).optional(),
+  search_provider:      z
+    .union([z.literal('searxng'), z.literal('tavily').transform(() => undefined as 'searxng' | undefined)])
+    .optional(),
   searxng_url:          z.string().url().refine(
     url => url.startsWith('http://') || url.startsWith('https://'),
     { message: 'SearXNG URL must use http:// or https:// scheme' },

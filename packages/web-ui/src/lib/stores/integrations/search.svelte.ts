@@ -7,9 +7,10 @@
 // from the secrets-status fetch in `./secrets.svelte.ts`; this module owns
 // the *write* + form-buffer side and the health-probe.
 //
-// Tavily key save was dropped 2026-05-17 (P3-FOLLOWUP-HOTFIX) — SearXNG is
-// the only surfaced provider now. Engine backend still honours an existing
-// TAVILY_API_KEY env var for backwards-compat but nothing in the UI sets it.
+// Tavily backend retired entirely 2026-05-24. SearXNG is the supported
+// full-quality provider; without it the engine falls back to a best-effort
+// DuckDuckGo HTML-scrape so `web_research` keeps working without the agent
+// having to fabricate.
 
 import { getApiBase } from '../../config.svelte.js';
 import { t } from '../../i18n.svelte.js';

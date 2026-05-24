@@ -2424,7 +2424,11 @@ export class LynoxHTTPApi {
         public_demo: process.env['LYNOX_PUBLIC_DEMO'] === 'true',
         configured: {
           api_key: llmConfigured,
-          search: names.has('TAVILY_API_KEY') || names.has('SEARCH_API_KEY') || !!searxngUrl,
+          // Tavily backend retired 2026-05-24 — search is "configured" only
+          // when SearXNG is wired (full quality). The DDG HTML-scrape
+          // fallback always provides a `web_research` tool but counts as
+          // best-effort, not configured.
+          search: !!searxngUrl,
           searxng: !!searxngUrl,
           google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
           bugsink: names.has('LYNOX_BUGSINK_DSN'),

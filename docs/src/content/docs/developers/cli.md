@@ -63,8 +63,7 @@ REST/SSE endpoints exposed by this server.
 | `LYNOX_WEBUI_URL` | Web UI URL to open (default: `http://localhost:5173`) |
 | `GCP_PROJECT_ID` | Google Cloud project (for `provider: vertex`) |
 | `CLOUD_ML_REGION` | Vertex AI region (e.g. `europe-west4`, `us-east5`) |
-| `SEARXNG_URL` | SearXNG instance for web search (Docker: `http://searxng:8080`) |
-| `TAVILY_API_KEY` | Enable Tavily web search (fallback when no SearXNG) |
+| `SEARXNG_URL` | SearXNG instance for web search (Docker: `http://searxng:8080`). Without it, `web_research` falls back to a best-effort DuckDuckGo HTML scrape. |
 
 ## Exit Codes
 

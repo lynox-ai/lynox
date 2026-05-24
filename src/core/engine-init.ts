@@ -355,11 +355,10 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         userConfig.google_client_secret = vaultGoogleSecret;
       }
 
-      const vaultSearchKey = vault.get('SEARCH_API_KEY') ?? vault.get('TAVILY_API_KEY');
-      if (vaultSearchKey && !process.env['TAVILY_API_KEY']) {
-        userConfig.search_api_key = vaultSearchKey;
-      }
-
+      // Tavily backend removed 2026-05-24 — `SEARCH_API_KEY` / `TAVILY_API_KEY`
+      // vault entries left behind by older installs are ignored on read. They
+      // stay in the vault (untouched) so a user who reinstates Tavily later
+      // doesn't lose them; the secret-store keeps the alias to avoid orphans.
 
       // Mistral API key — BYOK users may store it via Web UI (vault) without
       // exporting an env var. Voice (speak/transcribe) and the llm_mode
@@ -409,7 +408,8 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
   }> = [
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
     { vaultName: 'GOOGLE_CLIENT_SECRET', configField: 'google_client_secret', envVar: 'GOOGLE_CLIENT_SECRET' },
-    { vaultName: 'SEARCH_API_KEY', configField: 'search_api_key', envVar: 'TAVILY_API_KEY' },
+    // SEARCH_API_KEY / TAVILY_API_KEY migration entry removed 2026-05-24
+    // when the Tavily backend was retired.
   ];
 
   const fieldsToRemove: string[] = [];

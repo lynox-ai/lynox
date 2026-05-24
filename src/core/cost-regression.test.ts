@@ -47,6 +47,8 @@ import {
   CRM_PROMPT_SUFFIX,
   GOOGLE_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
+  NO_WEB_SEARCH_PROMPT_SUFFIX,
+  WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
 } from './prompts.js';
 import * as builtinTools from '../tools/builtin/index.js';
 import type { ToolEntry } from '../types/index.js';
@@ -75,6 +77,13 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
   CRM_PROMPT_SUFFIX,
   GOOGLE_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
+  // Conditional, mutually-exclusive — at most one is appended per session.
+  // The fix/websearch-default-honesty-fallback PR introduced these to stop
+  // the agent silently fabricating search results when web_research isn't
+  // wired up. They count toward the static budget because Session appends
+  // them verbatim (no per-turn templating) for the matching deployments.
+  NO_WEB_SEARCH_PROMPT_SUFFIX,
+  WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
 ];
 
 /** All builtin `ToolEntry` objects exported from the builtin tools barrel. */

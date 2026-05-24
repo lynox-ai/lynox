@@ -57,7 +57,7 @@
 		// PRD-IA-V2 P3-PR-A2 — `settings.integrations` retired in favour of
 		// `settings.channels`. Keywords still include the old "integrations"
 		// term so muscle-memory queries still hit the right command.
-		{ id: 'nav-channels', label: t('settings.channels'), group: t('cmd.nav'), action: () => goto('/app/settings/channels'), keywords: 'channels integrations google tavily mail email imap smtp push notifications search' },
+		{ id: 'nav-channels', label: t('settings.channels'), group: t('cmd.nav'), action: () => goto('/app/settings/channels'), keywords: 'channels integrations google mail email imap smtp push notifications search searxng' },
 		// PRD-IA-V2 P1-PR-A2 — /app/settings/config was deleted; target the
 		// LLM-page (Provider + Model + Advanced + Memory). Phase-3 splits this
 		// further into /llm/advanced, /llm/memory, /workspace/limits, etc.
@@ -80,7 +80,7 @@
 		{ id: 'nav-channels-mail-rules', label: t('inbox.rules_title'), group: t('cmd.nav'), action: () => goto('/app/settings/channels/mail/rules'), keywords: 'rules regeln inbox mail filter auto-archive newsletter' },
 		{ id: 'nav-channels-google', label: t('settings.channels.google'), group: t('cmd.nav'), action: () => goto('/app/settings/channels/google'), keywords: 'google workspace gmail drive calendar sheets docs oauth' },
 		{ id: 'nav-channels-notifications', label: t('settings.channels.notifications'), group: t('cmd.nav'), action: () => goto('/app/settings/channels/notifications'), keywords: 'push notifications benachrichtigungen browser quiet hours ruhezeiten mute stumm' },
-		{ id: 'nav-channels-search', label: t('settings.channels.search'), group: t('cmd.nav'), action: () => goto('/app/settings/channels/search'), keywords: 'search suche websuche tavily searxng' },
+		{ id: 'nav-channels-search', label: t('settings.channels.search'), group: t('cmd.nav'), action: () => goto('/app/settings/channels/search'), keywords: 'search suche websuche searxng duckduckgo' },
 
 		// PRD-IA-V2 P3-PR-B — Workspace & System sub-pages (Self-Host only;
 		// `keepItem()`-equivalent below filters these out on Managed). Reuses

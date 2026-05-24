@@ -38,8 +38,10 @@ services:
       # - LYNOX_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
 
       # ── Web Search ────────────────────────────────────
-      - SEARXNG_URL=http://searxng:8080  # Free, unlimited via SearXNG below
-      # - TAVILY_API_KEY                 # Alternative: tavily.com (1K free/month, set search_provider: 'tavily')
+      - SEARXNG_URL=http://searxng:8080  # Free, unlimited via SearXNG below.
+      # Without SEARXNG_URL set, lynox falls back to a best-effort
+      # DuckDuckGo HTML-scrape — works for casual research, but SearXNG
+      # is the only full-quality backend.
 
       # ── Optional features ─────────────────────────────
       # - GOOGLE_CLIENT_ID          # Google Workspace OAuth

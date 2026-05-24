@@ -443,8 +443,9 @@
 		descKey: string;
 	}
 	const llmSubRoutes: ReadonlyArray<SubRoute> = [
-		// v1.5.2: API keys for 3rd-party tools (Tavily, DataForSEO, …) moved
-		// to /app/hub?section=keys so they live next to API Profile endpoints.
+		// v1.5.2: API keys for 3rd-party tools (DataForSEO, etc.) moved to
+		// /app/hub?section=keys so they live next to API Profile endpoints.
+		// (Tavily was retired 2026-05-24; SearXNG uses a URL, not a key.)
 		// Settings v3 PR 4.6 (2026-05-19): /llm/advanced removed from this nav
 		// — Advanced settings now render inline below as an expandable section.
 		// The /advanced route still exists for back-compat with deep links.
