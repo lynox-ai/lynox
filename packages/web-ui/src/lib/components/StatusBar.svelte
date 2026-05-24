@@ -24,8 +24,17 @@
 	let engineOk = $state<boolean | null>(null);
 	let engineVersion = $state<string | null>(null);
 	let apiStatus = $state<Indicator | null>(null);
-	let providerName = $state('Anthropic API');
+	// Display name of the active provider. Default reads "API" so we never show
+	// a stale "Anthropic API" label when the active provider is actually
+	// Mistral / OpenAI-compatible / etc. /api/providers/status fills this on
+	// first poll with the real provider name (e.g. "Mistral AI").
+	let providerName = $state('API');
 	let providers = $state<ProviderEntry[]>([]);
+	// Tooltip text for the API-status pill — surfaces "Last run failed" (or
+	// equivalent provider description) so the user knows WHY the dot is red
+	// without having to open the status panel. Falls back to the provider
+	// name when no description is available.
+	let apiStatusTooltip = $state('');
 	let activeTasks = $state(0);
 	let todayCost = $state(0);
 	let todayRuns = $state(0);
@@ -86,17 +95,51 @@
 				const data = (await providersRes.json()) as { providers: ProviderEntry[] };
 				providers = Array.isArray(data.providers) ? data.providers : [];
 				const primary = providers[0];
-				if (primary) {
-					const ind = primary.indicator;
-					apiStatus = ind === 'none' || ind === 'minor' || ind === 'major' || ind === 'critical'
-						? ind : 'unknown';
-					if (primary.provider) providerName = primary.provider;
-				} else {
+				if (primary?.provider) providerName = primary.provider;
+
+				// Aggregate worst-state across ALL configured providers — when one
+				// provider (e.g. Mistral with an expired key) is failing, the bar
+				// must reflect that even if the primary (Anthropic) is healthy.
+				// Severity order: critical > major > minor > unknown > none.
+				// Pre-fix this read only providers[0], so a failing Mistral was
+				// invisible while the status bar misled with "OpenAI-compatible
+				// · API OK" (the prod symptom that triggered this fix).
+				const rank: Record<Indicator, number> = {
+					none: 0,
+					unknown: 1,
+					minor: 2,
+					major: 3,
+					critical: 4,
+				};
+				let worst: Indicator = 'unknown';
+				let worstDescription = '';
+				let worstProvider = '';
+				for (const p of providers) {
+					const ind: Indicator = p.indicator === 'none' || p.indicator === 'minor'
+						|| p.indicator === 'major' || p.indicator === 'critical'
+						? p.indicator
+						: 'unknown';
+					if (rank[ind] >= rank[worst]) {
+						worst = ind;
+						worstDescription = p.description ?? '';
+						worstProvider = p.provider ?? '';
+					}
+				}
+				if (providers.length === 0) {
 					apiStatus = 'unknown';
+					apiStatusTooltip = providerName;
+				} else {
+					apiStatus = worst;
+					// If the worst entry isn't the primary, prefix with its name
+					// so the tooltip explains which provider is degraded.
+					apiStatusTooltip = worstProvider && worstProvider !== providerName
+						? `${worstProvider}: ${worstDescription || worstProvider}`
+						: (worstDescription || providerName);
 				}
 			} else {
 				apiStatus = 'unknown';
 				providers = [];
+				apiStatusTooltip = providerName;
 			}
 
 			if (tasksRes?.ok) {
@@ -251,12 +294,15 @@
 	bar visually overlaps the bottom edge now, but the status text sits above
 	the indicator and stays legible. -->
 <div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2">
-	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors">
+	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors" title={apiStatusTooltip || providerName}>
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
 		<span class="text-border mx-1">|</span>
+		<!-- Aggregated worst-state across all configured providers (mobile mirror
+		     of the desktop pill). Pre-fix this used providers[0] only, so a
+		     failing Mistral was invisible on mobile too. -->
 		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
-		{apiStatusLabel()}
+		{providerName} · {apiStatusLabel()}
 		<span class="text-border mx-1">|</span>
 		{formatCost(todayCost)}
 	</button>
@@ -276,10 +322,13 @@
 
 	<span class="text-border">|</span>
 
-	<!-- API Status -->
-	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title={providerName}>
+	<!-- API Status — shows active provider name + aggregated worst-state across
+		all configured providers. Tooltip surfaces the failing provider's
+		description (e.g. "Mistral AI: Last run failed") so the user knows
+		which provider is degraded without opening the status panel. -->
+	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title={apiStatusTooltip || providerName}>
 		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
-		{apiStatusLabel()}
+		{providerName} · {apiStatusLabel()}
 	</span>
 
 	<span class="text-border">|</span>

@@ -569,6 +569,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_context_length': { de: 'Die Konversation ist zu lang. Starte einen neuen Chat.', en: 'The conversation is too long. Start a new chat.' },
 	'chat.error_offline': { de: 'Keine Internetverbindung. Stelle die Verbindung wieder her und versuche es nochmal.', en: 'No internet connection. Reconnect and try again.' },
 	'chat.error_copy_detail': { de: 'Fehlerdetails kopieren', en: 'Copy error details' },
+	'chat.error_toast_prefix': { de: 'Diese Antwort ist fehlgeschlagen', en: 'This response failed' },
 	'chat.retry': { de: 'Wiederhole… Versuch {attempt}/{max}', en: 'Retrying… attempt {attempt}/{max}' },
 	'chat.busy_wait': { de: 'Agent arbeitet noch am vorherigen Schritt — deine Nachricht wartet…', en: 'Agent still working on the previous step — your message is queued…' },
 	'chat.busy_cancel': { de: 'Abbrechen', en: 'Cancel' },
