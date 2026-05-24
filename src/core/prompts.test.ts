@@ -6,6 +6,7 @@ import {
   modelIdentityContext,
   NO_WEB_SEARCH_PROMPT_SUFFIX,
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
+  DATASTORE_PROMPT_SUFFIX,
 } from './prompts.js';
 
 // File-level reset so a forgotten useRealTimers() in a future test can't
@@ -342,5 +343,82 @@ describe('WEB_SEARCH_FALLBACK_PROMPT_SUFFIX', () => {
   it('flags the fallback as best-effort and surfaces the upgrade path', () => {
     expect(WEB_SEARCH_FALLBACK_PROMPT_SUFFIX).toMatch(/best.effort|fallback/i);
     expect(WEB_SEARCH_FALLBACK_PROMPT_SUFFIX).toMatch(/SearXNG/);
+  });
+});
+
+// Pre-launch capability-surface regression-pins (2026-05-24 PR #577): three
+// prompt-slice edits identified via the pre-launch probe agent — capability-
+// floor for brand-new users, EU/OSS differentiator block, OKR/KPI DataStore
+// trigger. These edits close discoverability gaps that HN first-touch
+// visitors will hit. Pin headings + at least one intent-anchor per edit so a
+// silent removal in a future refactor fails fast.
+//
+// Assertions deliberately mix literal headings (stable anchor) and intent
+// regexes — a paraphrase that preserves the meaning passes, a silent deletion
+// fails. Same pattern as F-Halu + doc-research pins above.
+describe('SYSTEM_PROMPT capability-floor for brand-new users (Session Start §4)', () => {
+  it('names the four capability anchors when memory + tasks are empty', () => {
+    expect(SYSTEM_PROMPT).toMatch(/brand-new user/i);
+    expect(SYSTEM_PROMPT).toMatch(/four capability anchors/i);
+    // The four anchors themselves — paraphrase-tolerant
+    expect(SYSTEM_PROMPT).toMatch(/workflows.*scheduling/i);
+    expect(SYSTEM_PROMPT).toMatch(/memory.*knowledge graph/i);
+    expect(SYSTEM_PROMPT).toMatch(/sub-agents/i);
+    expect(SYSTEM_PROMPT).toMatch(/APIs.*integrations|api_setup/i);
+  });
+
+  it('forbids collapsing the answer to the most recent past session', () => {
+    expect(SYSTEM_PROMPT).toMatch(/do not collapse|don't collapse|not just the last thing/i);
+  });
+});
+
+describe('SYSTEM_PROMPT differentiators block (positioning answers)', () => {
+  it('includes the differentiators block heading', () => {
+    expect(SYSTEM_PROMPT).toMatch(/\*\*Differentiators\*\*/);
+  });
+
+  it('lists the four primary positioning anchors', () => {
+    expect(SYSTEM_PROMPT).toMatch(/self.hostable.*BYOK|BYOK.*self.hostable/i);
+    expect(SYSTEM_PROMPT).toMatch(/EU.sovereign/i);
+    expect(SYSTEM_PROMPT).toMatch(/persistent memory.*knowledge graph|knowledge graph.*persistent memory/i);
+    expect(SYSTEM_PROMPT).toMatch(/workflows.*cron|cron.*workflows/i);
+    expect(SYSTEM_PROMPT).toMatch(/sub-agents/i);
+  });
+
+  it('gates the block behind explicit positioning questions (anti-pitch guard)', () => {
+    // "Don't lead with these unprompted" — pin the intent so a future edit
+    // doesn't accidentally turn the block into a pitch on every turn.
+    expect(SYSTEM_PROMPT).toMatch(/(don't lead.*unprompted|answers, not pitches|how are you different|why not ChatGPT|vs Claude)/i);
+  });
+
+  it('clarifies EU-sovereign is conditional on the Mistral set (Anthropic users are not)', () => {
+    // Anti-misquote guard: an Anthropic user shouldn't be able to point at
+    // a generic "EU-sovereign" claim — the conditionality must survive.
+    expect(SYSTEM_PROMPT).toMatch(/(EU.sovereign option|requires picking Mistral|sovereign data path)/i);
+  });
+});
+
+describe('DATASTORE_PROMPT_SUFFIX OKR/KPI proactive trigger', () => {
+  it('triggers on OKR/KPI/metrics terminology', () => {
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/OKR.*KPI.*metrics|KPIs.*OKRs/i);
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/targets|dashboards|scorecards/i);
+  });
+
+  it('covers multi-language synonyms (German/French)', () => {
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/Kennzahlen/);
+    // At least one more non-English form to ensure trigger is robustly
+    // multilingual, not English-only with hope-the-LLM-translates.
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/Zielvorgaben|indicateurs|métriques/);
+  });
+
+  it('proposes DataStore table FIRST, not template / file upload', () => {
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/(DataStore table FIRST|propose a DataStore|table.*first)/i);
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/(don't lead.*template|not.*template|not.*upload|miss the.*point)/i);
+  });
+
+  it('suggests a canonical OKR column shape', () => {
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/objective.*key_result|key_result.*objective/);
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/target/);
+    expect(DATASTORE_PROMPT_SUFFIX).toMatch(/current_value/);
   });
 });
