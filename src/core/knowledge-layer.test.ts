@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -252,6 +252,85 @@ describe('KnowledgeLayer', () => {
     const ctx = layer.formatRetrievalContext({ memories, entities: [], contextGraph: '' });
     expect(ctx.length).toBeLessThanOrEqual(12_000);
     expect(ctx).toContain('<relevant_context>');
+  });
+
+  // --- PR #569 cleanup-owe: direct setAnthropicClient propagation tests ---
+
+  describe('KnowledgeLayer.setAnthropicClient — provider-switch propagation', () => {
+    let scratchDir: string;
+    let scratchLayer: KnowledgeLayer;
+
+    beforeAll(async () => {
+      scratchDir = await mkdtemp(join(tmpdir(), 'lynox-kl-setter-'));
+      scratchLayer = new KnowledgeLayer(join(scratchDir, 'test.db'), new LocalProvider());
+      await scratchLayer.init();
+    });
+
+    afterAll(async () => {
+      await scratchLayer.close();
+      await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+    });
+
+    it('updates the internal anthropicClient field', () => {
+      const fakeClient = { beta: { messages: { stream: () => ({}) } } } as unknown as
+        import('@anthropic-ai/sdk').default;
+
+      scratchLayer.setAnthropicClient(fakeClient);
+
+      // Private field — read via cast since there's no public getter.
+      const stored = (scratchLayer as unknown as {
+        anthropicClient: import('@anthropic-ai/sdk').default | undefined;
+      }).anthropicClient;
+      expect(stored).toBe(fakeClient);
+    });
+
+    it('accepts undefined to clear the client', () => {
+      scratchLayer.setAnthropicClient(undefined);
+      const stored = (scratchLayer as unknown as {
+        anthropicClient: import('@anthropic-ai/sdk').default | undefined;
+      }).anthropicClient;
+      expect(stored).toBeUndefined();
+    });
+
+    it('propagates the same client reference down to the RetrievalEngine', () => {
+      const fakeClient = { beta: { messages: { stream: () => ({}) } } } as unknown as
+        import('@anthropic-ai/sdk').default;
+
+      // RetrievalEngine is private — read via cast.
+      const retrieval = (scratchLayer as unknown as {
+        retrievalEngine: import('./retrieval-engine.js').RetrievalEngine;
+      }).retrievalEngine;
+
+      scratchLayer.setAnthropicClient(fakeClient);
+
+      const retrievalClient = (retrieval as unknown as {
+        anthropicClient: import('@anthropic-ai/sdk').default | undefined;
+      }).anthropicClient;
+      expect(retrievalClient).toBe(fakeClient);
+    });
+
+    it('calls retrievalEngine.setAnthropicClient on every invocation (no caching)', () => {
+      const retrieval = (scratchLayer as unknown as {
+        retrievalEngine: import('./retrieval-engine.js').RetrievalEngine;
+      }).retrievalEngine;
+      const spy = vi.spyOn(retrieval, 'setAnthropicClient');
+
+      const c1 = { beta: { messages: { stream: () => ({}) } } } as unknown as
+        import('@anthropic-ai/sdk').default;
+      const c2 = { beta: { messages: { stream: () => ({}) } } } as unknown as
+        import('@anthropic-ai/sdk').default;
+
+      scratchLayer.setAnthropicClient(c1);
+      scratchLayer.setAnthropicClient(c2);
+      scratchLayer.setAnthropicClient(undefined);
+
+      expect(spy).toHaveBeenCalledTimes(3);
+      expect(spy).toHaveBeenNthCalledWith(1, c1);
+      expect(spy).toHaveBeenNthCalledWith(2, c2);
+      expect(spy).toHaveBeenNthCalledWith(3, undefined);
+
+      spy.mockRestore();
+    });
   });
 
   // --- T2-M2: scope-id-scoped dedup (cross-project bleed regression) ---

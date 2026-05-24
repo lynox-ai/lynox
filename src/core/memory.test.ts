@@ -19,6 +19,22 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }));
 
+// Spy on createLLMClient so `setClient` provider-switch tests can assert the
+// factory was called with the new provider config. Falls through to the real
+// factory (which is itself mocked at the @anthropic-ai/sdk layer above) so
+// the returned client still behaves like a stream-capable Anthropic client.
+const createLLMClientSpy = vi.fn();
+vi.mock('./llm-client.js', async () => {
+  const actual = await vi.importActual<typeof import('./llm-client.js')>('./llm-client.js');
+  return {
+    ...actual,
+    createLLMClient: (opts: Parameters<typeof actual.createLLMClient>[0]) => {
+      createLLMClientSpy(opts);
+      return actual.createLLMClient(opts);
+    },
+  };
+});
+
 vi.mock('./observability.js', () => ({
   channels: {
     memoryStore: { publish: vi.fn(), hasSubscribers: false },
@@ -927,6 +943,108 @@ describe('Memory', () => {
 
       const content = await mem.load('knowledge');
       expect(content).toContain('PostgreSQL 16');
+    });
+  });
+
+  // Direct tests for the PR #569 setter — guards against silent regression of
+  // the EU-residency provider-switch propagation path.
+  describe('Memory.setClient — provider-switch propagation', () => {
+    beforeEach(() => {
+      createLLMClientSpy.mockClear();
+      mockCreate.mockReset().mockResolvedValue({
+        content: [{ type: 'text', text: '{}' }],
+      });
+    });
+
+    it('rebuilds the LLM client with the new provider config', () => {
+      const mem = new Memory(dir, 'sk-ant-old', undefined);
+      createLLMClientSpy.mockClear(); // ignore constructor call
+
+      mem.setClient({
+        apiKey: 'sk-mistral-new',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        provider: 'openai',
+        openaiModelId: 'mistral-large-2512',
+      });
+
+      expect(createLLMClientSpy).toHaveBeenCalledTimes(1);
+      expect(createLLMClientSpy).toHaveBeenCalledWith({
+        apiKey: 'sk-mistral-new',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        provider: 'openai',
+        openaiModelId: 'mistral-large-2512',
+      });
+    });
+
+    it('clears the in-memory consolidation cache (cache keys are not provider-aware)', async () => {
+      const mem = new Memory(dir);
+      // Prime the cache with a saved memory.
+      await mem.save('knowledge', 'cached fact from old provider');
+      // Read once more to ensure the value is hot in the cache.
+      expect(await mem.load('knowledge')).toBe('cached fact from old provider');
+
+      // Overwrite the file on disk so cache vs. disk diverge — load() would
+      // still serve the cached value if the cache survives setClient.
+      const projDir = join(dir, 'memory', 'global');
+      await writeFile(join(projDir, 'knowledge.txt'), 'fresh from disk', 'utf-8');
+
+      mem.setClient({
+        apiKey: 'sk-mistral-new',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        provider: 'openai',
+        openaiModelId: 'mistral-large-2512',
+      });
+
+      // After setClient, the cache is cleared — load() must re-read from disk.
+      expect(await mem.load('knowledge')).toBe('fresh from disk');
+    });
+
+    it('routes a subsequent maybeUpdate call through the NEW client (not the pre-setClient one)', async () => {
+      const mem = new Memory(dir, 'sk-ant-old', undefined);
+
+      // Pin a sentinel "OLD" client on the instance so any post-setClient
+      // call to it would be detectable.
+      const oldStreamCalls: unknown[] = [];
+      const oldClientMock = {
+        beta: {
+          messages: {
+            stream: (params: unknown) => {
+              oldStreamCalls.push(params);
+              return {
+                finalMessage: () => Promise.resolve({
+                  content: [{ type: 'text', text: '{}' }],
+                }),
+              };
+            },
+          },
+        },
+      };
+      (mem as unknown as { client: unknown }).client = oldClientMock;
+
+      // Now call setClient — internally it invokes createLLMClient which is
+      // spied. Verify the factory was given the new provider config.
+      mem.setClient({
+        apiKey: 'sk-mistral-new',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        provider: 'openai',
+        openaiModelId: 'mistral-large-2512',
+      });
+
+      // Drive a maybeUpdate large enough to bypass the trivial-skip guard.
+      await mem.maybeUpdate('A'.repeat(400), 5);
+
+      // The OLD client must NOT have seen any stream calls after setClient —
+      // proof that setClient swapped the client reference.
+      expect(oldStreamCalls).toHaveLength(0);
+
+      // The factory was called with the new provider params (sanity check
+      // duplicating test 1 but in the maybeUpdate execution path).
+      expect(createLLMClientSpy).toHaveBeenCalledWith({
+        apiKey: 'sk-mistral-new',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        provider: 'openai',
+        openaiModelId: 'mistral-large-2512',
+      });
     });
   });
 });
