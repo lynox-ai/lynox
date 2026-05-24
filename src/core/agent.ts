@@ -223,6 +223,36 @@ export class Agent implements IAgent {
     return this.costGuard ? this.costGuard.snapshot() : null;
   }
 
+  /**
+   * Defensive credential scrub for `JSON.stringify(agent)`. No code path in
+   * core today serialises the Agent itself, but future debug-logging /
+   * error-reporting / structured-clone paths would silently leak the
+   * plaintext `inheritedApiKey` (and the `apiKey` on `getProviderConfig()`)
+   * if they reached for `JSON.stringify` first.
+   *
+   * Strategy: return a shallow snapshot of the public, non-credential surface
+   * and explicitly redact any field whose name suggests a secret. Anything
+   * the consumer didn't ask for stays off the snapshot — adding a new field
+   * here is a conscious decision, not an automatic leak.
+   */
+  toJSON(): Record<string, unknown> {
+    return {
+      name: this.name,
+      model: this.model,
+      provider: this.provider,
+      spawnDepth: this.spawnDepth,
+      autonomy: this.autonomy,
+      // Surface that credentials EXIST without revealing their values —
+      // useful for "is this agent provisioned?" diagnostics.
+      apiKey: this.inheritedApiKey ? '[REDACTED]' : undefined,
+      apiBaseURL: this.inheritedApiBaseURL,
+      openaiModelId: this.inheritedOpenaiModelId,
+      openaiAuth: this.inheritedOpenaiAuth,
+      currentRunId: this.currentRunId,
+      currentThreadId: this.currentThreadId,
+    };
+  }
+
   constructor(config: AgentConfig) {
     this.name = config.name;
     this.model = config.model;

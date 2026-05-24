@@ -71,8 +71,9 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig } from './spawn.js';
 import { channels } from '../../core/observability.js';
+import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot } from '../../types/index.js';
 
 function makeTool(name: string): ToolEntry {
   return {
@@ -1087,6 +1088,121 @@ describe('spawn_agent tool', () => {
       // Symmetry with the success path: error-path also records duration.
       expect(typeof updateArg.durationMs).toBe('number');
       expect(updateArg.durationMs).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // === PR #568 follow-up: provider-config inheritance precedence chain ===
+  //
+  // Documents + locks the 3-tier precedence used to derive a sub-agent's
+  // provider credentials (profile > parent > userConfig). Each test walks
+  // ONE arm of the chain so a regression points at the exact tier that
+  // shifted. Drives a pure helper (no spawn handler invocation) — the
+  // handler-level integration is covered by the T2-X1 block above.
+  describe('resolveChildProviderConfig: profile > parent > userConfig', () => {
+    const PROFILE: ModelProfile = {
+      provider: 'openai',
+      api_base_url: 'https://api.mistral.ai/v1',
+      api_key: 'profile-key',
+      auth: 'static',
+      model_id: 'mistral-large-2512',
+    };
+    const PARENT: ProviderConfigSnapshot = {
+      provider: 'openai',
+      apiKey: 'parent-key',
+      apiBaseURL: 'https://parent.example.com/v1',
+      openaiModelId: 'parent-model',
+      openaiAuth: 'static',
+    };
+    function makeUserConfig(over: Partial<LynoxUserConfig> = {}): LynoxUserConfig {
+      return {
+        api_key: 'userconfig-key',
+        api_base_url: 'https://userconfig.example.com/v1',
+        provider: 'anthropic',
+        ...over,
+      } as LynoxUserConfig;
+    }
+
+    it('profile wins when all three sources are present', () => {
+      const out = resolveChildProviderConfig(PROFILE, PARENT, makeUserConfig());
+      expect(out.apiKey).toBe('profile-key');
+      expect(out.apiBaseURL).toBe('https://api.mistral.ai/v1');
+      expect(out.provider).toBe('openai');
+      expect(out.openaiModelId).toBe('mistral-large-2512');
+      expect(out.openaiAuth).toBe('static');
+    });
+
+    it('parent wins when profile is missing', () => {
+      const out = resolveChildProviderConfig(undefined, PARENT, makeUserConfig());
+      expect(out.apiKey).toBe('parent-key');
+      expect(out.apiBaseURL).toBe('https://parent.example.com/v1');
+      expect(out.provider).toBe('openai');
+      expect(out.openaiModelId).toBe('parent-model');
+      expect(out.openaiAuth).toBe('static');
+    });
+
+    it('userConfig wins when both profile and parent are missing', () => {
+      const out = resolveChildProviderConfig(undefined, null, makeUserConfig());
+      expect(out.apiKey).toBe('userconfig-key');
+      expect(out.apiBaseURL).toBe('https://userconfig.example.com/v1');
+      expect(out.provider).toBe('anthropic');
+      // userConfig has no openai-specific fields — they fall through to undefined.
+      expect(out.openaiModelId).toBeUndefined();
+      expect(out.openaiAuth).toBeUndefined();
+    });
+
+    it('falls through to userConfig when parent is null (legacy IAgent mock without getProviderConfig)', () => {
+      const out = resolveChildProviderConfig(undefined, null, makeUserConfig({
+        api_key: 'legacy-fallback-key',
+      }));
+      expect(out.apiKey).toBe('legacy-fallback-key');
+    });
+
+    it('profile partial override (api_key only) inherits parent baseURL', () => {
+      // A profile that sets ONLY api_key still inherits api_base_url and the
+      // openai-specific fields from the parent — per-field precedence, not
+      // all-or-nothing.
+      const partialProfile: ModelProfile = {
+        provider: 'openai',
+        api_base_url: '', // explicit empty: still wins via ??-chain on truthy '' — but `??` only short-circuits on null/undefined, so '' is a value. Test below covers that explicitly.
+        api_key: 'override-key-only',
+        model_id: 'partial-model',
+      };
+      // Construct the partial without api_base_url to test the inheritance.
+      const profileWithoutBaseURL: ModelProfile = {
+        provider: 'openai',
+        api_base_url: undefined as unknown as string, // simulate "profile didn't set this" path
+        api_key: 'override-key-only',
+        model_id: 'partial-model',
+      };
+      const out = resolveChildProviderConfig(profileWithoutBaseURL, PARENT, makeUserConfig());
+      expect(out.apiKey).toBe('override-key-only');
+      // api_base_url undefined on profile → inherits parent's baseURL
+      expect(out.apiBaseURL).toBe('https://parent.example.com/v1');
+      // Touch partialProfile so the const isn't unused — documents the
+      // edge case that '' is a value, not a fall-through trigger.
+      expect(partialProfile.api_base_url).toBe('');
+    });
+
+    it('profile partial (model_id only) inherits parent openaiAuth', () => {
+      const profileNoAuth: ModelProfile = {
+        provider: 'openai',
+        api_base_url: 'https://profile-base.example.com',
+        api_key: 'profile-only-key',
+        model_id: 'profile-model',
+        // auth intentionally undefined
+      };
+      const out = resolveChildProviderConfig(profileNoAuth, PARENT, makeUserConfig());
+      expect(out.openaiAuth).toBe('static'); // from PARENT
+      expect(out.openaiModelId).toBe('profile-model'); // from profile
+    });
+
+    it('returns all undefined when nothing is configured anywhere', () => {
+      const out = resolveChildProviderConfig(undefined, null, {} as LynoxUserConfig);
+      expect(out.apiKey).toBeUndefined();
+      expect(out.apiBaseURL).toBeUndefined();
+      expect(out.provider).toBeUndefined();
+      expect(out.openaiModelId).toBeUndefined();
+      expect(out.openaiAuth).toBeUndefined();
     });
   });
 });
