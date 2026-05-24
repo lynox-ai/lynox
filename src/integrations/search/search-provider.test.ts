@@ -676,20 +676,39 @@ describe('parseDdgHtml', () => {
     expect(snippets[0]).toBe('price < $100 & free shipping');
   });
 
-  it('drops sponsored-ad results (DDG /y.js?ad_domain=…)', () => {
+  it('drops sponsored-ad results (DDG /y.js?ad_domain=…) AND keeps snippets aligned', () => {
     // Live DDG SERP for "typescript handbook" returns Amazon + Udemy ads
     // as the top two hits before the real result. Letting them through
     // landed Amazon URLs in research output during the 2026-05-24 smoke;
     // the agent treats them as real hits and cites them. Drop on parse.
+    //
+    // Regression guard: earlier impl pushed snippets in a separate loop
+    // bounded only by `>= urls.length`, so when an ad slot was dropped,
+    // the SPONSORED snippet ended up paired with the real result. Assert
+    // both alignment and ad-drop in the same case.
     const html = `
       <a class="result__a" href="//duckduckgo.com/y.js?ad_domain=amazon.de&amp;ad_provider=bingv7aa">Sponsored title</a>
       <a class="result__snippet">Sponsored snippet</a>
       <a class="result__a" href="https://www.typescriptlang.org/docs/handbook/intro.html">The TypeScript Handbook</a>
       <a class="result__snippet">Official TS handbook.</a>
     `;
-    const { urls, titles } = parseDdgHtml(html, 5);
+    const { urls, titles, snippets } = parseDdgHtml(html, 5);
     expect(urls).toEqual(['https://www.typescriptlang.org/docs/handbook/intro.html']);
     expect(titles).toEqual(['The TypeScript Handbook']);
+    expect(snippets).toEqual(['Official TS handbook.']);
+  });
+
+  it('does not unwrap /l/ paths on non-DDG hosts (SSRF-bypass guard)', () => {
+    // A bare pathname-suffix match would silently follow
+    // `https://evil.example.com/foo/l/?uddg=…` and hand the agent
+    // whatever attacker-controlled `uddg` payload says. Restrict the
+    // redirect-unwrap to DDG's own host.
+    const html = `
+      <a class="result__a" href="https://evil.example.com/foo/l/?uddg=https%3A%2F%2Fattacker.example.com%2Fmalware">Looks normal</a>
+      <a class="result__snippet">Innocent snippet</a>
+    `;
+    const { urls } = parseDdgHtml(html, 5);
+    expect(urls).toEqual(['https://evil.example.com/foo/l/?uddg=https%3A%2F%2Fattacker.example.com%2Fmalware']);
   });
 
   it('drops results with non-http(s) schemes from the unwrap', () => {

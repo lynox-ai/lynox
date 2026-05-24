@@ -270,26 +270,32 @@ export function parseDdgHtml(
   html: string,
   maxResults: number,
 ): { titles: string[]; urls: string[]; snippets: string[] } {
+  // Pair links with their snippets POSITIONALLY across the page in document
+  // order — when a sponsored-ad link is filtered out (returns null from
+  // unwrapDdgRedirect), the matching snippet at the same DDG-page index
+  // MUST also be skipped. Earlier impl pushed snippets in their own loop
+  // bounded only by `>= urls.length`, which silently mis-aligned snippets
+  // to the wrong results whenever an ad slot was dropped.
   const linkPattern = /<a[^>]*class="[^"]*\bresult__a\b[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
   const snippetPattern = /<a[^>]*class="[^"]*\bresult__snippet\b[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
   const titles: string[] = [];
   const urls: string[] = [];
   const snippets: string[] = [];
   const linkMatches = [...html.matchAll(linkPattern)];
-  for (const match of linkMatches) {
-    if (urls.length >= maxResults) break;
-    const rawUrl = match[1] ?? '';
-    const title = stripHtml(match[2] ?? '').trim();
-    const cleanedUrl = unwrapDdgRedirect(rawUrl);
-    if (cleanedUrl && title) {
-      urls.push(cleanedUrl);
-      titles.push(title);
-    }
-  }
   const snippetMatches = [...html.matchAll(snippetPattern)];
-  for (const match of snippetMatches) {
-    if (snippets.length >= urls.length) break;
-    snippets.push(stripHtml(match[1] ?? '').trim());
+  for (let i = 0; i < linkMatches.length; i++) {
+    if (urls.length >= maxResults) break;
+    const linkMatch = linkMatches[i]!;
+    const rawUrl = linkMatch[1] ?? '';
+    const title = stripHtml(linkMatch[2] ?? '').trim();
+    const cleanedUrl = unwrapDdgRedirect(rawUrl);
+    if (!cleanedUrl || !title) continue;
+    urls.push(cleanedUrl);
+    titles.push(title);
+    // Snippet at the same page-index — empty string when DDG omitted one
+    // for this result, so the consumer can index-align titles/urls/snippets.
+    const snippetMatch = snippetMatches[i];
+    snippets.push(snippetMatch ? stripHtml(snippetMatch[1] ?? '').trim() : '');
   }
   return { titles, urls, snippets };
 }
@@ -329,7 +335,11 @@ function unwrapDdgRedirect(href: string): string | null {
     if (parsed.hostname === 'duckduckgo.com' && parsed.pathname === '/y.js') {
       return null;
     }
-    if (parsed.pathname === '/l/' || parsed.pathname.endsWith('/l/')) {
+    // Only unwrap the /l/ redirect when it's on DDG's own host. A bare
+    // pathname-suffix match would silently follow `https://evil.example.com/foo/l/?uddg=…`
+    // and hand the agent whatever attacker-controlled `uddg` payload says.
+    if (parsed.hostname === 'duckduckgo.com'
+        && (parsed.pathname === '/l/' || parsed.pathname.endsWith('/l/'))) {
       const inner = parsed.searchParams.get('uddg');
       if (inner) target = inner;
     }
