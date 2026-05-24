@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 
@@ -6,6 +8,8 @@
 	interface Relation { fromEntityId: string; toEntityId: string; relationType: string; description: string; confidence: number; }
 	interface GraphNode { entity: Entity; x: number; y: number; vx: number; vy: number; }
 	interface GraphEdge { source: string; target: string; label: string; }
+
+	type ViewMode = 'list' | 'graph';
 
 	const PAGE_SIZE = 50;
 
@@ -19,8 +23,24 @@
 	let relations = $state<Relation[]>([]);
 	let error = $state('');
 
-	// Graph state
-	let viewMode = $state<'list' | 'graph'>('list');
+	// Graph state — viewMode derived from URL `?view=` so the toggle survives
+	// reloads + matches IntelligenceHub's `?tab=`/`?sub=` pattern. Reading the
+	// URL via $derived guarantees the active-class branch and the render branch
+	// observe the exact same value (the previous local $state version was
+	// reported broken in production with both buttons highlighted and no
+	// SVG render — likely a state-isolation issue inside the library bundle).
+	const viewMode = $derived<ViewMode>(((): ViewMode => {
+		const v = $page.url.searchParams.get('view');
+		return v === 'graph' ? 'graph' : 'list';
+	})());
+
+	function setViewMode(next: ViewMode): void {
+		const url = new URL($page.url);
+		if (next === 'list') url.searchParams.delete('view');
+		else url.searchParams.set('view', next);
+		void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
 	let graphNodes = $state<GraphNode[]>([]);
 	let graphEdges = $state<GraphEdge[]>([]);
 	let graphLoading = $state(false);
@@ -245,16 +265,22 @@
 <div class="p-6 max-w-5xl mx-auto">
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('kg.title')}</h1>
-		<div class="flex gap-1 rounded-[var(--radius-sm)] border border-border p-0.5">
+		<div class="flex gap-1 rounded-[var(--radius-sm)] border border-border p-0.5" role="radiogroup" aria-label={t('kg.view_toggle_label')}>
 			<button
+				type="button"
+				role="radio"
+				aria-checked={viewMode === 'list'}
 				class="px-2.5 py-1 text-xs rounded-[var(--radius-sm)] transition-colors {viewMode === 'list' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-				onclick={() => viewMode = 'list'}
+				onclick={() => setViewMode('list')}
 			>
 				{t('kg.list_view')}
 			</button>
 			<button
+				type="button"
+				role="radio"
+				aria-checked={viewMode === 'graph'}
 				class="px-2.5 py-1 text-xs rounded-[var(--radius-sm)] transition-colors {viewMode === 'graph' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-				onclick={() => viewMode = 'graph'}
+				onclick={() => setViewMode('graph')}
 			>
 				{t('kg.graph_view')}
 			</button>
