@@ -1222,9 +1222,13 @@ export class RunHistory {
       daily.push({ date: iso, cost_cents: Math.round((dailyMap.get(iso) ?? 0) * 100) });
     }
 
-    const usedCents = Math.round(
-      byModelRows.reduce((sum, r) => sum + r.cost_usd, 0) * 100,
-    );
+    // `used_cents` is rebuilt from `daily.cost_cents` (not from a separate
+    // SUM(cost_usd) over `byModelRows`) so the headline number matches the
+    // bar chart, the daily-derived "Heute" tile, and the StatusBar footer
+    // bit-for-bit. Cross-source drift here was an HN-launch P0: managed
+    // dashboards were showing `used_cents=0` while `daily` + `by_kind` in
+    // the same response carried real spend.
+    const usedCents = daily.reduce((sum, d) => sum + d.cost_cents, 0);
 
     const unitLabelFor = (k: 'llm' | 'voice_stt' | 'voice_tts'): 'tokens' | 'characters' | 'seconds' =>
       k === 'voice_tts' ? 'characters' : k === 'voice_stt' ? 'seconds' : 'tokens';

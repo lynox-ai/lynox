@@ -916,10 +916,14 @@ export class LynoxHTTPApi {
     }
 
     let budgetCents: number;
-    let overriddenUsedCents: number | undefined;
     if (cpSummary?.managed) {
+      // Budget stays CP-driven (Stripe tier amount is the canonical truth);
+      // `used_cents` is always recomputed from local `daily` below so it
+      // stays consistent with the rest of the response shape (`by_kind`,
+      // `daily`, and the StatusBar footer all read the same engine SQLite).
+      // The CP-supplied `used_cents` was a separate counter that drifted to
+      // 0 on staging — see commit message for the regression details.
       budgetCents = cpSummary.budget_cents ?? 0;
-      overriddenUsedCents = cpSummary.used_cents;
     } else if (isManagedTier) {
       budgetCents = 0;
     } else {
@@ -928,7 +932,11 @@ export class LynoxHTTPApi {
         : 0;
     }
 
-    const usedCents = overriddenUsedCents ?? summary.used_cents;
+    // SSoT: rebuild `used_cents` from `daily` entries (already done in
+    // `getUsageSummary`, but the dashboard reads `used_cents` directly so
+    // we re-derive here defensively in case a future caller mocks
+    // `summary.used_cents` out of sync with `daily`).
+    const usedCents = summary.daily.reduce((sum, d) => sum + d.cost_cents, 0);
     const projection = this._projectExhaust(summary.daily, usedCents, budgetCents, endIso);
     const hardLimits = isManagedTier
       ? { tier: 'managed', contact_for_quotas: true }

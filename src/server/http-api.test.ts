@@ -38,10 +38,13 @@ const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
 const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
   // Pass through the handler-computed period so per-period tests see the right source/label/window.
   period: { label: opts.label, start_iso: opts.startIso, end_iso: opts.endIso, source: opts.source },
+  // `used_cents` is rebuilt from `daily` in the handler — provide a daily
+  // entry that sums to the same value so existing assertions stay valid
+  // and the SSoT-rebuild path is exercised here too.
   used_cents: 1842,
   by_model: [],
   by_kind: [],
-  daily: [],
+  daily: [{ date: '2026-04-01', cost_cents: 1842 }],
 }));
 // Saved Workflows library (PRD-WORKFLOW-UX D13).
 const mockHistoryGetPlannedPipelines = vi.fn().mockReturnValue([]);
@@ -1692,6 +1695,52 @@ describe('LynoxHTTPApi', () => {
       // 7d/30d use rolling window, prev uses calendar-month
       if (period === 'prev') expect(p['source']).toBe('calendar-month');
       else expect(p['source']).toBe('rolling');
+    });
+
+    // Regression — HN-launch P0 billing-summary-zero.
+    // The handler MUST recompute `used_cents` from `daily` so a stale
+    // upstream counter cannot zero the headline tile while `by_kind` and
+    // `daily` carry real spend. Staging shipped 2026-05-24 with
+    // used_cents=0 / by_kind[llm]=$19.69 / daily[today]=$0.07 in the SAME
+    // response — `_serveUsageCurrent` now derives used_cents from daily.
+    it('summary endpoint computes used_cents from daily entries (chart SSoT)', async () => {
+      mockHistoryGetUsageSummary.mockReturnValueOnce({
+        period: { label: 'May 1 – May 24', start_iso: '2026-05-01T00:00:00.000Z', end_iso: '2026-06-01T00:00:00.000Z', source: 'calendar-month' },
+        // Pretend an out-of-sync upstream counter (would have been the bug).
+        used_cents: 0,
+        by_model: [],
+        by_kind: [{ kind: 'llm' as const, cost_cents: 1969, unit_count: 12_345, unit_label: 'tokens' as const, run_count: 42 }],
+        daily: [
+          { date: '2026-05-20', cost_cents: 1500 },
+          { date: '2026-05-23', cost_cents: 462 },
+          { date: '2026-05-24', cost_cents: 7 },
+        ],
+      });
+      const res = await jsonFetch('/api/usage/current');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      // sum(daily) = 1500 + 462 + 7 = 1969 — the SSoT-rebuilt value, NOT 0.
+      expect(body['used_cents']).toBe(1969);
+    });
+
+    it('summary used_cents matches by_kind sum when daily and by_kind agree', async () => {
+      mockHistoryGetUsageSummary.mockReturnValueOnce({
+        period: { label: 'Apr', start_iso: '2026-04-01T00:00:00.000Z', end_iso: '2026-05-01T00:00:00.000Z', source: 'calendar-month' },
+        used_cents: 12,
+        by_model: [],
+        by_kind: [{ kind: 'llm' as const, cost_cents: 12, unit_count: 380, unit_label: 'tokens' as const, run_count: 2 }],
+        daily: [
+          { date: '2026-04-10', cost_cents: 10 },
+          { date: '2026-04-11', cost_cents: 2 },
+        ],
+      });
+      const res = await jsonFetch('/api/usage/current');
+      const body = await res.json() as { used_cents: number; by_kind: Array<{ cost_cents: number }>; daily: Array<{ cost_cents: number }> };
+      const byKindSum = body.by_kind.reduce((n, k) => n + k.cost_cents, 0);
+      const dailySum = body.daily.reduce((n, d) => n + d.cost_cents, 0);
+      expect(body.used_cents).toBe(byKindSum);
+      expect(body.used_cents).toBe(dailySum);
+      expect(body.used_cents).toBe(12);
     });
   });
 

@@ -1529,6 +1529,63 @@ describe('RunHistory', () => {
       expect(s.by_kind.reduce((n, k) => n + k.run_count, 0)).toBe(1);
       h.close();
     });
+
+    // Regression — HN-launch P0 billing-summary-zero.
+    // `used_cents` MUST be rebuilt from `daily` so the dashboard tiles
+    // ("Monat bis dato", "Heute"), the bar chart, and `by_kind` all read
+    // the same SSoT bit-for-bit. Previously `used_cents` was a separate
+    // SUM over `byModelRows`, which could (and did) drift to 0 on staging
+    // while `daily` and `by_kind` carried real spend.
+    it('used_cents equals sum(daily.cost_cents) — the chart-SSoT contract', () => {
+      const h = createHistory();
+      insertAt(h, '2026-04-10T12:00:00.000Z', {
+        taskText: 'a', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { costUsd: 0.07, status: 'completed' });
+      insertAt(h, '2026-04-15T12:00:00.000Z', {
+        taskText: 'b', modelTier: 'haiku', modelId: 'claude-haiku-4-5',
+      }, { costUsd: 0.05, status: 'completed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z',
+        endIso:   '2026-05-01T00:00:00.000Z',
+        source: 'calendar-month',
+        label: 'Apr',
+      });
+
+      const dailySum = s.daily.reduce((n, d) => n + d.cost_cents, 0);
+      expect(s.used_cents).toBe(dailySum);
+      expect(s.used_cents).toBe(12);
+      h.close();
+    });
+
+    // Regression — HN-launch P0 billing-summary-zero.
+    // When `daily` and `by_kind` carry spend, `used_cents` MUST NOT be 0.
+    // This is the exact symptom staging exhibited: by_kind[llm]=$19.69,
+    // daily had non-zero entries, but used_cents=0 → the budget tile read
+    // "$0.00 of $20.00" while runs were burning credit.
+    it('used_cents matches by_kind sum when daily and by_kind agree', () => {
+      const h = createHistory();
+      insertAt(h, '2026-04-10T12:00:00.000Z', {
+        taskText: 'llm', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+      }, { tokensIn: 100, tokensOut: 50, costUsd: 0.10, status: 'completed' });
+      insertAt(h, '2026-04-11T12:00:00.000Z', {
+        taskText: 'llm2', modelTier: 'haiku', modelId: 'claude-haiku-4-5',
+      }, { tokensIn: 200, tokensOut: 30, costUsd: 0.02, status: 'completed' });
+
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z',
+        endIso:   '2026-05-01T00:00:00.000Z',
+        source: 'calendar-month',
+        label: 'Apr',
+      });
+
+      const byKindSum = s.by_kind.reduce((n, k) => n + k.cost_cents, 0);
+      const dailySum = s.daily.reduce((n, d) => n + d.cost_cents, 0);
+      expect(s.used_cents).toBe(byKindSum);
+      expect(s.used_cents).toBe(dailySum);
+      expect(s.used_cents).toBe(12);
+      h.close();
+    });
   });
 
   // T1-2 regression — see PRD-HN-LAUNCH-HARDENING §3.
