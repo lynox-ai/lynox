@@ -1765,6 +1765,19 @@ export class LynoxHTTPApi {
         agent.toolContext.streamHandler = session.onStream;
       }
 
+      // Surface any init-time agent warnings as SSE events for the web-UI to
+      // render as toasts. Currently only emits for the thinking-flag-guard
+      // when a user opts thinking on a non-reasoning Mistral model.
+      // Explicit projection (not JSON.stringify of the whole object) so a
+      // future AgentWarning field additions can't silently leak to the
+      // browser without an SSE-shape review.
+      if (agent) {
+        for (const w of agent.getWarnings()) {
+          const payload = { code: w.code, modelId: w.modelId, hint: w.hint };
+          res.write(`event: warning\ndata: ${JSON.stringify(payload)}\n\n`);
+        }
+      }
+
       // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
       const promptStore = this.engine?.getPromptStore();
       // AbortController for the session — used to cancel prompt polling on disconnect

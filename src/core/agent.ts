@@ -8,6 +8,7 @@ import type {
   StreamHandler,
   AgentConfig,
   ThinkingMode,
+  AgentWarning,
   EffortLevel,
   AutonomyLevel,
   PreApprovalSet,
@@ -78,6 +79,14 @@ export class Agent implements IAgent {
   private readonly provider: LLMProvider;
   private readonly systemPrompt: string | undefined;
   private thinking: ThinkingMode;
+  /**
+   * Structured warnings produced during agent init / per-call that the
+   * HTTP-API surfaces as `warning` SSE events so the web-UI can render a
+   * toast. Currently emitted from the thinking-flag guard when a user
+   * requests thinking on a non-reasoning Mistral model. Read-only after
+   * construction.
+   */
+  private readonly warnings: AgentWarning[] = [];
   private effort: EffortLevel | undefined;
   private readonly maxTokens: number;
   private readonly workerPool: IWorkerPool | null;
@@ -168,6 +177,8 @@ export class Agent implements IAgent {
   /** Override thinking mode for the next run without recreating the agent. */
   setThinking(mode: ThinkingMode): void { this.thinking = mode; }
   getThinking(): ThinkingMode { return this.thinking; }
+  /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Stream to UI as toast events. */
+  getWarnings(): readonly AgentWarning[] { return this.warnings; }
 
   /**
    * Cumulative cost snapshot from the agent's CostGuard, or null if no
@@ -203,6 +214,22 @@ export class Agent implements IAgent {
     this.isCustomProxy = activeProvider === 'custom' || activeProvider === 'openai';
     const isHaiku = this.model.includes('haiku');
     const requestedThinking = config.thinking ?? { type: 'adaptive' };
+    // Mistral thinking-flag guard (per PRD-MISTRAL-AS-ANTHROPIC-ALTERNATIVE §4.4):
+    // Hostname-gate to api.mistral.ai — a user on OpenRouter / llama.cpp /
+    // Together via `provider: 'openai'` would otherwise receive a Mistral-
+    // specific warning that doesn't apply to their provider. Same hostname-
+    // gate pattern as the cache-key forward in openai-adapter.ts.
+    const isMistralHost = (() => {
+      try { return config.apiBaseURL ? new URL(config.apiBaseURL).hostname.toLowerCase() === 'api.mistral.ai' : false; }
+      catch { return false; }
+    })();
+    if (isMistralHost && requestedThinking.type === 'enabled' && !this.model.startsWith('magistral-')) {
+      this.warnings.push({
+        code: 'thinking_not_supported_on_model',
+        modelId: this.model,
+        hint: `${this.model} does not support reasoning chains. Switch to Magistral Medium for reasoning, or keep thinking disabled.`,
+      });
+    }
     // Haiku 4.5 has no extended-thinking support (manual or adaptive) — sending
     // either shape returns "model does not support" 400 from Anthropic. Force
     // disabled regardless of what the caller requested.

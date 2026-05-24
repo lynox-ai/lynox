@@ -1328,6 +1328,26 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (summary) step.summary = summary;
 			break;
 		}
+		case 'warning': {
+			// Engine-init warnings (e.g. thinking-flag dropped on Mistral) — surface as toast.
+			// Code-based dispatch lets us i18n the title/body; modelId is interpolated text-safe
+			// (Svelte default-escapes via `{...}`, addToast takes a plain string).
+			const code = String(data['code'] ?? '');
+			// Defensive cap on modelId: server-controlled enum today, but slice prevents
+			// a future leak/spam scenario from rendering megabyte strings in the toast UI.
+			const modelId = String(data['modelId'] ?? 'unknown').slice(0, 64);
+			if (code === 'thinking_not_supported_on_model') {
+				// addToast accepts 'success' | 'error' | 'info'; use 'info' for soft
+				// degrades (thinking silently dropped). 'error' would be misleading —
+				// the call still works, just without reasoning.
+				addToast(
+					t('chat.warning.thinking_disabled.body').replace('{model}', modelId),
+					'info',
+					8000,
+				);
+			}
+			break;
+		}
 		case 'done': {
 			// Usage fallback: if the `turn_end` SSE frame was lost in transit
 			// (reconnect, dropped stream), the live message never received its

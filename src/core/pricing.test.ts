@@ -109,32 +109,38 @@ describe('Pricing', () => {
     it('returns pinned Mistral pricing', () => {
       expect(getPricing('mistral-small-2603').input).toBe(0.20);
       expect(getPricing('mistral-small-2603').output).toBe(0.60);
-      expect(getPricing('mistral-large-2512').input).toBe(2);
-      expect(getPricing('mistral-large-2512').output).toBe(6);
+      // Mistral Large 3 (Dec 2025): 75% price cut vs Large 2.
+      expect(getPricing('mistral-large-2512').input).toBe(0.50);
+      expect(getPricing('mistral-large-2512').output).toBe(1.50);
       expect(getPricing('magistral-medium-2509').input).toBe(2);
       expect(getPricing('magistral-medium-2509').output).toBe(5);
+      // Gen-3 ministrals (2026-05-24): replaced retired -2410 in tier-map.
+      expect(getPricing('ministral-3b-2512').input).toBe(0.10);
+      expect(getPricing('ministral-8b-2512').input).toBe(0.15);
     });
 
     it('calculates mistral-large cost without overcharging', () => {
       // Regression guard: same shape as the staging mistral-demo run that
-      // exposed the missing entry. Mistral rates → $0.025842, not the
-      // $0.038865 Sonnet fallback that shipped before this fix.
+      // exposed the missing entry. Mistral Large 3 rates ($0.50/$1.50) →
+      // 12,870 × $0.50/M + 17 × $1.50/M = $0.0064605.
       const cost = calculateCost('mistral-large-2512', {
         input_tokens: 12_870,
         output_tokens: 17,
       });
-      expect(cost).toBeCloseTo(0.025842, 6);
+      expect(cost).toBeCloseTo(0.0064605, 7);
     });
 
-    it('charges cache reads at the input rate (no native cache discount)', () => {
-      // Mistral docs: `prompt_cache_key` enables transparent prompt caching
-      // but does not discount the cached prefix — bill it as input.
+    it('charges cache reads at 10% of input rate (Mistral native prompt-cache)', () => {
+      // Mistral docs (https://docs.mistral.ai/api/endpoint/chat — 2026-05-24):
+      // `prompt_cache_key` enables transparent prompt caching;
+      // cached input is billed at 10% of standard input rate.
+      // Large 3 input = $0.50/M → cached = $0.05/M → 1M cached = $0.05.
       const cost = calculateCost('mistral-large-2512', {
         input_tokens: 0,
         output_tokens: 0,
         cache_read_input_tokens: 1_000_000,
       });
-      expect(cost).toBeCloseTo(2);
+      expect(cost).toBeCloseTo(0.05);
     });
   });
 });

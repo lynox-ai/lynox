@@ -1480,7 +1480,7 @@ describe('LynoxHTTPApi', () => {
         expect(am!['provider']).toBe('openai');
         expect(am!['tier']).toBe('opus');
         expect(am!['contextWindow']).toBe(131_072);
-        expect(am!['uiLabel']).toBe('Magistral Medium');
+        expect(am!['uiLabel']).toBe('Magistral Medium 1.2');
         // Mistral lineage carries different feature flags than Claude.
         const features = am!['features'] as Record<string, boolean>;
         expect(features['extendedThinking']).toBe(false);

@@ -49,14 +49,17 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * Pinned to specific snapshots so behaviour stays reproducible across model
  * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
  * and behaviour-drift in managed-EU tenants.
- *   haiku  → mistral-small-2603     (cheap, orchestration)
- *   sonnet → mistral-large-2512     (workhorse, tool-use)
- *   opus   → magistral-medium-2509  (reasoning-heavy)
+ *   haiku  → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
+ *   sonnet → mistral-large-2512     (workhorse, tool-use, 6× cheaper than Anthropic Sonnet)
+ *   opus   → magistral-medium-2509  (reasoning-heavy, batch-suitable)
+ *
+ * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
+ * Haiku-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   'opus':   'magistral-medium-2509',
   'sonnet': 'mistral-large-2512',
-  'haiku':  'mistral-small-2603',
+  'haiku':  'ministral-8b-2512',
 };
 
 const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
@@ -329,32 +332,46 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Claude Sonnet 4.6 (1M)',
   },
   // === Mistral tier-set (eu-sovereign managed via openai-compat) ===
-  // cacheWrite/cacheRead mirror input rate — Mistral exposes
-  // `prompt_cache_key` but bills the cached prefix at the standard input
-  // rate. Setting these to zero would under-bill opportunistic cache hits.
-  'mistral-small-2603': {
-    id: 'mistral-small-2603',
+  // cacheRead = 10% of input per Mistral pricing docs (2026-05-24).
+  // Mistral exposes `prompt_cache_key` opt-in; cached input billed at 10%.
+  // Cache-write is implicit (no separate billing field per Mistral terms).
+  'ministral-3b-2512': {
+    id: 'ministral-3b-2512',
     provider: 'openai',
     tier: 'haiku',
-    contextWindow: 32_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
-    uiLabel: 'Mistral Small',
+    pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 },
+    uiLabel: 'Ministral 3B',
   },
+  'ministral-8b-2512': {
+    id: 'ministral-8b-2512',
+    provider: 'openai',
+    tier: 'haiku',
+    contextWindow: 262_144,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
+    uiLabel: 'Ministral 8B',
+  },
+  // Mistral Large 3 (Dec 2025): 256k context, $0.50/$1.50 (75% price cut vs Large 2),
+  // multimodal input (text+image), structured-outputs, function-calling, prefix-cache.
   'mistral-large-2512': {
     id: 'mistral-large-2512',
     provider: 'openai',
     tier: 'sonnet',
-    contextWindow: 131_072,
+    contextWindow: 256_000,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 2, output: 6, cacheWrite: 2, cacheRead: 2 },
-    uiLabel: 'Mistral Large',
+    pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
+    uiLabel: 'Mistral Large 3',
   },
   'magistral-medium-2509': {
     id: 'magistral-medium-2509',
@@ -365,13 +382,29 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 20,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 2, output: 5, cacheWrite: 2, cacheRead: 2 },
-    uiLabel: 'Magistral Medium',
+    pricing: { input: 2, output: 5, cacheWrite: 2, cacheRead: 0.20 },
+    uiLabel: 'Magistral Medium 1.2',
   },
-  // === Mistral bench-only roster (set-bench cost tracking; no tier routing) ===
+  // === Mistral bench-only / legacy roster (cost tracking; no tier routing) ===
   // contextWindow values from Mistral docs (2026-05). These models aren't
   // wired into MISTRAL_MODEL_MAP — they're only referenced by set-bench and
   // cost-guard so the user can opt-in via openai_model_id.
+  //
+  // Note: ministral-3b/8b-2410 + mistral-small-2603 retired by Mistral 2025-12.
+  // Kept here for backwards-compat of legacy configs + cost-guard. New code
+  // should use the gen-3 ministral-3b/8b-2512 entries above (tier:'haiku').
+  'mistral-small-2603': {
+    id: 'mistral-small-2603',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 32_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
+    uiLabel: 'Mistral Small (deprecated)',
+  },
   'ministral-8b-2410': {
     id: 'ministral-8b-2410',
     provider: 'openai',
@@ -552,6 +585,23 @@ export type ThinkingMode =
   | { type: 'disabled' };
 
 export type ThinkingHint = ThinkingMode['type'];
+
+/**
+ * Structured warning produced by the engine that the HTTP-API surfaces as a
+ * `warning` SSE event so the web-UI can render a user-facing toast. Used
+ * when the engine has to silently degrade behaviour to avoid a customer-
+ * facing API error (e.g. `thinking=enabled` requested on a non-reasoning
+ * Mistral model — the call still works but reasoning is disabled).
+ *
+ * `modelId` is an internal enum (no user-supplied content), `code` is a
+ * stable identifier the UI uses to pick the right i18n string + icon,
+ * `hint` is a short fallback English message for clients without i18n.
+ */
+export interface AgentWarning {
+  readonly code: 'thinking_not_supported_on_model';
+  readonly modelId: string;
+  readonly hint: string;
+}
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 

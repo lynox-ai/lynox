@@ -571,6 +571,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_offline': { de: 'Keine Internetverbindung. Stelle die Verbindung wieder her und versuche es nochmal.', en: 'No internet connection. Reconnect and try again.' },
 	'chat.error_copy_detail': { de: 'Fehlerdetails kopieren', en: 'Copy error details' },
 	'chat.error_toast_prefix': { de: 'Diese Antwort ist fehlgeschlagen', en: 'This response failed' },
+	// Mistral thinking-flag guard: surfaced when a customer requests `thinking: enabled`
+	// on a non-reasoning Mistral model (e.g. Mistral Large 3 — only Magistral has native reasoning).
+	'chat.warning.thinking_disabled.title': { de: 'Thinking deaktiviert', en: 'Thinking disabled' },
+	'chat.warning.thinking_disabled.body': { de: 'Modell {model} unterstützt keine Reasoning-Chains. Wechsle in den Einstellungen zu Magistral Medium für natives Reasoning.', en: 'Model {model} does not support reasoning chains. Switch to Magistral Medium in Settings for reasoning.' },
+	'settings.warning.thinking_incompatible': { de: '{model} unterstützt kein Extended Thinking.', en: '{model} does not support extended thinking.' },
+	'settings.warning.thinking_incompatible_hint': { de: 'Magistral Medium ist das einzige Mistral-Modell mit nativem Reasoning. Wähle es aus dem Dropdown, um Reasoning-Chains zu aktivieren.', en: 'Magistral Medium is the only Mistral model with native reasoning. Pick it from the dropdown to enable reasoning chains.' },
+	'settings.info.magistral_latency': { de: 'Magistral generiert Reasoning-Chains; rechne mit 30-40s pro Aufruf. Ideal für Batch oder tiefe Analyse, nicht für interaktiven Chat.', en: 'Magistral emits reasoning chains; expect 30-40s per call. Best for batch or deep analysis, not interactive chat.' },
 	'chat.retry': { de: 'Wiederhole… Versuch {attempt}/{max}', en: 'Retrying… attempt {attempt}/{max}' },
 	'chat.busy_wait': { de: 'Agent arbeitet noch am vorherigen Schritt — deine Nachricht wartet…', en: 'Agent still working on the previous step — your message is queued…' },
 	'chat.busy_cancel': { de: 'Abbrechen', en: 'Cancel' },

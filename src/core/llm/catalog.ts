@@ -120,39 +120,50 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
  * catalog stay aligned. `*-latest` aliases auto-roll silently → bad for
  * cost predictability + behaviour-drift in managed-EU tenants.
  *
- * Tier mapping: small ↔ haiku, large ↔ sonnet, magistral-medium ↔ opus
- * (see types/models.ts for the cost/quality rationale).
+ * Tier mapping (updated 2026-05-24): ministral-3b/8b ↔ haiku,
+ * mistral-large-3 ↔ sonnet, magistral-medium ↔ opus.
+ * mistral-small-2603 retired from catalog in favor of Ministral gen 3.
  */
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
     id: 'mistral-large-2512',
     tier: 'sonnet',
-    label: 'Mistral Large',
-    context_window: 131_072,
-    pricing: { input: 2, output: 6 },
+    label: 'Mistral Large 3',
+    context_window: 256_000,
+    pricing: { input: 0.50, output: 1.50 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended default — tool-calling workhorse on EU-sovereign mode.',
+    notes: 'Recommended for chat. 6× cheaper than Anthropic Sonnet at comparable agent-runtime quality. 256k context, native prompt-cache, multimodal input.',
   },
   {
     id: 'magistral-medium-2509',
     tier: 'opus',
-    label: 'Magistral Medium',
+    label: 'Magistral Medium 1.2',
     context_window: 131_072,
     pricing: { input: 2, output: 5 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Reasoning-heavy variant — slower, better at multi-step planning.',
+    notes: 'Reasoning specialist — native reasoning chains, ~30-40s typical latency. Opus-tier quality at 60% lower output cost. Best for batch / deep analysis, not interactive chat.',
   },
   {
-    id: 'mistral-small-2603',
+    id: 'ministral-3b-2512',
     tier: 'haiku',
-    label: 'Mistral Small',
-    context_window: 32_000,
-    pricing: { input: 0.20, output: 0.60 },
+    label: 'Ministral 3B',
+    context_window: 262_144,
+    pricing: { input: 0.10, output: 0.10 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Fast + cheap; suitable for routing, classification, and quick replies.',
+    notes: 'Cheapest Mistral model. Orchestration, classification, routing.',
+  },
+  {
+    id: 'ministral-8b-2512',
+    tier: 'haiku',
+    label: 'Ministral 8B',
+    context_window: 262_144,
+    pricing: { input: 0.15, output: 0.15 },
+    capabilities: ['tool_use'],
+    residency: 'EU-Paris (Mistral SAS)',
+    notes: 'Recommended haiku-tier default. Stronger orchestration model with multimodal input.',
   },
 ];
 
