@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TavilyProvider, SearXNGProvider, createSearchProvider } from './search-provider.js';
+import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider } from './search-provider.js';
 import type { WebSearchEvent } from './search-provider.js';
 import { channels } from '../../core/observability.js';
 
@@ -15,87 +15,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('TavilyProvider', () => {
-  it('sends correct request body', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ results: [] }),
-    });
-
-    const provider = new TavilyProvider('tvly-test-key');
-    await provider.search('test query', { maxResults: 3, topic: 'news' });
-
-    expect(mockFetch).toHaveBeenCalledWith('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: expect.any(String),
-    });
-
-    const body = JSON.parse(mockFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
-    expect(body).toEqual({
-      api_key: 'tvly-test-key',
-      query: 'test query',
-      max_results: 3,
-      include_raw_content: 'markdown',
-      topic: 'news',
-    });
-  });
-
-  it('maps results correctly', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        results: [
-          {
-            title: 'Test Result',
-            url: 'https://example.com',
-            content: 'A snippet',
-            raw_content: '# Full content',
-            score: 0.95,
-            published_date: '2026-01-15',
-          },
-        ],
-      }),
-    });
-
-    const provider = new TavilyProvider('tvly-key');
-    const results = await provider.search('test');
-
-    expect(results).toHaveLength(1);
-    expect(results[0]).toEqual({
-      title: 'Test Result',
-      url: 'https://example.com',
-      snippet: 'A snippet',
-      content: '# Full content',
-      publishedDate: '2026-01-15',
-      source: 'tavily',
-    });
-  });
-
-  it('clamps max_results to 20', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ results: [] }),
-    });
-
-    const provider = new TavilyProvider('tvly-key');
-    await provider.search('test', { maxResults: 50 });
-
-    const body = JSON.parse(mockFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
-    expect(body['max_results']).toBe(20);
-  });
-
-  it('throws on API error', async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 401,
-      text: async () => 'Invalid API key',
-    });
-
-    const provider = new TavilyProvider('tvly-bad');
-    await expect(provider.search('test')).rejects.toThrow('Tavily API error 401');
-  });
-});
+// TavilyProvider tests removed 2026-05-24 when the backend was retired —
+// see search-provider.ts header comment for context.
 
 describe('SearXNGProvider', () => {
   it('sends correct request', async () => {
@@ -479,33 +400,6 @@ describe('SearXNGProvider', () => {
     expect(events[0]!.unresponsiveEngines).toEqual([]);
   });
 
-  it('Tavily provider publishes webSearch event with synthetic engine bucket', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        results: [
-          { title: 'r1', url: 'https://a', content: 's', score: 0.9 },
-          { title: 'r2', url: 'https://b', content: 's', score: 0.8 },
-        ],
-      }),
-    });
-    const events: WebSearchEvent[] = [];
-    const onMessage = (msg: unknown): void => { events.push(msg as WebSearchEvent); };
-    channels.webSearch.subscribe(onMessage);
-    try {
-      const provider = new TavilyProvider('tvly-key');
-      await provider.search('x');
-    } finally {
-      channels.webSearch.unsubscribe(onMessage);
-    }
-
-    expect(events).toHaveLength(1);
-    expect(events[0]!.provider).toBe('tavily');
-    expect(events[0]!.engines).toEqual({ tavily: 2 });
-    expect(events[0]!).not.toHaveProperty('query');
-    expect(events[0]!.queryLength).toBe(1);
-  });
-
   it('handles network timeout gracefully in healthCheck', async () => {
     mockFetch.mockImplementation(() => new Promise((_, reject) =>
       setTimeout(() => reject(new Error('timeout')), 10),
@@ -735,13 +629,139 @@ describe('SearXNGProvider', () => {
 });
 
 describe('createSearchProvider', () => {
-  it('creates TavilyProvider', () => {
-    const provider = createSearchProvider('tavily', 'tvly-key');
-    expect(provider.name).toBe('tavily');
-  });
-
   it('creates SearXNGProvider', () => {
     const provider = createSearchProvider('searxng', 'http://localhost:8888');
     expect(provider.name).toBe('searxng');
+  });
+
+  it('creates DuckDuckGoProvider', () => {
+    const provider = createSearchProvider('duckduckgo-fallback', '');
+    expect(provider.name).toBe('duckduckgo-fallback');
+  });
+});
+
+describe('parseDdgHtml', () => {
+  it('extracts title + unwrapped url + snippet from a typical DDG SERP block', () => {
+    const html = `
+      <div class="result">
+        <h2 class="result__title">
+          <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Farxiv.org%2Fabs%2F2401.12345&rut=foo">Sample Paper Title</a>
+        </h2>
+        <a class="result__snippet" href="//x">A short snippet of the result text.</a>
+      </div>
+    `;
+    const { titles, urls, snippets } = parseDdgHtml(html, 5);
+    expect(urls).toEqual(['https://arxiv.org/abs/2401.12345']);
+    expect(titles).toEqual(['Sample Paper Title']);
+    expect(snippets).toEqual(['A short snippet of the result text.']);
+  });
+
+  it('respects maxResults cap', () => {
+    const block = (i: number) => `
+      <a class="result__a" href="https://example.com/${i}">Title ${i}</a>
+      <a class="result__snippet">Snippet ${i}</a>
+    `;
+    const html = [0, 1, 2, 3, 4].map(block).join('\n');
+    const { urls } = parseDdgHtml(html, 3);
+    expect(urls).toHaveLength(3);
+  });
+
+  it('decodes HTML entities in title and snippet', () => {
+    const html = `
+      <a class="result__a" href="https://example.com/x">Rock &amp; Roll &#39;25</a>
+      <a class="result__snippet">price &lt; $100 &amp; free shipping</a>
+    `;
+    const { titles, snippets } = parseDdgHtml(html, 5);
+    expect(titles[0]).toBe("Rock & Roll '25");
+    expect(snippets[0]).toBe('price < $100 & free shipping');
+  });
+
+  it('drops sponsored-ad results (DDG /y.js?ad_domain=…) AND keeps snippets aligned', () => {
+    // Live DDG SERP for "typescript handbook" returns Amazon + Udemy ads
+    // as the top two hits before the real result. Letting them through
+    // landed Amazon URLs in research output during the 2026-05-24 smoke;
+    // the agent treats them as real hits and cites them. Drop on parse.
+    //
+    // Regression guard: earlier impl pushed snippets in a separate loop
+    // bounded only by `>= urls.length`, so when an ad slot was dropped,
+    // the SPONSORED snippet ended up paired with the real result. Assert
+    // both alignment and ad-drop in the same case.
+    const html = `
+      <a class="result__a" href="//duckduckgo.com/y.js?ad_domain=amazon.de&amp;ad_provider=bingv7aa">Sponsored title</a>
+      <a class="result__snippet">Sponsored snippet</a>
+      <a class="result__a" href="https://www.typescriptlang.org/docs/handbook/intro.html">The TypeScript Handbook</a>
+      <a class="result__snippet">Official TS handbook.</a>
+    `;
+    const { urls, titles, snippets } = parseDdgHtml(html, 5);
+    expect(urls).toEqual(['https://www.typescriptlang.org/docs/handbook/intro.html']);
+    expect(titles).toEqual(['The TypeScript Handbook']);
+    expect(snippets).toEqual(['Official TS handbook.']);
+  });
+
+  it('does not unwrap /l/ paths on non-DDG hosts (SSRF-bypass guard)', () => {
+    // A bare pathname-suffix match would silently follow
+    // `https://evil.example.com/foo/l/?uddg=…` and hand the agent
+    // whatever attacker-controlled `uddg` payload says. Restrict the
+    // redirect-unwrap to DDG's own host.
+    const html = `
+      <a class="result__a" href="https://evil.example.com/foo/l/?uddg=https%3A%2F%2Fattacker.example.com%2Fmalware">Looks normal</a>
+      <a class="result__snippet">Innocent snippet</a>
+    `;
+    const { urls } = parseDdgHtml(html, 5);
+    expect(urls).toEqual(['https://evil.example.com/foo/l/?uddg=https%3A%2F%2Fattacker.example.com%2Fmalware']);
+  });
+
+  it('drops results with non-http(s) schemes from the unwrap', () => {
+    const html = `
+      <a class="result__a" href="javascript:alert(1)">Bad</a>
+      <a class="result__a" href="https://good.example.com/">Good</a>
+    `;
+    const { urls, titles } = parseDdgHtml(html, 5);
+    expect(urls).toEqual(['https://good.example.com/']);
+    expect(titles).toEqual(['Good']);
+  });
+
+  it('returns empty arrays for non-DDG HTML', () => {
+    const { titles, urls, snippets } = parseDdgHtml('<html><body><p>nothing here</p></body></html>', 5);
+    expect(titles).toHaveLength(0);
+    expect(urls).toHaveLength(0);
+    expect(snippets).toHaveLength(0);
+  });
+});
+
+describe('DuckDuckGoProvider', () => {
+  it('parses SERP results from a successful HTML response', async () => {
+    const html = `
+      <div class="result">
+        <a class="result__a" href="https://example.com/1">First Result</a>
+        <a class="result__snippet">First snippet text.</a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="https://example.com/2">Second Result</a>
+        <a class="result__snippet">Second snippet.</a>
+      </div>
+    `;
+    mockFetch.mockResolvedValue({
+      ok: true,
+      text: async () => html,
+    });
+    const provider = new DuckDuckGoProvider();
+    const results = await provider.search('llm agents');
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ title: 'First Result', url: 'https://example.com/1', snippet: 'First snippet text.' });
+    expect(results[1]?.source).toBe('duckduckgo-fallback');
+  });
+
+  it('throws when DDG returns a non-OK status', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => '' });
+    const provider = new DuckDuckGoProvider();
+    await expect(provider.search('anything')).rejects.toThrow(/503/);
+  });
+
+  it('returns [] when the HTML has no result blocks (parse drift)', async () => {
+    mockFetch.mockResolvedValue({ ok: true, text: async () => '<html>empty</html>' });
+    const provider = new DuckDuckGoProvider();
+    const results = await provider.search('anything');
+    expect(results).toEqual([]);
   });
 });

@@ -42,6 +42,8 @@ import {
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
   DEVELOPER_PROMPT_SUFFIX,
+  NO_WEB_SEARCH_PROMPT_SUFFIX,
+  WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
   currentDateContext,
   modelIdentityContext,
   withCurrentTimePrefix,
@@ -1004,6 +1006,21 @@ export class Session {
     // Append developer mode suffix when experience is set to 'developer'
     if (userConfig.experience === 'developer') {
       basePrompt += DEVELOPER_PROMPT_SUFFIX;
+    }
+    // Honesty-fallback for web-search availability — prevents the silent-
+    // fabrication failure mode where the agent invents arxiv IDs / news /
+    // prices instead of telling the user the capability is missing.
+    //  - 'none'      → `web_research` not registered at all (no SearXNG
+    //                  AND DDG fallback init also failed). Hard-refuse
+    //                  with explicit "how to enable" guidance.
+    //  - 'fallback'  → DDG HTML-scrape registered. Tool works but is
+    //                  best-effort; warn the agent to caveat findings.
+    //  - 'configured'→ SearXNG wired. No suffix needed.
+    const webSearchStatus = engine.getWebSearchStatus();
+    if (webSearchStatus === 'none') {
+      basePrompt += NO_WEB_SEARCH_PROMPT_SUFFIX;
+    } else if (webSearchStatus === 'fallback') {
+      basePrompt += WEB_SEARCH_FALLBACK_PROMPT_SUFFIX;
     }
     // Anchor the model identity so a third-party adapter (Mistral, custom)
     // doesn't hallucinate "I am Claude Haiku" from training-data bias.

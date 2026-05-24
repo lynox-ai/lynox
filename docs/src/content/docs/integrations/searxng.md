@@ -11,22 +11,24 @@ SearXNG is a free, open-source metasearch engine that aggregates results from Go
 
 lynox has two independent web search mechanisms:
 
-1. **Anthropic built-in `web_search`** — server-side, automatic, only with Anthropic direct API
-2. **`web_research` tool** — client-side, works with all LLM providers (SearXNG or Tavily)
+1. **Anthropic built-in `web_search`** — server-side, automatic, only with Anthropic direct API.
+2. **`web_research` tool** — client-side, works with every LLM provider. Backed by SearXNG when you configure it, otherwise a best-effort DuckDuckGo HTML-scrape fallback (so the tool is always registered and the agent never has to fabricate).
 
 Both can coexist — the model chooses which to use.
 
-For the `web_research` tool, **SearXNG is the default when configured**. If you set up a SearXNG instance and provide the URL, lynox uses it — even if you also have a Tavily API key. This is intentional: setting up SearXNG is a deliberate choice, and it's unlimited.
+For the `web_research` tool, **SearXNG is the supported full-quality backend.** Setting up a SearXNG instance is a deliberate, unlimited choice; the DDG fallback is there to keep `web_research` honest on a no-config install, not as a long-term substitute.
 
-| Config | `web_research` provider |
+| Config | `web_research` backend |
 |--------|------------------------|
-| SearXNG URL configured | **SearXNG** (default when present) |
-| SearXNG URL + `search_provider: 'tavily'` | Tavily (explicit override) |
-| Only Tavily API key | Tavily |
-| Nothing | No `web_research` tool |
+| `SEARXNG_URL` set (or docker-compose) | **SearXNG** |
+| Neither set | DuckDuckGo HTML-scrape (best-effort fallback) |
 
 :::tip
 Anthropic users get `web_search` automatically — `web_research` via SearXNG is an additional tool, not a replacement.
+:::
+
+:::caution
+The Tavily backend was retired on 2026-05-24. The `TAVILY_API_KEY` env var is ignored. Use SearXNG (sidecar via docker-compose, or any `SEARXNG_URL` you already host).
 :::
 
 ## Setup
@@ -80,17 +82,19 @@ SearXNG doesn't need to be exposed to the internet — only lynox needs to reach
 
 ## Comparison
 
-| | Anthropic Built-in | Tavily | SearXNG |
+| | Anthropic Built-in | SearXNG | DDG fallback |
 |---|---|---|---|
-| Cost | Included | Free tier, then paid | Free |
-| API key required | No | Yes | No |
+| Cost | Included | Free | Free |
+| API key required | No | No | No |
 | Providers | Anthropic only | All | All |
-| Content extraction | Deep (full page) | Deep (raw_content) | Auto-enriched (top 3 results) |
-| Quality | High (Claude-optimized) | High (AI-optimized) | High (enriched + multi-engine) |
-| Setup | Zero | Account creation | Docker container |
-| Rate limits | API rate limits | 1,000/month free | Unlimited |
+| Content extraction | Deep (full page) | Auto-enriched (top 3 results) | Snippet only (no enrichment) |
+| Quality | High (Claude-optimized) | High (enriched + multi-engine) | Best-effort (single engine, HTML scrape) |
+| Setup | Zero | Docker container or URL env | Zero |
+| Rate limits | API rate limits | Unlimited | DDG may rate-limit / CAPTCHA |
 
-**Content enrichment:** lynox automatically fetches full page content for the top 3 search results using its built-in content extractor (Readability-based). This closes the quality gap to Tavily. A 10-second timeout ensures search stays responsive even when pages are slow.
+**Content enrichment:** lynox automatically fetches full page content for the top 3 search results using its built-in content extractor (Readability-based). A 10-second timeout ensures search stays responsive even when pages are slow.
+
+**DDG fallback caveats:** parses HTML (brittle if DDG changes layout), no `time_range` filter, no topic categories, and occasional empty results under load. Treat it as the "agent doesn't have to fabricate" safety net, not a replacement for SearXNG.
 
 ## Search Categories
 

@@ -81,8 +81,7 @@ Web search is included out of the box via **SearXNG** (bundled in docker-compose
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `search_provider` | `searxng`, `tavily` | `searxng` |
-| `searxng_url` | SearXNG instance URL | — |
+| `searxng_url` | SearXNG instance URL — leave unset to fall back to DuckDuckGo HTML scrape (best-effort) | — |
 
 See [SearXNG setup](/integrations/searxng/) for details.
 
@@ -213,8 +212,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 | Variable | Purpose |
 |----------|---------|
-| `SEARXNG_URL` | SearXNG instance URL (included in docker-compose, recommended) |
-| `TAVILY_API_KEY` | Tavily API key (alternative to SearXNG, 1K free/month) |
+| `SEARXNG_URL` | SearXNG instance URL (included in docker-compose, recommended). Without it, `web_research` falls back to a best-effort DuckDuckGo HTML scrape. |
 
 ### Network & Server
 

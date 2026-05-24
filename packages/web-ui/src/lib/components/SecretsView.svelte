@@ -42,16 +42,16 @@
 		return CHANNEL_MANAGED_PREFIXES.some((prefix) => name.startsWith(prefix));
 	}
 
-	// Suggested names — drives the "Add new key" dropdown. Free-text still works
-	// for anything custom (zapier, replicate, etc.). Tavily is intentionally
-	// absent: web search defaults to SearXNG (docker-compose) and the chat
-	// settings don't surface a Tavily input, so suggesting it here misleads
-	// users into thinking they need a Tavily key for search.
+	// Suggested names — drives the "Add new key" dropdown. Free-text still
+	// works for anything custom (zapier, replicate, etc.). Search-related
+	// keys (TAVILY_API_KEY / SEARCH_API_KEY) intentionally omitted — the
+	// Tavily backend was retired 2026-05-24 and SearXNG uses a URL, not a
+	// key. Suggesting these names would mislead users into thinking they
+	// need a key for search.
 	const SUGGESTED_NAMES = [
 		'DATAFORSEO_LOGIN',
 		'DATAFORSEO_PASSWORD',
 		'BREVO_API_KEY',
-		'SEARCH_API_KEY',
 		'GOOGLE_CLIENT_ID',
 		'GOOGLE_CLIENT_SECRET',
 		'LYNOX_BUGSINK_DSN',

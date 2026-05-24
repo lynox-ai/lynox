@@ -142,6 +142,11 @@ describe('migration E2E', () => {
   describe('full round-trip', () => {
     it('migrates secrets, databases, artifacts, and config', () => {
       // Setup source data
+      // Two well-known secret names exercise the migration round-trip.
+      // TAVILY_API_KEY is included even though the Tavily backend was
+      // retired 2026-05-24: existing vaults can still carry this entry
+      // and the migration mechanism must preserve arbitrary opaque
+      // secret names verbatim.
       createTestVault(srcDir, SRC_VAULT_KEY, [
         { name: 'ANTHROPIC_API_KEY', value: 'sk-ant-test-key-123456' },
         { name: 'TAVILY_API_KEY', value: 'tvly-test-key-789' },

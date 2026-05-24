@@ -260,7 +260,7 @@ Environment:
   GCP_PROJECT_ID                Google Cloud project (for provider: vertex)
   CLOUD_ML_REGION               Vertex AI region (e.g. europe-west4, us-east5)
   SEARXNG_URL                   SearXNG instance for web search (Docker: http://searxng:8080)
-  TAVILY_API_KEY                Enable Tavily web search (fallback when no SearXNG)
+                                Without it, lynox falls back to a DuckDuckGo HTML-scrape (best-effort).
 
 Power-user modes (single-task, --watch, --manifest, --task, --output) were removed
 in favour of the Web UI and HTTP API. Drive lynox via the UI or the HTTP API.

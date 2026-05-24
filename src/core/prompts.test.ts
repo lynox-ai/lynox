@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { currentDateContext, withCurrentTimePrefix, SYSTEM_PROMPT, modelIdentityContext } from './prompts.js';
+import {
+  currentDateContext,
+  withCurrentTimePrefix,
+  SYSTEM_PROMPT,
+  modelIdentityContext,
+  NO_WEB_SEARCH_PROMPT_SUFFIX,
+  WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
+} from './prompts.js';
 
 // File-level reset so a forgotten useRealTimers() in a future test can't
 // poison the next case's `new Date()` reads.
@@ -308,5 +315,32 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
   it('returns empty string when sanitization strips the entire modelId', () => {
     const out = modelIdentityContext('openai', '\n\n```');
     expect(out).toBe('');
+  });
+});
+
+describe('NO_WEB_SEARCH_PROMPT_SUFFIX', () => {
+  // The honesty-fallback's whole job is to keep the agent from inventing
+  // search results when web_research isn't registered. The block has to
+  // carry three things at minimum, in plain English the LLM can't talk
+  // itself out of: the prohibition, the enable-paths, and the carve-out
+  // for training-data Q&A.
+  it('explicitly forbids fabricating search results', () => {
+    expect(NO_WEB_SEARCH_PROMPT_SUFFIX).toMatch(/never fabricate|do not fabricate|don.?t fabricate/i);
+  });
+
+  it('tells the agent how to surface the upgrade path to the user', () => {
+    expect(NO_WEB_SEARCH_PROMPT_SUFFIX).toContain('SEARXNG_URL');
+    expect(NO_WEB_SEARCH_PROMPT_SUFFIX).toMatch(/docker compose up/i);
+  });
+
+  it('preserves the training-data carve-out so general-knowledge Q&A still works', () => {
+    expect(NO_WEB_SEARCH_PROMPT_SUFFIX).toMatch(/training data|prior knowledge/i);
+  });
+});
+
+describe('WEB_SEARCH_FALLBACK_PROMPT_SUFFIX', () => {
+  it('flags the fallback as best-effort and surfaces the upgrade path', () => {
+    expect(WEB_SEARCH_FALLBACK_PROMPT_SUFFIX).toMatch(/best.effort|fallback/i);
+    expect(WEB_SEARCH_FALLBACK_PROMPT_SUFFIX).toMatch(/SearXNG/);
   });
 });

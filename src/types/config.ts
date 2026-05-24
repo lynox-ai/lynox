@@ -216,10 +216,13 @@ export interface LynoxUserConfig {
   memory_auto_scope?: boolean | undefined;
   /** Show auto-greeting on interactive REPL start. Default: true */
   greeting?: boolean | undefined;
-  /** API key for Tavily web search provider */
+  /** Deprecated 2026-05-24 — Tavily backend retired. Field retained as
+   *  `string | undefined` for migration-import compatibility with older
+   *  config.json snapshots; the engine no longer reads it. */
   search_api_key?: string | undefined;
-  /** Web search provider: 'tavily' or 'searxng' */
-  search_provider?: 'tavily' | 'searxng' | undefined;
+  /** Deprecated 2026-05-24 — Tavily backend retired. Only `'searxng'` is
+   *  meaningful; left in place for migration compatibility. */
+  search_provider?: 'searxng' | undefined;
   /** SearXNG instance URL (e.g. http://localhost:8888). Default web search provider when configured. */
   searxng_url?: string | undefined;
   /** Google OAuth client ID (from GCP Console) */

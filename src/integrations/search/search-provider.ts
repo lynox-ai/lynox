@@ -26,7 +26,7 @@ export interface WebSearchEvent {
   /** Length of the query in characters. Useful for "are users sending one-word vs sentence-length queries?" without leaking content. */
   queryLength: number;
   resultCount: number;
-  /** Per-engine hit count. For Tavily, single synthetic key 'tavily'. */
+  /** Per-engine hit count. For DDG fallback, single synthetic key 'duckduckgo'. */
   engines: Record<string, number>;
   /** SearXNG-only: engines that failed to respond for this query. */
   unresponsiveEngines: string[];
@@ -52,75 +52,12 @@ export interface SearchProvider {
   search(query: string, opts?: SearchOptions): Promise<SearchResult[]>;
 }
 
-// --- Tavily ---
-
-interface TavilyResult {
-  title: string;
-  url: string;
-  content: string;
-  raw_content?: string | undefined;
-  score: number;
-  published_date?: string | undefined;
-}
-
-interface TavilyResponse {
-  results: TavilyResult[];
-}
-
-export class TavilyProvider implements SearchProvider {
-  readonly name = 'tavily';
-  constructor(private readonly apiKey: string) {}
-
-  async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
-    const start = Date.now();
-    const maxResults = Math.min(opts?.maxResults ?? 5, 20);
-    const body: Record<string, unknown> = {
-      api_key: this.apiKey,
-      query,
-      max_results: maxResults,
-      include_raw_content: 'markdown',
-    };
-    if (opts?.topic) body['topic'] = opts.topic;
-    if (opts?.timeRange) body['time_range'] = opts.timeRange;
-
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`Tavily API error ${response.status}: ${text}`);
-    }
-
-    const data = await response.json() as TavilyResponse;
-    const results = data.results.map((r): SearchResult => ({
-      title: r.title,
-      url: r.url,
-      snippet: r.content,
-      content: r.raw_content ?? undefined,
-      publishedDate: r.published_date ?? undefined,
-      source: 'tavily',
-    }));
-
-    if (channels.webSearch.hasSubscribers) {
-      const event: WebSearchEvent = {
-        provider: this.name,
-        queryHash: hashQuery(query),
-        queryLength: query.length,
-        resultCount: results.length,
-        // Tavily doesn't attribute results to engines — use a synthetic bucket.
-        engines: results.length > 0 ? { tavily: results.length } : {},
-        unresponsiveEngines: [],
-        durationMs: Date.now() - start,
-      };
-      channels.webSearch.publish(event);
-    }
-
-    return results;
-  }
-}
+// Tavily backend removed 2026-05-24 — the UI hadn't surfaced it since the
+// IA-V2 hotfix, and keeping a dead env-var path (`TAVILY_API_KEY`) was
+// misleading users into thinking a Tavily key would still enable search.
+// SearXNG (sidecar or `SEARXNG_URL`) is the supported full-quality
+// backend; the DuckDuckGo HTML-scrape fallback below is the no-config
+// honesty alternative.
 
 // --- SearXNG ---
 
@@ -240,13 +177,187 @@ export class SearXNGProvider implements SearchProvider {
   }
 }
 
+// --- DuckDuckGo HTML-scrape fallback ---
+
+/**
+ * Best-effort fallback provider that scrapes the DuckDuckGo HTML SERP at
+ * https://html.duckduckgo.com/html?q=…. Used ONLY when SearXNG isn't
+ * configured — fixes the silent-fabrication failure mode where
+ * `web_research` was unregistered and the agent invented citations from
+ * training data instead of telling the user search wasn't wired up.
+ *
+ * Limitations vs. SearXNG — operator should treat as best-effort:
+ *  - No JSON API: parses HTML, so DDG layout changes break it.
+ *  - Rate-limited / occasionally CAPTCHA-walled when called at volume.
+ *  - No `time_range` (DDG HTML SERP doesn't expose the filter cleanly).
+ *  - No topic categories — every query goes against the general SERP.
+ *
+ * The agent gets a `WEB_SEARCH_FALLBACK_PROMPT_SUFFIX` so it knows results
+ * are best-effort and surfaces the upgrade path (SearXNG) to the user
+ * when high-stakes research comes up.
+ */
+export class DuckDuckGoProvider implements SearchProvider {
+  readonly name = 'duckduckgo-fallback';
+
+  async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+    const start = Date.now();
+    const maxResults = Math.min(opts?.maxResults ?? 5, 10);
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          // DDG HTML SERP is sensitive to default fetch UA — many bot-style
+          // UAs get an empty body. A standard browser UA is the minimum the
+          // endpoint accepts; treat this as part of the "best-effort"
+          // contract documented above.
+          'User-Agent': 'Mozilla/5.0 (compatible; lynox/1.0; +https://lynox.ai)',
+          'Accept': 'text/html',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: `q=${encodeURIComponent(query)}`,
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err) {
+      throw new Error(`DuckDuckGo fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (!response.ok) {
+      throw new Error(`DuckDuckGo HTML SERP error ${response.status}`);
+    }
+    const html = await response.text();
+    const { titles, urls, snippets } = parseDdgHtml(html, maxResults);
+    const results: SearchResult[] = [];
+    for (let i = 0; i < urls.length; i++) {
+      const u = urls[i];
+      const t = titles[i];
+      if (!u || !t) continue;
+      results.push({
+        title: t,
+        url: u,
+        snippet: snippets[i] ?? '',
+        source: 'duckduckgo-fallback',
+      });
+    }
+
+    if (channels.webSearch.hasSubscribers) {
+      const event: WebSearchEvent = {
+        provider: this.name,
+        queryHash: hashQuery(query),
+        queryLength: query.length,
+        resultCount: results.length,
+        engines: results.length > 0 ? { duckduckgo: results.length } : {},
+        unresponsiveEngines: [],
+        durationMs: Date.now() - start,
+      };
+      channels.webSearch.publish(event);
+    }
+
+    return results;
+  }
+}
+
+/**
+ * Parse a DuckDuckGo HTML SERP into parallel title/url/snippet arrays.
+ * Split out so the regex layout can be unit-tested without spinning up a
+ * live HTTP fetch. The DDG layout has been stable for years, but treat it
+ * as brittle — if a future DDG change breaks the parse, the provider
+ * returns [] and the agent surfaces "no results" honestly rather than
+ * fabricating.
+ */
+export function parseDdgHtml(
+  html: string,
+  maxResults: number,
+): { titles: string[]; urls: string[]; snippets: string[] } {
+  // Pair links with their snippets POSITIONALLY across the page in document
+  // order — when a sponsored-ad link is filtered out (returns null from
+  // unwrapDdgRedirect), the matching snippet at the same DDG-page index
+  // MUST also be skipped. Earlier impl pushed snippets in their own loop
+  // bounded only by `>= urls.length`, which silently mis-aligned snippets
+  // to the wrong results whenever an ad slot was dropped.
+  const linkPattern = /<a[^>]*class="[^"]*\bresult__a\b[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippetPattern = /<a[^>]*class="[^"]*\bresult__snippet\b[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  const titles: string[] = [];
+  const urls: string[] = [];
+  const snippets: string[] = [];
+  const linkMatches = [...html.matchAll(linkPattern)];
+  const snippetMatches = [...html.matchAll(snippetPattern)];
+  for (let i = 0; i < linkMatches.length; i++) {
+    if (urls.length >= maxResults) break;
+    const linkMatch = linkMatches[i]!;
+    const rawUrl = linkMatch[1] ?? '';
+    const title = stripHtml(linkMatch[2] ?? '').trim();
+    const cleanedUrl = unwrapDdgRedirect(rawUrl);
+    if (!cleanedUrl || !title) continue;
+    urls.push(cleanedUrl);
+    titles.push(title);
+    // Snippet at the same page-index — empty string when DDG omitted one
+    // for this result, so the consumer can index-align titles/urls/snippets.
+    const snippetMatch = snippetMatches[i];
+    snippets.push(snippetMatch ? stripHtml(snippetMatch[1] ?? '').trim() : '');
+  }
+  return { titles, urls, snippets };
+}
+
+/** Strip HTML tags + decode the most common HTML entities. Keeps the impl
+ *  small (no DOM dep) — sufficient for the DDG SERP which uses a tight
+ *  vocabulary of entities (&amp;, &quot;, &#39;, &lt;, &gt;). */
+function stripHtml(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+/** DDG wraps result URLs in a redirect (/l/?kh=-1&uddg=<encoded-url>)
+ *  to track clicks. Unwrap so the agent gets the canonical target URL.
+ *  Also drops sponsored-ad results (`y.js?ad_domain=…&ad_provider=…`) so
+ *  the agent doesn't get Amazon / Udemy spam in research output. Returns
+ *  null when the input doesn't parse as http/https — the agent must
+ *  never see a relative or javascript-scheme URL. */
+function unwrapDdgRedirect(href: string): string | null {
+  let target = href;
+  // Relative redirect form: //duckduckgo.com/l/?uddg=…
+  if (target.startsWith('//')) target = `https:${target}`;
+  if (target.startsWith('/')) target = `https://duckduckgo.com${target}`;
+  try {
+    const parsed = new URL(target);
+    // Drop sponsored-ad results: DDG renders ads as duckduckgo.com/y.js
+    // with `ad_domain` / `ad_provider` query params. They poison research
+    // because the URL still resolves but lands on Amazon/Udemy/etc., not
+    // the page the user thought they were getting.
+    if (parsed.hostname === 'duckduckgo.com' && parsed.pathname === '/y.js') {
+      return null;
+    }
+    // Only unwrap the /l/ redirect when it's on DDG's own host. A bare
+    // pathname-suffix match would silently follow `https://evil.example.com/foo/l/?uddg=…`
+    // and hand the agent whatever attacker-controlled `uddg` payload says.
+    if (parsed.hostname === 'duckduckgo.com'
+        && (parsed.pathname === '/l/' || parsed.pathname.endsWith('/l/'))) {
+      const inner = parsed.searchParams.get('uddg');
+      if (inner) target = inner;
+    }
+    const final = new URL(target);
+    if (final.protocol !== 'http:' && final.protocol !== 'https:') return null;
+    return final.toString();
+  } catch {
+    return null;
+  }
+}
+
 // --- Factory ---
 
-export type SearchProviderType = 'tavily' | 'searxng';
+export type SearchProviderType = 'searxng' | 'duckduckgo-fallback';
 
 export function createSearchProvider(type: SearchProviderType, apiKeyOrUrl: string): SearchProvider {
   switch (type) {
-    case 'tavily': return new TavilyProvider(apiKeyOrUrl);
     case 'searxng': return new SearXNGProvider(apiKeyOrUrl);
+    case 'duckduckgo-fallback': return new DuckDuckGoProvider();
   }
 }

@@ -118,7 +118,9 @@ export class SecretStore implements SecretStoreLike {
     const wellKnownEnv: Array<[string, string]> = [
       ['ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY'],
       ['GOOGLE_CLIENT_SECRET', 'GOOGLE_CLIENT_SECRET'],
-      ['SEARCH_API_KEY', 'TAVILY_API_KEY'],
+      // SEARCH_API_KEY / TAVILY_API_KEY pairing removed 2026-05-24 with the
+      // Tavily backend. The vault entry (if any) is no longer resolved as a
+      // search credential; SearXNG (URL only, no key) is the supported path.
     ];
     for (const [secretName, envVar] of wellKnownEnv) {
       const value = process.env[envVar];

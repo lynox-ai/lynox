@@ -173,10 +173,9 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['GOOGLE_CLIENT_SECRET']) {
     merged.google_client_secret = process.env['GOOGLE_CLIENT_SECRET'];
   }
-  if (process.env['TAVILY_API_KEY']) {
-    merged.search_api_key = process.env['TAVILY_API_KEY'];
-    if (!merged.search_provider) merged.search_provider = 'tavily';
-  }
+  // TAVILY_API_KEY env wiring removed 2026-05-24 — backend retired in favour
+  // of SearXNG (full quality) + DuckDuckGo HTML-scrape fallback (no-config
+  // honesty path). Setting TAVILY_API_KEY now has no effect.
   if (process.env['SEARXNG_URL']) {
     merged.searxng_url = process.env['SEARXNG_URL'];
   }
