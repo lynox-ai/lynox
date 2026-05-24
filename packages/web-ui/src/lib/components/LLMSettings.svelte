@@ -92,6 +92,17 @@
 	let config = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let activeProvider = $state<LLMProvider | null>(null);
+	// Magistral latency advisory: shown when user picks the opus-tier on Mistral
+	// (which maps to Magistral Medium, ~30-40s per call). Dismissable, persists
+	// via localStorage so the banner doesn't re-show on every Settings reload.
+	// Re-shows if the user clears browser storage (opt-in reset).
+	let dismissedMagistralAdvisory = $state(
+		typeof localStorage !== 'undefined' && localStorage.getItem('lynox_dismissed_magistral_advisory') === '1'
+	);
+	function dismissMagistralAdvisory(): void {
+		dismissedMagistralAdvisory = true;
+		try { localStorage.setItem('lynox_dismissed_magistral_advisory', '1'); } catch { /* ignore quota/private-mode */ }
+	}
 	// UI key of the active catalog entry — disambiguates entries that share
 	// `provider` (e.g. mistral vs. generic openai-compat). Stays in sync with
 	// `activeProvider` on selection; on load, derived from config (Mistral
@@ -632,10 +643,21 @@
 					<select disabled={!loaded || providerLocked} bind:value={config.default_tier}
 						class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 						{#each activeProviderEntry.models as m (m.id)}
-							<option value={m.tier ?? m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
+							<option value={m.tier ?? m.id}>{m.label}{m.id === 'mistral-large-2512' ? ' (Recommended for chat)' : ''} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
 						{/each}
 					</select>
 				</label>
+
+				<!-- Magistral latency advisory: shown only when user picks opus-tier on Mistral.
+				     Dismissable via localStorage flag (see dismissedMagistralAdvisory state). -->
+				{#if activeCatalogKey === 'mistral' && config.default_tier === 'opus' && !dismissedMagistralAdvisory}
+					<div class="mt-2 p-3 rounded border border-amber-500/30 bg-amber-500/5 text-sm flex items-start gap-2">
+						<span class="flex-1 text-text-muted">{t('settings.info.magistral_latency')}</span>
+						<button type="button" onclick={dismissMagistralAdvisory}
+							class="text-text-subtle hover:text-text-muted px-1 -mt-1 -mr-1"
+							aria-label="Dismiss">×</button>
+					</div>
+				{/if}
 				<!--
 					Pre-1.5.2 Mistral had a separate single-model dropdown that wrote
 					openai_model_id — but that field is only consulted as a fallback
