@@ -1897,4 +1897,56 @@ describe('Agent', () => {
       expect(occ).toBeLessThan(5_000);
     });
   });
+
+  // === PR #568 follow-up: toJSON credential scrub ===
+  //
+  // Defensive — no code in core today JSON.stringify's an Agent, but any
+  // future debug-logging / error-reporting path that does so would leak the
+  // plaintext `inheritedApiKey` without this. The contract is: the field
+  // exists in the snapshot only as a presence-flag, never the value.
+  describe('toJSON credential scrub', () => {
+    it('redacts plaintext apiKey to "[REDACTED]" when one is configured', () => {
+      const agent = new Agent({
+        name: 'cred-test',
+        model: 'claude-sonnet-4-6',
+        apiKey: 'sk-ant-supersecret-plain-value',
+        apiBaseURL: 'https://api.anthropic.com',
+      });
+      const dumped = JSON.parse(JSON.stringify(agent)) as Record<string, unknown>;
+      expect(dumped['apiKey']).toBe('[REDACTED]');
+      // Crucially: the plaintext value must NOT appear anywhere in the dump.
+      expect(JSON.stringify(agent)).not.toContain('sk-ant-supersecret-plain-value');
+      // Non-credential fields are still useful — keep them visible.
+      expect(dumped['apiBaseURL']).toBe('https://api.anthropic.com');
+      expect(dumped['name']).toBe('cred-test');
+      expect(dumped['model']).toBe('claude-sonnet-4-6');
+    });
+
+    it('apiKey field is undefined when no key was configured (presence flag)', () => {
+      const agent = new Agent({ name: 'noauth', model: 'claude-sonnet-4-6' });
+      // JSON.stringify drops `undefined`, so we go through toJSON() directly
+      // to inspect the presence-flag shape.
+      const snap = agent.toJSON();
+      expect(snap['apiKey']).toBeUndefined();
+    });
+
+    it('does not surface secretStore, costGuard, or messages on the snapshot', () => {
+      // The toJSON snapshot is an allow-list, not a deny-list — any field
+      // not explicitly added stays off the dump. This test pins that
+      // policy: if someone adds `messages` or `secretStore` to the snapshot
+      // later, they have to update this assertion AND think about whether
+      // they're leaking conversation history or vault refs.
+      const agent = new Agent({
+        name: 'allowlist',
+        model: 'claude-sonnet-4-6',
+        apiKey: 'whatever',
+      });
+      const snap = agent.toJSON();
+      expect(snap).not.toHaveProperty('secretStore');
+      expect(snap).not.toHaveProperty('costGuard');
+      expect(snap).not.toHaveProperty('messages');
+      expect(snap).not.toHaveProperty('client');
+      expect(snap).not.toHaveProperty('inheritedApiKey');
+    });
+  });
 });

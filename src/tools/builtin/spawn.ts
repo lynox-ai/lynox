@@ -1,4 +1,4 @@
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
 import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
@@ -71,6 +71,64 @@ function estimateSpawnCost(model: string, maxIterations: number): number {
 
 interface SpawnAgentInput {
   agents: SpawnSpec[];
+}
+
+/**
+ * Five provider fields a sub-agent needs to talk to an LLM. Carries `apiKey`
+ * as plaintext, so the result is consumed inline by `AgentConfig` construction
+ * and never logged / serialized / sent to telemetry.
+ *
+ * Exported only for the unit tests that walk the precedence chain end-to-end.
+ */
+export interface ChildProviderConfig {
+  apiKey: string | undefined;
+  apiBaseURL: string | undefined;
+  provider: LLMProvider | undefined;
+  openaiModelId: string | undefined;
+  openaiAuth: 'static' | 'google-vertex' | undefined;
+}
+
+/**
+ * Reads the parent agent's `getProviderConfig()` defensively — legacy `IAgent`
+ * mocks in older tests don't implement the method, so the typeof check keeps
+ * the spawn path working without forcing a `__mocks__` update. Returns `null`
+ * when the parent has no `getProviderConfig` member at all.
+ */
+function readParentProviderConfig(parentAgent: IAgent): ProviderConfigSnapshot | null {
+  const candidate = (parentAgent as { getProviderConfig?: unknown }).getProviderConfig;
+  if (typeof candidate !== 'function') return null;
+  return (parentAgent as { getProviderConfig: () => ProviderConfigSnapshot }).getProviderConfig();
+}
+
+/**
+ * Resolve sub-agent provider config along an explicit 3-tier precedence chain:
+ *
+ *   1. **profile** — a `ModelProfile` (named entry from `userConfig.model_profiles`)
+ *      passed via `spec.profile`. Wins everything: a user who pinned a named
+ *      profile for this spawn explicitly opted out of inheritance.
+ *   2. **parent** — the parent agent's runtime `getProviderConfig()`. Closes
+ *      the staging bug where managed-tier UI provider-switch wasn't reflected
+ *      in `~/.lynox/config.json` and sub-agents got undefined apiBaseURL.
+ *   3. **userConfig** — `loadConfig()` from disk. Final fallback for
+ *      self-host paths where parent didn't set its provider config explicitly.
+ *
+ * Per-field nullish-coalesce means a profile that sets only `api_key` still
+ * inherits `api_base_url` from the parent (or, finally, the user config).
+ * The mid-tier `parent` may be `null` for legacy `IAgent` mocks without
+ * `getProviderConfig()` — see `readParentProviderConfig`.
+ */
+export function resolveChildProviderConfig(
+  profile: ModelProfile | undefined,
+  parent: ProviderConfigSnapshot | null,
+  userConfig: LynoxUserConfig,
+): ChildProviderConfig {
+  return {
+    apiKey: profile?.api_key ?? parent?.apiKey ?? userConfig.api_key,
+    apiBaseURL: profile?.api_base_url ?? parent?.apiBaseURL ?? userConfig.api_base_url,
+    provider: profile?.provider ?? parent?.provider ?? userConfig.provider,
+    openaiModelId: profile?.model_id ?? parent?.openaiModelId,
+    openaiAuth: profile?.auth ?? parent?.openaiAuth,
+  };
 }
 
 // Control characters (incl. CR/LF) that could be used to spoof log lines or
@@ -267,20 +325,8 @@ async function executeThinker(
     // llm-client threw "OpenAI provider requires apiBaseURL". Profile +
     // userConfig.* preserved as fallback for self-host paths where the
     // parent might not have set its provider config explicitly.
-    // Defensive typeof-check tolerates legacy IAgent mocks without the
-    // method (older test helpers); the field-spread is a no-op then.
-    ...(() => {
-      const parentProv = typeof (parentAgent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
-        ? (parentAgent as { getProviderConfig: () => ProviderConfigSnapshot }).getProviderConfig()
-        : null;
-      return {
-        apiKey: profile?.api_key ?? parentProv?.apiKey ?? userConfig.api_key,
-        apiBaseURL: profile?.api_base_url ?? parentProv?.apiBaseURL ?? userConfig.api_base_url,
-        provider: profile?.provider ?? parentProv?.provider ?? userConfig.provider,
-        openaiModelId: profile?.model_id ?? parentProv?.openaiModelId,
-        openaiAuth: profile?.auth ?? parentProv?.openaiAuth,
-      };
-    })(),
+    // Precedence chain documented + unit-tested in `resolveChildProviderConfig`.
+    ...resolveChildProviderConfig(profile, readParentProviderConfig(parentAgent), userConfig),
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
