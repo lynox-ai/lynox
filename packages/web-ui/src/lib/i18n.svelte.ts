@@ -341,7 +341,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.advanced.subtitle':              { de: 'Wie gründlich der Agent arbeitet und wie viel Kontext er pro Anfrage lädt.',   en: 'How thoroughly the agent works and how much context it loads per request.' },
 	'llm.advanced.expand_label':          { de: 'Erweiterte Einstellungen',                                                     en: 'Advanced settings' },
 	'llm.advanced.reasoning_heading':     { de: 'Denkstil',                                                                     en: 'Reasoning style' },
-	'llm.advanced.experience_heading':    { de: 'Kommunikation',                                                                en: 'Communication' },
+	'llm.advanced.experience_heading':    { de: 'Wissen & Embeddings',                                                          en: 'Knowledge & Embeddings' },
 	// Settings v3 PR 3 (Item 8) — show-all-grayed tooltips
 	'llm.advanced.embedding_provider_managed_tooltip': { de: 'Auf Managed-Plänen vom CP verwaltet — lokale ONNX-Einbettung bleibt aktiv.', en: 'CP-managed on Managed plans — local ONNX embedding stays active.' },
 
@@ -1009,14 +1009,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.managed_eu_model_managed_label': { de: 'verwaltet', en: 'managed' },
 	'config.effort': { de: 'Gründlichkeit', en: 'Thoroughness' },
 	'config.effort_desc': { de: 'Wie ausführlich der Agent Aufgaben bearbeitet. Höhere Stufen brauchen mehr Zeit und Tokens.', en: 'How thoroughly the agent works on tasks. Higher levels use more time and tokens.' },
-	'config.effort_default': { de: 'Standard (vom Modell vorgegeben)', en: 'Default (model-defined)' },
 	'config.effort_low': { de: 'Schnell — kurze Antworten', en: 'Quick — short answers' },
 	'config.effort_medium': { de: 'Ausgewogen', en: 'Balanced' },
 	'config.effort_high': { de: 'Gründlich (empfohlen)', en: 'Thorough (recommended)' },
 	'config.effort_max': { de: 'Maximum — tiefgehende Analyse', en: 'Maximum — deep analysis' },
 	'config.thinking': { de: 'Nachdenken', en: 'Thinking' },
 	'config.thinking_desc': { de: 'Agent nimmt sich bei komplexen Aufgaben mehr Bedenkzeit.', en: 'Agent takes more time to reason through complex tasks.' },
-	'config.thinking_default': { de: 'Standard (vom Modell vorgegeben)', en: 'Default (model-defined)' },
 	'config.thinking_disabled': { de: 'Deaktiviert', en: 'Disabled' },
 	'config.thinking_adaptive': { de: 'Automatisch bei Bedarf (empfohlen)', en: 'Automatically when needed (recommended)' },
 	'config.anthropic_only_hint': { de: 'Nur mit Claude (Anthropic) verfügbar. Bei anderen Providern automatisch deaktiviert.', en: 'Only available with Claude (Anthropic). Automatically disabled with other providers.' },
@@ -1028,7 +1026,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.memory_extraction_desc': { de: 'Agent merkt sich wichtige Details aus Gesprächen', en: 'Agent remembers key details from conversations' },
 	'config.experience': { de: 'Erfahrungslevel', en: 'Experience Level' },
 	'config.experience_desc': { de: 'Bestimmt den Kommunikationsstil: Business = einfache Anleitungen, Developer = CLI-Befehle & Config-Details', en: 'Controls communication style: Business = simple instructions, Developer = CLI commands & config details' },
-	'config.experience_default': { de: 'Standard (vom Modell vorgegeben)', en: 'Default (model-defined)' },
 	'config.experience_business': { de: 'Business', en: 'Business' },
 	'config.experience_developer': { de: 'Entwickler (experimentell)', en: 'Developer (experimental)' },
 
