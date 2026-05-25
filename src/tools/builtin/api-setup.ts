@@ -22,6 +22,7 @@ import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core
 import { fetchWithValidatedRedirects, readBodyLimited } from './http.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { isFeatureEnabled } from '../../core/features.js';
+import { isAllowlistedEndpoint, describeDisclosure } from '../../core/llm/endpoint-allowlist.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -73,6 +74,14 @@ interface ApiSetupInput {
   docs_url?: string | undefined;
   /** Additive patch (required for refine). */
   refine?: RefinePatch | undefined;
+  /**
+   * Wave 5d BYOK liability gate: when `profile.base_url` is not on lynox's
+   * vetted sub-processor allowlist (see `core/llm/endpoint-allowlist.ts`),
+   * create/update returns a REQUIRES_USER_CONFIRMATION sentinel. The agent
+   * must surface the disclosure via `ask_user`, then re-call api_setup with
+   * `confirm_custom_endpoint: true` to capture user acceptance and proceed.
+   */
+  confirm_custom_endpoint?: boolean | undefined;
 }
 
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
@@ -877,6 +886,10 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
           type: 'string',
           description: 'For fetch_token action: vault key name to store the resulting access_token under. UPPER_SNAKE_CASE. Default: `${id.toUpperCase()}_ACCESS_TOKEN`.',
         },
+        confirm_custom_endpoint: {
+          type: 'boolean',
+          description: 'Required when `profile.base_url` points at a host outside lynox\'s vetted sub-processor allowlist. First call returns `REQUIRES_USER_CONFIRMATION` with a disclosure text; surface that to the user via `ask_user`, then re-call this tool with `confirm_custom_endpoint: true` to record acceptance and proceed.',
+        },
       },
       required: ['action'],
     },
@@ -1027,6 +1040,20 @@ Next steps before calling create:
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;
+      }
+
+      // Wave 5d BYOK liability gate: a profile pointed at a host outside
+      // lynox's vetted sub-processor list cannot be saved without explicit
+      // user acceptance. validateProfile() has already verified base_url
+      // parses as a URL, so isAllowlistedEndpoint() will only return false
+      // here for genuinely non-allowlisted hosts (not malformed input).
+      if (!isAllowlistedEndpoint(profile.base_url) && input.confirm_custom_endpoint !== true) {
+        const disclosure = describeDisclosure(profile.base_url);
+        return JSON.stringify({
+          status: 'REQUIRES_USER_CONFIRMATION',
+          disclosure,
+          hint: 'Surface the `disclosure` text to the user via `ask_user`. Once they accept, re-call `api_setup` with the same `profile` plus `confirm_custom_endpoint: true` to record acceptance and persist the profile.',
+        }, null, 2);
       }
 
       // Enforce research: warn if profile is too thin

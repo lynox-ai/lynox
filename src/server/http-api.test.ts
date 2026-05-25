@@ -1626,6 +1626,128 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
       }
     });
+
+    // ── Wave 5d BYOK liability gate (server-side surface) ──────────────────
+    // /pr-review on PR #607 found the UI-only carveout: a direct `curl PUT
+    // /api/config` bypassed the Settings modal entirely. These tests pin the
+    // server-side gate that closes that carveout — same `evaluateEndpointBootGate`
+    // decision logic as engine boot + api_setup tool, single disclosure
+    // wording via `describeDisclosure(url)`.
+    describe('BYOK custom-endpoint allowlist gate (PUT /api/config)', () => {
+      it('PUT with allowlisted base_url + no confirm flag → 200 (vetted host, no disclosure capture)', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: 'openai',
+            api_base_url: 'https://api.mistral.ai/v1',
+            openai_model_id: 'mistral-large-2512',
+          }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      it('PUT with localhost base_url + no confirm flag → 200 (self-host dev case, no third-party exposure)', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: 'openai',
+            api_base_url: 'http://localhost:11434/v1',
+            openai_model_id: 'llama-3-8b',
+          }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      it('PUT with non-allowlisted base_url + no confirm flag → 400 REQUIRES_USER_CONFIRMATION', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: 'openai',
+            api_base_url: 'https://my-litellm.example.com/v1',
+            openai_model_id: 'gpt-4o-mini',
+          }),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error: string; disclosure: string; hint: string };
+        expect(body.error).toBe('REQUIRES_USER_CONFIRMATION');
+        // Disclosure text comes from the shared `describeDisclosure(url)` helper —
+        // identical wording across Settings UI, api_setup, engine boot, HTTP gate.
+        expect(body.disclosure).toContain('my-litellm.example.com');
+        expect(body.disclosure).toContain('controller responsibility');
+        expect(body.hint).toContain('confirm_custom_endpoint: true');
+      });
+
+      it('PUT with non-allowlisted base_url + confirm_custom_endpoint:true → 200 (per-call acceptance recorded)', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: 'openai',
+            api_base_url: 'https://my-litellm.example.com/v1',
+            openai_model_id: 'gpt-4o-mini',
+            confirm_custom_endpoint: true,
+          }),
+        });
+        expect(res.status).toBe(200);
+        // `confirm_custom_endpoint` is a control-plane signal and must be
+        // STRIPPED before saveUserConfig — it must not pollute config.json.
+        const { saveUserConfig } = await import('../core/config.js');
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        expect(lastCall).toBeDefined();
+        expect(lastCall![0]).not.toHaveProperty('confirm_custom_endpoint');
+      });
+
+      it('PUT with non-allowlisted base_url + LYNOX_CUSTOM_ENDPOINT_ACCEPTED=true env → 200 (operator-side acceptance)', async () => {
+        vi.stubEnv('LYNOX_CUSTOM_ENDPOINT_ACCEPTED', 'true');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              provider: 'openai',
+              api_base_url: 'https://my-litellm.example.com/v1',
+              openai_model_id: 'gpt-4o-mini',
+            }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          // Restore the test-harness env after the case (mirrors the pattern
+          // used by managed-mode tests in this file).
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+          vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+        }
+      });
+
+      it('PUT with non-allowlisted base_url + confirm_custom_endpoint:false → 400 (false ≠ accepted)', async () => {
+        // Guards against a future regression where `confirmCustomEndpoint`
+        // is computed via `Boolean(body['confirm_custom_endpoint'])` or
+        // truthy coercion — only literal `true` is acceptance.
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: 'openai',
+            api_base_url: 'https://my-litellm.example.com/v1',
+            openai_model_id: 'gpt-4o-mini',
+            confirm_custom_endpoint: false,
+          }),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error: string };
+        expect(body.error).toBe('REQUIRES_USER_CONFIRMATION');
+      });
+
+      it('PUT that omits api_base_url entirely → 200 (existing url left alone, gate does not re-fire)', async () => {
+        // A PUT that touches `default_tier` without re-sending the base_url
+        // must NOT trigger the gate — the engine-boot gate already captured
+        // acceptance when the URL was first installed, and reloadUserConfig
+        // re-checks anyway.
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ default_tier: 'sonnet' }),
+        });
+        expect(res.status).toBe(200);
+      });
+    });
   });
 
   describe('usage SSoT', () => {

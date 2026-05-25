@@ -24,6 +24,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
+	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
@@ -363,7 +364,44 @@
 		}
 	}
 
+	// Wave 5d — BYOK custom-endpoint disclosure gate.
+	// State for the disclosure modal: holds the URL pending acceptance + the
+	// "I understand and accept" checkbox state. Gating predicate runs before
+	// every saveConfig call when api_base_url points outside lynox's vetted
+	// sub-processor allowlist. Acceptance is captured per-URL in sessionStorage
+	// so the modal doesn't re-fire on every tweak to the same custom endpoint
+	// within a session (consistent with the existing key-exfil confirm flow).
+	let pendingDisclosureUrl = $state<string | null>(null);
+	let disclosureAccepted = $state(false);
+
+	function shouldShowDisclosure(provider: typeof activeProvider, url: string | undefined): boolean {
+		// Managed tenants can't reach non-allowlisted endpoints via the UI
+		// (custom_provider_endpoints lock + curated tile list), so we never
+		// gate them. Self-host + hosted-BYOK go through the gate.
+		if (isManaged()) return false;
+		if (provider !== 'custom' && provider !== 'openai') return false;
+		if (!url || url.trim().length === 0) return false;
+		if (isAllowlistedEndpoint(url)) return false;
+		if (typeof sessionStorage === 'undefined') return true;
+		return !sessionStorage.getItem(`llm_disclosure_accepted:${url}`);
+	}
+
+	function markDisclosureAccepted(url: string): void {
+		if (typeof sessionStorage === 'undefined') return;
+		try { sessionStorage.setItem(`llm_disclosure_accepted:${url}`, '1'); } catch { /* ignore quota */ }
+	}
+
 	async function saveConfig(): Promise<void> {
+		if (!activeProvider || !loaded) return;
+		if (shouldShowDisclosure(activeProvider, config.api_base_url)) {
+			pendingDisclosureUrl = config.api_base_url ?? '';
+			disclosureAccepted = false;
+			return; // wait for the modal-accept path to call runSaveConfig
+		}
+		await runSaveConfig();
+	}
+
+	async function runSaveConfig(): Promise<void> {
 		if (!activeProvider || !loaded) return;
 		saving = true;
 		try {
@@ -779,6 +817,50 @@
 		</details>
 	{/if}
 </div>
+
+<!-- Wave 5d — BYOK Custom Endpoint Disclosure modal.
+     Distinct from the test-connection confirm above: this gate fires on
+     SAVE for any endpoint outside lynox's vetted sub-processor allowlist,
+     and the user must tick "I understand and accept" before saving can
+     proceed. Captures explicit GDPR-Art-28 controller-responsibility
+     transfer for non-allowlisted third-party endpoints. -->
+{#if pendingDisclosureUrl !== null}
+	<div role="dialog" aria-modal="true" aria-labelledby="disclosure-title"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay/60 p-4">
+		<div class="bg-bg border border-border rounded-lg shadow-xl max-w-md w-full p-6 space-y-4">
+			<h3 id="disclosure-title" class="text-lg font-medium">
+				{t('endpoint_disclosure_title')}
+			</h3>
+			<p class="text-sm">
+				{t('endpoint_disclosure_body').replace('{hostname}', disclosureHostname(pendingDisclosureUrl))}
+			</p>
+			<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded break-all whitespace-pre-wrap">{pendingDisclosureUrl}</pre>
+			<label class="flex items-start gap-2 text-sm cursor-pointer">
+				<input type="checkbox" bind:checked={disclosureAccepted} class="mt-0.5" />
+				<span>{t('endpoint_disclosure_accept')}</span>
+			</label>
+			<div class="flex justify-end gap-2 pt-2">
+				<button type="button"
+					onclick={() => { pendingDisclosureUrl = null; disclosureAccepted = false; }}
+					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5">
+					{t('endpoint_disclosure_cancel')}
+				</button>
+				<button type="button"
+					disabled={!disclosureAccepted}
+					onclick={() => {
+						const url = pendingDisclosureUrl!;
+						pendingDisclosureUrl = null;
+						disclosureAccepted = false;
+						markDisclosureAccepted(url);
+						void runSaveConfig();
+					}}
+					class="px-3 py-1.5 text-sm bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
+					{t('endpoint_disclosure_save')}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <!-- Custom-endpoint key-exfil confirm modal — fires per distinct URL,
      once per browser session. SSRF-guard handles private-IP exfil; this

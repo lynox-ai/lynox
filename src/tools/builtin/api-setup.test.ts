@@ -46,10 +46,15 @@ function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-api-setup-test-'));
 }
 
+// Use an allowlisted base_url so the bulk of pre-existing tests don't trip
+// the Wave 5d BYOK liability gate (see core/llm/endpoint-allowlist.ts). The
+// gate itself is covered by its own describe block below — these tests
+// exercise validation / persistence / agent-context wiring, not the
+// allowlist policy.
 const SAMPLE_PROFILE: ApiProfile = {
   id: 'test-api',
   name: 'Test API',
-  base_url: 'https://api.test.com/v1',
+  base_url: 'https://api.openai.com/v1',
   description: 'A test API.',
   auth: { type: 'bearer' },
   rate_limit: { requests_per_minute: 60 },
@@ -137,7 +142,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store);
       await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
       expect(store.get('test-api')).toBeDefined();
-      expect(store.getByHostname('api.test.com')).toBeDefined();
+      expect(store.getByHostname('api.openai.com')).toBeDefined();
     });
 
     it('rejects missing required fields', async () => {
@@ -202,6 +207,67 @@ describe('api_setup tool', () => {
       const agent = createMockAgent();
       const result = await apiSetupTool.handler({ action: 'create' }, agent);
       expect(result).toContain('required');
+    });
+  });
+
+  // Wave 5d — BYOK custom-endpoint disclosure gate. Paired security-block +
+  // legitimate-use coverage per the sprint convention.
+  describe('custom-endpoint disclosure gate', () => {
+    it('allowlisted base_url + no confirm_custom_endpoint → proceeds without REQUIRES_USER_CONFIRMATION', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      // SAMPLE_PROFILE points at api.openai.com (allowlisted host).
+      const result = await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      expect(result).toContain('Created API profile');
+      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(store.get('test-api')).toBeDefined();
+    });
+
+    it('non-allowlisted base_url + no confirm_custom_endpoint → returns REQUIRES_USER_CONFIRMATION with disclosure', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const customProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'custom-proxy',
+        base_url: 'https://my-litellm-proxy.example.com/v1',
+      };
+      const result = await apiSetupTool.handler({ action: 'create', profile: customProfile }, agent);
+      expect(result).toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).toContain('my-litellm-proxy.example.com');
+      expect(result).toContain('controller responsibility');
+      // Profile must NOT be persisted on the gated path.
+      expect(store.get('custom-proxy')).toBeUndefined();
+    });
+
+    it('non-allowlisted base_url + confirm_custom_endpoint=true → proceeds', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const customProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'custom-proxy-confirmed',
+        base_url: 'https://my-litellm-proxy.example.com/v1',
+      };
+      const result = await apiSetupTool.handler({
+        action: 'create',
+        profile: customProfile,
+        confirm_custom_endpoint: true,
+      }, agent);
+      expect(result).toContain('Created API profile');
+      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(store.get('custom-proxy-confirmed')).toBeDefined();
+    });
+
+    it('malformed base_url → rejected by existing validator BEFORE the disclosure gate fires', async () => {
+      // The disclosure gate must never become a smokescreen for a malformed
+      // URL: validation must still flag "Invalid base_url" so the agent fixes
+      // the input rather than walking the user through a meaningless disclosure.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler({
+        action: 'create',
+        profile: { ...SAMPLE_PROFILE, base_url: 'not-a-url' },
+      }, agent);
+      expect(result).toContain('Invalid base_url');
+      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
     });
   });
 
@@ -1487,7 +1553,7 @@ describe('api_setup tool', () => {
     it('refuses fetch_token when vault is missing client_id / client_secret', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, makeMockSecretStore({})); // empty vault
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE }, agent);
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
       expect(result).toMatch(/missing the OAuth credentials/i);
       expect(result).toContain('SHOPIFY_CLIENT_ID');
@@ -1501,7 +1567,7 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
       }) as { _peek: (n: string) => string | undefined };
       const agent = createMockAgent(store, vaultMock);
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE }, agent);
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_returned_token_abc', expires_in: 86400 }), {
@@ -1536,7 +1602,7 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_ID: 'id',
         SHOPIFY_CLIENT_SECRET: 'sec',
       }));
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE }, agent);
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response('<!DOCTYPE html><html><body>app_not_installed</body></html>', {

@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
+import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,
@@ -268,6 +269,14 @@ export class Engine {
     const oldDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
     const oldBugsinkActive = !!oldDsn && this.userConfig.bugsink_enabled !== false;
     this.userConfig = loadConfig();
+    // Wave 5d BYOK liability gate — defense-in-depth: re-evaluate the
+    // allowlist BEFORE the LLM client is recreated against the new config.
+    // The HTTP PUT /api/config handler pre-checks via `evaluateEndpointBootGate`
+    // so it can 400 without exception-as-control-flow, but if any other
+    // mutation path (config.json edit + SIGHUP, vault rotation, future admin
+    // tooling) installs a non-allowlisted `api_base_url`, this gate still
+    // catches it before the client swap. Throws on `refuse`; caller catches.
+    this._enforceEndpointAllowlist();
     const newProvider = this.userConfig.provider;
     // Recreate API client if credentials or provider changed
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
@@ -296,6 +305,13 @@ export class Engine {
    */
   async reloadCredentials(): Promise<void> {
     this.userConfig = loadConfig();
+    // Wave 5d BYOK liability gate — defense-in-depth re-check (symmetric with
+    // `reloadUserConfig` and the engine-boot gate). A vault rotation that
+    // changes the resolved provider's base_url, or any code-path that lands
+    // a non-allowlisted endpoint into `loadConfig()` output without going
+    // through PUT /api/config, must still be blocked before the new LLM
+    // client is built. Throws on `refuse`; caller catches.
+    this._enforceEndpointAllowlist();
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
@@ -546,6 +562,17 @@ export class Engine {
     // Activate debug logging early (before any channel publishing)
     initDebugSubscriber();
 
+    // Wave 5d BYOK liability gate: when the active config (env-driven boot
+    // path included) points the LLM at a host outside lynox's vetted
+    // sub-processor list, refuse to start unless the operator explicitly
+    // accepts controller responsibility via LYNOX_CUSTOM_ENDPOINT_ACCEPTED.
+    // Implementation note: we treat *any* configured `api_base_url` as the
+    // surface to police (covers ANTHROPIC_BASE_URL env, eu-sovereign Mistral
+    // override, BYOK custom providers). Allowlisted endpoints (the Mistral
+    // host bound by the eu-sovereign toggle, localhost, RFC1918 LAN, the
+    // curated provider set) pass silently.
+    this._enforceEndpointAllowlist();
+
     // Initialize LLM provider SDK if using vertex/custom/openai
     const provider = this.userConfig.provider;
     if (provider && provider !== 'anthropic') {
@@ -567,6 +594,66 @@ export class Engine {
     // Managed deployments pre-configure the DSN; the toggle still honours
     // GDPR Art. 21 opt-out for managed users.
     await this._initBugsink();
+  }
+
+  /**
+   * Wave 5d BYOK liability gate — shared between engine boot AND runtime
+   * config-reload paths (`reloadUserConfig` / `reloadCredentials`).
+   *
+   * Refuses to proceed when `userConfig.api_base_url` points at a host outside
+   * lynox's vetted sub-processor allowlist UNLESS the operator has set
+   * `LYNOX_CUSTOM_ENDPOINT_ACCEPTED=true`. When the flag is set we emit a
+   * one-time stderr warning carrying the host + the canonical disclosure text
+   * so the acceptance leaves an audit trail.
+   *
+   * No-ops when the config has no `api_base_url` — that's the standard
+   * Anthropic-via-default-host case (covered by the lynox DPA without
+   * disclosure capture).
+   *
+   * Self-host vs Managed scope:
+   *  - Self-host (BYOK / unmanaged): the operator IS the controller so this
+   *    gate captures their acceptance of the third-party-processor relationship.
+   *  - Managed: the control plane only injects allowlisted hosts
+   *    (api.anthropic.com / api.mistral.ai under the eu-sovereign toggle), so
+   *    the gate evaluates to `allowlisted` and the warning never fires for
+   *    paying managed tenants.
+   *
+   * Defense-in-depth: also invoked from `reloadUserConfig` + `reloadCredentials`
+   * to plug the bypass surface where a non-UI mutation path (config.json edit
+   * + SIGHUP, vault rotation, future admin tooling) could install a
+   * non-allowlisted `api_base_url` without re-evaluating the gate. The HTTP
+   * `PUT /api/config` handler additionally pre-checks via `evaluateEndpointBootGate`
+   * so it can return a clean 400 without exception-as-control-flow — but if
+   * any future caller bypasses that pre-check, this gate still catches it
+   * before the LLM client is rebuilt.
+   *
+   * Both call-sites (init + reload) handle the throw differently:
+   *  - init(): the throw bubbles out of `_initBootstrap` and aborts startup;
+   *    `cli/start.ts` converts init() rejections to a non-zero exit code.
+   *  - reload paths: the throw bubbles to whoever called the reload (HTTP
+   *    handler, admin API, SIGHUP path) which is expected to catch + surface
+   *    a controlled response without crashing the engine process.
+   *
+   * Decision logic + message wording live in `llm/endpoint-allowlist.ts` so
+   * `endpoint-boot-gate.test.ts` can pin the contract without instantiating
+   * an Engine.
+   */
+  private _enforceEndpointAllowlist(): void {
+    const baseUrl = this.userConfig.api_base_url;
+    const decision = evaluateEndpointBootGate(baseUrl, process.env['LYNOX_CUSTOM_ENDPOINT_ACCEPTED']);
+    if (decision === 'skip' || decision === 'allowlisted') return;
+    if (decision === 'refuse') {
+      const msg = buildBootRefusalMessage(baseUrl ?? '');
+      process.stderr.write(msg + '\n');
+      // Throw rather than process.exit(1) so test harnesses can intercept
+      // the boot refusal without slaughtering the test runner; production
+      // bootstrappers (cli/start.ts) already convert init() rejections to
+      // a non-zero exit. Reload-path callers catch this and convert it
+      // into a 400 response (see http-api.ts PUT /api/config).
+      throw new Error(msg);
+    }
+    // decision === 'accepted'
+    process.stderr.write(buildBootAcceptedWarning(baseUrl ?? '') + '\n');
   }
 
   /**
