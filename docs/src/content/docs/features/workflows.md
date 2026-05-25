@@ -88,7 +88,7 @@ When you work through a task interactively, lynox can save the workflow as a reu
 
 Background task results are delivered through your configured channels:
 
-- **Web UI** — Results appear in the [Activity Hub](/features/web-ui/) (`/app/hub`)
+- **Web UI** — Results appear in the [Activity Hub](/daily-use/web-ui/#activity-hub) (`/app/activity`)
 - **Mail** — Sent to your connected mailbox with a reply-to-act follow-up
 - **Push** — Web push notification if enabled in your browser
 
