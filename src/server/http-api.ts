@@ -1536,19 +1536,31 @@ export class LynoxHTTPApi {
   /**
    * Derive Mistral status from run history. Mistral does not publish a
    * Statuspage-compatible JSON endpoint, so we infer health from recent runs
-   * whose model_id starts with "mistral". If there are no Mistral runs yet, we
-   * report "Configured" with an unknown indicator.
+   * whose model_id starts with "mistral".
+   *
+   * Healthy-config rule: when MISTRAL_API_KEY is configured but no Mistral
+   * run has been recorded yet, return `none` ("Ready") — mirroring the
+   * primary's `getRunBasedStatus` semantics for the same state. This is the
+   * normal day-1 state for every prod tenant that has the EU-residency
+   * fallback key set engine-side but hasn't toggled into Mistral yet.
+   *
+   * Pre-fix this returned `unknown` here, which the StatusBar aggregator
+   * (severity-ranked unknown > none) then bubbled up over a fully healthy
+   * Anthropic primary — surfacing in the UI as "Anthropic · API ?" despite
+   * the API being fine. Caller (`getProvidersStatus`) only invokes this
+   * function when the key IS present, so the key-existence precondition is
+   * implicit.
    */
   private getMistralStatus(): ProviderStatus {
     const label = 'Mistral AI';
     const history = this.engine?.getRunHistory();
-    if (!history) return { indicator: 'unknown', description: 'Configured (no run history)', provider: label };
+    if (!history) return { indicator: 'none', description: 'Ready', provider: label };
 
     const recent = history.getRecentRuns(50);
     const mistralRun = recent.find(r => r.model_id?.toLowerCase().startsWith('mistral'));
 
     if (!mistralRun) {
-      return { indicator: 'unknown', description: 'Configured (no runs yet)', provider: label };
+      return { indicator: 'none', description: 'Ready', provider: label };
     }
 
     const lastRunTime = new Date(mistralRun.created_at).getTime();
