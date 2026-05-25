@@ -10,7 +10,7 @@ This roadmap is intentionally short. The Managed-hosting tier funds the project,
 
 The state of `lynox/main` at the time of this post (see [CHANGELOG.md](CHANGELOG.md) for the version-by-version history):
 
-- **Engine + Web UI** — chat, knowledge graph, workflow capture, background worker, mail integration, MCP server, 4 specialized agent roles
+- **Engine + Web UI** — chat, knowledge graph, workflow capture, background worker, mail integration, 4 specialized agent roles
 - **Multi-provider LLM routing** — Anthropic (primary), Mistral (secondary + fallback profile), any OpenAI-compatible endpoint (Ollama, LM Studio, LiteLLM, Groq, vLLM)
 - **Magic-link OTP login** for managed instances (Settings v3)
 - **Set-Bench harness** — 220-run public benchmark on agent-loop completion (`core/scripts/set-bench/`)
@@ -26,7 +26,7 @@ Three roughly-parallel workstreams. Order is best-effort; if launch traffic surf
 
 ### MCP Client (self-hosted → managed → remote HTTP)
 
-Finish the half-wired MCP client in core so lynox can talk to user-installed MCP servers (filesystem, shell, custom integrations). PRD is sprint-ready. Three phases:
+Finish the half-wired MCP client in core so lynox can talk to user-installed MCP servers (filesystem, shell, custom integrations). PRD is sprint-ready. The previously shipped MCP **server** was removed pre-HN-launch (core PR #536) pending re-introduction with full E2E test coverage. Three phases:
 
 1. **Self-hosted stdio** — local MCP servers via stdio transport, configured per-instance.
 2. **Managed CP plumbing** — managed customers can register MCP server endpoints via the control plane; CP injects credentials.
