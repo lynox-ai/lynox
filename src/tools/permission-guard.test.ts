@@ -1461,6 +1461,144 @@ describe('isDangerous', () => {
     });
   });
 
+  // H-003 (HN-launch overnight punch-list 2026-05-25) + L1-011: SENSITIVE_PATHS gap.
+  // Prompt-injection-via-read-file lets an attacker exfiltrate lynox-internal DBs
+  // (vault, agent-memory, runs, migration-export), shell histories (bash/zsh/fish
+  // history files often contain pasted secrets or ssh URLs), macOS Keychain DBs,
+  // and browser-stored cookies/passwords. Default OSS Docker does NOT set
+  // LYNOX_WORKSPACE so workspace gating is off — denylist via SENSITIVE_PATHS is
+  // the only line of defense. Tests pair every BLOCK case with a LEGIT case to
+  // prevent the denylist from regressing legitimate "summarize my Desktop report"
+  // / "read /tmp/upload.txt" / "read my own ~/.lynox/config.json" flows.
+  describe('H-003 SENSITIVE_PATHS expansion (lynox DBs + shell histories + Keychain + browsers)', () => {
+    describe('A. security regressions — blocks LLM-driven exfiltration', () => {
+      it('BLOCKS read_file on ~/.lynox/vault.db (macOS path)', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.lynox/vault.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+        expect(result).toContain('read sensitive path');
+      });
+
+      it('BLOCKS read_file on ~/.lynox/vault.db (Linux path)', () => {
+        const result = isDangerous('read_file', { path: '/home/foo/.lynox/vault.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.lynox/agent-memory.db', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.lynox/agent-memory.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.lynox/runs.db', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.lynox/runs.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.lynox/migration-export-2026-05-25.db', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.lynox/migration-export-2026-05-25.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS write_file on ~/.lynox/vault.db', () => {
+        const result = isDangerous('write_file', { path: '/Users/foo/.lynox/vault.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.bash_history', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.bash_history' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.zsh_history', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.zsh_history' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.fish_history', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.fish_history' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on ~/.node_repl_history', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/.node_repl_history' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on macOS Keychain (~/Library/Keychains/login.keychain-db)', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/Library/Keychains/login.keychain-db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on macOS system Keychain (/Library/Keychains/System.keychain)', () => {
+        const result = isDangerous('read_file', { path: '/Library/Keychains/System.keychain' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on Chrome cookies (macOS Application Support)', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/Library/Application Support/Google/Chrome/Default/Cookies' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on Firefox profile (macOS Application Support)', () => {
+        const result = isDangerous('read_file', { path: '/Users/foo/Library/Application Support/Firefox/Profiles/abc.default/cookies.sqlite' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+
+      it('BLOCKS read_file on Firefox profile (Linux ~/.mozilla/)', () => {
+        const result = isDangerous('read_file', { path: '/home/foo/.mozilla/firefox/abc.default/key4.db' }, 'autonomous');
+        expect(result).not.toBeNull();
+        expect(result).toContain('[BLOCKED');
+      });
+    });
+
+    describe('B. legitimate-use regressions — denylist MUST NOT over-block', () => {
+      it('allows read_file on ~/Documents/report.txt (legit "summarize my report" flow)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/Documents/report.txt' }, 'autonomous')).toBeNull();
+      });
+
+      it('allows read_file on /tmp/upload.txt (legit upload flow)', () => {
+        expect(isDangerous('read_file', { path: '/tmp/upload.txt' }, 'autonomous')).toBeNull();
+      });
+
+      it('allows read_file on ~/Downloads/data.csv (legit data-analysis flow)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/Downloads/data.csv' }, 'autonomous')).toBeNull();
+      });
+
+      it('allows read_file on ~/Desktop/notes.md (legit Desktop flow)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/Desktop/notes.md' }, 'autonomous')).toBeNull();
+      });
+
+      it('allows read_file on ~/.lynox/config.json (lynox MUST read its own non-secret config)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/.lynox/config.json' }, 'autonomous')).toBeNull();
+      });
+
+      it('allows read_file on ~/.lynox/sessions/abc.json (lynox MUST read its own session files)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/.lynox/sessions/abc.json' }, 'autonomous')).toBeNull();
+      });
+
+      it('does NOT match "history" embedded in unrelated filenames (e.g. notes-history.md)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/notes-history.md' }, 'autonomous')).toBeNull();
+      });
+
+      it('does NOT match .bash_history.bak (suffixed history backup is not the live history)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/project/.bash_history.bak' }, 'autonomous')).toBeNull();
+      });
+    });
+  });
+
   describe('edge cases', () => {
     it('handles extra whitespace in commands', () => {
       const result = isDangerous('bash', { command: 'rm   -rf   /' }, 'autonomous');

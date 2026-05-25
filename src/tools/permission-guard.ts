@@ -241,6 +241,20 @@ const SENSITIVE_PATHS: RegExp[] = [
   /credentials/i, /\.netrc$/,
   /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
   /\.token$/, /\.secret$/,
+  // lynox-internal DBs — vault + agent-memory + run-history + migration exports.
+  // Specific filenames, NOT the whole `~/.lynox/` dir — lynox must still read its own
+  // `config.json` and other non-secret files. Prefix is fuzzy (matches macOS /Users/foo
+  // AND Linux /home/foo paths). H-003 / L1-011.
+  /\.lynox\/(vault|agent-memory|runs|migration-export)/i,
+  // Shell history files — prime exfil target for env vars, ssh URLs, pasted secrets.
+  /\.(bash|zsh|fish|node_repl|python)_?history$/,
+  // macOS Keychain — system + user keychains hold credentials, certs, browser passwords.
+  /\/Library\/Keychains\//,
+  // Browser-stored secrets — cookies + saved passwords + session storage.
+  // macOS Application Support paths for Chrome / Firefox / Brave / Edge + Linux ~/.mozilla.
+  // (Linux ~/.config/google-chrome already covered by the broader .config/ rule above.)
+  /Application\s+Support\/(Google\/Chrome|Firefox\/Profiles|Brave-Browser|Microsoft\/Edge)/i,
+  /\.mozilla\//,
 ];
 
 function resolveRealPath(filePath: string): string {
