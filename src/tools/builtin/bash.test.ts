@@ -225,4 +225,111 @@ describe('buildSafeEnv', () => {
       expect(env['CHILD_SCOPED_TOKEN']).toBe('forwarded-by-caller');
     });
   });
+
+  // H-004: auth-bearing handles that don't match CREDENTIAL_NAME_RE. The
+  // bash tool can no longer authenticate via ssh-agent or hijack git's
+  // askpass/ssh-command hooks unless the caller explicitly forwards them
+  // via isolation.envVars (the deliberate opt-in path).
+  describe('H-004 auth-handle filter', () => {
+    const H004_NAMES = ['SSH_AUTH_SOCK', 'GIT_ASKPASS', 'GIT_SSH_COMMAND'];
+
+    afterEach(() => {
+      for (const name of H004_NAMES) {
+        delete process.env[name];
+      }
+    });
+
+    it('strips SSH_AUTH_SOCK from subprocess env', () => {
+      process.env['SSH_AUTH_SOCK'] = '/tmp/ssh-agent.sock';
+      const env = buildSafeEnv();
+      expect(env['SSH_AUTH_SOCK']).toBeUndefined();
+    });
+
+    it('strips GIT_ASKPASS from subprocess env', () => {
+      process.env['GIT_ASKPASS'] = '/evil/script.sh';
+      const env = buildSafeEnv();
+      expect(env['GIT_ASKPASS']).toBeUndefined();
+    });
+
+    it('strips GIT_SSH_COMMAND from subprocess env', () => {
+      process.env['GIT_SSH_COMMAND'] = '/bin/evil';
+      const env = buildSafeEnv();
+      expect(env['GIT_SSH_COMMAND']).toBeUndefined();
+    });
+
+    it('preserves PATH/HOME/USER/LANG (legitimate vars not affected)', () => {
+      const env = buildSafeEnv();
+      expect(env['PATH']).toBe(process.env['PATH']);
+      expect(env['HOME']).toBe(process.env['HOME']);
+      if (process.env['USER']) {
+        expect(env['USER']).toBe(process.env['USER']);
+      }
+      if (process.env['LANG']) {
+        expect(env['LANG']).toBe(process.env['LANG']);
+      }
+    });
+
+    it('preserves legitimate GIT_ vars (GIT_AUTHOR_NAME, GIT_COMMITTER_EMAIL)', () => {
+      process.env['GIT_AUTHOR_NAME'] = 'Rafael';
+      process.env['GIT_COMMITTER_EMAIL'] = 'rafael@example.com';
+      try {
+        const env = buildSafeEnv();
+        expect(env['GIT_AUTHOR_NAME']).toBe('Rafael');
+        expect(env['GIT_COMMITTER_EMAIL']).toBe('rafael@example.com');
+      } finally {
+        delete process.env['GIT_AUTHOR_NAME'];
+        delete process.env['GIT_COMMITTER_EMAIL'];
+      }
+    });
+
+    it('preserves NODE_PATH and NPM_CONFIG_REGISTRY (allow-listed, no credential substring)', () => {
+      process.env['NODE_PATH'] = '/usr/lib/node_modules';
+      process.env['NPM_CONFIG_REGISTRY'] = 'https://registry.npmjs.org/';
+      try {
+        const env = buildSafeEnv();
+        expect(env['NODE_PATH']).toBe('/usr/lib/node_modules');
+        expect(env['NPM_CONFIG_REGISTRY']).toBe('https://registry.npmjs.org/');
+      } finally {
+        delete process.env['NODE_PATH'];
+        delete process.env['NPM_CONFIG_REGISTRY'];
+      }
+    });
+
+    it('still strips NPM_TOKEN (CREDENTIAL_NAME_RE regression guard)', () => {
+      process.env['NPM_TOKEN'] = 'npm_xxxxxx';
+      try {
+        const env = buildSafeEnv();
+        expect(env['NPM_TOKEN']).toBeUndefined();
+      } finally {
+        delete process.env['NPM_TOKEN'];
+      }
+    });
+
+    it('air-gapped isolation does not leak SSH_AUTH_SOCK/GIT_ASKPASS/GIT_SSH_COMMAND', () => {
+      process.env['SSH_AUTH_SOCK'] = '/tmp/ssh-agent.sock';
+      process.env['GIT_ASKPASS'] = '/evil/script.sh';
+      process.env['GIT_SSH_COMMAND'] = '/bin/evil';
+      try {
+        const env = buildSafeEnv({ level: 'air-gapped' });
+        expect(env['SSH_AUTH_SOCK']).toBeUndefined();
+        expect(env['GIT_ASKPASS']).toBeUndefined();
+        expect(env['GIT_SSH_COMMAND']).toBeUndefined();
+        // Bare-essentials still present
+        expect(env['PATH']).toBe(process.env['PATH']);
+      } finally {
+        // afterEach handles H004_NAMES cleanup
+      }
+    });
+
+    it('caller-explicit isolation.envVars CAN forward SSH_AUTH_SOCK (intentional opt-in path)', () => {
+      // spawn_agent may legitimately need ssh-agent auth for a scoped
+      // child — the isolation.envVars merge runs AFTER the explicit
+      // H-004 drops, so the override still wins.
+      const env = buildSafeEnv({
+        level: 'scoped',
+        envVars: { SSH_AUTH_SOCK: '/tmp/explicit-agent.sock' },
+      });
+      expect(env['SSH_AUTH_SOCK']).toBe('/tmp/explicit-agent.sock');
+    });
+  });
 });
