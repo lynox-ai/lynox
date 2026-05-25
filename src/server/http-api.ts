@@ -30,6 +30,7 @@ import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
+import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -2713,6 +2714,18 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
       const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
+      // Wave 5d BYOK liability gate (server-side): `confirm_custom_endpoint` is
+      // a control-plane signal, not a config field — it acts as a per-call
+      // equivalent of the `LYNOX_CUSTOM_ENDPOINT_ACCEPTED=true` env-flag and
+      // shifts controller-responsibility for the third-party endpoint to the
+      // customer. Strip it BEFORE schema-parse because `LynoxUserConfigSchema`
+      // is `.strict()` and would otherwise 400 on the unknown key. We hold
+      // the boolean and feed it to `evaluateEndpointBootGate` below.
+      const bodyObj = body as Record<string, unknown>;
+      const confirmCustomEndpoint = bodyObj['confirm_custom_endpoint'] === true;
+      if ('confirm_custom_endpoint' in bodyObj) {
+        delete bodyObj['confirm_custom_endpoint'];
+      }
       const parsed = LynoxUserConfigSchema.safeParse(body);
       if (!parsed.success) {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
@@ -2780,6 +2793,42 @@ export class LynoxHTTPApi {
         const openaiModelId = incoming['openai_model_id'];
         if (typeof openaiModelId !== 'string' || openaiModelId.trim() === '') {
           errorResponse(res, 400, "provider:'openai' requires openai_model_id");
+          return;
+        }
+      }
+      // Wave 5d BYOK liability gate (HTTP surface). Closes the UI-only carveout
+      // — a direct `curl PUT /api/config` previously bypassed the LLMSettings
+      // modal entirely. When the incoming body proposes a non-allowlisted
+      // `api_base_url`, require either:
+      //   - `confirm_custom_endpoint: true` in the body (per-call acceptance,
+      //     equivalent to the env-flag for this single write), OR
+      //   - `LYNOX_CUSTOM_ENDPOINT_ACCEPTED=true` on the engine process
+      //     (operator-side acceptance, persists across writes)
+      // Decision logic is the SAME `evaluateEndpointBootGate` used at engine
+      // boot + by `_enforceEndpointAllowlist`, so the contract is one
+      // source-of-truth. Disclosure text comes from `describeDisclosure(url)`
+      // — single wording across Settings UI, api_setup tool, engine boot,
+      // and this HTTP gate.
+      //
+      // Only fires when `api_base_url` is present in the incoming body — a
+      // PUT that touches unrelated fields leaves the existing `api_base_url`
+      // alone and doesn't re-trigger the disclosure (the engine-boot gate
+      // already captured acceptance when the URL was first installed).
+      // Defense-in-depth: `reloadUserConfig` re-checks the gate post-save so
+      // any non-HTTP write-path (config.json edit, vault rotation) is still
+      // gated before the LLM client is rebuilt.
+      const incomingBaseUrl = incoming['api_base_url'];
+      if (typeof incomingBaseUrl === 'string' && incomingBaseUrl.trim().length > 0) {
+        const acceptedFlag = confirmCustomEndpoint
+          ? 'true'
+          : process.env['LYNOX_CUSTOM_ENDPOINT_ACCEPTED'];
+        const decision = evaluateEndpointBootGate(incomingBaseUrl, acceptedFlag);
+        if (decision === 'refuse') {
+          jsonResponse(res, 400, {
+            error: 'REQUIRES_USER_CONFIRMATION',
+            disclosure: describeDisclosure(incomingBaseUrl),
+            hint: 'Re-submit with `confirm_custom_endpoint: true` in the body to record acceptance.',
+          });
           return;
         }
       }
