@@ -288,6 +288,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.confirm_body_2':     { de: 'Nur fortfahren, wenn du dieser Domain vollständig vertraust. SSRF-Schutz blockiert interne Adressen, aber ein bösartiger öffentlicher Endpoint könnte deinen Key abgreifen.', en: 'Only proceed if you fully trust this domain. SSRF guard blocks internal addresses, but a malicious public endpoint could still capture your key.' },
 	'llm.confirm_cancel':     { de: 'Abbrechen',                                                                 en: 'Cancel' },
 	'llm.confirm_proceed':    { de: 'Verstanden, fortfahren',                                                    en: 'Understood, proceed' },
+
+	// Wave 5d — BYOK custom-endpoint disclosure modal (i18n keys per the
+	// PRD-HN-LAUNCH-HARDENING spec; surface text per `feedback_native_language`
+	// rule — DE and EN written natively, never translated word-for-word).
+	'endpoint_disclosure_title':  { de: 'Hinweis: Eigener Endpoint',                                               en: 'Custom endpoint disclosure' },
+	'endpoint_disclosure_body':   { de: 'Der Endpoint {hostname} steht nicht auf der gelisteten Sub-Auftragsverarbeiter-Liste von lynox. Mit dem Speichern übernimmst du die Verantwortung als Verantwortlicher gegenüber {hostname}. Der DPA von lynox deckt selbst konfigurierte Drittanbieter-Endpoints nicht ab. Siehe AGB — Kundenseitig konfigurierte Endpoints.', en: 'The endpoint {hostname} is not part of lynox\'s published sub-processor list. By saving, you accept controller responsibility for the data-processing relationship with {hostname}. lynox\'s DPA does not cover customer-configured third-party endpoints. See Terms — Customer-Configured Endpoints.' },
+	'endpoint_disclosure_accept': { de: 'Ich verstehe und akzeptiere',                                             en: 'I understand and accept' },
+	'endpoint_disclosure_save':   { de: 'Mit Hinweis speichern',                                                  en: 'Save with disclosure' },
+	'endpoint_disclosure_cancel': { de: 'Abbrechen',                                                              en: 'Cancel' },
 	'llm.endpoints_heading':       { de: 'Gespeicherte Endpoints',                                                en: 'Saved endpoints' },
 	'llm.endpoints_empty':         { de: 'Keine gespeicherten Endpoints. Speichere den aktuellen, um schnell zwischen LiteLLM-Setups zu wechseln.', en: 'No saved endpoints. Save the current one to switch quickly between LiteLLM setups.' },
 	'llm.endpoints_use':           { de: 'Verwenden',                                                             en: 'Use' },
