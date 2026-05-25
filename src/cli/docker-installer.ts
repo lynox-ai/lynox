@@ -43,7 +43,7 @@ async function acceptTos(rl: ReturnType<typeof createInterface>): Promise<boolea
   }
 
   try {
-    mkdirSync(lynoxDir, { recursive: true });
+    mkdirSync(lynoxDir, { recursive: true, mode: 0o700 });
     writeFileAtomicSync(flagPath, `${new Date().toISOString()}\n`);
   } catch {
     // Non-fatal — the wizard proceeds even if the flag can't be persisted.
