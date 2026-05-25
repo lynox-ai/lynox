@@ -26,6 +26,7 @@ import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { channels } from './observability.js';
+import { ToolCallTracker } from './output-guard.js';
 import { abortSpawnedAgents } from '../tools/builtin/spawn.js';
 import { abortPipelineAgents } from '../orchestrator/runtime-adapter.js';
 import { ChangesetManager } from './changeset.js';
@@ -159,6 +160,19 @@ export class Session {
    * next `compact()` — see `compact()`.
    */
   private readonly _toolResultBlobStore = new ToolResultBlobStore();
+  /**
+   * H-024 shadow mode — per-conversation `ToolCallTracker` for behavioural
+   * anomaly detection. Owned here (not on the Agent) so the rolling 20-call
+   * window survives Agent recreation (setModel / setEffort / _recreateAgent
+   * all rebuild the Agent — see _createAgent below). The same reference is
+   * threaded into every Agent via `toolCallTracker` on AgentConfig so a
+   * sub-agent spawn or model-switch mid-conversation doesn't reset the
+   * detector's history. Shadow mode is observability-only — see the wiring
+   * in agent.ts `_executeOne` for the no-block contract.
+   */
+  private readonly _toolCallTracker: ToolCallTracker = new ToolCallTracker();
+  /** H-024 shadow-mode tracker (read-only access for agent.ts wiring + tests). */
+  get toolCallTracker(): ToolCallTracker { return this._toolCallTracker; }
 
   // Per-session config (copied from engine.config at creation, mutated independently)
   private _registryVersion = 0;
@@ -1104,6 +1118,9 @@ export class Session {
       // Phase 2: same blob-store reference across every Agent recreation so
       // `recall_tool_result` resolves handles minted by a prior `compact()`.
       toolResultBlobStore: this._toolResultBlobStore,
+      // H-024 shadow mode: same tracker reference across Agent recreation so
+      // the rolling 20-call window survives setModel / setEffort / spawn paths.
+      toolCallTracker: this._toolCallTracker,
       userTimezone: this._userTimezone ?? undefined,
     });
 

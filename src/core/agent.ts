@@ -32,6 +32,8 @@ import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
+import type { ToolCallTracker } from './output-guard.js';
+import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
@@ -153,6 +155,17 @@ export class Agent implements IAgent {
   readonly sessionCounters: import('../types/agent.js').SessionCounters;
   /** Per-conversation blob store for tool results recallable after compaction. */
   readonly toolResultBlobStore: import('./tool-result-blob-store.js').ToolResultBlobStore | undefined;
+  /**
+   * H-024 shadow-mode tracker — per-conversation behavioural anomaly detector.
+   * Threaded from the Session (owns it across Agent recreation). When set, the
+   * agent records every successful tool dispatch and calls `checkAnomaly()`
+   * for channel-side-effect publishing. Return value intentionally discarded:
+   * shadow mode does NOT block dispatch or surface a warning to the user.
+   * Enforcement-mode follow-up is deferred to v1.7.3 / v1.8.0 after we observe
+   * false-positive rate in production. Undefined for ad-hoc agents built
+   * outside a Session (CLI smoke harness, sub-agents in legacy tests).
+   */
+  readonly toolCallTracker: ToolCallTracker | undefined;
   /** Mutable so Session can update per-request without recreating the agent — sub-agent paths still inherit a snapshot. */
   userTimezone: string | undefined;
   private readonly changesetManager: ChangesetManagerLike | undefined;
@@ -338,6 +351,7 @@ export class Agent implements IAgent {
       pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
+    this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
     this.costGuard = config.costGuard
@@ -1105,6 +1119,20 @@ export class Agent implements IAgent {
         masked = maskSecretPatterns(masked);
       }
       const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name);
+
+      // H-024 shadow mode: observe tool-call sequences for anomaly patterns.
+      // Channel publishes happen inside checkAnomaly; we intentionally discard
+      // the return value — shadow mode does NOT block dispatch or surface a
+      // warning to the user. Enforcement is deferred to v1.7.3 after we
+      // observe false-positive rate in production. The preview is built via
+      // formatToolCallPreview (secret-safe: URL-only for http_request, path-
+      // only for read_file/write_file, strips known secret-bearing fields
+      // from the catch-all). record() + checkAnomaly() are O(1) per call.
+      if (this.toolCallTracker) {
+        const preview = formatToolCallPreview(tc.name, tc.input);
+        this.toolCallTracker.record(tc.name, preview);
+        this.toolCallTracker.checkAnomaly(); // void — channel-side-effect only
+      }
 
       // Truncate oversized tool results to prevent context window waste
       const toolResultLimit = this.toolContext.userConfig?.max_tool_result_chars ?? Agent.DEFAULT_MAX_TOOL_RESULT_CHARS;
