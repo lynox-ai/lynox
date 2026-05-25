@@ -3185,6 +3185,42 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // Pins the regression that surfaced on rafael prod 2026-05-26 (v1.7.4):
+  // /api/providers/status returned Mistral with `unknown` "Configured (no runs
+  // yet)" whenever MISTRAL_API_KEY was set at engine level but the user hadn't
+  // produced a Mistral run yet. The StatusBar aggregator (severity-ranks
+  // unknown > none) then bubbled that over a fully healthy Anthropic primary
+  // and rendered "Anthropic · API ?" in the footer despite the API being fine.
+  // Day-1 state for every prod managed tenant with the EU fallback key.
+  //
+  // Fix-side contract: the secondary provider with a configured key but no
+  // run history yet must return `none` ("Ready"), mirroring the primary's
+  // `getRunBasedStatus` semantics for the same state. The aggregator can
+  // then leave a healthy primary alone.
+  describe('getMistralStatus — no-runs-yet healthy-config', () => {
+    it('returns indicator=none when MISTRAL_API_KEY is set and no Mistral run is recorded', () => {
+      // Recent-runs default = a single Anthropic run (no model_id), so
+      // `.find(r => r.model_id?.toLowerCase().startsWith("mistral"))` resolves
+      // to undefined — the path we want to pin.
+      const status = (api as unknown as { getMistralStatus(): { indicator: string; description: string; provider: string } }).getMistralStatus();
+      expect(status.provider).toBe('Mistral AI');
+      expect(status.indicator).toBe('none');
+    });
+
+    it('still flags Mistral as major when the most recent Mistral run failed within 5min', () => {
+      const prevImpl = mockHistoryGetRecentRuns.getMockImplementation();
+      mockHistoryGetRecentRuns.mockReturnValueOnce([
+        { id: 'r-fail', model_id: 'mistral-large-2512', status: 'failed', created_at: new Date().toISOString() },
+      ]);
+      try {
+        const status = (api as unknown as { getMistralStatus(): { indicator: string; description: string; provider: string } }).getMistralStatus();
+        expect(status.indicator).toBe('major');
+      } finally {
+        if (prevImpl) mockHistoryGetRecentRuns.mockImplementation(prevImpl);
+      }
+    });
+  });
+
   describe('POST /api/artifacts', () => {
     it('accepts a csv data-file artifact', async () => {
       const res = await jsonFetch('/api/artifacts', {
