@@ -346,11 +346,19 @@ export class WorkerLoop {
     const { getPipeline, runSavedWorkflow } = await import('../tools/builtin/pipeline.js');
     const planned = getPipeline(task.pipeline_id, runHistory);
 
+    // Benign race: the workflow was deleted between scheduling and this
+    // executor tick. Record a skip (so the task list reflects reality) and
+    // return without surfacing to Bugsink — there's nothing to fix in code.
+    if (!planned) {
+      this.recordAndNotify(task, `Pipeline ${task.pipeline_id} no longer exists (skipped)`, false);
+      return;
+    }
+
     // Hard gate: WorkerLoop only runs autonomous pipelines. Interactive
     // pipelines that somehow got onto a cron schedule (legacy data, manual
     // edit, sync from another instance) are refused at the boundary so they
     // can't hang waiting for a non-existent live session.
-    if (planned && planned.mode !== 'autonomous') {
+    if (planned.mode !== 'autonomous') {
       throw new Error(
         `Pipeline "${planned.id}" is marked '${planned.mode}'; WorkerLoop only runs 'autonomous' pipelines. ` +
         `Convert it (remove ask_user/ask_secret steps) or invoke it manually from a chat session.`,
