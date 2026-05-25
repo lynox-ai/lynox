@@ -1022,3 +1022,80 @@ describe('template-integrity guard (T2-W1)', () => {
     });
   });
 });
+
+// H-011: run_workflow must read provider config from the agent's fresh
+// getProviderConfig() snapshot, not the stale toolContext.userConfig — the
+// latter was captured at engine init and is not updated after a runtime
+// reloadUserConfig (UI provider-switch). Pattern recidivism of PRs #568/#570/#571.
+describe('run_workflow — H-011: fresh provider config via getProviderConfig()', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+  });
+
+  it('uses fresh getProviderConfig() snapshot, NOT stale userConfig (UI provider-switch)', async () => {
+    // Stale userConfig: anthropic (pre-switch).
+    const staleConfig: LynoxUserConfig = {
+      api_key: 'anthropic-key',
+      api_base_url: 'https://api.anthropic.com/v1',
+      provider: 'anthropic',
+    };
+
+    // Fresh snapshot: mistral (post-switch).
+    const getProviderConfig = vi.fn(() => ({
+      provider: 'openai' as const,
+      apiKey: 'mistral-key',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'mistral-large-2512',
+      openaiAuth: 'static' as const,
+    }));
+
+    const baseAgent = makePipelineAgent({ config: staleConfig });
+    const agent = { ...baseAgent, getProviderConfig } as unknown as IAgent;
+
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+    await runWorkflowTool.handler(
+      { name: 'single', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+
+    expect(getProviderConfig).toHaveBeenCalled();
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+
+    // runManifest(manifest, config, options) — config is arg[1].
+    const cfgArg = mockRunManifest.mock.calls[0]![1] as LynoxUserConfig;
+    expect(cfgArg.api_key).toBe('mistral-key');
+    expect(cfgArg.api_base_url).toBe('https://api.mistral.ai/v1');
+    expect(cfgArg.provider).toBe('openai');
+    expect(cfgArg.openai_model_id).toBe('mistral-large-2512');
+    // CRITICAL: stale anthropic-key MUST NOT leak through.
+    expect(cfgArg.api_key).not.toBe('anthropic-key');
+  });
+
+  it('falls back to userConfig when agent has no getProviderConfig (legacy mock)', async () => {
+    const userConfig: LynoxUserConfig = {
+      api_key: 'anthropic-key',
+      api_base_url: 'https://api.anthropic.com/v1',
+      provider: 'anthropic',
+    };
+
+    // Legacy IAgent mock: makePipelineAgent doesn't attach getProviderConfig.
+    const agent = makePipelineAgent({ config: userConfig });
+    expect((agent as { getProviderConfig?: unknown }).getProviderConfig).toBeUndefined();
+
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+    await expect(
+      runWorkflowTool.handler(
+        { name: 'single', steps: [makeStep('s1', 'do thing')] },
+        agent,
+      ),
+    ).resolves.not.toThrow();
+
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    const cfgArg = mockRunManifest.mock.calls[0]![1] as LynoxUserConfig;
+    expect(cfgArg.api_key).toBe('anthropic-key');
+    expect(cfgArg.provider).toBe('anthropic');
+  });
+});

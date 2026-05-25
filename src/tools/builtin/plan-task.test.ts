@@ -565,3 +565,89 @@ describe('plan_task auto-planning fallback', () => {
     expect(parsed.workflow_id).toBeDefined();
   });
 });
+
+// H-011: plan_task must read provider config from the agent's fresh
+// getProviderConfig() snapshot, not the stale toolContext.userConfig — the
+// latter was captured at engine init and is not updated after a runtime
+// reloadUserConfig (UI provider-switch). Pattern recidivism of PRs #568/#570/#571.
+describe('plan_task — H-011: fresh provider config via getProviderConfig()', () => {
+  it('uses fresh getProviderConfig() snapshot, NOT stale userConfig (UI provider-switch)', async () => {
+    mockPlanDAG.mockResolvedValueOnce({
+      steps: [{ id: 'do', task: 'do it' }],
+      reasoning: '',
+      estimatedCost: 0.01,
+    });
+
+    // Stale userConfig: anthropic (pre-switch).
+    const staleConfig: LynoxUserConfig = {
+      api_key: 'anthropic-key',
+      api_base_url: 'https://api.anthropic.com/v1',
+      provider: 'anthropic',
+    };
+
+    // Fresh snapshot: mistral (post-switch).
+    const getProviderConfig = vi.fn(() => ({
+      provider: 'openai' as const,
+      apiKey: 'mistral-key',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'mistral-large-2512',
+      openaiAuth: 'static' as const,
+    }));
+
+    const agent = makeAgent(
+      { promptUser: undefined, getProviderConfig } as Partial<IAgent>,
+      staleConfig,
+    );
+
+    await planTaskTool.handler({ summary: 'Auto-plan task' }, agent);
+
+    expect(getProviderConfig).toHaveBeenCalled();
+    expect(mockPlanDAG).toHaveBeenCalledOnce();
+    const call = mockPlanDAG.mock.calls[0]!;
+    const planDAGOpts = call[1] as {
+      apiKey: string;
+      apiBaseURL: string;
+      provider: string;
+      openaiModelId: string;
+    };
+    // CRITICAL: fresh snapshot wins. Stale anthropic-key MUST NOT leak through.
+    expect(planDAGOpts.apiKey).toBe('mistral-key');
+    expect(planDAGOpts.apiBaseURL).toBe('https://api.mistral.ai/v1');
+    expect(planDAGOpts.provider).toBe('openai');
+    expect(planDAGOpts.openaiModelId).toBe('mistral-large-2512');
+    expect(planDAGOpts.apiKey).not.toBe('anthropic-key');
+  });
+
+  it('falls back to userConfig when agent has no getProviderConfig (legacy mock)', async () => {
+    mockPlanDAG.mockResolvedValueOnce({
+      steps: [{ id: 'do', task: 'do it' }],
+      reasoning: '',
+      estimatedCost: 0.01,
+    });
+
+    const userConfig: LynoxUserConfig = {
+      api_key: 'anthropic-key',
+      api_base_url: 'https://api.anthropic.com/v1',
+      provider: 'anthropic',
+    };
+
+    // Legacy IAgent mock: no getProviderConfig method (returns undefined,
+    // typeof check falls through).
+    const agent = makeAgent({ promptUser: undefined }, userConfig);
+    expect((agent as { getProviderConfig?: unknown }).getProviderConfig).toBeUndefined();
+
+    await expect(
+      planTaskTool.handler({ summary: 'Auto-plan task' }, agent),
+    ).resolves.not.toThrow();
+
+    expect(mockPlanDAG).toHaveBeenCalledOnce();
+    const planDAGOpts = mockPlanDAG.mock.calls[0]![1] as {
+      apiKey: string;
+      apiBaseURL: string;
+      provider: string;
+    };
+    expect(planDAGOpts.apiKey).toBe('anthropic-key');
+    expect(planDAGOpts.apiBaseURL).toBe('https://api.anthropic.com/v1');
+    expect(planDAGOpts.provider).toBe('anthropic');
+  });
+});
