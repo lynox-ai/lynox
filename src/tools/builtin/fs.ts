@@ -3,6 +3,7 @@ import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -54,7 +55,14 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
         }
         filePath = resolved;
       }
-      return readFileSync(filePath, 'utf-8');
+      // Wrap file content in untrusted-data envelope. The content originates
+      // outside the agent's trust boundary (user-provided file, attacker-
+      // controllable in shared/managed workspaces) so any prompt-injection
+      // payload it carries must be presented to the LLM as data, not framing.
+      // See H-001 (OVERNIGHT-PUNCH-LIST-2026-05-25) — read_file used to be
+      // exempt from the wrap via the INTERNAL_TOOLS allowlist in agent.ts.
+      const content = readFileSync(filePath, 'utf-8');
+      return wrapUntrustedData(content, `file:${basename(filePath)}`);
     } catch (err: unknown) {
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new Error(`read_file: ${cause.message}`, { cause });

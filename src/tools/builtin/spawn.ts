@@ -10,7 +10,7 @@ import { getRole, getRoleNames, applyTierGate } from '../../core/roles.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
-import { escapeXml } from '../../core/data-boundary.js';
+import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
@@ -617,7 +617,14 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       const spec = input.agents[i]!;
 
       if (outcome.status === 'fulfilled') {
-        sections.push(`## ${spec.name}\n\n${outcome.value.result}`);
+        // Wrap sub-agent return value in untrusted-data envelope. A sub-agent
+        // can ingest attacker-controlled content (read_file output, web pages,
+        // mail bodies) and return it verbatim — without the envelope, the
+        // parent would see that content as trusted framing rather than data.
+        // See H-002 (OVERNIGHT-PUNCH-LIST-2026-05-25) — spawn_agent used to
+        // be exempt from the wrap via the INTERNAL_TOOLS allowlist in agent.ts.
+        const wrapped = wrapUntrustedData(outcome.value.result, `sub_agent:${spec.name}`);
+        sections.push(`## ${spec.name}\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error
