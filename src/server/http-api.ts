@@ -1099,7 +1099,7 @@ export class LynoxHTTPApi {
 
     this.server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only)';
-      process.stderr.write(`LYNOX HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
+      process.stderr.write(`lynox HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
       if (ALLOWED_IPS.length > 0) {
         process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
       }

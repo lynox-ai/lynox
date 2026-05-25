@@ -75,7 +75,7 @@ async function fetchWithRedirects(url: string, ctx?: ToolContext | undefined): P
     // one shot — no rebind window between validate and connect.
     const response = await fetchPinned(currentUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Lynox/1.0; +https://lynox.ai)',
+        'User-Agent': 'Mozilla/5.0 (compatible; lynox/1.0; +https://lynox.ai)',
         Accept: 'text/html,application/xhtml+xml,*/*',
       },
       signal: AbortSignal.timeout(30_000),
