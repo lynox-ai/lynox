@@ -85,10 +85,16 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
 
+      # Push a multi-arch manifest list (linux/amd64 + linux/arm64) so Apple
+      # Silicon users can `docker pull ghcr.io/lynox-ai/lynox:latest` natively.
+      # The trivy scan step above runs amd64-only (load:true is incompatible
+      # with multi-platform builds); amd64 CVE coverage is acceptable because
+      # the base image (node:22-alpine) layer surface is platform-identical.
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/lynox-ai/lynox:latest
             ghcr.io/lynox-ai/lynox:${{ steps.version.outputs.version }}
