@@ -15,7 +15,7 @@ const ENV_SAFE_PREFIXES = [
   'TMPDIR', 'TMP', 'TEMP',
   'NODE_', 'NPM_',
   'EDITOR', 'VISUAL', 'PAGER',
-  'GIT_', 'SSH_AUTH_SOCK',
+  'GIT_',
   'DISPLAY', 'XDG_',
   'HOSTNAME', 'PWD', 'OLDPWD', 'SHLVL',
   'COLORTERM', 'FORCE_COLOR', 'NO_COLOR',
@@ -62,7 +62,12 @@ const CREDENTIAL_NAME_RE = /(TOKEN|KEY|SECRET|PASSWORD)/i;
  *    bash invocation to see.
  *
  * Pre-isolation behaviour (no agent, or `isolation` unset) is the previous
- * allow-listed env minus NODE_OPTIONS / NODE_EXTRA_CA_CERTS.
+ * allow-listed env minus NODE_OPTIONS / NODE_EXTRA_CA_CERTS — and minus
+ * SSH_AUTH_SOCK / GIT_ASKPASS / GIT_SSH_COMMAND (H-004): these are
+ * auth-bearing handles that don't match the credential-name regex but let
+ * the LLM sign operations as the user (ssh-agent forwarding, arbitrary
+ * binary exec via git's askpass / ssh-command hooks). Callers who need
+ * ssh-agent auth must opt in deliberately via `isolation.envVars`.
  */
 export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
   // Air-gapped: minimal env, nothing inherited beyond the bare essentials.
@@ -95,6 +100,15 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
   // Remove dangerous NODE_ vars that could be exploited for code injection
   delete safeEnv.NODE_OPTIONS;
   delete safeEnv.NODE_EXTRA_CA_CERTS;
+
+  // H-004: auth-bearing handles that don't match CREDENTIAL_NAME_RE.
+  // Defense-in-depth — even if a future edit re-adds the prefix, these
+  // explicit drops fire AFTER the allow-list loop and AFTER the regex
+  // filter, BEFORE the isolation.envVars merge (which is the intentional
+  // opt-in path for callers like spawn_agent that need ssh-agent auth).
+  delete safeEnv.SSH_AUTH_SOCK;    // ssh-agent socket — lets LLM sign as the user
+  delete safeEnv.GIT_ASKPASS;       // exec'd binary — captures git credentials
+  delete safeEnv.GIT_SSH_COMMAND;   // replaces ssh binary in git operations
 
   // Per-spawn env overrides for scoped/sandboxed levels.
   // These are caller-explicit — spawn_agent / orchestrator deliberately
