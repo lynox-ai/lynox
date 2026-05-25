@@ -122,7 +122,7 @@ export { setTenantWorkspace, ensureContextWorkspace } from './core/workspace.js'
 import { stdout, stderr, argv } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
-import { existsSync, readFileSync, statSync, lstatSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 import { setDataDir } from './core/config.js';
@@ -349,13 +349,45 @@ Docs: https://docs.lynox.ai
 }
 
 
+/**
+ * Compare two filesystem paths after realpath-resolving them, so that the
+ * comparison is robust to symlinks on BOTH sides.
+ *
+ * Why this exists (BI-002, HN-launch hardening):
+ *   `fileURLToPath(import.meta.url)` returns the realpath of `dist/index.js`,
+ *   but `process.argv[1]` is the npm bin shim — always a symlink
+ *   (`.bin/lynox` → `../@lynox-ai/core/dist/index.js`), and on macOS the path
+ *   itself may transit `/private/tmp` symlinked from `/tmp`. A strict-equality
+ *   compare therefore fails for every `npx @lynox-ai/core` invocation, so
+ *   `runCLI()` was never invoked and the process exited 0 with zero output.
+ *
+ * The `.ts → .js` heuristic is preserved for the `tsx` dev loop where
+ * `import.meta.url` resolves to a `.ts` source while `argv[1]` is the compiled
+ * `.js` entry (or vice-versa) and realpath alone won't bridge the extension.
+ *
+ * Exported (not just module-local) so the symlink scenario is covered by a
+ * vitest regression. `realpathSync` is wrapped in try/catch because a missing
+ * file (e.g. argv[1] pointing at a deleted shim) must degrade to the literal
+ * path string, never throw inside boot.
+ */
+export function isSameModule(thisFile: string, mainArg: string | undefined): boolean {
+  if (!mainArg) return false;
+  const resolveReal = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  const a = resolveReal(thisFile);
+  const b = resolveReal(mainArg);
+  return a === b || a.replace(/\.ts$/, '.js') === b;
+}
+
 // Entry point detection
 const isMainModule = (() => {
   try {
-    const thisFile = fileURLToPath(import.meta.url);
-    const mainArg = process.argv[1];
-    if (!mainArg) return false;
-    return thisFile === mainArg || thisFile.replace(/\.ts$/, '.js') === mainArg;
+    return isSameModule(fileURLToPath(import.meta.url), process.argv[1]);
   } catch {
     return false;
   }
