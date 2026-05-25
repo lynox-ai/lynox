@@ -198,6 +198,19 @@ export class Engine {
   private _mailStateDb: import('../integrations/mail/state.js').MailStateDb | null = null;
   private _inboxLlmRegion: 'us' | 'eu' | null = null;
   private _inboxRebootstrapInflight: Promise<void> | null = null;
+  /**
+   * H-012 follow-up — drain-window privacy guard. While the engine is
+   * mid-rebootstrap on a cross-region provider switch (e.g. Anthropic-US
+   * → Mistral-EU), `await old.shutdown()` can take seconds. New mail
+   * arriving via the MailContext watcher during that window would
+   * otherwise still fire into the OLD US runtime's hook closure —
+   * GDPR Art. 44+ transfer if the user explicitly switched to EU
+   * residency. Suspension flips on BEFORE the shutdown await and clears
+   * AFTER the new runtime is wired (or in the `finally` on bootstrap
+   * failure). Mail server keeps mails unread so the next polling cycle
+   * picks them up via the NEW runtime.
+   */
+  private _inboxClassifierSuspended: boolean = false;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -437,6 +450,13 @@ export class Engine {
       apiBaseURL: this.userConfig.api_base_url,
     });
     if (newRegion === this._inboxLlmRegion) return;
+    // Privacy guard: suspend classification BEFORE we touch the old
+    // runtime so any mail that lands during `await old.shutdown()` is
+    // not fired into the US-bound closure. The wrapper installed below
+    // (and in `_initIntegrations`) honors this flag — mail stays unread
+    // on the server and gets picked up by the next polling cycle via
+    // the NEW EU-bound runtime.
+    this._inboxClassifierSuspended = true;
     try {
       const old = this._inboxRuntime;
       // Detach the live runtime first so any concurrent mail arrival
@@ -484,7 +504,14 @@ export class Engine {
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
-        this._mailContext.hooks.onInboundMail = runtime.hook;
+        // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
+        // true (e.g. during a future drain window) the hook short-
+        // circuits without touching the runtime closure. Preserves the
+        // `Promise<void>` return type the MailContext awaits.
+        this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
+          if (this._inboxClassifierSuspended) return;
+          return runtime.hook(accountId, envelope);
+        };
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
       }
       this._inboxRuntime = runtime;
@@ -496,6 +523,10 @@ export class Engine {
         + 'classifier disabled until next restart:',
         err,
       );
+    } finally {
+      // Always clear: a mid-flight bootstrap failure must not leave the
+      // engine with suspension stuck on (mail would silently pile up).
+      this._inboxClassifierSuspended = false;
     }
   }
 
@@ -1034,7 +1065,14 @@ export class Engine {
         // the MailContext is null — the runtime is still alive and the
         // hook can be invoked manually by other inbound-channel adapters.
         if (this._mailContext) {
-          this._mailContext.hooks.onInboundMail = runtime.hook;
+          // Suspension-aware wrapper — symmetric with the rebootstrap
+          // path. The flag is only set during cross-region rebootstrap;
+          // on the cold-boot path it is permanently false, so the
+          // wrapper is a zero-cost passthrough until the first switch.
+          this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
+            if (this._inboxClassifierSuspended) return;
+            return runtime.hook(accountId, envelope);
+          };
           // Auto-trigger backfill on account-connect. The adapter gates
           // re-runs via `state.hasAnyItemForAccount`, so a re-credential
           // does not pull provider.list() again.
