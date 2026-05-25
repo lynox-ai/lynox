@@ -1,11 +1,17 @@
 import { getApiBase } from '../config.svelte.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
+import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
+
+// Re-export the canonical UsageInfo + helpers from the pure module so existing
+// `import { UsageInfo } from './chat.svelte.js'` callers keep working.
+export { usageFromDoneEvent } from './chat-usage.js';
+export type { UsageInfo } from './chat-usage.js';
 
 // ---------------------------------------------------------------------------
 // Follow-up parsing (mirrors core telegram-formatter logic)
@@ -60,22 +66,8 @@ function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; clea
 	return { suggestions: suggestions.slice(0, MAX_FOLLOW_UPS), cleanText };
 }
 
-export interface UsageInfo {
-	tokensIn: number;
-	tokensOut: number;
-	cacheRead: number;
-	cacheWrite: number;
-	costUsd: number;
-	/** Cumulative third-party API cost (DataForSEO etc.) charged this message,
-	 *  populated by the api_cost stream event. Distinct from `costUsd` which is
-	 *  LLM-only. Surfaces in the thread footer rollup. */
-	apiCostUsd?: number;
-	/** Actual model that produced this turn — comes from the engine's turn_end
-	 *  event. Differs from the session default when the auto-downgrade flipped
-	 *  to the haiku-tier for a simple task; surfaces in the footer so the user
-	 *  can tell which model their reply came from. */
-	model?: string;
-}
+// `UsageInfo` and `usageFromDoneEvent` live in ./chat-usage.ts (pure module,
+// unit-tested) and are re-exported at the top of this file for back-compat.
 
 /** Single profiled-API call attributed to a chat message. Populated by the
  *  api_cost stream event so the UI can render "$0.0006 (DataForSEO) — /v3/serp/…"
@@ -1349,24 +1341,21 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'done': {
-			// Usage fallback: if the `turn_end` SSE frame was lost in transit
-			// (reconnect, dropped stream), the live message never received its
-			// usage and the footer would show no stats until a reload. The engine
-			// echoes the persisted per-run total on the `done` event — adopt it.
-			// Guarded on `!msg.usage` so a normal `turn_end` (which accumulates
-			// across multi-turn runs) is never overwritten.
-			const doneUsage = data['usage'];
-			if (!msg.usage && doneUsage && typeof doneUsage === 'object') {
-				const u = doneUsage as Record<string, unknown>;
-				msg.usage = {
-					tokensIn: Number(u['tokensIn'] ?? 0),
-					tokensOut: Number(u['tokensOut'] ?? 0),
-					cacheRead: Number(u['cacheRead'] ?? 0),
-					cacheWrite: Number(u['cacheWrite'] ?? 0),
-					costUsd: Number(u['costUsd'] ?? 0),
-					...(typeof u['model'] === 'string' ? { model: u['model'] } : {}),
-				};
-			}
+			// Engine echoes the authoritative per-run total on the `done` event via
+			// `session.getLastRunUsage()` — the same value persisted to RunHistory
+			// (`cost_usd`) and surfaced in `/api/history/cost/daily`. Adopt it as
+			// the single source of truth for the footer.
+			//
+			// `mergeDoneUsage` REPLACES (not adds) any `turn_end`-accumulated total
+			// because multi-turn agent loops (api_setup, web_research, plan_task,
+			// spawn) fire one `turn_end` per LLM call in the loop, and the UI used
+			// to sum them while the engine reports a single per-run cumulative
+			// figure. The accumulation showed 3-6× actual cost — a credibility
+			// bug at HN-launch. Third-party `apiCostUsd` (DataForSEO etc.) is
+			// preserved across the replacement because the engine's run-usage
+			// covers LLM cost only.
+			const merged = mergeDoneUsage(msg.usage, data['usage']);
+			if (merged) msg.usage = merged;
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
 			// cases where the user never completes a run. Fire-and-forget:
