@@ -195,6 +195,9 @@ export class Engine {
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _scheduledSendPoller: import('../integrations/mail/mail-scheduled-poller.js').ScheduledSendPoller | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
+  private _mailStateDb: import('../integrations/mail/state.js').MailStateDb | null = null;
+  private _inboxLlmRegion: 'us' | 'eu' | null = null;
+  private _inboxRebootstrapInflight: Promise<void> | null = null;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -372,13 +375,22 @@ export class Engine {
   }
 
   /**
-   * Push the freshly created LLM client into Memory + KnowledgeLayer so
-   * any client recreation (UI provider-switch, BYOK key rotation, vault
-   * reload) propagates instead of leaving stale clients on the old
-   * provider — a GDPR / EU-residency leak path: Memory consolidation +
-   * KG entity-extraction + HyDE retrieval all embed user content in LLM
-   * prompts. Setters are null-guarded for the pre-init case (early
-   * reloadCredentials before `_initMemoryAndKnowledge`).
+   * Push the freshly created LLM client into Memory + KnowledgeLayer + the
+   * unified-inbox classifier so any client recreation (UI provider-switch,
+   * BYOK key rotation, vault reload) propagates instead of leaving stale
+   * clients on the old provider — a GDPR / EU-residency leak path: Memory
+   * consolidation + KG entity-extraction + HyDE retrieval + inbox classifier
+   * all embed user content in LLM prompts.
+   *
+   * Inbox path (H-012): when the effective region (resolveInboxLlmRegion of
+   * the new provider) differs from the bound region, the runtime is torn
+   * down and re-bootstrapped — InboxRuntime closes over a region-pinned
+   * LLMCaller at bootstrap time, so swapping the inner client in place is
+   * not possible. The rebootstrap is async + fire-and-forget; tests +
+   * shutdown await `_inboxRebootstrapInflight` for determinism.
+   *
+   * Setters are null-guarded for the pre-init case (early reloadCredentials
+   * before `_initMemoryAndKnowledge` / `_initIntegrations`).
    */
   private _propagateProviderSwitch(apiKey: string | undefined): void {
     if (this.memory) {
@@ -391,6 +403,99 @@ export class Engine {
     }
     if (this.knowledgeLayer) {
       this.knowledgeLayer.setAnthropicClient(this.client);
+    }
+    // Inbox classifier — gated on `_inboxRuntime` so the pre-`_initIntegrations`
+    // path (constructor's _recreateClient via _initContextAndIdentity) is a
+    // no-op. Once initialised, defer to the async helper so the await chain
+    // doesn't leak into this sync method's signature.
+    if (this._inboxRuntime) {
+      this._inboxRebootstrapInflight = this
+        ._rebootstrapInboxOnProviderSwitch()
+        .finally(() => { this._inboxRebootstrapInflight = null; });
+    }
+  }
+
+  /**
+   * Rebuild the inbox classifier runtime when a UI provider-switch crosses
+   * the us/eu region boundary. Idempotent + region-gated: a same-region
+   * rotation (BYOK refresh, Anthropic→Anthropic) short-circuits to avoid
+   * the queue.drain() + reminder-poller restart cost. When the region
+   * crosses, the old runtime is drained via `shutdown()` and a fresh one
+   * is bootstrapped against the same MailStateDb + the current secret /
+   * env config.
+   *
+   * Best-effort: any failure (mistral key missing post-switch, bootstrap
+   * exception, etc.) is logged and leaves the engine without an inbox
+   * runtime rather than crashing the whole engine — matching the
+   * `_initIntegrations` posture for the cold-boot path.
+   */
+  private async _rebootstrapInboxOnProviderSwitch(): Promise<void> {
+    if (!this._inboxRuntime || !this._mailStateDb) return;
+    const newRegion = resolveInboxLlmRegion({
+      envOverride: process.env['LYNOX_INBOX_LLM_REGION'],
+      provider: this.userConfig.provider,
+      apiBaseURL: this.userConfig.api_base_url,
+    });
+    if (newRegion === this._inboxLlmRegion) return;
+    try {
+      const old = this._inboxRuntime;
+      // Detach the live runtime first so any concurrent mail arrival
+      // doesn't see a half-disposed instance.
+      this._inboxRuntime = null;
+      try { await old.shutdown(); } catch { /* best-effort drain */ }
+      // Re-wire the MailContext hook (only present when a vault exists)
+      // — without this, the watcher would keep firing into the disposed
+      // runtime's hook closure. exactOptionalPropertyTypes forbids `=
+      // undefined`, so `delete` is the correct idiom here.
+      if (this._mailContext) {
+        delete this._mailContext.hooks.onInboundMail;
+        delete this._mailContext.hooks.onAccountAdded;
+      }
+      const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
+      const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
+      const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
+      const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
+        ?? this.secretStore?.resolve('MISTRAL_API_KEY')
+        ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
+        ?? process.env['MISTRAL_API_KEY']
+        ?? undefined;
+      const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
+      const folderBlacklist = new Set(
+        folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
+      );
+      const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
+      const disabledAccounts = new Set(
+        disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
+      );
+      const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
+        mailStateDb: this._mailStateDb,
+        anthropicClient: this.client,
+        crm: this._crm,
+        sensitiveMode,
+        llmRegion: newRegion,
+        requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
+        privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
+      };
+      if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
+      if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
+      if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
+      bootOpts.notificationRouter = this._notificationRouter;
+      const runHistoryForInbox = this.getRunHistory();
+      if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
+      const runtime = bootstrapInbox(bootOpts);
+      if (this._mailContext) {
+        this._mailContext.hooks.onInboundMail = runtime.hook;
+        this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
+      }
+      this._inboxRuntime = runtime;
+      this._inboxLlmRegion = newRegion;
+    } catch (err) {
+      // Same posture as the cold-boot path — surface but don't crash.
+      console.error(
+        '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
+        + 'classifier disabled until next restart:',
+        err,
+      );
     }
   }
 
@@ -818,6 +923,10 @@ export class Engine {
       // share the connection even when no vault is configured (e.g. CI,
       // test fixtures, browse-only mode).
       mailStateDb = new MailStateDb();
+      // Retain on the engine so `_propagateProviderSwitch` can re-bootstrap
+      // the inbox classifier without re-opening the SQLite file (and racing
+      // the live MailContext that still holds the original connection).
+      this._mailStateDb = mailStateDb;
       if (this.secretVault) {
         const mailCtx = new MailContext(mailStateDb, this.secretVault, undefined, {}, this._googleAuth);
         await mailCtx.init();
@@ -877,6 +986,11 @@ export class Engine {
           provider: this.userConfig.provider,
           apiBaseURL: this.userConfig.api_base_url,
         });
+        // Track the bound region so `_propagateProviderSwitch` can detect
+        // a region transition (us<->eu) on a UI provider-switch and rebuild
+        // the runtime — without this, switching the main provider to Mistral
+        // would leave the classifier on Anthropic-US (the H-012 leak).
+        this._inboxLlmRegion = llmRegion;
         const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
           ?? this.secretStore?.resolve('MISTRAL_API_KEY')
           ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
@@ -1264,10 +1378,18 @@ export class Engine {
     // Drain in-flight inbox classifier jobs so a late shutdown does not
     // leave half-processed mails. drain() resolves immediately on an empty
     // queue and within seconds otherwise (per-job timeout 30s).
+    // First await any in-flight rebootstrap (e.g. shutdown racing a
+    // provider-switch) so we don't dispose a runtime that is about to be
+    // replaced and then forgotten.
+    if (this._inboxRebootstrapInflight) {
+      try { await this._inboxRebootstrapInflight; } catch { /* best-effort */ }
+    }
     if (this._inboxRuntime) {
       try { await this._inboxRuntime.shutdown(); } catch { /* best-effort */ }
       this._inboxRuntime = null;
     }
+    this._mailStateDb = null;
+    this._inboxLlmRegion = null;
 
     // Stop the scheduled-send poller — bounded interval, no in-flight
     // work to drain (sendMail awaits per-row inside the tick).
