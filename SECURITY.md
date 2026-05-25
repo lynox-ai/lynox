@@ -60,7 +60,7 @@ Internal OWASP Top 10 review of the lynox Core engine and Web UI. No critical or
 | **A05 Security Misconfiguration** | PASS | Security headers set (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, CSP, HSTS on TLS). No debug endpoints. Error responses do not leak stack traces. |
 | **A06 Vulnerable Components** | PASS | `pnpm audit` clean (0 vulnerabilities). Dependency overrides protect against known CVEs in transitive deps (path-to-regexp, cookie, lodash-es, serialize-javascript). |
 | **A07 XSS** | PASS | All markdown rendered through DOMPurify. Error messages HTML-escaped before rendering. Search highlighting escapes both text and query. SSE data JSON-stringified. Artifact iframes sandboxed (`allow-scripts` only). |
-| **A08 CSRF** | PASS | API clients use Bearer tokens. Session cookies set `SameSite=Strict`, `HttpOnly`, `Secure` (on HTTPS). |
+| **A08 CSRF** | PASS | API clients use Bearer tokens. Session cookies set `SameSite=Lax` (was `Strict` pre-v1.6.0 — relaxed for OAuth-callback compatibility; documented in CHANGELOG), `HttpOnly`, `Secure` (on HTTPS). |
 | **A09 Logging Failures** | PASS | Failed logins, rate limit hits, and security events logged. Bugsink integration (always active on managed, opt-in on self-hosted) with PII scrubbing. |
 | **A10 SSRF** | PASS | SearXNG URL validation blocks cloud metadata endpoints (169.254.x, metadata.google.internal). Scheme restricted to http/https. 5-second timeout. Private IPs allowed by design (Docker/LAN deployments). |
 
