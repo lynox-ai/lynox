@@ -14,7 +14,7 @@ This page documents what's supported today and the curated catalog of free publi
 | Flow | Status | Example |
 |------|--------|---------|
 | `none` (public, no key) | ✓ | Hacker News, Wikipedia, arXiv, Open-Meteo |
-| API key in custom header (`X-Api-Key` etc.) | ✓ | Tavily, Brevo |
+| API key in custom header (`X-Api-Key` etc.) | ✓ | Brave Search, Brevo |
 | API key in query parameter | ✓ | many news / data APIs |
 | Bearer token in `Authorization` header | ✓ | OpenAI, Anthropic, GitHub PAT |
 | Basic auth (user/pass or pre-encoded base64) | ✓ | DataForSEO |
