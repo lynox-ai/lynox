@@ -95,6 +95,17 @@ export interface AgentConfig {
    * is responsible for its own error handling.
    */
   onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
+  /**
+   * H-024 shadow mode: per-conversation `ToolCallTracker` for anomaly
+   * observability. The Session owns one instance so the rolling 20-call
+   * window survives Agent recreation (setModel / setEffort / _recreateAgent).
+   * When set, the agent records each successful tool dispatch + calls
+   * `checkAnomaly()` for channel-side-effect publishing — return value
+   * intentionally discarded (shadow mode does NOT block dispatch or surface
+   * a warning to the user). Enforcement-mode follow-up tracked for v1.7.3 /
+   * v1.8.0 after we observe false-positive rate in production.
+   */
+  toolCallTracker?: import('../core/output-guard.js').ToolCallTracker | undefined;
 }
 
 /** Minimal interface to avoid circular deps between agent and changeset module */
