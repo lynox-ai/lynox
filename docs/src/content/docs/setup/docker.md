@@ -11,6 +11,8 @@ Docker is the recommended way to run lynox in production.
 |-------|---------|
 | `ghcr.io/lynox-ai/lynox:latest` | Engine + Web UI on port 3000 (also tagged with version, e.g. `:1.4.1`) |
 
+The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`), so Apple Silicon and ARM servers can pull natively. The bundled `docker-compose.yml` pins `platform: linux/amd64` as a conservative default — remove that line in the compose service if you want native arm64 on Apple Silicon.
+
 ## Quick Start
 
 ```bash
