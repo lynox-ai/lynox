@@ -776,6 +776,17 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('runs', () => {
+    // Pre-flight key check (added 2026-05-25 to gate Anthropic SDK
+    // validateHeaders deep-throws on BYOK demo tenants without a key).
+    // Default the resolve to a fake key so the rest of these tests can
+    // exercise their actual concern. Tests that probe the "no key" state
+    // should override locally.
+    beforeEach(() => {
+      mockSecretResolve.mockImplementation((name: string) =>
+        name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null,
+      );
+    });
+
     it('returns 404 for run on unknown session', async () => {
       mockSessionGet.mockReturnValue(undefined);
       const res = await jsonFetch('/api/sessions/bad/run', {
