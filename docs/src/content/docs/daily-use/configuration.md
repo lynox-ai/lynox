@@ -24,7 +24,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 {
   "provider": "anthropic",
   "api_base_url": "https://api.mistral.ai/v1",
-  "openai_model_id": "mistral-large-latest"
+  "openai_model_id": "mistral-large-2512"
 }
 ```
 
@@ -32,9 +32,11 @@ Project configs cannot override security-sensitive fields like API keys or vault
 |---------|--------|---------|
 | `provider` | `anthropic`, `openai` (Mistral / Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini long-context), `custom` (Anthropic-compat proxy via LiteLLM), `vertex` (legacy) | `anthropic` |
 | `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
-| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-latest`, `llama3.2`) | — |
+| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-2512`, `llama3.2`) | — |
 
 Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides per provider, including a "Legacy: Vertex AI" footnote for existing `provider: vertex` users.
+
+> Prefer pinned model IDs (`mistral-large-2512`) over floating tags like `mistral-large-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
 
 ### Model & Intelligence
 
@@ -194,7 +196,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 | Variable | Purpose |
 |----------|---------|
-| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-latest`, `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
+| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-2512` (prefer pinned over `-latest`), `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
 | `ANTHROPIC_API_KEY` | API key for the provider (reused env var; leave blank for local Ollama / LM Studio without auth) |
 | `ANTHROPIC_BASE_URL` | Provider base URL — see [LLM Providers](/setup/llm-providers/) for the value per backend |
 
