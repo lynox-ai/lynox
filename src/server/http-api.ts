@@ -1667,6 +1667,35 @@ export class LynoxHTTPApi {
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
 
+      // Pre-flight: provider key must be configured before we hand off to the
+      // LLM SDK. Without this the Anthropic SDK throws deep inside
+      // validateHeaders() ("Could not resolve authentication method ..."),
+      // which surfaces in the UI as a stacktrace and lands in Bugsink as a
+      // noisy "handled" error every time someone opens a BYOK demo tenant
+      // without supplying a key. Symmetric with the `configured.api_key`
+      // check in GET /api/secrets/status.
+      const preflightStore = engine.getSecretStore();
+      const preflightCfg = engine.getUserConfig();
+      const preflightProvider = preflightCfg.provider ?? 'anthropic';
+      let preflightKeyOk: boolean;
+      if (preflightProvider === 'vertex') {
+        preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
+      } else if (preflightProvider === 'custom') {
+        const base = preflightCfg.api_base_url ?? process.env['ANTHROPIC_BASE_URL'];
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        preflightKeyOk = !!base && !!key;
+      } else if (preflightProvider === 'openai') {
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        preflightKeyOk = !!preflightCfg.api_base_url && !!key && !!preflightCfg.openai_model_id;
+      } else {
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        preflightKeyOk = !!key;
+      }
+      if (!preflightKeyOk) {
+        errorResponse(res, 400, `No ${preflightProvider} API key configured. Open Settings → Providers and add one.`);
+        return;
+      }
+
       // Client-capability negotiation. protocol=2 enables one-shot multi-question
       // ask_user via `prompt_tabs` SSE event + /reply-tabs endpoint. Older or
       // legacy clients omit it and fall back to sequential per-question prompts.
