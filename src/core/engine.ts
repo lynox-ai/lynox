@@ -305,7 +305,7 @@ export class Engine {
    */
   async reloadCredentials(): Promise<void> {
     this.userConfig = loadConfig();
-    // Wave 5d BYOK liability gate — defense-in-depth re-eval (symmetric with
+    // Wave 5d BYOK liability gate — defense-in-depth re-check (symmetric with
     // `reloadUserConfig` and the engine-boot gate). A vault rotation that
     // changes the resolved provider's base_url, or any code-path that lands
     // a non-allowlisted endpoint into `loadConfig()` output without going
