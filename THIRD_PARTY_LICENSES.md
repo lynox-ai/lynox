@@ -39,6 +39,13 @@ The full license text is available at: https://www.mozilla.org/en-US/MPL/2.0/
 
 - **web-push** - Copyright Web Push contributors (used for Push notifications)
 
+## LGPL-3.0-or-later
+
+The following dependency is licensed under the GNU Lesser General Public License v3.0 or later.
+The full license text is available at: https://www.gnu.org/licenses/lgpl-3.0.html
+
+- **libvips** - Copyright libvips contributors (https://github.com/libvips/libvips) - Bundled as prebuilt binaries via the `@img/sharp-libvips-{platform}` packages, pulled transitively through `sharp` (image-processing dependency of `@huggingface/transformers`). As required by the LGPL, users have the right to replace the bundled libvips binaries with their own builds; the prebuilt libvips binaries inside `node_modules/@img/sharp-libvips-*` can be swapped for a locally-built libvips by following the sharp installation guide at https://sharp.pixelplumbing.com/install/#custom-libvips.
+
 ## ISC License
 
 - **linkedom** - Copyright Andrea Giammarchi (also dual-listed above; ISC is the primary license)
