@@ -26,7 +26,7 @@ Three roughly-parallel workstreams. Order is best-effort; if launch traffic surf
 
 ### MCP Client (self-hosted → managed → remote HTTP)
 
-Finish the half-wired MCP client in core so lynox can talk to user-installed MCP servers (filesystem, shell, custom integrations). PRD is sprint-ready. The previously shipped MCP **server** was removed pre-HN-launch pending re-introduction with full E2E test coverage; see `pro/docs/internal/PRD-MCP-SUPPORT.md`. Three phases:
+Finish the half-wired MCP client in core so lynox can talk to user-installed MCP servers (filesystem, shell, custom integrations). PRD is sprint-ready. The previously shipped MCP **server** was removed pre-HN-launch (core PR #536) pending re-introduction with full E2E test coverage. Three phases:
 
 1. **Self-hosted stdio** — local MCP servers via stdio transport, configured per-instance.
 2. **Managed CP plumbing** — managed customers can register MCP server endpoints via the control plane; CP injects credentials.

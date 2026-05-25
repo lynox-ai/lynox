@@ -38,7 +38,7 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 - `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, Tavily fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/integrations/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/archive/whatsapp-inbox.md`.)
-- `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see `pro/docs/internal/PRD-MCP-SUPPORT.md`.)
+- `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see core PR #536.)
 - `src/types/` — 12 domain type files, barrel re-export via index.ts
 
 ### Web UI (`@lynox-ai/web-ui`, packages/web-ui/)
