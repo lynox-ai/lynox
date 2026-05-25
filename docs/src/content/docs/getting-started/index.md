@@ -65,7 +65,7 @@ lynox remembers context across conversations. The more you use it, the more it l
 
 1. **Container running** — `docker ps` shows `lynox` with status `(healthy)`
 2. **Web UI loads** — Open [localhost:3000](http://localhost:3000) and enter the token
-3. **Status bar** — Bottom of the page shows green dots for "Engine" and "API"
+3. **Status bar** — The bar at the bottom shows the active provider and API health (e.g. `Anthropic · API OK`), today's cost (e.g. `$0.04`), and today's run count. Click the cost pill to open the Activity Hub at `/app/activity`.
 4. **Send a message** — Type "Hello" and get an AI response
 
 ## Common Issues
