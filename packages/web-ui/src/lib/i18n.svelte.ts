@@ -721,6 +721,9 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? 'Double-tap ⌘' : 'Double-tap Ctrl',
 	},
 	'chat.thinking_label': { de: 'Thinking', en: 'Thinking' },
+	// EU AI Act Art. 50 §1 — persistent transparency disclosure on every assistant message
+	'chat.ai_generated_badge': { de: 'KI', en: 'AI' },
+	'chat.ai_generated_aria': { de: 'Von KI generiert', en: 'AI-generated' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
 	'chat.edit_answer': { de: 'Antworten verwerfen & neu starten', en: 'Discard answers & restart' },
 	'chat.retry_hint': { de: 'Antworten verworfen. Starte die Fragen erneut, z.B. \"stell mir die Fragen nochmal\".', en: 'Answers discarded. Start the questions again, e.g. "ask me those questions again".' },
