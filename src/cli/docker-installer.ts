@@ -21,6 +21,37 @@ import { writeFileAtomicSync } from '../core/atomic-write.js';
 const execFileAsync = promisify(execFileCb);
 
 // ---------------------------------------------------------------------------
+// Terms-of-service acceptance
+// ---------------------------------------------------------------------------
+
+const TOS_VERSION = '1';
+
+async function acceptTos(rl: ReturnType<typeof createInterface>): Promise<boolean> {
+  const lynoxDir = join(homedir(), '.lynox');
+  const flagPath = join(lynoxDir, `.tos-accepted-${TOS_VERSION}`);
+  if (existsSync(flagPath)) return true;
+
+  stdout.write(`\n  ${BOLD}Terms of Service${RESET}\n`);
+  stdout.write(`  ${DIM}https://lynox.ai/terms${RESET}\n\n`);
+  stdout.write(`  By continuing you accept the lynox terms of service\n`);
+  stdout.write(`  (ELv2 license, no warranty, no support obligation for self-host).\n\n`);
+
+  const ok = await confirm('Continue?', true, stdin.isTTY ? undefined : rl);
+  if (!ok) {
+    stdout.write(`  ${DIM}Cancelled — acceptance required to proceed.${RESET}\n`);
+    return false;
+  }
+
+  try {
+    mkdirSync(lynoxDir, { recursive: true });
+    writeFileAtomicSync(flagPath, `${new Date().toISOString()}\n`);
+  } catch {
+    // Non-fatal — the wizard proceeds even if the flag can't be persisted.
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Docker check
 // ---------------------------------------------------------------------------
 
@@ -451,6 +482,9 @@ export async function runDockerInstaller(): Promise<void> {
   try {
     stdout.write('\n' + renderGradientArt());
     stdout.write(`  ${BOLD}Install${RESET}  ${DIM}Docker setup in one command.${RESET}\n\n`);
+
+    // ── ToS acceptance ─────────────────────────────────
+    if (!(await acceptTos(rl))) return;
 
     // ── Docker check ───────────────────────────────────
     const ok = await checkDocker();
