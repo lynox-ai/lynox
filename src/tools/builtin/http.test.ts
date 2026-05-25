@@ -961,7 +961,10 @@ describe('httpRequestTool', () => {
     });
 
     it('does not emit api_cost when the api-cost-display flag is off', async () => {
-      delete process.env.LYNOX_FEATURE_API_COST_DISPLAY;
+      // Explicitly disable — the default flipped to ON for HN-launch (B-011),
+      // so deleting the env var would now resolve to enabled. We assert the
+      // disabled-state behavior, not the default value.
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '0';
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({

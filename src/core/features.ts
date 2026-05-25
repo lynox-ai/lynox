@@ -37,12 +37,14 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'api-setup-v2': true,
   // PRD-UNIFIED-API-PROFILE-V2 Phase E. Surfaces per-call cost in the tool_result
   // block + a thread-footer API rollup when an ApiProfile carries a `cost` field
-  // (per_call only — per_token / per_unit are deferred). Off by default; users
-  // opt in once their own keys are configured. The public demo MUST NOT route
-  // through paid APIs (DataForSEO etc.) — that would charge the lynox.ai bill
-  // for anonymous traffic; demo instances use only the Meridian seed data plus
-  // bundled web_search.
-  'api-cost-display': false,
+  // (per_call only — per_token / per_unit are deferred). Default-on as of the
+  // HN-launch — the "$0.0006 cost-in-chat" surface is a headline differentiator
+  // in HN-LAUNCH-POSTS.md, so self-hosters need it out-of-the-box. Set
+  // LYNOX_FEATURE_API_COST_DISPLAY=0 to disable. Emission is still guarded by
+  // the profile having a per_call `cost` field, so unprofiled traffic and the
+  // public demo (which routes only through Meridian seed + bundled web_search,
+  // never paid APIs like DataForSEO) emit no cost events and incur no charges.
+  'api-cost-display': true,
 };
 
 // Dynamic registry for Pro/plugin feature flags
