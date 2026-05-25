@@ -279,13 +279,22 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     const hasSteps = (input.steps ?? []).length > 0;
 
     // Auto-plan fallback: no phases AND no steps → use planDAG()
+    // H-011: prefer fresh getProviderConfig() snapshot over stale userConfig.
+    // userConfig is captured at engine init and goes stale after a runtime
+    // provider-switch (reloadUserConfig); the snapshot accessor reflects the
+    // post-switch state. Tolerate legacy mocks without getProviderConfig via
+    // typeof-check + fall back to userConfig. Pattern recidivism of #568/#570/#571.
     const planConfig = agent.toolContext.userConfig;
-    if (!hasPhases && !hasSteps && planConfig.api_key) {
+    const planProv = typeof (agent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
+      ? (agent as { getProviderConfig: () => import('../../types/agent.js').ProviderConfigSnapshot }).getProviderConfig()
+      : null;
+    const planApiKey = planProv?.apiKey ?? planConfig.api_key;
+    if (!hasPhases && !hasSteps && planApiKey) {
       const plan = await planDAG(input.summary, {
-        apiKey: planConfig.api_key,
-        apiBaseURL: planConfig.api_base_url,
-        provider: planConfig.provider,
-        openaiModelId: planConfig.openai_model_id,
+        apiKey: planApiKey,
+        apiBaseURL: planProv?.apiBaseURL ?? planConfig.api_base_url,
+        provider: planProv?.provider ?? planConfig.provider,
+        openaiModelId: planProv?.openaiModelId ?? planConfig.openai_model_id,
         maxSteps: 10,
         projectContext: input.context?.summary,
       });

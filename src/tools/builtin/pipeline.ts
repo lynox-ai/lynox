@@ -754,13 +754,33 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     },
   },
   handler: async (input: RunPipelineInput, agent): Promise<string> => {
-    const pipelineConfig = agent.toolContext.userConfig;
+    const rawPipelineConfig = agent.toolContext.userConfig;
     const pipelineTools = agent.toolContext.tools;
     const pipelineStreamHandler = agent.toolContext.streamHandler;
     const pipelineRunHistory = agent.toolContext.runHistory;
-    if (!pipelineConfig) {
+    if (!rawPipelineConfig) {
       return 'Error: Workflow config not initialized. Workflow tools are not available.';
     }
+
+    // H-011: prefer fresh getProviderConfig() snapshot over stale userConfig.
+    // toolContext.userConfig is captured at engine init and goes stale after a
+    // runtime provider-switch (reloadUserConfig); the snapshot accessor reflects
+    // the post-switch state. Sub-steps run via runManifest -> runtime-adapter
+    // read config.{api_key,api_base_url,provider,openai_model_id}, so we shape
+    // a fresh overlay. Tolerate legacy mocks without getProviderConfig via
+    // typeof-check + fall back to userConfig. Pattern recidivism of #568/#570/#571.
+    const pipelineProv = typeof (agent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
+      ? (agent as { getProviderConfig: () => import('../../types/agent.js').ProviderConfigSnapshot }).getProviderConfig()
+      : null;
+    const pipelineConfig: LynoxUserConfig = pipelineProv
+      ? {
+          ...rawPipelineConfig,
+          api_key: pipelineProv.apiKey ?? rawPipelineConfig.api_key,
+          api_base_url: pipelineProv.apiBaseURL ?? rawPipelineConfig.api_base_url,
+          provider: pipelineProv.provider ?? rawPipelineConfig.provider,
+          openai_model_id: pipelineProv.openaiModelId ?? rawPipelineConfig.openai_model_id,
+        }
+      : rawPipelineConfig;
 
     if (pipelineTools.length === 0) {
       return 'Error: No parent tools available for inline pipeline steps.';
