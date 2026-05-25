@@ -1920,7 +1920,14 @@
 						</button>
 					</div>
 				{:else}
-					<div class="space-y-2">
+					<!-- EU AI Act Art. 50 §1: persistent visible disclosure that the
+					     message is AI-generated. data-ai-generated exposes the same
+					     fact machine-readably for assistive tech / regulators. -->
+					<div class="space-y-2" data-ai-generated="true">
+						<span
+							class="inline-flex items-center rounded-[var(--radius-sm)] border border-border bg-bg-muted px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-text-subtle"
+							aria-label={t('chat.ai_generated_aria')}
+						>{t('chat.ai_generated_badge')}</span>
 						{#if msg.thinking && !msg.blocks?.some((b) => b.type === 'thinking')}
 							<!-- Legacy threads saved before interleaved thinking blocks
 							     existed keep the single trailing pill. New messages
