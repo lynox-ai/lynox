@@ -89,7 +89,7 @@ This is the most "self-host" path but requires the most operations work: cert re
 
 lynox used to ship a Telegram bot as the mobile-access companion. We removed it because:
 
-- **Data sovereignty** — every voice message, photo, and reply went through Telegram (Meta-adjacent infrastructure) before reaching your engine. The PWA + the options above keep traffic end-to-end on infrastructure you control.
+- **Data sovereignty** — every voice message, photo, and reply went through Telegram's own infrastructure (Telegram FZ-LLC, Dubai) before reaching your engine. The PWA + the options above keep traffic end-to-end on infrastructure you control.
 - **Attack surface** — a Telegram bot token is a public webhook endpoint with stable URL; mistakes there can't be quickly contained.
 - **Feature parity** — the PWA covers everything the bot did (chat, voice, mail, push notifications), better.
 
