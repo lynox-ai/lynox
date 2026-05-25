@@ -12,6 +12,23 @@
 - **Honesty-fallback when `web_research` is not configured.** Previously the agent silently fabricated search results (made-up arXiv IDs, prices, "recent X") when no search backend was wired up. Now the agent gets explicit "no search available — DO NOT fabricate" instructions in its system prompt, and tells the user how to enable search instead.
 - **Embedded DuckDuckGo HTML-scrape fallback** for `web_research` when SearXNG isn't configured. Best-effort (no JSON API, no time-range filter, susceptible to rate-limits) — `web_research` always exists so the agent never has to invent results, but the agent receives a "fallback quality" prompt suffix so it caveats findings and surfaces the SearXNG upgrade path.
 
+## 1.7.4 — 2026-05-25
+
+Patch — pre-HN-launch cleanup. Two Bugsink-noise fixes against `v1.7.1` and a CLI-side legal addition.
+
+### Added
+
+- **`Terms of Service` acceptance gate in the CLI setup wizard.** First `npx @lynox-ai/core` / `lynox init` shows the ELv2 / no-warranty terms with a confirm prompt, persists acceptance in `~/.lynox/.tos-accepted-1`. Bumping `TOS_VERSION` re-prompts (versioned consent). Closes Item 17 of the 2026-05-25 pre-HN legal audit (#613).
+
+### Fixed
+
+- **WorkerLoop benign workflow-not-found races no longer surface to Bugsink.** When a saved workflow is deleted between cron-scheduling and the executor tick, `executePipeline` records the skip via `recordAndNotify` ("no longer exists (skipped)") instead of rethrowing the typed error. Closes Bugsink `ENGINE-8` (#614).
+- **Session-run returns a friendly 400 when no LLM key is configured** instead of letting the Anthropic SDK deep-throw from `validateHeaders()`. Adds a pre-flight check on `POST /api/sessions/:id/run` that mirrors the `configured.api_key` logic in `GET /api/secrets/status`. Closes Bugsink `STAGING-ENGINE-6` + `STAGING-ENGINE-7` (#615).
+
+### Internal
+
+- User-facing string casing `LYNOX` → `lynox` in 4 boundary surfaces (http-api startup log, Google-auth HTML pages, content-extractor User-Agent header). Closes pre-HN legal audit trademark item P1-19 (#612).
+
 ## 1.7.0 — 2026-05-22
 
 Minor — **Workflow-UX unification + chat-streaming polish + agent-efficiency**. The agent's workflow tool surface is consolidated 8 → 6 with one consistent "workflow" vocabulary across tools, HTTP API and UI, plus a new **Saved Workflows** library tab. The chat stream gains an animated presence indicator, a live activity ticker, interleaved thinking, and an inline compaction marker. Agent-efficiency work lands orchestrated sub-agent routing and non-lossy compaction (a tool-result recall blob store). **Breaking:** the tool renames and the `/api/pipelines*` → `/api/workflows*` endpoint move are a hard cut with no alias — external MCP clients / API scripts must update.
