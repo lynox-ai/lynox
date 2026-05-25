@@ -1757,6 +1757,7 @@ export class LynoxHTTPApi {
       // SSE headers
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
+        'X-lynox-AI-Generated': 'true',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
@@ -3435,6 +3436,7 @@ export class LynoxHTTPApi {
 
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
+        'X-lynox-AI-Generated': 'true',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
       });
@@ -3528,6 +3530,7 @@ export class LynoxHTTPApi {
       // segment (Voxtral, no native streaming).
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
+        'X-lynox-AI-Generated': 'true',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
       });
@@ -5187,6 +5190,7 @@ export class LynoxHTTPApi {
       // SSE response for progress
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
+        'X-lynox-AI-Generated': 'true',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
       });
