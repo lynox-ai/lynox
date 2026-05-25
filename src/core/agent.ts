@@ -889,9 +889,9 @@ export class Agent implements IAgent {
    * `src/tools/registry.ts`.
    */
   private static readonly INTERNAL_TOOLS = new Set([
-    'read_file', 'write_file', 'batch_files',
+    'write_file', 'batch_files',
     'memory_store', 'memory_recall', 'memory_update', 'memory_delete', 'memory_list', 'memory_promote',
-    'ask_user', 'ask_secret', 'spawn_agent',
+    'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',
     'api_setup',
@@ -899,6 +899,13 @@ export class Agent implements IAgent {
     'data_store_list', 'data_store_delete', 'data_store_drop',
     'plan_task', 'run_workflow',
   ]);
+  // NOTE: `read_file` and `spawn_agent` were removed from this allowlist
+  // (H-001 + H-002). Their return values now flow through the full guard
+  // chain — `wrapUntrustedData()` at the tool boundary AND `scanToolResult()`
+  // here in the dispatcher — because both can carry attacker-controlled
+  // content into the parent agent's context (a read file or a sub-agent's
+  // returned summary). The wrap is the primary defence; this scan is
+  // defence-in-depth.
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
     const toolCalls = content.filter(
