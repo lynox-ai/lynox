@@ -10,6 +10,16 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Matrix split: each platform builds on its native arch runner — no QEMU.
+  # Each matrix job pushes its image by digest only (no human-readable tag
+  # yet); the `manifest` job below stitches both digests into the final
+  # `:staging` + `:staging-${sha}` tags. Pattern documented at
+  # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
+  #
+  # Multi-arch coverage closes BI-003: Apple Silicon developers pulling
+  # `:staging` for testing get a native arm64 layer instead of "no matching
+  # manifest" / amd64 emulation. The release workflow already shipped
+  # multi-arch via QEMU; this brings staging to parity AND faster.
   build:
     # Burst of merges (e.g. 4 squash-merges seconds apart) used to fan out into
     # 4 parallel builds + 4 staging redeploys, with the final `:staging` tag
@@ -18,10 +28,117 @@ jobs:
     # latest commit ships. Group is scoped to the trigger so a manual
     # `workflow_dispatch` rerun (operator recovering a transient failure) is
     # not racing a regular push, and vice versa.
+    #
+    # With the matrix split, each arch gets its own concurrency group so a
+    # newer push cancels its own pair; manifest has its own scoped group
+    # below.
     concurrency:
-      group: staging-build-${{ github.event_name }}
+      group: staging-build-${{ github.event_name }}-${{ matrix.arch_tag }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch_tag: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch_tag: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # amd64-only: build with load+tag-for-scan so trivy can read the same
+      # layers we ship. arm64's base image surface is platform-identical to
+      # amd64's, so the arm64 scan would add zero CVE coverage. The
+      # push-by-digest build below re-uses the gha cache, so this is
+      # essentially free on its second invocation.
+      - name: Build (load) for trivy scan
+        if: matrix.platform == 'linux/amd64'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: ghcr.io/lynox-ai/lynox:scan-staging
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=staging-${{ matrix.arch_tag }}
+          cache-to: type=gha,mode=max,scope=staging-${{ matrix.arch_tag }}
+
+      - name: Scan image for vulnerabilities
+        if: matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/lynox-ai/lynox:scan-staging
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+          ignore-unfixed: true
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Push by digest only — no human-readable tag yet. The `manifest` job
+      # below stitches the per-arch digests into `:staging` and
+      # `:staging-${sha}`. push-by-digest=true + name-canonical=true is the
+      # canonical multi-runner pattern. OCI labels are baked into each
+      # per-arch image config here so they survive the imagetools stitch.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/lynox-ai/lynox,push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=staging-${{ matrix.arch_tag }}
+          cache-to: type=gha,mode=max,scope=staging-${{ matrix.arch_tag }}
+
+      - name: Export digest
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          # Strip the "sha256:" prefix for a filesystem-safe filename; the
+          # manifest job re-applies the prefix when constructing image refs.
+          touch "/tmp/digests/${BUILD_DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch_tag }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the per-arch digests into the final `:staging` + `:staging-${sha}`
+  # tags. This is the only job that produces human-readable tags — `build`
+  # only pushes by digest. Also surfaces the `sha` output that the
+  # downstream `dispatch` job consumes.
+  manifest:
+    needs: build
+    concurrency:
+      group: staging-manifest-${{ github.event_name }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -29,6 +146,12 @@ jobs:
       sha: ${{ steps.meta.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -42,59 +165,57 @@ jobs:
         id: meta
         run: |
           echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/build-push-action@v7
-        id: build
-        with:
-          context: .
-          load: true
-          tags: ghcr.io/lynox-ai/lynox:scan-staging
-          # Same build-args as the push step below so trivy scans the same
-          # layers we ship and the gha cache is shared between both invocations.
-          build-args: |
-            BUILD_SHA=${{ steps.meta.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ghcr.io/lynox-ai/lynox:scan-staging
-          format: table
-          exit-code: '1'
-          severity: CRITICAL
-          ignore-unfixed: true
 
       # Only `:staging` is guaranteed to track main's tip — the per-SHA
       # `:staging-<sha>` companion tag is sparse: any commit whose build was
       # cancelled mid-burst won't have one. Treat `:staging-<sha>` as
       # best-effort archival, never as a stable rollback target.
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/lynox-ai/lynox:staging
-            ghcr.io/lynox-ai/lynox:staging-${{ steps.meta.outputs.sha }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
-            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
-          build-args: |
-            BUILD_SHA=${{ steps.meta.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create multi-arch manifest
+        env:
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Re-apply the "sha256:" prefix that we stripped when exporting digests.
+          DIGEST_REFS=()
+          for f in /tmp/digests/*; do
+            digest_name="$(basename "$f")"
+            DIGEST_REFS+=("ghcr.io/lynox-ai/lynox@sha256:${digest_name}")
+          done
+          if [ "${#DIGEST_REFS[@]}" -ne 2 ]; then
+            echo "Expected 2 digests (amd64+arm64), got ${#DIGEST_REFS[@]}: ${DIGEST_REFS[*]}"
+            exit 1
+          fi
+          for TAG in \
+            "ghcr.io/lynox-ai/lynox:staging" \
+            "ghcr.io/lynox-ai/lynox:staging-${SHA}"; do
+            echo "::group::Creating manifest $TAG"
+            docker buildx imagetools create -t "$TAG" "${DIGEST_REFS[@]}"
+            echo "::endgroup::"
+          done
 
-  # Separate job — deliberately NOT in the build's concurrency group, so a
-  # newer push that cancels an in-flight `build` cannot also cancel this
-  # dispatch once it's running. `needs: build` ensures we only fire on a
-  # build that completed successfully (i.e. actually pushed `:staging`).
+      # Verify the multi-arch manifest landed — fails the workflow if either
+      # arch is missing. Pre-launch we cannot ship a workflow that silently
+      # regresses to single-arch (BI-003 carry-over).
+      - name: Verify multi-arch manifest
+        run: |
+          set -euo pipefail
+          INSPECT=$(docker buildx imagetools inspect "ghcr.io/lynox-ai/lynox:staging" --raw)
+          echo "$INSPECT"
+          echo "$INSPECT" | grep -q '"architecture": "amd64"' || { echo "amd64 missing from manifest"; exit 1; }
+          echo "$INSPECT" | grep -q '"architecture": "arm64"' || { echo "arm64 missing from manifest"; exit 1; }
+          echo "Multi-arch manifest verified: amd64 + arm64 both present."
+
+  # Separate job — deliberately NOT in the build/manifest concurrency
+  # group, so a newer push that cancels an in-flight build cannot also
+  # cancel this dispatch once it's running. `needs: manifest` ensures we
+  # only fire on a manifest that completed successfully (i.e. actually
+  # published `:staging`).
   # Trade-off: a 4-merge burst whose builds all somehow finish will produce
   # 4 dispatches in close succession instead of 1. Pro's redeploy is
   # idempotent (pull + recreate to whatever `:staging` currently points at),
   # so duplicates only cost extra image pulls, not correctness.
   dispatch:
-    needs: build
+    needs: manifest
     runs-on: ubuntu-latest
     steps:
       # Trigger engine redeploy on staging.lynox.cloud in the pro repo.
@@ -107,7 +228,7 @@ jobs:
       - name: Dispatch engine redeploy to lynox-pro
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}
-          SHA: ${{ needs.build.outputs.sha }}
+          SHA: ${{ needs.manifest.outputs.sha }}
         run: |
           curl -sSf -X POST \
             -H "Authorization: Bearer $PRO_DISPATCH_TOKEN" \
