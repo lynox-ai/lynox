@@ -73,7 +73,7 @@ arrays by default. Only include what you are confident about.
 
 ACCEPT only proper nouns — specific named people, companies, products, places, projects:
 - Personal names: "Peter Huber", "Roland"
-- Named organizations: "lynox.ai", "Mistral AI", "Hetzner", "Brandfusion"
+- Named organizations: "lynox.ai", "Mistral AI", "Hetzner", "Acme Studio"
 - Named products: "lynox", "Postgres", "Cloudflare Pages"
 - Named projects (explicit): project "Finance Monthly", "auth-rewrite"
 - Real geographic locations: "Zurich", "Berlin", "Switzerland"
@@ -102,7 +102,7 @@ CANONICAL_NAME rules:
 
 TYPE disambiguation (critical):
 - Bare domain names representing a business or tenant (foo.ch, customer.lynox.cloud,
-  acme-shop.com, brandfusion.ch) → "organization". These are entity references, not products.
+  acme-shop.com, acme-studio.example) → "organization". These are entity references, not products.
 - Vendor-product offerings (Cloudflare Pages, Hetzner Cloud, AWS S3, Google Drive,
   "[Vendor] [Offering]" pattern) → "product".
 - Standalone tech (Postgres, Docker, Astro, SvelteKit, Ubuntu) → "product".
@@ -140,15 +140,15 @@ TEXT: "CHF 39/mo plan, hosted on Hetzner"
 → entities: [{canonical_name:"Hetzner", type:"organization", confidence:0.9, aliases:[], evidence_span:"hosted on Hetzner"}]
 → relations: []   (price expressions rejected)
 
-TEXT: "Peter works for Brandfusion in Zurich"
+TEXT: "Peter works for Acme Studio in Zurich"
 → entities: [
     {canonical_name:"Peter", type:"person", confidence:0.85, aliases:[], evidence_span:"Peter works for"},
-    {canonical_name:"Brandfusion", type:"organization", confidence:0.9, aliases:[], evidence_span:"works for Brandfusion"},
+    {canonical_name:"Acme Studio", type:"organization", confidence:0.9, aliases:[], evidence_span:"works for Acme Studio"},
     {canonical_name:"Zurich", type:"location", confidence:0.95, aliases:[], evidence_span:"in Zurich"}
   ]
 → relations: [
-    {subject:"Peter", predicate:"works_for", object:"Brandfusion", confidence:0.9},
-    {subject:"Brandfusion", predicate:"located_in", object:"Zurich", confidence:0.85}
+    {subject:"Peter", predicate:"works_for", object:"Acme Studio", confidence:0.9},
+    {subject:"Acme Studio", predicate:"located_in", object:"Zurich", confidence:0.85}
   ]
 
 TEXT: "Einzeltools kosten CHF 39/mo direct bei lynox.ai"

@@ -270,12 +270,12 @@ describe('buildSafeEnv', () => {
     });
 
     it('preserves legitimate GIT_ vars (GIT_AUTHOR_NAME, GIT_COMMITTER_EMAIL)', () => {
-      process.env['GIT_AUTHOR_NAME'] = 'Rafael';
-      process.env['GIT_COMMITTER_EMAIL'] = 'rafael@example.com';
+      process.env['GIT_AUTHOR_NAME'] = 'Alice';
+      process.env['GIT_COMMITTER_EMAIL'] = 'alice@example.com';
       try {
         const env = buildSafeEnv();
-        expect(env['GIT_AUTHOR_NAME']).toBe('Rafael');
-        expect(env['GIT_COMMITTER_EMAIL']).toBe('rafael@example.com');
+        expect(env['GIT_AUTHOR_NAME']).toBe('Alice');
+        expect(env['GIT_COMMITTER_EMAIL']).toBe('alice@example.com');
       } finally {
         delete process.env['GIT_AUTHOR_NAME'];
         delete process.env['GIT_COMMITTER_EMAIL'];

@@ -6,7 +6,7 @@ import { decideMagicLinkOutcome, type MagicLinkDeps } from './magic-link.js';
 const VALID_TOKEN = 'a'.repeat(120);
 
 function mkDeps(overrides: Partial<MagicLinkDeps> = {}): MagicLinkDeps {
-	const url = new URL(overrides.url?.toString() ?? `https://cat.lynox.cloud/auth/magic?token=${VALID_TOKEN}`);
+	const url = new URL(overrides.url?.toString() ?? `https://acme.lynox.cloud/auth/magic?token=${VALID_TOKEN}`);
 	return {
 		url,
 		hasValidSession: false,
@@ -30,14 +30,14 @@ describe('decideMagicLinkOutcome — short-circuit guards', () => {
 
 	it('returns redirect_login(missing_token) when ?token is absent', async () => {
 		const outcome = await decideMagicLinkOutcome(mkDeps({
-			url: new URL('https://cat.lynox.cloud/auth/magic'),
+			url: new URL('https://acme.lynox.cloud/auth/magic'),
 		}));
 		expect(outcome).toEqual({ type: 'redirect_login', reason: 'missing_token' });
 	});
 
 	it('returns redirect_login(missing_token) when token is below the length floor (filters obvious garbage)', async () => {
 		const outcome = await decideMagicLinkOutcome(mkDeps({
-			url: new URL('https://cat.lynox.cloud/auth/magic?token=tooshort'),
+			url: new URL('https://acme.lynox.cloud/auth/magic?token=tooshort'),
 		}));
 		expect(outcome).toEqual({ type: 'redirect_login', reason: 'missing_token' });
 	});

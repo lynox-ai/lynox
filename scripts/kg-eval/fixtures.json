@@ -115,30 +115,30 @@
       "expected_relations": []
     },
     {
-      "id": "pos-03-rafael-migration",
+      "id": "pos-03-alice-migration",
       "category": "clean-positive",
-      "text": "Rafael runs Brandfusion and migrated from Webflow to Astro",
+      "text": "Alice runs Northwind Studio and migrated from Webflow to Astro",
       "expected_entities": [
-        { "canonical_name": "Rafael", "type": "person" },
-        { "canonical_name": "Brandfusion", "type": "organization" },
+        { "canonical_name": "Alice", "type": "person" },
+        { "canonical_name": "Northwind Studio", "type": "organization" },
         { "canonical_name": "Webflow", "type": "product" },
         { "canonical_name": "Astro", "type": "product" }
       ],
       "expected_relations": [
-        { "subject": "Rafael", "predicate": "manages", "object": "Brandfusion" },
-        { "subject": "Brandfusion", "predicate": "uses", "object": "Astro" }
+        { "subject": "Alice", "predicate": "manages", "object": "Northwind Studio" },
+        { "subject": "Northwind Studio", "predicate": "uses", "object": "Astro" }
       ]
     },
     {
       "id": "pos-04-cloudflare-pages",
       "category": "clean-positive",
-      "text": "deployed brandfusion.ch via Cloudflare Pages",
+      "text": "deployed northwind.example via Cloudflare Pages",
       "expected_entities": [
-        { "canonical_name": "brandfusion.ch", "type": "organization" },
+        { "canonical_name": "northwind.example", "type": "organization" },
         { "canonical_name": "Cloudflare Pages", "type": "product" }
       ],
       "expected_relations": [
-        { "subject": "brandfusion.ch", "predicate": "uses", "object": "Cloudflare Pages" }
+        { "subject": "northwind.example", "predicate": "uses", "object": "Cloudflare Pages" }
       ]
     },
     {
@@ -227,12 +227,12 @@
       "expected_relations": []
     },
     {
-      "id": "mix-03-roland-warlynox",
+      "id": "mix-03-roland-tenant",
       "category": "mixed-positive",
-      "text": "meeting mit Roland über war.lynox.cloud nächste Woche",
+      "text": "meeting mit Roland über acme.example.com nächste Woche",
       "expected_entities": [
         { "canonical_name": "Roland", "type": "person" },
-        { "canonical_name": "war.lynox.cloud", "type": "organization" }
+        { "canonical_name": "acme.example.com", "type": "organization" }
       ],
       "expected_relations": []
     },
@@ -301,9 +301,9 @@
     {
       "id": "edge-02-domain-only",
       "category": "domain-as-org",
-      "text": "customer signed up via rafael.lynox.cloud yesterday",
+      "text": "customer signed up via acme.example.com yesterday",
       "expected_entities": [
-        { "canonical_name": "rafael.lynox.cloud", "type": "organization" }
+        { "canonical_name": "acme.example.com", "type": "organization" }
       ],
       "expected_relations": []
     },

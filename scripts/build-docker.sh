@@ -15,7 +15,7 @@
 # Prerequisites:
 #   - Run on amd64 build server (not Mac/ARM64)
 #   - docker login ghcr.io done
-#   - For --deploy: SSH access to control plane (root@46.224.229.143)
+#   - For --deploy: SSH access to control plane (root@<control-plane-host>)
 #
 # Tags produced:
 #   ghcr.io/lynox-ai/lynox:1.2.3     (exact version — immutable)
@@ -84,7 +84,6 @@ echo "Image pushed."
 
 # ── Deploy ──────────────────────────────────────────────────────────
 
-CONTROL_PLANE="root@46.224.229.143"
 PILOT_COMPOSE="/opt/lynox-pilot"
 
 if ! $DEPLOY; then
@@ -92,17 +91,22 @@ if ! $DEPLOY; then
   echo "To deploy, re-run with --deploy or manually:"
   echo "  # Pilots"
   echo "  docker tag $TAG_LATEST lynox:webui"
-  echo "  cd $PILOT_COMPOSE && docker compose up -d --force-recreate rafael-lynox alessia-lynox rafael-searxng alessia-searxng"
+  echo "  cd $PILOT_COMPOSE && docker compose up -d --force-recreate \$LYNOX_PILOT_TENANTS"
   echo "  # Managed (per instance)"
-  echo "  ssh $CONTROL_PLANE 'TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \\"
+  echo "  ssh \$LYNOX_CONTROL_PLANE_SSH 'TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \\"
   echo "    curl -s -X POST http://localhost:4000/admin/instances/<ID>/redeploy -H \"Authorization: Bearer \$TOKEN\"'"
   exit 0
 fi
 
+# Deploy path — enforce env vars now, not at build/push time
+: "${LYNOX_CONTROL_PLANE_SSH:?Set LYNOX_CONTROL_PLANE_SSH=root@your-host}"
+: "${LYNOX_PILOT_TENANTS:?Set LYNOX_PILOT_TENANTS to space-separated tenant container names}"
+CONTROL_PLANE="$LYNOX_CONTROL_PLANE_SSH"
+
 echo ""
 echo "=== Deploying pilots ==="
 docker tag "$TAG_LATEST" lynox:webui
-cd "$PILOT_COMPOSE" && docker compose up -d --force-recreate rafael-lynox alessia-lynox rafael-searxng alessia-searxng
+cd "$PILOT_COMPOSE" && docker compose up -d --force-recreate $LYNOX_PILOT_TENANTS
 cd "$ROOT_DIR"
 
 echo ""

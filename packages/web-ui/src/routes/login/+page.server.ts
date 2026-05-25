@@ -56,16 +56,16 @@ function setSessionCookie(cookies: Parameters<PageServerLoad>[0]['cookies'], sec
 		secure: isSecure,
 		// Lax (not Strict): with Strict the cookie is NOT attached on top-level
 		// cross-site GETs (e.g. tap a link from Mail.app or another tab to
-		// cat.lynox.cloud/login). The server load() therefore can't redirect a
-		// logged-in user away from /login on first paint — they see the OTP
-		// form, type their email, click "Send code", and only THEN does the
-		// same-site form POST attach the cookie. enhance.update() re-runs the
-		// load function, the redirect fires, and the user is logged in without
+		// /login). The server load() therefore can't redirect a logged-in
+		// user away from /login on first paint — they see the OTP form, type
+		// their email, click "Send code", and only THEN does the same-site
+		// form POST attach the cookie. enhance.update() re-runs the load
+		// function, the redirect fires, and the user is logged in without
 		// ever entering an OTP code. Confusing + looks like a bypass even
 		// though the cookie was genuinely valid. Lax sends cookie on safe
 		// methods (GET) cross-site → load() redirects on first paint as
 		// expected. State-changing POSTs (e.g. /api/run) still need same-site
-		// origin under Lax, so CSRF is still blocked. Cat 2026-05-19.
+		// origin under Lax, so CSRF is still blocked. Pilot tenant 2026-05-19.
 		sameSite: 'lax',
 		maxAge: SESSION_MAX_AGE_S,
 	});

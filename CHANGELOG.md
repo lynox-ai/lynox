@@ -29,6 +29,89 @@ Patch — pre-HN-launch cleanup. Two Bugsink-noise fixes against `v1.7.1` and a 
 
 - User-facing string casing `LYNOX` → `lynox` in 4 boundary surfaces (http-api startup log, Google-auth HTML pages, content-extractor User-Agent header). Closes pre-HN legal audit trademark item P1-19 (#612).
 
+## 1.7.3 — 2026-05-25
+
+Patch — **HN-launch hardening sprint** (33 PRs, +155 tests). Re-cut after `v1.7.2` stalled in the docker pipeline; the matrix builder unblocks a 6.5× faster multi-arch publish. Focuses on EU-residency leak closure, BYOK disclosure, multi-arch images, and security-audit follow-ups.
+
+### Added
+
+- **BYOK allowlist + disclosure for custom LLM endpoints** — the custom-provider wizard surfaces a vetted allowlist with provider-specific privacy posture before the key prompt; user must accept the data-flow disclosure (#607).
+- **AI-generated marker on assistant messages** (chat UI) + **`X-lynox-AI-Generated` SSE header** — Art. 50 transparency (#591, #590).
+- **ToolCallTracker wired in shadow mode** for anomaly observability — H-024 (#595).
+- **Sensitive-paths list expanded** to cover lynox DBs, shell histories, and macOS Keychain — H-003 (#593).
+
+### Fixed
+
+- **Chat cost-footer no longer accumulates across multi-turn** — was showing 3-6× actual cost on long threads (#608).
+- **Inbox classifier honours provider-switch** — H-012 / EU-residency leak (Anthropic was being called after switch to Mistral) (#606).
+- **`plan_task` + `run_workflow` plumb fresh provider config** — H-011 (#605).
+- **`read_file` + `spawn_agent` returns wrapped in untrusted-data envelope** — H-001 + H-002 (#592).
+- **`bash` env no longer inherits `SSH_AUTH_SOCK` / `GIT_ASKPASS` / `GIT_SSH_COMMAND`** — H-004 (#594).
+- **`npx` symlink shim resolves realpath in `isMainModule`** — fixes the silent no-op on some PNPM installs (#584).
+
+### Changed
+
+- **Multi-arch docker images (amd64 + arm64) via native arm64 runners + matrix manifest stitch** — fixes BI-003; 14.6 min total build (was QEMU-stalled in `v1.7.2`) (#585, #610).
+- **`uuid` override bumped to >=11.1.1** — H-007 / CVE (#603).
+- **`protobufjs` override bumped to >=8.2.0** — B-018 / CVE (#589).
+- **`mistral-large-2512` pinned** in catalog + docs (B-004 + B-005) (#586).
+- **`api-cost-display` flag defaults true** — B-011 (#588).
+- **Docs honesty pass**: Tavily references struck from `CLAUDE.md` + api-store (H-014, #602); Telegram infra attribution corrected (H-017, #596); SameSite cookie attr corrected to Lax in security docs (H-013, #598); docker image tag example bumped to 1.7.1 (H-015, #597); Activity Hub link route fixed after IA-V2 (H-016, #599); Automation Hub vs Activity Hub disambiguated (H-018, #600); Verify-Setup step 3 refreshed to match v1.5.1 StatusBar (#601); MCP server claim struck from `CLAUDE.md` + `ROADMAP.md` (B-006, #587).
+- **libvips LGPL-3.0 dependency documented** in licenses (H-005, #604).
+
+### Internal
+
+- **v1.7.2 cancelled** — docker-publish pipeline stalled on QEMU during the multi-arch build; re-cut as v1.7.3 with the new matrix manifest-stitch flow.
+
+## 1.7.2 — Cancelled
+
+Tag was cut and released but the docker-publish pipeline stalled on QEMU during the multi-arch build. Re-cut as `v1.7.3` with a matrix manifest-stitch flow (#610). Use `v1.7.3` or later — there is no production `v1.7.2` image.
+
+## 1.7.1 — 2026-05-25
+
+Patch — **Mistral first-class + EU-residency leak closure + Settings polish** (19 PRs, morning sprint).
+
+### Added
+
+- **Mistral Large 3 as Sonnet-tier replacement** + retire stale model names (`small/large/magistral` text refresh post-Ministral-gen3 swap) (#566, #567).
+- **Mistral native prompt cache** surfaced in adapter + bench harness (#565).
+- **Set-Bench v4 harness** — 8 lynox-real-world axes + cache-aware costs (#559).
+- **API-store: curated bootstrap-suggestion catalog** injected into agent context (#558).
+- **Honesty-fallback when `web_research` is not configured** — agent gets explicit "DO NOT fabricate" instructions instead of inventing arXiv IDs / prices (#564).
+- **Web-UI demo-mode**: auto-session + locale lock + onboarding chips + cost hide (#481).
+- **Provider-aware Denkstil UI** + remove duplicate Standard options (#578).
+
+### Fixed
+
+- **EU-residency leaks**: sub-agent inherits Mistral provider config from parent (#568); `llm-helper.callForStructuredJson` honours user provider/model (#570); `process-capture` plumbs provider/model so Mistral users can save workflows (#571); structured EU residency provider-switch propagation test (#574); bench-driven product tweaks (#569).
+- **Adapter delta.content** no longer leaks `[object Object]` for non-string content (#572).
+- **`/api/secrets/status`** recognises non-Anthropic provider keys (#546).
+- **OpenAI path hardened**: `finish_reason`, `tool_choice`, config-validate (#532).
+- **Web-UI**: SSE error events surfaced + status bar bound to active provider (#560); KG view toggle wires Graph mode (#561); auto-save LLM provider tile click for curated presets (#557); stop leaking `[ONBOARDING N/3]` markers + ask for explicit `artifact_save` (#556); hover-prefetch no longer silently logs users out (#554).
+- **Nav**: chat-history fills sidebar without flicker via `mt-auto` (#582); flex spacer pinning (#580); settings reactivity + compound-noun preservation (#581); markdown `N.` rendering + footer label + nav pin (#579).
+- **Server**: rebuild `used_cents` from daily entries (HN P0) (#562); default `ORIGIN` on source/npx boot to fix CSRF login 403 (#563).
+- **Orchestrator**: thread parent memory backend to sub-agent inline steps (#553); allow `memory_*` tools in workflow inline steps (#548).
+- **Network-guard**: guard against undefined address in `resolveAndValidate` (#551).
+- **Auth**: consolidate `isHttpsRequest` helper — restore `Secure` cookie flag on managed deployments (#484).
+- **Cron**: surface cron failure as `status='failed'`, auto-recover on next success (#544).
+- **B1 memory_recall/update/delete** reverted to flat-file + 3 optimizations (#540).
+
+### Changed
+
+- **Self-host installer hardened** — 6 P1 fixes for HN-launch readiness (#547).
+- **CLI trimmed** to launch-essential modes (wizard, http-api, init) (#537).
+- **WhatsApp Inbox removed** until staging E2E coverage exists (#538).
+- **README / docs**: docs honesty pass — source-available framing + internal OWASP + telegraf dep removal (#552); MCP card dropped from docs Integrations (#543); one-shot mode section removed from README (#542); login logo swapped to brand variants (#549); `mistral-large-2512` pinned in `llm-providers` + Mistral repositioned (#576).
+- **Pre-launch prompt-slice optimisation**: capability surface + EU/OSS framing + KPI trigger (#577).
+- **`/app/workflows` → `/app/automation` redirect** for the IA-V2 rename (#541).
+- **CI**: stub gitleaks/test/docker-scan for docs-only PRs (#550).
+- **Spawn**: extract provider-precedence helper + `Agent.toJSON` scrub (#573).
+- **Tier-1 HN-launch compliance hardening** umbrella (#555).
+- **Search-reranker Mistral-disabled state surfaced in UI** (#575).
+- **Launch-readiness sweep**: `CONTRIBUTING`, `ROADMAP`, `SECURITY`, licenses (#483).
+- **memory_recall chat visibility locked in** + label fallback tightened (#545).
+- **`Lock in memory_recall` chat visibility + tighter label fallback** (#545).
+
 ## 1.7.0 — 2026-05-22
 
 Minor — **Workflow-UX unification + chat-streaming polish + agent-efficiency**. The agent's workflow tool surface is consolidated 8 → 6 with one consistent "workflow" vocabulary across tools, HTTP API and UI, plus a new **Saved Workflows** library tab. The chat stream gains an animated presence indicator, a live activity ticker, interleaved thinking, and an inline compaction marker. Agent-efficiency work lands orchestrated sub-agent routing and non-lossy compaction (a tool-result recall blob store). **Breaking:** the tool renames and the `/api/pipelines*` → `/api/workflows*` endpoint move are a hard cut with no alias — external MCP clients / API scripts must update.
@@ -314,7 +397,7 @@ Minor — **HN-launch readiness release**. Settings & Usage IA Refactor (23 PRs 
 
 ## 1.4.2 — 2026-05-14
 
-Patch — UI clarity for long-running agent turns + the root-cause fix for the "Verbindung zum Server verloren" toast that surfaced on cat.lynox.cloud + Wave 3/4 security and refactor convergence.
+Patch — UI clarity for long-running agent turns + the root-cause fix for the "Verbindung zum Server verloren" toast that surfaced on a canary tenant + Wave 3/4 security and refactor convergence.
 
 ### Added
 
@@ -326,7 +409,7 @@ Patch — UI clarity for long-running agent turns + the root-cause fix for the "
 
 ### Fixed
 
-- **Orphan stream timer and body-size reject paths** — the root cause for the "Verbindung zum Server verloren" toast that surfaced on cat.lynox.cloud. The 30-min SSE timer was not cleared on normal stream end, killing random later sessions. (#334)
+- **Orphan stream timer and body-size reject paths** — the root cause for the "Verbindung zum Server verloren" toast that surfaced on a canary tenant. The 30-min SSE timer was not cleared on normal stream end, killing random later sessions. (#334)
 - Telegram pending input resolved when the stale-prompt timer aborts the run (#336)
 - Plan finalization gates on `completedAt`, not map presence — fixes the rare case of a plan finalising at step 2 of N (#335)
 - Inbox: consolidation pass + textarea autogrow + session-expired banner (#337)
@@ -603,10 +686,10 @@ Pro:
 - Spawn JSDocs trimmed (no incident anecdotes); 3-researcher estimate test tightened to a narrow band around the documented expectation; `OUTPUT_FILL_RATIO` renamed `SPAWN_OUTPUT_FILL_RATIO` for prefix consistency (#201, #202).
 - `.gitignore`: bench-models results excluded (#183).
 
-### lynox-pro
+### Managed (separate repo)
 
-- **Per-instance canary pinning** — `pinned_tag` column on managed instances; fleet rollout (`startRollout`) skips pinned instances and records the skipped set on the rollout row for audit; new `PATCH /admin/instances/:id/pinned-tag` endpoint to set or clear the pin; `updateOne` refuses to deploy when the new tag would diverge from an existing pin, forcing the operator to update the pin first. End-to-end-validated on staging control plane (lynox-pro #87).
-- `pnpm/action-setup` bumped 4 → 6 to fix transient CI (lynox-pro #17).
+- **Per-instance canary pinning** — `pinned_tag` column on managed instances; fleet rollout (`startRollout`) skips pinned instances and records the skipped set on the rollout row for audit; new `PATCH /admin/instances/:id/pinned-tag` endpoint to set or clear the pin; `updateOne` refuses to deploy when the new tag would diverge from an existing pin, forcing the operator to update the pin first. End-to-end-validated on staging control plane.
+- `pnpm/action-setup` bumped 4 → 6 to fix transient CI.
 
 ## 1.3.6 — 2026-04-27
 
