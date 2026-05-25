@@ -575,20 +575,21 @@ describe('WorkerLoop', () => {
   // template row untouched so the next tick can fire it again. The outer
   // catch in executeTask is unchanged and already exercised by the
   // standard task-failure tests above.
-  it('executePipeline surfaces a non-found pipeline as a typed error', async () => {
+  it('executePipeline skips cleanly when the workflow no longer exists', async () => {
     vi.useRealTimers();
     const task = makeTask({
       id: 'pipe-task-missing',
       pipeline_id: 'pipeline-missing',
       task_type: 'pipeline',
     });
+    const tm = makeTaskManager();
     const engine = {
-      getTaskManager: vi.fn(() => makeTaskManager()),
+      getTaskManager: vi.fn(() => tm),
       getUserConfig: vi.fn(() => ({})),
       getRunHistory: vi.fn(() => ({
-        // No saved-workflow row, no in-memory entry — runSavedWorkflow
-        // reports "not found", executePipeline rethrows as a typed Error
-        // so the outer catch can record it as a failed task run.
+        // No saved-workflow row, no in-memory entry — getPipeline returns
+        // undefined and executePipeline records a benign skip via
+        // recordAndNotify without throwing (so it doesn't land in Bugsink).
         getPlannedPipeline: vi.fn(() => undefined),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -605,7 +606,13 @@ describe('WorkerLoop', () => {
     await expect(
       (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
         .executePipeline(task),
-    ).rejects.toThrow(/not found/i);
+    ).resolves.toBeUndefined();
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(
+      task.id,
+      expect.stringContaining('no longer exists'),
+      'failed',
+    );
   });
 
   it('executePipeline surfaces a non-template pipeline as a typed error', async () => {
