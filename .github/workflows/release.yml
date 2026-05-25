@@ -32,24 +32,136 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: ./scripts/pre-release-check.sh
 
-  # This workflow builds and publishes artifacts only.
-  # It does NOT deploy to any managed instance.
-  # Production deploy is always manual via admin API after explicit confirmation.
-  docker:
+  # Matrix split: each platform builds on its native arch runner — no QEMU.
+  # Each matrix job pushes its image by digest only (no human-readable tag
+  # yet); the `docker-manifest` job below stitches both digests into the
+  # final multi-arch tags via `docker buildx imagetools create`.
+  # Pattern documented at
+  # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
+  #
+  # `fail-fast: true` — if amd64 fails, don't bother finishing arm64.
+  docker-build:
     needs: pre-release-check
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch_tag: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch_tag: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # amd64-only: build with load+tag-for-scan so trivy can read the same
+      # layers we ship. arm64's base image (node:22-alpine) has the same
+      # OS-package surface as amd64's, so a second arm64 scan adds zero CVE
+      # coverage — keep it amd64-only to match prior behavior. The
+      # push-by-digest build below re-uses the gha cache, so this step is
+      # essentially free on its second invocation.
+      - name: Build (load) for trivy scan
+        if: matrix.platform == 'linux/amd64'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: ghcr.io/lynox-ai/lynox:scan
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.arch_tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch_tag }}
+
+      - name: Scan image for vulnerabilities
+        if: matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/lynox-ai/lynox:scan
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+          ignore-unfixed: true
+
+      - name: Extract version from release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_CREATED: ${{ github.event.release.created_at }}
+        run: |
+          # Strip leading 'v' if present (v1.0.0 -> 1.0.0)
+          VERSION="${RELEASE_TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "created=${RELEASE_CREATED}" >> "$GITHUB_OUTPUT"
+
+      # Push by digest only — no human-readable tag yet. The manifest job
+      # below stitches the per-arch digests into `:latest`, `:${version}`,
+      # `:${sha}`. push-by-digest=true + name-canonical=true is the
+      # canonical multi-runner pattern. OCI labels are baked into each
+      # per-arch image config here so they survive the imagetools stitch.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/lynox-ai/lynox,push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.version.outputs.created }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.arch_tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch_tag }}
+
+      - name: Export digest
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          # Strip the "sha256:" prefix for a filesystem-safe filename; the
+          # manifest job re-applies the prefix when constructing image refs.
+          touch "/tmp/digests/${BUILD_DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch_tag }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the per-arch digests into the final multi-arch tags. This is the
+  # only job that produces human-readable tags — `docker-build` only pushes
+  # by digest. `docker buildx imagetools create` builds a manifest list and
+  # pushes it under each requested tag in one round trip per tag.
+  docker-manifest:
+    needs: docker-build
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
 
-      # QEMU enables the buildx multi-arch push step below to build the
-      # non-native (arm64) layer on the amd64 GitHub runner. Required for
-      # `platforms: linux/amd64,linux/arm64` on the push step.
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/download-artifact@v4
         with:
-          platforms: arm64
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -70,50 +182,44 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "created=${RELEASE_CREATED}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v7
-        id: build
-        with:
-          context: .
-          load: true
-          tags: ghcr.io/lynox-ai/lynox:scan
-          # Same build-args as the push step below so trivy scans the same
-          # layers we ship and the gha cache is shared.
-          build-args: |
-            BUILD_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create multi-arch manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Re-apply the "sha256:" prefix that we stripped when exporting digests.
+          DIGEST_REFS=()
+          for f in /tmp/digests/*; do
+            digest_name="$(basename "$f")"
+            DIGEST_REFS+=("ghcr.io/lynox-ai/lynox@sha256:${digest_name}")
+          done
+          if [ "${#DIGEST_REFS[@]}" -ne 2 ]; then
+            echo "Expected 2 digests (amd64+arm64), got ${#DIGEST_REFS[@]}: ${DIGEST_REFS[*]}"
+            exit 1
+          fi
+          for TAG in \
+            "ghcr.io/lynox-ai/lynox:latest" \
+            "ghcr.io/lynox-ai/lynox:${VERSION}" \
+            "ghcr.io/lynox-ai/lynox:${SHA}"; do
+            echo "::group::Creating manifest $TAG"
+            docker buildx imagetools create -t "$TAG" "${DIGEST_REFS[@]}"
+            echo "::endgroup::"
+          done
 
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ghcr.io/lynox-ai/lynox:scan
-          format: table
-          exit-code: '1'
-          severity: CRITICAL
-          ignore-unfixed: true
-
-      # Push a multi-arch manifest list (linux/amd64 + linux/arm64) so Apple
-      # Silicon users can `docker pull ghcr.io/lynox-ai/lynox:latest` natively.
-      # The trivy scan step above runs amd64-only (load:true is incompatible
-      # with multi-platform builds); amd64 CVE coverage is acceptable because
-      # the base image (node:22-alpine) layer surface is platform-identical.
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/lynox-ai/lynox:latest
-            ghcr.io/lynox-ai/lynox:${{ steps.version.outputs.version }}
-            ghcr.io/lynox-ai/lynox:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ steps.version.outputs.created }}
-          build-args: |
-            BUILD_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Verify the multi-arch manifest landed — fails the workflow if either
+      # arch is missing. Pre-launch we cannot ship a workflow that silently
+      # regresses to single-arch.
+      - name: Verify multi-arch manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          INSPECT=$(docker buildx imagetools inspect "ghcr.io/lynox-ai/lynox:${VERSION}" --raw)
+          echo "$INSPECT"
+          echo "$INSPECT" | grep -q '"architecture": "amd64"' || { echo "amd64 missing from manifest"; exit 1; }
+          echo "$INSPECT" | grep -q '"architecture": "arm64"' || { echo "arm64 missing from manifest"; exit 1; }
+          echo "Multi-arch manifest verified: amd64 + arm64 both present."
 
   npm:
     needs: pre-release-check
@@ -138,7 +244,7 @@ jobs:
   # Staging docs deploy runs on every main push via docs.yml; this job only
   # fires on a release tag and maps to the production custom domain.
   deploy-docs-prod:
-    needs: [docker, npm]
+    needs: [docker-manifest, npm]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -176,7 +282,7 @@ jobs:
   # `jq -n` to avoid injection via a crafted tag. PRO_DISPATCH_TOKEN is a
   # fine-grained PAT with actions:write on lynox-ai/lynox-pro only.
   dispatch-pro-release:
-    needs: [docker, npm]
+    needs: [docker-manifest, npm]
     runs-on: ubuntu-latest
     permissions:
       contents: read
