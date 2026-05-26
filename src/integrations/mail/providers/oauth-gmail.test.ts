@@ -332,13 +332,33 @@ describe('OAuthGmailProvider — send', () => {
     const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
     const body = JSON.parse((sendCall[1] as { body: string }).body) as { raw: string };
     const decoded = Buffer.from(body.raw, 'base64').toString('utf-8');
-    expect(decoded).toContain('From: user@example.org');
+    // displayName from the account config must appear in the From header,
+    // matching IMAP/SMTP behaviour. Without it recipients see only the
+    // local-part as the sender name.
+    expect(decoded).toContain('From: "Rafael" <user@example.org>');
     expect(decoded).toContain('To: bob@example.com');
     expect(decoded).toContain('Cc: cc@example.com');
     expect(decoded).toContain('Subject: Hello');
     expect(decoded).toContain('Body content');
     // Date header is present so receivers don't have to backfill on bounce
     expect(decoded).toMatch(/Date: \w{3}, \d{2} \w{3} \d{4}/);
+  });
+
+  it('falls back to bare address when displayName is empty', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-bare', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const account: MailAccountConfig = { ...makeAccount(), displayName: '' };
+    const provider = new OAuthGmailProvider(account, makeAuth());
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'Hi', text: 'body' });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    expect(decoded).toContain('From: user@example.org');
+    expect(decoded).not.toContain('From: ""');
   });
 
   it('strips CRLF from headers — defeats SMTP injection via subject', async () => {

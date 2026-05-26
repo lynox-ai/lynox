@@ -577,12 +577,17 @@
 						/>
 					</label>
 					<label class="block">
-						<span class="mb-1 block text-xs font-medium text-text-muted">Display name</span>
+						<span class="mb-1 block text-xs font-medium text-text-muted">
+							Display name
+							<span class="ml-1 text-[10px] font-normal text-text-subtle">
+								(shown to recipients as the sender)
+							</span>
+						</span>
 						<input
 							type="text"
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
 							bind:value={formDisplayName}
-							placeholder="My Gmail"
+							placeholder="Rafael Burlet"
 							data-testid="mail-display-name-input"
 						/>
 					</label>

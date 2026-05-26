@@ -331,8 +331,11 @@ describe('ImapSmtpProvider — send', () => {
     expect(result.rejected).toEqual([]);
 
     expect(sendMailMock).toHaveBeenCalledTimes(1);
-    const args = sendMailMock.mock.calls[0]?.[0] as { from: { address: string }; to: string[]; inReplyTo: string };
+    const args = sendMailMock.mock.calls[0]?.[0] as { from: { name?: string; address: string }; to: string[]; inReplyTo: string };
     expect(args.from.address).toBe('user@example.com');
+    // displayName from the account config must round-trip through nodemailer
+    // so recipients see a friendly sender name, not just the local-part.
+    expect(args.from.name).toBe('Test User');
     expect(args.to[0]).toBe('"Bob" <bob@example.com>');
     expect(args.inReplyTo).toBe('<old@example.com>');
 
@@ -342,6 +345,18 @@ describe('ImapSmtpProvider — send', () => {
     expect(transport.secure).toBe(true);
     expect(transport.requireTLS).toBe(false); // implicit TLS — STARTTLS is moot
     expect(transport.tls.rejectUnauthorized).toBe(true);
+  });
+
+  it('passes displayName through to nodemailer even when empty (renders as bare address)', async () => {
+    sendMailMock.mockResolvedValue({ messageId: '<x>', accepted: [], rejected: [] });
+
+    const provider = new ImapSmtpProvider({ ...ACCOUNT, displayName: '' }, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+
+    const args = sendMailMock.mock.calls[0]?.[0] as { from: { name: string; address: string } };
+    expect(args.from.address).toBe('user@example.com');
+    // Empty name passes through; nodemailer renders `<addr>` (no quoted empty-string).
+    expect(args.from.name).toBe('');
   });
 
   it('maps SMTP auth failure to MailError(auth_failed)', async () => {
