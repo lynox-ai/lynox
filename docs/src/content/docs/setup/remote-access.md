@@ -107,7 +107,7 @@ Regardless of how you expose lynox:
 
 - **LYNOX_HTTP_SECRET** protects the Web UI (required for all access)
 - **Rate limiting** prevents brute-force attacks (5 attempts per 15 minutes)
-- **Session cookies** are `httpOnly`, `secure` (HTTPS), `sameSite: strict`
+- **Session cookies** are `httpOnly`, `secure` (HTTPS), `sameSite: Lax`
 - **QR login codes** are one-time use, 256-bit random, expire in 5 minutes
 - **Onboarding tokens** (managed hosting only) are one-time use, separate from `LYNOX_HTTP_SECRET`, consumed after first login
 

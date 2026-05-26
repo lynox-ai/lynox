@@ -1,25 +1,11 @@
 ---
 title: Extension Points
-description: Extend lynox with custom tools, roles, and plugins.
+description: Extend lynox with custom tools, roles, agents, and workflow manifests.
 sidebar:
   order: 3
 ---
 
 lynox is designed to be extended without modifying core source code. There are several ways to add functionality.
-
-## Plugins
-
-Plugins can extend lynox's functionality at a deeper level. Enable or disable them in your config:
-
-```json
-{
-  "plugins": {
-    "my-plugin": true
-  }
-}
-```
-
-Plugins are loaded at startup and can register additional tools, modify behavior, or add new capabilities.
 
 ## Custom Roles
 

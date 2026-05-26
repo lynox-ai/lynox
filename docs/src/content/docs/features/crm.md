@@ -85,7 +85,7 @@ lynox can connect to external REST APIs on your behalf. The API Store manages cr
 
 Or let lynox set it up during a conversation:
 
-- *"Connect to the Stripe API — here's my key: sk_live_..."*
+- *"Connect to the Stripe API — here's my key: `<your-stripe-secret-key>`"*
 
 ### Using APIs
 

@@ -9,7 +9,7 @@ Docker is the recommended way to run lynox in production.
 
 | Image | Purpose |
 |-------|---------|
-| `ghcr.io/lynox-ai/lynox:latest` | Engine + Web UI on port 3000 (also tagged with version, e.g. `:1.7.1`) |
+| `ghcr.io/lynox-ai/lynox:latest` | Engine + Web UI on port 3000 (also tagged with version, e.g. `:1.7.4`) |
 
 The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`), so Apple Silicon and ARM servers can pull natively. The bundled `docker-compose.yml` pins `platform: linux/amd64` as a conservative default — remove that line in the compose service if you want native arm64 on Apple Silicon.
 
@@ -54,7 +54,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `ANTHROPIC_API_KEY` | Recommended | Anthropic API key. Also reused as the generic bearer for `provider: openai` (Mistral / custom endpoint) — name kept generic. |
 | `ANTHROPIC_BASE_URL` | No | Endpoint for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
 | `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy), `vertex` (legacy, see below) |
-| `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-large-latest`, `llama3.2`, `gpt-4o`) |
+| `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-large-2512`, `llama3.2`, `gpt-4o`) — prefer pinned over `-latest` to avoid silent snapshot rolls |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3000 in Docker, 3100 locally) |
@@ -150,7 +150,7 @@ The container exposes a health endpoint:
 
 ```bash
 curl http://localhost:3000/api/health
-# {"status":"ok","version":"1.7.1","uptime_s":...}
+# {"status":"ok","version":"1.7.4","uptime_s":...}
 ```
 
 Both `/health` and `/api/health` work — `/health` is a thin alias for proxies that only allow root-level health checks.
