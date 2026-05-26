@@ -1,0 +1,18 @@
+---
+title: Integrations
+description: Native integrations available in lynox — Gmail/Google Workspace, IMAP mail, SearXNG web search.
+sidebar:
+  order: 0
+---
+
+lynox ships with three native integrations today. Anything else connects through the universal API tool ([`api_setup`](/features/api-store/)).
+
+## Available
+
+- **[Google Workspace](/integrations/google-workspace/)** — Gmail, Calendar, Drive, Docs, Sheets. OAuth via your own Google Cloud project.
+- **[Mail (IMAP/SMTP)](/integrations/mail/)** — any IMAP-compatible mailbox (Gmail, Outlook, Fastmail, iCloud, self-hosted).
+- **[SearXNG](/integrations/searxng/)** — privacy-respecting web search; self-hosted or pointed at a public instance.
+
+## Beyond the natives
+
+For anything not on this list, the agent connects on demand via `api_setup`: point it at a docs URL or describe the API in natural language, and lynox extracts a typed profile (endpoints, auth, params) it can call. See [API Store](/features/api-store/).
