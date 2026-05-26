@@ -2588,6 +2588,45 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted });
     }));
 
+    // BYOK validation probe — used by the Web UI SetupBanner BEFORE
+    // PUT /api/secrets/:name so a typo'd key never silently lands in the
+    // vault + walks the user through 5 minutes of onboarding before
+    // dead-ending at a 401. Mirrors the CLI installer's pre-save
+    // validation (validateAnthropicKey / validateOpenAICompatKey in
+    // src/cli/docker-installer.ts) so both surfaces enforce the same
+    // contract: anthropic hits POST /v1/messages with max_tokens=1,
+    // openai-compat hits GET <base>/models. 3-state contract: `valid`
+    // blocks save on UI side iff false; `invalid` shows the engine
+    // reason (Invalid API key / Rate limited / etc.); `network-error`
+    // is non-blocking so a flaky Anthropic outage doesn't trap the
+    // user mid-setup.
+    this.addStatic('user', 'POST /api/secrets/validate-key', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const provider = b && typeof b['provider'] === 'string' ? b['provider'] : '';
+      const key = b && typeof b['key'] === 'string' ? b['key'] : '';
+      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? b['api_base_url'] : '';
+      if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
+      const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
+      try {
+        if (provider === 'anthropic') {
+          const result = await validateAnthropicKey(key);
+          jsonResponse(res, 200, result);
+        } else if (provider === 'mistral') {
+          const result = await validateMistralKey(key);
+          jsonResponse(res, 200, result);
+        } else if (provider === 'openai' || provider === 'custom') {
+          if (!apiBaseUrl) { errorResponse(res, 400, 'Missing api_base_url for openai/custom provider'); return; }
+          const result = await validateOpenAICompatKey(key, apiBaseUrl);
+          jsonResponse(res, 200, result);
+        } else {
+          errorResponse(res, 400, `Unsupported provider: ${provider}`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Validation failed';
+        jsonResponse(res, 200, { state: 'network-error', error: msg });
+      }
+    });
+
     // SearXNG health check — validates a SearXNG URL is reachable
     this.addStatic('user', 'POST /api/searxng/check', async (_req, res, _params, body) => {
       const b = body as Record<string, unknown> | null;

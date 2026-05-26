@@ -132,13 +132,24 @@ export async function validateAnthropicKey(key: string): Promise<KeyValidation> 
   }
 }
 
-// Mistral key validation — mirrors validateAnthropicKey shape. Hits the
-// cheap GET /v1/models endpoint instead of POST /v1/chat/completions so we
-// don't burn a token quota on every installer run. Same 3-state contract:
-// 200 → valid, 401/403 → invalid, anything else → network-error (don't block).
-export async function validateMistralKey(key: string): Promise<KeyValidation> {
+// Generic OpenAI-compatible key validation — hits GET <baseUrl>/models with
+// Bearer auth, which is the universal probe across Mistral, OpenAI, Groq,
+// vLLM, LM Studio, Ollama, etc. Cheap (no token spend) and short-circuits
+// on the same 3-state contract as validateAnthropicKey.
+//
+// `providerLabel` only feeds the user-facing error string ("Could not reach
+// Mistral API" vs "Could not reach OpenAI-compatible endpoint"), so the same
+// function backs both `validateMistralKey` and the engine-side
+// `POST /api/secrets/validate-key` endpoint that SetupBanner uses pre-save
+// to block typo'd keys from silently ending up in the vault.
+export async function validateOpenAICompatKey(
+  key: string,
+  baseUrl: string,
+  providerLabel = 'OpenAI-compatible endpoint',
+): Promise<KeyValidation> {
   try {
-    const res = await fetch('https://api.mistral.ai/v1/models', {
+    const url = baseUrl.replace(/\/+$/, '') + '/models';
+    const res = await fetch(url, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${key}`,
@@ -148,11 +159,19 @@ export async function validateMistralKey(key: string): Promise<KeyValidation> {
     if (res.ok) return { state: 'valid' };
     if (res.status === 401 || res.status === 403) return { state: 'invalid', error: 'Invalid API key' };
     if (res.status === 429) return { state: 'invalid', error: 'Rate limited — try again in a moment' };
-    return { state: 'network-error', error: `Mistral API responded ${String(res.status)}` };
+    return { state: 'network-error', error: `${providerLabel} responded ${String(res.status)}` };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { state: 'network-error', error: `Could not reach Mistral API (${msg})` };
+    return { state: 'network-error', error: `Could not reach ${providerLabel} (${msg})` };
   }
+}
+
+// Mistral key validation — mirrors validateAnthropicKey shape via
+// validateOpenAICompatKey. Hits the cheap GET /v1/models endpoint instead
+// of POST /v1/chat/completions so we don't burn a token quota on every
+// installer run.
+export async function validateMistralKey(key: string): Promise<KeyValidation> {
+  return validateOpenAICompatKey(key, 'https://api.mistral.ai/v1', 'Mistral API');
 }
 
 // TCP-probe a port to see if anything is already listening. Fast (~50ms on

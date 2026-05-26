@@ -131,6 +131,54 @@
 				providerConfig['openai_model_id'] = openaiModel.trim() || 'llama3.2';
 			}
 
+			// 0. Pre-flight key validation. Mirrors the CLI installer's
+			// 3-state probe (`valid` / `invalid` / `network-error`) — invalid
+			// blocks the save with the engine's reason, network-error and
+			// fetch failures are non-blocking so a flaky upstream doesn't
+			// trap the user. The engine endpoint reuses the validate
+			// functions used by `lynox init` so a typo'd key never silently
+			// lands in the vault + walks the user through 5 min of onboarding
+			// before dead-ending at a 401 on first chat (HN-launch eve
+			// self-host walkthrough finding).
+			const keyForValidation = selectedProvider === 'anthropic' ? anthropicKey.trim()
+				: selectedProvider === 'mistral' ? mistralKey.trim()
+				: openaiKey.trim();
+			if (keyForValidation) {
+				const validateBody: Record<string, unknown> = {
+					provider: selectedProvider,
+					key: keyForValidation,
+				};
+				if (selectedProvider === 'mistral') {
+					validateBody['api_base_url'] = 'https://api.mistral.ai/v1';
+				}
+				if (selectedProvider === 'openai') {
+					validateBody['api_base_url'] = openaiUrl.trim();
+				}
+				let validateState: 'valid' | 'invalid' | 'network-error' | null = null;
+				let validateError = '';
+				try {
+					const validateRes = await fetch(`${base}/secrets/validate-key`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(validateBody),
+					});
+					if (validateRes.ok) {
+						const v = (await validateRes.json()) as { state: 'valid' | 'invalid' | 'network-error'; error?: string };
+						validateState = v.state;
+						validateError = v.error ?? '';
+					}
+				} catch {
+					// Fetch failed (engine unreachable, CORS, etc.) — treat as
+					// non-blocking; the engine will surface a real error on
+					// first chat run.
+				}
+				if (validateState === 'invalid') {
+					saveError = validateError || 'Invalid API key';
+					saving = false;
+					return;
+				}
+			}
+
 			// 1. Save credentials to vault FIRST. The engine's PUT /api/config
 			// validates `provider:'openai'` configs eagerly and requires the
 			// vault to already contain an OPENAI_API_KEY (or it 500s with
