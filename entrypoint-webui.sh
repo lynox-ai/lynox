@@ -44,7 +44,8 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE")
     export LYNOX_HTTP_SECRET
     echo "  Access token loaded from volume (not shown in logs)." >&2
-    echo "  Retrieve: docker exec lynox cat \$HOME/.lynox/.access-token" >&2
+    echo "  Retrieve: cat ~/.lynox/.access-token (on the host)" >&2
+    echo "           with the documented \${HOME}/.lynox volume mount" >&2
     echo "" >&2
   else
     LYNOX_HTTP_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
@@ -53,13 +54,19 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     mkdir -p "$HOME/.lynox"
     printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
+    # POSIX-compatible 8-char preview — entrypoint runs under BusyBox `sh` in
+    # the lynox image, which does not support bash's ${VAR:0:8} substring
+    # expansion (was emitting `Bad substitution` on every fresh boot, leaving
+    # users with no token preview at all — pre-HN-launch P0 fix).
+    TOKEN_PREVIEW=$(printf '%s' "$LYNOX_HTTP_SECRET" | head -c 8)
     echo "" >&2
     echo "========================================" >&2
     echo "  Access Token (enter in browser):" >&2
-    echo "  ${LYNOX_HTTP_SECRET:0:8}..." >&2
+    echo "  ${TOKEN_PREVIEW}..." >&2
     echo "========================================" >&2
     echo "  Stored in volume — same token on every restart." >&2
-    echo "  Full token: docker exec lynox cat \$HOME/.lynox/.access-token" >&2
+    echo "  Full token: cat ~/.lynox/.access-token (on the host)" >&2
+    echo "             with the documented \${HOME}/.lynox volume mount" >&2
     echo "  Override: set LYNOX_HTTP_SECRET in .env or docker run" >&2
     echo "" >&2
   fi
