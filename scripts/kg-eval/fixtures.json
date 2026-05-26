@@ -91,17 +91,17 @@
       "expected_relations": []
     },
     {
-      "id": "pos-01-peter-brandfusion-zurich",
+      "id": "pos-01-peter-acme-zurich",
       "category": "clean-positive",
-      "text": "Peter Huber works for Brandfusion in Zurich",
+      "text": "Peter Huber works for Acme Studio in Zurich",
       "expected_entities": [
         { "canonical_name": "Peter Huber", "type": "person" },
-        { "canonical_name": "Brandfusion", "type": "organization" },
+        { "canonical_name": "Acme Studio", "type": "organization" },
         { "canonical_name": "Zurich", "type": "location" }
       ],
       "expected_relations": [
-        { "subject": "Peter Huber", "predicate": "works_for", "object": "Brandfusion" },
-        { "subject": "Brandfusion", "predicate": "located_in", "object": "Zurich" }
+        { "subject": "Peter Huber", "predicate": "works_for", "object": "Acme Studio" },
+        { "subject": "Acme Studio", "predicate": "located_in", "object": "Zurich" }
       ]
     },
     {
@@ -184,15 +184,15 @@
       "expected_relations": []
     },
     {
-      "id": "pos-09-brandfusion-gmbh",
+      "id": "pos-09-acme-gmbh",
       "category": "clean-positive-de",
-      "text": "Brandfusion GmbH wurde in Zürich gegründet",
+      "text": "Acme Studio GmbH wurde in Zürich gegründet",
       "expected_entities": [
-        { "canonical_name": "Brandfusion GmbH", "type": "organization" },
+        { "canonical_name": "Acme Studio GmbH", "type": "organization" },
         { "canonical_name": "Zürich", "type": "location" }
       ],
       "expected_relations": [
-        { "subject": "Brandfusion GmbH", "predicate": "located_in", "object": "Zürich" }
+        { "subject": "Acme Studio GmbH", "predicate": "located_in", "object": "Zürich" }
       ]
     },
     {
@@ -320,19 +320,19 @@
     {
       "id": "edge-04-mixed-everything",
       "category": "mixed-full-scenario",
-      "text": "Peter von Brandfusion nutzt lynox für CHF 79/mo — hosted auf Hetzner in Nürnberg",
+      "text": "Peter von Acme Studio nutzt lynox für CHF 49/mo — hosted auf Hetzner in Falkenstein",
       "expected_entities": [
         { "canonical_name": "Peter", "type": "person" },
-        { "canonical_name": "Brandfusion", "type": "organization" },
+        { "canonical_name": "Acme Studio", "type": "organization" },
         { "canonical_name": "lynox", "type": "product" },
         { "canonical_name": "Hetzner", "type": "organization" },
-        { "canonical_name": "Nürnberg", "type": "location" }
+        { "canonical_name": "Falkenstein", "type": "location" }
       ],
       "expected_relations": [
-        { "subject": "Peter", "predicate": "works_for", "object": "Brandfusion" },
-        { "subject": "Brandfusion", "predicate": "uses", "object": "lynox" },
+        { "subject": "Peter", "predicate": "works_for", "object": "Acme Studio" },
+        { "subject": "Acme Studio", "predicate": "uses", "object": "lynox" },
         { "subject": "lynox", "predicate": "depends_on", "object": "Hetzner" },
-        { "subject": "Hetzner", "predicate": "located_in", "object": "Nürnberg" }
+        { "subject": "Hetzner", "predicate": "located_in", "object": "Falkenstein" }
       ]
     }
   ]

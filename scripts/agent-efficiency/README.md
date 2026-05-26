@@ -1,7 +1,16 @@
 # Agent-Efficiency Measurement Protocol
 
-Phase 0 of [`PRD-AGENT-EFFICIENCY.md`](../../../pro/docs/internal/PRD-AGENT-EFFICIENCY.md)
-§6 — the **staging-`usage` protocol** (resolution O10).
+> **INTERNAL DOCUMENT**: This describes lynox's own staging cost-measurement
+> protocol (drives `engine.lynox.cloud` over its HTTP API, reads engine-side
+> `usage` rollups). Linked PRD lives in the private `pro/` repo. Self-hosters
+> running their own engines can adapt the harness, but the protocol is wired
+> against lynox-team staging credentials and is not a supported user-facing
+> tool.
+
+## Internal operations (lynox-team only)
+
+Phase 0 of `PRD-AGENT-EFFICIENCY.md` §6 (private `pro/docs/internal/`)
+— the **staging-`usage` protocol** (resolution O10).
 
 > **Why this exists.** The existing Set-Bench (`scripts/set-bench/`,
 > `scripts/bench-models/`) benchmarks *models* against a static prompt.

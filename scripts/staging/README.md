@@ -1,5 +1,12 @@
 # Staging helper scripts
 
+> **INTERNAL DOCUMENT**: This describes lynox's own staging infrastructure
+> (`engine.lynox.cloud` + `control-staging.lynox.cloud`). Self-hosters should
+> use the production docs at https://docs.lynox.ai/setup/docker/ instead.
+> Kept in the public repo so the scripts referenced here can be inspected.
+
+## Internal operations (lynox-team only)
+
 Tooling for the staging engine at `engine.lynox.cloud` + the staging CP at
 `control-staging.lynox.cloud`. Each script documents its own prereqs at the
 top; this README is the index.
