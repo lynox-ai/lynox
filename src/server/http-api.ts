@@ -1406,7 +1406,14 @@ export class LynoxHTTPApi {
     const store = this.engine?.getSecretStore();
     const userConfig = this.engine?.getUserConfig() ?? {};
     const managedMode = process.env['LYNOX_MANAGED_MODE'];
-    if (!managedMode && store) {
+    // Only bypass the not-configured check for tiers where the CP supplies
+    // the LLM key (managed / managed_pro / eu-sovereign). The Hosted-BYOK
+    // starter tier requires the CUSTOMER to bring their own key, so the
+    // not-configured signal MUST still surface — pre-fix the status bar
+    // showed "API OK" on managed-BYOK with empty vault while SetupBanner
+    // was simultaneously demanding the key, lying green on the indicator.
+    const cpSuppliesKey = managedMode === 'managed' || managedMode === 'managed_pro' || managedMode === 'eu';
+    if (!cpSuppliesKey && store) {
       let configured = false;
       try {
         if (provider === 'vertex') {
