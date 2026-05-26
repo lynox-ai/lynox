@@ -27,7 +27,7 @@
 	// the "Migration zu Managed Hosting" entry during the ~300 ms before the
 	// response arrives, which is confusing for customers who already have a
 	// managed instance. The filter below hides self-host-only items until we
-	// have a confirmed answer (Rafael reported this on engine.lynox.cloud).
+	// have a confirmed answer (reported via support).
 	let managed = $state<boolean | null>(null);
 
 	// Same default-null pattern for mobile/PWA detection — on first paint we

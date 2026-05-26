@@ -536,7 +536,7 @@ describe('Agent', () => {
     });
 
     it('does NOT emit a fatal `error` stream event when a tool throws and the agent recovers', async () => {
-      // Regression for the rafael.lynox.cloud incident (2026-04-26): spawn_agent
+      // Regression for a pilot incident (2026-04-26): spawn_agent
       // threw on the session cost ceiling, the agent fell back to direct
       // web_research and finished the turn — but the UI showed a global
       // "Etwas ist schiefgelaufen" toast because the engine emitted an

@@ -332,7 +332,7 @@
 		const name = local.split(/[.+_]/)[0] ?? local;
 
 		if (!formId) {
-			// "rafael-lynox-ai" for Workspace, "rafael-gmail" for standard Gmail
+			// e.g. "alice-example-com" for a custom domain, "alice-gmail" for standard Gmail
 			const suffix = isCustomDomain && domain ? domain.replace(/\./g, '-') : formPreset === 'custom' ? 'mail' : formPreset;
 			formId = `${name}-${suffix}`.toLowerCase().replace(/[^a-z0-9-]/g, '');
 		}
@@ -341,7 +341,7 @@
 				.split(/[.+_]/)
 				.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
 				.join(' ');
-			// "Rafael — lynox.ai" for Workspace, "Rafael — Gmail" for standard
+			// e.g. "Alice — example.com" for a custom domain, "Alice — Gmail" for standard
 			const label = isCustomDomain && domain ? domain : (selectedPreset?.label ?? formPreset);
 			formDisplayName = `${displayName} — ${label}`;
 		}
@@ -612,7 +612,7 @@
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
 							rows="2"
 							bind:value={formPersonaPrompt}
-							placeholder={selectedType?.defaultPersona ?? 'Short, formal, sign as Rafael…'}
+							placeholder={selectedType?.defaultPersona ?? 'Short, formal, sign with your first name…'}
 							data-testid="mail-persona-input"
 						></textarea>
 					</label>

@@ -50,11 +50,11 @@ describe.skipIf(SKIP)('Online: Agent', () => {
       maxIterations: 1,
     });
 
-    const r1 = await agent.send('My name is Rafael. Remember that.');
+    const r1 = await agent.send('My name is Alice. Remember that.');
     expect(r1).toBeTruthy();
 
     const r2 = await agent.send('What is my name?');
-    expect(r2.toLowerCase()).toContain('rafael');
+    expect(r2.toLowerCase()).toContain('alice');
   }, 20_000);
 
   it('emits stream events during response', async () => {

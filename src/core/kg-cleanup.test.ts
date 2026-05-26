@@ -22,7 +22,7 @@ describe('kg-cleanup', () => {
     });
 
     it('rejects common nouns observed in production KG (v1.3.6)', () => {
-      // Captured from rafael.lynox.cloud Graph (Beta) on 2026-04-27.
+      // Captured from a customer Graph (Beta) instance on 2026-04-27.
       expect(isCleanupTarget('when')).toBe(true);
       expect(isCleanupTarget('notification')).toBe(true);
       expect(isCleanupTarget('support')).toBe(true);

@@ -20,8 +20,8 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 const SAMPLE = {
 	id: 'acct-1',
-	displayName: 'Rafael',
-	address: 'rafael@example.com',
+	displayName: 'Alice',
+	address: 'alice@example.com',
 	preset: 'custom',
 	isDefault: true,
 	type: 'personal',

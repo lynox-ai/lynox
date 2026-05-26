@@ -15,7 +15,9 @@ verified end-to-end against the merged staging code, not just unit tests.
 The Greenmail container runs on `control-staging.lynox.cloud` (the CP host),
 not on the staging tenant host (`host-staging-02`). The Hetzner firewall
 `control-plane-staging` restricts the Greenmail ports (3025 SMTP, 3143 IMAP,
-8080 admin REST) to `78.47.14.168/32` — the staging tenant host's public IP.
+8080 admin REST) to `<staging-tenant-host-ip>/32` — the staging tenant host's
+public IP. Find your own via your hosting provider's dashboard (e.g.
+`hcloud server list`, `gcloud compute instances list`, AWS EC2 console).
 **Your dev machine cannot reach those ports directly.** That's by design:
 plain SMTP without auth is an open mail relay.
 

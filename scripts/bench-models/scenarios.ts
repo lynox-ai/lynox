@@ -56,7 +56,7 @@ index abc..def 100644
    return result;
  }`;
 
-const DEBUG_LOG = `2026-04-14T08:12:03.112Z [control-plane] Deploy started for instance=war.lynox.cloud version=1.0.5
+const DEBUG_LOG = `2026-04-14T08:12:03.112Z [control-plane] Deploy started for instance=acme-demo.example.com version=1.0.5
 2026-04-14T08:12:07.882Z [control-plane] SSH ok, docker version 24.0.7
 2026-04-14T08:12:11.341Z [control-plane] Pulling image ghcr.io/lynox-ai/lynox:1.0.5 ...
 2026-04-14T08:12:48.220Z [control-plane] Image pulled (128MB)
@@ -70,44 +70,43 @@ const DEBUG_LOG = `2026-04-14T08:12:03.112Z [control-plane] Deploy started for i
 2026-04-14T08:12:54.944Z [lynox-core]    at Parser.parseErrorMessage (/app/node_modules/pg-protocol/...)
 2026-04-14T08:12:54.945Z [lynox-core] engine failed to boot, exiting 1
 2026-04-14T08:12:55.002Z [control-plane] container exited code=1
-2026-04-14T08:12:55.003Z [control-plane] Deploy FAILED for war.lynox.cloud
+2026-04-14T08:12:55.003Z [control-plane] Deploy FAILED for acme-demo.example.com
 
 Migration file applied just before build:
 0021_add_mail_provider.sql:
 ALTER TABLE instance_settings ADD COLUMN mail_provider TEXT NOT NULL DEFAULT 'smtp';`;
 
-const SUMMARY_DOC = `Product Brief: Managed Hosting Tier "Managed Pro"
+const SUMMARY_DOC = `Product Brief: FlexBike Pro — Studio Plus Tier
 
-Context: lynox offers three customer tiers today — Hosted (CHF 39/mo, BYOK),
-Managed (CHF 79/mo, EU LLM keys included, isolated container), and Enterprise
-(dedicated VPS, custom pricing, manual onboarding). Between Managed and
-Enterprise there is a gap: customers who outgrow shared-host limits but are
-not yet ready for dedicated-VPS pricing.
+Context: FlexBike GmbH (fictional bike-shop SaaS) bietet heute drei Tiers —
+Solo (€19/mo, Einzelmechaniker, einfacher Kalender), Pro (€39/mo, bis 4 Mechaniker,
+Werkstatt-Dashboard) und Studio (€99/mo, bis 12 Mechaniker, Multi-Bay-Planung,
+Kundenportal). Zwischen Studio und individuellen Enterprise-Verträgen klafft
+eine Lücke: wachsende Werkstattketten mit 2-3 Standorten, denen Studio zu eng
+wird, die aber kein Custom-Onboarding brauchen.
 
-Proposal: Introduce "Managed Pro" at CHF 149/mo. Differentiators vs. Managed:
+Proposal: Neues Tier "Studio Plus" at €149/mo. Differentiators vs. Studio:
 
-1. Higher rate limits: 500 req/hour HTTP tool (Managed: 200), 2000 agent
-   iterations per session (Managed: 500).
-2. Extended context window opt-in: user can enable 1M-token context per
-   thread for complex multi-document work. Managed stays at 500k default cap.
-3. Priority provisioning: new Managed Pro instances deploy in under 10 min
-   (currently Managed provisioning is batched every 30 min).
-4. Daily encrypted backups to customer-controlled S3 or Google Drive (Managed
-   gets weekly control-plane backups only, customer has no direct access).
-5. Dedicated Bugsink project for error tracing with 30-day retention.
+1. Dedicated mechanic-priority booking: VIP-Kund:innen können bestimmte
+   Mechaniker:innen direkt buchen (Studio: Round-Robin only).
+2. Multi-location dashboard: zentrale Sicht über alle Filialen mit Roll-up
+   KPIs (Studio: nur Single-Location).
+3. Priority support response: garantierte Antwort in 4h Bürozeit (Studio:
+   best-effort, ~24h median).
+4. Erweiterte Reporting-APIs: CSV/Webhook export von Buchungs- und Umsatzdaten
+   (Studio: nur UI-Export).
+5. Branded customer-portal subdomain (z.B. werkstatt.kundenname.ch) statt
+   geteilter flexbike.app/<slug>.
 
-Out of scope: No dedicated compute, no dedicated IP, no SLA beyond best-effort.
-These stay exclusive to Enterprise.
+Out of scope: Keine dedizierten Server, keine SLA mit Strafzahlungen, kein
+Custom Branding über CSS-Tokens hinaus. Diese bleiben Enterprise vorbehalten.
 
-Timeline: Beta testing with 3 existing Managed customers in May; GA in June
-alongside v1.2.0 release. No migration path from existing Managed tier in
-Phase 1 — new signups only; existing customers can upgrade manually via admin
-API after GA.
+Timeline: Beta mit 3 Bestandskunden in Mai; GA Juni zusammen mit v2.4 Release.
+Bestandskunden können nach GA via Self-Service upgraden.
 
-Success metrics: 10 Managed Pro signups in first quarter; less than 5%
-churn-down from Managed to Hosted (signal that Pro cannibalizes Managed);
-at least 2 Enterprise inquiries re-routed to Pro (signal that Pro closes
-the gap).`;
+Success metrics: 15 Studio Plus signups in first quarter; less than 8%
+downgrade-rate zurück zu Studio; mindestens 2 ehemalige Enterprise-Anfragen,
+die in Studio Plus statt Custom-Vertrag landen.`;
 
 export const SCENARIOS: readonly BenchScenario[] = [
   {
@@ -188,14 +187,14 @@ export const SCENARIOS: readonly BenchScenario[] = [
     description: 'Verdichte Product-Brief zu Bullet-Summary.',
     prompt: `Fasse folgendes Product Brief zusammen als 5-7 Bullets. Kernpunkte: Differentiators, Timeline, Success-Metriken.\n\n${SUMMARY_DOC}`,
     judgeRubric: [
-      'Hauptproduktvorschlag erwähnt: Managed Pro bei CHF 149/mo',
-      'Nennt mindestens 3 der 5 Differentiators (Rate Limits, 1M Context, Provisioning, Backups, Bugsink)',
-      'Erwähnt Timeline: Beta im Mai, GA im Juni mit v1.2.0',
-      'Erwähnt Success-Metriken: 10 Signups/Quartal, <5% Churn-down',
+      'Hauptproduktvorschlag erwähnt: Studio Plus bei €149/mo',
+      'Nennt mindestens 3 der 5 Differentiators (Mechanic-Priority, Multi-Location, Priority Support, Reporting-APIs, Branded Subdomain)',
+      'Erwähnt Timeline: Beta im Mai, GA im Juni mit v2.4',
+      'Erwähnt Success-Metriken: 15 Signups/Quartal, <8% Downgrade-Rate',
       '5-7 Bullets — nicht zu kurz, nicht zu lang',
       'Keine halluzinierten Features',
     ],
-    referenceAnswer: '- Neues Tier "Managed Pro" bei CHF 149/mo — füllt Lücke zwischen Managed (CHF 79) und Enterprise\n- Differentiators: 2.5× Rate Limits, 1M-Token-Context-Opt-in, Priority Provisioning (<10min), tägliche Backups zu Customer-S3/GDrive, dediziertes Bugsink-Projekt\n- Out-of-Scope: Kein dediziertes Compute, keine IP, keine SLA (bleibt Enterprise exklusiv)\n- Timeline: Beta Mai mit 3 Bestandskunden, GA Juni mit v1.2.0\n- Kein automatischer Migrationspfad für Bestandskunden in Phase 1 — nur Neukunden\n- Success: 10 Signups im Q1, <5% Cannibalisierung von Managed, 2+ Enterprise-Inquiries auf Pro umgelenkt',
+    referenceAnswer: '- Neues Tier "Studio Plus" bei €149/mo — füllt Lücke zwischen Studio (€99) und Enterprise\n- Differentiators: Mechanic-Priority-Booking, Multi-Location-Dashboard, 4h Priority Support, Reporting-APIs (CSV/Webhook), branded Customer-Portal-Subdomain\n- Out-of-Scope: Keine dedizierten Server, keine SLA-Strafzahlungen, kein Custom-Branding über CSS-Tokens hinaus (bleibt Enterprise)\n- Timeline: Beta Mai mit 3 Bestandskunden, GA Juni mit v2.4\n- Bestandskunden können nach GA via Self-Service upgraden\n- Success: 15 Signups im Q1, <8% Downgrade-Rate zurück zu Studio, 2+ Enterprise-Inquiries auf Studio Plus umgelenkt',
     maxIterations: 2,
     timeoutMs: 60_000,
   },

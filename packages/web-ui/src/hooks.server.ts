@@ -76,8 +76,8 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	// they trigger a network request that iOS satisfies from its own cache.
 	// Hashed `_app/immutable/*.{js,css}` assets are safe to cache forever
 	// (different filename per build); only the HTML driver document needs
-	// no-store. Caught after rafael.lynox.cloud canary v1.3.10 by Rafael —
-	// his iPhone PWA was stuck reloading to the same cached HTML.
+	// no-store. Caught after a canary v1.3.10 incident —
+	// the iPhone PWA was stuck reloading to the same cached HTML.
 	const ct = response.headers.get('Content-Type') ?? '';
 	if (ct.startsWith('text/html')) {
 		response.headers.set('Cache-Control', 'no-store, must-revalidate');

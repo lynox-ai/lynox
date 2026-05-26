@@ -8,7 +8,7 @@
 
 **Run your business. Not your tools.**
 
-One source-available (ELv2) agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM (Anthropic, Mistral, or any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, Groq). Self-hosted, no vendor lock-in.
+One source-available (ELv2) agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM (Anthropic, OpenAI, Mistral, or any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, Groq, vLLM). Self-hosted, no vendor lock-in.
 
 > [!IMPORTANT]
 > **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
@@ -27,7 +27,7 @@ One source-available (ELv2) agent that learns your business — handles CRM, wor
 npx @lynox-ai/core
 ```
 
-You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic**, **Mistral**, or **Custom** — any OpenAI-compatible endpoint, including Ollama / LM Studio / LiteLLM / Groq / vLLM), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
+You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic**, **Mistral**, or **Custom** — any OpenAI-compatible endpoint, including **OpenAI**, Ollama / LM Studio / LiteLLM / Groq / vLLM), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
 
 Prefer to edit `.env` yourself before the first run? Jump to [manual Docker](#docker) below.
 
@@ -59,7 +59,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 └────────────────┘  └───────────────────┘
 ```
 
-**BYOK** — You provide your LLM credential (Anthropic / Mistral / OpenAI-compatible). When self-hosted, lynox calls the API directly: no proxy, no middleman, no data collection. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
+**BYOK** — You provide your LLM credential (Anthropic / Mistral / OpenAI-compatible). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via LYNOX_BUGSINK_DSN for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
 
 ## Key capabilities
 
@@ -147,7 +147,7 @@ This software is provided **"as is"**, without warranty of any kind. By using ly
 
 ## License
 
-**Free for any use including production and customer-facing**, except offering lynox itself as a competing hosted service. Source is open and forkable under the [Elastic License 2.0](LICENSE) — the same license as Elasticsearch and Kibana.
+**Free for any use including production and customer-facing**, except offering lynox itself as a competing hosted service. Source-available and forkable under the [Elastic License 2.0](LICENSE) — same license as Elasticsearch and Kibana, not OSI-approved "open source". Use it commercially, self-host it, fork it — the one restriction is you can't resell it as a competing managed service.
 
 **What you can do:** read, modify, and redistribute the source · self-host for your business, your clients, or your team · build commercial products and services on top of lynox.
 

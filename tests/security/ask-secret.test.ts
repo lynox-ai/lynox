@@ -106,7 +106,7 @@ describe('ask_secret security', () => {
     });
 
     it('preserves normal text', () => {
-      const input = 'Hello, my name is Rafael';
+      const input = 'Hello, my name is Alice';
       expect(maskSecretPatterns(input)).toBe(input);
     });
 

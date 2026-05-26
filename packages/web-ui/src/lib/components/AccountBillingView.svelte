@@ -6,7 +6,7 @@
 	broken in practice because the CP route is cookie-gated (`customerAuth`)
 	and tenant-subdomain browsers don't share cookies with control.lynox.cloud.
 	Customer saw raw `{"error":"Authentication required..."}` JSON instead of
-	a portal. Captured during rafael's canary verify on rafael.lynox.cloud.
+	a portal. Captured during a canary verify on a pilot instance.
 
 	V1.6.0 stopgap (this revision): if the engine has `LYNOX_STRIPE_PORTAL_LOGIN_URL`
 	env set (= Stripe-hosted Customer-Portal login page, `billing.stripe.com/p/login/...`),
