@@ -7,12 +7,13 @@ sidebar:
 
 ## Prerequisites
 
-- **An LLM credential** for one of three providers:
-  - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API. Prompt caching makes cache-heavy workflows the cheapest option per token of real work.
-  - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter. Lower list prices than Claude; pick it for sovereignty or for uncached workloads where the lower per-token rate dominates.
-  - **Custom (OpenAI-compatible)** — Ollama, LM Studio, OpenAI, Groq, vLLM, or any other OpenAI-compatible endpoint. Pick this for fully local inference. (LiteLLM as an Anthropic-compatible proxy is also supported via the separate `custom` provider — see [LLM Providers](/setup/llm-providers/).)
+- **An LLM credential** for one of the two natively-supported providers:
+  - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API. Prompt caching makes cache-heavy workflows the cheapest option per token of real work. Tested on every release.
+  - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter pinned to `api.mistral.ai`. Lower list prices than Claude; pick it for sovereignty or for uncached workloads where the lower per-token rate dominates. Tested on every release.
 
-The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**. A typical business day on Claude costs **$1–5**; local-only setups cost nothing per call. See [LLM Providers](/setup/llm-providers/) for the per-provider matrix.
+  Other endpoints — OpenAI itself, Ollama, LM Studio, Groq, vLLM, Gemini, the Anthropic-compatible "custom" proxy path (LiteLLM in Anthropic mode), and Google Vertex AI — are **wired but not regularly tested**. They work in principle and you can configure them via `~/.lynox/config.json` or environment variables, but expect rough edges around tool-calling reliability. See [LLM Providers](/setup/llm-providers/).
+
+The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**. A typical business day on Claude costs **$1–5**.
 
 ## Install
 

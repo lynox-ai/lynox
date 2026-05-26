@@ -1428,7 +1428,7 @@ export class Engine {
     }
   }
 
-  /** Start the background worker loop. Call from long-lived server modes (Telegram, MCP). */
+  /** Start the background worker loop. Call from long-lived server modes (HTTP API). */
   startWorkerLoop(intervalMs?: number | undefined): void {
     if (this._workerLoop) return; // already started
     this._workerLoop = new WorkerLoop(this, this._notificationRouter, intervalMs);

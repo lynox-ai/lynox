@@ -6,7 +6,7 @@
 // it's pure orchestration.
 //
 // Phase 0: read-only, no classification. Phase 1 will route the survivors
-// through a Haiku-tier classifier and emit Telegram notifications.
+// through a Haiku-tier classifier and emit web-push notifications.
 
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import { getErrorMessage } from '../../../core/utils.js';

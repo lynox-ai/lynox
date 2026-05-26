@@ -30,11 +30,11 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic`, `openai` (Mistral / Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini long-context), `custom` (Anthropic-compat proxy via LiteLLM), `vertex` (legacy) | `anthropic` |
+| `provider` | `anthropic` (tested), `openai` (Mistral tested; Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini experimental), `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) | `anthropic` |
 | `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
 | `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-2512`, `llama3.2`) | — |
 
-Only configure the fields relevant to your provider. See [LLM Providers](/setup/llm-providers/) for full setup guides per provider, including a "Legacy: Vertex AI" footnote for existing `provider: vertex` users.
+Only **anthropic** and **openai with the Mistral endpoint** are exercised on every release. The other paths work in principle but are not regularly tested — see [LLM Providers](/setup/llm-providers/) for full details.
 
 > Prefer pinned model IDs (`mistral-large-2512`) over floating tags like `mistral-large-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
 
@@ -188,21 +188,22 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 | Variable | Purpose |
 |----------|---------|
-| `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider) — also reused as the generic key for `provider: openai` |
-| `ANTHROPIC_BASE_URL` | Endpoint for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy), `vertex` (legacy) |
+| `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider). Anthropic-only — does NOT serve `provider: openai`. |
+| `ANTHROPIC_BASE_URL` | Base URL for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) |
 
 ### OpenAI-Compatible
 
 | Variable | Purpose |
 |----------|---------|
+| `MISTRAL_API_KEY` | Mistral API key — primary slot for `provider: openai` with the Mistral endpoint (natively supported). |
+| `OPENAI_API_KEY` | Bearer for generic OpenAI-compatible endpoints (experimental). Secondary slot — `MISTRAL_API_KEY` is also accepted. Leave blank for local Ollama / LM Studio without auth. |
 | `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-2512` (prefer pinned over `-latest`), `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
-| `ANTHROPIC_API_KEY` | API key for the provider (reused env var; leave blank for local Ollama / LM Studio without auth) |
 | `ANTHROPIC_BASE_URL` | Provider base URL — see [LLM Providers](/setup/llm-providers/) for the value per backend |
 
-### Legacy: Google Vertex AI
+### Legacy: Google Vertex AI (experimental)
 
-`provider: vertex` is no longer offered by the installer; the env vars below remain wired for existing `config.json` setups that still point at Vertex. New installs should use Anthropic direct or the OpenAI-compatible path above.
+`provider: vertex` is no longer offered by the installer; the env vars below remain wired for existing `config.json` setups that still point at Vertex but are not regularly tested. New installs should use Anthropic direct or Mistral.
 
 | Variable | Purpose |
 |----------|---------|

@@ -32,7 +32,7 @@ export interface RichSpeakOpts extends SpeakOpts {
    * Source-text language for the Markdown → spoken-text pre-processor.
    * Determines table/list summary labels and the list joiner. `'auto'`
    * (or omitted) runs a stopword vote that defaults to `'en'` on tie.
-   * Web UI / Telegram callers should pass the user's UI locale.
+   * Web UI / PWA callers should pass the user's UI locale.
    */
   readonly lang?: Lang | 'auto' | undefined;
 }

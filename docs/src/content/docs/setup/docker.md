@@ -47,13 +47,15 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ## Environment Variables
 
-`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral or a **Custom (OpenAI-compatible)** endpoint (Ollama, LM Studio, OpenAI, Groq, vLLM, …), see [LLM Providers](/setup/llm-providers/). Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
+`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral (the other natively-supported path), see [LLM Providers](/setup/llm-providers/). Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, …) are wired but **not regularly tested**. Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | Recommended | Anthropic API key. Also reused as the generic bearer for `provider: openai` (Mistral / custom endpoint) — name kept generic. |
-| `ANTHROPIC_BASE_URL` | No | Endpoint for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
-| `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy), `vertex` (legacy, see below) |
+| `ANTHROPIC_API_KEY` | Recommended | Anthropic API key. Anthropic-only — does NOT serve `provider: openai`. |
+| `MISTRAL_API_KEY` | Mistral only | Mistral API key (canonical primary slot for `provider: openai` with Mistral endpoint). |
+| `OPENAI_API_KEY` | Other openai-compat only | Bearer for generic OpenAI-compatible endpoints (experimental). Secondary slot — `MISTRAL_API_KEY` is also accepted. |
+| `ANTHROPIC_BASE_URL` | No | Base URL for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
+| `LYNOX_LLM_PROVIDER` | No | `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy, see below — experimental) |
 | `OPENAI_MODEL_ID` | OpenAI only | Model ID (e.g. `mistral-large-2512`, `llama3.2`, `gpt-4o`) — prefer pinned over `-latest` to avoid silent snapshot rolls |
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
@@ -74,7 +76,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ### Legacy: Vertex AI
 
-`provider: vertex` is no longer offered by the installer or in-product wizard but stays wired in the engine for existing self-hosters whose `config.json` still points at Vertex. New installs should use Anthropic direct or `provider: openai` instead.
+`provider: vertex` is no longer offered by the installer or in-product wizard but stays wired in the engine for existing self-hosters whose `config.json` still points at Vertex. New installs should use Anthropic direct or `provider: openai` (Mistral) instead. The Vertex path is not regularly tested — expect rough edges.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|

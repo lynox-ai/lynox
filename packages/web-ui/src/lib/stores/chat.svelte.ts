@@ -14,7 +14,7 @@ export { usageFromDoneEvent } from './chat-usage.js';
 export type { UsageInfo } from './chat-usage.js';
 
 // ---------------------------------------------------------------------------
-// Follow-up parsing (mirrors core telegram-formatter logic)
+// Follow-up parsing (<follow_ups>…</follow_ups> block extraction)
 // ---------------------------------------------------------------------------
 
 const FOLLOW_UP_RE = /<follow_ups>\s*([\s\S]*?)\s*<\/follow_ups>/;

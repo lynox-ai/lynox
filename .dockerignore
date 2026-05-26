@@ -1,7 +1,7 @@
-node_modules
-dist
-build
-.svelte-kit
+**/node_modules
+**/dist
+**/build
+**/.svelte-kit
 .git
 .github
 *.md

@@ -444,7 +444,7 @@ export class GoogleAuth {
   }
 
   /**
-   * Start device flow OAuth — for headless/Docker/Telegram environments.
+   * Start device flow OAuth — for headless / Docker environments.
    * Returns a verification URL and user code. The user opens the URL in any browser,
    * enters the code, and the method polls until authorized.
    */

@@ -392,10 +392,21 @@ services:
     tmpfs:
       - /tmp:size=512M
       - /workspace:size=256M,uid=1001,gid=1001
+      # ONNX embedding cache for the Knowledge Graph (Xenova/transformers.js).
+      # Without this writable tmpfs the read_only root filesystem rejects the
+      # subdirectory \`mkdir\` and every web-research call spams the engine
+      # log with ENOENT.
+      - /home/lynox/.cache:size=512M,uid=1001,gid=1001
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
       interval: 30s
@@ -418,6 +429,12 @@ services:
       - ALL
     security_opt:
       - no-new-privileges
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
 `;
@@ -536,9 +553,9 @@ export async function runDockerInstaller(): Promise<void> {
 
     type ProviderChoice = 'anthropic' | 'mistral' | 'custom';
     const provider = await select<ProviderChoice>([
-      { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
-      { label: 'Mistral', value: 'mistral', hint: 'Paris, EU' },
-      { label: 'OpenAI-compatible', value: 'custom', hint: 'Ollama, LM Studio, Groq, LiteLLM, vLLM' },
+      { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended — tested' },
+      { label: 'Mistral', value: 'mistral', hint: 'Paris, EU — tested' },
+      { label: 'OpenAI-compatible', value: 'custom', hint: 'Ollama / LM Studio / Groq / LiteLLM / vLLM — experimental' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'anthropic';
 
     // ── Provider-specific input ────────────────────────

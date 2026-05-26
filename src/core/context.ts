@@ -7,7 +7,7 @@ import { getLynoxDir } from './config.js';
 /**
  * Resolve the LynoxContext for the current session.
  *
- * - If `config.context` is provided (Telegram, Slack, PWA, MCP): use it directly,
+ * - If `config.context` is provided (HTTP API / PWA): use it directly,
  *   ensuring workspaceDir is set.
  * - If not (CLI): detect project root, wrap the result.
  */
