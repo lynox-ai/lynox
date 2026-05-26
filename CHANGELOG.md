@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.7.5 — 2026-05-26 night
+
+Pre-HN-launch eve self-host hardening + UX polish. 10 PRs since v1.7.4.
+
 ### Breaking
 
 - **Tavily web-search backend retired.** The `TAVILY_API_KEY` env var, `search_provider: 'tavily'` config value, and the `TavilyProvider` class are gone. The UI hadn't surfaced Tavily for months; keeping a dead env-var path was misleading. SearXNG (sidecar via `docker compose up`, or any `SEARXNG_URL` you host) is the supported full-quality backend.
@@ -9,8 +13,35 @@
 
 ### Added
 
-- **Honesty-fallback when `web_research` is not configured.** Previously the agent silently fabricated search results (made-up arXiv IDs, prices, "recent X") when no search backend was wired up. Now the agent gets explicit "no search available — DO NOT fabricate" instructions in its system prompt, and tells the user how to enable search instead.
-- **Embedded DuckDuckGo HTML-scrape fallback** for `web_research` when SearXNG isn't configured. Best-effort (no JSON API, no time-range filter, susceptible to rate-limits) — `web_research` always exists so the agent never has to invent results, but the agent receives a "fallback quality" prompt suffix so it caveats findings and surfaces the SearXNG upgrade path.
+- **SetupBanner pre-flight API-key validation** (#629). Typo'd keys are now rejected with the engine's actual reason before the vault write, instead of silently landing and 401-ing on the user's first chat. Reuses the same 3-state validators the CLI installer uses (`anthropic | mistral | openai-compat`).
+- **Status bar `Setup needed` indicator** (#630). The bar used to show "API OK" on fresh self-host because it only checked `status.anthropic.com` endpoint health, not whether the user had wired a key. New `not-configured` state colours amber and labels "Setup needed".
+- **Honesty-fallback when `web_research` is not configured.** Previously the agent silently fabricated search results (made-up arXiv IDs, prices, "recent X") when no search backend was wired up. Now the agent gets explicit "no search available — DO NOT fabricate" instructions in its system prompt.
+- **Embedded DuckDuckGo HTML-scrape fallback** for `web_research` when SearXNG isn't configured. Best-effort, with a "fallback quality" prompt suffix so the agent caveats findings.
+
+### Fixed
+
+- **Gmail-OAuth From-name** dropped — recipients saw the local-part only as sender (#623). Parity with IMAP/SMTP via the existing `formatAddr` helper.
+- **Entrypoint `${VAR:0:8}` bash-only on BusyBox sh** (#625). Fresh users never saw the 8-char token preview; retrieval command hardcoded `docker exec lynox` (wrong container name under docker-compose). POSIX `printf | head -c 8` + host-side `cat ~/.lynox/.access-token`.
+- **PasskeyPrompt no longer renders on self-host** (#626). Click used to dead-end at `/auth/passkey/register` (WebAuthn lives on the managed CP, not the engine). Bail on `supported === false`.
+- **SetupBanner Mistral/Custom-OpenAI-compat first-save 500** (#627). `PUT /api/config` validated eagerly and 500-ed if vault was empty. Reorder: secret-PUT then config-PUT.
+- **ONNX embedding cache write** (#628 + the installer compose-file parity in #631). `read_only: true` blocked the subdir mkdir; tmpfs at `/home/lynox/.cache` + entrypoint pre-creates expected subdirs.
+- **ChatView polish** (#622): inline KI-badge, thread-actions hamburger menu, scroll-during-generation race fix.
+- **Mistral fallback no longer overrides healthy Anthropic primary** in the status bar (#616).
+- **Login logo `l` letter top cropped at h-20** (#631). SVG viewBox extended.
+- **Login "Lost it?" hint** (#631) replaced hardcoded `docker logs lynox` with host-side `cat ~/.lynox/.access-token`.
+
+### Internal
+
+- **Installer Compose-version display** (#624). Was printing `Compose ersion` because the regex matched the `v` in literal "version". Anchored regex + Vertex env-vars removed from `--help`.
+- **Installer compose-file generator** picks up #628's huggingface tmpfs + pids_limit + json-file logging rotation (#631). Every `npx @lynox-ai/core` user used to re-trip the ONNX-cache ENOENT.
+- **`.dockerignore` patterns are recursive** (`**/node_modules` etc.) (#631). Host-side `node_modules` was leaking into the docker context on Apple Silicon contributor builds and dangling the symlinks pnpm install produced. CI on Ubuntu happened to not hit it; pinning explicitly removes the platform-dependence.
+- **Stale-name sweep** across 32 files (#631). Dead Telegram / Slack / MCP / Tavily references removed from JSDoc comments + retired-integration test fixtures. `ContextSource` narrowed from `'cli' | 'slack' | 'mcp' | 'pwa'` to `'cli' | 'pwa'` (actual call sites).
+- **LLM-provider claim cleanup** (#631). Docs, `.env.example`, `--help`, installer hints, SetupBanner i18n (DE+EN), `llm/catalog.ts` all mark Anthropic + Mistral as tested-on-every-release and every other openai-compat target as experimental.
+- **`POST /api/secrets/validate-key` engine endpoint** (#629) backs the SetupBanner pre-flight; same shape as the CLI's validators (`KeyValidation` 3-state).
+- **Pre-flight security + honesty + UWG sweep** (#617).
+- **Docs drift cleanup + ROADMAP v2 publish** (#621).
+- **Public-repo stale-ref + PII-fixture cleanup** (#620).
+- **Deps bump 16 minor/patch** (#619).
 
 ## 1.7.4 — 2026-05-25
 
