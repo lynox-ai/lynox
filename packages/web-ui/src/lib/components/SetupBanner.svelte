@@ -131,6 +131,24 @@
 				providerConfig['openai_model_id'] = openaiModel.trim() || 'llama3.2';
 			}
 
+			// 1. Save credentials to vault FIRST. The engine's PUT /api/config
+			// validates `provider:'openai'` configs eagerly and requires the
+			// vault to already contain an OPENAI_API_KEY (or it 500s with
+			// "OpenAI provider requires apiKey" — caught on a fresh Mistral
+			// pick during HN-launch self-host walkthrough). Anthropic doesn't
+			// trip the same eager check, but saving the secret first is
+			// always safe ordering: secret-only state is a no-op until the
+			// matching provider config lands.
+			if (selectedProvider === 'anthropic') {
+				await saveSecret('ANTHROPIC_API_KEY', anthropicKey.trim());
+			} else if (selectedProvider === 'mistral') {
+				await saveSecret('OPENAI_API_KEY', mistralKey.trim());
+			} else if (selectedProvider === 'openai' && openaiKey.trim()) {
+				await saveSecret('OPENAI_API_KEY', openaiKey.trim());
+			}
+
+			// 2. Persist provider config. Validation now passes because the
+			// vault entry is already present.
 			const configRes = await fetch(`${base}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -151,15 +169,6 @@
 					// non-JSON body — fall back to generic text
 				}
 				throw new Error(serverMsg || `Failed to save config (HTTP ${configRes.status})`);
-			}
-
-			// 2. Save credentials to vault
-			if (selectedProvider === 'anthropic') {
-				await saveSecret('ANTHROPIC_API_KEY', anthropicKey.trim());
-			} else if (selectedProvider === 'mistral') {
-				await saveSecret('OPENAI_API_KEY', mistralKey.trim());
-			} else if (selectedProvider === 'openai' && openaiKey.trim()) {
-				await saveSecret('OPENAI_API_KEY', openaiKey.trim());
 			}
 
 			saveSuccess = true;
