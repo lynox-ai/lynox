@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.7.6 — 2026-05-27 night
+
+Patch — three managed-tier UX gaps caught during the v1.7.5 staging walk on a Hosted-BYOK (`starter`) tenant. All three traced to managed-mode code paths assuming `LYNOX_MANAGED_MODE=*` always means the CP supplies the LLM key — wrong for Hosted-BYOK where the customer brings it. G2 additionally affected self-host with non-Anthropic providers.
+
+### Fixed
+
+- **LLM Settings now shows the API-key input on Hosted-BYOK** (#632 G1). New `cpSuppliesLLMKey()` helper returns true only for `managed`/`managed_pro`/`eu`; previously `isManaged()` returned true for `starter` BYOK too, hiding the key-input field and stranding the customer.
+- **ChatView inline empty-state is provider-aware** (#632 G2). Was hardcoded `sk-ant-...` placeholder + `console.anthropic.com` link regardless of selected provider — Mistral-via-Custom or Hosted-BYOK-with-Mistral users got the Anthropic prompt anyway. Affects self-host too. Now derives `variant` (anthropic / mistral / openai-custom) from `/api/config.api_base_url` and shows matching label/placeholder/console URL + saves to the correct vault slot.
+- **Status bar truthful on managed-BYOK** (#632 G3). PR #630's not-configured check bypassed every managed tier including BYOK; customer saw green "API OK" while SetupBanner demanded the key. Now gates on `cpSuppliesKey` (managed/managed_pro/eu) only.
+
 ## 1.7.5 — 2026-05-26 night
 
 Pre-HN-launch eve self-host hardening + UX polish. 10 PRs since v1.7.4.
