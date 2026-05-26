@@ -251,14 +251,12 @@ Options:
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required for anthropic provider)
   ANTHROPIC_BASE_URL            Custom API endpoint (for proxies)
-  LYNOX_LLM_PROVIDER            LLM provider: anthropic | vertex | custom | openai
+  LYNOX_LLM_PROVIDER            LLM provider: anthropic | mistral | openai | custom
   LYNOX_VAULT_KEY               AES-256 key for the secrets vault (critical — cannot be recovered if lost)
   LYNOX_DATA_DIR                Override data directory (same as --data-dir)
   LYNOX_HTTP_PORT               HTTP API port (default: 3100)
   LYNOX_HTTP_SECRET             HTTP API Bearer token (enables network binding)
   LYNOX_WEBUI_URL               Web UI URL to open (default: http://localhost:5173)
-  GCP_PROJECT_ID                Google Cloud project (for provider: vertex)
-  CLOUD_ML_REGION               Vertex AI region (e.g. europe-west4, us-east5)
   SEARXNG_URL                   SearXNG instance for web search (Docker: http://searxng:8080)
                                 Without it, lynox falls back to a DuckDuckGo HTML-scrape (best-effort).
 

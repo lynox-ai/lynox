@@ -76,7 +76,10 @@ async function checkDocker(): Promise<boolean> {
 
   try {
     const { stdout: cv } = await execFileAsync('docker', ['compose', 'version'], { timeout: 10_000 });
-    const ver = cv.trim().match(/v([^\s]+)/)?.[1] ?? 'unknown';
+    // Output is `Docker Compose version v2.x.y` — anchor on the literal so we
+    // don't pick up the `v` in `version` itself (which would print
+    // "Compose ersion" — caught during HN-launch self-host E2E).
+    const ver = cv.trim().match(/Docker Compose version v?([^\s]+)/)?.[1] ?? 'unknown';
     stdout.write(`  ${GREEN}✓${RESET} Compose ${ver}\n`);
   } catch {
     stdout.write(`  ${RED}✗${RESET} Docker Compose not found.\n`);
