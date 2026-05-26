@@ -26,14 +26,17 @@ body:
     attributes:
       label: Area
       options:
-        - CLI / REPL
-        - Memory / RAG
-        - Pipelines / DAG
-        - Tools
-        - Telegram
-        - MCP Server
-        - DataStore
-        - Docker / Deployment
+        - CLI / Installer
+        - Web UI / PWA
+        - Knowledge Graph / Memory
+        - Workflows / Background Worker
+        - Tools / Integrations
+        - Mail / Inbox
+        - Google Workspace
+        - LLM Providers (Anthropic / Mistral / OpenAI-compat)
+        - Docker / Self-host deployment
+        - Managed hosting
+        - Docs
         - Other
     validations:
       required: true

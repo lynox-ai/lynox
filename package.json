@@ -1,7 +1,7 @@
 {
   "name": "@lynox-ai/core",
   "version": "1.7.4",
-  "description": "Run your business, not your tools — AI runtime for CRM, workflows, research, monitoring. Self-hosted or managed EU. Source-available (ELv2).",
+  "description": "open-core AI agent runtime — connect any API, remember everything, run while you sleep",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
   "homepage": "https://lynox.ai",
@@ -14,13 +14,15 @@
   },
   "keywords": [
     "ai-agent",
+    "runtime",
+    "automation",
+    "knowledge-graph",
+    "byok",
+    "self-hostable",
+    "elv2",
     "anthropic",
     "claude",
-    "autonomous",
-    "business-automation",
-    "pipeline",
-    "memory",
-    "self-hosted"
+    "mistral"
   ],
   "type": "module",
   "sideEffects": false,
