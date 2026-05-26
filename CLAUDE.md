@@ -3,7 +3,7 @@
 ## Project
 
 lynox — business runtime engine + web UI. ESM-only TypeScript, Node.js 22+.
-Public OSS repo (lynox-ai/lynox). pnpm workspace with 2 packages.
+Public source-available repo under ELv2 (lynox-ai/lynox). pnpm workspace with 2 packages.
 Internal docs in private lynox-pro repo.
 
 ## Commands
@@ -34,18 +34,18 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
 - `src/core/` — ~95 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
-- `src/cli/` — Terminal utilities (ansi, spinner, stream rendering, Docker installer, setup wizard, watchdog)
-- `src/tools/` — 31 builtin tools (incl. api_setup, artifact_save/list/delete) + permission guard
+- `src/cli/` — Terminal utilities (ansi, spinner, stream-handler, docker-installer, approval-dialog, changeset-review, dag-visualizer, markdown, interactive)
+- `src/tools/` — 31 builtin tool functions across 16 modules (incl. api_setup, artifact_save/list/delete) + permission guard
 - `src/orchestrator/` — DAG pipeline engine
-- `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, DuckDuckGo HTML-scrape fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/integrations/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/archive/whatsapp-inbox.md`.)
+- `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, DuckDuckGo HTML-scrape fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/src/content/docs/setup/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/src/content/docs/archive/whatsapp-inbox.md`.)
 - `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see core PR #536.)
-- `src/types/` — 12 domain type files, barrel re-export via index.ts
+- `src/types/` — 15 domain type files, barrel re-export via index.ts
 
 ### Web UI (`@lynox-ai/web-ui`, packages/web-ui/)
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — 32 components (29 exported as library): ChatView (interleaved blocks), AppShell, MemoryView, HistoryView, ArtifactsView, ArtifactsHub, KnowledgeGraphView, KnowledgeHub, WorkflowsHub (list + analytics), WorkflowsView (expandable step details), PipelineProgress (sticky during execution), MarkdownRenderer (deferred artifact rendering), ContextPanel, ContactsView, DataStoreView, ApiStoreView, FileBrowserView, CommandPalette, StatusBar, ActivityHub, ChangesetReview, MigrationWizard (5-step zero-knowledge migration), SetupBanner, PasskeyPrompt, MobileAccess, ToastContainer, etc.
+- `src/lib/components/` — ~75 components, ~55 exported via `lib/index.ts` for `pro/pwa` consumers. Entry points: ChatView (interleaved blocks), AppShell, SettingsIndex, ChannelHub, IntelligenceHub, AutomationHub, InboxView. Full authoritative list in `packages/web-ui/src/lib/index.ts`.
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume, interleaved ContentBlock rendering (text + tool_call blocks in chronological order)
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)
@@ -65,7 +65,7 @@ Pro/pwa imports `@lynox-ai/web-ui` and wraps View components with Lucia auth + o
 No interactive REPL — CLI is for single-task, watch, manifest, and server modes only.
 
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
-- `getting-started/`, `daily-use/`, `features/`, `developers/`
+- `getting-started/`, `daily-use/`, `features/`, `setup/`, `developers/`, `integrations/`, `archive/`
 - Sidebar uses `autogenerate` — add new page = drop `.md` file + set `sidebar.order` frontmatter
 - CI: `docs.yml` builds docs on `docs/**` changes; `ci.yml` ignores `docs/**`
 
@@ -81,14 +81,14 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 - Types: single source of truth in src/types/index.ts — never duplicate
 - Tools: ToolRegistry + ToolContext dependency injection
-- Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`). Note: `ToolCallTracker` + `checkWriteContent` in `output-guard.ts` are defined but unwired today. Env vars always override vault (priority: env > vault > config).
+- Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`). Note: `checkWriteContent` in `output-guard.ts` is defined but currently unwired. `ToolCallTracker` (H-024 shadow-mode anomaly detector) is wired via `Session._toolCallTracker`. Env vars always override vault (priority: env > vault > config).
 - Cost & rate limits: Session $50, daily $100, monthly $500 (all configurable via config.json). HTTP tool: 200 req/hr, 2000 req/day default. Per-session: 100 HTTP requests, 500 max agent iterations. Spawn depth: 5 levels, $5 default budget per spawn.
 - Resumable Prompts: PromptStore (SQLite, shared DB with RunHistory) — ask_user/ask_secret survive SSE disconnects, page refreshes, thread switches. Agent polls SQLite every 2s. 24h expiry.
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
 - Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, thread insights (per-thread aggregated stats), pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
-- Migration: Zero-knowledge self-hosted→managed transfer. X25519 ECDH + AES-256-GCM chunk encryption + HMAC-signed handshake. Engine-to-engine (browser orchestrates via SSE). Migration token auth, DB name whitelist, 64 chunk / 500 MB limits.
+- Migration: Zero-knowledge self-hosted→managed transfer. X25519 ECDH + AES-256-GCM chunk encryption + HMAC-signed handshake. Engine-to-engine (browser orchestrates via SSE). Migration token auth, DB name whitelist, 64 chunks × 8 MB each (~512 MB total ceiling).
 - API Store: profile-first enforcement, agent-driven setup
 - CRM: agent-driven contacts/deals, entity-primary, DataStore for structured tracking
 - Bugsink: error reporting, PII scrubbed. Managed: always active (Art. 6(1)(f) legitimate interest, self-hosted EU). Self-hosted: opt-in via LYNOX_BUGSINK_DSN.

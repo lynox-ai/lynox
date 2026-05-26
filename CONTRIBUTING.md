@@ -10,7 +10,7 @@ Thanks for your interest in lynox! lynox is a small, focused project (one mainta
 | **Documentation fixes** | Always welcome | PR directly — typo fix, clarification, missing detail, expanded example |
 | **Integration scaffolds** | Welcome | New OpenAI-compatible provider entry, new MCP server example, new docker-compose pattern. Open an issue first so we can pre-discuss the shape |
 | **Test additions** | Welcome | Especially for edge cases we missed. Vitest, co-located `*.test.ts` |
-| **Bench scenarios** | Welcome | New scenario in `core/scripts/set-bench/scenarios/` — must come with a deterministic pass-check |
+| **Bench scenarios** | Welcome | Add a scenario entry to `scripts/set-bench/scenarios.ts` — must come with a deterministic pass-check |
 | **Features** | Discuss first | Open an issue describing the use case + proposed approach BEFORE coding. A feature PR without a prior issue may be closed without review — not because the work is bad but because architectural fit is the bottleneck |
 | **Refactors** | Discuss first | Same as features — open an issue with the motivation. Cosmetic refactors are usually declined; behaviour-preserving refactors that unblock a feature get reviewed |
 
@@ -31,7 +31,7 @@ For maintainers + invited collaborators with write access:
 
 `main` is protected: no force push, no direct push without CI passing. See the release strategy doc in the private pro repo for the full release process.
 
-Releases are cut from `main` and tagged `v<major>.<minor>.<patch>`; the release tag pushes both the `@lynox-ai/core` npm package and the `ghcr.io/lynox-ai/lynox:vX.Y.Z` Docker image. See [`CHANGELOG.md`](CHANGELOG.md) for the per-version log.
+Releases are cut from `main` and tagged `v<major>.<minor>.<patch>`; the release tag pushes both the `@lynox-ai/core` npm package and the `ghcr.io/lynox-ai/lynox:<major>.<minor>.<patch>` Docker image. The image tag has no `v` prefix — tag `v1.7.5` publishes image `:1.7.5` plus `:latest` plus `:<sha>`. See [`CHANGELOG.md`](CHANGELOG.md) for the per-version log.
 
 ## Why the narrow scope?
 
