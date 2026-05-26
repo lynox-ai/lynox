@@ -99,8 +99,15 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   fi
 fi
 
-# Warn if data directories are not writable
+# Pre-create + warn-if-unwritable for the data + cache subdirs the engine
+# expects. The mkdir is important because docker-compose mounts a tmpfs at
+# /home/lynox/.cache, which masks the Dockerfile's build-time directory
+# creation — without the mkdir here the subsequent Xenova ONNX cache write
+# fails with ENOENT on the first web_research call. The writability check
+# stays as a defensive signal in case a misconfigured host-volume mount
+# strips owner.
 for dir in "$HOME/.lynox" "$HOME/.cache/huggingface"; do
+  mkdir -p "$dir" 2>/dev/null || true
   if [ ! -w "$dir" ] 2>/dev/null; then
     echo "Warning: $dir is not writable by user $(id -u). Data persistence may fail." >&2
   fi
