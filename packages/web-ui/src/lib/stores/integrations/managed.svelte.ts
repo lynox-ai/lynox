@@ -19,6 +19,20 @@ export function isManaged(): boolean {
 	return !!managedTier;
 }
 
+/**
+ * `true` only when the control plane supplies the LLM credential (managed /
+ * managed_pro / eu-sovereign). The Hosted-BYOK starter tier is `isManaged()`
+ * but the CUSTOMER brings their own LLM key, so UI surfaces that gate on
+ * "key already provided" must distinguish.
+ *
+ * Found 2026-05-27 staging audit: LLMSettings was hiding the API-key input
+ * for every managed tenant including BYOK, leaving the customer with no UI
+ * path to set or rotate their own key.
+ */
+export function cpSuppliesLLMKey(): boolean {
+	return managedTier === 'managed' || managedTier === 'managed_pro' || managedTier === 'eu';
+}
+
 export async function loadManagedStatus(): Promise<void> {
 	try {
 		const res = await fetch(`${getApiBase()}/config`);

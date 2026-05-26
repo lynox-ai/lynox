@@ -901,6 +901,7 @@
 	// Standalone onboarding: check if LLM provider is configured
 	let hasApiKey = $state<boolean | null>(null);
 	let activeProvider = $state<string>('anthropic');
+	let activeApiBaseUrl = $state<string>('');
 	let setupKey = $state('');
 	let setupSaving = $state(false);
 	let justCompleted = $state(false);
@@ -911,20 +912,45 @@
 			const data = (await res.json()) as { provider?: string; configured: Record<string, boolean> };
 			activeProvider = data.provider ?? 'anthropic';
 			hasApiKey = data.configured['api_key'] ?? false;
+			// /api/secrets/status doesn't expose api_base_url; fetch from /api/config
+			// so the inline-setup form can render the right copy (Mistral vs Custom
+			// OpenAI-compatible vs straight Anthropic) — pre-fix this hardcoded
+			// "sk-ant-..." and console.anthropic.com regardless of active provider,
+			// confusing every Hosted-BYOK tenant who picked Mistral in Settings →
+			// LLM and was then asked to paste an Anthropic key (caught on staging
+			// meridian-demo walk 2026-05-27).
+			try {
+				const cfg = await fetch(`${getApiBase()}/config`).then(r => r.json()) as { api_base_url?: string };
+				activeApiBaseUrl = cfg.api_base_url ?? '';
+			} catch { /* keep default */ }
 		} catch {
 			hasApiKey = null; // Engine not reachable
 		}
 	}
 
+	/** Resolve the user-facing provider variant for the inline setup form. */
+	function inlineProviderVariant(): 'anthropic' | 'mistral' | 'openai-custom' {
+		if (activeProvider === 'anthropic') return 'anthropic';
+		if (activeProvider === 'openai' && activeApiBaseUrl === 'https://api.mistral.ai/v1') return 'mistral';
+		return 'openai-custom';
+	}
+
 	async function saveInlineKey() {
 		if (!setupKey.trim()) return;
-		if (!setupKey.trim().startsWith('sk-ant-')) {
+		const variant = inlineProviderVariant();
+		// Per-provider prefix validation (best-effort). Mistral keys are opaque
+		// hex; Anthropic uses sk-ant-; OpenAI uses sk-… — only the Anthropic
+		// case is strict enough to catch typos without false-positives.
+		if (variant === 'anthropic' && !setupKey.trim().startsWith('sk-ant-')) {
 			addToast(t('onboard.api_key_format'), 'error', 4000);
 			return;
 		}
+		const slot = variant === 'anthropic' ? 'ANTHROPIC_API_KEY'
+			: variant === 'mistral' ? 'MISTRAL_API_KEY'
+			: 'OPENAI_API_KEY';
 		setupSaving = true;
 		try {
-			await fetch(`${getApiBase()}/secrets/ANTHROPIC_API_KEY`, {
+			await fetch(`${getApiBase()}/secrets/${slot}`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ value: setupKey })
@@ -1817,6 +1843,11 @@
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
+					{@const variant = inlineProviderVariant()}
+					{@const labelText = variant === 'mistral' ? 'Mistral API Key' : variant === 'openai-custom' ? 'API Key' : t('onboard.api_key_label')}
+					{@const placeholderText = variant === 'mistral' ? 'mistral key…' : variant === 'openai-custom' ? 'sk-…' : 'sk-ant-...'}
+					{@const consoleUrl = variant === 'mistral' ? 'https://console.mistral.ai/api-keys/' : 'https://console.anthropic.com/settings/keys'}
+					{@const consoleHost = variant === 'mistral' ? 'console.mistral.ai' : 'console.anthropic.com'}
 					<!-- Inline API Key Setup (no navigation away) -->
 					<div class="w-full max-w-md space-y-6 px-4">
 						<div class="text-center">
@@ -1826,12 +1857,12 @@
 
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 space-y-4">
 							<div>
-								<label for="inline-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{t('onboard.api_key_label')}</label>
+								<label for="inline-key" class="block text-xs font-mono uppercase tracking-widest text-text-subtle mb-1.5">{labelText}</label>
 								<input
 									id="inline-key"
 									type="password"
 									bind:value={setupKey}
-									placeholder="sk-ant-..."
+									placeholder={placeholderText}
 									onkeydown={(e) => e.key === 'Enter' && saveInlineKey()}
 									class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-[16px] md:text-sm font-mono outline-none focus:border-border-hover"
 								/>
@@ -1845,9 +1876,11 @@
 							</button>
 						</div>
 
-						<p class="text-center text-xs text-text-subtle">
-							{t('onboard.api_key_hint')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">console.anthropic.com</a>
-						</p>
+						{#if variant !== 'openai-custom'}
+							<p class="text-center text-xs text-text-subtle">
+								{t('onboard.api_key_hint')} <a href={consoleUrl} target="_blank" rel="noopener noreferrer" class="text-accent-text hover:opacity-80">{consoleHost}</a>
+							</p>
+						{/if}
 						<p class="text-center text-xs text-text-subtle">{t('onboard.api_key_secure')}</p>
 					</div>
 				{:else}

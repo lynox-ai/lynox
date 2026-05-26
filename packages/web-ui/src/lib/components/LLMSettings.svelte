@@ -25,7 +25,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
-	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
 	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
@@ -375,10 +375,13 @@
 	let disclosureAccepted = $state(false);
 
 	function shouldShowDisclosure(provider: typeof activeProvider, url: string | undefined): boolean {
-		// Managed tenants can't reach non-allowlisted endpoints via the UI
-		// (custom_provider_endpoints lock + curated tile list), so we never
-		// gate them. Self-host + hosted-BYOK go through the gate.
-		if (isManaged()) return false;
+		// CP-managed tenants (managed / managed_pro / eu) can't reach non-
+		// allowlisted endpoints via the UI (custom_provider_endpoints lock +
+		// curated tile list), so we never gate them. Self-host + Hosted-BYOK
+		// starter (BYOK) go through the gate per the comment intent.
+		// Pre-fix this used isManaged() which incorrectly returned true for
+		// `starter` BYOK too, dropping the gate where it was needed.
+		if (cpSuppliesLLMKey()) return false;
 		if (provider !== 'custom' && provider !== 'openai') return false;
 		if (!url || url.trim().length === 0) return false;
 		if (isAllowlistedEndpoint(url)) return false;
@@ -582,7 +585,7 @@
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotFor(activeProviderEntry.provider) && !isManaged()}
+			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey()}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
@@ -591,7 +594,7 @@
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
-			{:else if isManaged()}
+			{:else if cpSuppliesLLMKey()}
 				<!-- v1.5.2: on managed tiers, the CP supplies the LLM key — the
 				     input would be misleading-disabled. Replace with a short
 				     note so the user knows why the field is missing. -->
@@ -761,7 +764,7 @@
 			<!-- Connection-test row — hidden on managed (CP-supplied key, can't
 			     be re-tested by the customer; the engine probe still runs on
 			     server start). -->
-			{#if !isManaged()}
+			{#if !cpSuppliesLLMKey()}
 			<div class="flex items-center gap-3">
 				<button type="button" onclick={testConnection} disabled={testing || providerLocked || !loaded}
 					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">
