@@ -94,13 +94,19 @@ npx @lynox-ai/core
 
 > `better-sqlite3` needs C++ build tools. macOS: `xcode-select --install`. Ubuntu: `sudo apt-get install build-essential python3`.
 
-### Clone & run
+### Clone & contribute
 
 ```bash
 git clone https://github.com/lynox-ai/lynox.git
 cd lynox && pnpm install
-pnpm run dev
+pnpm run build
+node dist/index.js --http-api          # engine HTTP API on :3100
+
+# In another terminal:
+cd packages/web-ui && pnpm run dev     # web UI on :5173, talks to :3100
 ```
+
+`pnpm run dev` from the repo root fires the Docker installer wizard — that's the same path as `npx @lynox-ai/core` (good for testing the installer itself). To actually run lynox from source, use the engine + web-ui combo above.
 
 ### Docker
 

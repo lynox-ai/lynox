@@ -87,7 +87,8 @@ First-class Sonnet replacement. 7/8 axes at 100% pass on the lynox agent-loop be
 ```bash
 LYNOX_LLM_PROVIDER=openai
 ANTHROPIC_BASE_URL=https://api.mistral.ai/v1
-ANTHROPIC_API_KEY=<your-mistral-key>          # var name is intentionally generic
+MISTRAL_API_KEY=<your-mistral-key>            # primary slot for Mistral
+# OPENAI_API_KEY=<your-mistral-key>           # also accepted as fallback
 OPENAI_MODEL_ID=mistral-large-2512
 ```
 
