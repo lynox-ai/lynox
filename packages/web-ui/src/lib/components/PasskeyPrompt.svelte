@@ -28,10 +28,15 @@
 			});
 
 			if (!res.ok) return;
-			const data = await res.json() as { hasPasskeys?: boolean; error?: string };
+			const data = await res.json() as { hasPasskeys?: boolean; supported?: boolean; error?: string };
 
 			// Only show if no passkeys registered yet
 			if (data.error) return; // Not managed or unreachable
+			// Self-host engines return `{supported: false}` for /auth/passkey because
+			// the WebAuthn backend lives on the managed control plane, not the engine.
+			// Without this guard the prompt shows up on self-host and clicking
+			// "Set up" leads to a dead end (no /auth/passkey/register endpoint).
+			if (data.supported === false) return;
 			if (!data.hasPasskeys) {
 				visible = true;
 			}
