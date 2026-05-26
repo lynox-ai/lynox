@@ -18,14 +18,19 @@
 	const autoSendOn = $derived(isVoiceAutoSendEnabled());
 	const speakState = $derived(getSpeakState());
 
-	type Indicator = 'none' | 'minor' | 'major' | 'critical' | 'unknown';
+	type Indicator = 'none' | 'not-configured' | 'minor' | 'major' | 'critical' | 'unknown';
 	interface ProviderEntry { indicator: Indicator; description: string; provider: string }
 
 	// Hoisted out of the 30s poll loop so we don't re-allocate the literal on
-	// every tick. Severity ranking: critical > major > minor > unknown > none.
+	// every tick. Severity ranking: critical > major > minor > not-configured >
+	// unknown > none. `not-configured` is ranked above `unknown` so a tenant
+	// missing its key wins over a stalled providers-status poll for a separate
+	// provider — clearer signal for the user that the actionable problem is
+	// "no key" not "transient outage".
 	const INDICATOR_RANK: Record<Indicator, number> = {
 		none: 0,
 		unknown: 1,
+		'not-configured': 1.5,
 		minor: 2,
 		major: 3,
 		critical: 4,
@@ -68,6 +73,7 @@
 	function apiStatusClass(): string {
 		if (hasAuthError) return 'bg-danger';
 		if (apiStatus === 'none') return 'bg-success';
+		if (apiStatus === 'not-configured') return 'bg-warning';
 		if (apiStatus === 'minor') return 'bg-warning';
 		if (apiStatus === 'major' || apiStatus === 'critical') return 'bg-danger';
 		return 'bg-text-subtle animate-pulse';
@@ -75,6 +81,7 @@
 	function apiStatusLabel(): string {
 		if (hasAuthError) return t('status.api_key_invalid');
 		if (apiStatus === 'none') return t('status.api_ok');
+		if (apiStatus === 'not-configured') return t('status.api_not_configured');
 		if (apiStatus === 'minor') return t('status.api_degraded');
 		if (apiStatus === 'major' || apiStatus === 'critical') return t('status.api_down');
 		return t('status.api_unknown');
@@ -120,20 +127,17 @@
 				// never step DOWN in severity. Strict `>` (not `>=`) makes the
 				// FIRST failing provider win ties — keeps tooltip selection
 				// stable across polls.
-				let worst: Indicator = primary
-					? (primary.indicator === 'none' || primary.indicator === 'minor'
-						|| primary.indicator === 'major' || primary.indicator === 'critical'
-						? primary.indicator
-						: 'unknown')
-					: 'none';
+				const narrowIndicator = (raw: string | undefined): Indicator =>
+					raw === 'none' || raw === 'not-configured' || raw === 'minor'
+						|| raw === 'major' || raw === 'critical'
+						? raw
+						: 'unknown';
+				let worst: Indicator = primary ? narrowIndicator(primary.indicator) : 'none';
 				let worstDescription = primary?.description ?? '';
 				let worstProvider = primary?.provider ?? '';
 				for (let i = 1; i < providers.length; i++) {
 					const p = providers[i]!;
-					const ind: Indicator = p.indicator === 'none' || p.indicator === 'minor'
-						|| p.indicator === 'major' || p.indicator === 'critical'
-						? p.indicator
-						: 'unknown';
+					const ind = narrowIndicator(p.indicator);
 					if (INDICATOR_RANK[ind] > INDICATOR_RANK[worst]) {
 						worst = ind;
 						worstDescription = p.description ?? '';

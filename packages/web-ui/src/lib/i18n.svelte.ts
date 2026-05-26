@@ -488,6 +488,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.engine_error': { de: 'Engine Fehler', en: 'Engine Error' },
 	'status.api_ok': { de: 'API OK', en: 'API OK' },
 	'status.api_key_invalid': { de: 'API-Schlüssel ungültig', en: 'API Key Invalid' },
+	'status.api_not_configured': { de: 'Setup nötig', en: 'Setup needed' },
 	'status.api_degraded': { de: 'API beeinträchtigt', en: 'API degraded' },
 	'status.api_down': { de: 'API Störung', en: 'API down' },
 	'status.api_unknown': { de: 'API ?', en: 'API ?' },

@@ -58,7 +58,7 @@ interface DynamicRoute {
 }
 
 interface ProviderStatus {
-  indicator: 'none' | 'minor' | 'major' | 'critical' | 'unknown';
+  indicator: 'none' | 'not-configured' | 'minor' | 'major' | 'critical' | 'unknown';
   description: string;
   provider?: string;
 }
@@ -1395,6 +1395,48 @@ export class LynoxHTTPApi {
     }
 
     const provider = getActiveProvider();
+
+    // Pre-flight: is a key actually configured for the active provider? Pre-fix
+    // the status bar showed "Anthropic · API OK" on every fresh self-host
+    // install because this method only ever hit status.anthropic.com — that's
+    // about Anthropic's endpoint health, not about whether the user has wired
+    // their key. HN-launch user would see green, ignore the red SetupBanner
+    // dot, then be confused why nothing works. `not-configured` is a distinct
+    // indicator the StatusBar renders as amber "Setup needed".
+    const store = this.engine?.getSecretStore();
+    const userConfig = this.engine?.getUserConfig() ?? {};
+    const managedMode = process.env['LYNOX_MANAGED_MODE'];
+    if (!managedMode && store) {
+      let configured = false;
+      try {
+        if (provider === 'vertex') {
+          configured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
+        } else if (provider === 'custom') {
+          const customBase = userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL'];
+          const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          configured = !!customBase && !!customKey;
+        } else if (provider === 'openai') {
+          const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          configured = !!userConfig.api_base_url && !!openaiKey;
+        } else {
+          const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          configured = !!anthropicKey;
+        }
+      } catch {
+        // If the resolver throws (vault sealed, etc.) treat as not-configured —
+        // honest signal for the user, never opaque "API OK".
+        configured = false;
+      }
+      if (!configured) {
+        const providerLabel = provider === 'anthropic' ? 'Anthropic'
+          : provider === 'vertex' ? 'Google Vertex AI'
+          : provider === 'openai' ? 'OpenAI-compatible'
+          : 'Custom';
+        const data: ProviderStatus = { indicator: 'not-configured', description: 'API key not configured', provider: providerLabel };
+        this.providerStatusCache = { data, expiresAt: now + 30_000 };
+        return data;
+      }
+    }
 
     // Custom + OpenAI providers have no public status page — rely solely on run history
     if (provider === 'custom' || provider === 'openai') {
