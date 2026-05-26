@@ -476,7 +476,7 @@ function sanitizeHeaderValue(value: string): string {
   return value.replace(/[\r\n\t]+/g, ' ').trim();
 }
 
-function buildRfc2822(input: MailSendInput, fromAddress: string): string {
+function buildRfc2822(input: MailSendInput, fromAddress: string, fromDisplayName?: string): string {
   const lines: string[] = [];
   // Display names get quotes escaped + CRLF stripped so a malicious display
   // name can't terminate its own quoted string and inject a header.
@@ -486,7 +486,10 @@ function buildRfc2822(input: MailSendInput, fromAddress: string): string {
     const safeName = sanitizeHeaderValue(a.name).replace(/"/g, '\\"');
     return `"${safeName}" <${address}>`;
   };
-  lines.push(`From: ${sanitizeHeaderValue(fromAddress)}`);
+  const fromAddr: MailAddress = fromDisplayName
+    ? { name: fromDisplayName, address: fromAddress }
+    : { address: fromAddress };
+  lines.push(`From: ${formatAddr(fromAddr)}`);
   lines.push(`To: ${input.to.map(formatAddr).join(', ')}`);
   if (input.cc?.length) lines.push(`Cc: ${input.cc.map(formatAddr).join(', ')}`);
   if (input.bcc?.length) lines.push(`Bcc: ${input.bcc.map(formatAddr).join(', ')}`);
@@ -545,6 +548,7 @@ export class OAuthGmailProvider implements MailProvider {
   private static readonly MAX_UID_MAP_SIZE = 10_000;
 
   private readonly googleAuth: GoogleAuth;
+  private readonly account: MailAccountConfig;
 
   /**
    * Two synced maps — `uidToGmailId` is the read path used by `fetch`,
@@ -564,6 +568,7 @@ export class OAuthGmailProvider implements MailProvider {
 
   constructor(account: MailAccountConfig, googleAuth: GoogleAuth) {
     this.accountId = account.id;
+    this.account = account;
     this.googleAuth = googleAuth;
   }
 
@@ -631,7 +636,7 @@ export class OAuthGmailProvider implements MailProvider {
       throw new MailError('unsupported', 'Gmail send requires the gmail.send scope. Grant write access in Settings → Channels → Google.');
     }
     const fromAddress = await this.resolveFromAddress();
-    const raw = base64urlEncode(Buffer.from(buildRfc2822(input, fromAddress), 'utf-8'));
+    const raw = base64urlEncode(Buffer.from(buildRfc2822(input, fromAddress, this.account.displayName), 'utf-8'));
     try {
       const result = await this.gmailPost<GmailSendResponse>('messages/send', { raw });
       const allRecipients = [
