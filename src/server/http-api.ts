@@ -1416,8 +1416,13 @@ export class LynoxHTTPApi {
           const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
           configured = !!customBase && !!customKey;
         } else if (provider === 'openai') {
+          // Parity with GET /api/secrets/status (line ~2496): an OpenAI-compat
+          // install needs base URL + key + model id. Missing any of the three
+          // = unusable, so the status bar must reflect that. Without the
+          // model-id check the two truth sources would disagree (SetupBanner
+          // still demands setup while StatusBar already shows green).
           const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
-          configured = !!userConfig.api_base_url && !!openaiKey;
+          configured = !!userConfig.api_base_url && !!openaiKey && !!userConfig.openai_model_id;
         } else {
           const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
           configured = !!anthropicKey;
