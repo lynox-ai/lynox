@@ -45,6 +45,14 @@ RUN corepack enable && corepack prepare pnpm@10 --activate
 
 COPY packages/web-ui/package.json packages/web-ui/package.json
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# No `--mount=type=cache` here: on Apple Silicon local docker builds, the
+# pnpm content-addressable store inside the cache mount produces symlinks
+# in /app/packages/web-ui/node_modules that dangle the moment the cache
+# unmounts post-RUN — `vite build` then fails with `Cannot find module
+# .../vite/bin/vite.js`. CI builds (GHA Ubuntu, type=gha cache survives)
+# work without this guard, but pinning explicitly keeps local + CI builds
+# behaviour-identical at the cost of ~1-2min slower install (no shared
+# pnpm store across builds).
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     cd packages/web-ui && pnpm install --frozen-lockfile
 COPY packages/web-ui/ packages/web-ui/

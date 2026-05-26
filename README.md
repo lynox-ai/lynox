@@ -8,7 +8,7 @@
 
 **Run your business. Not your tools.**
 
-One source-available (ELv2) agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM (Anthropic, OpenAI, Mistral, or any OpenAI-compatible endpoint — Ollama, LM Studio, LiteLLM, Groq, vLLM). Self-hosted, no vendor lock-in.
+One source-available (ELv2) agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM — **Anthropic Claude** and **Mistral** are natively supported and tested on every release. Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, LiteLLM) and Google Vertex AI are wired but not regularly tested. Self-hosted, no vendor lock-in.
 
 > [!IMPORTANT]
 > **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
@@ -27,7 +27,7 @@ One source-available (ELv2) agent that learns your business — handles CRM, wor
 npx @lynox-ai/core
 ```
 
-You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic**, **Mistral**, or **Custom** — any OpenAI-compatible endpoint, including **OpenAI**, Ollama / LM Studio / LiteLLM / Groq / vLLM), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
+You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic** or **Mistral** are the natively-supported options; the OpenAI-compatible **Custom** path lets you point at anything else — OpenAI itself, Ollama, LM Studio, LiteLLM, Groq, vLLM — but those targets are experimental), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
 
 Prefer to edit `.env` yourself before the first run? Jump to [manual Docker](#docker) below.
 
@@ -55,13 +55,13 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ┌──────▼─────────┐  ┌──────────▼────────┐
 │   Your LLM     │  │     Your Data     │
 │  Anthropic ·   │  │ Gmail · Sheets ·  │
-│  Mistral ·     │  │ Drive · Calendar  │
-│  Custom (any   │  │ Files · APIs ·    │
-│  OpenAI API)   │  │ Databases         │
+│  Mistral       │  │ Drive · Calendar  │
+│  (others wired │  │ Files · APIs ·    │
+│  but untested) │  │ Databases         │
 └────────────────┘  └───────────────────┘
 ```
 
-**BYOK** — You provide your LLM credential (Anthropic / Mistral / OpenAI-compatible). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via LYNOX_BUGSINK_DSN for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
+**BYOK** — You provide your LLM credential (Anthropic or Mistral are the natively-supported and tested paths; OpenAI-compatible / LiteLLM / Vertex are wired but experimental). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via `LYNOX_BUGSINK_DSN` for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
 
 ## Key capabilities
 

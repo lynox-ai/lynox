@@ -86,7 +86,7 @@ interface Block { readonly kind: BlockKind; readonly lines: readonly string[] }
 /**
  * Flatten Markdown into TTS-friendly text.
  *
- * `lang` is required: callers know the user's UI language (Web UI, Telegram)
+ * `lang` is required: callers know the user's UI language (Web UI / PWA)
  * or the assistant reply's locale. `'auto'` is an escape-hatch for paths
  * where context is genuinely missing (HTTP API without an explicit param);
  * it runs a cheap stopword vote that defaults to EN on tie / empty input.

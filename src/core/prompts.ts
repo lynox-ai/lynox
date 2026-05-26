@@ -217,7 +217,7 @@ export function currentDateContext(): string {
  * Caller passes whatever shape `agent.send()` accepts — string or a
  * multimodal content array — and gets the same shape back with the time
  * prefix attached. Already-prefixed inputs pass through unchanged so a
- * future double-decorator (e.g. Telegram pre-prepending) doesn't end up
+ * future double-decorator (e.g. a transport pre-prepending) doesn't end up
  * with two markers.
  */
 const NOW_MARKER_PREFIX = '[Now:';

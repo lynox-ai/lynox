@@ -328,7 +328,7 @@ export class Session {
     }
 
     // Extract text for subsystems that need string (input guard, KG retrieval, run history).
-    // Multimodal content (e.g. Telegram vision) is an array of content blocks.
+    // Multimodal content (e.g. vision: image + text) is an array of content blocks.
     const isMultimodal = Array.isArray(task);
     const taskText = isMultimodal ? '[image]' : task;
     const threadStore = this.engine.getThreadStore();

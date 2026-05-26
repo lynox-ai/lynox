@@ -104,7 +104,7 @@ describe('wrapChannelMessage', () => {
 
   it('skips nullish and empty-after-trim fields', () => {
     const out = wrapChannelMessage({
-      source: 'telegram:document',
+      source: 'chat:document',
       fields: { Caption: '   ', Filename: null, Body: 'real content' },
     });
     expect(out).not.toContain('Caption:');

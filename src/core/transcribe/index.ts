@@ -3,17 +3,17 @@
  *
  * Public API:
  *   - `transcribeAudio(buffer, filename, language?)` — drop-in replacement for
- *     the legacy export. Unchanged signature so the existing HTTP API and
- *     Telegram call sites continue working with no code change. Gets the core
- *     glossary automatically; session glossary requires the richer entry below.
+ *     the legacy export. Unchanged signature so the existing HTTP API call
+ *     sites continue working with no code change. Gets the core glossary
+ *     automatically; session glossary requires the richer entry below.
  *   - `transcribeAudioStream(buffer, filename, onSegment, language?)` — same
  *     story for SSE callers.
  *   - `transcribe(buffer, filename, opts)` / `transcribeWithStream(...)` —
  *     richer entry points that accept a `session` (for session glossary),
  *     `tenantId`, `timeoutMs`. Used by the online integration test and by any
  *     caller that wants the full two-layer glossary.
- *   - `HAS_WHISPER` — back-compat availability flag used by HTTP API / Telegram
- *     to decide whether to accept voice uploads at all.
+ *   - `HAS_WHISPER` — back-compat availability flag used by the HTTP API to
+ *     decide whether to accept voice uploads at all.
  *   - `getActiveTranscribeProvider()` — the chosen provider (informational).
  *
  * Provider selection order:
@@ -193,7 +193,7 @@ export async function transcribeWithStream(
 // ── Legacy drop-in exports ─────────────────────────────────────────────────
 
 /**
- * Legacy signature preserved for HTTP API and Telegram bot.
+ * Legacy signature preserved for the HTTP API.
  * Uses core glossary automatically; session glossary requires `transcribe()`.
  */
 export async function transcribeAudio(

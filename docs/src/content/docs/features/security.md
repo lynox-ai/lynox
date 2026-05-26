@@ -9,7 +9,7 @@ lynox is designed for self-hosting. Your data stays on your machine, your API ke
 
 ## Bring Your Own Key (BYOK)
 
-lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic), Mistral, or any OpenAI-compatible endpoint (Ollama, LM Studio, OpenAI, Groq, vLLM, …). There's no middleman, no data collection, no usage tracking. The installer lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
+lynox never proxies your API calls. Your credentials talk directly to your chosen provider — Claude (Anthropic) and Mistral are natively supported and tested on every release. Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, LiteLLM) and Google Vertex AI are wired but not regularly tested. There's no middleman, no data collection, no usage tracking. The installer lets you choose your provider and enter credentials on first run. All credentials are stored encrypted in the local vault.
 
 ## Authentication
 

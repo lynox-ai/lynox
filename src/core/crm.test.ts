@@ -104,7 +104,7 @@ describe('CRM', () => {
   describe('interactions', () => {
     it('logs and retrieves interactions', () => {
       crm.upsertContact({ name: 'Alice' });
-      crm.logInteraction({ contact_name: 'Alice', type: 'message', channel: 'telegram', summary: 'Asked about pricing' });
+      crm.logInteraction({ contact_name: 'Alice', type: 'message', channel: 'chat', summary: 'Asked about pricing' });
       crm.logInteraction({ contact_name: 'Alice', type: 'email', channel: 'email', summary: 'Sent proposal' });
 
       const interactions = crm.getInteractions('Alice');

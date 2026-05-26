@@ -59,7 +59,7 @@ check_output "CLI uses explicit context" "cli" \
 check_output "Empty workspaceDir auto-generates path" "true" \
   node --import tsx -e "
     import { resolveContext } from './src/core/context.js';
-    const c = resolveContext({ context: { id: 'test', source: 'slack', workspaceDir: '' } });
+    const c = resolveContext({ context: { id: 'test', source: 'pwa', workspaceDir: '' } });
     console.log(c.workspaceDir.includes('test'));
   "
 

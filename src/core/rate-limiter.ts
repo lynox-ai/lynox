@@ -1,6 +1,6 @@
 /**
  * Per-user rate limiter with sliding window and concurrency tracking.
- * Used by Telegram and Slack bot entry points to prevent abuse.
+ * Used by long-lived multi-user entry points (HTTP API) to prevent abuse.
  */
 
 export interface RateLimiterConfig {

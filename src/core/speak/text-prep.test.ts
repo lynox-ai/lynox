@@ -365,7 +365,7 @@ describe('strategist brief — end-to-end', () => {
       '- Pricing-Page A/B-Test starten',
       '- Onboarding auf 5 Mails kürzen',
       '- Cold-Outreach pausieren',
-      '- Telegram-Channel reaktivieren',
+      '- Notification-Channel reaktivieren',
       '',
       'Beispiel-Snippet:',
       '',

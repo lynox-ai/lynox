@@ -138,7 +138,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     }
 
     if (input.questions && input.questions.length > 0) {
-      // Prefer tabbed dialog (CLI), fall back to sequential prompts (Slack/MCP)
+      // Prefer tabbed dialog (CLI/PWA), fall back to sequential prompts for transports without tab UI
       if (agent.promptTabs) {
         const tabQuestions: TabQuestion[] = input.questions.map(q => ({
           question: q.question,

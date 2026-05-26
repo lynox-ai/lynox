@@ -473,7 +473,7 @@ export class Agent implements IAgent {
 
   async send(userMessage: string | unknown[]): Promise<string> {
     const snapshot = this.messages.length;
-    // Support multimodal content blocks (e.g. Telegram vision: image + text)
+    // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
       ? userMessage as BetaMessageParam['content']
       : userMessage;

@@ -553,9 +553,9 @@ export async function runDockerInstaller(): Promise<void> {
 
     type ProviderChoice = 'anthropic' | 'mistral' | 'custom';
     const provider = await select<ProviderChoice>([
-      { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended' },
-      { label: 'Mistral', value: 'mistral', hint: 'Paris, EU' },
-      { label: 'OpenAI-compatible', value: 'custom', hint: 'Ollama, LM Studio, Groq, LiteLLM, vLLM' },
+      { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended — tested' },
+      { label: 'Mistral', value: 'mistral', hint: 'Paris, EU — tested' },
+      { label: 'OpenAI-compatible', value: 'custom', hint: 'Ollama / LM Studio / Groq / LiteLLM / vLLM — experimental' },
     ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'anthropic';
 
     // ── Provider-specific input ────────────────────────

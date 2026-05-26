@@ -55,8 +55,8 @@ const CREDENTIAL_NAME_RE = /(TOKEN|KEY|SECRET|PASSWORD)/i;
  * Build the env that subprocesses inherit.
  *
  * Isolation source of truth is the calling agent's `isolation` config:
- *  - `air-gapped` collapses to PATH/HOME/TMPDIR only — no secrets, no Bedrock
- *    credentials, no Telegram token, nothing the parent process holds.
+ *  - `air-gapped` collapses to PATH/HOME/TMPDIR only — no secrets, no LLM
+ *    credentials, no integration tokens, nothing the parent process holds.
  *  - `envVars` (any level) is merged on top of the allow-listed env, letting
  *    `spawn_agent` inject the deliberately-scoped variables it wants the child
  *    bash invocation to see.

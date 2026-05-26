@@ -516,8 +516,8 @@ describe('Phase 4: Contradiction Detection Deep Dive', () => {
     });
 
     it('detects German negation with "nicht mehr"', async () => {
-      await layer2.store('Das Team nutzt Slack für Kommunikation.', 'knowledge', CTX);
-      const r = await layer2.store('Das Team nutzt nicht mehr Slack für Kommunikation.', 'knowledge', CTX);
+      await layer2.store('Das Team nutzt Mail für Kommunikation.', 'knowledge', CTX);
+      const r = await layer2.store('Das Team nutzt nicht mehr Mail für Kommunikation.', 'knowledge', CTX);
       expect(r.stored).toBe(true);
     });
 

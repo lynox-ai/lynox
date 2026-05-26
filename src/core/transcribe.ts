@@ -1,10 +1,10 @@
 /**
  * Thin re-export layer for back-compat.
  *
- * The provider-abstracted implementation lives in `./transcribe/`. HTTP API
- * and Telegram bot continue to import `core/transcribe.js` — this file keeps
- * those import paths working and lets new callers opt into the richer facade
- * by importing `core/transcribe/index.js` directly.
+ * The provider-abstracted implementation lives in `./transcribe/`. The HTTP
+ * API still imports `core/transcribe.js` — this file keeps that import path
+ * working and lets new callers opt into the richer facade by importing
+ * `core/transcribe/index.js` directly.
  */
 
 export {
