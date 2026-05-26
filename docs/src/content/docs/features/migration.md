@@ -7,7 +7,7 @@ sidebar:
 
 If you've been running lynox self-hosted and want to move to lynox-operated managed hosting, the **Migration Wizard** in the Web UI handles the transfer end-to-end without your data ever passing through a third party. Browser, source engine, and destination engine talk directly; lynox-operated infrastructure only sees the encrypted chunks moving between them.
 
-The wizard ships as part of the Web UI (`/app/migrate`) — no CLI tools, no SSH access required.
+The wizard ships as part of the Web UI (`/app/migration`) — no CLI tools, no SSH access required.
 
 ## What gets migrated
 
@@ -28,7 +28,7 @@ What does **not** get migrated:
 
 1. **Preview** — wizard inspects the source instance, lists data sizes per category. You confirm before anything moves.
 2. **Handshake** — source + destination perform an X25519 ECDH handshake, deriving a shared AES-256-GCM key. Handshake message is HMAC-signed against a one-shot migration token (rotated per attempt, expires in 30 minutes).
-3. **Encrypted transfer** — data flows in 64 chunks max, 500 MB per chunk, AES-256-GCM-encrypted with the derived key. Browser orchestrates over SSE; chunks stream source → destination directly.
+3. **Encrypted transfer** — data flows in up to 64 chunks of 8 MB each (~512 MB total ceiling), AES-256-GCM-encrypted with the derived key. Browser orchestrates over SSE; chunks stream source → destination directly.
 4. **Provisioning poll** — destination provisions the new tenant container, applies migrations, indexes the migrated data. Progress shown live.
 5. **Switchover** — you log into the destination with email OTP / Passkey. The source instance stays online (read-only) for 7 days so you can verify nothing is missing before the source is decommissioned.
 
