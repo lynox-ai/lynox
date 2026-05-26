@@ -21,6 +21,12 @@ services:
     tmpfs:
       - /tmp:size=512M
       - /workspace:size=256M,uid=1001,gid=1001
+      # ONNX embedding cache for the Knowledge Graph (Xenova/transformers.js).
+      # Without this writable tmpfs the read_only root filesystem rejects the
+      # subdirectory `mkdir` and every web-research call spams the engine log
+      # with ENOENT; semantic search has to re-download from huggingface on
+      # every restart anyway, so a tmpfs is exactly the right lifetime.
+      - /home/lynox/.cache:size=512M,uid=1001,gid=1001
     cap_drop:
       - ALL
     security_opt:
