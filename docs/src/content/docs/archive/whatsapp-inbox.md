@@ -20,7 +20,7 @@ This is **not** a chat-bot integration. Your contacts always see messages coming
 Before connecting, make sure the following is in place:
 
 - **WhatsApp Business App** on your phone, version **2.24.17 or newer**. Consumer WhatsApp (the green app) is not supported — Coexistence Mode is only available for WhatsApp Business.
-- Your WhatsApp Business account is **linked to a Facebook Page**. If you don't have one, create an unbeworbene Page — it just needs to exist, you never have to post on it.
+- Your WhatsApp Business account is **linked to a Facebook Page**. If you don't have one, create an unpromoted Page — it just needs to exist, you never have to post on it.
 - A **Meta Business Manager** account (free — [business.facebook.com](https://business.facebook.com)).
 - Your phone number is **not yet registered** with another Cloud-API provider (Twilio, 360dialog, etc.).
 - Your `LYNOX_VAULT_KEY` is set — credentials are stored encrypted in the vault.

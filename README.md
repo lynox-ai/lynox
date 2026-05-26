@@ -35,6 +35,8 @@ Prefer to edit `.env` yourself before the first run? Jump to [manual Docker](#do
 
 Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, integrations, features, API reference.
 
+**Roadmap:** see [ROADMAP.md](./ROADMAP.md) for what's next, later, and under evaluation.
+
 ## How it works
 
 ```

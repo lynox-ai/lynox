@@ -243,7 +243,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 ## Editing Config
 
-You can edit config in three ways:
+You can edit config in two ways:
 
 1. **Web UI** — Settings → Config
 2. **Direct** — Edit `~/.lynox/config.json` manually (restart required)
