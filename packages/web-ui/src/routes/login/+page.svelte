@@ -379,9 +379,9 @@
 
 			<p class="mt-6 text-center text-xs text-text-subtle">
 				{isDE
-					? 'Token verloren? lynox zeigt beim Start, wo es liegt — im Terminal oder via'
-					: 'Lost it? lynox prints where to find it on startup — in your terminal or via'}
-				<code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">docker logs lynox</code>
+					? 'Token verloren? Auf dem Host:'
+					: 'Lost it? On the host:'}
+				<code class="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs">cat ~/.lynox/.access-token</code>
 			</p>
 		{/if}
 	</div>
