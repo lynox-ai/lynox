@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-This file lists the licenses of third-party software included in or used by lynox. Coverage updated 2026-05-19. To check the full installed surface run `pnpm licenses list --prod` (engine) or `cd packages/web-ui && pnpm licenses list --prod` (web-ui); only material runtime deps are enumerated here.
+This file lists the material runtime third-party dependencies included in or used by lynox. It is not exhaustive — for the full installed surface, run `pnpm licenses list --prod` (engine) or `cd packages/web-ui && pnpm licenses list --prod` (web-ui).
 
 ## Apache License 2.0
 
@@ -11,15 +11,16 @@ The full license text is available at: https://www.apache.org/licenses/LICENSE-2
 - **@mozilla/readability** - Copyright Mozilla Foundation
 - **dompurify** (dual-licensed MPL-2.0 OR Apache-2.0) - Copyright Dr.-Ing. Mario Heiderich, Cure53
 - **google-auth-library** - Copyright Google LLC (used by Google Workspace OAuth integration)
-- **@anthropic-ai/vertex-sdk** — Copyright Anthropic (dormant; kept for the Vertex provider path documented in CLAUDE.md)
+- **@anthropic-ai/vertex-sdk** (optional peer dependency) — Copyright Anthropic. Install only if using the Vertex provider; loaded via dynamic import in `src/core/vertex-oauth.ts`.
 
 ## MIT License
 
 The following dependencies are licensed under the MIT License.
 
 - **@anthropic-ai/sdk** - Copyright Anthropic
-- **@modelcontextprotocol/sdk** - Copyright Anthropic
 - **@sentry/node** - Copyright Sentry (used for Bugsink error reporting)
+- **@simplewebauthn/browser** - Copyright SimpleWebAuthn (web-ui passkey + login flows)
+- **uqr** - Copyright Anthony Fu (QR rendering in `MobileAccess.svelte`)
 - **better-sqlite3** - Copyright Joshua Wise
 - **zod** - Copyright Colin McDonnell
 - **linkedom** - Copyright Andrea Giammarchi

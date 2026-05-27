@@ -138,7 +138,7 @@ lynox supports multiple email accounts simultaneously. Each account has its own 
 
 ### Transport
 
-- Implicit TLS enforced (IMAPS :993, SMTPS :465) — preferred over STARTTLS
+- IMAP uses implicit TLS (IMAPS :993). SMTP uses STARTTLS on :587 for the built-in presets (Gmail, iCloud, Fastmail, Yahoo, Outlook); custom servers can be configured for implicit SMTPS :465 if needed.
 - Minimum TLS 1.2, strict certificate validation
 - Connection timeouts: 10s connect, 60s idle with exponential backoff
 

@@ -9,7 +9,7 @@ Docker is the recommended way to run lynox in production.
 
 | Image | Purpose |
 |-------|---------|
-| `ghcr.io/lynox-ai/lynox:latest` | Engine + Web UI on port 3000 (also tagged with version, e.g. `:1.7.4`) |
+| `ghcr.io/lynox-ai/lynox:latest` | Engine + Web UI on port 3000 (also tagged with the release version, e.g. `:1.7.5` — no `v` prefix) |
 
 The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`), so Apple Silicon and ARM servers can pull natively. The bundled `docker-compose.yml` pins `platform: linux/amd64` as a conservative default — remove that line in the compose service if you want native arm64 on Apple Silicon.
 
@@ -47,7 +47,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ## Environment Variables
 
-`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral (the other natively-supported path), see [LLM Providers](/setup/llm-providers/). Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, …) are wired but **not regularly tested**. Without any LLM configuration, the container starts in browse mode (you can view data but not chat).
+`ANTHROPIC_API_KEY` is needed for the default Anthropic provider. For Mistral (the other natively-supported path), see [LLM Providers](/setup/llm-providers/). Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, …) are wired but **not regularly tested**. Without any LLM configuration, the container starts in a limited state — the chat input is disabled until you complete setup via the in-product wizard.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -152,7 +152,7 @@ The container exposes a health endpoint:
 
 ```bash
 curl http://localhost:3000/api/health
-# {"status":"ok","version":"1.7.4","uptime_s":...}
+# {"status":"ok","version":"…","uptime_s":…}
 ```
 
 Both `/health` and `/api/health` work — `/health` is a thin alias for proxies that only allow root-level health checks.
