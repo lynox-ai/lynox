@@ -104,6 +104,7 @@
 			// hides the tier-inappropriate entry from the nav — no redirect race.
 			labelKey: 'settings.section_privacy',
 			items: [
+				{ href: '/app/settings/privacy', titleKey: 'privacy.title', descKey: 'privacy.subtitle' },
 				{ href: '/app/settings/privacy/tools', titleKey: 'tools.heading', descKey: 'tools.subtitle', managedOnly: true },
 			],
 		},
