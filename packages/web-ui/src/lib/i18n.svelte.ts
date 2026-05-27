@@ -281,6 +281,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.save_failed':        { de: 'Speichern fehlgeschlagen.',                                                 en: 'Save failed.' },
 	'llm.load_failed':        { de: 'LLM-Daten konnten nicht geladen werden.',                                   en: 'Could not load LLM data.' },
 	'llm.locked_notice':      { de: 'Anbieter und Modell werden vom Managed-Hosting-Plan vorgegeben.',           en: 'Provider and model are managed by your hosting plan.' },
+	'llm.env_override_title': { de: 'Anbieter wird über eine Umgebungsvariable gesetzt',                          en: 'Provider is set via an environment variable' },
+	'llm.env_override_body':  { de: 'Solange diese ENV-Variable gesetzt ist, überschreibt sie deine Auswahl hier bei jedem Engine-Neustart. Entferne sie aus deiner .env / docker-compose.yml, damit Änderungen über das UI greifen.', en: 'While this env variable is set, it overrides your selection here on every engine reload. Remove it from your .env / docker-compose.yml so changes you make in the UI take effect.' },
 	'llm.locked_provider':    { de: 'Dieser Anbieter ist im aktuellen Plan nicht verfügbar.',                    en: 'This provider is not available on the current plan.' },
 	'llm.custom_endpoints_locked_notice': { de: 'Eigene OpenAI- oder Anthropic-kompatible Endpunkte sind im Managed-Plan nicht verfügbar. Anthropic und Mistral kannst du frei wechseln.', en: 'Custom OpenAI- or Anthropic-compatible endpoints are not available on the managed plan. You can switch freely between Anthropic and Mistral.' },
 	'llm.confirm_title':      { de: 'Eigene Endpoint-URL bestätigen',                                            en: 'Confirm custom endpoint URL' },

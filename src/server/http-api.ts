@@ -2836,6 +2836,16 @@ export class LynoxHTTPApi {
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
 
+      // ENV override surface — self-host docs recommend LYNOX_LLM_PROVIDER, but
+      // when set it overrides config.json on every reload, so the Settings →
+      // LLM provider-switch UI silently fails (user clicks Mistral, saves,
+      // refreshes — still on Anthropic because env trumps disk). Tell the UI
+      // so it can render a banner instead of accepting the click in silence.
+      // Symmetric for any future env override we add to the same screen.
+      redacted['env_overrides'] = {
+        provider: !!process.env['LYNOX_LLM_PROVIDER'],
+      };
+
       // Stripe Customer Portal hosted-login URL (v1.6.0 stopgap for PR 3).
       // When set, the engine surfaces it as `stripe_portal_login_url` so the
       // Account/Billing page can render a working CTA that drops the customer

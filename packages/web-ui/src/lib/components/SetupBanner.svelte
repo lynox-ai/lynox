@@ -435,7 +435,14 @@
 
 					<!-- Actions -->
 					<div class="flex items-center justify-between pt-1">
-						{#if !managedMode}
+						{#if managedMode !== 'managed' && managedMode !== 'managed_pro'}
+							<!-- Self-host AND Hosted-BYOK (starter) both surface the picker
+							     above this step, so the user has a real provider choice
+							     to go back to. Pre-fix, starter users were treated like
+							     CP-pre-configured (managed) and shown a Skip button only,
+							     trapping them on the provider the picker landed on if
+							     they wanted Mistral after seeing the Anthropic-default
+							     credential form (rafael F7 HN-launch QA 2026-05-27). -->
 							<button
 								onclick={goBack}
 								class="text-sm text-text-subtle hover:text-text transition-colors"

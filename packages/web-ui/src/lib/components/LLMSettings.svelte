@@ -72,6 +72,15 @@
 		default_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
+		// Self-host: env vars that override on-disk config every time the engine
+		// reloads. If `env_overrides.provider` is true, the user picking a
+		// different provider tile + Save will succeed against config.json but
+		// have zero runtime effect because `LYNOX_LLM_PROVIDER` keeps winning
+		// on the next reload. Surface this so we can render a banner instead
+		// of accepting the click in silence (rafael self-found 2026-05-27 while
+		// verifying #42 — turned the provider-switch fix into a silent no-op
+		// under the env-recommending docs path).
+		env_overrides?: { provider?: boolean };
 		// Advanced + Memory + Context-Window have moved to /settings/llm/advanced
 		// and /settings/llm/memory (PRD-IA-V2 P3-PR-C). The fields stay on
 		// /api/config (same SSoT) but live on their own surfaces; this page
@@ -315,6 +324,12 @@
 	function shouldConfirmCustomUrl(provider: LLMProvider, url: string | undefined): boolean {
 		if (provider !== 'custom' && provider !== 'openai') return false;
 		if (!url || url.trim().length === 0) return false;
+		// Skip the SSRF disclosure for vetted sub-processor hosts (api.mistral.ai,
+		// api.anthropic.com). Without this, Mistral users hitting "Test connection"
+		// on a well-known EU-sovereign endpoint see a scary "could capture your
+		// key" warning — the modal is intended for arbitrary attacker-controlled
+		// URLs, not for the curated provider presets the UI itself surfaces.
+		if (isAllowlistedEndpoint(url)) return false;
 		if (typeof sessionStorage === 'undefined') return false;
 		const key = `llm_custom_confirmed:${url}`;
 		return !sessionStorage.getItem(key);
@@ -511,6 +526,19 @@
 		<h1 class="text-2xl font-semibold mb-1">{t('llm.title')}</h1>
 		<p class="text-sm text-text-muted">{t('llm.subtitle')}</p>
 	</header>
+
+	{#if config.env_overrides?.provider}
+		<!-- Self-host docs recommend setting LYNOX_LLM_PROVIDER in .env, which
+		     overrides config.json on every engine reload. Without this banner,
+		     clicking a different provider tile and Save succeeds silently
+		     against disk but the env wins on the next reload and the UI choice
+		     vanishes — the silent-failure rafael hit during the #42 verify. -->
+		<div role="status" class="border border-warning bg-warning/10 rounded p-3 text-sm">
+			<p class="font-medium">{t('llm.env_override_title')}</p>
+			<p class="text-text-muted mt-1">{t('llm.env_override_body')}</p>
+			<p class="text-xs text-text-muted mt-2 font-mono">LYNOX_LLM_PROVIDER</p>
+		</div>
+	{/if}
 
 	{#if providerLocked}
 		<div class="border border-warning bg-warning/10 rounded p-3 text-sm">
