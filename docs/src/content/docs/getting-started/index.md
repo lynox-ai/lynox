@@ -11,9 +11,9 @@ sidebar:
   - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API. Prompt caching makes cache-heavy workflows the cheapest option per token of real work. Tested on every release.
   - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter pinned to `api.mistral.ai`. Lower list prices than Claude; pick it for sovereignty or for uncached workloads where the lower per-token rate dominates. Tested on every release.
 
-  Other endpoints — OpenAI itself, Ollama, LM Studio, Groq, vLLM, Gemini, the Anthropic-compatible "custom" proxy path (LiteLLM in Anthropic mode), and Google Vertex AI — are **wired but not regularly tested**. They work in principle and you can configure them via `~/.lynox/config.json` or environment variables, but expect rough edges around tool-calling reliability. See [LLM Providers](/setup/llm-providers/).
+  Other endpoints — OpenAI itself, Ollama, LM Studio, Groq, vLLM, Gemini, the Anthropic-compatible "custom" proxy path (e.g. a LiteLLM proxy exposing the Anthropic Messages route), and Google Vertex AI — are **wired but not regularly tested**. They work in principle and you can configure them via `~/.lynox/config.json` or environment variables, but expect rough edges around tool-calling reliability. See [LLM Providers](/setup/llm-providers/).
 
-The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**. A typical business day on Claude costs **$1–5**.
+The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**.
 
 ## Install
 
@@ -35,8 +35,12 @@ If you prefer to set things up yourself:
 # 1. Clone the repo (contains docker-compose.yml + SearXNG config)
 git clone https://github.com/lynox-ai/lynox.git && cd lynox
 
-# 2. Create .env with your API key
-cp .env.example .env    # then edit .env and set ANTHROPIC_API_KEY
+# 2. Copy .env.example and UNCOMMENT + set your AI provider key
+#    (.env.example ships with ANTHROPIC_API_KEY commented out so the file
+#    can stay in the repo; you must remove the leading `#` and paste the
+#    key before starting the container).
+cp .env.example .env
+# then: edit .env, uncomment the `ANTHROPIC_API_KEY=` line, paste your key
 
 # 3. Start lynox + SearXNG (web search)
 docker compose up -d
@@ -52,7 +56,7 @@ If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. On first 
 
 After setup, lynox opens at [localhost:3000](http://localhost:3000).
 
-If you started without an API key (e.g. manual Docker Compose without `.env`), lynox starts in **browse mode** — you can explore the UI but not chat. A **setup banner** appears at the top with a provider-aware wizard (Anthropic / Mistral / Custom) where you enter your credentials. They're stored encrypted in the local vault.
+If you started without an API key (e.g. manual Docker Compose without `.env`), lynox starts in a limited state — the chat input is disabled until setup is complete. A **setup banner** appears at the top with a provider-aware wizard (Anthropic / Mistral / Custom) where you enter your credentials. They're stored encrypted in the local vault.
 
 Try something:
 

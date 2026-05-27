@@ -35,8 +35,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Training on data | ❌ Never | ❌ Never (per Mistral terms) | Provider-dependent | ❌ Never |
 | | | | | |
 | **Cost** | | | | |
-| API pricing | $3/$15 (Sonnet), $15/$75 (Opus), $0.80/$4 (Haiku) per MTok | $0.50/$1.50 (Large 3); $0.15/$0.15 (Ministral 8B) per MTok | Model-dependent (free for local Ollama / LM Studio / vLLM) | Free (your hardware) |
-| Typical monthly | $30–150 | $0–50 | $0 (local) – varies (hosted) | $150 fixed (GPU) |
+| API pricing | See [Anthropic pricing](https://www.anthropic.com/pricing) — varies by model | See [Mistral pricing](https://mistral.ai/products/la-plateforme#pricing) — generally lower per-token list price than Anthropic | Model-dependent (free for local Ollama / LM Studio / vLLM) | Free (your hardware) |
 
 ## Claude (Anthropic) — Default
 
@@ -77,7 +76,7 @@ The wizard (npx installer or in-product **Settings → Provider**) prefills the 
 
 ### Mistral (France, EU) — natively supported
 
-First-class Sonnet replacement, tested on every release. 7/8 axes at 100% pass on the lynox agent-loop bench; ~6× cheaper than Claude on cached workloads; French company (no US CLOUD Act exposure).
+First-class Sonnet replacement, tested on every release. Every Anthropic tier has a 100%-pass Mistral replacement on the lynox agent-loop bench (see [/bench](https://lynox.ai/bench)); ~6× cheaper than Claude on cached workloads; French company (no US CLOUD Act exposure).
 
 ```json
 {

@@ -72,8 +72,21 @@ cloudflared tunnel create lynox
 # Route DNS
 cloudflared tunnel route dns lynox lynox.example.com
 
-# Run
-cloudflared tunnel run --url http://localhost:3000 lynox
+# Tell the tunnel where lynox is. Either (a) write an ingress rule
+# to ~/.cloudflared/config.yml:
+#
+#   tunnel: lynox
+#   credentials-file: /Users/you/.cloudflared/<TUNNEL-UUID>.json
+#   ingress:
+#     - hostname: lynox.example.com
+#       service: http://localhost:3000
+#     - service: http_status:404
+#
+# or (b) skip the named tunnel entirely and use a quick tunnel:
+#   cloudflared tunnel --url http://localhost:3000
+#
+# Then run the named tunnel:
+cloudflared tunnel run lynox
 ```
 
 Or as a Docker sidecar (recommended for always-on):

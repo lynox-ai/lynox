@@ -29,7 +29,7 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 | Model                 | `voxtral-mini-tts-latest`               |
 | Default voice         | `en_paul_neutral` (English)             |
 | Languages             | 9 supported; voice catalog currently EN-only |
-| Streaming             | SSE; ~1 s time-to-first-audio from Zurich |
+| Streaming             | SSE; low-latency time-to-first-audio (varies by region/network) |
 | Pricing               | $0.016 / 1 000 characters (~$0.02/min spoken). See [Mistral pricing](https://docs.mistral.ai/getting-started/models/) for the current number. |
 | Training              | Customer text is not used to train models (per Mistral's terms) |
 

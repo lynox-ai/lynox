@@ -13,7 +13,7 @@ lynox has four built-in roles, each optimized for a different type of work:
 |------|-------|-----------|-------------|
 | **Researcher** | Sonnet | Deep analysis, source citation, thorough exploration | Read-only — can't modify files or run commands |
 | **Creator** | Sonnet | Content creation, writing, tone adaptation | No system commands |
-| **Operator** | Haiku | Fast status checks, concise reporting | Read-only |
+| **Operator** | Haiku | Fast status checks, concise reporting | Tool-restricted (bash + read tools allowed; no write tools) |
 | **Collector** | Haiku | Structured Q&A, data gathering | Minimal tools — memory and user interaction only |
 
 ### Switching roles

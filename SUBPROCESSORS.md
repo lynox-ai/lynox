@@ -6,12 +6,12 @@ This file is the canonical, repo-checked-in list of sub-processors engaged for t
 
 The **self-hosted lynox software** (`@lynox-ai/core` and `@lynox-ai/web-ui`) engages **no sub-processors** — when you run lynox on your own infrastructure, the software only communicates with the LLM provider whose API key you configure. This list applies only to lynox AI's managed offering.
 
-The website page <https://lynox.ai/subprocessors> mirrors this file for non-engineering audiences. If the two ever diverge, this file is authoritative.
+The website page <https://lynox.ai/subprocessors> and this file mirror the customer-facing list. The contractually binding list lives in the **Data Processing Agreement** at <https://lynox.ai/dpa>. If any version diverges, the DPA prevails.
 
 | Sub-processor | Purpose | Location | Transfer mechanism |
 |---|---|---|---|
 | Anthropic, PBC | Primary LLM inference (Claude family, direct API) | United States | EU-US Data Privacy Framework + SCCs (Module 2/3, 2021/914); zero-retention contractual commitment |
-| Mistral AI SAS | LLM inference for secondary and background tasks, and as fallback provider (Mistral Large family, direct API) | France (EU) | EU; zero-retention contractual commitment |
+| Mistral AI SAS | LLM inference for chat, agent workflows, mail-triage classification, and memory consolidation (Mistral catalog: large/medium/small/magistral/ministral/codestral/nemo, direct API). Selected as primary provider by EU-residency customers and as secondary/fallback by others. | France (EU) | EU; zero-retention contractual commitment |
 | OpenAI, L.L.C. | LLM inference — engaged only if the customer enables the OpenAI-compatible provider via BYOK | United States | SCCs (Module 2/3, 2021/914); subject to OpenAI's own DPA |
 | Stripe, Inc. | Payment processing and subscription billing | United States / EU | EU-US Data Privacy Framework + SCCs |
 | Hetzner Online GmbH | Server infrastructure — shared tenant hosts (isolated container per customer); dedicated VPS available as Enterprise upgrade | Germany (EU) | EU |
