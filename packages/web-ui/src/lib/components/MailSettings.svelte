@@ -5,6 +5,7 @@
 
 	import { onMount } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
+	import { t } from '../i18n.svelte.js';
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 
@@ -427,23 +428,23 @@
 				onclick={() => { showForm = true; resetForm(); }}
 				data-testid="mail-add-button"
 			>
-				+ Add mail account
+				{t('mail.add_button')}
 			</button>
 		{:else}
 			<div class="space-y-3 rounded-[var(--radius-md)] border border-border bg-bg p-4" data-testid="mail-add-form">
 				<div class="flex items-center justify-between">
-					<h3 class="text-sm font-medium">Add mail account</h3>
+					<h3 class="text-sm font-medium">{t('mail.add_heading')}</h3>
 					<button
 						type="button"
 						class="text-xs text-text-muted hover:text-text"
 						onclick={() => { showForm = false; resetForm(); }}
 					>
-						Cancel
+						{t('mail.cancel')}
 					</button>
 				</div>
 
 				<label class="block">
-					<span class="mb-1 block text-xs font-medium text-text-muted">Provider</span>
+					<span class="mb-1 block text-xs font-medium text-text-muted">{t('mail.provider')}</span>
 					<select
 						class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
 						bind:value={formPreset}
@@ -457,9 +458,9 @@
 
 				<label class="block">
 					<span class="mb-1 block text-xs font-medium text-text-muted">
-						Account role
+						{t('mail.account_role')}
 						<span class="ml-1 text-[10px] font-normal text-text-subtle">
-							(drives tone, auto-reply policy, receive-only block)
+							{t('mail.account_role_hint')}
 						</span>
 					</span>
 					<select
@@ -494,7 +495,7 @@
 						</p>
 						{#if selectedPreset.appPasswordUrl}
 							<div class="space-y-1">
-								<p><strong>{selectedPreset.requires2FA ? '2FA required. ' : ''}How to create an app-password:</strong></p>
+								<p><strong>{selectedPreset.requires2FA ? t('mail.2fa_required_prefix') : ''}{t('mail.app_password_instructions_heading')}</strong></p>
 								{#if formPreset === 'gmail'}
 									<ol class="ml-4 list-decimal space-y-0.5">
 										<li>Open <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="text-accent-text underline">myaccount.google.com/apppasswords</a></li>
@@ -554,7 +555,7 @@
 				{/if}
 
 				<label class="block">
-					<span class="mb-1 block text-xs font-medium text-text-muted">Email address</span>
+					<span class="mb-1 block text-xs font-medium text-text-muted">{t('mail.email_address')}</span>
 					<input
 						type="email"
 						class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
@@ -567,7 +568,7 @@
 
 				<div class="grid grid-cols-2 gap-3">
 					<label class="block">
-						<span class="mb-1 block text-xs font-medium text-text-muted">Account id</span>
+						<span class="mb-1 block text-xs font-medium text-text-muted">{t('mail.account_id')}</span>
 						<input
 							type="text"
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
@@ -578,9 +579,9 @@
 					</label>
 					<label class="block">
 						<span class="mb-1 block text-xs font-medium text-text-muted">
-							Display name
+							{t('mail.display_name')}
 							<span class="ml-1 text-[10px] font-normal text-text-subtle">
-								(shown to recipients as the sender)
+								{t('mail.display_name_hint')}
 							</span>
 						</span>
 						<input
@@ -594,7 +595,7 @@
 				</div>
 
 				<label class="block">
-					<span class="mb-1 block text-xs font-medium text-text-muted">App password</span>
+					<span class="mb-1 block text-xs font-medium text-text-muted">{t('mail.app_password')}</span>
 					<input
 						type="password"
 						class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
@@ -608,9 +609,9 @@
 				{#if !typeIsReceiveOnly}
 					<label class="block">
 						<span class="mb-1 block text-xs font-medium text-text-muted">
-							Persona override
+							{t('mail.persona_override')}
 							<span class="ml-1 text-[10px] font-normal text-text-subtle">
-								(optional — leave blank to use the type default)
+								{t('mail.persona_override_hint')}
 							</span>
 						</span>
 						<textarea
