@@ -83,7 +83,15 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('account.back_to_settings')}</a>
 	<header>
 		<h1 class="text-2xl font-semibold mb-1">{t('account.billing.title')}</h1>
-		<p class="text-sm text-text-muted">{t('account.billing.subtitle')}</p>
+		<!-- Subtitle is conditional: the "Verwalte … via Stripe Customer Portal"
+		     copy is only honest when a portal URL is actually wired. For
+		     Hosted-BYOK demo tenants without LYNOX_STRIPE_PORTAL_LOGIN_URL set,
+		     fall back to a neutral "Plan-Status und Support-Kontakt" line so
+		     we don't promise something the page can't deliver. Found 2026-05-27
+		     during meridian-demo HN-readiness walk. -->
+		<p class="text-sm text-text-muted">
+			{stripePortalUrl ? t('account.billing.subtitle') : t('account.billing.subtitle_no_portal')}
+		</p>
 	</header>
 
 	{#if !loaded}
@@ -115,6 +123,23 @@
 					</svg>
 				</a>
 				<p class="text-xs text-text-muted">{t('account.billing.portal_hint')}</p>
+			{/if}
+
+			{#if managed === 'starter'}
+				<!-- Hosted-BYOK customers get a soft upgrade-CTA — without it
+				     the page has no self-serve path from CHF 39 BYOK to
+				     CHF 79/149 Managed plans, and the visitor sees a billing
+				     page with only a tier-label + mailto. Mailto stopgap until
+				     [[project_pr3_stripe_portal_sso_deferred]] lands a proper
+				     in-portal plan-switch flow. -->
+				<div class="rounded border border-border bg-bg-subtle p-4 text-sm space-y-2">
+					<p class="font-medium text-text">{t('account.billing.upgrade_heading')}</p>
+					<p class="text-text-muted">{t('account.billing.upgrade_body')}</p>
+					<a href="mailto:{supportEmail}?subject=Upgrade%20to%20Managed&body=Hi%2C%20I%27d%20like%20to%20upgrade%20my%20Hosted-BYOK%20subscription%20to%20Managed%20%2F%20Managed%20Pro.%20Please%20set%20up%20the%20switch.%20Thanks."
+						class="inline-flex items-center gap-2 px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 transition-opacity">
+						{t('account.billing.upgrade_cta')}
+					</a>
+				</div>
 			{/if}
 
 			<!-- Always-visible support fallback — covers (a) instances without

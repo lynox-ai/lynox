@@ -847,6 +847,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Account → Billing
 	'account.billing.title': { de: 'Abo & Rechnung', en: 'Subscription & billing' },
 	'account.billing.subtitle': { de: 'Verwalte dein Managed-Abo via Stripe Customer Portal.', en: 'Manage your Managed subscription via the Stripe customer portal.' },
+	'account.billing.subtitle_no_portal': { de: 'Plan-Status und Support-Kontakt.', en: 'Plan status and support contact.' },
+	'account.billing.upgrade_heading': { de: 'Auf Managed wechseln?', en: 'Upgrade to Managed?' },
+	'account.billing.upgrade_body': { de: 'Managed bringt vom CP bereitgestellte LLM-Schlüssel mit, ohne eigenen Anthropic-/Mistral-Account. CHF 79 / Monat inkl. $30 AI-Budget; Managed Pro CHF 149 mit $100. Schick uns eine kurze Mail, wir setzen den Wechsel auf.', en: 'Managed includes CP-provided LLM credentials — no separate Anthropic/Mistral account needed. CHF 79 / month with $30 AI budget; Managed Pro CHF 149 with $100. Drop us a short email and we set up the switch.' },
+	'account.billing.upgrade_cta': { de: 'Upgrade per Mail anfragen', en: 'Request upgrade via email' },
 	'account.billing.loading': { de: 'Lade Abo-Status…', en: 'Loading subscription status…' },
 	'account.billing.load_failed': { de: 'Abo-Status konnte nicht geladen werden.', en: 'Could not load subscription status.' },
 	'account.billing.current_tier': { de: 'Aktueller Plan', en: 'Current plan' },
