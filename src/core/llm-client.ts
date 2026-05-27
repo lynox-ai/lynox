@@ -66,20 +66,22 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   const provider = opts.provider ?? _activeProvider;
 
   if (provider === 'openai') {
-    if (!opts.apiBaseURL || !opts.openaiModelId) {
-      throw new Error('OpenAI provider requires apiBaseURL and openaiModelId.');
-    }
-    // Auth mode: static API key OR dynamic OAuth token from GCP service account
+    // Boot-time tolerance: we DELIBERATELY do NOT throw here on missing
+    // apiBaseURL / openaiModelId / apiKey. BYOK tenants legitimately reach
+    // this codepath at boot with an empty vault — the customer is meant to
+    // configure credentials via the SetupBanner UI, which they can only
+    // reach if the engine successfully boots. Pre-2026-05-27: throws here
+    // crash-looped meridian-demo and any future BYOK signup. The
+    // OpenAIAdapter shape-validates at request-time and surfaces a 401
+    // (or "missing baseURL") to the UI on first message, which is the
+    // correct place to surface the error.
     const apiKey: ApiKeyProvider = opts.openaiAuth === 'google-vertex'
       ? createVertexOAuthProvider()
       : opts.apiKey ?? '';
-    if (!apiKey) {
-      throw new Error('OpenAI provider requires apiKey (for static auth) or openaiAuth: "google-vertex" (for Vertex AI OAuth).');
-    }
     return new OpenAIAdapter({
-      baseURL: opts.apiBaseURL,
+      baseURL: opts.apiBaseURL ?? '',
       apiKey,
-      modelId: opts.openaiModelId,
+      modelId: opts.openaiModelId ?? '',
     }) as unknown as Anthropic;
   }
 

@@ -247,10 +247,23 @@ export class Engine {
     // Always create standard Anthropic client in constructor.
     // For non-Anthropic providers (vertex / openai-compat / Mistral) init()
     // rebuilds the client with the right SDK once user config is loaded.
-    this.client = createLLMClient({
-      apiKey: this.userConfig.api_key,
-      apiBaseURL: this.userConfig.api_base_url,
-    });
+    //
+    // Defensive try/catch (added 2026-05-27 after meridian-demo crash-loop):
+    // even though llm-client.ts is now lenient at boot, ANY future strict
+    // boot-time check that fires here would crash-loop the container and
+    // prevent BYOK customers from reaching SetupBanner. Belt + suspenders:
+    // fall back to a placeholder Anthropic client if construction throws.
+    try {
+      this.client = createLLMClient({
+        apiKey: this.userConfig.api_key,
+        apiBaseURL: this.userConfig.api_base_url,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.warn(`[engine] LLM client init failed: ${msg} — booting in browse-only mode until user configures via SetupBanner`);
+      this.client = createLLMClient({ provider: 'anthropic', apiKey: '' });
+    }
 
     this._toolContext = createToolContext(this.userConfig);
   }
