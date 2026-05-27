@@ -8,7 +8,7 @@ sidebar:
     variant: success
 ---
 
-lynox connects to any email account that supports IMAP and SMTP. Add your Gmail, iCloud, Fastmail, Outlook, Yahoo, or any custom mail server — lynox handles triage, search, reading, sending, and follow-up tracking.
+lynox connects to any email account that supports IMAP and SMTP. Gmail and iCloud are production-tested on every release; Fastmail, Outlook, Yahoo, and other IMAP-compatible servers are wired via the same auto-configuration table — they should work but haven't been exercised on the release smoke. lynox handles triage, search, reading, sending, and follow-up tracking.
 
 This is a standalone integration that works with any LLM provider. It's separate from the [Google Workspace](/integrations/google-workspace/) Gmail integration (which uses OAuth).
 
@@ -39,14 +39,14 @@ Most providers require an app-specific password instead of your regular login. T
 
 ## Supported Providers
 
-| Provider | IMAP | SMTP | Auto-configured |
-|----------|------|------|----------------|
-| Gmail | imap.gmail.com:993 | smtp.gmail.com:587 | Yes |
-| iCloud | imap.mail.me.com:993 | smtp.mail.me.com:587 | Yes |
-| Fastmail | imap.fastmail.com:993 | smtp.fastmail.com:587 | Yes |
-| Yahoo | imap.mail.yahoo.com:993 | smtp.mail.yahoo.com:587 | Yes |
-| Outlook | outlook.office365.com:993 | smtp-mail.outlook.com:587 | Yes |
-| Custom | Your server | Your server | Autodiscover via Thunderbird ISPDB |
+| Provider | IMAP | SMTP | Auto-configured | Release-smoke tested |
+|----------|------|------|----------------|----------------------|
+| Gmail | imap.gmail.com:993 | smtp.gmail.com:587 | Yes | Yes |
+| iCloud | imap.mail.me.com:993 | smtp.mail.me.com:587 | Yes | Yes |
+| Fastmail | imap.fastmail.com:993 | smtp.fastmail.com:587 | Yes | No |
+| Yahoo | imap.mail.yahoo.com:993 | smtp.mail.yahoo.com:587 | Yes | No |
+| Outlook | outlook.office365.com:993 | smtp-mail.outlook.com:587 | Yes | No |
+| Custom | Your server | Your server | Autodiscover via Thunderbird ISPDB | No |
 
 For custom servers, lynox tries autodiscovery first (using Mozilla's ISPDB). If that fails, enter host, port, and TLS settings manually.
 
