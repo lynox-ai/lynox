@@ -222,4 +222,48 @@ describe('Engine.reloadCredentials — provider-switch end-to-end propagation', 
 
     await expect(engine.reloadCredentials()).resolves.toBeUndefined();
   });
+
+  // ── #42 — configVersion increments + Session stale-detection ──
+  // Without this counter, a long-lived Session.agent (captured at construct
+  // time) keeps calling the previous provider after a UI provider-switch.
+  it('getConfigVersion increments on every _recreateClient (reloadCredentials path)', async () => {
+    const config: LynoxConfig = { model: 'sonnet' };
+    const engine = new Engine(config);
+    const initial = engine.getConfigVersion();
+
+    // First reload — same provider, fresh key.
+    mockLoadConfig.mockReturnValueOnce({
+      provider: 'anthropic',
+      api_key: 'sk-ant-rotated-1',
+    } satisfies LynoxUserConfig);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-rotated-1');
+    await engine.reloadCredentials();
+    const afterFirst = engine.getConfigVersion();
+    expect(afterFirst).toBeGreaterThan(initial);
+
+    // Second reload — provider switch to Mistral.
+    mockLoadConfig.mockReturnValueOnce({
+      provider: 'openai',
+      api_base_url: 'https://api.mistral.ai/v1',
+    } satisfies LynoxUserConfig);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+    await engine.reloadCredentials();
+    expect(engine.getConfigVersion()).toBeGreaterThan(afterFirst);
+  });
+
+  it('reloadUserConfig increments configVersion when the provider actually changes', async () => {
+    const config: LynoxConfig = { model: 'sonnet' };
+    const engine = new Engine(config);
+    const initial = engine.getConfigVersion();
+
+    // reloadUserConfig only calls _recreateClient when api_key / api_base_url
+    // / provider differs from the previous config. Switch provider to force it.
+    mockLoadConfig.mockReturnValueOnce({
+      provider: 'openai',
+      api_base_url: 'https://api.mistral.ai/v1',
+    } satisfies LynoxUserConfig);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-switch');
+    await engine.reloadUserConfig();
+    expect(engine.getConfigVersion()).toBeGreaterThan(initial);
+  });
 });
