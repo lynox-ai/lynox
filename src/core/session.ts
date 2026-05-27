@@ -176,6 +176,17 @@ export class Session {
 
   // Per-session config (copied from engine.config at creation, mutated independently)
   private _registryVersion = 0;
+  /**
+   * Engine config-version snapshot taken at the last Agent build. If the
+   * engine recreates its LLM client (Settings provider/key swap, vault
+   * rotation, BYOK key change), `engine.getConfigVersion()` advances and
+   * this Session rebuilds its Agent on the next run() so the new
+   * apiKey/provider/baseURL propagates. Without it, a UI-side provider
+   * switch updates engine.client but the long-lived Session.agent keeps
+   * a stale snapshot → empty replies + footer stuck on the old provider
+   * until logout (rafael 2026-05-27 BYOK provider-switch bug).
+   */
+  private _configVersionAtAgentBuild = 0;
   private _model: ModelTier;
   private _effort: EffortLevel;
   private _thinking: ThinkingMode | undefined;
@@ -324,6 +335,17 @@ export class Session {
 
     // Hot-reload tools when registry changed (e.g. Google connected mid-session)
     if (this.engine.getRegistry().version !== this._registryVersion) {
+      this._recreateAgent();
+    }
+
+    // Hot-rebuild Agent when the engine's LLM client was recreated (provider
+    // swap, BYOK key rotation, vault reload). _recreateAgent constructs the
+    // Agent against `this.engine.client`, so a stale snapshot means the
+    // Session keeps calling the previous provider's API with the old key —
+    // empty assistant replies + footer stuck on the previous provider name
+    // until the session is destroyed (rafael 2026-05-27 Settings provider
+    // switch from Anthropic → Mistral).
+    if (this.engine.getConfigVersion() !== this._configVersionAtAgentBuild) {
       this._recreateAgent();
     }
 
@@ -956,6 +978,10 @@ export class Session {
     const userConfig = engine.getUserConfig();
     const registry = engine.getRegistry();
     this._registryVersion = registry.version;
+    // Snapshot the engine's LLM-client version at the same moment the Agent
+    // captures engine.client — `run()` compares this against
+    // engine.getConfigVersion() to detect a swap and trigger a rebuild.
+    this._configVersionAtAgentBuild = engine.getConfigVersion();
     const pluginManager = engine.getPluginManager();
     const toolContext = engine.getToolContext();
 

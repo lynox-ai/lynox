@@ -31,7 +31,6 @@
 		clearError,
 		cancelQueue,
 		removeQueuedMessage,
-		downloadExport,
 		getSessionModel,
 		getContextBudget,
 		getContextWindow,
@@ -435,11 +434,6 @@
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
 	const SCROLL_THRESHOLD_PX = 64;
-	// Thread actions menu (Export MD / JSON). Closed by default; toggled via
-	// the top-right hamburger button. Closes on outside-click + Escape.
-	let chatMenuOpen = $state(false);
-	let chatMenuButtonEl: HTMLButtonElement | undefined = $state();
-	let chatMenuPanelEl: HTMLDivElement | undefined = $state();
 	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
@@ -1541,45 +1535,6 @@
 		if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
 	}
 
-	// Thread-actions menu wiring. The menu is sticky to the top-right of the
-	// chat container. Outside-click + Escape close it; the button keeps focus
-	// to anchor a return after dismissal.
-	function toggleChatMenu(): void {
-		chatMenuOpen = !chatMenuOpen;
-	}
-	function closeChatMenu(): void {
-		chatMenuOpen = false;
-	}
-	async function menuExportMd(): Promise<void> {
-		closeChatMenu();
-		downloadExport('md');
-	}
-	async function menuExportJson(): Promise<void> {
-		closeChatMenu();
-		const { exportAsJSON } = await import('../stores/chat.svelte.js');
-		await navigator.clipboard.writeText(exportAsJSON());
-		addToast(t('common.copied'), 'success', 1500);
-	}
-	$effect(() => {
-		if (!chatMenuOpen) return;
-		function onDocClick(e: MouseEvent): void {
-			const tgt = e.target as Node | null;
-			if (!tgt) return;
-			if (chatMenuPanelEl?.contains(tgt)) return;
-			if (chatMenuButtonEl?.contains(tgt)) return;
-			closeChatMenu();
-		}
-		function onKey(e: KeyboardEvent): void {
-			if (e.key === 'Escape') closeChatMenu();
-		}
-		document.addEventListener('mousedown', onDocClick);
-		document.addEventListener('keydown', onKey);
-		return () => {
-			document.removeEventListener('mousedown', onDocClick);
-			document.removeEventListener('keydown', onKey);
-		};
-	});
-
 	// Track streaming token churn and tool-call activity so the effect
 	// re-runs while the assistant is writing, not just when a turn ends.
 	const streamSignal = $derived.by(() => {
@@ -1796,49 +1751,6 @@
 	     scroll-to-bottom button can anchor to the viewport's lower-right
 	     without overlapping the composer below. -->
 	<div class="relative flex min-h-0 flex-1 flex-col">
-	{#if messages.length > 0}
-		<!-- Top-right thread-actions menu (Export MD / JSON). Replaces the
-		     bottom-of-stream buttons; sticky so it's reachable while scrolling
-		     up. md+ only — small viewports keep the AppShell sidebar's
-		     per-thread 3-dot menu as the export surface. -->
-		<div class="hidden md:flex absolute right-3 top-3 z-20">
-			<button
-				type="button"
-				bind:this={chatMenuButtonEl}
-				onclick={toggleChatMenu}
-				aria-haspopup="menu"
-				aria-expanded={chatMenuOpen}
-				aria-label={t('chat.thread_menu_aria') ?? 'Thread actions'}
-				class="rounded-[var(--radius-sm)] border border-border bg-bg/80 px-2 py-1 text-text-subtle hover:text-text hover:border-border-hover backdrop-blur transition-colors"
-			>
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<line x1="4" y1="7" x2="20" y2="7" />
-					<line x1="4" y1="12" x2="20" y2="12" />
-					<line x1="4" y1="17" x2="20" y2="17" />
-				</svg>
-			</button>
-			{#if chatMenuOpen}
-				<div
-					bind:this={chatMenuPanelEl}
-					role="menu"
-					class="absolute right-0 top-9 min-w-[180px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
-				>
-					<button
-						type="button"
-						role="menuitem"
-						onclick={menuExportMd}
-						class="block w-full text-left px-4 py-2 text-sm text-text-muted hover:bg-bg-muted hover:text-text font-mono uppercase tracking-widest"
-					>↓ Export</button>
-					<button
-						type="button"
-						role="menuitem"
-						onclick={menuExportJson}
-						class="block w-full text-left px-4 py-2 text-sm text-text-muted hover:bg-bg-muted hover:text-text font-mono uppercase tracking-widest border-t border-border"
-					>⎘ JSON</button>
-				</div>
-			{/if}
-		</div>
-	{/if}
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
@@ -2068,17 +1980,18 @@
 					<!-- EU AI Act Art. 50 §1: persistent visible disclosure that the
 					     message is AI-generated. data-ai-generated exposes the same
 					     fact machine-readably for assistive tech / regulators.
-					     Layout 2026-05-26: badge floats inline with the first line
-					     of message content so the AI disclosure sits on the same
-					     row as the speaker's first word, rather than as a separate
-					     header block stacked above. Subsequent blocks (thinking,
-					     tools) flow below; `clear-both` on the wrapper terminator
-					     prevents the float from bleeding into the next message. -->
+					     Layout 2026-05-27: badge floats inline with the FIRST
+					     TEXT block — not the first block of any type. A turn
+					     that opens with ▸THINKING + tool_calls (Anthropic
+					     extended-thinking + tool-use path) previously stranded
+					     the badge above the thinking pill, visually disconnected
+					     from the AI's actual prose. Computing firstTextIdx up
+					     front and only rendering the badge in the loop when
+					     gIdx === firstTextIdx places the disclosure where the
+					     reader's eye actually lands on the model's words. -->
+					{@const grouped = msg.blocks?.length ? groupedToolCalls(msg.blocks, msg.toolCalls ?? []) : []}
+					{@const firstTextIdx = grouped.findIndex((b) => b.type === 'text' && !!b.text)}
 					<div class="ai-message-wrap space-y-2" data-ai-generated="true">
-						<span
-							class="ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent"
-							aria-label={t('chat.ai_generated_aria')}
-						>{t('chat.ai_generated_badge')}</span>
 						{#if msg.thinking && !msg.blocks?.some((b) => b.type === 'thinking')}
 							<!-- Legacy threads saved before interleaved thinking blocks
 							     existed keep the single trailing pill. New messages
@@ -2090,7 +2003,7 @@
 						{/if}
 
 						<!-- Interleaved blocks: grouped tool calls + text in chronological order -->
-						{#each msg.blocks?.length ? groupedToolCalls(msg.blocks, msg.toolCalls ?? []) : [] as gBlock, gIdx (gIdx)}
+						{#each grouped as gBlock, gIdx (gIdx)}
 							{#if gBlock.type === 'plan'}
 								<details class="text-xs text-text-subtle border-l-2 border-accent/30 pl-3 py-1 my-1">
 									<summary class="cursor-pointer hover:text-text-muted font-medium text-text-muted">{gBlock.summary || 'Plan'}</summary>
@@ -2178,6 +2091,12 @@
 									<pre class="mt-1.5 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-subtle/60">{maskedThinking}</pre>
 								</details>
 							{:else if gBlock.type === 'text' && gBlock.text}
+								{#if gIdx === firstTextIdx}
+									<span
+										class="ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent"
+										aria-label={t('chat.ai_generated_aria')}
+									>{t('chat.ai_generated_badge')}</span>
+								{/if}
 								<MarkdownRenderer content={gBlock.text} streaming={isStreaming && msgIdx === messages.length - 1} />
 						{/if}
 						{/each}

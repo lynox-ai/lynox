@@ -180,6 +180,17 @@ export class Engine {
   private activeScopes: MemoryScopeRef[] = [];
   private _pipelinesEnabled = false;
   private _dataStoreEnabled = false;
+  /**
+   * Monotonic counter incremented every time the LLM client is rebuilt via
+   * `_recreateClient` — covers `reloadUserConfig`, `reloadCredentials`,
+   * `setApiKey`, and any other path that swaps the underlying client. Long-
+   * lived Sessions snapshot this at Agent-build time and re-create their
+   * Agent on the next `run()` if the engine's version has advanced. Without
+   * it, a provider/credential change propagates to the engine but the
+   * Session keeps an Agent bound to the stale key — empty assistant replies
+   * + footer stays on the previous provider until logout (rafael 2026-05-27).
+   */
+  private _configVersion = 0;
   /** Tracks which web-search provider (if any) is wired into the registry.
    *  - 'configured' — SearXNG registered (sidecar or self-hosted URL), full quality.
    *  - 'fallback'   — embedded DuckDuckGo HTML-scrape fallback (best-effort).
@@ -413,7 +424,20 @@ export class Engine {
       gcpRegion,
       openaiModelId: this.userConfig.openai_model_id,
     });
+    // Mirror of the registry-version pattern (see Session._registryVersion).
+    // Long-lived Sessions check this at run() to decide whether their cached
+    // Agent (which captured apiKey/baseURL/provider at construction) is stale.
+    this._configVersion++;
     this._propagateProviderSwitch(apiKey);
+  }
+
+  /**
+   * Snapshot of the LLM-client version Sessions compare against to detect
+   * a credential/provider swap that happened after their Agent was built.
+   * See `_configVersion` for the full rationale.
+   */
+  getConfigVersion(): number {
+    return this._configVersion;
   }
 
   /**
