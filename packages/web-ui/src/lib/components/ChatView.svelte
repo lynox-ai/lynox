@@ -38,6 +38,7 @@
 		getChangesetLoading,
 		submitChangesetReview,
 		getSessionId,
+		reconcileThread,
 		compactNow,
 		getIsCompacting,
 		getPendingPrompt,
@@ -272,6 +273,18 @@
 	onMount(() => {
 		void loadDisplayName();
 		loadOnboardingState();
+		// F13 (rafael HN-launch QA 2026-05-27): if the user navigated away
+		// mid-stream and came back, the SSE listener got torn down with the
+		// previous ChatView while the engine kept running the turn and
+		// persisted the assistant reply to history. The in-memory chat store
+		// still holds the empty pre-disconnect placeholder, so on re-mount
+		// the reader sees their prompt + an "AI" badge with no body even
+		// though they were billed and the answer exists in History. Reconcile
+		// against /threads/:id/messages on every mount; the call bails out
+		// while a stream is active and only swaps when the server has caught
+		// up (mirror of resumeThread's mid-persist guard), so this is safe to
+		// run unconditionally.
+		void reconcileThread();
 		// Pre-warm the iOS Safari TTS prime asset. The `<video>` element
 		// fetches /silent.wav with a Range request and only grabs the first
 		// few bytes if the file is short — iOS then can't play, the prime's

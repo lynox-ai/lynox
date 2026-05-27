@@ -2059,3 +2059,67 @@ export async function resumeThread(threadId: string): Promise<void> {
 	}
 }
 
+/**
+ * Lightweight reconciliation: if there's an active thread and we're NOT
+ * currently streaming, refetch the canonical message list from the server
+ * and swap it in when it's at least as long as the local snapshot.
+ *
+ * Why this exists (F13, rafael HN-launch QA 2026-05-27): when the user
+ * navigates away from /app mid-stream (e.g. clicks Settings), ChatView
+ * unmounts + the SSE listener is torn down. The engine finishes the run
+ * server-side, persists the assistant message to history, and bills the
+ * user — but the in-memory `messages` array still holds the empty
+ * assistant placeholder from before the disconnect. On return to /app,
+ * ChatView re-mounts against the stale store and the reader sees their
+ * own prompt + an empty "AI" reply, even though History → expand run
+ * shows the full response. Reads as "I got charged but no answer", the
+ * exact HN-comment pattern we want to avoid on launch day.
+ *
+ * Distinct from `resumeThread`:
+ *   - Doesn't reset activity / pending prompts / streaming flags
+ *   - Doesn't create a new backend session
+ *   - Bails out if a stream is in flight (the live stream is authoritative)
+ *   - Same merge rule: only swap when server >= local (mid-persist guard)
+ *
+ * Safe to call on every ChatView mount — additive, no SSE-lifecycle change.
+ */
+export async function reconcileThread(): Promise<void> {
+	const tid = sessionId;
+	if (!tid) return;
+	if (isStreaming) return;
+	try {
+		const res = await fetch(`${getApiBase()}/threads/${tid}/messages`);
+		if (!res.ok) return;
+		interface ServerRenderedMessage {
+			role: string;
+			content: string;
+			blocks?: ContentBlock[];
+			toolCalls?: ToolCallInfo[];
+			usage?: UsageInfo;
+		}
+		const data = (await res.json()) as { messages: ServerRenderedMessage[] };
+		const serverMessages: ChatMessage[] = dropEmptyUserMessages(
+			data.messages.map((m) => {
+				const cm: ChatMessage = {
+					role: m.role === 'assistant' ? 'assistant' : 'user',
+					content: m.content ?? '',
+				};
+				if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
+				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
+				if (m.usage) cm.usage = m.usage;
+				return cm;
+			}),
+		);
+		// Mirror resumeThread's mid-persist guard: only swap when the server
+		// has caught up to the local snapshot. A shorter server list means a
+		// turn is still being persisted; keep local until it lands.
+		if (serverMessages.length >= messages.length) {
+			messages = serverMessages;
+			persistChatNow();
+		}
+	} catch {
+		// Network hiccup is non-fatal — the local snapshot is still readable
+		// and the next user action (send / explicit resumeThread) will reconcile.
+	}
+}
+
