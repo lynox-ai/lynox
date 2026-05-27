@@ -76,7 +76,7 @@ The wizard (npx installer or in-product **Settings → Provider**) prefills the 
 
 ### Mistral (France, EU) — natively supported
 
-First-class Sonnet replacement, tested on every release. 7/8 axes at 100% pass on the lynox agent-loop bench; ~6× cheaper than Claude on cached workloads; French company (no US CLOUD Act exposure).
+First-class Sonnet replacement, tested on every release. Every Anthropic tier has a 100%-pass Mistral replacement on the lynox agent-loop bench (see [/bench](https://lynox.ai/bench)); ~6× cheaper than Claude on cached workloads; French company (no US CLOUD Act exposure).
 
 ```json
 {

@@ -8,7 +8,7 @@
 | **Registration No.** | 846701 |
 | **Type** | Word mark (Wortmarke) |
 | **Nice Classes** | 9 (Computer software), 42 (SaaS; design and development of computer software) |
-| **Filed** | April 1, 2026 |
+| **Filed** | April 1, 2026 (Accelerated Examination procedure) |
 | **Registered** | April 7, 2026 |
 | **Protected until** | April 1, 2036 |
 | **Lookup** | [swissreg.ch](https://www.swissreg.ch) |
