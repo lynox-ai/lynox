@@ -440,4 +440,18 @@ describe('docker-installer', () => {
       expect(INSTALLER_SRC).toMatch(/shell history/i);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // ORIGIN env — required so SvelteKit's CSRF guard accepts /login form POSTs
+  // from an http://localhost browser. Without it adapter-node defaults
+  // url.origin to https://, mismatching the http:// Origin header and 403'ing
+  // every form submission as "Cross-site POST form submissions are forbidden".
+  // -------------------------------------------------------------------------
+  describe('ORIGIN env for SvelteKit CSRF', () => {
+    it('installer writes ORIGIN=http://localhost:<port> into .env', () => {
+      expect(INSTALLER_SRC).toMatch(
+        /envVars\['ORIGIN'\]\s*=\s*`http:\/\/localhost:\$\{String\(hostPort\)\}`/,
+      );
+    });
+  });
 });

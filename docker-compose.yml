@@ -47,6 +47,14 @@ services:
       # - LYNOX_HTTP_SECRET         # Access token for Web UI login
       # - LYNOX_VAULT_KEY           # Encrypt data at rest (generate: openssl rand -base64 48)
 
+      # ── Required for the /login form (CSRF) ──────────
+      # SvelteKit's CSRF guard rejects POST forms when the request URL
+      # protocol doesn't match the browser's Origin header. adapter-node
+      # defaults to https when ORIGIN is unset, so http://localhost gets
+      # 403'd on every form submit (e.g. token-based login). Set ORIGIN
+      # to your actual bind URL — scheme + host + port, no path.
+      - ORIGIN=http://localhost:3000
+
       # ── Web Search ────────────────────────────────────
       - SEARXNG_URL=http://searxng:8080  # Free, unlimited via SearXNG below.
       # Without SEARXNG_URL set, lynox falls back to a best-effort

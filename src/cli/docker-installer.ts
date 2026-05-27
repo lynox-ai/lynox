@@ -738,6 +738,14 @@ export async function runDockerInstaller(): Promise<void> {
     const onboardingToken = randomBytes(32).toString('hex');
     envVars['LYNOX_ONBOARDING_TOKEN'] = onboardingToken;
 
+    // SvelteKit (adapter-node) defaults the request URL protocol to https when
+    // ORIGIN env is unset, which makes the CSRF Origin check reject every POST
+    // form submission from an http://localhost browser as cross-site (401/403
+    // "Cross-site POST form submissions are forbidden"). The /login token form
+    // is the user-facing path that hits this. Setting ORIGIN to the actual
+    // bind URL keeps url.origin aligned with the browser's Origin header.
+    envVars['ORIGIN'] = `http://localhost:${String(hostPort)}`;
+
     // ── Bind-mount target ──────────────────────────────
     // The compose file mounts ${HOME}/.lynox into the container. On native
     // Linux, if that directory doesn't exist yet, Docker creates it owned
