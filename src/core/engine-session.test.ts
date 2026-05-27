@@ -602,6 +602,23 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(session.getModelTier()).toBe('sonnet');
     });
 
+    it('getContextUsagePercent honours agent.model — [1m] suffix unlocks 1M window', async () => {
+      const { session } = await createEngineAndSession();
+      const agentMock = (session as unknown as {
+        agent: { model: string; getEstimatedOccupancyTokens: () => number };
+      }).agent;
+      agentMock.getEstimatedOccupancyTokens = () => 100_000;
+
+      agentMock.model = 'claude-sonnet-4-6';
+      expect(session.getContextUsagePercent()).toBe(50);
+
+      agentMock.model = 'claude-sonnet-4-6[1m]';
+      expect(session.getContextUsagePercent()).toBe(10);
+
+      agentMock.model = 'claude-opus-4-6[1m]';
+      expect(session.getContextUsagePercent()).toBe(10);
+    });
+
     it('promptUser setter propagates to agent', async () => {
       const { session } = await createEngineAndSession();
 

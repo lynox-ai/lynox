@@ -68,6 +68,70 @@ describe('readFileTool', () => {
     }
   });
 
+  // === Context-economy size guard ===
+
+  it('reads a file at exactly the 256 KB soft cap without truncating', async () => {
+    const d = await makeTempDir();
+    const filePath = join(d, 'boundary.txt');
+    const exact = 'B'.repeat(256 * 1024);
+    writeFileSync(filePath, exact, 'utf-8');
+
+    const result = await readFileTool.handler({ path: filePath }, makeAgent());
+    expect(result).not.toContain('[truncated:');
+    expect(result).toContain(exact);
+  });
+
+  it('reads an empty file without truncating', async () => {
+    const d = await makeTempDir();
+    const filePath = join(d, 'empty.txt');
+    writeFileSync(filePath, '', 'utf-8');
+
+    const result = await readFileTool.handler({ path: filePath }, makeAgent());
+    expect(result).not.toContain('[truncated:');
+    expect(result).toContain('<untrusted_data source="file:empty.txt">');
+  });
+
+  it('truncates without trailing U+FFFD when a multi-byte char straddles the soft cap', async () => {
+    const d = await makeTempDir();
+    const filePath = join(d, 'utf8.txt');
+    // Build a body where byte 256 KB lands in the middle of a 3-byte UTF-8 char.
+    // 'ä' is 2 bytes (0xC3 0xA4). Fill to 256 KB - 1 with ASCII, then a 2-byte
+    // char straddling the boundary, then more ASCII.
+    const head = 'a'.repeat(256 * 1024 - 1);
+    writeFileSync(filePath, `${head}ä${'b'.repeat(64 * 1024)}`, 'utf-8');
+
+    const result = await readFileTool.handler({ path: filePath }, makeAgent());
+    expect(result).toContain('[truncated:');
+    // Replacement char must not leak into the visible body.
+    expect(result).not.toContain('�');
+  });
+
+  it('truncates files over the 256 KB soft cap with a delegate hint', async () => {
+    const d = await makeTempDir();
+    const filePath = join(d, 'large.log');
+    // 300 KB of ASCII — comfortably above the 256 KB soft cap.
+    const oversized = 'A'.repeat(300 * 1024);
+    writeFileSync(filePath, oversized, 'utf-8');
+
+    const result = await readFileTool.handler({ path: filePath }, makeAgent());
+
+    expect(result).toContain('<untrusted_data source="file:large.log">');
+    expect(result).toContain('[truncated:');
+    expect(result).toMatch(/spawn_agent.*collector/);
+    // Sanity: the truncated body is at the soft cap, not the full 300 KB.
+    expect(result.length).toBeLessThan(280 * 1024);
+  });
+
+  it('rejects files over the 5 MB hard cap and points at delegation', async () => {
+    const d = await makeTempDir();
+    const filePath = join(d, 'huge.bin');
+    // 6 MB sparse-friendly buffer — write to disk in one shot.
+    writeFileSync(filePath, Buffer.alloc(6 * 1024 * 1024));
+
+    await expect(readFileTool.handler({ path: filePath }, makeAgent()))
+      .rejects.toThrow(/file too large.*spawn_agent.*collector/);
+  });
+
   // === H-001 regression evidence ===
   // The INTERNAL_TOOLS allowlist used to exempt read_file from both
   // wrapUntrustedData (envelope) and scanToolResult (pattern scanner).

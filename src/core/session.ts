@@ -19,7 +19,7 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, getModelId, clampTier } from '../types/index.js';
+import { effectiveContextWindow, getModelId, clampTier } from '../types/index.js';
 import { getActiveProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
@@ -832,7 +832,8 @@ export class Session {
     if (!this.agent) return 0;
     const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
     const userCap = this.engine.getUserConfig().max_context_window_tokens;
-    const maxCtx = effectiveContextWindow(MODEL_MAP[this._model], userCap);
+    // agent.model may carry a [1m] suffix; MODEL_MAP[tier] would strip it.
+    const maxCtx = effectiveContextWindow(this.agent.model, userCap);
     return Math.round(estimatedTokens / maxCtx * 100);
   }
 
