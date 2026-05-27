@@ -50,7 +50,7 @@
 		type ToolCallInfo,
 	} from '../stores/chat.svelte.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
-	import { getApiBase, getPipelineStatusV2, getDemoMode } from '../config.svelte.js';
+	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
@@ -1381,11 +1381,7 @@
 		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
 	);
 
-	// pipeline-status-v2 — the earlier sticky top bar was dropped because
-	// it papered over the inline DAG re-render bug rather than fixing it
-	// (Sprint F context-render-hygiene owns the actual fix).
-	const pipelineStatusV2 = $derived(getPipelineStatusV2());
-	const pendingPromptHead = $derived(pipelineStatusV2 ? getPendingPrompt() : null);
+	const pendingPromptHead = $derived(getPendingPrompt());
 	const waitingOnUser = $derived(pendingPromptHead !== null);
 	const runStartedAt = $derived(getRunStartedAt());
 	const runPromptCount = $derived(getRunPromptCount());
@@ -2626,7 +2622,7 @@
 	     flips. Other prompt kinds always have their own inline form below,
 	     so showing the anchor too gives the user two visually-equivalent
 	     reply surfaces — and the [Antworten] button is only a scroll-locator. -->
-	{#if pipelineStatusV2 && pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
+	{#if pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{:else if isStreaming && !pendingPermission && !pendingSecret && !pendingTabsPrompt}
 		<!-- Sticky activity surface above the input. Stays visible during

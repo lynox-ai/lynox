@@ -73,7 +73,7 @@ export { addToast, getToasts } from './stores/toast.svelte.js';
 export type { Toast } from './stores/toast.svelte.js';
 
 // Config
-export { configure, getApiBase, getPipelineStatusV2 } from './config.svelte.js';
+export { configure, getApiBase } from './config.svelte.js';
 
 // i18n
 export { t, setLocale, getLocale, initLocale } from './i18n.svelte.js';
