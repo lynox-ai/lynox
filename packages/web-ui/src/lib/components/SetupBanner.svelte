@@ -33,7 +33,7 @@
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (res.ok) {
-				const data = (await res.json()) as { provider: string; api_base_url?: string; managed?: string | null; configured: Record<string, boolean> };
+				const data = (await res.json()) as { provider: string; api_base_url?: string; openai_model_id?: string; managed?: string | null; configured: Record<string, boolean> };
 				// Narrow against the current Provider union explicitly. Legacy configs
 				// can still carry `provider: 'vertex'` or `'custom'` (Anthropic-compat
 				// proxy); both are valid engine paths but no longer offered by the
@@ -49,6 +49,19 @@
 					: narrowed;
 				currentProvider = restored;
 				selectedProvider = restored;
+
+				// Restore the previously chosen model + base URL so the user re-opens
+				// the wizard prefilled with their last selection instead of generic
+				// defaults (Ollama URL + llama3.2 model). Pre-fix the customer who
+				// chose Mistral-medium-2511 and dropped back here saw an Ollama-shaped
+				// Custom form even after the provider was correctly restored.
+				if (restored === 'mistral' && data.openai_model_id) {
+					mistralModel = data.openai_model_id;
+				}
+				if (restored === 'openai') {
+					if (data.api_base_url) openaiUrl = data.api_base_url;
+					if (data.openai_model_id) openaiModel = data.openai_model_id;
+				}
 				managedMode = data.managed ?? null;
 
 				// EU instances have pre-configured keys — never show wizard

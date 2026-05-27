@@ -2563,6 +2563,16 @@ export class LynoxHTTPApi {
         // engine.lynox.cloud (operated by lynox AI) sets this env. Customer
         // self-host stays clean.
         public_demo: process.env['LYNOX_PUBLIC_DEMO'] === 'true',
+        // Provider hints for SetupBanner restore (added 2026-05-27 to fix G5
+        // SetupBanner-Ollama-defaults regression). Without these, when the
+        // vault becomes empty (or the user re-opens SetupBanner after a
+        // provider switch), the banner can't distinguish "Mistral preset"
+        // from "generic OpenAI-compat" and falls back to Ollama defaults
+        // (URL=localhost:11434, model=llama3.2). These two fields are non-
+        // secret — base URLs are public + model ids are public — so safe to
+        // expose alongside provider.
+        api_base_url: userConfig.api_base_url ?? null,
+        openai_model_id: userConfig.openai_model_id ?? null,
         configured: {
           api_key: llmConfigured,
           // Tavily backend retired 2026-05-24 — search is "configured" only
