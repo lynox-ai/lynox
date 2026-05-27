@@ -1,7 +1,7 @@
 {
   "name": "@lynox-ai/core",
-  "version": "1.7.8",
-  "description": "open-core AI agent runtime — connect any API, remember everything, run while you sleep",
+  "version": "1.7.9",
+  "description": "open-core AI agent runtime \u2014 connect any API, remember everything, run while you sleep",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
   "homepage": "https://lynox.ai",
