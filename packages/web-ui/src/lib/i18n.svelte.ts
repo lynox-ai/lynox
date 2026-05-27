@@ -44,6 +44,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.actions_menu': { de: 'Thread-Aktionen', en: 'Thread actions' },
 	'threads.menu_close': { de: 'Menü schließen', en: 'Close menu' },
 	'threads.export': { de: 'Als Markdown exportieren', en: 'Export as Markdown' },
+	'threads.export_json': { de: 'Als JSON exportieren (mit Debug-Daten)', en: 'Export as JSON (with debug data)' },
 	'threads.error_export': { de: 'Thread konnte nicht exportiert werden', en: 'Failed to export thread' },
 	'threads.search_placeholder': { de: 'Threads durchsuchen…', en: 'Search threads…' },
 	'threads.search_empty': { de: 'Keine Treffer.', en: 'No matches.' },

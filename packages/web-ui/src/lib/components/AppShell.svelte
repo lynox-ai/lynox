@@ -107,6 +107,31 @@
 	}
 
 	/**
+	 * Filename slug shared by both export paths. Lowercase the title, collapse
+	 * non-alphanumerics into hyphens, trim leading/trailing hyphens, cap at 60
+	 * chars to stay below filesystem limits.
+	 */
+	function exportFilename(title: string | null, ext: 'md' | 'json'): string {
+		const base = (title || 'thread').trim();
+		const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+		const stamp = new Date().toISOString().slice(0, 10);
+		return `lynox-thread-${slug || 'export'}-${stamp}.${ext}`;
+	}
+
+	/** Trigger a browser-side download of an in-memory blob. */
+	function downloadBlob(content: string, mime: string, filename: string): void {
+		const blob = new Blob([content], { type: mime });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		URL.revokeObjectURL(url);
+	}
+
+	/**
 	 * Export a thread as a Markdown file: one `# Title` header, then each
 	 * message as `**You:** / **Assistant:** content`. Browser-side download.
 	 * Useful for archiving / sharing decisions made in chat without
@@ -132,17 +157,55 @@
 					: JSON.stringify(m.content, null, 2);
 				lines.push(`**${role}:**`, '', body, '');
 			}
-			const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
-			const url = URL.createObjectURL(blob);
-			const a = document.createElement('a');
-			a.href = url;
-			const slug = safeTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
-			const stamp = new Date().toISOString().slice(0, 10);
-			a.download = `lynox-thread-${slug || 'export'}-${stamp}.md`;
-			document.body.appendChild(a);
-			a.click();
-			document.body.removeChild(a);
-			URL.revokeObjectURL(url);
+			downloadBlob(lines.join('\n'), 'text/markdown', exportFilename(title, 'md'));
+		} catch {
+			alert(t('threads.error_export'));
+		}
+	}
+
+	/**
+	 * Export a thread as a structured JSON bundle: thread metadata + the full
+	 * projected messages (tool_use/tool_result blocks preserved as objects, not
+	 * stringified). Plus a `meta` envelope with engine version + git SHA from
+	 * /api/health so the export is self-describing for debug. Markdown loses
+	 * tool-call structure to text; this is the format to diff/grep.
+	 */
+	async function exportThreadJson(threadId: string, title: string | null) {
+		try {
+			const base = getApiBase();
+			const [threadRes, msgRes, healthRes] = await Promise.all([
+				fetch(`${base}/threads/${encodeURIComponent(threadId)}`),
+				fetch(`${base}/threads/${encodeURIComponent(threadId)}/messages?limit=10000`),
+				// Health is best-effort — failure shouldn't block the export.
+				fetch(`${base}/health`).catch(() => null),
+			]);
+			if (!threadRes.ok || !msgRes.ok) {
+				alert(t('threads.error_export'));
+				return;
+			}
+			const threadData = (await threadRes.json()) as { thread?: unknown };
+			const msgData = (await msgRes.json()) as { messages?: unknown };
+			let engineMeta: Record<string, unknown> | undefined;
+			if (healthRes && healthRes.ok) {
+				try {
+					const health = (await healthRes.json()) as Record<string, unknown>;
+					engineMeta = {
+						version: health['version'],
+						build_sha: health['build_sha'],
+						uptime_s: health['uptime_s'],
+					};
+				} catch {
+					// Ignore malformed health response; debug data is best-effort.
+				}
+			}
+			const bundle = {
+				exported_at: new Date().toISOString(),
+				exported_by: 'lynox web-ui',
+				engine: engineMeta,
+				thread: threadData.thread,
+				messages: msgData.messages,
+			};
+			downloadBlob(JSON.stringify(bundle, null, 2), 'application/json', exportFilename(title, 'json'));
 		} catch {
 			alert(t('threads.error_export'));
 		}
@@ -790,6 +853,12 @@
 						onclick={(e: MouseEvent) => { e.stopPropagation(); const id = activeThread.id; const title = activeThread.title ?? null; closeMenu(); void exportThread(id, title); }}
 						class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[44px]"
 					>{t('threads.export')}</button>
+				</li>
+				<li role="none">
+					<button type="button" role="menuitem"
+						onclick={(e: MouseEvent) => { e.stopPropagation(); const id = activeThread.id; const title = activeThread.title ?? null; closeMenu(); void exportThreadJson(id, title); }}
+						class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[44px]"
+					>{t('threads.export_json')}</button>
 				</li>
 				<li role="none">
 					<button type="button" role="menuitem"
