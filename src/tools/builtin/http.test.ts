@@ -348,6 +348,7 @@ describe('httpRequestTool', () => {
       const result = await handler({ url: 'http://example.com/big' }, makeAgent());
       expect(result).toContain('[truncated');
       expect(result).toContain('http_response_limit');
+      expect(result).toMatch(/spawn_agent.*role='collector'/);
       expect(result.length).toBeLessThan(150_000);
     });
 

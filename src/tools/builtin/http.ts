@@ -587,7 +587,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
       if (truncated) {
         const limitKB = Math.round(responseLimit / 1024);
-        body += `\n... [truncated — response exceeded ${limitKB}KB limit. Set "http_response_limit" in config to increase.]`;
+        // Active delegation hint: a half-cut response in the main context is
+        // expensive (eats the cap, may still miss the field the agent needs).
+        // A collector sub-agent can fetch + summarize in an isolated context
+        // and return only the relevant slice — that's the cheaper path.
+        body +=
+          `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
+          `For large responses prefer \`spawn_agent\` with role='collector' ` +
+          `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
+          `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
       }
 
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, fstatSync, readSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
@@ -15,6 +15,11 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
  * shares with sub-agents.
  */
 const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
+
+// Soft-cap: truncate + nudge toward spawn_agent collector. Hard-cap: refuse.
+// Without these one multi-MB read could consume the main agent's context.
+const READ_FILE_SOFT_CAP_BYTES = 256 * 1024;
+const READ_FILE_HARD_CAP_BYTES = 5 * 1024 * 1024;
 
 interface ReadFileInput {
   path: string;
@@ -61,7 +66,41 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
       // payload it carries must be presented to the LLM as data, not framing.
       // See H-001 (OVERNIGHT-PUNCH-LIST-2026-05-25) — read_file used to be
       // exempt from the wrap via the INTERNAL_TOOLS allowlist in agent.ts.
-      const content = readFileSync(filePath, 'utf-8');
+      //
+      // Open-once + fstat: same fd for stat and read closes the TOCTOU
+      // window where an attacker could swap the file between two separate
+      // path-based calls.
+      const fd = openSync(filePath, 'r');
+      let content: string;
+      try {
+        const stats = fstatSync(fd);
+        if (stats.size > READ_FILE_HARD_CAP_BYTES) {
+          const sizeMb = (stats.size / 1024 / 1024).toFixed(1);
+          const hardMb = READ_FILE_HARD_CAP_BYTES / 1024 / 1024;
+          throw new Error(
+            `file too large (${sizeMb} MB exceeds ${hardMb} MB hard cap). ` +
+            `Use \`spawn_agent\` with role='collector' to summarize this file, ` +
+            `or read specific sections via shell tools (head, tail, sed).`,
+          );
+        }
+        const oversized = stats.size > READ_FILE_SOFT_CAP_BYTES;
+        const readLen = oversized ? READ_FILE_SOFT_CAP_BYTES : stats.size;
+        const buf = Buffer.alloc(readLen);
+        if (readLen > 0) readSync(fd, buf, 0, readLen, 0);
+        // Slicing utf-8 mid-codepoint produces a trailing U+FFFD; strip it
+        // so the visible payload ends cleanly.
+        content = buf.toString('utf-8').replace(/�+$/, '');
+        if (oversized) {
+          const sizeKb = (stats.size / 1024).toFixed(1);
+          const capKb = READ_FILE_SOFT_CAP_BYTES / 1024;
+          content =
+            `${content}\n\n[truncated: file is ${sizeKb} KB, only first ${capKb} KB shown. ` +
+            `Spawn a collector agent (\`spawn_agent\` role='collector') to summarize the full file, ` +
+            `or read specific sections via shell tools.]`;
+        }
+      } finally {
+        closeSync(fd);
+      }
       return wrapUntrustedData(content, `file:${basename(filePath)}`);
     } catch (err: unknown) {
       const cause = err instanceof Error ? err : new Error(String(err));
