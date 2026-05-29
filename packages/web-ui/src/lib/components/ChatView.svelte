@@ -51,6 +51,7 @@
 	} from '../stores/chat.svelte.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
+	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { formatCost as fmtCost } from '../format.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
@@ -1655,6 +1656,19 @@
 		return parts.join(' · ');
 	}
 
+	// Diagnostics panel helpers (opt-in via Advanced metrics setting).
+	function fmtMs(ms: number): string {
+		return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+	}
+	function tokPerSec(u: UsageInfo): number | null {
+		if (!u.durationMs || u.durationMs <= 0 || !u.tokensOut) return null;
+		return Math.round(u.tokensOut / (u.durationMs / 1000));
+	}
+	/** Base input tokens = full input minus both cache buckets. */
+	function baseInput(u: UsageInfo): number {
+		return Math.max(0, u.tokensIn - u.cacheRead - u.cacheWrite);
+	}
+
 	function formatK(n: number): string {
 		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
 		if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
@@ -1733,6 +1747,30 @@
 			{/if}
 		</div>
 	</div>
+	<!-- Diagnostics panel: opt-in (Advanced metrics setting), never on demo
+	     tenants. Token breakdown + finish reason + iterations are live-only;
+	     duration / tok-s / run-id persist via usage_json and survive a reload. -->
+	{#if usage && !isStreaming && isDiagnosticsEnabled() && !getDemoMode()}
+		{@const tps = tokPerSec(usage)}
+		<details class="mt-1 text-[11px] text-text-subtle/80">
+			<summary class="cursor-pointer text-text-subtle/60 hover:text-text-muted font-mono uppercase tracking-widest text-[10px]">{t('diagnostics.details')}</summary>
+			<dl class="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono">
+				<dt class="text-text-subtle/60">{t('diagnostics.tokens_in')}</dt><dd>{baseInput(usage).toLocaleString()}</dd>
+				<dt class="text-text-subtle/60">{t('diagnostics.tokens_out')}</dt><dd>{usage.tokensOut.toLocaleString()}</dd>
+				{#if usage.cacheRead > 0}<dt class="text-text-subtle/60">{t('diagnostics.cache_read')}</dt><dd>{usage.cacheRead.toLocaleString()}</dd>{/if}
+				{#if usage.cacheWrite > 0}<dt class="text-text-subtle/60">{t('diagnostics.cache_write')}</dt><dd>{usage.cacheWrite.toLocaleString()}</dd>{/if}
+				{#if usage.stopReason}<dt class="text-text-subtle/60">{t('diagnostics.stop_reason')}</dt><dd>{usage.stopReason}</dd>{/if}
+				{#if usage.iterations !== undefined}<dt class="text-text-subtle/60">{t('diagnostics.iterations')}</dt><dd>{usage.iterations}</dd>{/if}
+				{#if usage.ttfbMs !== undefined}<dt class="text-text-subtle/60">{t('diagnostics.ttfb')}</dt><dd>{fmtMs(usage.ttfbMs)}</dd>{/if}
+				{#if usage.durationMs !== undefined}<dt class="text-text-subtle/60">{t('diagnostics.duration')}</dt><dd>{fmtMs(usage.durationMs)}</dd>{/if}
+				{#if tps !== null}<dt class="text-text-subtle/60">{t('diagnostics.throughput')}</dt><dd>{tps} tok/s</dd>{/if}
+				{#if usage.runId}
+					<dt class="text-text-subtle/60">{t('diagnostics.run_id')}</dt>
+					<dd><button class="hover:text-text transition-colors underline decoration-dotted" title={t('common.copy')} onclick={() => { navigator.clipboard.writeText(usage.runId ?? ''); addToast(t('common.copied'), 'success', 1500); }}>{usage.runId.slice(0, 8)}…</button></dd>
+				{/if}
+			</dl>
+		</details>
+	{/if}
 {/snippet}
 
 {#snippet speakButton(msgKey: string, msgContent: string)}

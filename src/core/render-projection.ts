@@ -35,6 +35,10 @@ export interface RenderedUsage {
   cacheWrite: number;
   costUsd: number;
   model?: string;
+  /** Diagnostics fields persisted in usage_json (see RunUsageSummary) so the
+   *  opt-in diagnostics panel survives a thread resume. */
+  runId?: string;
+  durationMs?: number;
 }
 
 /** Structured failure-note marker (B-full). The engine persists this as the
@@ -186,6 +190,8 @@ function parseUsage(raw: string | null): RenderedUsage | undefined {
       costUsd: num('costUsd'),
     };
     if (typeof u['model'] === 'string') usage.model = u['model'].slice(0, 64);
+    if (typeof u['runId'] === 'string') usage.runId = u['runId'].slice(0, 64);
+    if (typeof u['durationMs'] === 'number') usage.durationMs = u['durationMs'];
     return usage;
   } catch {
     return undefined;

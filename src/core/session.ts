@@ -100,6 +100,11 @@ export interface RunUsageSummary {
   cacheWrite: number;
   costUsd: number;
   model: string;
+  /** Diagnostics (opt-in UI panel): the run's id for log/Bugsink correlation
+   *  and its wall-to-wall agent duration. Persisted via setMessageUsage so the
+   *  diagnostics detail survives a thread resume. */
+  runId?: string;
+  durationMs?: number;
 }
 
 /**
@@ -583,6 +588,8 @@ export class Session {
         cacheWrite,
         costUsd,
         model,
+        ...(this.currentRunId ? { runId: this.currentRunId } : {}),
+        durationMs,
       };
       this._lastRunUsage = runUsage;
 

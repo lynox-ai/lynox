@@ -212,6 +212,26 @@ describe('projectMessages — usage', () => {
     const [msg] = projectMessages([r]);
     expect(msg?.usage).toEqual({ tokensIn: 100, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 });
   });
+
+  it('parses diagnostics runId + durationMs so the panel survives a resume', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'x'),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, runId: 'abc123def456', durationMs: 1840 }),
+    };
+    const [msg] = projectMessages([r]);
+    expect(msg?.usage?.runId).toBe('abc123def456');
+    expect(msg?.usage?.durationMs).toBe(1840);
+  });
+
+  it('ignores non-string runId / non-number durationMs', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'x'),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, runId: 42, durationMs: 'soon' }),
+    };
+    const [msg] = projectMessages([r]);
+    expect(msg?.usage?.runId).toBeUndefined();
+    expect(msg?.usage?.durationMs).toBeUndefined();
+  });
 });
 
 describe('projectMessages — B-full failure notes', () => {

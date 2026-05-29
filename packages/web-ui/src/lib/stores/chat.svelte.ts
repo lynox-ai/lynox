@@ -367,6 +367,10 @@ let secretPromptGeneration = $state(0);
 // resumeThread; runStartedAt is set on `pipeline_start`; runPromptCount
 // increments on each pending* null→non-null transition while a run is active.
 let runStartedAt = $state<number | null>(null);
+// Diagnostics TTFB: wall-clock at run dispatch, consumed once on the first
+// streamed content event to compute time-to-first-token. Plain let (not $state)
+// — it's read inside the SSE handler, never rendered directly.
+let runStartAt: number | null = null;
 let runPromptCount = $state(0);
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
@@ -634,6 +638,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// Seed liveness markers so a stale value from the previous run can't
 	// flash "Verbindung scheint langsam" for the first ~20s of this run.
 	lastEventAt = Date.now();
+	runStartAt = Date.now(); // diagnostics TTFB anchor (consumed on first delta)
 	currentToolStartedAt = null;
 
 	const payload: Record<string, unknown> = { task, protocol: 2 };
@@ -944,6 +949,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 	const msg = messages[idx];
 	if (!msg) return;
 
+	// Diagnostics TTFB: stamp the first streamed content event of the run.
+	// One-shot (clears runStartAt) so later deltas don't overwrite it.
+	if (runStartAt !== null && (type === 'text' || type === 'thinking' || type === 'tool_call')) {
+		const ttfbMs = Date.now() - runStartAt;
+		runStartAt = null;
+		msg.usage = { ...(msg.usage ?? { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }), ttfbMs };
+	}
+
 	switch (type) {
 		case 'text': {
 			const text = String(data['text'] ?? '');
@@ -1243,6 +1256,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					cache_read_input_tokens: cacheRead,
 				});
 				const prev = msg.usage;
+				// stop_reason / iterations feed the opt-in diagnostics panel.
+				const turnStop = typeof data['stop_reason'] === 'string' ? data['stop_reason'] : prev?.stopReason;
+				const turnIters = typeof usage['iterations'] === 'number' ? usage['iterations'] : prev?.iterations;
 				msg.usage = {
 					tokensIn: (prev?.tokensIn ?? 0) + inTok,
 					tokensOut: (prev?.tokensOut ?? 0) + outTok,
@@ -1253,7 +1269,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					// vs mistral-small-2603 after auto-downgrade) so the UI can
 					// show it next to the cost. Last-write-wins on multi-turn
 					// runs — typically only the final turn's model is shown.
-					...(turnModel ? { model: turnModel } : {}),
+					...(turnModel ? { model: turnModel } : prev?.model ? { model: prev.model } : {}),
+					// Carry live-only fields the per-turn REPLACE would otherwise drop:
+					// third-party API cost (api_cost event) + the client-measured TTFB
+					// (set on the first content delta) + diagnostics signals.
+					...(prev?.apiCostUsd !== undefined ? { apiCostUsd: prev.apiCostUsd } : {}),
+					...(prev?.ttfbMs !== undefined ? { ttfbMs: prev.ttfbMs } : {}),
+					...(turnStop !== undefined ? { stopReason: turnStop } : {}),
+					...(turnIters !== undefined ? { iterations: turnIters } : {}),
 				};
 				// Context budget is owned solely by the engine `context_budget`
 				// event (exact API usage). turn_end no longer writes it — the old
