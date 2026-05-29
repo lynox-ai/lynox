@@ -20,6 +20,19 @@ export interface UsageInfo {
 	 *  to the haiku-tier for a simple task; surfaces in the footer so the user
 	 *  can tell which model their reply came from. */
 	model?: string;
+	// ── Diagnostics (opt-in panel, not shown in the baseline footer) ──
+	/** Final turn's stop_reason (end_turn / max_tokens / tool_use). Live-only
+	 *  (from turn_end); absent after a reload. */
+	stopReason?: string;
+	/** Agent-loop iteration count for the run. Live-only (from turn_end usage). */
+	iterations?: number;
+	/** Client-measured time-to-first-token (ms): first streamed content event
+	 *  minus run start. Live-only. */
+	ttfbMs?: number;
+	/** Engine wall-to-wall run duration (ms). Persisted via usage_json. */
+	durationMs?: number;
+	/** Run id for log/Bugsink correlation. Persisted via usage_json. */
+	runId?: string;
 }
 
 /**
@@ -42,6 +55,8 @@ export function usageFromDoneEvent(raw: unknown): UsageInfo | null {
 		cacheWrite: Number(u['cacheWrite'] ?? 0),
 		costUsd: Number(u['costUsd'] ?? 0),
 		...(typeof u['model'] === 'string' ? { model: u['model'] } : {}),
+		...(typeof u['runId'] === 'string' ? { runId: u['runId'] } : {}),
+		...(typeof u['durationMs'] === 'number' ? { durationMs: u['durationMs'] } : {}),
 	};
 }
 
@@ -52,7 +67,10 @@ export function usageFromDoneEvent(raw: unknown): UsageInfo | null {
  * `done` we REPLACE that running total with the engine's cumulative figure
  * — the same value RunHistory + `/api/history/cost/daily` use as truth.
  * `apiCostUsd` (third-party API cost) is preserved across the replacement
- * because the engine's run-usage covers LLM cost only.
+ * because the engine's run-usage covers LLM cost only. The live-only
+ * diagnostics fields (`stopReason`, `iterations`, `ttfbMs`) are likewise
+ * carried over — they come from `turn_end` / client timing, not the `done`
+ * payload, so a naive replace would drop them.
  */
 export function mergeDoneUsage(
 	prior: UsageInfo | undefined,
@@ -60,6 +78,10 @@ export function mergeDoneUsage(
 ): UsageInfo | undefined {
 	const parsed = usageFromDoneEvent(rawDoneUsage);
 	if (!parsed) return prior;
-	const apiCostUsd = prior?.apiCostUsd;
-	return apiCostUsd !== undefined ? { ...parsed, apiCostUsd } : parsed;
+	const carried: Partial<UsageInfo> = {};
+	if (prior?.apiCostUsd !== undefined) carried.apiCostUsd = prior.apiCostUsd;
+	if (prior?.stopReason !== undefined) carried.stopReason = prior.stopReason;
+	if (prior?.iterations !== undefined) carried.iterations = prior.iterations;
+	if (prior?.ttfbMs !== undefined) carried.ttfbMs = prior.ttfbMs;
+	return { ...parsed, ...carried };
 }
