@@ -116,6 +116,11 @@ export interface ChatMessage {
 	/** Set on a synthetic marker bubble inserted when the engine auto-compacts
 	 *  the conversation — renders as an inline "conversation compacted" divider. */
 	compactionNote?: { previousPercent: number };
+	/** B-full: a display-only failure note persisted for a failed turn. The
+	 *  engine sends a structured code (not prose) so the UI renders a localized
+	 *  banner; `detail` is a sanitized provider-error snippet. Present only on
+	 *  rows the render projection flagged as notes (reload path). */
+	note?: { code: string; detail?: string };
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
 }
@@ -1337,6 +1342,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					'info',
 					8000,
 				);
+			} else if (code === 'run_blocked') {
+				// A run the engine fail-closed before the LLM (stale managed-credit
+				// status, budget reached). 'info' not 'error' — it's transient and
+				// recoverable; the inline done.result render carries the full reason.
+				const detail = String(data['detail'] ?? '').slice(0, 200);
+				addToast(detail ? `${t('chat.run_blocked')}: ${detail}` : t('chat.run_blocked'), 'info', 8000);
 			}
 			break;
 		}
@@ -1356,6 +1367,21 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// covers LLM cost only.
 			const merged = mergeDoneUsage(msg.usage, data['usage']);
 			if (merged) msg.usage = merged;
+			// Silent-turn guard (rafael 2026-05-29): a run that the engine
+			// fail-closes BEFORE the LLM (stale managed-credit status, budget
+			// reached, content-policy block) never streams a text/tool block —
+			// it returns a short reason string that the HTTP API forwards as
+			// `done.result`. Without this, `done` only merged usage and the
+			// user saw total silence ("null Mitteilung"). Render the trailing
+			// result whenever nothing was streamed so the block reason is
+			// visible. A NORMAL run already streamed its text into msg.content,
+			// so the `!msg.content` guard prevents a duplicate render.
+			const streamedText = msg.blocks?.some(b => b.type === 'text' && b.text) ?? false;
+			const result = typeof data['result'] === 'string' ? data['result'] : '';
+			if (!msg.content && !streamedText && result.trim()) {
+				msg.content = result;
+				msg.blocks = [{ type: 'text', text: result }];
+			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
 			// cases where the user never completes a run. Fire-and-forget:
@@ -2019,6 +2045,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				blocks?: ContentBlock[];
 				toolCalls?: ToolCallInfo[];
 				usage?: UsageInfo;
+				note?: { code: string; detail?: string };
 			}
 			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
 			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
@@ -2030,6 +2057,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 					if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
 					if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
 					if (m.usage) cm.usage = m.usage;
+					if (m.note) cm.note = m.note;
 					return cm;
 				}),
 			);
@@ -2096,6 +2124,7 @@ export async function reconcileThread(): Promise<void> {
 			blocks?: ContentBlock[];
 			toolCalls?: ToolCallInfo[];
 			usage?: UsageInfo;
+			note?: { code: string; detail?: string };
 		}
 		const data = (await res.json()) as { messages: ServerRenderedMessage[] };
 		const serverMessages: ChatMessage[] = dropEmptyUserMessages(
@@ -2107,6 +2136,7 @@ export async function reconcileThread(): Promise<void> {
 				if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
 				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
 				if (m.usage) cm.usage = m.usage;
+				if (m.note) cm.note = m.note;
 				return cm;
 			}),
 		);

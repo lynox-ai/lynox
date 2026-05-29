@@ -51,7 +51,7 @@ import {
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
-import { persistAgentMessages } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay } from './eager-persist.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -390,7 +390,17 @@ export class Session {
         try {
           await hook.onBeforeRun(preRunContext.runId, preRunContext);
         } catch (err: unknown) {
-          return `Run blocked: ${err instanceof Error ? err.message : String(err)}`;
+          const reason = err instanceof Error ? err.message : String(err);
+          // Surface the block as a `warning` SSE event so the web-UI shows a
+          // distinct, localized banner/toast instead of letting the reason
+          // string slip through as a `done.result` that the chat used to
+          // render as total silence (rafael 2026-05-29, first-session
+          // fail-closed credit check). The returned string is still the
+          // single source for non-SSE callers (CLI) and the `done.result`
+          // inline render fallback. `warning` (not `error`) keeps the failed
+          // user turn intact — the block is transient (credit re-syncs).
+          await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
+          return `Run blocked: ${reason}`;
         }
       }
     }
@@ -606,12 +616,17 @@ export class Session {
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
-          const existingCount = threadStore.getMessageCount(this.sessionId);
-          const newMessages = allMessages.slice(existingCount);
+          // Slice against the API-row count (display-only B-full notes aren't
+          // in agent.messages); start new seqs at the total row count so they
+          // sort after any interleaved display note. Identical until a failed
+          // turn has persisted a note. See eager-persist.ts for the rationale.
+          const apiCount = threadStore.getApiMessageCount(this.sessionId);
+          const totalCount = threadStore.getMessageCount(this.sessionId);
+          const newMessages = allMessages.slice(apiCount);
           if (newMessages.length > 0) {
             // Combined append + rollup in one transaction (P1).
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
-              message_count: allMessages.length,
+            threadStore.appendMessages(this.sessionId, newMessages, totalCount, {
+              message_count: totalCount + newMessages.length,
               total_tokens: this.usage.input_tokens + this.usage.output_tokens,
               total_cost_usd: costUsd,
             });
@@ -703,24 +718,21 @@ export class Session {
         }
       }
 
-      // Persist messages to thread even on failure (preserve partial progress).
-      // Uses the same combined-transaction shape as the success path (P1)
-      // when there's a delta to flush — one fsync instead of two. When eager
-      // already drained the delta, do a standalone message_count refresh.
-      if (threadStore) {
-        try {
-          const allMessages = this.saveMessages();
-          const existingCount = threadStore.getMessageCount(this.sessionId);
-          const newMessages = allMessages.slice(existingCount);
-          if (newMessages.length > 0) {
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
-              message_count: allMessages.length,
-            });
-          } else {
-            threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
-          }
-        } catch { /* fire-and-forget */ }
-      }
+      // B-full: persist the failed turn as DISPLAY-ONLY so it survives reload
+      // ("null Mitteilung" fix) WITHOUT lingering in the model's API context.
+      // The agent already rolled its in-memory context back to before the
+      // failed turn; here we (1) flip any rows this run eager-persisted to
+      // display-only so the disk matches that rollback, (2) ensure the failed
+      // user message survives in display history, and (3) append a structured,
+      // localizable failure note. None of these re-enter the prompt because the
+      // resume hydration filters display_only=1 (session-store.ts).
+      persistFailedTurnDisplay({
+        threadStore,
+        sessionId: this.sessionId,
+        startSeq: startMessageCount,
+        task,
+        error: err,
+      });
 
       throw err;
     } finally {
@@ -880,13 +892,14 @@ export class Session {
   /**
    * F-Eager-Persist: append any new messages from `agent.messages` into the
    * ThreadStore. Called from the Agent's `onMessageCheckpoint` hook after
-   * every stable turn boundary. Idempotent — `getMessageCount` gives the
-   * persisted floor, and `slice(existingCount)` selects only what's new.
+   * every stable turn boundary. Idempotent — `getApiMessageCount` gives the
+   * persisted API floor to slice `agent.messages` against, while new rows take
+   * their seq from the total `getMessageCount` (so B-full display-only rows
+   * can't misalign the delta). See eager-persist.ts.
    *
    * Safe to call concurrently (better-sqlite3 serialises writes within a
    * single process) and from the end-of-run persist block — if both fire
-   * back-to-back, the second sees an updated `existingCount` and appends
-   * an empty delta.
+   * back-to-back, the second sees an updated floor and appends an empty delta.
    */
   private _persistMessages(): void {
     if (!this.agent) return;

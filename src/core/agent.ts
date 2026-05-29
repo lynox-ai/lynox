@@ -491,30 +491,20 @@ export class Agent implements IAgent {
         this.messages.length = snapshot + 1;
         return '';
       }
-      // Non-abort error (e.g. provider connection failure): keep the user
-      // message and record a short synthetic assistant turn instead of the
-      // previous full rollback. Rationale: a full rollback erased the user's
-      // turn from the persisted thread, so after an API failure the message
-      // vanished on reload with no trace ("null Mitteilung" — rafael 2026-05).
-      // Keeping the user message + a failure note (a) makes the failed turn
-      // survive persistence and visible on reload, and (b) preserves
-      // role-alternation so the NEXT call doesn't 400 on consecutive user
-      // messages. Drop any partial assistant content first (snapshot + 1).
-      // NOTE: this is the B-light fix; the clean display-vs-API history
-      // separation is tracked as a follow-up so failure notes don't linger in
-      // the model's context.
-      this.messages.length = snapshot + 1;
-      // Strip control chars before embedding: a provider error body can echo
-      // attacker-influenced bytes (e.g. a fetched URL reflected in a 4xx), and
-      // this note is persisted as assistant content + re-fed to the model next
-      // turn. Cap to 300 chars.
-      const failureText = (err instanceof Error ? err.message : String(err))
-        .replace(/[\u0000-\u001F\u007F]/g, ' ')
-        .slice(0, 300);
-      this.messages.push({
-        role: 'assistant',
-        content: `⚠️ This turn could not be completed (provider error): ${failureText}`,
-      });
+      // Non-abort error (e.g. provider connection failure): fully roll the API
+      // context back to before this turn (drop the failed user message AND any
+      // partial assistant content). Re-throw so Session can (a) persist the
+      // failed turn as DISPLAY-ONLY rows — the user message + a structured
+      // failure note that survive reload — and (b) surface an `error` SSE event.
+      //
+      // This is B-full. B-light kept the user message + a synthetic English
+      // assistant note IN this.messages so the failed turn survived persistence,
+      // but that array is ALSO the model's API context, so the note (and the
+      // failed user turn) lingered in the prompt on the next call. Now the API
+      // context is clean — the failed turn lives only in display history
+      // (display_only=1 rows) — and role-alternation is trivially valid because
+      // nothing partial remains.
+      this.messages.length = snapshot;
       throw err;
     } finally {
       // Drain fire-and-forget memory extraction so the stream isn't orphaned (avoids 499)

@@ -1,6 +1,6 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { MODEL_MAP, getModelId, clampTier, normalizeTier } from '../types/index.js';
+import { getModelId, clampTier, normalizeTier } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';

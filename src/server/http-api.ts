@@ -4995,6 +4995,11 @@ export class LynoxHTTPApi {
             seq: m.seq,
             role: m.role,
             content: JSON.parse(m.content_json) as unknown,
+            // Include the B-full display-only flag in the GDPR data dump so a
+            // re-import preserves which rows are failed-turn notes (display-only)
+            // vs real API messages. (The encrypted DB-chunk migration keeps the
+            // column natively; this is the portable JSON export path.)
+            display_only: m.display_only,
             created_at: m.created_at,
           })),
         }));
