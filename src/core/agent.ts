@@ -504,10 +504,16 @@ export class Agent implements IAgent {
       // separation is tracked as a follow-up so failure notes don't linger in
       // the model's context.
       this.messages.length = snapshot + 1;
-      const failureText = err instanceof Error ? err.message : String(err);
+      // Strip control chars before embedding: a provider error body can echo
+      // attacker-influenced bytes (e.g. a fetched URL reflected in a 4xx), and
+      // this note is persisted as assistant content + re-fed to the model next
+      // turn. Cap to 300 chars.
+      const failureText = (err instanceof Error ? err.message : String(err))
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .slice(0, 300);
       this.messages.push({
         role: 'assistant',
-        content: `⚠️ This turn could not be completed (provider error): ${failureText.slice(0, 300)}`,
+        content: `⚠️ This turn could not be completed (provider error): ${failureText}`,
       });
       throw err;
     } finally {
