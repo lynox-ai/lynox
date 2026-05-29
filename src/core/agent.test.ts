@@ -248,15 +248,26 @@ describe('Agent', () => {
       expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
     });
 
-    it('rolls back fully on non-abort errors', async () => {
+    it('keeps the user message + a failure note on non-abort errors (B-light)', async () => {
+      // A provider error must NOT silently erase the user's turn from history
+      // (the "null Mitteilung" / message-vanishes-on-reload bug). The failed
+      // turn is preserved as [user, assistant-failure-note] so it survives
+      // persistence AND role-alternation stays valid for the next call.
       mockProcess.mockRejectedValue(new Error('boom'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       agent.loadMessages([{ role: 'user', content: 'old' }]);
 
       await expect(agent.send('new message')).rejects.toThrow('boom');
-      expect(agent.getMessages()).toHaveLength(1);
-      expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
+      const msgs = agent.getMessages();
+      expect(msgs).toHaveLength(3);
+      expect(msgs[0]).toEqual({ role: 'user', content: 'old' });
+      expect(msgs[1]).toEqual({ role: 'user', content: 'new message' });
+      expect(msgs[2]!.role).toBe('assistant');
+      expect(String(msgs[2]!.content)).toContain('boom');
+      // Role-alternation must hold so the next send() doesn't 400 on
+      // consecutive user messages.
+      expect(msgs[2]!.role).not.toBe(msgs[1]!.role);
     });
   });
 

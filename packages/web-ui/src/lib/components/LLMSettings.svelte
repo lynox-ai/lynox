@@ -463,6 +463,13 @@
 			});
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			addToast(t('llm.saved'), 'success', 3000);
+			// Tell the StatusBar (and any other live provider indicator) to refresh
+			// NOW instead of waiting up to 30s for its next poll — otherwise the
+			// footer keeps showing the previous provider after a switch and the user
+			// thinks the save didn't take (rafael 2026-05-27/29 Anthropic↔Mistral).
+			if (typeof window !== 'undefined') {
+				window.dispatchEvent(new CustomEvent('lynox:provider-changed'));
+			}
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('llm.save_failed'), 'error', 5000);
 		} finally {
