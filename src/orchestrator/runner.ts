@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { MODEL_MAP } from '../types/index.js';
+import { MODEL_MAP, normalizeTier } from '../types/index.js';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry } from '../types/index.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
@@ -313,7 +313,7 @@ async function executeStep(
       const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext) : step.task;
       const resolvedStep = resolvedTask !== step.task ? { ...step, task: resolvedTask } : step;
       // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, 'sonnet');
+      const stepModel = resolveModelForCost(step, 'balanced');
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null);
@@ -420,5 +420,8 @@ function makeSkipped(stepId: string, reason: string): AgentOutput {
 
 function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier): string {
   if (!step.model) return MODEL_MAP[defaultTier];
-  return step.model in MODEL_MAP ? MODEL_MAP[step.model as ModelTier] : step.model;
+  // normalizeTier accepts both current + legacy-brand tier names (pre-rename
+  // manifests); a genuine pinned model id passes through unchanged.
+  const tier = normalizeTier(step.model);
+  return tier ? MODEL_MAP[tier] : step.model;
 }

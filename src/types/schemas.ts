@@ -3,10 +3,19 @@
  * Used for runtime validation of user-facing config files and role JSON.
  */
 import { z } from 'zod';
+import { LEGACY_TIER_ALIASES } from './models.js';
 
 // === Shared enums ===
 
-const ModelTierSchema = z.enum(['opus', 'sonnet', 'haiku']);
+// Accepts legacy Anthropic-brand names (opus/sonnet/haiku) and normalizes them
+// to the provider-agnostic names so config.json files written before the
+// 2026-05-29 rename keep validating. Reuses the single-source alias map from
+// models.ts (see also `normalizeTier`). Unknown strings pass through so the
+// inner z.enum produces the proper validation error.
+const ModelTierSchema = z.preprocess(
+  v => (typeof v === 'string' ? (LEGACY_TIER_ALIASES[v] ?? v) : v),
+  z.enum(['deep', 'balanced', 'fast']),
+);
 const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 // AutonomyLevelSchema and ThinkingModeSchema validated at runtime via type checks, not Zod
 

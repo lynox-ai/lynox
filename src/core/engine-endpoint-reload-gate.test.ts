@@ -159,7 +159,7 @@ afterEach(() => {
 });
 
 function makeEngine(): Engine {
-  const config: LynoxConfig = { model: 'sonnet' };
+  const config: LynoxConfig = { model: 'balanced' };
   return new Engine(config);
 }
 

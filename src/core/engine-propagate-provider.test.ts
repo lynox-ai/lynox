@@ -127,7 +127,7 @@ describe('Engine.reloadCredentials — provider-switch end-to-end propagation', 
   it('calls Memory.setClient AND KnowledgeLayer.setAnthropicClient when reloadCredentials switches to Mistral', async () => {
     // Construct a minimal Engine (constructor calls loadConfig + createLLMClient
     // once each — covered by the mocks above).
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
 
     // Inject mock memory + knowledgeLayer into the private fields so
@@ -173,7 +173,7 @@ describe('Engine.reloadCredentials — provider-switch end-to-end propagation', 
   });
 
   it('also calls both setters on a same-provider key rotation (BYOK refresh)', async () => {
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
 
     const memorySetClient = vi.fn();
@@ -209,7 +209,7 @@ describe('Engine.reloadCredentials — provider-switch end-to-end propagation', 
   });
 
   it('does NOT throw when memory + knowledgeLayer are still null (pre-init reloadCredentials)', async () => {
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
     // Leave memory + knowledgeLayer as the default null — simulates a
     // reloadCredentials() that fires before _initMemoryAndKnowledge has run.
@@ -227,7 +227,7 @@ describe('Engine.reloadCredentials — provider-switch end-to-end propagation', 
   // Without this counter, a long-lived Session.agent (captured at construct
   // time) keeps calling the previous provider after a UI provider-switch.
   it('getConfigVersion increments on every _recreateClient (reloadCredentials path)', async () => {
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
     const initial = engine.getConfigVersion();
 
@@ -252,7 +252,7 @@ describe('Engine.reloadCredentials — provider-switch end-to-end propagation', 
   });
 
   it('reloadUserConfig increments configVersion when the provider actually changes', async () => {
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
     const initial = engine.getConfigVersion();
 

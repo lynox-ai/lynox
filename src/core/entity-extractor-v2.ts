@@ -275,7 +275,7 @@ export async function extractEntitiesV2(
 
   try {
     const stream = client.beta.messages.stream({
-      model: getModelId('haiku', provider),
+      model: getModelId('fast', provider),
       max_tokens: 1024,
       temperature: 0,
       ...(isCustomProvider() ? {} : { betas: getBetasForProvider(provider) }),

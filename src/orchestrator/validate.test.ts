@@ -32,7 +32,7 @@ describe('validateManifest', () => {
           id: 'step-1',
           agent: 'my-agent',
           runtime: 'agent',
-          model: 'sonnet',
+          model: 'balanced',
           input_from: ['step-0'],
           conditions: [{ path: 'x', operator: 'gt', value: 5 }],
           timeout_ms: 30000,

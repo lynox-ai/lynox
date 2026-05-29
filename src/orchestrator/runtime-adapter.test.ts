@@ -48,15 +48,24 @@ const mockParentTools: ToolEntry[] = [
 
 describe('resolveModel', () => {
   it('maps ModelTier to full model ID', () => {
-    expect(resolveModel('sonnet', 'sonnet')).toContain('sonnet');
+    expect(resolveModel('balanced', 'balanced')).toContain('sonnet');
   });
 
   it('uses default tier when step model is undefined', () => {
-    expect(resolveModel(undefined, 'haiku')).toContain('haiku');
+    expect(resolveModel(undefined, 'fast')).toContain('haiku');
   });
 
   it('passes through full model ID', () => {
-    expect(resolveModel('claude-3-custom-model', 'sonnet')).toBe('claude-3-custom-model');
+    expect(resolveModel('claude-3-custom-model', 'balanced')).toBe('claude-3-custom-model');
+  });
+
+  it('resolves legacy Anthropic-brand tier names on a step (pre-rename manifests)', () => {
+    // Back-compat: a manifest/pipeline persisted before the 2026-05-29 rename
+    // stores model: 'sonnet'|'haiku'|'opus'. These must resolve to the tier's
+    // model id, NOT be passed through as a literal (which the API would reject).
+    expect(resolveModel('sonnet', 'fast')).toContain('sonnet');
+    expect(resolveModel('haiku', 'balanced')).toContain('haiku');
+    expect(resolveModel('opus', 'fast')).toContain('opus');
   });
 });
 
@@ -91,7 +100,7 @@ describe('spawnInline with role', () => {
 
   it('applies role model and effort', async () => {
     const role: RoleConfig = {
-      model: 'opus',
+      model: 'deep',
       effort: 'max',
       autonomy: 'guided',
       description: 'Analyzes code',
@@ -114,7 +123,7 @@ describe('spawnInline with role', () => {
 
   it('step.model overrides role.model', async () => {
     const role: RoleConfig = {
-      model: 'opus',
+      model: 'deep',
       effort: 'max',
       autonomy: 'guided',
       description: 'Researches',
@@ -126,7 +135,7 @@ describe('spawnInline with role', () => {
       agent: 'research-step',
       runtime: 'inline',
       role: 'researcher',
-      model: 'haiku',
+      model: 'fast',
     };
 
     await spawnInline(step, {}, mockConfig, mockParentTools);
@@ -150,7 +159,7 @@ describe('spawnInline with role', () => {
 
   it('role denyTools filters tools', async () => {
     const role: RoleConfig = {
-      model: 'haiku',
+      model: 'fast',
       effort: 'high',
       autonomy: 'autonomous',
       denyTools: ['write_file'],
@@ -176,7 +185,7 @@ describe('spawnInline with role', () => {
 
   it('role allowTools restricts to whitelist', async () => {
     const role: RoleConfig = {
-      model: 'haiku',
+      model: 'fast',
       effort: 'medium',
       autonomy: 'supervised',
       allowTools: ['read_file'],
@@ -201,7 +210,7 @@ describe('spawnInline with role', () => {
 
   it('role defaults to maxIterations 10', async () => {
     const role: RoleConfig = {
-      model: 'opus',
+      model: 'deep',
       effort: 'high',
       autonomy: 'guided',
       description: 'Plans',
@@ -234,7 +243,7 @@ describe('spawnInline thinking gating', () => {
     // thinking entirely on Haiku.
     const step: ManifestStep = {
       id: 'h-step', agent: 'h-step', runtime: 'inline',
-      model: 'haiku', thinking: 'enabled',
+      model: 'fast', thinking: 'enabled',
     };
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -243,7 +252,7 @@ describe('spawnInline thinking gating', () => {
 
   it('uses adaptive thinking for non-Haiku DAG step with no hint', async () => {
     const step: ManifestStep = {
-      id: 's-step', agent: 's-step', runtime: 'inline', model: 'sonnet',
+      id: 's-step', agent: 's-step', runtime: 'inline', model: 'balanced',
     };
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -253,7 +262,7 @@ describe('spawnInline thinking gating', () => {
   it('honors explicit thinking=enabled on non-Haiku step', async () => {
     const step: ManifestStep = {
       id: 's-step', agent: 's-step', runtime: 'inline',
-      model: 'sonnet', thinking: 'enabled',
+      model: 'balanced', thinking: 'enabled',
     };
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -263,7 +272,7 @@ describe('spawnInline thinking gating', () => {
   it('honors explicit thinking=disabled on non-Haiku step', async () => {
     const step: ManifestStep = {
       id: 's-step', agent: 's-step', runtime: 'inline',
-      model: 'sonnet', thinking: 'disabled',
+      model: 'balanced', thinking: 'disabled',
     };
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;

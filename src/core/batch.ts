@@ -48,7 +48,7 @@ export async function submitBatch(
   batchIndex: BatchIndex,
   contextId: string,
 ): Promise<{ batchId: string; parentRunId: string | null }> {
-  const model = MODEL_MAP[config.modelTier] ?? MODEL_MAP['opus'];
+  const model = MODEL_MAP[config.modelTier] ?? MODEL_MAP['deep'];
   const basePrompt = config.systemPrompt ?? SYSTEM_PROMPT;
   const effectivePrompt = config.systemPromptSuffix
     ? basePrompt + config.systemPromptSuffix

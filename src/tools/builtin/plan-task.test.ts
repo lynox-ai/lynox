@@ -456,16 +456,16 @@ describe('phasesToPipelineSteps', () => {
 
   it('should pass model/thinking/effort from phase to pipeline step', () => {
     const steps = phasesToPipelineSteps([
-      { name: 'Simple', steps: ['format'], model: 'haiku', thinking: 'disabled', effort: 'low' },
-      { name: 'Complex', steps: ['analyze'], model: 'opus', thinking: 'enabled', effort: 'high' },
+      { name: 'Simple', steps: ['format'], model: 'fast', thinking: 'disabled', effort: 'low' },
+      { name: 'Complex', steps: ['analyze'], model: 'deep', thinking: 'enabled', effort: 'high' },
       { name: 'Default', steps: ['standard work'] },
     ]);
 
-    expect(steps[0]!.model).toBe('haiku');
+    expect(steps[0]!.model).toBe('fast');
     expect(steps[0]!.thinking).toBe('disabled');
     expect(steps[0]!.effort).toBe('low');
 
-    expect(steps[1]!.model).toBe('opus');
+    expect(steps[1]!.model).toBe('deep');
     expect(steps[1]!.thinking).toBe('enabled');
     expect(steps[1]!.effort).toBe('high');
 

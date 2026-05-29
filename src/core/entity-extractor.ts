@@ -250,7 +250,7 @@ export async function extractEntitiesLLM(
   _llmExtractionCount++;
   try {
     const stream = client.beta.messages.stream({
-      model: getModelId('haiku', getActiveProvider()),
+      model: getModelId('fast', getActiveProvider()),
       max_tokens: 512,
       ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
       messages: [{ role: 'user', content: ENTITY_EXTRACTION_PROMPT + text.slice(0, 2000) }],

@@ -16,7 +16,7 @@ function freshDb(): Database.Database {
     CREATE TABLE threads (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL DEFAULT '',
-      model_tier TEXT NOT NULL DEFAULT 'sonnet',
+      model_tier TEXT NOT NULL DEFAULT 'balanced',
       context_id TEXT NOT NULL DEFAULT '',
       message_count INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,

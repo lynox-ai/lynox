@@ -2,7 +2,43 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 // === 4.1 Model Tiers & Providers ===
 
-export type ModelTier = 'opus' | 'sonnet' | 'haiku';
+/**
+ * Provider-agnostic capability tiers. Renamed 2026-05-29 from the legacy
+ * Anthropic-brand names (`opus`/`sonnet`/`haiku`) because lynox is now
+ * provider-agnostic — the brand names leaked into tool schemas + config and
+ * caused models on non-Anthropic providers to mislabel themselves (a Mistral
+ * tenant reporting its `balanced` tier as "Sonnet"). The tier names describe
+ * the cost/capability band; each provider resolves them to a concrete model
+ * via the `*_MODEL_MAP`s below.
+ *   fast     — cheapest/lowest-latency (status checks, formatting)
+ *   balanced — default workhorse (data queries, content, tool use)
+ *   deep     — reasoning-heavy (strategy, multi-source analysis)
+ * Legacy names are still accepted at input boundaries via {@link normalizeTier}.
+ */
+export type ModelTier = 'deep' | 'balanced' | 'fast';
+
+/** Legacy Anthropic-brand tier aliases → provider-agnostic names. Single
+ *  source of truth; also reused by `ModelTierSchema` in types/schemas.ts. */
+export const LEGACY_TIER_ALIASES: Record<string, ModelTier> = {
+  opus: 'deep',
+  sonnet: 'balanced',
+  haiku: 'fast',
+};
+
+/**
+ * Normalize a tier string to the canonical provider-agnostic name, accepting
+ * both the current names (`fast`/`balanced`/`deep`) and the legacy
+ * Anthropic-brand names (`haiku`/`sonnet`/`opus`). Returns `undefined` for
+ * anything unrecognized so callers can fall back to their own default.
+ * Applied at every input boundary (config load, env vars, tool inputs) so
+ * persisted `config.json` files and `LYNOX_DEFAULT_TIER` env vars written
+ * before the rename keep working.
+ */
+export function normalizeTier(value: string | undefined): ModelTier | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'fast' || value === 'balanced' || value === 'deep') return value;
+  return LEGACY_TIER_ALIASES[value];
+}
 
 export type LLMProvider = 'anthropic' | 'vertex' | 'custom' | 'openai';
 
@@ -29,16 +65,16 @@ export interface ModelProfile {
 }
 
 export const MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'claude-opus-4-6',
-  'sonnet': 'claude-sonnet-4-6',
-  'haiku':  'claude-haiku-4-5-20251001',
+  'deep':     'claude-opus-4-6',
+  'balanced': 'claude-sonnet-4-6',
+  'fast':     'claude-haiku-4-5-20251001',
 };
 
 /** Vertex AI Claude model identifiers (Google Cloud). */
 export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'claude-opus-4-6',
-  'sonnet': 'claude-sonnet-4-6',
-  'haiku':  'claude-haiku-4-5',
+  'deep':     'claude-opus-4-6',
+  'balanced': 'claude-sonnet-4-6',
+  'fast':     'claude-haiku-4-5',
 };
 
 /** Canonical Mistral base URL (used for tier-map detection). */
@@ -49,17 +85,17 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * Pinned to specific snapshots so behaviour stays reproducible across model
  * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
  * and behaviour-drift in managed-EU tenants.
- *   haiku  → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
- *   sonnet → mistral-large-2512     (workhorse, tool-use, 6× cheaper than Anthropic Sonnet)
- *   opus   → magistral-medium-2509  (reasoning-heavy, batch-suitable)
+ *   fast     → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
+ *   balanced → mistral-large-2512     (workhorse, tool-use, 6× cheaper than Anthropic balanced tier)
+ *   deep     → magistral-medium-2509  (reasoning-heavy, batch-suitable)
  *
  * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
- * Haiku-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
+ * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
-  'opus':   'magistral-medium-2509',
-  'sonnet': 'mistral-large-2512',
-  'haiku':  'ministral-8b-2512',
+  'deep':     'magistral-medium-2509',
+  'balanced': 'mistral-large-2512',
+  'fast':     'ministral-8b-2512',
 };
 
 const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
@@ -229,7 +265,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-opus-4-7': {
     id: 'claude-opus-4-7',
     provider: 'anthropic',
-    tier: 'opus',
+    tier: 'deep',
     contextWindow: 1_000_000,
     defaultMaxOutput: 32_000,
     maxContinuations: 20,
@@ -241,7 +277,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-opus-4-6': {
     id: 'claude-opus-4-6',
     provider: 'anthropic',
-    tier: 'opus',
+    tier: 'deep',
     contextWindow: 1_000_000,
     defaultMaxOutput: 32_000,
     maxContinuations: 20,
@@ -253,7 +289,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-sonnet-4-6': {
     id: 'claude-sonnet-4-6',
     provider: 'anthropic',
-    tier: 'sonnet',
+    tier: 'balanced',
     contextWindow: 200_000,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
@@ -265,7 +301,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-haiku-4-5-20251001': {
     id: 'claude-haiku-4-5-20251001',
     provider: 'anthropic',
-    tier: 'haiku',
+    tier: 'fast',
     contextWindow: 200_000,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
@@ -278,7 +314,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-haiku-4-5': {
     id: 'claude-haiku-4-5',
     provider: 'vertex',
-    tier: 'haiku',
+    tier: 'fast',
     contextWindow: 200_000,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
@@ -298,7 +334,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-opus-4-7[1m]': {
     id: 'claude-opus-4-7[1m]',
     provider: 'anthropic',
-    tier: 'opus',
+    tier: 'deep',
     contextWindow: 1_000_000,
     defaultMaxOutput: 32_000,
     maxContinuations: 20,
@@ -310,7 +346,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-opus-4-6[1m]': {
     id: 'claude-opus-4-6[1m]',
     provider: 'anthropic',
-    tier: 'opus',
+    tier: 'deep',
     contextWindow: 1_000_000,
     defaultMaxOutput: 32_000,
     maxContinuations: 20,
@@ -322,7 +358,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'claude-sonnet-4-6[1m]': {
     id: 'claude-sonnet-4-6[1m]',
     provider: 'anthropic',
-    tier: 'sonnet',
+    tier: 'balanced',
     contextWindow: 1_000_000,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
@@ -338,7 +374,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'ministral-3b-2512': {
     id: 'ministral-3b-2512',
     provider: 'openai',
-    tier: 'haiku',
+    tier: 'fast',
     contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
@@ -350,7 +386,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'ministral-8b-2512': {
     id: 'ministral-8b-2512',
     provider: 'openai',
-    tier: 'haiku',
+    tier: 'fast',
     contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
@@ -364,7 +400,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'mistral-large-2512': {
     id: 'mistral-large-2512',
     provider: 'openai',
-    tier: 'sonnet',
+    tier: 'balanced',
     contextWindow: 256_000,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
@@ -376,7 +412,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'magistral-medium-2509': {
     id: 'magistral-medium-2509',
     provider: 'openai',
-    tier: 'opus',
+    tier: 'deep',
     contextWindow: 131_072,
     defaultMaxOutput: 32_000,
     maxContinuations: 20,
@@ -392,7 +428,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   //
   // Note: ministral-3b/8b-2410 + mistral-small-2603 retired by Mistral 2025-12.
   // Kept here for backwards-compat of legacy configs + cost-guard. New code
-  // should use the gen-3 ministral-3b/8b-2512 entries above (tier:'haiku').
+  // should use the gen-3 ministral-3b/8b-2512 entries above (tier:'fast').
   'mistral-small-2603': {
     id: 'mistral-small-2603',
     provider: 'openai',
@@ -615,7 +651,7 @@ export interface StepHint {
 }
 
 /** Tier ordering for clamping — lower index = cheaper/faster. */
-const TIER_ORDER: Record<ModelTier, number> = { haiku: 0, sonnet: 1, opus: 2 };
+const TIER_ORDER: Record<ModelTier, number> = { fast: 0, balanced: 1, deep: 2 };
 
 /** Clamp a requested tier to the maximum allowed tier. Returns requested if no cap set. */
 export function clampTier(requested: ModelTier, maxTier: ModelTier | undefined): ModelTier {

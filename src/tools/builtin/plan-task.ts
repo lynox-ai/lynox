@@ -233,8 +233,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
               },
               model: {
                 type: 'string',
-                enum: ['opus', 'sonnet', 'haiku'],
-                description: 'Model tier for this step. Omit to use session default. Prefer haiku for simple tasks, sonnet for standard, opus only for complex analysis.',
+                enum: ['deep', 'balanced', 'fast'],
+                description: 'Capability tier for this step. Omit to use session default. Prefer fast for simple tasks, balanced for standard, deep only for complex analysis. Provider-agnostic — resolves to a concrete model per the active provider.',
               },
               thinking: {
                 type: 'string',

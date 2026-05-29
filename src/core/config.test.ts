@@ -50,11 +50,11 @@ describe('Config', () => {
   it('loads user-level config', async () => {
     const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'config.json'), JSON.stringify({ default_tier: 'sonnet', effort_level: 'high' }));
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ default_tier: 'balanced', effort_level: 'high' }));
 
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
-    expect(config.default_tier).toBe('sonnet');
+    expect(config.default_tier).toBe('balanced');
     expect(config.effort_level).toBe('high');
   });
 
@@ -64,12 +64,12 @@ describe('Config', () => {
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
-    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'opus', effort_level: 'high' }));
-    writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ default_tier: 'sonnet' }));
+    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'deep', effort_level: 'high' }));
+    writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
 
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
-    expect(config.default_tier).toBe('sonnet');
+    expect(config.default_tier).toBe('balanced');
     expect(config.effort_level).toBe('high');
   });
 
@@ -86,12 +86,12 @@ describe('Config', () => {
 
   it('saveUserConfig writes with 0600 permissions', async () => {
     const { saveUserConfig } = await import('./config.js');
-    saveUserConfig({ api_key: 'sk-test-123', default_tier: 'haiku' });
+    saveUserConfig({ api_key: 'sk-test-123', default_tier: 'fast' });
 
     const filePath = join(fakeHome, '.lynox', 'config.json');
     const content = JSON.parse(readFileSync(filePath, 'utf-8'));
     expect(content.api_key).toBe('sk-test-123');
-    expect(content.default_tier).toBe('haiku');
+    expect(content.default_tier).toBe('fast');
 
     const stats = statSync(filePath);
     expect(stats.mode & 0o777).toBe(0o600);
@@ -168,18 +168,18 @@ describe('Config', () => {
     mkdirSync(userDir, { recursive: true });
     mkdirSync(projectDir, { recursive: true });
 
-    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'opus', effort_level: 'high' }));
-    writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ default_tier: 'sonnet', effort_level: 'max' }));
+    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'deep', effort_level: 'high' }));
+    writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ default_tier: 'balanced', effort_level: 'max' }));
 
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
-    expect(config.default_tier).toBe('sonnet');
+    expect(config.default_tier).toBe('balanced');
     expect(config.effort_level).toBe('max');
   });
 
   it('saveUserConfig creates dir with 0700 permissions', async () => {
     const { saveUserConfig } = await import('./config.js');
-    saveUserConfig({ default_tier: 'haiku' });
+    saveUserConfig({ default_tier: 'fast' });
 
     const dirStats = statSync(join(fakeHome, '.lynox'));
     expect(dirStats.mode & 0o777).toBe(0o700);

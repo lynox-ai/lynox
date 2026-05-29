@@ -8,45 +8,68 @@ import {
   getOpenAIModelMap,
   setOpenAIModelResolver,
   effectiveContextWindow,
+  normalizeTier,
   MISTRAL_MODEL_MAP,
   MISTRAL_API_BASE,
 } from './models.js';
 
+describe('normalizeTier', () => {
+  it('passes the canonical provider-agnostic names through unchanged', () => {
+    expect(normalizeTier('fast')).toBe('fast');
+    expect(normalizeTier('balanced')).toBe('balanced');
+    expect(normalizeTier('deep')).toBe('deep');
+  });
+
+  it('maps legacy Anthropic-brand names to the canonical names (back-compat)', () => {
+    // Persisted config.json + LYNOX_DEFAULT_TIER env vars written before the
+    // 2026-05-29 rename must keep working.
+    expect(normalizeTier('haiku')).toBe('fast');
+    expect(normalizeTier('sonnet')).toBe('balanced');
+    expect(normalizeTier('opus')).toBe('deep');
+  });
+
+  it('returns undefined for unknown values and undefined input', () => {
+    expect(normalizeTier(undefined)).toBeUndefined();
+    expect(normalizeTier('gpt-5')).toBeUndefined();
+    expect(normalizeTier('')).toBeUndefined();
+  });
+});
+
 describe('clampTier', () => {
   it('returns requested tier when no cap is set', () => {
-    expect(clampTier('opus', undefined)).toBe('opus');
-    expect(clampTier('sonnet', undefined)).toBe('sonnet');
-    expect(clampTier('haiku', undefined)).toBe('haiku');
+    expect(clampTier('deep', undefined)).toBe('deep');
+    expect(clampTier('balanced', undefined)).toBe('balanced');
+    expect(clampTier('fast', undefined)).toBe('fast');
   });
 
   it('clamps opus to sonnet when max_tier is sonnet', () => {
-    expect(clampTier('opus', 'sonnet')).toBe('sonnet');
+    expect(clampTier('deep', 'balanced')).toBe('balanced');
   });
 
   it('clamps opus to haiku when max_tier is haiku', () => {
-    expect(clampTier('opus', 'haiku')).toBe('haiku');
+    expect(clampTier('deep', 'fast')).toBe('fast');
   });
 
   it('clamps sonnet to haiku when max_tier is haiku', () => {
-    expect(clampTier('sonnet', 'haiku')).toBe('haiku');
+    expect(clampTier('balanced', 'fast')).toBe('fast');
   });
 
   it('allows sonnet when max_tier is sonnet', () => {
-    expect(clampTier('sonnet', 'sonnet')).toBe('sonnet');
+    expect(clampTier('balanced', 'balanced')).toBe('balanced');
   });
 
   it('allows haiku when max_tier is sonnet', () => {
-    expect(clampTier('haiku', 'sonnet')).toBe('haiku');
+    expect(clampTier('fast', 'balanced')).toBe('fast');
   });
 
   it('allows haiku when max_tier is haiku', () => {
-    expect(clampTier('haiku', 'haiku')).toBe('haiku');
+    expect(clampTier('fast', 'fast')).toBe('fast');
   });
 
   it('allows any tier when max_tier is opus', () => {
-    expect(clampTier('opus', 'opus')).toBe('opus');
-    expect(clampTier('sonnet', 'opus')).toBe('sonnet');
-    expect(clampTier('haiku', 'opus')).toBe('haiku');
+    expect(clampTier('deep', 'deep')).toBe('deep');
+    expect(clampTier('balanced', 'deep')).toBe('balanced');
+    expect(clampTier('fast', 'deep')).toBe('fast');
   });
 });
 
@@ -64,9 +87,9 @@ describe('Mistral tier-set', () => {
   it('exposes pinned snapshot IDs (not the auto-rolling -latest alias)', () => {
     // Reproducibility guarantee for managed-EU tenants — Mistral rolls
     // `*-latest` silently which would change behaviour mid-billing-period.
-    expect(MISTRAL_MODEL_MAP.haiku).toBe('ministral-8b-2512');
-    expect(MISTRAL_MODEL_MAP.sonnet).toBe('mistral-large-2512');
-    expect(MISTRAL_MODEL_MAP.opus).toBe('magistral-medium-2509');
+    expect(MISTRAL_MODEL_MAP.fast).toBe('ministral-8b-2512');
+    expect(MISTRAL_MODEL_MAP.balanced).toBe('mistral-large-2512');
+    expect(MISTRAL_MODEL_MAP.deep).toBe('magistral-medium-2509');
     expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
   });
 
@@ -132,37 +155,37 @@ describe('getModelId for openai provider', () => {
   it('returns Anthropic IDs when no resolver is registered (legacy fallback)', () => {
     // Preserves test-environment behaviour for code paths that never
     // bootstrap Engine — vitest unit tests, scripts, etc.
-    expect(getModelId('haiku', 'openai')).toBe('claude-haiku-4-5-20251001');
-    expect(getModelId('sonnet', 'openai')).toBe('claude-sonnet-4-6');
-    expect(getModelId('opus', 'openai')).toBe('claude-opus-4-6');
+    expect(getModelId('fast', 'openai')).toBe('claude-haiku-4-5-20251001');
+    expect(getModelId('balanced', 'openai')).toBe('claude-sonnet-4-6');
+    expect(getModelId('deep', 'openai')).toBe('claude-opus-4-6');
   });
 
   it('returns Mistral tier-set when the mistral map is registered', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
-    expect(getModelId('haiku', 'openai')).toBe('ministral-8b-2512');
-    expect(getModelId('sonnet', 'openai')).toBe('mistral-large-2512');
-    expect(getModelId('opus', 'openai')).toBe('magistral-medium-2509');
+    expect(getModelId('fast', 'openai')).toBe('ministral-8b-2512');
+    expect(getModelId('balanced', 'openai')).toBe('mistral-large-2512');
+    expect(getModelId('deep', 'openai')).toBe('magistral-medium-2509');
   });
 
   it('falls back to fallbackModelId when no map but fallback is set', () => {
     setOpenAIModelResolver({ map: null, fallbackModelId: 'custom-model-v1' });
     // Single-model openai-compat setups (e.g. Ollama with one model) — every
     // tier resolves to the configured single id.
-    expect(getModelId('haiku', 'openai')).toBe('custom-model-v1');
-    expect(getModelId('sonnet', 'openai')).toBe('custom-model-v1');
-    expect(getModelId('opus', 'openai')).toBe('custom-model-v1');
+    expect(getModelId('fast', 'openai')).toBe('custom-model-v1');
+    expect(getModelId('balanced', 'openai')).toBe('custom-model-v1');
+    expect(getModelId('deep', 'openai')).toBe('custom-model-v1');
   });
 
   it('prefers map over fallback when both are set', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP, fallbackModelId: 'should-be-ignored' });
-    expect(getModelId('sonnet', 'openai')).toBe('mistral-large-2512');
+    expect(getModelId('balanced', 'openai')).toBe('mistral-large-2512');
   });
 
   it('still resolves Anthropic/Vertex providers correctly when openai resolver is set', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
-    expect(getModelId('sonnet', 'anthropic')).toBe('claude-sonnet-4-6');
-    expect(getModelId('sonnet', 'vertex')).toBe('claude-sonnet-4-6');
-    expect(getModelId('sonnet', 'custom')).toBe('claude-sonnet-4-6');
+    expect(getModelId('balanced', 'anthropic')).toBe('claude-sonnet-4-6');
+    expect(getModelId('balanced', 'vertex')).toBe('claude-sonnet-4-6');
+    expect(getModelId('balanced', 'custom')).toBe('claude-sonnet-4-6');
   });
 });
 

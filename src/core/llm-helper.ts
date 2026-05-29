@@ -117,7 +117,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 4_000;
  * For `openai` provider (Mistral / Gemini / etc.) we never hardcode an
  * Anthropic id — see `resolveModel()`.
  */
-const DEFAULT_ANTHROPIC_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? MODEL_MAP.sonnet;
+const DEFAULT_ANTHROPIC_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? MODEL_MAP.balanced;
 
 /**
  * Resolve the model id to send in the API call. Provider-aware:

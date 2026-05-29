@@ -662,7 +662,7 @@ describe('OpenAIAdapter', () => {
     }
 
     it('forwards request-provided model id when it is a real downstream id', async () => {
-      // Tier-routing path: getModelId('sonnet', 'openai') resolved to a
+      // Tier-routing path: getModelId('balanced', 'openai') resolved to a
       // Mistral id via MISTRAL_MODEL_MAP, caller sends it through, adapter
       // forwards it as-is. Without this the adapter would always send its
       // constructor modelId — collapsing all tiers onto a single model.

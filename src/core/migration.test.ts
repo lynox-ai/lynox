@@ -126,7 +126,7 @@ describe('migration E2E', () => {
       ]);
       createTestDatabase(srcDir, 'history.db', [{ id: 1, text: 'hello' }]);
       createTestArtifacts(srcDir, [{ id: 'abcd1234', title: 'Test', content: '<h1>Test</h1>' }]);
-      createTestConfig(srcDir, { default_tier: 'sonnet' });
+      createTestConfig(srcDir, { default_tier: 'balanced' });
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
       const preview = exporter.preview();
@@ -163,7 +163,7 @@ describe('migration E2E', () => {
         { id: 'efgh5678', title: 'Report', content: '<html><body>Report</body></html>' },
       ]);
       createTestConfig(srcDir, {
-        default_tier: 'opus',
+        default_tier: 'deep',
         thinking_mode: true,
         api_key: 'SHOULD_NOT_MIGRATE',
         provider: 'SHOULD_NOT_MIGRATE',
@@ -225,7 +225,7 @@ describe('migration E2E', () => {
       // Verify config — safe fields migrated, credentials excluded
       expect(verification.configApplied).toBe(true);
       const dstConfig = JSON.parse(readFileSync(join(dstDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
-      expect(dstConfig['default_tier']).toBe('opus');
+      expect(dstConfig['default_tier']).toBe('deep');
       expect(dstConfig['thinking_mode']).toBe(true);
       expect(dstConfig['api_key']).toBeUndefined();
       expect(dstConfig['provider']).toBeUndefined();
@@ -258,8 +258,8 @@ describe('migration E2E', () => {
     });
 
     it('merges config into existing destination config', () => {
-      createTestConfig(srcDir, { default_tier: 'opus', effort_level: 'high' });
-      createTestConfig(dstDir, { plugins: ['test'], default_tier: 'haiku' });
+      createTestConfig(srcDir, { default_tier: 'deep', effort_level: 'high' });
+      createTestConfig(dstDir, { plugins: ['test'], default_tier: 'fast' });
 
       const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
       const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
@@ -271,7 +271,7 @@ describe('migration E2E', () => {
       importer.restore();
 
       const dstConfig = JSON.parse(readFileSync(join(dstDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
-      expect(dstConfig['default_tier']).toBe('opus');      // overwritten by import
+      expect(dstConfig['default_tier']).toBe('deep');      // overwritten by import
       expect(dstConfig['effort_level']).toBe('high');       // new from import
       expect(dstConfig['plugins']).toEqual(['test']);        // preserved from existing
 
@@ -416,7 +416,7 @@ describe('migration E2E', () => {
       // Even if exporter is compromised and sends dangerous fields,
       // the importer should filter them out
       createTestConfig(srcDir, {
-        default_tier: 'sonnet',
+        default_tier: 'balanced',
         api_key: 'INJECTED_KEY', // should be blocked by exporter AND importer
       });
 
@@ -429,7 +429,7 @@ describe('migration E2E', () => {
       importer.restore();
 
       const config = JSON.parse(readFileSync(join(dstDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
-      expect(config['default_tier']).toBe('sonnet');
+      expect(config['default_tier']).toBe('balanced');
       expect(config['api_key']).toBeUndefined(); // blocked by both exporter and importer
       importer.cleanup();
     });
@@ -578,7 +578,7 @@ describe('migration E2E', () => {
       createTestConfig(srcDir, {
         api_key: 'sk-ant-SHOULD-NOT-MIGRATE',
         provider: 'anthropic',
-        default_tier: 'sonnet',
+        default_tier: 'balanced',
         aws_region: 'eu-central-1',
         max_session_cost_usd: 5,
       });
@@ -596,7 +596,7 @@ describe('migration E2E', () => {
       expect(dstConfig['api_key']).toBeUndefined();
       expect(dstConfig['provider']).toBeUndefined();
       expect(dstConfig['aws_region']).toBeUndefined();
-      expect(dstConfig['default_tier']).toBe('sonnet');
+      expect(dstConfig['default_tier']).toBe('balanced');
       expect(dstConfig['max_session_cost_usd']).toBe(5);
 
       importer.cleanup();

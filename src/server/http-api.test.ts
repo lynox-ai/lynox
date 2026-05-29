@@ -73,7 +73,7 @@ const mockSessionInstance = {
   reset: mockSessionReset,
   onStream: null as unknown,
   promptUser: null as unknown,
-  getModelTier: vi.fn().mockReturnValue('sonnet'),
+  getModelTier: vi.fn().mockReturnValue('balanced'),
   getChangesetManager: vi.fn().mockReturnValue(null),
   getLastRunUsage: vi.fn().mockReturnValue(null),
   getAgent: vi.fn().mockReturnValue(null),
@@ -156,9 +156,9 @@ vi.mock('../core/session-store.js', () => ({
 }));
 
 vi.mock('../core/config.js', () => ({
-  loadConfig: vi.fn().mockReturnValue({ default_tier: 'opus' }),
+  loadConfig: vi.fn().mockReturnValue({ default_tier: 'deep' }),
   readUserConfig: vi.fn().mockReturnValue({
-    default_tier: 'opus', thinking_mode: 'adaptive',
+    default_tier: 'deep', thinking_mode: 'adaptive',
     api_key: 'sk-ant-secret-key',
   }),
   saveUserConfig: vi.fn(),
@@ -1370,7 +1370,7 @@ describe('LynoxHTTPApi', () => {
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
       const body = await res.json() as Record<string, unknown>;
-      expect(body['default_tier']).toBe('opus');
+      expect(body['default_tier']).toBe('deep');
       // Secrets must be stripped, replaced with _configured flags
       expect(body['api_key']).toBeUndefined();
       expect(body['api_key_configured']).toBe(true);
@@ -1379,7 +1379,7 @@ describe('LynoxHTTPApi', () => {
     it('PUT saves user config', async () => {
       const res = await jsonFetch('/api/config', {
         method: 'PUT',
-        body: JSON.stringify({ default_tier: 'sonnet' }),
+        body: JSON.stringify({ default_tier: 'balanced' }),
       });
       expect(res.status).toBe(200);
     });
@@ -1389,7 +1389,7 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/config', {
           method: 'PUT',
-          body: JSON.stringify({ default_tier: 'haiku' }), // mock effective is 'opus'
+          body: JSON.stringify({ default_tier: 'fast' }), // mock effective is 'deep'
         });
         expect(res.status).toBe(403);
         const body = await res.json() as { error: string };
@@ -1453,10 +1453,10 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       const am = body['active_model'] as Record<string, unknown> | undefined;
       expect(am).toBeDefined();
-      // Test fixture's default_tier is 'opus' → resolves to claude-opus-4-6
+      // Test fixture's default_tier is 'deep' → resolves to claude-opus-4-6
       // under the Anthropic-direct provider (default).
       expect(am!['id']).toBe('claude-opus-4-6');
-      expect(am!['tier']).toBe('opus');
+      expect(am!['tier']).toBe('deep');
       expect(am!['provider']).toBe('anthropic');
       expect(am!['contextWindow']).toBe(1_000_000);
       expect(am!['defaultMaxOutput']).toBe(32_000);
@@ -1486,10 +1486,10 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as Record<string, unknown>;
         const am = body['active_model'] as Record<string, unknown> | undefined;
         expect(am).toBeDefined();
-        // Fixture default_tier='opus' → Mistral 'magistral-medium-2509'.
+        // Fixture default_tier='deep' → Mistral 'magistral-medium-2509'.
         expect(am!['id']).toBe('magistral-medium-2509');
         expect(am!['provider']).toBe('openai');
-        expect(am!['tier']).toBe('opus');
+        expect(am!['tier']).toBe('deep');
         expect(am!['contextWindow']).toBe(131_072);
         expect(am!['uiLabel']).toBe('Magistral Medium 1.2');
         // Mistral lineage carries different feature flags than Claude.
@@ -1627,7 +1627,7 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/config', {
           method: 'PUT',
-          body: JSON.stringify({ default_tier: 'opus', experience: 'developer' }), // mock effective is 'opus'
+          body: JSON.stringify({ default_tier: 'deep', experience: 'developer' }), // mock effective is 'deep'
         });
         expect(res.status).toBe(200);
       } finally {
@@ -1754,7 +1754,7 @@ describe('LynoxHTTPApi', () => {
         // re-checks anyway.
         const res = await jsonFetch('/api/config', {
           method: 'PUT',
-          body: JSON.stringify({ default_tier: 'sonnet' }),
+          body: JSON.stringify({ default_tier: 'balanced' }),
         });
         expect(res.status).toBe(200);
       });
@@ -2519,7 +2519,7 @@ describe('LynoxHTTPApi', () => {
       });
 
       it.each([
-        ['default_tier', 'haiku'],
+        ['default_tier', 'fast'],
         ['max_session_cost_usd', 1_000_000],
         ['max_daily_cost_usd', 1_000_000],
         ['max_monthly_cost_usd', 1_000_000],
@@ -2620,7 +2620,7 @@ describe('LynoxHTTPApi', () => {
       // (chore/remove-mcp) — field no longer exists on the user config.
       it.each<[string, Record<string, unknown>]>([
         ['provider', { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-latest' }],
-        ['default_tier', { default_tier: 'haiku' }],
+        ['default_tier', { default_tier: 'fast' }],
         ['max_session_cost_usd', { max_session_cost_usd: 250 }],
       ])(
         'PUT /api/config allows %s change in starter (BYOK) mode',

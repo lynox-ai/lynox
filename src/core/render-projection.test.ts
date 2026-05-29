@@ -190,10 +190,10 @@ describe('projectMessages — usage', () => {
   it('attaches parsed usage to an assistant message', () => {
     const r: ThreadMessageRecord = {
       ...rec(0, 'assistant', [{ type: 'text', text: 'hi' }]),
-      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 5, cacheWrite: 0, costUsd: 0.01, model: 'sonnet' }),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 5, cacheWrite: 0, costUsd: 0.01, model: 'balanced' }),
     };
     const [msg] = projectMessages([r]);
-    expect(msg?.usage).toEqual({ tokensIn: 100, tokensOut: 20, cacheRead: 5, cacheWrite: 0, costUsd: 0.01, model: 'sonnet' });
+    expect(msg?.usage).toEqual({ tokensIn: 100, tokensOut: 20, cacheRead: 5, cacheWrite: 0, costUsd: 0.01, model: 'balanced' });
   });
 
   it('leaves usage undefined when usage_json is null', () => {

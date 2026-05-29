@@ -125,8 +125,8 @@ describe('askUserTool', () => {
     const result = await askUserTool.handler({
       question: 'How to proceed?',
       options: [
-        { label: 'Quick summary', hint: { model: 'haiku', effort: 'low' } },
-        { label: 'Deep analysis', hint: { model: 'opus', effort: 'high' } },
+        { label: 'Quick summary', hint: { model: 'fast', effort: 'low' } },
+        { label: 'Deep analysis', hint: { model: 'deep', effort: 'high' } },
       ],
     }, agent);
 
@@ -145,13 +145,13 @@ describe('askUserTool', () => {
     await askUserTool.handler({
       question: 'How to proceed?',
       options: [
-        { label: 'Quick summary', hint: { model: 'haiku', effort: 'low' } },
-        { label: 'Deep analysis', hint: { model: 'opus', thinking: 'enabled', effort: 'high' } },
+        { label: 'Quick summary', hint: { model: 'fast', effort: 'low' } },
+        { label: 'Deep analysis', hint: { model: 'deep', thinking: 'enabled', effort: 'high' } },
       ],
     }, agent);
 
     expect(toolContext.pendingStepHint).toEqual({
-      model: 'opus',
+      model: 'deep',
       thinking: 'enabled',
       effort: 'high',
     });
@@ -165,7 +165,7 @@ describe('askUserTool', () => {
     await askUserTool.handler({
       question: 'Continue?',
       options: [
-        { label: 'Analyze', hint: { model: 'opus' } },
+        { label: 'Analyze', hint: { model: 'deep' } },
         'Cancel',
       ],
     }, agent);
@@ -194,7 +194,7 @@ describe('askUserTool', () => {
       question: 'Proceed?',
       options: [
         'Yes',
-        { label: 'No', hint: { model: 'haiku' } },
+        { label: 'No', hint: { model: 'fast' } },
       ],
     }, agent);
 
@@ -242,10 +242,10 @@ describe('askUserTool', () => {
       question: 'Multi',
       questions: [
         { question: 'Q1' },
-        { question: 'Q2', options: [{ label: 'Opus mode', hint: { model: 'opus' } }] },
+        { question: 'Q2', options: [{ label: 'Opus mode', hint: { model: 'deep' } }] },
       ],
     }, agent);
 
-    expect(toolContext.pendingStepHint).toEqual({ model: 'opus' });
+    expect(toolContext.pendingStepHint).toEqual({ model: 'deep' });
   });
 });

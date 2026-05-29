@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig } from '../types/index.js';
-import { MISTRAL_API_BASE } from '../types/index.js';
+import { MISTRAL_API_BASE, normalizeTier } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
@@ -139,19 +139,17 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['OPENAI_MODEL_ID']) {
     merged.openai_model_id = process.env['OPENAI_MODEL_ID'];
   }
-  // Model tier override (used by managed EU to lock model)
+  // Model tier override (used by managed EU to lock model). normalizeTier
+  // accepts both the current provider-agnostic names and the legacy
+  // Anthropic-brand names so existing managed env vars keep working.
   if (process.env['LYNOX_DEFAULT_TIER']) {
-    const tier = process.env['LYNOX_DEFAULT_TIER'];
-    if (tier === 'haiku' || tier === 'sonnet' || tier === 'opus') {
-      merged.default_tier = tier;
-    }
+    const tier = normalizeTier(process.env['LYNOX_DEFAULT_TIER']);
+    if (tier) merged.default_tier = tier;
   }
   // Max tier cap (managed hosting cost control — StepHints and pipelines are clamped)
   if (process.env['LYNOX_MAX_TIER']) {
-    const tier = process.env['LYNOX_MAX_TIER'];
-    if (tier === 'haiku' || tier === 'sonnet' || tier === 'opus') {
-      merged.max_tier = tier;
-    }
+    const tier = normalizeTier(process.env['LYNOX_MAX_TIER']);
+    if (tier) merged.max_tier = tier;
   }
   // Account plan tier (separate from LLM model tier) — 'pro' unlocks
   // capabilities like the researcher-role Opus override. Defaults to
