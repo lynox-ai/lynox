@@ -248,15 +248,43 @@ describe('Agent', () => {
       expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
     });
 
-    it('rolls back fully on non-abort errors', async () => {
+    it('keeps the user message + a failure note on non-abort errors (B-light)', async () => {
+      // A provider error must NOT silently erase the user's turn from history
+      // (the "null Mitteilung" / message-vanishes-on-reload bug). We assert the
+      // [user, assistant-failure-note] in-memory shape that the session then
+      // persists — keeping the turn visible and role-alternation valid for the
+      // next call. (End-to-end persistence is the session/thread-store layer.)
       mockProcess.mockRejectedValue(new Error('boom'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       agent.loadMessages([{ role: 'user', content: 'old' }]);
 
       await expect(agent.send('new message')).rejects.toThrow('boom');
-      expect(agent.getMessages()).toHaveLength(1);
-      expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
+      const msgs = agent.getMessages();
+      expect(msgs).toHaveLength(3);
+      expect(msgs[0]).toEqual({ role: 'user', content: 'old' });
+      expect(msgs[1]).toEqual({ role: 'user', content: 'new message' });
+      expect(msgs[2]!.role).toBe('assistant');
+      expect(String(msgs[2]!.content)).toContain('boom');
+      // Role-alternation must hold so the next send() doesn't 400 on
+      // consecutive user messages.
+      expect(msgs[2]!.role).not.toBe(msgs[1]!.role);
+    });
+
+    it('caps + sanitizes the failure note (long, control-char-laden provider error)', async () => {
+      // err.message can carry an attacker-influenced provider body; the note is
+      // persisted + re-fed to the model, so it's capped to 300 chars and has
+      // control chars stripped.
+      const dirty = '\x1b[31m\x07' + 'A'.repeat(500);
+      mockProcess.mockRejectedValue(new Error(dirty));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('hi')).rejects.toThrow();
+
+      const note = String(agent.getMessages().at(-1)!.content);
+      const payload = note.replace('⚠️ This turn could not be completed (provider error): ', '');
+      expect(payload.length).toBeLessThanOrEqual(300);
+      expect(payload).not.toMatch(/[\x00-\x1f\x7f]/);
     });
   });
 

@@ -491,8 +491,30 @@ export class Agent implements IAgent {
         this.messages.length = snapshot + 1;
         return '';
       }
-      // Non-abort error: full rollback to keep history consistent.
-      this.messages.length = snapshot;
+      // Non-abort error (e.g. provider connection failure): keep the user
+      // message and record a short synthetic assistant turn instead of the
+      // previous full rollback. Rationale: a full rollback erased the user's
+      // turn from the persisted thread, so after an API failure the message
+      // vanished on reload with no trace ("null Mitteilung" — rafael 2026-05).
+      // Keeping the user message + a failure note (a) makes the failed turn
+      // survive persistence and visible on reload, and (b) preserves
+      // role-alternation so the NEXT call doesn't 400 on consecutive user
+      // messages. Drop any partial assistant content first (snapshot + 1).
+      // NOTE: this is the B-light fix; the clean display-vs-API history
+      // separation is tracked as a follow-up so failure notes don't linger in
+      // the model's context.
+      this.messages.length = snapshot + 1;
+      // Strip control chars before embedding: a provider error body can echo
+      // attacker-influenced bytes (e.g. a fetched URL reflected in a 4xx), and
+      // this note is persisted as assistant content + re-fed to the model next
+      // turn. Cap to 300 chars.
+      const failureText = (err instanceof Error ? err.message : String(err))
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .slice(0, 300);
+      this.messages.push({
+        role: 'assistant',
+        content: `⚠️ This turn could not be completed (provider error): ${failureText}`,
+      });
       throw err;
     } finally {
       // Drain fire-and-forget memory extraction so the stream isn't orphaned (avoids 499)

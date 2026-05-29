@@ -261,6 +261,15 @@
 
 	onDestroy(() => stopPolling());
 
+	// Refresh immediately when the user switches provider in Settings, instead
+	// of waiting up to 30s for the next poll — keeps the footer provider label
+	// in lockstep with the save so it never looks like the switch failed.
+	$effect(() => {
+		function onProviderChanged() { void poll(); }
+		window.addEventListener('lynox:provider-changed', onProviderChanged);
+		return () => window.removeEventListener('lynox:provider-changed', onProviderChanged);
+	});
+
 	$effect(() => {
 		if (!panelOpen) return;
 		function onKey(e: KeyboardEvent) { if (e.key === 'Escape') closePanel(); }
