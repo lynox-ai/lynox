@@ -4,8 +4,8 @@
 // guarantees intact.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { persistAgentMessages } from './eager-persist.js';
-import type { ThreadStore } from './thread-store.js';
+import { persistAgentMessages, persistFailedTurnDisplay } from './eager-persist.js';
+import type { ThreadStore, DisplayNoteInput } from './thread-store.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 function makeMockThreadStore(opts?: {
@@ -154,5 +154,61 @@ describe('persistAgentMessages', () => {
     const second = persistAgentMessages({ threadStore: store, sessionId: 's1', allMessages });
     expect(second).toEqual({ kind: 'noop', reason: 'no-new-messages' });
     expect(store.appendMessages).toHaveBeenCalledTimes(1);
+  });
+});
+
+function makeFailMockStore(opts?: { hadUserMessage?: boolean; marked?: number; total?: number }) {
+  const appendDisplayNotes = vi.fn();
+  const updateThread = vi.fn();
+  const markDisplayOnlyFrom = vi.fn().mockReturnValue({ marked: opts?.marked ?? 0, hadUserMessage: opts?.hadUserMessage ?? false });
+  const getMessageCount = vi.fn().mockReturnValue(opts?.total ?? 0);
+  const store = { appendDisplayNotes, updateThread, markDisplayOnlyFrom, getMessageCount } as unknown as ThreadStore;
+  return { store, appendDisplayNotes, updateThread, markDisplayOnlyFrom, getMessageCount };
+}
+
+describe('persistFailedTurnDisplay (B-full)', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('returns noop when threadStore is null', () => {
+    const res = persistFailedTurnDisplay({ threadStore: null, sessionId: 's1', startSeq: 0, task: 'hi', error: new Error('x') });
+    expect(res).toEqual({ kind: 'noop', reason: 'no-threadstore' });
+  });
+
+  it('first-response error (nothing persisted): appends BOTH user message + note', () => {
+    const m = makeFailMockStore({ hadUserMessage: false, marked: 0, total: 2 });
+    const res = persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'what is the weather?', error: new Error('boom') });
+    expect(res).toEqual({ kind: 'persisted', appended: 2, flipped: 0 });
+    expect(m.markDisplayOnlyFrom).toHaveBeenCalledWith('s1', 2);
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toEqual({ role: 'user', content: 'what is the weather?' });
+    expect(notes[1]!.role).toBe('assistant');
+    expect(notes[1]!.content).toMatchObject({ _lynox_note: { code: 'provider_error', detail: 'boom' } });
+    expect(m.appendDisplayNotes).toHaveBeenCalledWith('s1', notes, 2); // startSeq = total
+    expect(m.updateThread).toHaveBeenCalledWith('s1', { message_count: 4 });
+  });
+
+  it('eager-persisted then failed (footprint flipped): appends ONLY the note, not a duplicate user message', () => {
+    const m = makeFailMockStore({ hadUserMessage: true, marked: 2, total: 4 });
+    const res = persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'q', error: new Error('rate limit') });
+    expect(res).toEqual({ kind: 'persisted', appended: 1, flipped: 2 });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.role).toBe('assistant');
+    expect(m.updateThread).toHaveBeenCalledWith('s1', { message_count: 5 });
+  });
+
+  it('swallows thread-store errors (fire-and-forget contract)', () => {
+    const store = { markDisplayOnlyFrom: vi.fn().mockImplementation(() => { throw new Error('SQLite locked'); }) } as unknown as ThreadStore;
+    const res = persistFailedTurnDisplay({ threadStore: store, sessionId: 's1', startSeq: 0, task: 'q', error: new Error('x') });
+    expect(res.kind).toBe('error');
+  });
+
+  it('sanitizes control chars in the note detail', () => {
+    const m = makeFailMockStore({ total: 0 });
+    persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 0, task: 'q', error: new Error('a' + String.fromCharCode(7) + 'b') });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { detail: string } };
+    expect(note._lynox_note.detail).toBe('a b');
   });
 });

@@ -5,6 +5,8 @@
 
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { ThreadStore } from './thread-store.js';
+import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
+import { getErrorMessage } from './utils.js';
 
 export interface EagerPersistInput {
   /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
@@ -66,6 +68,53 @@ export function persistAgentMessages(input: EagerPersistInput): EagerPersistOutc
       message_count: totalCount + delta.length,
     });
     return { kind: 'appended', deltaLength: delta.length, newTotal: totalCount + delta.length };
+  } catch (err) {
+    return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };
+  }
+}
+
+export interface FailedTurnDisplayInput {
+  threadStore: ThreadStore | null;
+  sessionId: string;
+  /** ThreadStore message count captured BEFORE the run — the seq floor of the
+   *  failed run's footprint. */
+  startSeq: number;
+  /** The failed turn's original user content (string or multimodal blocks). */
+  task: unknown;
+  /** The error that aborted the run. */
+  error: unknown;
+}
+
+export type FailedTurnDisplayOutcome =
+  | { kind: 'noop'; reason: 'no-threadstore' }
+  | { kind: 'persisted'; appended: number; flipped: number }
+  | { kind: 'error'; error: Error };
+
+/**
+ * B-full: persist a failed turn as DISPLAY-ONLY rows so it survives reload
+ * without lingering in the model's API context. Mirrors the agent's in-memory
+ * rollback on disk: (1) flip any rows this run eager-persisted to display-only,
+ * (2) ensure the failed user message survives in display history (only if it
+ * wasn't already persisted + flipped), (3) append a structured, localizable
+ * failure note. Extracted from `Session.run`'s catch so both `hadUserMessage`
+ * branches are unit-testable. Fire-and-forget by contract; returns an outcome
+ * enum for tests only.
+ */
+export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedTurnDisplayOutcome {
+  const { threadStore, sessionId, startSeq, task, error } = input;
+  if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };
+  try {
+    const footprint = threadStore.markDisplayOnlyFrom(sessionId, startSeq);
+    const notes: { role: 'user' | 'assistant'; content: unknown }[] = [];
+    if (!footprint.hadUserMessage) notes.push({ role: 'user', content: task });
+    notes.push({
+      role: 'assistant',
+      content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error))),
+    });
+    const totalCount = threadStore.getMessageCount(sessionId);
+    threadStore.appendDisplayNotes(sessionId, notes, totalCount);
+    threadStore.updateThread(sessionId, { message_count: totalCount + notes.length });
+    return { kind: 'persisted', appended: notes.length, flipped: footprint.marked };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };
   }

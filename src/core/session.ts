@@ -2,8 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { LynoxError } from './errors.js';
-import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
-import type { DisplayNoteInput } from './thread-store.js';
 import type {
   LynoxUserConfig,
   ToolEntry,
@@ -53,7 +51,7 @@ import {
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
-import { persistAgentMessages } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay } from './eager-persist.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -728,27 +726,13 @@ export class Session {
       // user message survives in display history, and (3) append a structured,
       // localizable failure note. None of these re-enter the prompt because the
       // resume hydration filters display_only=1 (session-store.ts).
-      if (threadStore) {
-        try {
-          const footprint = threadStore.markDisplayOnlyFrom(this.sessionId, startMessageCount);
-          const notes: DisplayNoteInput[] = [];
-          // Common case (first-response provider error): nothing was persisted,
-          // and the agent dropped the user message on rollback — so it lives
-          // only in `task` now. Persist it as a display row. If the run had
-          // eager-persisted the user message, it's already in display history
-          // (just flipped above) — don't duplicate it.
-          if (!footprint.hadUserMessage) {
-            notes.push({ role: 'user', content: task });
-          }
-          notes.push({
-            role: 'assistant',
-            content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(err))),
-          });
-          const totalCount = threadStore.getMessageCount(this.sessionId);
-          threadStore.appendDisplayNotes(this.sessionId, notes, totalCount);
-          threadStore.updateThread(this.sessionId, { message_count: totalCount + notes.length });
-        } catch { /* fire-and-forget */ }
-      }
+      persistFailedTurnDisplay({
+        threadStore,
+        sessionId: this.sessionId,
+        startSeq: startMessageCount,
+        task,
+        error: err,
+      });
 
       throw err;
     } finally {
@@ -908,13 +892,14 @@ export class Session {
   /**
    * F-Eager-Persist: append any new messages from `agent.messages` into the
    * ThreadStore. Called from the Agent's `onMessageCheckpoint` hook after
-   * every stable turn boundary. Idempotent — `getMessageCount` gives the
-   * persisted floor, and `slice(existingCount)` selects only what's new.
+   * every stable turn boundary. Idempotent — `getApiMessageCount` gives the
+   * persisted API floor to slice `agent.messages` against, while new rows take
+   * their seq from the total `getMessageCount` (so B-full display-only rows
+   * can't misalign the delta). See eager-persist.ts.
    *
    * Safe to call concurrently (better-sqlite3 serialises writes within a
    * single process) and from the end-of-run persist block — if both fire
-   * back-to-back, the second sees an updated `existingCount` and appends
-   * an empty delta.
+   * back-to-back, the second sees an updated floor and appends an empty delta.
    */
   private _persistMessages(): void {
     if (!this.agent) return;
