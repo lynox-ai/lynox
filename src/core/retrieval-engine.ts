@@ -314,7 +314,7 @@ export class RetrievalEngine {
     if (!this.anthropicClient) return null;
     try {
       const stream = this.anthropicClient.beta.messages.stream({
-        model: getModelId('haiku', getActiveProvider()),
+        model: getModelId('fast', getActiveProvider()),
         max_tokens: 256,
         ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
         messages: [{

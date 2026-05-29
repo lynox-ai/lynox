@@ -33,7 +33,7 @@ describe.skipIf(SKIP)('Online: DAG Planner', () => {
     for (const step of result!.steps) {
       expect(step.id).toBeTruthy();
       expect(step.task).toBeTruthy();
-      expect(['haiku', 'sonnet', 'opus']).toContain(step.model);
+      expect(['fast', 'balanced', 'deep']).toContain(step.model);
     }
   }, 20_000);
 
@@ -79,7 +79,7 @@ describe.skipIf(SKIP)('Online: DAG Planner', () => {
     expect(result).not.toBeNull();
 
     // Simple read-only tasks should use haiku (cheapest)
-    const haikuSteps = result!.steps.filter(s => s.model === 'haiku');
+    const haikuSteps = result!.steps.filter(s => s.model === 'fast');
     expect(haikuSteps.length).toBeGreaterThan(0);
   }, 20_000);
 });

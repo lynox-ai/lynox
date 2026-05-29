@@ -17,7 +17,7 @@ export const state = {
   showThinking: false,
   lastResponse: '',
   responseStarted: false,
-  currentModelId: MODEL_MAP['sonnet'],
+  currentModelId: MODEL_MAP['balanced'],
   activeSession: null as Session | null,
   thinkingStarted: false,
   showThinkingRendered: false,

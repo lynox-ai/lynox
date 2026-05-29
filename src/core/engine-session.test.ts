@@ -410,13 +410,13 @@ describe('Engine + Session (Orchestrator)', () => {
       // (17 chars) is a research follow-up — it must run on the configured tier,
       // not silently drop to Haiku and then run multi-step web research there.
       const { session } = await createEngineAndSession();
-      expect(session.getModelTier()).toBe('sonnet');
+      expect(session.getModelTier()).toBe('balanced');
 
       vi.mocked(Agent).mockClear();
       mockSend.mockResolvedValueOnce('response');
       await session.run('gemini und search');
 
-      expect(session.getModelTier()).toBe('sonnet');
+      expect(session.getModelTier()).toBe('balanced');
       // No Agent may be reconstructed with a downgraded Haiku model mid-run.
       const downgraded = vi.mocked(Agent).mock.calls.some(
         (call) => call[0]?.model?.includes('haiku') === true,
@@ -432,7 +432,7 @@ describe('Engine + Session (Orchestrator)', () => {
       mockSend.mockResolvedValueOnce('response');
       await session.run('zeig mir die neuesten infos');
 
-      expect(session.getModelTier()).toBe('sonnet');
+      expect(session.getModelTier()).toBe('balanced');
       const downgraded = vi.mocked(Agent).mock.calls.some(
         (call) => call[0]?.model?.includes('haiku') === true,
       );
@@ -505,7 +505,7 @@ describe('Engine + Session (Orchestrator)', () => {
       // Clear the initial Agent construction call
       vi.mocked(Agent).mockClear();
 
-      const modelId = session.setModel('sonnet');
+      const modelId = session.setModel('balanced');
       expect(modelId).toBe('claude-sonnet-4-6');
 
       // Agent should be recreated
@@ -518,9 +518,9 @@ describe('Engine + Session (Orchestrator)', () => {
     it('returns the resolved model ID', async () => {
       const { session } = await createEngineAndSession();
 
-      expect(session.setModel('opus')).toBe('claude-opus-4-6');
-      expect(session.setModel('sonnet')).toBe('claude-sonnet-4-6');
-      expect(session.setModel('haiku')).toBe('claude-haiku-4-5-20251001');
+      expect(session.setModel('deep')).toBe('claude-opus-4-6');
+      expect(session.setModel('balanced')).toBe('claude-sonnet-4-6');
+      expect(session.setModel('fast')).toBe('claude-haiku-4-5-20251001');
     });
   });
 
@@ -598,8 +598,8 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('getModelTier() returns configured model', async () => {
-      const { session } = await createEngineAndSession({ model: 'sonnet' });
-      expect(session.getModelTier()).toBe('sonnet');
+      const { session } = await createEngineAndSession({ model: 'balanced' });
+      expect(session.getModelTier()).toBe('balanced');
     });
 
     it('getContextUsagePercent honours agent.model — [1m] suffix unlocks 1M window', async () => {

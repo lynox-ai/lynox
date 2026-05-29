@@ -484,7 +484,7 @@ describe('captureProcess — provider plumbing', () => {
     anthropicCtorCalls.length = 0;
     openaiCtorCalls.length = 0;
     // Mirror engine bootstrap for a Mistral-hosted tenant — without this,
-    // `getModelId('haiku', 'openai')` falls back to the Anthropic id and
+    // `getModelId('fast', 'openai')` falls back to the Anthropic id and
     // the assertion below would only catch the client-routing bug, not
     // the model-id bug. Reset to null in afterEach so other tests aren't
     // affected.

@@ -8,6 +8,29 @@ import { LynoxUserConfigSchema } from './schemas.js';
  * code (Agent, http-api, vault) relies on so a future schema relaxation
  * trips a test instead of a security regression.
  */
+describe('LynoxUserConfigSchema — default_tier back-compat (2026-05-29 rename)', () => {
+  it('normalizes legacy Anthropic-brand tier names to provider-agnostic names', () => {
+    // Persisted config.json files written before the rename store opus/sonnet/haiku.
+    for (const [legacy, canonical] of [['opus', 'deep'], ['sonnet', 'balanced'], ['haiku', 'fast']] as const) {
+      const result = LynoxUserConfigSchema.safeParse({ default_tier: legacy });
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.default_tier).toBe(canonical);
+    }
+  });
+
+  it('passes canonical names through unchanged', () => {
+    for (const tier of ['fast', 'balanced', 'deep'] as const) {
+      const result = LynoxUserConfigSchema.safeParse({ default_tier: tier });
+      expect(result.success && result.data.default_tier).toBe(tier);
+    }
+  });
+
+  it('rejects an unknown tier value', () => {
+    const result = LynoxUserConfigSchema.safeParse({ default_tier: 'gpt-5' });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('LynoxUserConfigSchema — http(s) scheme allowlist', () => {
   it('accepts https api_base_url', () => {
     const result = LynoxUserConfigSchema.safeParse({ api_base_url: 'https://api.example.com/v1' });
@@ -213,7 +236,7 @@ describe('LynoxUserConfigSchema — strict mode (PRD-IA-V2 P1-PR-A2)', () => {
   it('still accepts a real settings payload (no false-positive on the happy path)', () => {
     const result = LynoxUserConfigSchema.safeParse({
       provider: 'anthropic',
-      default_tier: 'sonnet',
+      default_tier: 'balanced',
       effort_level: 'high',
       thinking_mode: 'adaptive',
       experience: 'business',

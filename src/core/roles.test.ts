@@ -6,22 +6,22 @@ describe('BUILTIN_ROLES', () => {
     // The 2026-04-21 rebalance moved researcher off Opus-by-default.
     // Bench (see project_bench_phase_1_verdict) showed Sonnet with
     // adaptive-thinking matches Opus on deep-research at a fraction of
-    // the cost. Managed-Pro tenants can still pass `model: 'opus'`;
+    // the cost. Managed-Pro tenants can still pass `model: 'deep'`;
     // non-Pro tenants get downgraded.
-    expect(BUILTIN_ROLES['researcher']!.model).toBe('sonnet');
+    expect(BUILTIN_ROLES['researcher']!.model).toBe('balanced');
     expect(BUILTIN_ROLES['researcher']!.effort).toBe('max');
     expect(BUILTIN_ROLES['researcher']!.denyTools).toContain('write_file');
     expect(BUILTIN_ROLES['researcher']!.denyTools).toContain('bash');
   });
 
   it('creator/operator/collector defaults unchanged', () => {
-    expect(BUILTIN_ROLES['creator']!.model).toBe('sonnet');
-    expect(BUILTIN_ROLES['operator']!.model).toBe('haiku');
-    expect(BUILTIN_ROLES['collector']!.model).toBe('haiku');
+    expect(BUILTIN_ROLES['creator']!.model).toBe('balanced');
+    expect(BUILTIN_ROLES['operator']!.model).toBe('fast');
+    expect(BUILTIN_ROLES['collector']!.model).toBe('fast');
   });
 
   it('getRole returns the named role, undefined on miss', () => {
-    expect(getRole('researcher')?.model).toBe('sonnet');
+    expect(getRole('researcher')?.model).toBe('balanced');
     expect(getRole('nonexistent')).toBeUndefined();
   });
 });
@@ -37,26 +37,26 @@ describe('applyTierGate', () => {
     stderrSpy.mockRestore();
   });
 
-  it('passes opus through when account_tier is pro', () => {
-    expect(applyTierGate('opus', 'pro')).toBe('opus');
+  it('passes the deep tier through when account_tier is pro', () => {
+    expect(applyTierGate('deep', 'pro')).toBe('deep');
     expect(stderrSpy).not.toHaveBeenCalled();
   });
 
-  it('downgrades opus to sonnet for standard tier', () => {
-    expect(applyTierGate('opus', 'standard')).toBe('sonnet');
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('opus override requires account_tier=pro'));
+  it('downgrades deep to balanced for standard tier', () => {
+    expect(applyTierGate('deep', 'standard')).toBe('balanced');
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('deep-tier override requires account_tier=pro'));
   });
 
-  it('downgrades opus to sonnet when account_tier is unset (defaults to non-pro)', () => {
-    expect(applyTierGate('opus', undefined)).toBe('sonnet');
+  it('downgrades deep to balanced when account_tier is unset (defaults to non-pro)', () => {
+    expect(applyTierGate('deep', undefined)).toBe('balanced');
     expect(stderrSpy).toHaveBeenCalled();
   });
 
-  it('passes sonnet and haiku through untouched for any tier', () => {
-    expect(applyTierGate('sonnet', 'standard')).toBe('sonnet');
-    expect(applyTierGate('sonnet', 'pro')).toBe('sonnet');
-    expect(applyTierGate('haiku', 'standard')).toBe('haiku');
-    expect(applyTierGate('haiku', 'pro')).toBe('haiku');
+  it('passes balanced and fast through untouched for any tier', () => {
+    expect(applyTierGate('balanced', 'standard')).toBe('balanced');
+    expect(applyTierGate('balanced', 'pro')).toBe('balanced');
+    expect(applyTierGate('fast', 'standard')).toBe('fast');
+    expect(applyTierGate('fast', 'pro')).toBe('fast');
     expect(stderrSpy).not.toHaveBeenCalled();
   });
 

@@ -66,9 +66,9 @@ describe('planDAG', () => {
   it('successfully parses valid response with steps', async () => {
     mockCreate.mockResolvedValueOnce(makeToolUseResponse({
       steps: [
-        { id: 'analyze', task: 'Analyze the codebase', model: 'sonnet' },
-        { id: 'implement', task: 'Implement changes', model: 'opus', input_from: ['analyze'] },
-        { id: 'test', task: 'Write tests', model: 'haiku', input_from: ['implement'] },
+        { id: 'analyze', task: 'Analyze the codebase', model: 'balanced' },
+        { id: 'implement', task: 'Implement changes', model: 'deep', input_from: ['analyze'] },
+        { id: 'test', task: 'Write tests', model: 'fast', input_from: ['implement'] },
       ],
       reasoning: 'Three-phase approach',
       estimated_cost_usd: 0.12,
@@ -80,9 +80,9 @@ describe('planDAG', () => {
     expect(result!.steps).toHaveLength(3);
     expect(result!.steps[0]!.id).toBe('analyze');
     expect(result!.steps[0]!.task).toBe('Analyze the codebase');
-    expect(result!.steps[0]!.model).toBe('sonnet');
+    expect(result!.steps[0]!.model).toBe('balanced');
     expect(result!.steps[1]!.input_from).toEqual(['analyze']);
-    expect(result!.steps[2]!.model).toBe('haiku');
+    expect(result!.steps[2]!.model).toBe('fast');
     expect(result!.reasoning).toBe('Three-phase approach');
     expect(result!.estimatedCost).toBe(0.12);
   });
@@ -241,9 +241,9 @@ describe('planDAG', () => {
   it('correctly maps model tiers', async () => {
     mockCreate.mockResolvedValueOnce(makeToolUseResponse({
       steps: [
-        { id: 'a', task: 'heavy', model: 'opus' },
-        { id: 'b', task: 'normal', model: 'sonnet' },
-        { id: 'c', task: 'light', model: 'haiku' },
+        { id: 'a', task: 'heavy', model: 'deep' },
+        { id: 'b', task: 'normal', model: 'balanced' },
+        { id: 'c', task: 'light', model: 'fast' },
       ],
       reasoning: 'tiered',
       estimated_cost_usd: 0.11,
@@ -252,9 +252,9 @@ describe('planDAG', () => {
     const result = await planDAG('test goal');
 
     expect(result).not.toBeNull();
-    expect(result!.steps[0]!.model).toBe('opus');
-    expect(result!.steps[1]!.model).toBe('sonnet');
-    expect(result!.steps[2]!.model).toBe('haiku');
+    expect(result!.steps[0]!.model).toBe('deep');
+    expect(result!.steps[1]!.model).toBe('balanced');
+    expect(result!.steps[2]!.model).toBe('fast');
   });
 
   it('ignores invalid model tier values', async () => {
@@ -366,7 +366,7 @@ describe('estimatePipelineCost', () => {
 
   it('uses per-step cost lookup for sonnet', () => {
     const steps: InlinePipelineStep[] = [
-      { id: 'analyze', task: 'Analyze code', model: 'sonnet' },
+      { id: 'analyze', task: 'Analyze code', model: 'balanced' },
     ];
     const result = estimatePipelineCost(steps);
 
@@ -378,9 +378,9 @@ describe('estimatePipelineCost', () => {
 
   it('sums totalCostUsd across multiple steps', () => {
     const steps: InlinePipelineStep[] = [
-      { id: 'a', task: 'First task', model: 'sonnet' },
-      { id: 'b', task: 'Second task', model: 'sonnet' },
-      { id: 'c', task: 'Third task', model: 'sonnet' },
+      { id: 'a', task: 'First task', model: 'balanced' },
+      { id: 'b', task: 'Second task', model: 'balanced' },
+      { id: 'c', task: 'Third task', model: 'balanced' },
     ];
     const result = estimatePipelineCost(steps);
 
@@ -390,9 +390,9 @@ describe('estimatePipelineCost', () => {
 
   it('produces different costs for different model tiers', () => {
     const task = 'Do something';
-    const opusCost = estimatePipelineCost([{ id: 'o', task, model: 'opus' }]);
-    const sonnetCost = estimatePipelineCost([{ id: 's', task, model: 'sonnet' }]);
-    const haikuCost = estimatePipelineCost([{ id: 'h', task, model: 'haiku' }]);
+    const opusCost = estimatePipelineCost([{ id: 'o', task, model: 'deep' }]);
+    const sonnetCost = estimatePipelineCost([{ id: 's', task, model: 'balanced' }]);
+    const haikuCost = estimatePipelineCost([{ id: 'h', task, model: 'fast' }]);
 
     // Opus > Sonnet > Haiku
     expect(opusCost.totalCostUsd).toBe(1.20);

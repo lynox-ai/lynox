@@ -67,7 +67,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
                     type: 'object',
                     description: 'Configuration hint for the next step when this option is selected',
                     properties: {
-                      model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'], description: 'Preferred model tier' },
+                      model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Preferred capability tier (fast/balanced/deep)' },
                       thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'], description: 'Thinking mode' },
                       effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'], description: 'Effort level' },
                     },
@@ -98,7 +98,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
                         hint: {
                           type: 'object',
                           properties: {
-                            model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'] },
+                            model: { type: 'string', enum: ['deep', 'balanced', 'fast'] },
                             thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'] },
                             effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
                           },

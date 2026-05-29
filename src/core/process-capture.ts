@@ -30,7 +30,7 @@ interface CaptureOptions {
    * process-wide active provider (`getActiveProvider()`). Plumb the
    * caller's actual provider here so a Mistral/OpenAI-compat user's
    * workflow-save call routes to the right endpoint with the right
-   * model id — without this, `getModelId('haiku', 'anthropic')` returns
+   * model id — without this, `getModelId('fast', 'anthropic')` returns
    * `claude-haiku-…` which Mistral rejects with 4xx.
    */
   provider?: LLMProvider | undefined;
@@ -384,7 +384,7 @@ export async function captureProcess(
     openaiAuth: options.openaiAuth,
   });
   const response = await client.beta.messages.create({
-    model: getModelId('haiku', provider),
+    model: getModelId('fast', provider),
     max_tokens: 4096,
     ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
     system: EXTRACTION_SYSTEM,

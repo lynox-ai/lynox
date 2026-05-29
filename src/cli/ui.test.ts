@@ -36,7 +36,7 @@ describe('wordWrap', () => {
 });
 
 describe('renderBanner', () => {
-  const banner = renderBanner('opus', 'adaptive', 'high', 'loaded', 2, 10, '1.0.0-rc.1');
+  const banner = renderBanner('deep', 'adaptive', 'high', 'loaded', 2, 10, '1.0.0-rc.1');
 
   it('contains lynox brand name', () => {
     const plain = banner.replace(/\x1b\[[0-9;]*m/g, '');
@@ -44,7 +44,7 @@ describe('renderBanner', () => {
   });
 
   it('contains model name', () => {
-    expect(banner).toContain('opus');
+    expect(banner).toContain('deep');
   });
 
   it('contains tool count', () => {
@@ -56,7 +56,7 @@ describe('renderBanner', () => {
   });
 
   it('shows memory status', () => {
-    const b = renderBanner('opus', 'adaptive', 'high', 'none', 0, 5);
+    const b = renderBanner('deep', 'adaptive', 'high', 'none', 0, 5);
     expect(b).toContain('none');
   });
 });

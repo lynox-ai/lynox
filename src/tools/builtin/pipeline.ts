@@ -281,7 +281,7 @@ function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHist
   // Build step-id → model-tier lookup from manifest
   const stepModelMap = new Map<string, string>();
   for (const step of manifest.agents) {
-    stepModelMap.set(step.id, step.model ?? 'sonnet');
+    stepModelMap.set(step.id, step.model ?? 'balanced');
   }
   try {
     pipelineRunHistory.insertPipelineRun({

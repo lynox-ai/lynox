@@ -136,7 +136,7 @@ export async function rerankSearchResults(
     const client = createLLMClient();
     const provider = getActiveProvider();
     const callPromise = client.beta.messages.create({
-      model: getModelId('haiku', provider),
+      model: getModelId('fast', provider),
       max_tokens: 512,
       ...(isCustomProvider() ? {} : { betas: getBetasForProvider(provider) }),
       system: SYSTEM_PROMPT,

@@ -7,9 +7,9 @@ describe('MODEL_MAP', () => {
   });
 
   it('contains opus, sonnet, haiku', () => {
-    expect(MODEL_MAP['opus']).toBeDefined();
-    expect(MODEL_MAP['sonnet']).toBeDefined();
-    expect(MODEL_MAP['haiku']).toBeDefined();
+    expect(MODEL_MAP['deep']).toBeDefined();
+    expect(MODEL_MAP['balanced']).toBeDefined();
+    expect(MODEL_MAP['fast']).toBeDefined();
   });
 
   it('uses full model IDs', () => {

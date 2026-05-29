@@ -239,7 +239,7 @@ export class Engine {
     this.userConfig = loadConfig();
     // Apply user config defaults if not already set in LynoxConfig
     if (!config.model) {
-      config.model = this.userConfig.default_tier ?? 'sonnet';
+      config.model = this.userConfig.default_tier ?? 'balanced';
     }
     if (!config.effort && this.userConfig.effort_level) {
       config.effort = this.userConfig.effort_level;
@@ -250,7 +250,7 @@ export class Engine {
         : { type: 'adaptive' };
     }
     // Haiku does not support extended thinking — auto-disable
-    const resolvedModel = MODEL_MAP[config.model ?? 'sonnet'];
+    const resolvedModel = MODEL_MAP[config.model ?? 'balanced'];
     if (resolvedModel && resolvedModel.includes('haiku')) {
       config.thinking = undefined;
     }
@@ -1478,7 +1478,7 @@ export class Engine {
     const result = await submitBatch(
       this.client, reqs,
       {
-        modelTier: this.config.model ?? 'opus',
+        modelTier: this.config.model ?? 'deep',
         maxTokens: this.config.maxTokens ?? 8192,
         systemPrompt: this.config.systemPrompt,
         systemPromptSuffix: sessionConfig?.systemPromptSuffix,

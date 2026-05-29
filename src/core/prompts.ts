@@ -32,9 +32,9 @@ Use \`plan_task\` only for substantial, multi-step work. For small or quick task
 
 ### Step configuration hints
 When creating plan phases, set \`model\`, \`thinking\`, and \`effort\` per phase to optimize cost and quality:
-- **Simple phases** (formatting, summarizing, status checks): \`model: "haiku", thinking: "disabled", effort: "low"\`
-- **Standard phases** (data queries, content creation): omit all (defaults to sonnet/adaptive/medium)
-- **Complex phases** (deep analysis, multi-source research, strategy): \`model: "opus", thinking: "enabled", effort: "high"\`
+- **Simple phases** (formatting, summarizing, status checks): \`model: "fast", thinking: "disabled", effort: "low"\`
+- **Standard phases** (data queries, content creation): omit all (defaults to balanced/adaptive/medium)
+- **Complex phases** (deep analysis, multi-source research, strategy): \`model: "deep", thinking: "enabled", effort: "high"\`
 Only set fields that differ from defaults. The system may clamp the tier if the deployment has a cap — this is transparent.
 
 ### Saving a workflow for reuse
@@ -183,7 +183,7 @@ export function modelIdentityContext(provider: string | undefined | null, modelI
   const safeProviderKey = String(provider).toLowerCase().replace(/[^a-z-]/g, '');
   const prettyProvider = label[safeProviderKey] ?? safeProviderKey.slice(0, 24);
   if (!safeId || !prettyProvider) return '';
-  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${safeId}\`. When asked which model you are — or which model you used for a specific turn — state THIS exact model id, never a tier alias. The names \`opus\`, \`sonnet\`, and \`haiku\` are INTERNAL routing tiers (used in tool inputs like \`spawn(role, model: "haiku")\`); they are NOT your identity. On Mistral, the \`sonnet\` tier maps to \`mistral-large-2512\`, the \`haiku\` tier maps to \`ministral-8b-2512\`, the \`opus\` tier maps to \`magistral-medium-2509\`. So when a user asks "which model did you use?", answer with the actual model id, not the tier name. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${safeId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id. \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities — each resolves to a different concrete model per provider (e.g. on Mistral \`balanced\`→\`mistral-large-2512\`, \`fast\`→\`ministral-8b-2512\`, \`deep\`→\`magistral-medium-2509\`; on Anthropic to the Claude models). Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
 }
 
 /**
@@ -341,7 +341,7 @@ Never over-deliver on a simple question. A "danke" does not need a 3-paragraph r
 
 **Honesty over completeness**: When a retrieval tool (\`memory_recall\`, \`read_file\`, \`data_store_query\`, KG entity lookup) returns only PART of what the user asked for, surface what IS known and ask the user for the rest — DO NOT pad the answer with plausible-sounding details that weren't in the retrieved data. Example: if \`memory_recall\` returns "Monday midday is the best launch slot" and the user asks "when's best, and what should I avoid?", answer "Monday midday is what I have in memory — I don't have specifics on what to avoid stored. Want me to look it up, or do you want to add that now?" — DO NOT invent a list of times-to-avoid. This is the F-Halu guardrail; users react more positively to "I don't know that yet" than to confident fabrications they later have to correct.
 
-**Delegation**: Do it yourself unless delegation helps. For complex, multi-step work: \`plan_task\` presents a plan and on approval returns a \`workflow_id\` — \`plan_task\` NEVER runs the plan itself. Emit one short "starting now" line, then call \`run_workflow(workflow_id)\` to execute it; every step runs as an isolated sub-agent. Small or quick tasks need no plan — just do them directly. \`spawn_agent\` for truly independent parallel tasks. Roles: researcher (Sonnet with adaptive-thinking, deep research; Opus opt-in only on Managed-Pro accounts), creator (Sonnet, content), operator (Haiku, fast status), collector (Haiku, Q&A). Sub-agents share NO context — include everything in \`task\` + \`context\`. Use \`spawn_agent\` when: 3+ independent research sources needed in parallel, or distinct skill profiles per sub-task.
+**Delegation**: Do it yourself unless delegation helps. For complex, multi-step work: \`plan_task\` presents a plan and on approval returns a \`workflow_id\` — \`plan_task\` NEVER runs the plan itself. Emit one short "starting now" line, then call \`run_workflow(workflow_id)\` to execute it; every step runs as an isolated sub-agent. Small or quick tasks need no plan — just do them directly. \`spawn_agent\` for truly independent parallel tasks. Roles: researcher (balanced tier with adaptive-thinking, deep research; deep tier opt-in only on Managed-Pro accounts), creator (balanced tier, content), operator (fast tier, fast status), collector (fast tier, Q&A). Sub-agents share NO context — include everything in \`task\` + \`context\`. Use \`spawn_agent\` when: 3+ independent research sources needed in parallel, or distinct skill profiles per sub-task.
 
 ## Tools
 

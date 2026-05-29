@@ -30,7 +30,7 @@ describe('RunHistory', () => {
     const h = createHistory();
     const id = h.insertRun({
       taskText: 'Write hello world',
-      modelTier: 'sonnet',
+      modelTier: 'balanced',
       modelId: 'claude-sonnet-4-6',
     });
     expect(id).toHaveLength(36); // UUID format
@@ -38,7 +38,7 @@ describe('RunHistory', () => {
     const run = h.getRun(id);
     expect(run).toBeDefined();
     expect(run!.task_text).toBe('Write hello world');
-    expect(run!.model_tier).toBe('sonnet');
+    expect(run!.model_tier).toBe('balanced');
     expect(run!.status).toBe('running');
     h.close();
   });
@@ -47,7 +47,7 @@ describe('RunHistory', () => {
     const h = createHistory();
     const id = h.insertRun({
       taskText: 'Test task',
-      modelTier: 'opus',
+      modelTier: 'deep',
       modelId: 'claude-opus-4-6',
     });
 
@@ -78,7 +78,7 @@ describe('RunHistory', () => {
     const h = createHistory();
     const runId = h.insertRun({
       taskText: 'Test',
-      modelTier: 'opus',
+      modelTier: 'deep',
       modelId: 'claude-opus-4-6',
     });
 
@@ -109,15 +109,15 @@ describe('RunHistory', () => {
   it('getSessionToolCalls gathers tool calls across all runs in a session', () => {
     const h = createHistory();
     // Two runs in the SAME session (one conversation, two turns).
-    const runA = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'sonnet', modelId: 'm' });
+    const runA = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
     h.insertToolCall({ runId: runA, toolName: 'http_request', inputJson: '{"url":"a"}', outputJson: 'ok', durationMs: 10, sequenceOrder: 0 });
     h.insertToolCall({ runId: runA, toolName: 'write_file', inputJson: '{"path":"r.pdf"}', outputJson: 'ok', durationMs: 20, sequenceOrder: 1 });
 
-    const runB = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 2', modelTier: 'sonnet', modelId: 'm' });
+    const runB = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 2', modelTier: 'balanced', modelId: 'm' });
     h.insertToolCall({ runId: runB, toolName: 'capture_process', inputJson: '{}', outputJson: 'ok', durationMs: 5, sequenceOrder: 0 });
 
     // A run in a DIFFERENT session — must not leak in.
-    const runOther = h.insertRun({ sessionId: 'thread-2', taskText: 'other', modelTier: 'sonnet', modelId: 'm' });
+    const runOther = h.insertRun({ sessionId: 'thread-2', taskText: 'other', modelTier: 'balanced', modelId: 'm' });
     h.insertToolCall({ runId: runOther, toolName: 'bash', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
 
     const sessionCalls = h.getSessionToolCalls('thread-1');
@@ -143,7 +143,7 @@ describe('RunHistory', () => {
     for (let i = 0; i < 5; i++) {
       h.insertRun({
         taskText: `Task ${i}`,
-        modelTier: 'opus',
+        modelTier: 'deep',
         modelId: 'claude-opus-4-6',
       });
     }
@@ -155,8 +155,8 @@ describe('RunHistory', () => {
 
   it('searches runs by text', () => {
     const h = createHistory();
-    h.insertRun({ taskText: 'Fix the login bug', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-    h.insertRun({ taskText: 'Write unit tests', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6' });
+    h.insertRun({ taskText: 'Fix the login bug', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    h.insertRun({ taskText: 'Write unit tests', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
 
     const results = h.searchRuns('login');
     expect(results).toHaveLength(1);
@@ -166,8 +166,8 @@ describe('RunHistory', () => {
 
   it('computes stats', () => {
     const h = createHistory();
-    const id1 = h.insertRun({ taskText: 'Task 1', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-    const id2 = h.insertRun({ taskText: 'Task 2', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6' });
+    const id1 = h.insertRun({ taskText: 'Task 1', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    const id2 = h.insertRun({ taskText: 'Task 2', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
 
     h.updateRun(id1, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, durationMs: 1000, status: 'completed' });
     h.updateRun(id2, { tokensIn: 200, tokensOut: 100, costUsd: 0.02, durationMs: 2000, status: 'completed' });
@@ -182,7 +182,7 @@ describe('RunHistory', () => {
 
   it('handles prefix-based run lookup', () => {
     const h = createHistory();
-    const id = h.insertRun({ taskText: 'Test', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+    const id = h.insertRun({ taskText: 'Test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
     const prefix = id.slice(0, 8);
 
     const run = h.getRun(prefix);
@@ -193,8 +193,8 @@ describe('RunHistory', () => {
 
   it('inserts and queries spawns', () => {
     const h = createHistory();
-    const parentId = h.insertRun({ taskText: 'Parent', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-    const childId = h.insertRun({ taskText: 'Child', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6', spawnParentId: parentId, spawnDepth: 1 });
+    const parentId = h.insertRun({ taskText: 'Parent', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    const childId = h.insertRun({ taskText: 'Child', modelTier: 'balanced', modelId: 'claude-sonnet-4-6', spawnParentId: parentId, spawnDepth: 1 });
 
     h.insertSpawn({ parentRunId: parentId, childRunId: childId, depth: 1 });
 
@@ -211,21 +211,21 @@ describe('RunHistory', () => {
     const h = createHistory();
     const parentId = h.insertRun({
       taskText: 'Batch job',
-      modelTier: 'opus',
+      modelTier: 'deep',
       modelId: 'claude-opus-4-6',
       runType: 'batch_parent',
     });
 
     h.insertRun({
       taskText: 'Item 1',
-      modelTier: 'sonnet',
+      modelTier: 'balanced',
       modelId: 'claude-sonnet-4-6',
       runType: 'batch_item',
       batchParentId: parentId,
     });
     const id2 = h.insertRun({
       taskText: 'Item 2',
-      modelTier: 'sonnet',
+      modelTier: 'balanced',
       modelId: 'claude-sonnet-4-6',
       runType: 'batch_item',
       batchParentId: parentId,
@@ -259,7 +259,7 @@ describe('RunHistory', () => {
 
   it('getCostByDay returns daily breakdown', () => {
     const h = createHistory();
-    const id = h.insertRun({ taskText: 'Test', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+    const id = h.insertRun({ taskText: 'Test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
     h.updateRun(id, { costUsd: 0.05, status: 'completed' });
 
     const days = h.getCostByDay(7);
@@ -270,8 +270,8 @@ describe('RunHistory', () => {
 
   it('getCostByModel groups correctly', () => {
     const h = createHistory();
-    const id1 = h.insertRun({ taskText: 'T1', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-    const id2 = h.insertRun({ taskText: 'T2', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6' });
+    const id1 = h.insertRun({ taskText: 'T1', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    const id2 = h.insertRun({ taskText: 'T2', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
     h.updateRun(id1, { costUsd: 0.10 });
     h.updateRun(id2, { costUsd: 0.02 });
 
@@ -318,7 +318,7 @@ describe('RunHistory', () => {
   it('insertPreApprovalSet stores correct data', () => {
     const h = createHistory();
     // Create a run to satisfy FK
-    const runId = h.insertRun({ taskText: 'Test', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+    const runId = h.insertRun({ taskText: 'Test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
     h.insertPreApprovalSet({
       id: 'set-full', taskSummary: 'Deploy',
       approvedBy: 'operator', patternsJson: '[{"tool":"bash"}]',
@@ -340,7 +340,7 @@ describe('RunHistory', () => {
       for (let i = 0; i < 5; i++) {
         const id = h.insertRun({
           taskText: 'Same task',
-          modelTier: 'opus',
+          modelTier: 'deep',
           modelId: 'claude-opus-4-6',
           contextId: '/test',
         });
@@ -348,7 +348,7 @@ describe('RunHistory', () => {
       }
       h.insertRun({
         taskText: 'Different task',
-        modelTier: 'opus',
+        modelTier: 'deep',
         modelId: 'claude-opus-4-6',
         contextId: '/test',
       });
@@ -363,7 +363,7 @@ describe('RunHistory', () => {
     it('getRepeatTasks scopes to context id', () => {
       const h = createHistory();
       for (let i = 0; i < 5; i++) {
-        h.insertRun({ taskText: 'Task', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/other' });
+        h.insertRun({ taskText: 'Task', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/other' });
       }
       const repeats = h.getRepeatTasks('/test', 3, 7);
       expect(repeats).toHaveLength(0);
@@ -373,7 +373,7 @@ describe('RunHistory', () => {
     it('getFailurePatterns groups by model and error prefix', () => {
       const h = createHistory();
       for (let i = 0; i < 3; i++) {
-        const id = h.insertRun({ taskText: `Fail ${i}`, modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/test' });
+        const id = h.insertRun({ taskText: `Fail ${i}`, modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/test' });
         h.updateRun(id, { status: 'failed', responseText: 'Rate limit exceeded' });
       }
       const failures = h.getFailurePatterns('/test', 7);
@@ -385,7 +385,7 @@ describe('RunHistory', () => {
 
     it('getFailurePatterns returns empty for no failures', () => {
       const h = createHistory();
-      const id = h.insertRun({ taskText: 'OK', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/test' });
+      const id = h.insertRun({ taskText: 'OK', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/test' });
       h.updateRun(id, { status: 'completed' });
       const failures = h.getFailurePatterns('/test', 7);
       expect(failures).toHaveLength(0);
@@ -395,7 +395,7 @@ describe('RunHistory', () => {
     it('getCacheEfficiency aggregates correctly', () => {
       const h = createHistory();
       for (let i = 0; i < 3; i++) {
-        const id = h.insertRun({ taskText: `C${i}`, modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/test' });
+        const id = h.insertRun({ taskText: `C${i}`, modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/test' });
         h.updateRun(id, { tokensIn: 1000, tokensCacheRead: 200, tokensCacheWrite: 50 });
       }
       const cache = h.getCacheEfficiency('/test', 7);
@@ -417,10 +417,10 @@ describe('RunHistory', () => {
     it('getModelEfficiency returns per-model averages', () => {
       const h = createHistory();
       for (let i = 0; i < 2; i++) {
-        const id = h.insertRun({ taskText: `O${i}`, modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/test' });
+        const id = h.insertRun({ taskText: `O${i}`, modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/test' });
         h.updateRun(id, { tokensOut: 1000, toolCallCount: 5, costUsd: 0.10, durationMs: 5000, status: 'completed' });
       }
-      const id3 = h.insertRun({ taskText: 'S1', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6', contextId: '/test' });
+      const id3 = h.insertRun({ taskText: 'S1', modelTier: 'balanced', modelId: 'claude-sonnet-4-6', contextId: '/test' });
       h.updateRun(id3, { tokensOut: 200, toolCallCount: 2, costUsd: 0.01, durationMs: 2000, status: 'completed' });
 
       const models = h.getModelEfficiency('/test', 7);
@@ -983,7 +983,7 @@ describe('RunHistory', () => {
 
     it('getToolStats aggregates tool call data', () => {
       const h = createHistory();
-      const runId = h.insertRun({ taskText: 'test', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/test/project' });
+      const runId = h.insertRun({ taskText: 'test', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/test/project' });
       h.insertToolCall({ runId, toolName: 'bash', inputJson: '{}', outputJson: 'error', durationMs: 100, sequenceOrder: 0 });
       h.insertToolCall({ runId, toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 200, sequenceOrder: 1 });
       h.insertToolCall({ runId, toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 50, sequenceOrder: 2 });
@@ -1030,7 +1030,7 @@ describe('RunHistory', () => {
       const h = createHistory();
       const runId = h.insertRun({
         taskText: 'test',
-        modelTier: 'opus',
+        modelTier: 'deep',
         modelId: 'claude-opus-4-6',
         contextId: '/proj',
       });
@@ -1054,7 +1054,7 @@ describe('RunHistory', () => {
       const h = createHistory();
       const runId = h.insertRun({
         taskText: 'test',
-        modelTier: 'opus',
+        modelTier: 'deep',
         modelId: 'claude-opus-4-6',
         contextId: '/proj',
       });
@@ -1073,7 +1073,7 @@ describe('RunHistory', () => {
       const h = createHistory();
       const runId = h.insertRun({
         taskText: 'test',
-        modelTier: 'opus',
+        modelTier: 'deep',
         modelId: 'claude-opus-4-6',
       });
 
@@ -1097,9 +1097,9 @@ describe('RunHistory', () => {
 
     it('groups runs by session_id', () => {
       const h = createHistory();
-      h.insertRun({ sessionId: 'sess-aaa', taskText: 'A1', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
-      h.insertRun({ sessionId: 'sess-aaa', taskText: 'A2', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
-      h.insertRun({ sessionId: 'sess-bbb', taskText: 'B1', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-aaa', taskText: 'A1', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-aaa', taskText: 'A2', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-bbb', taskText: 'B1', modelTier: 'balanced', modelId: 'claude-sonnet-4-6', contextId: '/proj' });
       const summaries = h.getSessionSummaries('/proj', 7);
       expect(summaries).toHaveLength(2);
       const sessA = summaries.find(s => s.session_id === 'sess-aaa');
@@ -1110,7 +1110,7 @@ describe('RunHistory', () => {
 
     it('filters by context id', () => {
       const h = createHistory();
-      h.insertRun({ sessionId: 'sess-1', taskText: 'X', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/other' });
+      h.insertRun({ sessionId: 'sess-1', taskText: 'X', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/other' });
       const summaries = h.getSessionSummaries('/proj', 7);
       expect(summaries).toHaveLength(0);
       h.close();
@@ -1118,8 +1118,8 @@ describe('RunHistory', () => {
 
     it('excludes empty session_id rows', () => {
       const h = createHistory();
-      h.insertRun({ taskText: 'Legacy', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
-      h.insertRun({ sessionId: 'sess-c', taskText: 'New', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      h.insertRun({ taskText: 'Legacy', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-c', taskText: 'New', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
       const summaries = h.getSessionSummaries('/proj', 7);
       expect(summaries).toHaveLength(1);
       expect(summaries[0]!.session_id).toBe('sess-c');
@@ -1128,9 +1128,9 @@ describe('RunHistory', () => {
 
     it('deduplicates model_ids in GROUP_CONCAT', () => {
       const h = createHistory();
-      h.insertRun({ sessionId: 'sess-d', taskText: 'D1', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
-      h.insertRun({ sessionId: 'sess-d', taskText: 'D2', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
-      h.insertRun({ sessionId: 'sess-d', taskText: 'D3', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-d', taskText: 'D1', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-d', taskText: 'D2', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      h.insertRun({ sessionId: 'sess-d', taskText: 'D3', modelTier: 'balanced', modelId: 'claude-sonnet-4-6', contextId: '/proj' });
       const summaries = h.getSessionSummaries('/proj', 7);
       expect(summaries).toHaveLength(1);
       const models = summaries[0]!.model_ids.split(',');
@@ -1155,12 +1155,12 @@ describe('RunHistory', () => {
       const h = createHistory();
       // 3 runs with hash 'aaa', 1 failed
       for (let i = 0; i < 3; i++) {
-        const id = h.insertRun({ taskText: `Task ${i}`, modelTier: 'opus', modelId: 'claude-opus-4-6', promptHash: 'aaa', contextId: '/proj' });
+        const id = h.insertRun({ taskText: `Task ${i}`, modelTier: 'deep', modelId: 'claude-opus-4-6', promptHash: 'aaa', contextId: '/proj' });
         h.updateRun(id, { tokensIn: 1000, tokensOut: 500, costUsd: 0.02, status: i === 2 ? 'failed' : 'completed', durationMs: 1000 });
       }
       // 2 runs with hash 'bbb'
       for (let i = 0; i < 2; i++) {
-        const id = h.insertRun({ taskText: `Task B${i}`, modelTier: 'opus', modelId: 'claude-opus-4-6', promptHash: 'bbb', contextId: '/proj' });
+        const id = h.insertRun({ taskText: `Task B${i}`, modelTier: 'deep', modelId: 'claude-opus-4-6', promptHash: 'bbb', contextId: '/proj' });
         h.updateRun(id, { tokensIn: 2000, tokensOut: 800, costUsd: 0.05, status: 'completed', durationMs: 2000 });
       }
       const stats = h.getPromptVariantStats('/proj', 7);
@@ -1177,9 +1177,9 @@ describe('RunHistory', () => {
 
     it('filters by context_id', () => {
       const h = createHistory();
-      const id1 = h.insertRun({ taskText: 'A', modelTier: 'opus', modelId: 'claude-opus-4-6', promptHash: 'h1', contextId: '/proj1' });
+      const id1 = h.insertRun({ taskText: 'A', modelTier: 'deep', modelId: 'claude-opus-4-6', promptHash: 'h1', contextId: '/proj1' });
       h.updateRun(id1, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, status: 'completed', durationMs: 100 });
-      const id2 = h.insertRun({ taskText: 'B', modelTier: 'opus', modelId: 'claude-opus-4-6', promptHash: 'h2', contextId: '/proj2' });
+      const id2 = h.insertRun({ taskText: 'B', modelTier: 'deep', modelId: 'claude-opus-4-6', promptHash: 'h2', contextId: '/proj2' });
       h.updateRun(id2, { tokensIn: 200, tokensOut: 100, costUsd: 0.02, status: 'completed', durationMs: 200 });
       const stats = h.getPromptVariantStats('/proj1', 7);
       expect(stats).toHaveLength(1);
@@ -1189,7 +1189,7 @@ describe('RunHistory', () => {
 
     it('excludes empty prompt_hash', () => {
       const h = createHistory();
-      const id = h.insertRun({ taskText: 'No hash', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/proj' });
+      const id = h.insertRun({ taskText: 'No hash', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/proj' });
       h.updateRun(id, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, status: 'completed', durationMs: 100 });
       const stats = h.getPromptVariantStats('/proj', 7);
       expect(stats).toHaveLength(0);
@@ -1198,7 +1198,7 @@ describe('RunHistory', () => {
 
     it('respects days parameter', () => {
       const h = createHistory();
-      const id = h.insertRun({ taskText: 'Recent', modelTier: 'opus', modelId: 'claude-opus-4-6', promptHash: 'rr', contextId: '/proj' });
+      const id = h.insertRun({ taskText: 'Recent', modelTier: 'deep', modelId: 'claude-opus-4-6', promptHash: 'rr', contextId: '/proj' });
       h.updateRun(id, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, status: 'completed', durationMs: 100 });
       // Within default 7 days, should be returned
       const stats = h.getPromptVariantStats('/proj', 7);
@@ -1212,7 +1212,7 @@ describe('RunHistory', () => {
   describe('deleteRun', () => {
     it('deletes a run and its tool calls', () => {
       const h = createHistory();
-      const id = h.insertRun({ taskText: 'Delete me', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const id = h.insertRun({ taskText: 'Delete me', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       h.insertToolCall({ runId: id, toolName: 'bash', inputJson: '{}', outputJson: 'ok', durationMs: 10, sequenceOrder: 0 });
 
       expect(h.deleteRun(id)).toBe(true);
@@ -1231,9 +1231,9 @@ describe('RunHistory', () => {
   describe('deleteRunsByContext', () => {
     it('deletes all runs for a context', () => {
       const h = createHistory();
-      h.insertRun({ taskText: 'A', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/target' });
-      h.insertRun({ taskText: 'B', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/target' });
-      h.insertRun({ taskText: 'C', modelTier: 'opus', modelId: 'claude-opus-4-6', contextId: '/other' });
+      h.insertRun({ taskText: 'A', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/target' });
+      h.insertRun({ taskText: 'B', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/target' });
+      h.insertRun({ taskText: 'C', modelTier: 'deep', modelId: 'claude-opus-4-6', contextId: '/other' });
 
       const count = h.deleteRunsByContext('/target');
       expect(count).toBe(2);
@@ -1245,9 +1245,9 @@ describe('RunHistory', () => {
   describe('deleteRunsByTenant', () => {
     it('deletes all runs for a tenant', () => {
       const h = createHistory();
-      const id1 = h.insertRun({ taskText: 'T1', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-      const id2 = h.insertRun({ taskText: 'T2', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-      h.insertRun({ taskText: 'T3', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const id1 = h.insertRun({ taskText: 'T1', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+      const id2 = h.insertRun({ taskText: 'T2', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+      h.insertRun({ taskText: 'T3', modelTier: 'deep', modelId: 'claude-opus-4-6' });
 
       // Insert tenant record for FK, then assign runs
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
@@ -1265,7 +1265,7 @@ describe('RunHistory', () => {
   describe('vacuum', () => {
     it('runs without error', () => {
       const h = createHistory();
-      h.insertRun({ taskText: 'Vacuum test', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      h.insertRun({ taskText: 'Vacuum test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       expect(() => h.vacuum()).not.toThrow();
       h.close();
     });
@@ -1282,7 +1282,7 @@ describe('RunHistory', () => {
 
     it('encrypts and decrypts task_text round-trip', () => {
       const h = createEncryptedHistory();
-      const id = h.insertRun({ taskText: 'Secret prompt here', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const id = h.insertRun({ taskText: 'Secret prompt here', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       const run = h.getRun(id);
       expect(run!.task_text).toBe('Secret prompt here');
       h.close();
@@ -1290,7 +1290,7 @@ describe('RunHistory', () => {
 
     it('encrypts and decrypts response_text round-trip', () => {
       const h = createEncryptedHistory();
-      const id = h.insertRun({ taskText: 'Test', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const id = h.insertRun({ taskText: 'Test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       h.updateRun(id, { responseText: 'Secret response data' });
       const run = h.getRun(id);
       expect(run!.response_text).toBe('Secret response data');
@@ -1299,7 +1299,7 @@ describe('RunHistory', () => {
 
     it('encrypts and decrypts tool call data round-trip', () => {
       const h = createEncryptedHistory();
-      const runId = h.insertRun({ taskText: 'T', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const runId = h.insertRun({ taskText: 'T', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       h.insertToolCall({ runId, toolName: 'bash', inputJson: '{"cmd":"secret"}', outputJson: 'secret output', durationMs: 10, sequenceOrder: 0 });
       const calls = h.getRunToolCalls(runId);
       expect(calls[0]!.input_json).toBe('{"cmd":"secret"}');
@@ -1309,7 +1309,7 @@ describe('RunHistory', () => {
 
     it('stored data is actually encrypted on disk', () => {
       const h = createEncryptedHistory();
-      const id = h.insertRun({ taskText: 'Sensitive data must not appear in DB', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const id = h.insertRun({ taskText: 'Sensitive data must not appear in DB', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       // Read raw from DB without decryption
       const raw = (h as unknown as { db: import('better-sqlite3').Database }).db
         .prepare('SELECT task_text FROM runs WHERE id = ?').get(id) as { task_text: string };
@@ -1320,7 +1320,7 @@ describe('RunHistory', () => {
 
     it('unencrypted history works without key (fallback)', () => {
       const h = createHistory(); // No encryption key
-      const id = h.insertRun({ taskText: 'Plaintext task', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      const id = h.insertRun({ taskText: 'Plaintext task', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       const run = h.getRun(id);
       expect(run!.task_text).toBe('Plaintext task');
       h.close();
@@ -1328,8 +1328,8 @@ describe('RunHistory', () => {
 
     it('search finds encrypted records', () => {
       const h = createEncryptedHistory();
-      h.insertRun({ taskText: 'Find the secret login bug', modelTier: 'opus', modelId: 'claude-opus-4-6' });
-      h.insertRun({ taskText: 'Write unit tests', modelTier: 'opus', modelId: 'claude-opus-4-6' });
+      h.insertRun({ taskText: 'Find the secret login bug', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+      h.insertRun({ taskText: 'Write unit tests', modelTier: 'deep', modelId: 'claude-opus-4-6' });
       const results = h.searchRuns('secret login');
       expect(results).toHaveLength(1);
       expect(results[0]!.task_text).toContain('secret login');
@@ -1342,7 +1342,7 @@ describe('RunHistory', () => {
   describe('kind + units (v28)', () => {
     it('defaults kind to null and units to 0 for legacy LLM rows', () => {
       const h = createHistory();
-      const id = h.insertRun({ taskText: 'Chat', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6' });
+      const id = h.insertRun({ taskText: 'Chat', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
       const run = h.getRun(id);
       expect(run!.kind).toBeNull();
       expect(run!.units).toBe(0);
@@ -1409,10 +1409,10 @@ describe('RunHistory', () => {
       const h = createHistory();
       // Two LLM runs + one voice_tts run, all inside the window.
       insertAt(h, '2026-04-10T12:00:00.000Z', {
-        taskText: 'A', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'A', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { tokensIn: 100, tokensOut: 50, costUsd: 0.10, status: 'completed' });
       insertAt(h, '2026-04-11T12:00:00.000Z', {
-        taskText: 'B', modelTier: 'haiku', modelId: 'claude-haiku-4-5',
+        taskText: 'B', modelTier: 'fast', modelId: 'claude-haiku-4-5',
       }, { tokensIn: 200, tokensOut: 30, costUsd: 0.02, status: 'completed' });
       insertAt(h, '2026-04-12T12:00:00.000Z', {
         taskText: 'Speak', modelTier: 'voice', modelId: 'voxtral-mini-tts-latest',
@@ -1443,7 +1443,7 @@ describe('RunHistory', () => {
     it('legacy rows with kind=null count as llm', () => {
       const h = createHistory();
       insertAt(h, '2026-04-05T00:00:00.000Z', {
-        taskText: 'old', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'old', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { tokensIn: 10, tokensOut: 5, costUsd: 0.01, status: 'completed' });
 
       const s = h.getUsageSummary({
@@ -1462,13 +1462,13 @@ describe('RunHistory', () => {
     it('window excludes rows outside [start, end)', () => {
       const h = createHistory();
       insertAt(h, '2026-03-31T23:59:59.000Z', {
-        taskText: 'pre',  modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'pre',  modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.99, status: 'completed' });
       insertAt(h, '2026-04-15T12:00:00.000Z', {
-        taskText: 'in',   modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'in',   modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.10, status: 'completed' });
       insertAt(h, '2026-05-01T00:00:00.000Z', {
-        taskText: 'post', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'post', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.99, status: 'completed' });
 
       const s = h.getUsageSummary({
@@ -1485,7 +1485,7 @@ describe('RunHistory', () => {
     it('zero-fills daily entries so the UI sparkline has no gaps', () => {
       const h = createHistory();
       insertAt(h, '2026-04-10T12:00:00.000Z', {
-        taskText: 'x', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'x', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.05, status: 'completed' });
 
       const s = h.getUsageSummary({
@@ -1507,15 +1507,15 @@ describe('RunHistory', () => {
       const h = createHistory();
       // completed — counts
       insertAt(h, '2026-04-10T12:00:00.000Z', {
-        taskText: 'ok', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'ok', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.10, status: 'completed' });
       // running — excluded
       insertAt(h, '2026-04-11T12:00:00.000Z', {
-        taskText: 'live', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'live', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.99 });
       // failed — excluded
       insertAt(h, '2026-04-12T12:00:00.000Z', {
-        taskText: 'bad', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'bad', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.99, status: 'failed' });
 
       const s = h.getUsageSummary({
@@ -1539,10 +1539,10 @@ describe('RunHistory', () => {
     it('used_cents equals sum(daily.cost_cents) — the chart-SSoT contract', () => {
       const h = createHistory();
       insertAt(h, '2026-04-10T12:00:00.000Z', {
-        taskText: 'a', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'a', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.07, status: 'completed' });
       insertAt(h, '2026-04-15T12:00:00.000Z', {
-        taskText: 'b', modelTier: 'haiku', modelId: 'claude-haiku-4-5',
+        taskText: 'b', modelTier: 'fast', modelId: 'claude-haiku-4-5',
       }, { costUsd: 0.05, status: 'completed' });
 
       const s = h.getUsageSummary({
@@ -1566,10 +1566,10 @@ describe('RunHistory', () => {
     it('used_cents matches by_kind sum when daily and by_kind agree', () => {
       const h = createHistory();
       insertAt(h, '2026-04-10T12:00:00.000Z', {
-        taskText: 'llm', modelTier: 'sonnet', modelId: 'claude-sonnet-4-6',
+        taskText: 'llm', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { tokensIn: 100, tokensOut: 50, costUsd: 0.10, status: 'completed' });
       insertAt(h, '2026-04-11T12:00:00.000Z', {
-        taskText: 'llm2', modelTier: 'haiku', modelId: 'claude-haiku-4-5',
+        taskText: 'llm2', modelTier: 'fast', modelId: 'claude-haiku-4-5',
       }, { tokensIn: 200, tokensOut: 30, costUsd: 0.02, status: 'completed' });
 
       const s = h.getUsageSummary({

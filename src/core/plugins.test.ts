@@ -299,7 +299,7 @@ describe('PluginManager', () => {
         api_key: 'sk-secret-key',
         api_base_url: 'https://api.example.com',
         plugins: { 'test-plugin': true },
-        default_tier: 'sonnet',
+        default_tier: 'balanced',
       };
       const pm = new PluginManager(config, log);
 
@@ -334,7 +334,7 @@ describe('PluginManager', () => {
       expect(receivedConfig).toBeDefined();
       expect(receivedConfig!.api_key).toBeUndefined();
       expect(receivedConfig!.api_base_url).toBeUndefined();
-      expect(receivedConfig!.default_tier).toBe('sonnet');
+      expect(receivedConfig!.default_tier).toBe('balanced');
     });
   });
 });

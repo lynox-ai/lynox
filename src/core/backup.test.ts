@@ -134,7 +134,7 @@ describe('BackupManager', () => {
     createTestSqlite(join(lynoxDir, 'history.db'));
     mkdirSync(join(lynoxDir, 'memory', '_global'), { recursive: true });
     writeFileSync(join(lynoxDir, 'memory', '_global', 'facts.txt'), 'User is a developer');
-    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'sonnet' }));
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
 
     manager = new BackupManager(lynoxDir, {
       backupDir,
@@ -191,7 +191,7 @@ describe('BackupManager', () => {
     expect(result.success).toBe(true);
     expect(existsSync(join(result.path, 'config.json'))).toBe(true);
     const config = JSON.parse(readFileSync(join(result.path, 'config.json'), 'utf-8')) as Record<string, unknown>;
-    expect(config['default_tier']).toBe('sonnet');
+    expect(config['default_tier']).toBe('balanced');
   });
 
   it('createBackup skips missing databases gracefully', async () => {
@@ -248,7 +248,7 @@ describe('BackupManager', () => {
     expect(backup.success).toBe(true);
 
     // Modify the source data
-    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'opus' }));
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
 
     const result = await manager.restoreBackup(backup.path);
     expect(result.success).toBe(true);
@@ -257,7 +257,7 @@ describe('BackupManager', () => {
 
     // Config should be restored to original
     const config = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
-    expect(config['default_tier']).toBe('sonnet');
+    expect(config['default_tier']).toBe('balanced');
   });
 
   it('restoreBackup fails gracefully with missing manifest', async () => {

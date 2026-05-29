@@ -16,7 +16,7 @@ describe('loadAgentDef', () => {
 export default {
   name: 'test-agent',
   version: '1.0.0',
-  defaultTier: 'sonnet',
+  defaultTier: 'balanced',
   systemPrompt: 'You are a test agent.',
   tools: [],
 };
@@ -25,7 +25,7 @@ export default {
     const def = await loadAgentDef('test-agent', agentsDir);
     expect(def.name).toBe('test-agent');
     expect(def.version).toBe('1.0.0');
-    expect(def.defaultTier).toBe('sonnet');
+    expect(def.defaultTier).toBe('balanced');
     expect(def.systemPrompt).toBe('You are a test agent.');
   });
 
@@ -55,7 +55,7 @@ export default {
 
   it('accepts agent names with hyphens and underscores', async () => {
     const agentsDir = mkdtempSync(join(tmpdir(), 'lynox-agents-'));
-    const content = `export default { name: 'my-agent_v2', version: '1.0', defaultTier: 'haiku', systemPrompt: 'x' };`;
+    const content = `export default { name: 'my-agent_v2', version: '1.0', defaultTier: 'fast', systemPrompt: 'x' };`;
     createAgentFile(agentsDir, 'my-agent_v2', content);
     const def = await loadAgentDef('my-agent_v2', agentsDir);
     expect(def.name).toBe('my-agent_v2');

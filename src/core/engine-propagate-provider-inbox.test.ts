@@ -149,7 +149,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
    */
   it('disposes the US runtime and bootstraps a fresh EU runtime on Anthropic→Mistral switch', async () => {
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
 
     // Inject a fresh "US-bound" runtime + the mail state db + a MailStateDb
@@ -213,7 +213,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
    *   would needlessly drain the queue + restart the reminder poller.
    */
   it('does NOT rebootstrap on same-region rotation (Anthropic→Anthropic)', async () => {
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
 
     const usRuntime = makeRuntime('us-runtime');
@@ -257,7 +257,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
    *   explicitly flags.
    */
   it('is a no-op when _inboxRuntime is null (feature flag off / pre-init)', async () => {
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
     // Leave _inboxRuntime + _mailStateDb at their default null.
 
@@ -296,7 +296,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
    */
   it('suspends classifier during rebootstrap drain window (privacy-residency guarantee)', async () => {
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
-    const config: LynoxConfig = { model: 'sonnet' };
+    const config: LynoxConfig = { model: 'balanced' };
     const engine = new Engine(config);
 
     const usRuntime = makeRuntime('us-runtime');

@@ -50,7 +50,7 @@ export class ThreadStore {
     `).run(
       id,
       opts?.title ?? '',
-      opts?.model_tier ?? 'sonnet',
+      opts?.model_tier ?? 'balanced',
       opts?.context_id ?? '',
     );
   }

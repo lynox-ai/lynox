@@ -451,7 +451,7 @@ export class Memory implements IMemory {
         : finalAnswer;
 
       const stream = this.client.beta.messages.stream({
-        model: getModelId('haiku', getActiveProvider()),
+        model: getModelId('fast', getActiveProvider()),
         max_tokens: 1024,
         ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
         messages: [{

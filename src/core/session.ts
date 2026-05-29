@@ -207,7 +207,7 @@ export class Session {
     this.engine = engine;
     this.sessionId = opts?.sessionId ?? randomUUID();
     // Copy config from engine — session mutates its own copy, not the shared config
-    this._model = opts?.model ?? engine.config.model ?? 'sonnet';
+    this._model = opts?.model ?? engine.config.model ?? 'balanced';
     this._effort = opts?.effort ?? engine.config.effort ?? 'medium';
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;

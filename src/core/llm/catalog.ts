@@ -54,7 +54,7 @@ export type LLMCatalog = ReadonlyArray<CatalogProviderEntry>;
 const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
   {
     id: 'claude-sonnet-4-6',
-    tier: 'sonnet',
+    tier: 'balanced',
     label: 'Sonnet 4.6',
     context_window: 200_000,
     pricing: { input: 3, output: 15 },
@@ -64,7 +64,7 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'claude-opus-4-6',
-    tier: 'opus',
+    tier: 'deep',
     label: 'Opus 4.6',
     context_window: 1_000_000,
     pricing: { input: 15, output: 75 },
@@ -74,7 +74,7 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'claude-haiku-4-5-20251001',
-    tier: 'haiku',
+    tier: 'fast',
     label: 'Haiku 4.5',
     context_window: 200_000,
     pricing: { input: 0.80, output: 4 },
@@ -87,7 +87,7 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
 const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
   {
     id: 'claude-sonnet-4-6',
-    tier: 'sonnet',
+    tier: 'balanced',
     label: 'Sonnet 4.6 (Vertex)',
     context_window: 200_000,
     pricing: { input: 3, output: 15 },
@@ -96,7 +96,7 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'claude-opus-4-6',
-    tier: 'opus',
+    tier: 'deep',
     label: 'Opus 4.6 (Vertex)',
     context_window: 1_000_000,
     pricing: { input: 15, output: 75 },
@@ -105,7 +105,7 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'claude-haiku-4-5',
-    tier: 'haiku',
+    tier: 'fast',
     label: 'Haiku 4.5 (Vertex)',
     context_window: 200_000,
     pricing: { input: 0.80, output: 4 },
@@ -128,7 +128,7 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
     id: 'mistral-large-2512',
-    tier: 'sonnet',
+    tier: 'balanced',
     label: 'Mistral Large 3',
     context_window: 256_000,
     pricing: { input: 0.50, output: 1.50 },
@@ -138,7 +138,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'magistral-medium-2509',
-    tier: 'opus',
+    tier: 'deep',
     label: 'Magistral Medium 1.2',
     context_window: 131_072,
     pricing: { input: 2, output: 5 },
@@ -148,7 +148,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'ministral-3b-2512',
-    tier: 'haiku',
+    tier: 'fast',
     label: 'Ministral 3B',
     context_window: 262_144,
     pricing: { input: 0.10, output: 0.10 },
@@ -158,13 +158,13 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   },
   {
     id: 'ministral-8b-2512',
-    tier: 'haiku',
+    tier: 'fast',
     label: 'Ministral 8B',
     context_window: 262_144,
     pricing: { input: 0.15, output: 0.15 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended haiku-tier default. 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
+    notes: 'Recommended fast-tier default. 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
   },
 ];
 

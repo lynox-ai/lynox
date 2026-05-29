@@ -28,7 +28,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 
@@ -1655,7 +1655,7 @@ export class LynoxHTTPApi {
       }
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
-        model: typeof opts['model'] === 'string' ? opts['model'] as 'opus' | 'sonnet' | 'haiku' : undefined,
+        model: typeof opts['model'] === 'string' ? normalizeTier(opts['model']) : undefined,
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
         systemPromptSuffix: WEB_UI_SYSTEM_PROMPT_SUFFIX,
       });
@@ -2809,7 +2809,7 @@ export class LynoxHTTPApi {
       // values ≤ contextWindow; show-all-grayed (Item 8) reads `features` to
       // disable settings that don't apply to the active model.
       const activeProvider = getActiveProvider();
-      const activeTier = config.default_tier ?? 'sonnet';
+      const activeTier = config.default_tier ?? 'balanced';
       const activeModelId = getModelId(activeTier, activeProvider);
       const activeCap = modelCapability(activeModelId);
       if (activeCap) {

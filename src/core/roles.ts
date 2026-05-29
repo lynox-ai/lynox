@@ -17,34 +17,35 @@ export interface RoleConfig {
 
 export const BUILTIN_ROLES: Record<string, RoleConfig> = {
   researcher: {
-    // Default model is Sonnet for all tiers — bench (2026-04) showed
-    // Sonnet + adaptive-thinking matches Opus on deep-research tasks at
-    // a fraction of the cost. Managed-Pro tenants can still override via
-    // explicit `model: 'opus'` on the spawn call; `applyTierGate` below
-    // downgrades that override to Sonnet for non-Pro tenants so Starter/
-    // Managed accounts can't burn Opus budget by accident.
-    model: 'sonnet',
+    // Default is the `balanced` tier for all accounts — bench (2026-04) showed
+    // the balanced tier + adaptive-thinking matches the `deep` tier on
+    // deep-research tasks at a fraction of the cost. Managed-Pro tenants can
+    // still override via explicit `model: 'deep'` on the spawn call;
+    // `applyTierGate` below downgrades that override to `balanced` for non-Pro
+    // tenants so Starter/Managed accounts can't burn the deep-tier budget by
+    // accident.
+    model: 'balanced',
     effort: 'max',
     autonomy: 'guided',
     denyTools: ['write_file', 'bash'],
     description: 'Thorough exploration, source citation. Read-only.',
   },
   creator: {
-    model: 'sonnet',
+    model: 'balanced',
     effort: 'high',
     autonomy: 'guided',
     denyTools: ['bash'],
     description: 'Content creation, tone adaptation. No system commands.',
   },
   operator: {
-    model: 'haiku',
+    model: 'fast',
     effort: 'high',
     autonomy: 'autonomous',
     denyTools: ['write_file'],
     description: 'Fast status checks, concise reporting. Read-only.',
   },
   collector: {
-    model: 'haiku',
+    model: 'fast',
     effort: 'medium',
     autonomy: 'supervised',
     allowTools: ['ask_user', 'memory_store', 'memory_recall'],
@@ -67,10 +68,10 @@ export type AccountTier = 'standard' | 'pro';
 /**
  * Gate an explicit model override by the caller's account tier.
  *
- * Today's only rule: Opus is a Managed-Pro-only capability. If a
- * non-Pro caller asks for `model: 'opus'`, we silently downgrade to
- * Sonnet and emit a warning on stderr — the Starter/Managed tiers
- * shouldn't burn Opus budget on a per-spawn opt-in.
+ * Today's only rule: the `deep` tier is a Managed-Pro-only capability. If a
+ * non-Pro caller asks for `model: 'deep'`, we silently downgrade to the
+ * `balanced` tier and emit a warning on stderr — the Starter/Managed tiers
+ * shouldn't burn deep-tier budget on a per-spawn opt-in.
  *
  * Keep this function the single place that knows the rule; spawn tool
  * + any other callers delegate. `requestedModel === undefined` means
@@ -81,11 +82,11 @@ export function applyTierGate(
   requestedModel: ModelTier | undefined,
   accountTier: AccountTier | undefined,
 ): ModelTier | undefined {
-  if (requestedModel === 'opus' && accountTier !== 'pro') {
+  if (requestedModel === 'deep' && accountTier !== 'pro') {
     process.stderr.write(
-      `[role-gate] opus override requires account_tier=pro — downgrading to sonnet\n`,
+      `[role-gate] deep-tier override requires account_tier=pro — downgrading to balanced\n`,
     );
-    return 'sonnet';
+    return 'balanced';
   }
   return requestedModel;
 }

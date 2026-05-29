@@ -32,26 +32,26 @@ describe('LLM_CATALOG', () => {
   it('anthropic models pin Sonnet/Opus/Haiku with provider-specific IDs', () => {
     const entry = getCatalogForProvider('anthropic')!;
     const tiers = entry.models.map((m) => m.tier).sort();
-    expect(tiers).toEqual(['haiku', 'opus', 'sonnet']);
+    expect(tiers).toEqual(['balanced', 'deep', 'fast']);
     const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
-    expect(byTier['sonnet']?.id).toBe('claude-sonnet-4-6');
-    expect(byTier['opus']?.id).toBe('claude-opus-4-6');
+    expect(byTier['balanced']?.id).toBe('claude-sonnet-4-6');
+    expect(byTier['deep']?.id).toBe('claude-opus-4-6');
     // Haiku ID has date suffix on Anthropic Direct, NOT on Vertex — pin both.
-    expect(byTier['haiku']?.id).toBe('claude-haiku-4-5-20251001');
-    expect(byTier['sonnet']?.pricing).toEqual({ input: 3, output: 15 });
-    expect(byTier['opus']?.pricing).toEqual({ input: 15, output: 75 });
-    expect(byTier['haiku']?.pricing).toEqual({ input: 0.80, output: 4 });
-    expect(byTier['sonnet']?.notes).toContain('Recommended');
+    expect(byTier['fast']?.id).toBe('claude-haiku-4-5-20251001');
+    expect(byTier['balanced']?.pricing).toEqual({ input: 3, output: 15 });
+    expect(byTier['deep']?.pricing).toEqual({ input: 15, output: 75 });
+    expect(byTier['fast']?.pricing).toEqual({ input: 0.80, output: 4 });
+    expect(byTier['balanced']?.notes).toContain('Recommended');
   });
 
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {
     const entry = getCatalogForProvider('vertex')!;
     const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
-    expect(byTier['sonnet']?.id).toBe('claude-sonnet-4-6');
-    expect(byTier['opus']?.id).toBe('claude-opus-4-6');
+    expect(byTier['balanced']?.id).toBe('claude-sonnet-4-6');
+    expect(byTier['deep']?.id).toBe('claude-opus-4-6');
     // CRITICAL: vertex haiku is 'claude-haiku-4-5', NOT 'claude-haiku-4-5-20251001'
     // (matches VERTEX_MODEL_MAP in src/types/models.ts).
-    expect(byTier['haiku']?.id).toBe('claude-haiku-4-5');
+    expect(byTier['fast']?.id).toBe('claude-haiku-4-5');
   });
 
   it('mistral preset pins dated snapshots and EU-Paris residency', () => {
@@ -75,10 +75,10 @@ describe('LLM_CATALOG', () => {
     // — kept in sync with MISTRAL_MODEL_MAP. Two ministrals share the haiku
     // tier; assert by-id rather than by-tier for unique mapping.
     const byId = Object.fromEntries(entry.models.map((m) => [m.id, m]));
-    expect(byId['ministral-3b-2512']?.tier).toBe('haiku');
-    expect(byId['ministral-8b-2512']?.tier).toBe('haiku');
-    expect(byId['mistral-large-2512']?.tier).toBe('sonnet');
-    expect(byId['magistral-medium-2509']?.tier).toBe('opus');
+    expect(byId['ministral-3b-2512']?.tier).toBe('fast');
+    expect(byId['ministral-8b-2512']?.tier).toBe('fast');
+    expect(byId['mistral-large-2512']?.tier).toBe('balanced');
+    expect(byId['magistral-medium-2509']?.tier).toBe('deep');
     // Mistral Large 3 pricing — 75% cut vs Large 2
     expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
   });

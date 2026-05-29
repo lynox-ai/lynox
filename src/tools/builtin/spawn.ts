@@ -181,7 +181,7 @@ async function executeThinker(
   parentAgent: IAgent,
   parentOnStream: StreamHandler | null,
   childDepth: number,
-): Promise<{ result: string; childRunId: string | undefined }> {
+): Promise<{ result: string; childRunId: string | undefined; model: string }> {
   // Load role if specified
   const resolved = spec.role ? getRole(spec.role) : undefined;
   if (spec.role && !resolved) {
@@ -203,11 +203,11 @@ async function executeThinker(
   }
 
   // Account-tier gate: explicit `spec.model` overrides are checked before
-  // falling through to role defaults. Today only Opus is gated — non-Pro
-  // tenants requesting Opus get a silent downgrade to Sonnet so role
-  // defaults + budget caps stay predictable.
+  // falling through to role defaults. Today only the `deep` tier is gated —
+  // non-Pro tenants requesting `deep` get a silent downgrade to `balanced` so
+  // role defaults + budget caps stay predictable.
   const gatedOverride = applyTierGate(spec.model as ModelTier | undefined, userConfig.account_tier);
-  const modelTier = (gatedOverride ?? resolved?.model ?? userConfig.default_tier ?? 'sonnet') as ModelTier;
+  const modelTier = (gatedOverride ?? resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier;
   // Profile overrides model ID + provider; otherwise use Claude tier resolution
   const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider());
   const systemPrompt = spec.system_prompt;
@@ -413,7 +413,7 @@ async function executeThinker(
       }
     }
 
-    return { result, childRunId: childAgent.currentRunId };
+    return { result, childRunId: childAgent.currentRunId, model };
   } catch (err) {
     // Mark the child run failed so the cost cap and history UI don't show
     // it as still-running. Fires for BOTH ctor failures (childAgent
@@ -461,7 +461,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               context: { type: 'string', description: 'Additional context prepended to the task.' },
               isolated_memory: { type: 'boolean', description: 'If true, agent has no access to parent memory.' },
               system_prompt: { type: 'string' },
-              model: { type: 'string', enum: ['opus', 'sonnet', 'haiku'] },
+              model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier — fast (cheap/quick), balanced (default), deep (reasoning-heavy). Provider-agnostic; resolves to a concrete model per the active provider.' },
               thinking: { type: 'object' },
               effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
               max_tokens: { type: 'number' },
@@ -495,16 +495,16 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     // Pre-spawn cost estimation. Apply the same tier gate here as the
     // per-agent resolution in runSpawn, AND honor the role's default
-    // model — otherwise Haiku-roled spawns (operator/collector) get
-    // estimated at Sonnet rates, which over-allocates against the
+    // model — otherwise fast-tier-roled spawns (operator/collector) get
+    // estimated at balanced-tier rates, which over-allocates against the
     // session ceiling and blocks cheap batches.
     const cfg = loadConfig();
     const cfgTier = cfg.default_tier;
     const totalEstimate = input.agents.reduce((sum, spec) => {
       const gated = applyTierGate(spec.model as ModelTier | undefined, cfg.account_tier);
       const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
-      const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'sonnet') as ModelTier;
-      const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['sonnet'];
+      const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'balanced') as ModelTier;
+      const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['balanced'];
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
       return sum + estimateSpawnCost(resolvedModel, iters);
     }, 0);
@@ -624,7 +624,18 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // See H-002 (OVERNIGHT-PUNCH-LIST-2026-05-25) — spawn_agent used to
         // be exempt from the wrap via the INTERNAL_TOOLS allowlist in agent.ts.
         const wrapped = wrapUntrustedData(outcome.value.result, `sub_agent:${spec.name}`);
-        sections.push(`## ${spec.name}\n\n${wrapped}`);
+        // Surface the concrete model this sub-agent actually ran on. Without
+        // this the parent only knows the *tier* it requested (e.g. "fast") and
+        // would mislabel the sub-agent's model when reporting back — on a
+        // non-Anthropic provider "fast" is NOT a Claude model. The Model-identity
+        // prompt rule tells the agent to report THIS id, not the tier.
+        // The id can originate from user config (`profile.model_id`) and lands
+        // in the header OUTSIDE the untrusted-data envelope, so sanitize it to
+        // the conventional model-id charset to prevent markdown / boundary-tag
+        // injection into the parent context (defense-in-depth; same pattern as
+        // `modelIdentityContext`'s safeId).
+        const safeModel = String(outcome.value.model).replace(/[^a-zA-Z0-9._:@-]/g, '').slice(0, 64);
+        sections.push(`## ${spec.name} (ran on \`${safeModel}\`)\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error

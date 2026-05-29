@@ -145,6 +145,11 @@ describe('spawn_agent tool', () => {
 
     expect(result).toContain('## worker');
     expect(result).toContain('sub-agent result');
+    // B2: the section header surfaces the concrete resolved model (not the
+    // requested tier) so the parent can report truthfully which model ran.
+    // No role → default 'balanced' tier → claude-sonnet-4-6 on the test default
+    // (anthropic) provider.
+    expect(result).toContain('ran on `claude-sonnet-4-6`');
   });
 
   it('publishes spawnStart and spawnEnd events', async () => {
@@ -387,7 +392,7 @@ describe('spawn_agent tool', () => {
   it('applies role model and tool scoping', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({
-      model: 'sonnet',
+      model: 'balanced',
       effort: 'high',
       autonomy: 'guided',
       denyTools: ['write_file', 'bash'],
@@ -413,7 +418,7 @@ describe('spawn_agent tool', () => {
   it('explicit spec fields override role defaults', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({
-      model: 'sonnet',
+      model: 'balanced',
       effort: 'high',
       autonomy: 'guided',
       description: 'Research role',
@@ -421,7 +426,7 @@ describe('spawn_agent tool', () => {
 
     const agent = makeAgent();
     await spawnAgentTool.handler(
-      { agents: [{ name: 'r1', task: 'Research', role: 'researcher', model: 'opus', system_prompt: 'Custom prompt.', effort: 'max' }] },
+      { agents: [{ name: 'r1', task: 'Research', role: 'researcher', model: 'deep', system_prompt: 'Custom prompt.', effort: 'max' }] },
       agent,
     );
 
@@ -446,7 +451,7 @@ describe('spawn_agent tool', () => {
   it('role allowTools whitelist filters parent tools', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({
-      model: 'haiku',
+      model: 'fast',
       effort: 'medium',
       autonomy: 'supervised',
       allowTools: ['read_file'],
@@ -467,7 +472,7 @@ describe('spawn_agent tool', () => {
   it('spec.tools overrides role tool scoping', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({
-      model: 'opus',
+      model: 'deep',
       effort: 'max',
       autonomy: 'guided',
       denyTools: ['write_file', 'bash'],
@@ -519,7 +524,7 @@ describe('spawn_agent tool', () => {
   it('3-tier resolution: spec > role > defaults', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({
-      model: 'opus',
+      model: 'deep',
       effort: 'high',
       autonomy: 'guided',
       description: 'Strategy role',
@@ -640,7 +645,7 @@ describe('spawn_agent tool', () => {
       const agents = Array.from({ length: 10 }, (_, i) => ({
         name: `agent-${i}`,
         task: 'Think hard',
-        model: 'opus' as const,
+        model: 'deep' as const,
         max_turns: 50,
       }));
       await expect(
@@ -659,7 +664,7 @@ describe('spawn_agent tool', () => {
       const agents = Array.from({ length: 10 }, (_, i) => ({
         name: `w${i}`,
         task: 'Think more',
-        model: 'opus' as const,
+        model: 'deep' as const,
         max_turns: 50,
       }));
       await expect(

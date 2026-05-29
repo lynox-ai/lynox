@@ -30,7 +30,7 @@ describe('PatternEngine', () => {
     const runId = rh.insertRun({
       sessionId: opts.sessionId ?? 'test-session',
       taskText: 'test task',
-      modelTier: 'sonnet',
+      modelTier: 'balanced',
       modelId: 'claude-sonnet',
     });
     rh.updateRun(runId, {

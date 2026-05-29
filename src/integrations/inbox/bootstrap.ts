@@ -94,7 +94,7 @@ export interface BootstrapInboxOptions {
   budget?: InboxCostBudgetOptions | undefined;
   /** Override queue concurrency / timeout policy. */
   policy?: InboxRunnerPolicy | undefined;
-  /** Pin a specific Haiku variant — defaults to `getModelId('haiku')`. */
+  /** Pin a specific Haiku variant — defaults to `getModelId('fast')`. */
   modelIdOverride?: string | undefined;
   /** Single-tenant scope; defaults to InboxStateDb's `'default'` sentinel. */
   tenantId?: string | undefined;
@@ -233,7 +233,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   } else {
     llm = wrapAnthropicAsLLMCaller(
       opts.anthropicClient as unknown as AnthropicLike,
-      opts.modelIdOverride ?? getModelId('haiku'),
+      opts.modelIdOverride ?? getModelId('fast'),
       { onUsage },
     );
   }

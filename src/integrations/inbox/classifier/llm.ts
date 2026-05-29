@@ -5,7 +5,7 @@
 //
 //   - wrapAnthropicAsLLMCaller(client, modelId): pure, testable with stubs
 //   - createHaikuLLMCaller(opts): convenience that builds a real client via
-//     `core/llm-client.ts` and the project's `getModelId('haiku')` mapping
+//     `core/llm-client.ts` and the project's `getModelId('fast')` mapping
 //
 // The classifier itself stays decoupled from the SDK — tests inject the
 // caller directly (see classifier/index.test.ts).
@@ -108,7 +108,7 @@ export interface HaikuCallerOptions extends LLMClientOptions, WrapOptions {
 export function createHaikuLLMCaller(opts: HaikuCallerOptions = {}): LLMCaller {
   const provider: LLMProvider = opts.provider ?? 'anthropic';
   const client = createLLMClient(opts);
-  const modelId = opts.modelId ?? getModelId('haiku', provider);
+  const modelId = opts.modelId ?? getModelId('fast', provider);
   const wrapOpts: WrapOptions = {};
   if (opts.maxTokens !== undefined) wrapOpts.maxTokens = opts.maxTokens;
   if (opts.onUsage !== undefined) wrapOpts.onUsage = opts.onUsage;

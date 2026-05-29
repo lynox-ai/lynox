@@ -1,5 +1,5 @@
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
-import { getBetasForProvider, getModelId } from '../types/index.js';
+import { getBetasForProvider, getModelId, normalizeTier } from '../types/index.js';
 import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
@@ -18,13 +18,13 @@ Rules:
 - Prefer fewer, broader steps over many tiny ones (3-8 steps ideal)
 - Each step's task should be specific enough that a sub-agent can execute it without additional context
 
-IMPORTANT — you MUST set the "model" field on EVERY step. Choose the cheapest model that can handle the task:
-- "haiku" (Haiku, ~$0.005/step): Read-only tasks, data extraction, validation, simple transformations, status checks where the result is returned as text output. USE THIS BY DEFAULT for tasks that do NOT write files.
-- "sonnet" (Sonnet, ~$0.08/step): Any task that must write files with specific names, analysis, code review, multi-step reasoning, report writing. Use whenever the step produces file artifacts for downstream steps.
-- "opus" (Opus, ~$1.20/step): Complex architecture decisions, ambiguous requirements, large-scale refactoring. Use sparingly.
+IMPORTANT — you MUST set the "model" field on EVERY step. The tiers are provider-agnostic capability bands; choose the cheapest tier that can handle the task:
+- "fast" (~$0.005/step): Read-only tasks, data extraction, validation, simple transformations, status checks where the result is returned as text output. USE THIS BY DEFAULT for tasks that do NOT write files.
+- "balanced" (~$0.08/step): Any task that must write files with specific names, analysis, code review, multi-step reasoning, report writing. Use whenever the step produces file artifacts for downstream steps.
+- "deep" (~$1.20/step): Complex architecture decisions, ambiguous requirements, large-scale refactoring. Use sparingly.
 
-IMPORTANT: If a step must write files with exact filenames (e.g. for downstream steps to read), use "sonnet" — Haiku may ignore exact filename instructions.
-Cost optimization is critical — always prefer the cheapest model that can reliably complete the step.`;
+IMPORTANT: If a step must write files with exact filenames (e.g. for downstream steps to read), use "balanced" — the fast tier may ignore exact filename instructions.
+Cost optimization is critical — always prefer the cheapest tier that can reliably complete the step.`;
 
 const PROPOSE_DAG_TOOL = {
   name: 'propose_dag',
@@ -39,7 +39,7 @@ const PROPOSE_DAG_TOOL = {
           properties: {
             id: { type: 'string' as const, description: 'Unique step ID (e.g. "analyze", "implement", "test")' },
             task: { type: 'string' as const, description: 'Task description for the sub-agent' },
-            model: { type: 'string' as const, enum: ['opus', 'sonnet', 'haiku'], description: 'Model tier (default: sonnet)' },
+            model: { type: 'string' as const, enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (default: balanced)' },
             input_from: { type: 'array' as const, items: { type: 'string' as const }, description: 'Step IDs whose output this step depends on' },
           },
           required: ['id', 'task'],
@@ -73,7 +73,7 @@ export async function planDAG(
       openaiModelId: options?.openaiModelId,
     });
 
-    const model = options?.model ?? getModelId('haiku', getActiveProvider());
+    const model = options?.model ?? getModelId('fast', getActiveProvider());
     const maxSteps = options?.maxSteps ?? 15;
 
     let systemText = PLANNING_SYSTEM;
@@ -123,8 +123,12 @@ export async function planDAG(
           task: s['task'],
         };
 
-        if (typeof s['model'] === 'string' && ['opus', 'sonnet', 'haiku'].includes(s['model'])) {
-          step.model = s['model'] as InlinePipelineStep['model'];
+        if (typeof s['model'] === 'string') {
+          // normalizeTier accepts both the current names and the legacy
+          // Anthropic-brand names, so an LLM that emits an old tier name still
+          // resolves correctly.
+          const tier = normalizeTier(s['model']);
+          if (tier) step.model = tier;
         }
 
         if (Array.isArray(s['input_from']) && s['input_from'].every((x: unknown) => typeof x === 'string')) {
@@ -152,9 +156,9 @@ export async function planDAG(
 
 // Simple per-step cost lookup based on typical model pricing
 const COST_PER_STEP: Record<string, number> = {
-  opus: 1.20,
-  sonnet: 0.08,
-  haiku: 0.005,
+  deep: 1.20,
+  balanced: 0.08,
+  fast: 0.005,
 };
 
 /**
@@ -167,8 +171,8 @@ export function estimatePipelineCost(
   historicalAvgByTier?: Record<string, number>,
 ): PipelineCostEstimate {
   const stepEstimates: StepCostEstimate[] = steps.map(step => {
-    const model = resolveModel(step.model, 'sonnet');
-    const tier = step.model ?? 'sonnet';
+    const model = resolveModel(step.model, 'balanced');
+    const tier = step.model ?? 'balanced';
     const estimatedCostUsd = historicalAvgByTier?.[tier] ?? COST_PER_STEP[tier] ?? 0.08;
     return {
       stepId: step.id,

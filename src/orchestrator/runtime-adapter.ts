@@ -1,6 +1,6 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { MODEL_MAP, getModelId, clampTier } from '../types/index.js';
+import { MODEL_MAP, getModelId, clampTier, normalizeTier } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
@@ -173,8 +173,14 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
     const clamped = clampTier(defaultTier, maxTier);
     return getModelId(clamped, provider);
   }
-  if (stepModel in MODEL_MAP) {
-    const clamped = clampTier(stepModel as ModelTier, maxTier);
+  // Accept a tier name in either the current (fast/balanced/deep) or the legacy
+  // Anthropic-brand (haiku/sonnet/opus) form — manifests + inline pipelines
+  // persisted before the 2026-05-29 rename store the old names. A genuine
+  // model id (normalizeTier → undefined) passes through unchanged so callers
+  // can still pin an explicit id like `claude-opus-4-7`.
+  const tier = normalizeTier(stepModel);
+  if (tier) {
+    const clamped = clampTier(tier, maxTier);
     return getModelId(clamped, provider);
   }
   return stepModel;
@@ -324,10 +330,13 @@ export async function spawnInline(
     throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
-  // 4-tier resolution: step > role > user config > defaults, clamped by max_tier
+  // 4-tier resolution: step > role > user config > defaults, clamped by max_tier.
+  // normalizeTier canonicalizes a legacy-brand tier name on step.model (pre-rename
+  // manifests) so the cost-guard tier bucket below is correct; a genuine model id
+  // (normalizeTier → undefined) falls through to step.model as before.
   const configTier = config.default_tier;
-  const modelTier = (step.model ?? resolved?.model ?? configTier ?? 'sonnet') as ModelTier;
-  const model = resolveModel(modelTier, 'sonnet', config.max_tier);
+  const modelTier = (normalizeTier(step.model) ?? step.model ?? resolved?.model ?? configTier ?? 'balanced') as ModelTier;
+  const model = resolveModel(modelTier, 'balanced', config.max_tier);
   const systemPrompt = 'You are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.';
   // Use minimal tool set for inline steps unless role specifies custom tools
   const roleProfile = resolved
@@ -386,7 +395,7 @@ export async function spawnInline(
     autonomy,
     toolContext: parentToolContext,
     maxIterations: maxIter,
-    costGuard: { maxBudgetUSD: modelTier === 'opus' ? 10 : 2, maxIterations: maxIter },
+    costGuard: { maxBudgetUSD: modelTier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,

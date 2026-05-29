@@ -42,7 +42,7 @@ Only **anthropic** and **openai with the Mistral endpoint** are exercised on eve
 
 ```json
 {
-  "default_tier": "sonnet",
+  "default_tier": "balanced",
   "thinking_mode": "adaptive",
   "effort_level": "high"
 }
@@ -50,9 +50,11 @@ Only **anthropic** and **openai with the Mistral endpoint** are exercised on eve
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `default_tier` | `opus`, `sonnet`, `haiku` | `sonnet` |
+| `default_tier` | `fast`, `balanced`, `deep` | `balanced` |
 | `thinking_mode` | `adaptive`, `disabled` | `adaptive` |
 | `effort_level` | `low`, `medium`, `high`, `max` | `high` |
+
+The tiers are provider-agnostic capability bands (`fast` = cheapest/quickest, `balanced` = default workhorse, `deep` = reasoning-heavy); each resolves to a concrete model for your active provider. The legacy Anthropic-brand names (`haiku`/`sonnet`/`opus`) are still accepted and normalized automatically, so existing configs keep working.
 
 - **opus** — Most capable, higher cost
 - **sonnet** — Balanced (recommended)
