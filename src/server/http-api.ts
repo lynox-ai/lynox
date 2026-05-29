@@ -4995,6 +4995,10 @@ export class LynoxHTTPApi {
             seq: m.seq,
             role: m.role,
             content: JSON.parse(m.content_json) as unknown,
+            // Preserve the B-full display-only flag so failed-turn notes stay
+            // display-only after a migration instead of re-entering the model's
+            // context on the destination engine.
+            display_only: m.display_only,
             created_at: m.created_at,
           })),
         }));

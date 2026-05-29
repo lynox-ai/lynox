@@ -19,6 +19,13 @@ function makeMockThreadStore(opts?: {
       if (opts?.getCountThrows) throw new Error('SQLite locked');
       return count;
     }),
+    // No display-only rows in these fixtures, so the API count tracks the
+    // total count exactly — mirrors the production invariant that the two
+    // diverge only after a failed turn has persisted a display note.
+    getApiMessageCount: vi.fn().mockImplementation((): number => {
+      if (opts?.getCountThrows) throw new Error('SQLite locked');
+      return count;
+    }),
     appendMessages: vi.fn().mockImplementation((_tid: string, msgs: BetaMessageParam[], _start: number, updates?: { message_count?: number }) => {
       if (opts?.appendThrows) throw new Error('SQLite full');
       count += msgs.length;
@@ -103,7 +110,7 @@ describe('persistAgentMessages', () => {
     expect(result).toEqual({ kind: 'shrink-skip', bufferLength: 1, floorLength: 10 });
     expect(store.appendMessages).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0]![0]).toContain('shorter than persisted floor');
+    expect(warnSpy.mock.calls[0]![0]).toContain('shorter than persisted API floor');
     expect(warnSpy.mock.calls[0]![0]).toContain('s1');
   });
 

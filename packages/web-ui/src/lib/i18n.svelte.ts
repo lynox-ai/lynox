@@ -584,6 +584,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_offline': { de: 'Keine Internetverbindung. Stelle die Verbindung wieder her und versuche es nochmal.', en: 'No internet connection. Reconnect and try again.' },
 	'chat.error_copy_detail': { de: 'Fehlerdetails kopieren', en: 'Copy error details' },
 	'chat.error_toast_prefix': { de: 'Diese Antwort ist fehlgeschlagen', en: 'This response failed' },
+	// B-full failure note (display-only, persisted): rendered from a structured
+	// engine code so it's localized here instead of being baked into the engine
+	// as English prose. `title` is shared; the per-code line explains the cause.
+	'chat.note.title': { de: 'Diese Runde konnte nicht abgeschlossen werden', en: 'This turn could not be completed' },
+	'chat.note.provider_error': { de: 'Der KI-Anbieter hat einen Fehler zurückgegeben. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'The AI provider returned an error. Send your message again to retry.' },
+	'chat.note.generic': { de: 'Ein Fehler hat diese Runde unterbrochen. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'An error interrupted this turn. Send your message again to retry.' },
+	'chat.run_blocked': { de: 'Anfrage blockiert', en: 'Request blocked' },
 	// Mistral thinking-flag guard: surfaced when a customer requests `thinking: enabled`
 	// on a non-reasoning Mistral model (e.g. Mistral Large 3 — only Magistral has native reasoning).
 	'chat.warning.thinking_disabled.title': { de: 'Thinking deaktiviert', en: 'Thinking disabled' },

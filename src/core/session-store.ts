@@ -83,8 +83,11 @@ export class SessionStore {
       const thread = threadStore?.getThread(sessionId);
 
       if (thread) {
-        // Resume: load messages from persisted thread
-        const messageRecords = threadStore!.getMessages(sessionId);
+        // Resume: load messages from persisted thread. `apiOnly` excludes
+        // B-full display-only rows (failed-turn notes + the failed user
+        // message) so they never re-enter the model's API context — they
+        // exist purely for the render history.
+        const messageRecords = threadStore!.getMessages(sessionId, { apiOnly: true });
         const messages: BetaMessageParam[] = messageRecords.map(r => ({
           role: r.role as 'user' | 'assistant',
           content: JSON.parse(r.content_json) as BetaMessageParam['content'],

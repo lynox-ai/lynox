@@ -720,6 +720,18 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);
    CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
    CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);`,
+
+  // v32: Display-only thread messages (B-full). A failed turn (provider
+  // error, fail-closed managed-credit block) must persist for DISPLAY so it
+  // survives a reload, but must NOT linger in the model's context — B-light's
+  // interim synthetic assistant note did both because thread_messages was the
+  // single source for both render history AND the API message array. This
+  // flag splits them: rows with display_only=1 are projected to the UI but
+  // excluded from the API-context hydration (session-store) and from the
+  // usage-stamp target. Default 0 = ordinary API message (pre-v32 rows + every
+  // normal turn), so existing threads are unchanged.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (32);
+   ALTER TABLE thread_messages ADD COLUMN display_only INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export class RunHistory {

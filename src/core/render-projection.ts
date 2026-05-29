@@ -37,6 +37,15 @@ export interface RenderedUsage {
   model?: string;
 }
 
+/** Structured failure-note marker (B-full). The engine persists this as the
+ *  content of a display-only assistant row instead of an English prose note,
+ *  so the UI can render a localized message keyed by `code`. `detail` is a
+ *  sanitized provider-error snippet (may be empty/absent). */
+export interface DisplayNoteMarker {
+  code: string;
+  detail?: string;
+}
+
 export interface RenderedMessage {
   seq: number;
   role: 'user' | 'assistant';
@@ -44,7 +53,49 @@ export interface RenderedMessage {
   blocks?: RenderedContentBlock[];
   toolCalls?: RenderedToolCall[];
   usage?: RenderedUsage;
+  /** Set when this row is a B-full failure note — the client renders a
+   *  localized banner from `note.code` instead of `content`. */
+  note?: DisplayNoteMarker;
   created_at: string;
+}
+
+const NOTE_KEY = '_lynox_note';
+
+/** Build the content payload for a display-only failure note. Persisted via
+ *  `ThreadStore.appendDisplayNotes`; recognized on read by `parseDisplayNote`. */
+export function buildDisplayNoteContent(code: string, detail?: string): Record<string, DisplayNoteMarker> {
+  const marker: DisplayNoteMarker = detail !== undefined && detail !== '' ? { code, detail } : { code };
+  return { [NOTE_KEY]: marker };
+}
+
+/** Strip control chars + cap length for a failure-note detail embedded from a
+ *  provider error body, which can echo attacker-influenced bytes (e.g. a
+ *  fetched URL reflected in a 4xx). Done char-by-char to avoid a control-char
+ *  regex literal. */
+export function sanitizeNoteDetail(s: string): string {
+  let out = '';
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0;
+    out += c < 0x20 || c === 0x7f ? ' ' : ch;
+  }
+  return out.slice(0, 300);
+}
+
+function parseDisplayNote(raw: string): DisplayNoteMarker | null {
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (v && typeof v === 'object' && !Array.isArray(v) && NOTE_KEY in v) {
+      const m = (v as Record<string, unknown>)[NOTE_KEY];
+      if (m && typeof m === 'object') {
+        const code = (m as Record<string, unknown>)['code'];
+        const detail = (m as Record<string, unknown>)['detail'];
+        if (typeof code === 'string') {
+          return typeof detail === 'string' ? { code, detail } : { code };
+        }
+      }
+    }
+  } catch { /* not JSON / not a note */ }
+  return null;
 }
 
 interface RawContentBlock {
@@ -181,6 +232,14 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     }
 
     // role === 'assistant'
+    // B-full failure note: a display-only assistant row whose content is a
+    // structured marker. Emit it as `note` (localized client-side) rather than
+    // running it through the normal text/block projection.
+    const note = parseDisplayNote(r.content_json);
+    if (note) {
+      out.push({ seq: r.seq, role: 'assistant', content: '', note, created_at: r.created_at });
+      continue;
+    }
     const usage = parseUsage(r.usage_json);
     if (typeof content === 'string') {
       const msg: RenderedMessage = {

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { LynoxError } from './errors.js';
+import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
+import type { DisplayNoteInput } from './thread-store.js';
 import type {
   LynoxUserConfig,
   ToolEntry,
@@ -390,7 +392,17 @@ export class Session {
         try {
           await hook.onBeforeRun(preRunContext.runId, preRunContext);
         } catch (err: unknown) {
-          return `Run blocked: ${err instanceof Error ? err.message : String(err)}`;
+          const reason = err instanceof Error ? err.message : String(err);
+          // Surface the block as a `warning` SSE event so the web-UI shows a
+          // distinct, localized banner/toast instead of letting the reason
+          // string slip through as a `done.result` that the chat used to
+          // render as total silence (rafael 2026-05-29, first-session
+          // fail-closed credit check). The returned string is still the
+          // single source for non-SSE callers (CLI) and the `done.result`
+          // inline render fallback. `warning` (not `error`) keeps the failed
+          // user turn intact — the block is transient (credit re-syncs).
+          await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
+          return `Run blocked: ${reason}`;
         }
       }
     }
@@ -606,12 +618,17 @@ export class Session {
       if (threadStore) {
         try {
           const allMessages = this.saveMessages();
-          const existingCount = threadStore.getMessageCount(this.sessionId);
-          const newMessages = allMessages.slice(existingCount);
+          // Slice against the API-row count (display-only B-full notes aren't
+          // in agent.messages); start new seqs at the total row count so they
+          // sort after any interleaved display note. Identical until a failed
+          // turn has persisted a note. See eager-persist.ts for the rationale.
+          const apiCount = threadStore.getApiMessageCount(this.sessionId);
+          const totalCount = threadStore.getMessageCount(this.sessionId);
+          const newMessages = allMessages.slice(apiCount);
           if (newMessages.length > 0) {
             // Combined append + rollup in one transaction (P1).
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
-              message_count: allMessages.length,
+            threadStore.appendMessages(this.sessionId, newMessages, totalCount, {
+              message_count: totalCount + newMessages.length,
               total_tokens: this.usage.input_tokens + this.usage.output_tokens,
               total_cost_usd: costUsd,
             });
@@ -703,22 +720,33 @@ export class Session {
         }
       }
 
-      // Persist messages to thread even on failure (preserve partial progress).
-      // Uses the same combined-transaction shape as the success path (P1)
-      // when there's a delta to flush — one fsync instead of two. When eager
-      // already drained the delta, do a standalone message_count refresh.
+      // B-full: persist the failed turn as DISPLAY-ONLY so it survives reload
+      // ("null Mitteilung" fix) WITHOUT lingering in the model's API context.
+      // The agent already rolled its in-memory context back to before the
+      // failed turn; here we (1) flip any rows this run eager-persisted to
+      // display-only so the disk matches that rollback, (2) ensure the failed
+      // user message survives in display history, and (3) append a structured,
+      // localizable failure note. None of these re-enter the prompt because the
+      // resume hydration filters display_only=1 (session-store.ts).
       if (threadStore) {
         try {
-          const allMessages = this.saveMessages();
-          const existingCount = threadStore.getMessageCount(this.sessionId);
-          const newMessages = allMessages.slice(existingCount);
-          if (newMessages.length > 0) {
-            threadStore.appendMessages(this.sessionId, newMessages, existingCount, {
-              message_count: allMessages.length,
-            });
-          } else {
-            threadStore.updateThread(this.sessionId, { message_count: allMessages.length });
+          const footprint = threadStore.markDisplayOnlyFrom(this.sessionId, startMessageCount);
+          const notes: DisplayNoteInput[] = [];
+          // Common case (first-response provider error): nothing was persisted,
+          // and the agent dropped the user message on rollback — so it lives
+          // only in `task` now. Persist it as a display row. If the run had
+          // eager-persisted the user message, it's already in display history
+          // (just flipped above) — don't duplicate it.
+          if (!footprint.hadUserMessage) {
+            notes.push({ role: 'user', content: task });
           }
+          notes.push({
+            role: 'assistant',
+            content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(err))),
+          });
+          const totalCount = threadStore.getMessageCount(this.sessionId);
+          threadStore.appendDisplayNotes(this.sessionId, notes, totalCount);
+          threadStore.updateThread(this.sessionId, { message_count: totalCount + notes.length });
         } catch { /* fire-and-forget */ }
       }
 

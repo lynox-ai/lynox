@@ -36,6 +36,7 @@ function freshDb(): Database.Database {
       role TEXT NOT NULL,
       content_json TEXT NOT NULL,
       usage_json TEXT,
+      display_only INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
@@ -144,5 +145,74 @@ describe('ThreadStore.setMessageUsage', () => {
     store.appendMessages('t1', [makeMessage('user', 'hi')], 0, { message_count: 1 });
     store.setMessageUsage('t1', JSON.stringify({ tokensIn: 5 }));
     expect(store.getMessages('t1')[0]?.usage_json).toBeNull();
+  });
+
+  it('targets the highest-seq NON-display assistant row (skips a B-full note)', () => {
+    store.appendMessages('t1', [makeMessage('user', 'q'), makeMessage('assistant', 'real reply')], 0, { message_count: 2 });
+    // A failed follow-up turn left a display-only assistant note at a higher seq.
+    store.appendDisplayNotes('t1', [{ role: 'assistant', content: { _lynox_note: { code: 'provider_error' } } }], 2);
+    const usage = JSON.stringify({ tokensIn: 42 });
+    store.setMessageUsage('t1', usage);
+    const rows = store.getMessages('t1');
+    expect(rows[1]?.usage_json).toBe(usage); // the real reply (seq 1) is stamped
+    expect(rows[2]?.usage_json).toBeNull();  // the display note (seq 2) is NOT
+  });
+});
+
+describe('ThreadStore B-full display-only rows', () => {
+  let db: Database.Database;
+  let store: ThreadStore;
+
+  beforeEach(() => {
+    db = freshDb();
+    store = new ThreadStore(db);
+    store.createThread('t1');
+    // A completed turn: user + assistant (both API rows, display_only=0).
+    store.appendMessages('t1', [makeMessage('user', 'hello'), makeMessage('assistant', 'hi there')], 0, { message_count: 2 });
+  });
+
+  it('appendDisplayNotes persists rows with display_only=1', () => {
+    store.appendDisplayNotes('t1', [
+      { role: 'user', content: 'failed question' },
+      { role: 'assistant', content: { _lynox_note: { code: 'provider_error', detail: '401' } } },
+    ], 2);
+    const rows = store.getMessages('t1');
+    expect(rows).toHaveLength(4);
+    expect(rows[2]?.display_only).toBe(1);
+    expect(rows[3]?.display_only).toBe(1);
+    expect(rows[0]?.display_only).toBe(0);
+  });
+
+  it('getMessages({apiOnly}) excludes display-only rows; default includes them', () => {
+    store.appendDisplayNotes('t1', [{ role: 'assistant', content: { _lynox_note: { code: 'provider_error' } } }], 2);
+    expect(store.getMessages('t1')).toHaveLength(3);                  // render path: full history
+    expect(store.getMessages('t1', { apiOnly: true })).toHaveLength(2); // API context: notes filtered
+  });
+
+  it('getApiMessageCount tracks non-display rows; getMessageCount tracks all', () => {
+    store.appendDisplayNotes('t1', [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: { _lynox_note: { code: 'provider_error' } } },
+    ], 2);
+    expect(store.getApiMessageCount('t1')).toBe(2); // unchanged by the notes
+    expect(store.getMessageCount('t1')).toBe(4);    // includes both notes
+  });
+
+  it('markDisplayOnlyFrom flips a failed run footprint and reports the user message', () => {
+    // A second turn eager-persisted its user + partial assistant, then failed.
+    store.appendMessages('t1', [
+      makeMessage('user', 'second q'), makeMessage('assistant', 'partial'),
+    ], 2, { message_count: 4 }); // appends seq 2,3 (the second turn)
+    const res = store.markDisplayOnlyFrom('t1', 2);
+    expect(res).toEqual({ marked: 2, hadUserMessage: true });
+    expect(store.getApiMessageCount('t1')).toBe(2);          // only the first turn remains API
+    expect(store.getMessages('t1', { apiOnly: true })).toHaveLength(2);
+    expect(store.getMessages('t1')).toHaveLength(4);         // all still render
+  });
+
+  it('markDisplayOnlyFrom on an empty footprint is a no-op', () => {
+    const res = store.markDisplayOnlyFrom('t1', 2); // nothing persisted at seq>=2
+    expect(res).toEqual({ marked: 0, hadUserMessage: false });
+    expect(store.getApiMessageCount('t1')).toBe(2);
   });
 });

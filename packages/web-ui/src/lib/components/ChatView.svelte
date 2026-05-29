@@ -1626,20 +1626,27 @@
 	// `tool-call-details`, but the new interleaved-block rendering doesn't
 	// emit that class anywhere — the toggle never had anything to expand.
 
-	function formatUsage(u: UsageInfo): string {
+	// `includeCost` gates ONLY the dollar figures (LLM + third-party API). The
+	// token/model/cache metrics always render — they're free of pricing and
+	// carry the provider/tier verification self-hosters + BYOK users rely on.
+	// Demo tenants pass includeCost=false so the public playground shows
+	// metrics (not a black box) without surfacing prices. Real tenants
+	// (self-host, BYOK, Managed) always see cost — keeping AI spend
+	// transparent rather than hidden. (rafael 2026-05-29)
+	function formatUsage(u: UsageInfo, includeCost: boolean): string {
 		const totalIn = u.tokensIn;
 		const cachePct = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
-		const parts = [
-			`${(totalIn + u.tokensOut).toLocaleString()} tokens`,
-			fmtCost(u.costUsd),
-		];
-		if (cachePct > 0) parts.push(`${cachePct}% cache`);
-		// Phase E: surface third-party API cost (DataForSEO etc.) next to the LLM
-		// cost when the message hit any profiled API. Threshold of >$0.001 keeps
-		// the row clean when nothing meaningful happened.
-		if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
-			parts.push(`API: ${fmtCost(u.apiCostUsd)}`);
+		const parts = [`${(totalIn + u.tokensOut).toLocaleString()} tokens`];
+		if (includeCost) {
+			parts.push(fmtCost(u.costUsd));
+			// Phase E: surface third-party API cost (DataForSEO etc.) next to the
+			// LLM cost when the message hit any profiled API. Threshold of >$0.001
+			// keeps the row clean when nothing meaningful happened.
+			if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
+				parts.push(`API: ${fmtCost(u.apiCostUsd)}`);
+			}
 		}
+		if (cachePct > 0) parts.push(`${cachePct}% cache`);
 		// rafael QA 2026-05-18: surface the actual dispatched model id so the
 		// user can verify their provider choice actually applies (and so
 		// auto-downgrade is observable rather than hidden behind an
@@ -1709,8 +1716,8 @@
 	     them in the thumb sweep zone for right-handed mobile users — the
 	     stats column is read-only, the icons are the actual touch targets. -->
 	<div class="flex items-center gap-2 mt-2">
-		{#if usage && !isStreaming && !getDemoMode()}
-			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage)}</span>
+		{#if usage && !isStreaming}
+			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage, !getDemoMode())}</span>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
 			{@render speakButton(msgKey, msgContent)}
@@ -1955,6 +1962,24 @@
 					<div class="flex items-start gap-2 text-[13px] md:text-[11px] border-l-2 border-accent/30 pl-3 py-1 md:py-0.5" role="status">
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 text-accent/60 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M6 12h12M9 17h6" /></svg>
 						<span class="text-text-subtle">{t('context.compacted_marker')}</span>
+					</div>
+				{:else if msg.note}
+					<!-- B-full failure note (display-only, survives reload). Localized
+					     from the engine's structured code; the raw provider detail is
+					     a small monospace line so the user can debug without it
+					     dominating the transcript. This row never enters the model's
+					     API context (filtered at resume hydration). -->
+					{@const noteKey = `chat.note.${msg.note.code}`}
+					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
+					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 border-danger/40 pl-3 py-1 my-1" role="status">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-danger/70 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+						<div class="min-w-0">
+							<div class="text-text-muted">{t('chat.note.title')}</div>
+							<div class="text-text-subtle">{noteBody}</div>
+							{#if msg.note.detail}
+								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
+							{/if}
+						</div>
 					</div>
 				{:else if msg.role === 'user'}
 					{@const userText = stripNowMarker(msg.content)}

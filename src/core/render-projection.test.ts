@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -211,5 +211,47 @@ describe('projectMessages — usage', () => {
     const r: ThreadMessageRecord = { ...rec(0, 'assistant', 'x'), usage_json: JSON.stringify({ tokensIn: 100 }) };
     const [msg] = projectMessages([r]);
     expect(msg?.usage).toEqual({ tokensIn: 100, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 });
+  });
+});
+
+describe('projectMessages — B-full failure notes', () => {
+  it('projects a structured note marker to RenderedMessage.note', () => {
+    const out = projectMessages([rec(0, 'assistant', buildDisplayNoteContent('provider_error', '401 Unauthorized'))]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.note).toEqual({ code: 'provider_error', detail: '401 Unauthorized' });
+    expect(out[0]?.content).toBe('');     // not rendered as text
+    expect(out[0]?.blocks).toBeUndefined();
+  });
+
+  it('projects a note without detail', () => {
+    const out = projectMessages([rec(0, 'assistant', buildDisplayNoteContent('run_blocked'))]);
+    expect(out[0]?.note).toEqual({ code: 'run_blocked' });
+  });
+
+  it('renders the failed user message + note as an ordinary turn pair', () => {
+    const out = projectMessages([
+      rec(0, 'user', 'what is the weather?'),
+      rec(1, 'assistant', buildDisplayNoteContent('provider_error', 'timeout')),
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ role: 'user', content: 'what is the weather?' });
+    expect(out[1]?.note).toEqual({ code: 'provider_error', detail: 'timeout' });
+  });
+
+  it('does not mistake an ordinary assistant object-content for a note', () => {
+    const out = projectMessages([rec(0, 'assistant', [{ type: 'text', text: 'real answer' }])]);
+    expect(out[0]?.note).toBeUndefined();
+    expect(out[0]?.content).toBe('real answer');
+  });
+});
+
+describe('sanitizeNoteDetail', () => {
+  it('strips control characters and caps length', () => {
+    expect(sanitizeNoteDetail('a bcd')).toBe('a b c d');
+    expect(sanitizeNoteDetail('x'.repeat(500))).toHaveLength(300);
+  });
+
+  it('leaves ordinary text untouched', () => {
+    expect(sanitizeNoteDetail('429 Too Many Requests')).toBe('429 Too Many Requests');
   });
 });
