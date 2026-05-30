@@ -161,7 +161,7 @@ export function parseVerdict(text: string): QualityVerdict | undefined {
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
   const raw = obj['score'];
-  const score = typeof raw === 'number' ? raw : typeof raw === 'string' ? parseFloat(raw) : NaN;
+  const score = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
   if (!Number.isFinite(score) || score < 1 || score > 5) return undefined;
   const reason = typeof obj['reason'] === 'string' ? obj['reason'] : '';
   return { score: Math.round(score), reason };
