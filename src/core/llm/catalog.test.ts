@@ -63,7 +63,7 @@ describe('LLM_CATALOG', () => {
     // ministrals in haiku slot; Large 3 ctx 256k + new $0.50/$1.50 pricing.
     expect(entry.models.map((m) => m.id)).toEqual([
       'mistral-large-2512',
-      'magistral-medium-2509',
+      'ministral-14b-2512',
       'ministral-3b-2512',
       'ministral-8b-2512',
     ]);
@@ -71,14 +71,14 @@ describe('LLM_CATALOG', () => {
     expect(entry.base_url_default).toBe('https://api.mistral.ai/v1');
     expect(entry.preset_id).toBe('mistral');
     expect(entry.provider).toBe('openai');
-    // Tier mapping (ministrals ↔ haiku, large ↔ sonnet, magistral ↔ opus)
-    // — kept in sync with MISTRAL_MODEL_MAP. Two ministrals share the haiku
-    // tier; assert by-id rather than by-tier for unique mapping.
+    // Tier mapping (2026-05-29 refresh): ministral-8b ↔ fast, ministral-14b ↔
+    // balanced, mistral-large-3 ↔ deep (magistral dropped — deprecated). Kept
+    // in sync with MISTRAL_MODEL_MAP. ministral-3b stays listed as opt-in fast.
     const byId = Object.fromEntries(entry.models.map((m) => [m.id, m]));
     expect(byId['ministral-3b-2512']?.tier).toBe('fast');
     expect(byId['ministral-8b-2512']?.tier).toBe('fast');
-    expect(byId['mistral-large-2512']?.tier).toBe('balanced');
-    expect(byId['magistral-medium-2509']?.tier).toBe('deep');
+    expect(byId['ministral-14b-2512']?.tier).toBe('balanced');
+    expect(byId['mistral-large-2512']?.tier).toBe('deep');
     // Mistral Large 3 pricing — 75% cut vs Large 2
     expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
   });
