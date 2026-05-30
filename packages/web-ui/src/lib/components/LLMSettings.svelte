@@ -25,6 +25,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
+	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
@@ -81,6 +82,10 @@
 		// verifying #42 — turned the provider-switch fix into a silent no-op
 		// under the env-recommending docs path).
 		env_overrides?: { provider?: boolean };
+		// CP-managed flag from /api/config ('managed' | 'managed_pro' | 'eu' | …).
+		// Selects the env-override banner copy: managed users can't touch .env, so
+		// the self-host remediation is noise for them (staging-walk finding F2).
+		managed?: string;
 		// Advanced + Memory + Context-Window have moved to /settings/llm/advanced
 		// and /settings/llm/memory (PRD-IA-V2 P3-PR-C). The fields stay on
 		// /api/config (same SSoT) but live on their own surfaces; this page
@@ -489,15 +494,22 @@
 	);
 	const providerLocked = $derived(!!locks.provider);
 	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
+	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
+	// reload + backend 403s the save). Drives the read-only tile state below.
+	const providerEnvPinned = $derived(!!config.env_overrides?.provider);
 
-	// Per-tile predicate (P3-FOLLOWUP-HOTFIX): replaces the binary providerLocked
-	// gate on tile click. On Managed, only free-text endpoints (`requires_base_url`)
-	// are off-limits; the curated tiles (Anthropic, Mistral) stay interactive.
-	// `providerLocked` (operator hard-lock) still blanket-disables everything.
+	// Per-tile predicate — extracted to ../utils/llm-tile-lock.js so the
+	// env-pin / lock matrix is unit-tested. On Managed only free-text endpoints
+	// are off-limits; an operator hard-lock pins everything but the active tile;
+	// an env-pin disables every tile (staging-walk finding 2026-05-30).
 	function isTileLocked(entry: CatalogProvider): boolean {
-		if (providerLocked && catalogEntryKey(entry) !== activeCatalogKey) return true;
-		if (customEndpointsLocked && entry.requires_base_url) return true;
-		return false;
+		return isProviderTileLocked({
+			providerEnvPinned,
+			providerLocked,
+			customEndpointsLocked,
+			isActive: catalogEntryKey(entry) === activeCatalogKey,
+			requiresBaseUrl: !!entry.requires_base_url,
+		});
 	}
 
 	// Empty-state CTA (PRD acceptance: fresh ~/.lynox/config.json → SetupBanner
@@ -542,8 +554,10 @@
 		     vanishes — the silent-failure rafael hit during the #42 verify. -->
 		<div role="status" class="border border-warning bg-warning/10 rounded p-3 text-sm">
 			<p class="font-medium">{t('llm.env_override_title')}</p>
-			<p class="text-text-muted mt-1">{t('llm.env_override_body')}</p>
-			<p class="text-xs text-text-muted mt-2 font-mono">LYNOX_LLM_PROVIDER</p>
+			<p class="text-text-muted mt-1">{config.managed ? t('llm.env_override_body_managed') : t('llm.env_override_body_selfhost')}</p>
+			{#if !config.managed}
+				<p class="text-xs text-text-muted mt-2 font-mono">LYNOX_LLM_PROVIDER</p>
+			{/if}
 		</div>
 	{/if}
 
