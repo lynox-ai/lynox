@@ -36,6 +36,7 @@ import type { CellRun, SetBenchAxis, SetBenchCell } from './types.js';
 
 interface CliArgs {
   axis?: SetBenchAxis;
+  axes?: SetBenchAxis[];
   cellLabels?: string[];
   runsPerCell: number;
   smoke: boolean;
@@ -56,6 +57,15 @@ function parseArgs(argv: readonly string[]): CliArgs {
         throw new Error(`--axis must be one of: ${ALL_AXES.join(', ')}`);
       }
       out.axis = v;
+    } else if (a === '--axes') {
+      // Comma-separated subset of axes in ONE run → one combined report.
+      // Used to publish only the agentic axes (skip the slow judge-scored ones).
+      const v = argv[++i];
+      if (!v) throw new Error('--axes needs a comma-separated value');
+      const list = v.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+      const bad = list.filter((s) => !isAxis(s));
+      if (bad.length > 0) throw new Error(`--axes: unknown axes: ${bad.join(', ')}`);
+      out.axes = list as SetBenchAxis[];
     } else if (a === '--cells') {
       const v = argv[++i];
       if (!v) throw new Error('--cells needs a value');
@@ -78,7 +88,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
       out.judge = true;
     } else if (a === '--help' || a === '-h') {
       // eslint-disable-next-line no-console
-      console.log(`usage: run.ts [--axis <axis>] [--cells a,b,c] [--runs N] [--smoke] [--judge]\n\naxes: ${ALL_AXES.join(', ')}`);
+      console.log(`usage: run.ts [--axis <axis>] [--axes a,b,c] [--cells a,b,c] [--runs N] [--smoke] [--judge]\n\naxes: ${ALL_AXES.join(', ')}`);
       process.exit(0);
     } else {
       throw new Error(`unknown arg: ${a}`);
@@ -118,6 +128,10 @@ function pickCells(args: CliArgs): readonly SetBenchCell[] {
   }
   let cells: readonly SetBenchCell[] = ALL_CELLS;
   if (args.axis) cells = cells.filter((c) => c.axis === args.axis);
+  if (args.axes) {
+    const wanted = new Set<string>(args.axes);
+    cells = cells.filter((c) => wanted.has(c.axis));
+  }
   if (args.cellLabels) {
     const wanted = new Set(args.cellLabels);
     cells = cells.filter((c) => wanted.has(c.label));
