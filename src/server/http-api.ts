@@ -2846,6 +2846,21 @@ export class LynoxHTTPApi {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
       };
 
+      // F1b: when the provider is env-pinned it never lands in config.json, so
+      // `provider`/`api_base_url` are absent from the spread above and the
+      // Settings UI can't tell which tile is active (it falls back to
+      // 'anthropic' and shows the wrong provider selected — engine runs e.g.
+      // Mistral). Surface the EFFECTIVE active provider + its (non-secret) base
+      // URL so the UI can highlight the right tile. Gated on the env-pin so the
+      // on-disk `provider`/empty-state/`providerExplicit` logic is untouched
+      // when the provider comes from config.json normally.
+      if (process.env['LYNOX_LLM_PROVIDER']) {
+        redacted['active_provider'] = {
+          provider: getActiveProvider(),
+          api_base_url: engine.getUserConfig().api_base_url ?? '',
+        };
+      }
+
       // Stripe Customer Portal hosted-login URL (v1.6.0 stopgap for PR 3).
       // When set, the engine surfaces it as `stripe_portal_login_url` so the
       // Account/Billing page can render a working CTA that drops the customer

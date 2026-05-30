@@ -82,6 +82,12 @@
 		// verifying #42 — turned the provider-switch fix into a silent no-op
 		// under the env-recommending docs path).
 		env_overrides?: { provider?: boolean };
+		// F1b: effective active provider + base, surfaced ONLY when env-pinned
+		// (the provider then never lands in config.json, so `provider` /
+		// `api_base_url` above are empty). Used as a fallback to highlight the
+		// right tile — without it an env-pinned Mistral tenant defaults to
+		// 'anthropic' and shows the wrong provider selected (staging-walk F1b).
+		active_provider?: { provider?: LLMProvider; api_base_url?: string };
 		// CP-managed flag from /api/config ('managed' | 'managed_pro' | 'eu' | …).
 		// Selects the env-override banner copy: managed users can't touch .env, so
 		// the self-host remediation is noise for them (staging-walk finding F2).
@@ -208,15 +214,24 @@
 			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks };
 			config = configBody;
 			locks = configBody.locks ?? {};
-			providerExplicit = typeof configBody.provider === 'string' && configBody.provider.length > 0;
-			activeProvider = configBody.provider ?? 'anthropic';
+			// F1b: when env-pinned the provider isn't on disk, so fall back to the
+			// effective `active_provider` the engine surfaces. An env-pinned
+			// provider IS an explicit choice (just made via env) → count it for
+			// providerExplicit so the empty-state CTA doesn't wrongly appear.
+			const effProvider = configBody.active_provider;
+			providerExplicit = (typeof configBody.provider === 'string' && configBody.provider.length > 0)
+				|| typeof effProvider?.provider === 'string';
+			activeProvider = configBody.provider ?? effProvider?.provider ?? 'anthropic';
 			// Pick the matching catalog entry. For providers with multiple
 			// presets (openai → mistral + openai-compat) we disambiguate from
 			// the saved api_base_url: a Mistral host activates the Mistral
 			// preset, anything else falls through to the generic OpenAI-compat
 			// entry. Keeps round-trip consistent so a returning user lands on
 			// the same button they last picked.
-			activeCatalogKey = resolveCatalogKey(activeProvider, configBody.api_base_url);
+			// F1b: fall back to the effective base URL too, so an env-pinned
+			// Mistral tenant (api_base_url not on disk) resolves the Mistral
+			// preset instead of the generic OpenAI-compat tile.
+			activeCatalogKey = resolveCatalogKey(activeProvider, configBody.api_base_url ?? effProvider?.api_base_url);
 			if (statusRes.ok) {
 				const status = (await statusRes.json()) as { configured?: { api_key?: boolean } };
 				apiKeyConfigured = status.configured?.api_key === true;
