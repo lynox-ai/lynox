@@ -31,6 +31,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { OpenAIAdapter } from '../../src/core/openai-adapter.js';
 import { dispatchMockTool, resetMockState, SET_BENCH_TOOLS } from './mock-tools.js';
+import { judgeQuality } from './judge.js';
 import type { CellRun, SetBenchCell, SetBenchScenario, ToolCallTrace } from './types.js';
 
 const SYSTEM_PREAMBLE = [
@@ -137,10 +138,13 @@ function buildSystem(
   scenario: SetBenchScenario,
   provider: SetBenchCell['provider'],
 ): string | readonly BetaTextBlockParam[] {
+  // Reasoning axes override the "never narrate" preamble so chain-of-thought
+  // isn't suppressed (see SetBenchScenario.systemPreambleOverride).
+  const preamble = scenario.systemPreambleOverride ?? SYSTEM_PREAMBLE;
   if (provider !== 'anthropic') {
     // Flat string for openai-compat — Mistral has no native prompt cache.
-    if (!scenario.inlineContext) return SYSTEM_PREAMBLE;
-    return `${SYSTEM_PREAMBLE}\n\n---\n\n${scenario.inlineContext}`;
+    if (!scenario.inlineContext) return preamble;
+    return `${preamble}\n\n---\n\n${scenario.inlineContext}`;
   }
   // Anthropic: mark the preamble with cache_control=ephemeral so cache_read
   // populates across n=10 sequential runs of the same scenario AND across
@@ -150,10 +154,10 @@ function buildSystem(
   // cache_read=0 and the "cache pays back on multi-turn loops" headline
   // claim wouldn't show in the data.
   if (!scenario.inlineContext) {
-    return [{ type: 'text', text: SYSTEM_PREAMBLE, cache_control: { type: 'ephemeral' } }];
+    return [{ type: 'text', text: preamble, cache_control: { type: 'ephemeral' } }];
   }
   return [
-    { type: 'text', text: SYSTEM_PREAMBLE, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: preamble, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: scenario.inlineContext, cache_control: { type: 'ephemeral' } },
   ];
 }
@@ -162,6 +166,13 @@ export async function runCell(
   cell: SetBenchCell,
   scenario: SetBenchScenario,
   runId: string,
+  /**
+   * When true, the completed run's final answer is scored by the judge PANEL
+   * (judge.ts) — graded quality above the deterministic gate. The panel reads
+   * its own API keys (Anthropic + Mistral) from the environment, so no key is
+   * threaded through here.
+   */
+  judge?: boolean,
 ): Promise<CellRun> {
   const start = Date.now();
   const apiKey = process.env[cell.apiKeyEnv];
@@ -208,6 +219,7 @@ export async function runCell(
   let cacheCreationTokens = 0;
   let iterations = 0;
   let finalText = '';
+  let truncated = false;
 
   const system = buildSystem(scenario, cell.provider);
   const deadline = start + scenario.timeoutMs;
@@ -233,14 +245,25 @@ export async function runCell(
       let stream: ReturnType<typeof client.beta.messages.stream> | undefined;
       let msg: Awaited<ReturnType<NonNullable<typeof stream>['finalMessage']>> | undefined;
       let attempt = 0;
+      let dropTemperature = false;
       while (attempt < MAX_ATTEMPTS) {
         try {
           stream = client.beta.messages.stream({
             model: cell.modelId,
-            max_tokens: 2048,
+            max_tokens: scenario.maxTokens ?? 2048,
+            // Uniform temperature across every cell — a fairness fix: without
+            // it each provider uses its own default (Anthropic ~1.0, Mistral
+            // differs), confounding the comparison. 0.7 keeps n=10 variance
+            // meaningful (temp 0 would make the repeats near-identical).
+            // Some newer models (e.g. claude-opus-4-7) REJECT temperature
+            // ("deprecated for this model") — dropTemperature retries without
+            // it so those cells run on their fixed sampling rather than failing.
+            ...(dropTemperature ? {} : { temperature: 0.7 }),
             system,
             messages,
-            tools: SET_BENCH_TOOLS as BetaTool[],
+            // Pure-cognition scenarios opt out of tools (see scenario.noTools)
+            // so strict tool-users don't loop on mocks and burn iterations.
+            tools: scenario.noTools ? [] : (SET_BENCH_TOOLS as BetaTool[]),
             // Mistral native prompt cache: `${runId}` prefix prevents
             // parallel-dev-run cross-pollution; within a single run, calls
             // 2+ of the same scenario hit the warm cache. Adapter further
@@ -258,6 +281,14 @@ export async function runCell(
         } catch (err) {
           (stream as { controller?: { abort?: () => void } } | undefined)?.controller?.abort?.();
           const m = err instanceof Error ? err.message : String(err);
+          // Model rejects the temperature param (e.g. opus-4-7) — retry once
+          // without it rather than failing the cell. Not a rate-limit, doesn't
+          // consume a backoff attempt.
+          if (!dropTemperature && /temperature/i.test(m)
+            && /(deprecat|unsupport|not support|invalid_request)/i.test(m)) {
+            dropTemperature = true;
+            continue;
+          }
           if (!isRateLimitError(m) || attempt === MAX_ATTEMPTS - 1) {
             throw err;
           }
@@ -273,6 +304,8 @@ export async function runCell(
       tokensOut += usage.output_tokens ?? 0;
       cacheReadTokens += usage.cache_read_input_tokens ?? 0;
       cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
+      // Fairness guard: flag if the model ran into the output cap mid-answer.
+      if (msg.stop_reason === 'max_tokens') truncated = true;
 
       const assistantBlocks = msg.content;
       const toolUses = assistantBlocks.filter((b): b is BetaToolUseBlock & { type: 'tool_use' } =>
@@ -327,6 +360,16 @@ export async function runCell(
     }
 
     const result = scenario.passCheck(finalText, toolCalls);
+
+    // Graded-quality judging (opt-in). Runs on the final answer regardless of
+    // the pass/fail gate — a failing answer can still carry useful quality
+    // signal, and a passing answer's quality is the whole reason this layer
+    // exists. Best-effort: a judge failure attaches qualityReason but never
+    // changes `pass` or sinks the run.
+    const judged = (judge && finalText.length > 0)
+      ? await judgeQuality(scenario, finalText, toolCalls)
+      : undefined;
+
     return {
       cellLabel: cell.label, axis: cell.axis, scenarioId: scenario.id,
       pass: result.pass,
@@ -336,6 +379,14 @@ export async function runCell(
       costUsdCold: c.cold, costUsdWarm: c.warm,
       durationMs: Date.now() - start, iterations, finalText, toolCalls,
       routedCacheKey: willRouteCacheKey,
+      ...(truncated ? { truncated: true } : {}),
+      ...(judged?.verdict ? { qualityScore: judged.verdict.score } : {}),
+      ...(judged ? {
+        qualityByJudge: judged.byJudge,
+        qualityReason: judged.verdict?.reason ?? judged.error ?? 'unscored',
+        judgeTokensIn: judged.judgeTokensIn,
+        judgeTokensOut: judged.judgeTokensOut,
+      } : {}),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -11,9 +11,10 @@
  *
  * Usage:
  *   npx tsx scripts/set-bench/run.ts                       # full matrix, 10 runs/cell
+ *   npx tsx scripts/set-bench/run.ts --judge               # + LLM-as-judge graded quality 1–5 (needs ANTHROPIC_API_KEY)
  *   npx tsx scripts/set-bench/run.ts --smoke               # 1 cheap cell × 1 run per axis (~5min, ~$0.50)
  *   npx tsx scripts/set-bench/run.ts --axis cron-task-cold-start
- *   npx tsx scripts/set-bench/run.ts --cells anthropic-haiku-4-5,mistral-ministral-3b-2410 --runs 3
+ *   npx tsx scripts/set-bench/run.ts --cells anthropic-haiku-4-5,mistral-ministral-3b-2512 --runs 3
  *
  * API keys: reads `anthropic_api_key` + `mistral_api_key` from
  * `~/.lynox/config.json` if not in env. Bench never writes back.
@@ -28,6 +29,7 @@ import { dirname } from 'node:path';
 import { ALL_CELLS } from './configs.js';
 import { SET_BENCH_SCENARIOS } from './scenarios.js';
 import { runCell } from './run-cell.js';
+import { JUDGE_PANEL } from './judge.js';
 import { buildReport, formatReportMarkdown } from './report.js';
 import { ALL_AXES } from './types.js';
 import type { CellRun, SetBenchAxis, SetBenchCell } from './types.js';
@@ -37,6 +39,7 @@ interface CliArgs {
   cellLabels?: string[];
   runsPerCell: number;
   smoke: boolean;
+  judge: boolean;
 }
 
 function isAxis(v: string): v is SetBenchAxis {
@@ -44,7 +47,7 @@ function isAxis(v: string): v is SetBenchAxis {
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
-  const out: CliArgs = { runsPerCell: 10, smoke: false };
+  const out: CliArgs = { runsPerCell: 10, smoke: false, judge: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--axis') {
@@ -68,9 +71,14 @@ function parseArgs(argv: readonly string[]): CliArgs {
       // end before kicking off the overnight n=10 matrix.
       out.smoke = true;
       out.runsPerCell = 1;
+    } else if (a === '--judge') {
+      // Score each completed run's answer 1–5 via the LLM-as-judge layer
+      // (judge.ts). Adds one Anthropic call per scored run — needs
+      // ANTHROPIC_API_KEY even on an all-Mistral cell selection.
+      out.judge = true;
     } else if (a === '--help' || a === '-h') {
       // eslint-disable-next-line no-console
-      console.log(`usage: run.ts [--axis <axis>] [--cells a,b,c] [--runs N] [--smoke]\n\naxes: ${ALL_AXES.join(', ')}`);
+      console.log(`usage: run.ts [--axis <axis>] [--cells a,b,c] [--runs N] [--smoke] [--judge]\n\naxes: ${ALL_AXES.join(', ')}`);
       process.exit(0);
     } else {
       throw new Error(`unknown arg: ${a}`);
@@ -106,7 +114,7 @@ function pickCells(args: CliArgs): readonly SetBenchCell[] {
     // board — it's the cheapest Mistral cell and uses the openai-compat
     // path; a smoke-run pass here proves both Anthropic-SDK + openai-
     // compat code paths handle the scenario.
-    return ALL_CELLS.filter((c) => c.label === 'mistral-ministral-3b-2410');
+    return ALL_CELLS.filter((c) => c.label === 'mistral-ministral-3b-2512');
   }
   let cells: readonly SetBenchCell[] = ALL_CELLS;
   if (args.axis) cells = cells.filter((c) => c.axis === args.axis);
@@ -126,6 +134,21 @@ async function main(): Promise<void> {
   const cells = pickCells(args);
   if (cells.length === 0) throw new Error('no cells selected');
 
+  // The judge PANEL spans families (Anthropic + Mistral), so --judge needs
+  // BOTH keys for a fair cross-family score. Fail fast if neither is present;
+  // warn (don't abort) if only one — the panel degrades to a single judge and
+  // the bias signal is lost, which the operator should know about.
+  if (args.judge) {
+    const haveAnthropic = !!process.env['ANTHROPIC_API_KEY'];
+    const haveMistral = !!process.env['MISTRAL_API_KEY'];
+    if (!haveAnthropic && !haveMistral) {
+      throw new Error('--judge needs ANTHROPIC_API_KEY and MISTRAL_API_KEY (env or ~/.lynox/config.json)');
+    }
+    if (!haveAnthropic || !haveMistral) {
+      process.stderr.write(`! --judge: only one judge family has a key (${haveAnthropic ? 'Anthropic' : 'Mistral'} present) — panel degrades to a single judge, cross-family bias signal lost\n`);
+    }
+  }
+
   // Stable identifier for this matrix run. Used as a prefix in
   // Mistral prompt_cache_key (`bench-${runId}-…`) so parallel dev
   // runs don't pollute each other's cold-cache baselines. Format is
@@ -136,7 +159,11 @@ async function main(): Promise<void> {
   if (args.smoke) {
     process.stdout.write(`# Smoke mode — 1 cell × 1 run per axis (${cells.length} cells)\n\n`);
   } else {
-    process.stdout.write(`# Set-Bench v4 — ${cells.length} cells × ${args.runsPerCell} runs = ${cells.length * args.runsPerCell} model calls\n\n`);
+    process.stdout.write(`# Set-Bench v4 — ${cells.length} cells × ${args.runsPerCell} runs = ${cells.length * args.runsPerCell} model calls\n`);
+    if (args.judge) {
+      process.stdout.write(`# Judge panel ON — ${JUDGE_PANEL.map((j) => j.id).join(' + ')} score every non-empty run (mean = quality, per-judge spread = cross-family bias)\n`);
+    }
+    process.stdout.write('\n');
   }
 
   const runs: CellRun[] = [];
@@ -152,9 +179,10 @@ async function main(): Promise<void> {
         : `[${cell.axis} / ${cell.label} ${i + 1}/${args.runsPerCell}]`;
       process.stdout.write(`${tag} running... `);
       const t0 = Date.now();
-      const result = await runCell(cell, scenario, runId);
+      const result = await runCell(cell, scenario, runId, args.judge);
       const dt = ((Date.now() - t0) / 1000).toFixed(1);
-      process.stdout.write(`${result.pass ? 'PASS' : 'FAIL'} (${dt}s, cold=$${result.costUsdCold.toFixed(5)}, warm=$${result.costUsdWarm.toFixed(5)}, cache_read=${result.cacheReadTokens})`);
+      const qual = result.qualityScore !== undefined ? `, q=${result.qualityScore}/5` : '';
+      process.stdout.write(`${result.pass ? 'PASS' : 'FAIL'}${qual} (${dt}s, cold=$${result.costUsdCold.toFixed(5)}, warm=$${result.costUsdWarm.toFixed(5)}, cache_read=${result.cacheReadTokens})`);
       if (!result.pass) process.stdout.write(` — ${result.reason ?? ''}`);
       process.stdout.write('\n');
       runs.push(result);

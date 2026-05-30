@@ -7,10 +7,18 @@
  * parsing differences). They re-enter the panel post-launch once each
  * passes a feature-parity smoke (see backlog).
  *
- * Model panel (per lynox.ai/bench):
- *   - haiku-class:  Anthropic Haiku 4.5 + Mistral ministral-3b-2410 + ministral-8b-2410
+ * Model panel (refreshed 2026-05-29 against docs.mistral.ai/models/overview):
+ *   - haiku-class:  Anthropic Haiku 4.5 + Mistral ministral-3b-2512 + ministral-8b-2512
+ *   - mid-class:    Mistral ministral-14b-2512 (Ministral 3 14B, new gen-3 mid model)
  *   - sonnet-class: Anthropic Sonnet 4.6 + Mistral mistral-large-latest + mistral-large-2512 (pinned)
- *   - opus-class:   Anthropic Opus 4.7 + Mistral magistral-medium-2509
+ *   - opus-class:   Anthropic Opus 4.7 + Mistral mistral-medium-2604 (Medium 3.5)
+ *
+ * magistral-medium-2509 was DROPPED from the panel 2026-05-29: Mistral
+ * deprecated the entire Magistral reasoning family (magistral-medium-2509
+ * retires 2026-07-31, magistral-small-2509 already retired 2026-04-30).
+ * The deep/reasoning tier candidate is now mistral-medium-2604 (Medium 3.5,
+ * agentic/coding-optimised) measured against mistral-large-2512 (Large 3,
+ * hybrid reasoning) — this run picks the Magistral successor.
  *
  * Each model runs against ALL 8 axes — the same panel × 8 axes = the
  * matrix the page renders.
@@ -60,17 +68,25 @@ const PRICE_OPUS_4_7 = {
 // (256k vs 128k). Pricing went up modestly (3b: +150%, 8b: +50%) for the
 // gen-3 capabilities.
 // Mistral Large 3 (Dec 2025): 75% price cut vs Large 2. Was $2/$6, now $0.50/$1.50.
+// Pricing verified 2026-05-29 against mistral.ai/pricing.
 const PRICE_MINISTRAL_3B_2512 = {
   inputPerMillion: 0.10, outputPerMillion: 0.10, cacheReadPerMillion: 0.010,
 } as const;
 const PRICE_MINISTRAL_8B_2512 = {
   inputPerMillion: 0.15, outputPerMillion: 0.15, cacheReadPerMillion: 0.015,
 } as const;
+// Ministral 3 14B (gen-3 mid model, Dec 2025): text + vision, fills the gap
+// between 8B and Large 3.
+const PRICE_MINISTRAL_14B_2512 = {
+  inputPerMillion: 0.20, outputPerMillion: 0.20, cacheReadPerMillion: 0.020,
+} as const;
 const PRICE_MISTRAL_LARGE_2512 = {
   inputPerMillion: 0.50, outputPerMillion: 1.50, cacheReadPerMillion: 0.05,
 } as const;
-const PRICE_MAGISTRAL_MEDIUM_2509 = {
-  inputPerMillion: 2, outputPerMillion: 5, cacheReadPerMillion: 0.2,
+// Mistral Medium 3.5 (v26.04, dated snapshot mistral-medium-2604): agentic/
+// coding-optimised, Magistral successor candidate for the deep/reasoning tier.
+const PRICE_MISTRAL_MEDIUM_2604 = {
+  inputPerMillion: 1.50, outputPerMillion: 7.50, cacheReadPerMillion: 0.15,
 } as const;
 
 type CellTemplate = Omit<SetBenchCell, 'axis'>;
@@ -124,6 +140,17 @@ const MINISTRAL_8B: CellTemplate = {
   providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
+const MINISTRAL_14B: CellTemplate = {
+  label: 'mistral-ministral-14b-2512',
+  provider: 'openai',
+  modelId: 'ministral-14b-2512',
+  apiBaseURL: MISTRAL,
+  apiKeyEnv: MISTRAL_KEY,
+  pricing: PRICE_MINISTRAL_14B_2512,
+  pinned: true,
+  providerExtras: MISTRAL_PROVIDER_EXTRAS,
+};
+
 const MISTRAL_LARGE_LATEST: CellTemplate = {
   label: 'mistral-large-latest',
   provider: 'openai',
@@ -146,13 +173,19 @@ const MISTRAL_LARGE_2512: CellTemplate = {
   providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
 
-const MAGISTRAL_MEDIUM: CellTemplate = {
-  label: 'mistral-magistral-medium-2509',
+// Mistral Medium 3.5 — the deep/reasoning-tier candidate that replaces the
+// deprecated magistral-medium-2509 (retires 2026-07-31). Dated snapshot is
+// `mistral-medium-2604` (v26.04); verified against the live GET /v1/models
+// list 2026-05-29 (the docs-overview "mistral-medium-3504" ID is rejected
+// by the API with invalid_model — aliases mistral-medium-3.5 / -latest also
+// resolve here, but we pin the dated snapshot per the drift-discipline note).
+const MISTRAL_MEDIUM_2604: CellTemplate = {
+  label: 'mistral-medium-2604',
   provider: 'openai',
-  modelId: 'magistral-medium-2509',
+  modelId: 'mistral-medium-2604',
   apiBaseURL: MISTRAL,
   apiKeyEnv: MISTRAL_KEY,
-  pricing: PRICE_MAGISTRAL_MEDIUM_2509,
+  pricing: PRICE_MISTRAL_MEDIUM_2604,
   pinned: true,
   providerExtras: MISTRAL_PROVIDER_EXTRAS,
 };
@@ -163,15 +196,16 @@ const ALL_MODELS: readonly CellTemplate[] = [
   OPUS_4_7,
   MINISTRAL_3B,
   MINISTRAL_8B,
+  MINISTRAL_14B,
   MISTRAL_LARGE_LATEST,
   MISTRAL_LARGE_2512,
-  MAGISTRAL_MEDIUM,
+  MISTRAL_MEDIUM_2604,
 ];
 
 /**
- * Cross-product of all 8 models × all 8 axes = 64 cells. Every cell
- * runs every axis once per --runs N. Default n=10 → 640 model calls
- * per full matrix. Ballpark spend with the seeded scenarios: ~$5.
+ * Cross-product of all 9 models × all 8 axes = 72 cells. Every cell
+ * runs every axis once per --runs N. Default n=10 → 720 model calls
+ * per full matrix. Ballpark spend with the seeded scenarios: ~$7.
  */
 export const ALL_CELLS: readonly SetBenchCell[] = ALL_AXES.flatMap((axis) =>
   ALL_MODELS.map((m): SetBenchCell => ({ ...m, axis })),
