@@ -1503,6 +1503,41 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET surfaces active_provider (effective provider + base) when env-pinned (F1b)', async () => {
+      // LYNOX_LLM_PROVIDER never lands in config.json, so the on-disk
+      // provider/api_base_url are absent and the UI would fall back to
+      // 'anthropic'. The engine-effective provider must be surfaced so the
+      // Settings page highlights the right (Mistral) tile.
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      mockGetUserConfig.mockReturnValue({ api_base_url: 'https://api.mistral.ai/v1' });
+      vi.stubEnv('LYNOX_LLM_PROVIDER', 'openai');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const ap = body['active_provider'] as Record<string, unknown> | undefined;
+        expect(ap).toBeDefined();
+        expect(ap!['provider']).toBe('openai');
+        expect(ap!['api_base_url']).toBe('https://api.mistral.ai/v1');
+        expect((body['env_overrides'] as Record<string, unknown>)['provider']).toBe(true);
+      } finally {
+        providerSpy.mockRestore();
+        vi.unstubAllEnvs();
+        mockGetUserConfig.mockReturnValue({});
+      }
+    });
+
+    it('GET omits active_provider when the provider is NOT env-pinned (F1b)', async () => {
+      // No LYNOX_LLM_PROVIDER → on-disk provider + empty-state logic stays the
+      // source of truth; active_provider must be absent so it can't override it.
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['active_provider']).toBeUndefined();
+      expect((body['env_overrides'] as Record<string, unknown>)['provider']).toBe(false);
+    });
+
     it('GET surfaces LYNOX_STRIPE_PORTAL_LOGIN_URL when set + valid (v1.6.0 billing stopgap)', async () => {
       vi.stubEnv('LYNOX_STRIPE_PORTAL_LOGIN_URL', 'https://billing.stripe.com/p/login/test_xxx');
       try {
