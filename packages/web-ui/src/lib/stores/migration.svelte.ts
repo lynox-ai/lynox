@@ -128,7 +128,7 @@ export function setTarget(url: string, token: string): void {
  * Build the checkout URL with return parameters.
  * The checkout page will redirect back here after payment + provisioning.
  */
-export function getCheckoutUrl(plan: 'starter' | 'eu'): string {
+export function getCheckoutUrl(plan: 'hosted' | 'managed'): string {
 	// The returnUrl tells checkout where to redirect after provisioning
 	const currentUrl = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '';
 	const returnUrl = encodeURIComponent(currentUrl);

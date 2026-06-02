@@ -1,4 +1,5 @@
 import { getApiBase } from '../config.svelte.js';
+import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
@@ -427,7 +428,7 @@ function probeManagedTier(): Promise<void> {
  *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
 function isInstanceSuppliedLlm(): boolean {
 	if (managedTier === null) return true;
-	return managedTier === 'managed' || managedTier === 'managed_pro' || managedTier === 'eu';
+	return cpSuppliesLLMKey(managedTier);
 }
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let changesetLoading = $state(false);

@@ -85,7 +85,7 @@
 		startMigration();
 	}
 
-	function handleCheckout(plan: 'starter' | 'eu') {
+	function handleCheckout(plan: 'hosted' | 'managed') {
 		window.open(getCheckoutUrl(plan), '_blank');
 	}
 
@@ -195,7 +195,7 @@
 				<!-- Starter -->
 				<button
 					class="group rounded-[var(--radius-md)] border border-border bg-bg p-4 text-left hover:border-accent/50 transition-all"
-					onclick={() => handleCheckout('starter')}
+					onclick={() => handleCheckout('hosted')}
 				>
 					<div class="text-sm font-medium text-text">{t('migration.plan_starter')}</div>
 					<div class="mt-1 text-xs text-text-muted">{t('migration.plan_starter_desc')}</div>
@@ -208,7 +208,7 @@
 				<!-- EU Managed -->
 				<button
 					class="group rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 text-left hover:border-accent/60 transition-all"
-					onclick={() => handleCheckout('eu')}
+					onclick={() => handleCheckout('managed')}
 				>
 					<div class="text-sm font-medium text-text">{t('migration.plan_eu')}</div>
 					<div class="mt-1 text-xs text-text-muted">{t('migration.plan_eu_desc')}</div>
