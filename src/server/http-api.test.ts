@@ -1486,12 +1486,13 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as Record<string, unknown>;
         const am = body['active_model'] as Record<string, unknown> | undefined;
         expect(am).toBeDefined();
-        // Fixture default_tier='deep' → Mistral 'magistral-medium-2509'.
-        expect(am!['id']).toBe('magistral-medium-2509');
+        // Fixture default_tier='deep' → Mistral 'mistral-large-2512'
+        // (2026-05-29 refresh; was magistral-medium-2509 before it was deprecated).
+        expect(am!['id']).toBe('mistral-large-2512');
         expect(am!['provider']).toBe('openai');
         expect(am!['tier']).toBe('deep');
-        expect(am!['contextWindow']).toBe(131_072);
-        expect(am!['uiLabel']).toBe('Magistral Medium 1.2');
+        expect(am!['contextWindow']).toBe(256_000);
+        expect(am!['uiLabel']).toBe('Mistral Large 3');
         // Mistral lineage carries different feature flags than Claude.
         const features = am!['features'] as Record<string, boolean>;
         expect(features['extendedThinking']).toBe(false);

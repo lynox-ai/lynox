@@ -120,31 +120,32 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
  * catalog stay aligned. `*-latest` aliases auto-roll silently → bad for
  * cost predictability + behaviour-drift in managed-EU tenants.
  *
- * Tier mapping (updated 2026-05-24): ministral-3b/8b ↔ haiku,
- * mistral-large-3 ↔ sonnet, magistral-medium ↔ opus. mistral-small-2603
- * retired from catalog 2026-05-24 in favor of Ministral gen 3 (replacement
- * for Mistral's own retired ministral-3b/8b-2410 effective 2025-12).
+ * Tier mapping (updated 2026-05-29): ministral-8b ↔ fast, ministral-14b ↔
+ * balanced, mistral-large-3 ↔ deep. magistral-medium dropped from the catalog
+ * — Mistral deprecated the Magistral family (retires 2026-07-31) and Set-Bench
+ * v4 (fair judge panel) showed it never beats mistral-large-2512 at 6× the
+ * cost. ministral-3b stays listed as the cheapest opt-in orchestration model.
  */
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
     id: 'mistral-large-2512',
-    tier: 'balanced',
+    tier: 'deep',
     label: 'Mistral Large 3',
     context_window: 256_000,
     pricing: { input: 0.50, output: 1.50 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended for chat. 6× cheaper than Anthropic Sonnet at comparable agent-runtime quality. 256k context, native prompt-cache, multimodal input.',
+    notes: 'Mistral quality leader — the deep tier. Set-Bench v4 top Mistral scorer on the open-ended analysis axes; no Mistral model beats it. 256k context, native prompt-cache, multimodal input.',
   },
   {
-    id: 'magistral-medium-2509',
-    tier: 'deep',
-    label: 'Magistral Medium 1.2',
-    context_window: 131_072,
-    pricing: { input: 2, output: 5 },
+    id: 'ministral-14b-2512',
+    tier: 'balanced',
+    label: 'Ministral 14B',
+    context_window: 262_144,
+    pricing: { input: 0.20, output: 0.20 },
     capabilities: ['tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Reasoning specialist — native reasoning chains, ~30-40s typical latency. Best for batch / deep analysis. Tool-routing reliability is lower than the chat-tier (5/8 bench axes had failures including 70% pass on workflow-composition); not a Sonnet/Opus replacement for interactive chat.',
+    notes: 'Recommended balanced default. Gen-3 mid model, text+vision. 100% pass on every Set-Bench axis at near-Large quality and ~6× lower cost.',
   },
   {
     id: 'ministral-3b-2512',

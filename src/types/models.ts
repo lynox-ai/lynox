@@ -92,9 +92,15 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
  * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
+// Refreshed 2026-05-29 (Set-Bench v4, fair judge panel): Mistral deprecated
+// the Magistral reasoning family (magistral-medium-2509 retires 2026-07-31),
+// so `deep` moves to mistral-large-2512 — the Mistral quality leader, which
+// medium-2604 (the nominal Magistral successor) never beats at 6× the cost.
+// `balanced` adopts ministral-14b-2512 (100% pass, near-large quality at ~6×
+// lower cost), giving a clean fast→balanced→deep capability ladder.
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
-  'deep':     'magistral-medium-2509',
-  'balanced': 'mistral-large-2512',
+  'deep':     'mistral-large-2512',
+  'balanced': 'ministral-14b-2512',
   'fast':     'ministral-8b-2512',
 };
 
@@ -395,12 +401,29 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
     uiLabel: 'Ministral 8B',
   },
+  // Ministral 3 14B (Dec 2025): gen-3 mid model, text+vision, 262k context.
+  // The `balanced` tier as of 2026-05-29 — Set-Bench v4 showed 100% pass and
+  // near-Large quality at ~6× lower cost than mistral-large-2512.
+  'ministral-14b-2512': {
+    id: 'ministral-14b-2512',
+    provider: 'openai',
+    tier: 'balanced',
+    contextWindow: 262_144,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_SMALL,
+    pricing: { input: 0.20, output: 0.20, cacheWrite: 0.20, cacheRead: 0.02 },
+    uiLabel: 'Ministral 14B',
+  },
   // Mistral Large 3 (Dec 2025): 256k context, $0.50/$1.50 (75% price cut vs Large 2),
   // multimodal input (text+image), structured-outputs, function-calling, prefix-cache.
+  // The `deep` tier as of 2026-05-29 (replaced the deprecated magistral-medium-2509);
+  // the Mistral quality leader on Set-Bench v4.
   'mistral-large-2512': {
     id: 'mistral-large-2512',
     provider: 'openai',
-    tier: 'balanced',
+    tier: 'deep',
     contextWindow: 256_000,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
@@ -409,10 +432,13 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
     uiLabel: 'Mistral Large 3',
   },
+  // DEPRECATED by Mistral — magistral-medium-2509 retires 2026-07-31. No longer
+  // tier-routed (tier:null); kept for cost-guard + back-compat of legacy configs
+  // that pinned it via openai_model_id. Set-Bench v4: never beat mistral-large-2512.
   'magistral-medium-2509': {
     id: 'magistral-medium-2509',
     provider: 'openai',
-    tier: 'deep',
+    tier: null,
     contextWindow: 131_072,
     defaultMaxOutput: 32_000,
     maxContinuations: 20,

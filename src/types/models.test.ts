@@ -88,8 +88,8 @@ describe('Mistral tier-set', () => {
     // Reproducibility guarantee for managed-EU tenants — Mistral rolls
     // `*-latest` silently which would change behaviour mid-billing-period.
     expect(MISTRAL_MODEL_MAP.fast).toBe('ministral-8b-2512');
-    expect(MISTRAL_MODEL_MAP.balanced).toBe('mistral-large-2512');
-    expect(MISTRAL_MODEL_MAP.deep).toBe('magistral-medium-2509');
+    expect(MISTRAL_MODEL_MAP.balanced).toBe('ministral-14b-2512');
+    expect(MISTRAL_MODEL_MAP.deep).toBe('mistral-large-2512');
     expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
   });
 
@@ -163,8 +163,8 @@ describe('getModelId for openai provider', () => {
   it('returns Mistral tier-set when the mistral map is registered', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
     expect(getModelId('fast', 'openai')).toBe('ministral-8b-2512');
-    expect(getModelId('balanced', 'openai')).toBe('mistral-large-2512');
-    expect(getModelId('deep', 'openai')).toBe('magistral-medium-2509');
+    expect(getModelId('balanced', 'openai')).toBe('ministral-14b-2512');
+    expect(getModelId('deep', 'openai')).toBe('mistral-large-2512');
   });
 
   it('falls back to fallbackModelId when no map but fallback is set', () => {
@@ -178,7 +178,7 @@ describe('getModelId for openai provider', () => {
 
   it('prefers map over fallback when both are set', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP, fallbackModelId: 'should-be-ignored' });
-    expect(getModelId('balanced', 'openai')).toBe('mistral-large-2512');
+    expect(getModelId('balanced', 'openai')).toBe('ministral-14b-2512');
   });
 
   it('still resolves Anthropic/Vertex providers correctly when openai resolver is set', () => {
@@ -280,7 +280,9 @@ describe('ModelCapability registry', () => {
       'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
       'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]',
-      'mistral-large-2512', 'magistral-medium-2509',
+      // 2026-05-29 tier refresh: deep=mistral-large-2512, balanced=ministral-14b-2512,
+      // fast=ministral-8b-2512 (magistral-medium-2509 dropped to bench-only/tier:null).
+      'mistral-large-2512', 'ministral-14b-2512',
       // Gen-3 ministrals replaced mistral-small-2603 in the haiku slot 2026-05-24
       'ministral-3b-2512', 'ministral-8b-2512',
     ];
@@ -312,7 +314,7 @@ describe('ModelCapability registry', () => {
     }
     expect(MODEL_CAPABILITIES['claude-haiku-4-5']!.provider).toBe('vertex');
     for (const id of ['mistral-small-2603', 'mistral-large-2512', 'magistral-medium-2509',
-                      'ministral-3b-2512', 'ministral-8b-2512',
+                      'ministral-3b-2512', 'ministral-8b-2512', 'ministral-14b-2512',
                       'ministral-8b-2410', 'ministral-3b-2410', 'open-mistral-nemo',
                       'mistral-medium-2508', 'codestral-2508', 'magistral-small-2509']) {
       expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('openai');
@@ -342,6 +344,9 @@ describe('ModelCapability registry', () => {
       'mistral-medium-2508', 'mistral-medium-latest',
       'codestral-2508', 'codestral-latest',
       'magistral-small-2509', 'magistral-small-latest',
+      // Demoted from the `deep` slot 2026-05-29 (deprecated by Mistral, retires
+      // 2026-07-31) — now tier:null, cost-guard / legacy-config only.
+      'magistral-medium-2509',
     ];
     for (const id of benchOnlyIds) {
       const cap = MODEL_CAPABILITIES[id];

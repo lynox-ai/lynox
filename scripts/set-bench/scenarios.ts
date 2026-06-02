@@ -14,6 +14,19 @@
 import type { PassResult, SetBenchScenario, ToolCallTrace } from './types.js';
 import { inspectFlakyAttempts, inspectMemory, inspectWorkflow, seedMemory } from './mock-tools.js';
 
+// Preamble for the ceiling-free reasoning axes. Unlike the default harness
+// preamble (which bans narration to keep structured-output axes clean), this
+// REQUIRES step-by-step work — otherwise a strict instruction-follower
+// suppresses chain-of-thought and fails arithmetic it could otherwise do,
+// confounding capability with narration-obedience. The final-line format is
+// still enforced by each scenario's deterministic passCheck.
+const REASONING_PREAMBLE = [
+  'You are a careful reasoning agent in a benchmark. Think step by step and',
+  'show your full intermediate work — do NOT skip steps or answer from',
+  'intuition. Accuracy matters far more than brevity. After your reasoning,',
+  'end your reply with exactly the single final line the instructions specify.',
+].join(' ');
+
 // Bind the inline arXiv-paper context for long-context-with-tools. We
 // inline a high-density excerpt of "Attention Is All You Need" — large
 // enough to exercise cache-read (~60-70k tokens when repeated for the
@@ -441,6 +454,223 @@ export const SCENARIO_REAL_WORLD_GROUNDED: SetBenchScenario = {
   timeoutMs: 120_000,
 };
 
+// ── 9. hard-deductive-reasoning ────────────────────────────────
+// Pure reasoning, NO tools. A 6-runner finishing-order puzzle with 7
+// entangled constraints that admit exactly ONE valid ordering
+// (A-F-C-B-D-E, hand-verified: every other ordering violates ≥1 clue).
+// Weak models slip on the immediately-before chains + the not-first/last
+// constraint; deep models hold the whole constraint set. The pass-rate
+// spread here is the discriminator the other 8 axes lack.
+
+export const SCENARIO_HARD_DEDUCTIVE: SetBenchScenario = {
+  id: 'hard-deductive-reasoning.six-runner-order',
+  axis: 'hard-deductive-reasoning',
+  description: 'Constraint-satisfaction: deduce the unique finishing order of 6 runners from 7 entangled clues. Verifiable single answer; no tools.',
+  prompt: [
+    'Logic puzzle. Six runners — A, B, C, D, E, F — finished a race in distinct positions 1st through 6th. Deduce the exact finishing order from these clues:',
+    '',
+    '  1. F finished immediately before C (F is exactly one place ahead of C).',
+    '  2. A finished somewhere before D.',
+    '  3. B finished neither first nor last.',
+    '  4. E finished last.',
+    '  5. D finished immediately after B (D is exactly one place behind B).',
+    '  6. A finished first.',
+    '  7. C finished somewhere before B.',
+    '',
+    'Exactly one ordering satisfies all seven clues. Work through it step by step,',
+    'then end your reply with EXACTLY one final line in this form (1st place first):',
+    '',
+    'ORDER: X-X-X-X-X-X',
+    '',
+    'where each X is a runner letter. The harness greps only that final ORDER line.',
+  ].join('\n'),
+  passCheck: (finalText: string): PassResult => {
+    // LAST match, not first: with chain-of-thought permitted the model may
+    // write intermediate "ORDER:" candidates while reasoning; the final line
+    // is the answer. Grabbing the first match would catch a discarded guess.
+    const matches = [...finalText.matchAll(/ORDER:\s*([A-Fa-f](?:\s*-\s*[A-Fa-f]){5})/g)];
+    if (matches.length === 0) return { pass: false, reason: 'no ORDER: X-X-X-X-X-X line found' };
+    const normalized = matches[matches.length - 1]![1]!.replace(/\s+/g, '').toUpperCase();
+    if (normalized !== 'A-F-C-B-D-E') {
+      return { pass: false, reason: `wrong order ${normalized} (correct: A-F-C-B-D-E)` };
+    }
+    return { pass: true };
+  },
+  systemPreambleOverride: REASONING_PREAMBLE,
+  noTools: true,
+  maxIterations: 4,
+  timeoutMs: 90_000,
+};
+
+// ── 10. multi-hop-quant-chain ──────────────────────────────────
+// Pure reasoning, NO tools. A 6-step dependent arithmetic chain where any
+// intermediate slip propagates to a wrong final number (hand-verified
+// 240 → 160 → 200 → 150 → 132 → 264 → 174). The "25% of the CURRENT total"
+// and "double THEN ship" ordering are the trap steps weak models botch.
+
+export const SCENARIO_MULTI_HOP_QUANT: SetBenchScenario = {
+  id: 'multi-hop-quant-chain.widget-inventory',
+  axis: 'multi-hop-quant-chain',
+  description: 'Six-step dependent arithmetic chain with order-sensitive trap steps. Single verifiable integer answer; no tools.',
+  prompt: [
+    'Inventory word problem. Track the widget count carefully through each step — each step operates on the result of the previous one.',
+    '',
+    'A workshop starts the week with 240 widgets.',
+    '  - Monday: it ships 1/3 of the widgets it has.',
+    '  - Tuesday: it produces 40 new widgets, then ships 25% of the total it has at that moment.',
+    '  - Wednesday: 18 widgets are found defective and scrapped.',
+    '  - Thursday: a partner shipment DOUBLES the current stock, and then the workshop ships exactly 90 widgets.',
+    '',
+    'How many widgets remain at the end of Thursday? Work through it step by step,',
+    'then end your reply with EXACTLY one final line in this form:',
+    '',
+    'REMAINING: <integer>',
+    '',
+    'The harness greps only that final REMAINING line.',
+  ].join('\n'),
+  passCheck: (finalText: string): PassResult => {
+    // LAST match, not first: chain-of-thought writes intermediate
+    // "Remaining: N" step labels (240 at the start, etc.); the final line is
+    // the answer. Grabbing the first match caught the starting value 240 and
+    // failed every model that actually showed its work.
+    const matches = [...finalText.matchAll(/REMAINING:\s*(-?\d+)/gi)];
+    if (matches.length === 0) return { pass: false, reason: 'no REMAINING: <integer> line found' };
+    const value = parseInt(matches[matches.length - 1]![1]!, 10);
+    if (value !== 174) {
+      return { pass: false, reason: `got ${value} (correct: 174)` };
+    }
+    return { pass: true };
+  },
+  systemPreambleOverride: REASONING_PREAMBLE,
+  noTools: true,
+  maxIterations: 4,
+  timeoutMs: 90_000,
+};
+
+// Preamble for the open-ended judge-scored axes: produce a full analysis
+// (no "final line only" ban). Depth/specificity is the thing being measured.
+const ANALYSIS_PREAMBLE = [
+  'You are an expert analyst answering a hard, open-ended question that has no',
+  'single correct answer. Produce a thorough, well-structured analysis.',
+  'Specificity, depth, weighing the real trade-offs, and reasoning about',
+  'second-order and downstream effects matter far more than length or hedging.',
+  'Where a recommendation is asked for, commit to one and justify it.',
+].join(' ');
+
+// Stringent, full-range judge rubrics. The generic rubric clusters every
+// answer at 4.5–5.0; these force calibration with explicit per-band anchors
+// and an instruction to be stingy, so quality actually separates tiers.
+const STRATEGY_RUBRIC = [
+  'You are a stringent senior strategy evaluator scoring a business analysis 1–5.',
+  'BE CALIBRATED AND USE THE FULL RANGE. Reserve 5 for genuinely exceptional',
+  'answers; do NOT cluster scores at the top. Judge on: depth (non-obvious',
+  'insight vs generic advice), trade-off rigor (weighing real tensions, not',
+  'just listing options), second-order reasoning (downstream/dynamic effects),',
+  'decisiveness with justification, and whether it identifies what to investigate',
+  'first (e.g. the root cause of the churn trend).',
+  '',
+  'Anchors:',
+  '5 = exceptional: sharp non-obvious insight, rigorous trade-off reasoning,',
+  '    addresses second-order effects, decisive and well-justified.',
+  '4 = strong: solid with real analysis and some depth, minor gaps.',
+  '3 = competent but generic: correct-but-surface, lists more than it analyses.',
+  '2 = weak: vague, platitudes, misses the key tensions or the runway/churn',
+  '    constraint.',
+  '1 = poor: irrelevant, shallow, internally inconsistent, or wrong.',
+  '',
+  'Respond with ONLY a single-line JSON object, no prose, no code fence:',
+  '{"score": <1-5 integer>, "reason": "<=20 word rationale>"}',
+].join('\n');
+
+const DESIGN_RUBRIC = [
+  'You are a stringent principal-engineer evaluator scoring a system-design',
+  'answer 1–5. BE CALIBRATED AND USE THE FULL RANGE. Reserve 5 for genuinely',
+  'exceptional answers; do NOT cluster at the top. Judge on: correct grasp of',
+  'the conflict-resolution trade-offs (CRDT vs OT vs last-write-wins and WHY),',
+  'handling of concurrent edits AND deletions (tombstones), causality/ordering,',
+  'the storage/bandwidth implications of the chosen approach, and identification',
+  'of the real failure modes with concrete mitigations.',
+  '',
+  'Anchors:',
+  '5 = exceptional: correct deep trade-off reasoning, handles deletion/causality',
+  '    edge cases, honest about storage/bandwidth cost, names real failure modes.',
+  '4 = strong: sound choice with real justification, minor omissions.',
+  '3 = competent but generic: names the options but shallow on why / edge cases.',
+  '2 = weak: hand-wavy, misses deletions or causality, no cost awareness.',
+  '1 = poor: incorrect, irrelevant, or ignores the offline-merge core problem.',
+  '',
+  'Respond with ONLY a single-line JSON object, no prose, no code fence:',
+  '{"score": <1-5 integer>, "reason": "<=20 word rationale>"}',
+].join('\n');
+
+// Shared sanity gate for judge-scored axes: a real attempt is non-trivial in
+// length. The quality SCORE (not pass/fail) is the discriminator.
+// Gate kept deliberately low: it only catches empties / refusals / one-liners.
+// A terse-but-present answer should be SCORED by the judge (which penalises
+// shallowness), not gate-failed — gate-failing it would drop the quality signal.
+const analysisGate = (finalText: string): PassResult =>
+  finalText.trim().length >= 120
+    ? { pass: true }
+    : { pass: false, reason: `answer too short (${finalText.trim().length} chars) — no real attempt` };
+
+// ── 11. deep-strategy-tradeoff (open-ended, judge-scored) ──────
+
+export const SCENARIO_DEEP_STRATEGY: SetBenchScenario = {
+  id: 'deep-strategy-tradeoff.saas-churn-runway',
+  axis: 'deep-strategy-tradeoff',
+  description: 'Open-ended strategy: weigh three growth paths for a churning SaaS under a runway constraint. No single right answer; graded on analytical depth.',
+  prompt: [
+    'A B2B SaaS company has $45k MRR, 14 months of runway, and a team of 6.',
+    'Net revenue churn has crept from 2% to 5% per month over the last two quarters.',
+    'Three options are on the table:',
+    '',
+    '  (A) Move upmarket — pursue larger enterprise accounts with higher ACV and',
+    '      lower churn, but a 6–9 month sales cycle and heavy implementation needs.',
+    '  (B) Double down on self-serve PLG — cut friction, improve onboarding and',
+    '      activation, keep ACV low but scale volume.',
+    '  (C) Add a professional-services arm — bespoke implementations for existing',
+    '      accounts to reduce churn and lift revenue per account now.',
+    '',
+    'Analyse the trade-offs given the runway constraint and the churn trend, reason',
+    'about the second-order effects of each path, and recommend a concrete course',
+    'of action — including what you would investigate FIRST before committing.',
+  ].join('\n'),
+  passCheck: analysisGate,
+  systemPreambleOverride: ANALYSIS_PREAMBLE,
+  judgeRubric: STRATEGY_RUBRIC,
+  noTools: true,
+  maxTokens: 4096,
+  maxIterations: 3,
+  timeoutMs: 120_000,
+};
+
+// ── 12. deep-ambiguous-design (open-ended, judge-scored) ───────
+
+export const SCENARIO_DEEP_DESIGN: SetBenchScenario = {
+  id: 'deep-ambiguous-design.offline-first-sync',
+  axis: 'deep-ambiguous-design',
+  description: 'Open-ended system design: offline-first collaborative note sync. No single right answer; graded on trade-off depth + edge-case handling.',
+  prompt: [
+    'Design the data model and synchronization strategy for an offline-first,',
+    'collaborative note-taking app. Multiple devices edit the same notes while',
+    'offline and later reconnect to sync. In your design, address:',
+    '',
+    '  - The conflict-resolution approach (e.g. CRDT vs operational transform vs',
+    '    last-write-wins) and WHY you chose it.',
+    '  - How you handle concurrent edits AND concurrent deletions.',
+    '  - Causality / ordering of edits across devices.',
+    '  - The storage and bandwidth trade-offs of your chosen approach.',
+    '  - The main failure modes and how your design handles them.',
+  ].join('\n'),
+  passCheck: analysisGate,
+  systemPreambleOverride: ANALYSIS_PREAMBLE,
+  judgeRubric: DESIGN_RUBRIC,
+  noTools: true,
+  maxTokens: 4096,
+  maxIterations: 3,
+  timeoutMs: 120_000,
+};
+
 // ── registry ──────────────────────────────────────────────────
 
 export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
@@ -452,4 +682,8 @@ export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
   SCENARIO_TOOL_CHAIN_BACKTRACK,
   SCENARIO_CRON_COLD_START,
   SCENARIO_REAL_WORLD_GROUNDED,
+  SCENARIO_HARD_DEDUCTIVE,
+  SCENARIO_MULTI_HOP_QUANT,
+  SCENARIO_DEEP_STRATEGY,
+  SCENARIO_DEEP_DESIGN,
 ];
