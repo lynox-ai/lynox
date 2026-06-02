@@ -2753,7 +2753,11 @@ export class LynoxHTTPApi {
       const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {
-        redacted['managed'] = tier;
+        // Emit the CANONICAL tier (starter→hosted, eu→managed) so every Web UI
+        // consumer sees canonical ids regardless of provisioning vintage — a
+        // pre-rename tenant still carries LYNOX_MANAGED_MODE=starter until it's
+        // re-synced. cpSuppliesLLMKey above already normalizes internally.
+        redacted['managed'] = normalizeBillingTier(tier) ?? tier;
       }
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop
