@@ -98,8 +98,8 @@ OPENAI_MODEL_ID=mistral-large-2512
 - **Models**:
   - `mistral-large-2512` (recommended — pinned Sonnet-class flagship)
   - `mistral-large-latest` (floating tag — may drift between snapshots, prefer the pinned form in production)
+  - `ministral-14b-2512` (the `balanced` tier pick — best cost/quality midpoint)
   - `ministral-8b-2512` (low-cost orchestration; 100% pass on all 8 bench axes)
-  - `magistral-medium-2509` (reasoning specialist — batch / deep analysis only; tool-routing reliability lower than chat-tier)
   - `codestral-latest` (code-focused)
 - **Pricing**: $0.50 / $1.50 per MTok input/output (Large 3); $0.15 / $0.15 (Ministral 8B)
 - **Tool calling**: bench-verified near-Sonnet quality on Large 3; the pinned snapshot is what we ship.

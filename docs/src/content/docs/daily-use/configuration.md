@@ -56,9 +56,9 @@ Only **anthropic** and **openai with the Mistral endpoint** are exercised on eve
 
 The tiers are provider-agnostic capability bands (`fast` = cheapest/quickest, `balanced` = default workhorse, `deep` = reasoning-heavy); each resolves to a concrete model for your active provider. The legacy Anthropic-brand names (`haiku`/`sonnet`/`opus`) are still accepted and normalized automatically, so existing configs keep working.
 
-- **opus** — Most capable, higher cost
-- **sonnet** — Balanced (recommended)
-- **haiku** — Fastest, lowest cost
+- **deep** — Most capable, reasoning-heavy, higher cost
+- **balanced** — Default workhorse (recommended)
+- **fast** — Quickest, lowest cost
 
 ### Cost Limits
 
