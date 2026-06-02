@@ -20,6 +20,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { normalizeBillingTier } from '../utils/billing-tier.js';
 
 	let managed = $state<boolean | null>(null);
 	let hasPasskeys = $state<boolean | null>(null);
@@ -32,7 +33,10 @@
 			const cfg = await fetch(`${getApiBase()}/config`);
 			if (cfg.ok) {
 				const body = (await cfg.json()) as { managed?: string };
-				managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu' || body.managed === 'starter';
+				// Any managed-infra tier (incl. Hosted-BYOK). normalizeBillingTier
+				// maps legacy starter→hosted / eu→managed, so this covers both the
+				// canonical ids the engine now emits and any un-re-synced legacy env.
+				managed = !!normalizeBillingTier(body.managed);
 			}
 
 			if (typeof window === 'undefined' || !window.PublicKeyCredential) {

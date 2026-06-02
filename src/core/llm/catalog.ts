@@ -121,7 +121,7 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
  * cost predictability + behaviour-drift in managed-EU tenants.
  *
  * Tier mapping (updated 2026-05-29): ministral-8b ↔ fast, ministral-14b ↔
- * balanced, mistral-large-3 ↔ deep. magistral-medium dropped from the catalog
+ * balanced, mistral-large-2512 ↔ deep. magistral-medium dropped from the catalog
  * — Mistral deprecated the Magistral family (retires 2026-07-31) and Set-Bench
  * v4 (fair judge panel) showed it never beats mistral-large-2512 at 6× the
  * cost. ministral-3b stays listed as the cheapest opt-in orchestration model.
@@ -193,7 +193,7 @@ export const LLM_CATALOG: LLMCatalog = [
     requires_region: false,
     base_url_default: 'https://api.mistral.ai/v1',
     default_residency: 'EU-Paris (Mistral SAS; DPA + GDPR)',
-    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large / magistral picked from the model dropdown.',
+    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
   },
   {
     provider: 'openai',

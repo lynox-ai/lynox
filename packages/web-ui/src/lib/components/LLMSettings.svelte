@@ -113,17 +113,6 @@
 	let config = $state<UserConfig>({});
 	let locks = $state<Locks>({});
 	let activeProvider = $state<LLMProvider | null>(null);
-	// Magistral latency advisory: shown when user picks the opus-tier on Mistral
-	// (which maps to Magistral Medium, ~30-40s per call). Dismissable, persists
-	// via localStorage so the banner doesn't re-show on every Settings reload.
-	// Re-shows if the user clears browser storage (opt-in reset).
-	let dismissedMagistralAdvisory = $state(
-		typeof localStorage !== 'undefined' && localStorage.getItem('lynox_dismissed_magistral_advisory') === '1'
-	);
-	function dismissMagistralAdvisory(): void {
-		dismissedMagistralAdvisory = true;
-		try { localStorage.setItem('lynox_dismissed_magistral_advisory', '1'); } catch { /* ignore quota/private-mode */ }
-	}
 	// UI key of the active catalog entry — disambiguates entries that share
 	// `provider` (e.g. mistral vs. generic openai-compat). Stays in sync with
 	// `activeProvider` on selection; on load, derived from config (Mistral
@@ -738,7 +727,7 @@
 				     (Anthropic + Mistral). Binds to `default_tier` which IS
 				     runtime-meaningful — sets the starting orchestration tier
 				     before auto-downgrade. On Mistral, the tier maps via
-				     MISTRAL_MODEL_MAP: sonnet→Large, opus→Magistral, haiku→Small.
+				     MISTRAL_MODEL_MAP: deep→Large-2512, balanced→Ministral-14B, fast→Ministral-8B.
 				     v1.5.2 parity (rafael QA 2026-05-18): Mistral previously had
 				     no picker because the old single-model dropdown wrote
 				     openai_model_id (no runtime effect). Now the tier-bound picker
@@ -753,26 +742,14 @@
 					</select>
 				</label>
 
-				<!-- Magistral latency advisory: shown only when user picks opus-tier on Mistral.
-				     Dismissable via localStorage flag (see dismissedMagistralAdvisory state). -->
-				{#if activeCatalogKey === 'mistral' && config.default_tier === 'opus' && !dismissedMagistralAdvisory}
-					<div class="mt-2 p-3 rounded border border-amber-500/30 bg-amber-500/5 text-sm flex items-start gap-2">
-						<span class="flex-1 text-text-muted">{t('settings.info.magistral_latency')}</span>
-						<button type="button" onclick={dismissMagistralAdvisory}
-							class="text-text-subtle hover:text-text-muted px-1 -mt-1 -mr-1"
-							aria-label="Dismiss">×</button>
-					</div>
-				{/if}
 				<!--
 					Pre-1.5.2 Mistral had a separate single-model dropdown that wrote
 					openai_model_id — but that field is only consulted as a fallback
 					when a tier is missing from MISTRAL_MODEL_MAP. All three Mistral
-					tiers (sonnet→Large, haiku→Small, opus→Magistral) are mapped,
-					so the dropdown value was never actually used. Users picked
-					"Magistral Medium" and the engine still routed to Mistral Large.
-					Replaced with the unified default-tier picker above + the
-					tier-set summary block below (single source of truth).
-					single source of truth and lynox routes automatically per turn.
+					tiers (deep→Large, balanced→Ministral-14B, fast→Ministral-8B) are
+					mapped, so the dropdown value was never actually used. Replaced
+					with the unified default-tier picker above + the tier-set summary
+					block below — single source of truth, lynox routes per turn.
 				-->
 			{:else if activeProvider === 'custom'}
 				<!--

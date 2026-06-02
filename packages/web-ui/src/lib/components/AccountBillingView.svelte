@@ -22,8 +22,8 @@
 	[[project_pr3_stripe_portal_sso_deferred]] — PRD-v3 at
 	`pro/docs/internal/PRD-STRIPE-PORTAL-SSO.md` is the spec for that sprint.
 
-	Tier-awareness audit (`managed` value from /api/config):
-	| Surface             | null (self-host/BYOK) | 'starter'/'managed'/'managed_pro'/'eu' |
+	Tier-awareness audit (`managed` value from /api/config, canonical post-v1.8.0):
+	| Surface             | null (self-host)      | 'hosted'/'managed'/'managed_pro' |
 	|---------------------|-----------------------|----------------------------------------|
 	| Subscription tier   | ✗ self_host_note      | ✓ tier label                           |
 	| Stripe portal CTA   | ✗ hidden              | ✓ if LYNOX_STRIPE_PORTAL_LOGIN_URL set |
@@ -33,10 +33,9 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { normalizeBillingTier, isHostedInstance, type BillingTier } from '../utils/billing-tier.js';
 
-	type ManagedTier = 'starter' | 'managed' | 'managed_pro' | 'eu';
-
-	let managed = $state<ManagedTier | null>(null);
+	let managed = $state<BillingTier | null>(null);
 	let stripePortalUrl = $state<string | null>(null);
 	let loaded = $state(false);
 
@@ -45,9 +44,10 @@
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as { managed?: string; stripe_portal_login_url?: string };
-			if (body.managed === 'starter' || body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu') {
-				managed = body.managed;
-			}
+			// normalizeBillingTier maps any legacy id (starter→hosted, eu→managed)
+			// to canonical; the engine already emits canonical, this stays robust.
+			const norm = normalizeBillingTier(body.managed);
+			if (norm) managed = norm;
 			// Stripe-hosted login URL — engine only surfaces it when it passes
 			// the `^https://billing.stripe.com/` prefix check, so we trust the
 			// shape here and just render. Absent → CTA hidden, support fallback only.
@@ -68,10 +68,9 @@
 		// switch with no default — TS narrows the union and a future tier id
 		// addition (e.g. PRD-OPENAI-NATIVE `native` tier) will fail to compile.
 		switch (managed) {
-			case 'starter':      return t('account.billing.tier.hosted');
+			case 'hosted':       return t('account.billing.tier.hosted');
 			case 'managed':      return t('account.billing.tier.managed');
 			case 'managed_pro':  return t('account.billing.tier.managed_pro');
-			case 'eu':           return t('account.billing.tier.managed');  // legacy alias
 			case null:           return '—';
 		}
 	});
@@ -125,7 +124,7 @@
 				<p class="text-xs text-text-muted">{t('account.billing.portal_hint')}</p>
 			{/if}
 
-			{#if managed === 'starter'}
+			{#if isHostedInstance(managed)}
 				<!-- Hosted-BYOK customers get a soft upgrade-CTA — without it
 				     the page has no self-serve path from CHF 39 BYOK to
 				     CHF 79/149 Managed plans, and the visitor sees a billing
