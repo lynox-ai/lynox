@@ -29,6 +29,7 @@ import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability, normalizeTier } from '../types/index.js';
+import { isHostedInstance, cpSuppliesLLMKey } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 
@@ -149,8 +150,11 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  *   - `requiresConfigLockGate()` → true ONLY for pool (BYOK keeps full config
  *     control because the customer pays for and operates their own LLM).
  */
-const ADMIN_SPLIT_TIERS = new Set(['managed', 'managed_pro', 'eu', 'starter']);
-const CONFIG_LOCKED_TIERS = new Set(['managed', 'managed_pro', 'eu']);
+// Tier predicates derive from the canonical billing-tier mirror (./billing-tier.js):
+//   - admin-split gate  → isHostedInstance (true for every CP tier incl. BYOK)
+//   - config-lock gate  → cpSuppliesLLMKey (managed pool only)
+// The mirror normalizes legacy `starter`/`eu`, so these gates work whether an
+// instance reports the old or the renamed (`hosted`) tier.
 
 /**
  * Managed-pool effective defaults for fields that are NOT in the user-config
@@ -329,7 +333,7 @@ function constantTimeEqual(candidate: Buffer, expected: Buffer): boolean {
 
 /** Cookie auth is user-scope → secret writes need the BYOK whitelist. Covers BYOK starter + managed pool. */
 function requiresAdminSplitGate(value: string | undefined): boolean {
-  return value !== undefined && ADMIN_SPLIT_TIERS.has(value);
+  return isHostedInstance(value);
 }
 
 /**
@@ -350,7 +354,7 @@ export function predictManagedBlocked(name: string): boolean {
 
 /** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
 function requiresConfigLockGate(value: string | undefined): boolean {
-  return value !== undefined && CONFIG_LOCKED_TIERS.has(value);
+  return cpSuppliesLLMKey(value);
 }
 
 async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
@@ -881,7 +885,7 @@ export class LynoxHTTPApi {
 
     const config = readUserConfig();
     const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
-    const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
+    const isManagedTier = cpSuppliesLLMKey(tier);
 
     interface CpSummary {
       managed: boolean;
@@ -1412,7 +1416,7 @@ export class LynoxHTTPApi {
     // not-configured signal MUST still surface — pre-fix the status bar
     // showed "API OK" on managed-BYOK with empty vault while SetupBanner
     // was simultaneously demanding the key, lying green on the indicator.
-    const cpSuppliesKey = managedMode === 'managed' || managedMode === 'managed_pro' || managedMode === 'eu';
+    const cpSuppliesKey = cpSuppliesLLMKey(managedMode);
     if (!cpSuppliesKey && store) {
       let configured = false;
       try {
@@ -2742,7 +2746,7 @@ export class LynoxHTTPApi {
       }
       // Expose managed tier so the Web UI can adapt its settings UI ('starter' = BYOK, 'eu' = Managed Mistral EU)
       const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
-      const isManagedTier = tier === 'managed' || tier === 'managed_pro' || tier === 'eu';
+      const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {
         redacted['managed'] = tier;
       }

@@ -7,6 +7,10 @@
 // Foundation for P3-PR-A1. Zero behaviour change.
 
 import { getApiBase } from '../../config.svelte.js';
+import {
+	isHostedInstance,
+	cpSuppliesLLMKey as tierCpSuppliesLLMKey,
+} from '../../utils/billing-tier.js';
 
 let managedTier = $state<string | undefined>(undefined);
 
@@ -14,9 +18,9 @@ export function getManagedTier(): string | undefined {
 	return managedTier;
 }
 
-/** `true` when running on a managed instance (any non-empty tier string). */
+/** `true` when running on a managed instance (any CP-provisioned tier, BYOK incl.). */
 export function isManaged(): boolean {
-	return !!managedTier;
+	return isHostedInstance(managedTier);
 }
 
 /**
@@ -30,7 +34,7 @@ export function isManaged(): boolean {
  * path to set or rotate their own key.
  */
 export function cpSuppliesLLMKey(): boolean {
-	return managedTier === 'managed' || managedTier === 'managed_pro' || managedTier === 'eu';
+	return tierCpSuppliesLLMKey(managedTier);
 }
 
 export async function loadManagedStatus(): Promise<void> {
