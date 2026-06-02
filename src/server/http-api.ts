@@ -2744,7 +2744,7 @@ export class LynoxHTTPApi {
           redacted[`${key}_configured`] = true;
         }
       }
-      // Expose managed tier so the Web UI can adapt its settings UI ('starter' = BYOK, 'eu' = Managed Mistral EU)
+      // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro = CP-supplied LLM)
       const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {
