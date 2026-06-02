@@ -19,7 +19,8 @@
  *   - costUsdCold: pricing.inputPerMillion × all input tokens
  *   - costUsdWarm: cache_read_input_tokens billed at cacheReadPerMillion,
  *                  remaining input tokens at inputPerMillion, output as-is
- * Mistral / openai-compat cells without cache fields → warm == cold.
+ * Mistral caches via prompt_cache_key (cached_tokens surface as
+ * cache_read_input_tokens), so its cells also show warm < cold.
  */
 
 import Anthropic from '@anthropic-ai/sdk';

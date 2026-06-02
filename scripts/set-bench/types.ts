@@ -13,9 +13,10 @@
  *
  * Cache treatment: Anthropic's `cache_read_input_tokens` +
  * `cache_creation_input_tokens` are read from `usage` and used to compute
- * warm-effective cost. Mistral exposes no native cache field; warm cost
- * equals cold cost for those cells (the report flags this explicitly so a
- * reader doesn't misinterpret "0% cache hit" as a model failure).
+ * warm-effective cost. Mistral caches natively too (prompt_cache_key routing,
+ * surfaced as cached_tokens in the usage block) — so warm < cold there as
+ * well; the mechanism differs (request-body key vs Anthropic's cache_control
+ * markers) but both populate cacheReadTokens.
  */
 
 import type { LLMProvider } from '../../src/types/index.js';

@@ -7,7 +7,7 @@
  * v4 additions:
  *   - Cache-aware cost columns: cold (no cache discount) vs warm
  *     (cache_read tokens at the published cache-read rate). Mistral cells
- *     report warm == cold (no native cache field).
+ *     cache too (prompt_cache_key routing), so warm < cold there as well.
  *   - cache-hit-rate per cell — input tokens served from cache /
  *     (input + cache_read). Honesty discipline: this is what the page
  *     promises to report when the long-context axis runs.

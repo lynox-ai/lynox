@@ -25,8 +25,9 @@
  *
  * Pricing sourced from `src/core/pricing.ts`. Anthropic cache rates:
  * read = 10% of input rate, write = 125% (Anthropic's published
- * multipliers). Mistral does not expose a native prompt-cache field;
- * cache rates are left undefined (warm = cold for those cells).
+ * multipliers). Mistral DOES cache natively now (prompt_cache_key routing,
+ * surfaced as cached_tokens) — its cells carry a cacheReadPerMillion (10% of
+ * input) and warm < cold there too, just via a different mechanism.
  */
 
 import { ALL_AXES } from './types.js';
