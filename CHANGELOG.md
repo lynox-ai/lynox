@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+## 1.8.0 — 2026-06-03
+
+Provider-agnostic tier model + canonical billing-tier consolidation. 16 commits since v1.7.9.
+
+### Breaking
+
+- **Provider-agnostic model-tier names** (#639). `opus`/`sonnet`/`haiku` → `deep`/`balanced`/`fast` across the `ModelTier` type and config. Legacy Anthropic-brand names are still accepted and normalized via `normalizeTier`, so existing `config.json` and `LYNOX_DEFAULT_TIER`/`LYNOX_MAX_TIER` env vars keep working unchanged.
+- **Billing-tier rename `starter` → `hosted` + `eu` tier retired** (#647). A canonical billing-tier module is now the single source of truth across web-ui, engine, and the control plane; `starter`/`eu` are accepted as legacy aliases. Managed deployments apply migration `0029_rename_tier_hosted` (renames existing rows; `eu` rows preserved).
+
+### Added
+
+- **Opt-in chat diagnostics panel** (#643) — per-message metrics surfaced in the chat view.
+- **JSON export** option in the thread kebab menu (#636).
+- **`/api/config` surfaces the effective active provider** when a provider is env-pinned (#646).
+
+### Changed
+
+- **Mistral tier refresh** (#644): `deep` = `mistral-large-2512`, `balanced` = `ministral-14b-2512`; `magistral` dropped from the tier set (retires 2026-07-31). Set-Bench got a fairness pass (judge-panel + open-ended axes).
+- **Provider tiles are read-only with a tailored banner when the provider is env-pinned** (#645).
+- **Provider-switch hardening** (#641, #642): footer reactivity, API-error keeps the turn, env-copy, display/API history split, silent-turn render, demo cost-gate.
+- **Tightened `read_file`/`http` context caps** + `api_setup` source-domain filter (#637).
+- **Grounding prompt** now splits knowledge by verification source (#638).
+
+### Removed
+
+- Retired the `pipelineStatusV2` knob (#635).
+
+## 1.7.9 — 2026-05-27
+
+### Added
+
+- Propagate provider/credential switch to long-lived Sessions; `engine.configVersion` increments on credential/provider swap (#42).
+- Mistral SSRF whitelist + ENV-override banner + Hosted-BYOK back-button (F9/F7).
+
+### Fixed
+
+- Reconcile chat thread from server on ChatView re-mount (F13).
+- Self-host `/login` form 403 via `ORIGIN` env.
+
+### Changed
+
+- Overnight i18n + copy hygiene batch — mail modal, Google grammar, push card (#634); HN-doc-sweep (#633).
+
+## 1.7.8 — 2026-05-27
+
+### Fixed
+
+- Billing-page subtitle + Upgrade-CTA for the Hosted-BYOK tier (G4).
+
+## 1.7.7 — 2026-05-27
+
+### Added
+
+- Link the Privacy & Data page from the Settings hub.
+
+### Fixed
+
+- Engine boot crash on BYOK tenants with `provider=openai` and no key.
+- Restore Mistral / Custom-OpenAI provider config in the SetupBanner (G5).
+
 ## 1.7.6 — 2026-05-27 night
 
 Patch — three managed-tier UX gaps caught during the v1.7.5 staging walk on a Hosted-BYOK (`starter`) tenant. All three traced to managed-mode code paths assuming `LYNOX_MANAGED_MODE=*` always means the CP supplies the LLM key — wrong for Hosted-BYOK where the customer brings it. G2 additionally affected self-host with non-Anthropic providers.
