@@ -773,7 +773,7 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Onboarding (kept for web-ui setup hints)
 	'onboard.welcome': { de: 'Willkommen bei lynox', en: 'Welcome to lynox' },
-	'onboard.standalone_hint': { de: 'Gib deinen Anthropic API Key ein, um loszulegen.', en: 'Enter your Anthropic API key to get started.' },
+	'onboard.standalone_hint': { de: 'Gib deinen API Key ein, um loszulegen.', en: 'Enter your API key to get started.' },
 	'onboard.key_saved': { de: 'Bereit zum Chatten!', en: 'Ready to chat!' },
 	'onboard.save_key': { de: 'Speichern & Starten', en: 'Save & Start' },
 	'onboard.ready_title': { de: 'Alles eingerichtet!', en: 'All set!' },
