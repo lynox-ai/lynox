@@ -216,6 +216,32 @@ describe('ImapSmtpProvider — list', () => {
     expect(arg.all).toBeUndefined();
   });
 
+  it('decodes the snippet from a base64-CTE part (UTF-8 umlaut) — feeds inbox cold-start body snapshot', async () => {
+    const original = 'Grüße aus München — über alle Maßen schön.';
+    const b64 = Buffer.from(original, 'utf-8').toString('base64');
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      {
+        ...makeFetchMessage({
+          uid: 1,
+          bodyStructure: {
+            type: 'multipart/mixed',
+            childNodes: [
+              { type: 'text/plain', part: '1', size: 200, encoding: 'base64', parameters: { charset: 'utf-8' } },
+            ],
+          },
+        }),
+        bodyParts: new Map([['1', Buffer.from(b64, 'ascii')]]),
+      } as FetchMessageObject,
+    ]));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const envelopes = await provider.list({ limit: 10 });
+
+    expect(envelopes[0]?.snippet).toBe(original);
+    expect(envelopes[0]?.snippet).not.toContain('Gr'.concat(b64.slice(2, 8)));
+  });
+
   it('caps the limit at the default ceiling', async () => {
     probe.search.mockResolvedValue(Array.from({ length: 100 }, (_, i) => i + 1));
     probe.fetch.mockImplementation(() => asyncIterFrom([]));
@@ -275,6 +301,78 @@ describe('ImapSmtpProvider — fetch', () => {
     const err = await provider.fetch({ uid: 999 }).catch(e => e as MailError);
     expect(err).toBeInstanceOf(MailError);
     expect(err.code).toBe('not_found');
+  });
+});
+
+describe('ImapSmtpProvider — Content-Transfer-Encoding decoding', () => {
+  it('decodes a base64 CTE text/plain part (UTF-8 with umlaut) to original plaintext', async () => {
+    const original = 'Grüße aus München — über alle Maßen schön.';
+    const b64 = Buffer.from(original, 'utf-8').toString('base64');
+    // base64 on the wire is usually CRLF-folded at 76 chars; emulate folding.
+    const folded = (b64.match(/.{1,76}/g) ?? [b64]).join('\r\n');
+
+    probe.fetchOne.mockResolvedValue(makeFetchMessage({
+      uid: 50,
+      bodyStructure: {
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'text/plain', part: '1', size: 200, encoding: 'base64', parameters: { charset: 'utf-8' } },
+        ],
+      },
+    }));
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      { ...makeFetchMessage({ uid: 50 }), bodyParts: new Map([['1', Buffer.from(folded, 'ascii')]]) } as FetchMessageObject,
+    ]));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const msg = await provider.fetch({ uid: 50 });
+
+    expect(msg.text).toBe(original);
+    expect(msg.text).toContain('Grüße');
+    expect(msg.text).not.toContain(b64.slice(0, 12)); // not raw base64
+  });
+
+  it('decodes a quoted-printable CTE text/plain part (=20 → space, =C3=A4 → ä)', async () => {
+    // "Café =20 test" — QP-encoded: é = =C3=A9 (UTF-8), literal =20 → space
+    const qp = 'Caf=C3=A9=20test=20line';
+    probe.fetchOne.mockResolvedValue(makeFetchMessage({
+      uid: 51,
+      bodyStructure: {
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'text/plain', part: '1', size: 200, encoding: 'quoted-printable', parameters: { charset: 'utf-8' } },
+        ],
+      },
+    }));
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      { ...makeFetchMessage({ uid: 51 }), bodyParts: new Map([['1', Buffer.from(qp, 'latin1')]]) } as FetchMessageObject,
+    ]));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const msg = await provider.fetch({ uid: 51 });
+
+    expect(msg.text).toBe('Café test line');
+  });
+
+  it('leaves a 7bit CTE text/plain part unchanged', async () => {
+    const original = 'Plain 7bit ASCII body, nothing to decode.';
+    probe.fetchOne.mockResolvedValue(makeFetchMessage({
+      uid: 52,
+      bodyStructure: {
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'text/plain', part: '1', size: 200, encoding: '7bit', parameters: { charset: 'us-ascii' } },
+        ],
+      },
+    }));
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      { ...makeFetchMessage({ uid: 52 }), bodyParts: new Map([['1', Buffer.from(original, 'ascii')]]) } as FetchMessageObject,
+    ]));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const msg = await provider.fetch({ uid: 52 });
+
+    expect(msg.text).toBe(original);
   });
 });
 

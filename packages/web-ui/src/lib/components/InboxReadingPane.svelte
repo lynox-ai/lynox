@@ -24,9 +24,11 @@
 		onActionApplied?: () => void;
 		/** Mobile back-button is shown when true (hidden on three-pane desktop). */
 		showBack?: boolean;
+		/** Optional content rendered at the end of the body scroll container (e.g. inline context). */
+		children?: import('svelte').Snippet;
 	}
 
-	const { onReply, onActionApplied, showBack = false }: Props = $props();
+	const { onReply, onActionApplied, showBack = false, children }: Props = $props();
 
 	const full = $derived(getSelectedFull());
 	const thread = $derived(getSelectedThread());
@@ -310,6 +312,7 @@
 						<InboxThreadHistory {thread} currentMessageId={full.item.messageId} />
 					</div>
 				{/if}
+				{@render children?.()}
 			{/if}
 		</div>
 	</div>

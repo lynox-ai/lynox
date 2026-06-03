@@ -167,6 +167,43 @@ function hasAttachments(node: MessageStructureObject | undefined): boolean {
   return countAttachments(node) > 0;
 }
 
+/**
+ * RFC 2045 quoted-printable decoding for body parts. `=20` → space, `=3D`
+ * → `=`, soft line breaks (`=\r\n` or `=\n`) join lines, every other `=XX`
+ * is a hex byte. Returns the raw decoded bytes; charset interpretation
+ * happens afterwards in `decodeBuffer` so unknown-charset bodies are
+ * handled uniformly across all transfer encodings.
+ */
+function decodeQuotedPrintableBytes(input: string): Buffer {
+  const cleaned = input
+    // Soft line breaks (must come first so we don't try to interpret `=\r` as a hex escape)
+    .replace(/=\r?\n/g, '')
+    // Hex escapes
+    .replace(/=([0-9A-Fa-f]{2})/g, (_m, h: string) => String.fromCharCode(Number.parseInt(h, 16)));
+  return Buffer.from(cleaned, 'binary');
+}
+
+/**
+ * Decode a raw body-part Buffer per its Content-Transfer-Encoding into the
+ * actual content bytes, BEFORE charset interpretation. IMAP delivers the
+ * part exactly as encoded on the wire (base64 / quoted-printable / 7bit /
+ * 8bit / binary), so without this step base64/QP bodies leak to the UI as
+ * their raw encoded payload. `7bit`/`8bit`/`binary` (and anything unknown)
+ * pass through untouched.
+ */
+function decodeTransferEncoding(buf: Buffer, encoding?: string): Buffer {
+  const enc = (encoding ?? '7bit').toLowerCase().trim();
+  if (enc === 'base64') {
+    // Base64 is ASCII; strip all whitespace (CRLF folding) before decoding.
+    return Buffer.from(buf.toString('ascii').replace(/\s/g, ''), 'base64');
+  }
+  if (enc === 'quoted-printable') {
+    return decodeQuotedPrintableBytes(buf.toString('latin1'));
+  }
+  // 7bit / 8bit / binary / unknown — already the literal content bytes.
+  return buf;
+}
+
 /** Decode a body-part Buffer using a permissive charset hint. */
 function decodeBuffer(buf: Buffer, charset?: string): string {
   const cs = (charset ?? 'utf-8').toLowerCase();
@@ -470,17 +507,17 @@ export class ImapSmtpProvider implements MailProvider {
       let text = '';
       if (textPart) {
         const partId = isMultipart ? (textPart.part ?? '1') : 'TEXT';
-        text = await this.downloadPartAsText(client, opts.uid, partId);
+        text = await this.downloadPartAsText(client, opts.uid, partId, textPart.encoding, textPart.parameters?.['charset']);
       } else if (htmlPart) {
         const partId = isMultipart ? (htmlPart.part ?? '1') : 'TEXT';
-        const html = await this.downloadPartAsText(client, opts.uid, partId);
+        const html = await this.downloadPartAsText(client, opts.uid, partId, htmlPart.encoding, htmlPart.parameters?.['charset']);
         text = htmlToTextSnippet(html);
       }
 
       let html: string | undefined;
       if (opts.includeHtml && htmlPart) {
         const partId = isMultipart ? (htmlPart.part ?? '1') : 'TEXT';
-        html = await this.downloadPartAsText(client, opts.uid, partId);
+        html = await this.downloadPartAsText(client, opts.uid, partId, htmlPart.encoding, htmlPart.parameters?.['charset']);
       }
 
       const headers = msg.headers ? parseHeaders(msg.headers.toString('utf-8')) : new Map<string, string>();
@@ -500,7 +537,13 @@ export class ImapSmtpProvider implements MailProvider {
     }
   }
 
-  private async downloadPartAsText(client: ImapFlow, uid: number, partId: string): Promise<string> {
+  private async downloadPartAsText(
+    client: ImapFlow,
+    uid: number,
+    partId: string,
+    encoding?: string,
+    charset?: string,
+  ): Promise<string> {
     // Use fetch() with explicit bodyParts rather than downloadMany() — downloadMany
     // also requests BODY[<part>.MIME] which fails on single-part messages because
     // there is no per-part MIME header section to read.
@@ -519,7 +562,10 @@ export class ImapSmtpProvider implements MailProvider {
     )) {
       const buf = msg.bodyParts?.get(key);
       if (buf && buf.length > 0) {
-        const text = decodeBuffer(buf, undefined);
+        // Decode the Content-Transfer-Encoding (base64 / quoted-printable)
+        // BEFORE charset, otherwise encoded bodies leak raw to the UI.
+        const decodedBytes = decodeTransferEncoding(buf, encoding);
+        const text = decodeBuffer(decodedBytes, charset);
         if (buf.length >= MAX_BODY_BYTES) {
           return `${text}\n\n[… body truncated at ${String(MAX_BODY_BYTES)} bytes for safety]`;
         }
@@ -699,11 +745,28 @@ export class ImapSmtpProvider implements MailProvider {
       typeof internal === 'string' ? new Date(internal) :
       new Date(0);
 
-    // Extract snippet from BODYPART '1' if requested in the fetch
+    // Extract snippet from BODYPART '1' if requested in the fetch. Decode the
+    // part's Content-Transfer-Encoding BEFORE charset — the BODYSTRUCTURE node
+    // for part '1' carries the encoding/charset. Without this the snippet (and
+    // the body snapshot persisted by inbox cold-start, which reads list()) is
+    // raw base64/quoted-printable instead of plaintext.
     let snippetText = '';
     const partBuf = msg.bodyParts?.get('1');
     if (partBuf) {
-      const decoded = decodeBuffer(partBuf, undefined);
+      // Resolve the encoding/charset from the actual text part — the SAME way
+      // the full-body path (downloadPartAsText) does, via findTextPart. The
+      // earlier findPartById('1') lookup missed single-part messages (the root
+      // text node has no `.part='1'`), so its encoding fell through to 7bit and
+      // base64/QP snippets leaked raw into the list + THREAD-VERLAUF + the
+      // cold-start-persisted snippet. findTextPart returns the text/plain (or
+      // text/html) node — which carries `.encoding` for both single- and
+      // multipart — exactly the node BODY[1] was fetched from.
+      const textNode =
+        findTextPart(msg.bodyStructure, 'text/plain') ??
+        findTextPart(msg.bodyStructure, 'text/html') ??
+        msg.bodyStructure;
+      const decodedBytes = decodeTransferEncoding(partBuf, textNode?.encoding);
+      const decoded = decodeBuffer(decodedBytes, textNode?.parameters?.['charset']);
       // If the part was actually HTML (e.g. message has only text/html as part 1),
       // strip it down before snippeting.
       const looksHtml = /<[a-z!/][\s\S]*?>/i.test(decoded.slice(0, 200));

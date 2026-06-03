@@ -67,21 +67,6 @@
 	// Gate items-fetch on counts-loaded so the $effect below doesn't race
 	// onMount's initial load (without this the bucket gets fetched twice).
 	let countsLoaded = $state(false);
-	// Mail-Context-Sidebar drawer state (md/sm). Always-visible split on lg+.
-	let contextOpen = $state(false);
-	// Persistent collapse state — applies on lg+ where the sidebar otherwise
-	// shows as an inline split column. Read once on mount; written on every
-	// toggle so the choice survives a refresh. md/sm uses `contextOpen`.
-	let contextCollapsed = $state(false);
-	if (typeof window !== 'undefined') {
-		contextCollapsed = window.localStorage.getItem('inbox.contextCollapsed') === '1';
-	}
-	function toggleContextCollapsed(): void {
-		contextCollapsed = !contextCollapsed;
-		if (typeof window !== 'undefined') {
-			window.localStorage.setItem('inbox.contextCollapsed', contextCollapsed ? '1' : '0');
-		}
-	}
 	const touchPrimary = isTouchPrimary();
 
 	let cleanupVisibility: (() => void) | undefined;
@@ -687,36 +672,20 @@
 				reader is already wider. -->
 			<div class="flex flex-1 flex-col min-w-0 lg:min-w-[380px] overflow-hidden relative">
 				{#if readingOpen}
+					<!-- Context (sender / recent threads / followups …) renders
+						stacked below the mail body + thread history, inside the
+						reading pane's scroll container — mirrors THREAD-VERLAUF.
+						The former narrow right-side column was removed (2026-06-03)
+						because it clipped at every width. -->
 					<InboxReadingPane
 						onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 						onActionApplied={refreshAfterAction}
 						showBack
-					/>
-					<!-- Context toggle: drawer on md/sm, collapse on lg+. Single
-						button, viewport-aware behaviour so the action sits in the
-						same place. Monochrome chevron — no emoji. -->
-					<button
-						type="button"
-						class="absolute right-3 top-3 z-30 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-subtle hover:text-text hover:border-border-hover"
-						onclick={() => {
-							if (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches) {
-								toggleContextCollapsed();
-							} else {
-								contextOpen = !contextOpen;
-							}
-						}}
-						aria-pressed={contextOpen || !contextCollapsed}
-						aria-label={contextCollapsed ? t('inbox.context_sidebar_open') : t('inbox.context_sidebar_close')}
-					>{contextCollapsed ? '‹' : '›'}</button>
-					{#if contextOpen}
-						<!-- md/sm-only backdrop; tap-outside closes. -->
-						<button
-							type="button"
-							class="absolute inset-0 z-10 lg:hidden bg-bg/40 cursor-default"
-							aria-label={t('inbox.context_sidebar_close')}
-							onclick={() => (contextOpen = false)}
-						></button>
-					{/if}
+					>
+						<div class="mt-6">
+							<InboxContextSidebar inline itemId={getSelectedItemId()} />
+						</div>
+					</InboxReadingPane>
 				{:else}
 					<InboxKopilotCard
 						onPickItem={pickItem}
@@ -724,24 +693,6 @@
 					/>
 				{/if}
 			</div>
-			{#if readingOpen}
-				<!-- Sidebar wrapper: inline split on lg+ (unless user collapsed it),
-					absolutely-positioned drawer on md/sm. Single mount → single
-					context fetch per item. lg-collapse hides the column entirely
-					so the reading pane reclaims the width (fixes action-button
-					clipping on narrow viewports). -->
-				<div
-					class="
-						{contextOpen ? 'absolute z-20 right-0 top-0 h-full w-[85%] max-w-[320px] shadow-xl' : 'hidden'}
-						{contextCollapsed ? 'lg:hidden' : 'lg:relative lg:flex lg:z-auto lg:right-auto lg:top-auto lg:h-auto lg:w-[300px] xl:w-[340px] lg:shrink-0 lg:shadow-none lg:max-w-none'}
-					"
-				>
-					<InboxContextSidebar
-						itemId={getSelectedItemId()}
-						onClose={contextOpen ? () => (contextOpen = false) : undefined}
-					/>
-				</div>
-			{/if}
 		</div>
 	{/if}
 </div>
