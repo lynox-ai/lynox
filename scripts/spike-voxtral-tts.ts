@@ -103,7 +103,7 @@ const PROMPTS: readonly Prompt[] = [
     category: '~150 chars, DE + English product terms + numbers + URL',
     lang: 'mixed',
     text:
-      'Schick mir ein Follow-up für den Call. Die Action Items zum Deployment von Version 1.0.5 findest du unter https://control.lynox.cloud/admin. Setup Wizard läuft grün.',
+      'Schick mir ein Follow-up für den Call. Die Action Items zum Deployment von Version 1.0.5 findest du unter https://app.example.com/admin. Setup Wizard läuft grün.',
   },
 ];
 

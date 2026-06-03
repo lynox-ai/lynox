@@ -1,9 +1,8 @@
 // === Phase-4 visual verification smoke ===
 //
-// Drives a real browser against engine.lynox.cloud (staging) with a
-// pre-minted session cookie (see scripts/pre-release-smoke.sh for the
-// HMAC chain) and screenshots the four Phase-4 surfaces that just
-// shipped to main:
+// Drives a real browser against a staging engine (SMOKE_BASE_URL) with a
+// pre-minted session cookie and screenshots the four Phase-4 surfaces that
+// just shipped to main:
 //
 //   1. Inbox list   — baseline + zone rail working
 //   2. Reading-Pane + Mail-Context-Sidebar (PR #322)
@@ -15,14 +14,17 @@
 // PNGs are for human review.
 //
 // Run with:
-//   SMOKE_BASE_URL=https://engine.lynox.cloud \
+//   SMOKE_BASE_URL=https://your-staging-engine.example.com \
 //   STAGING_COOKIE=$(cat /tmp/staging-cookie.txt) \
 //   pnpm exec playwright test tests/smoke/phase4-visual.spec.ts \
 //     --config=playwright.config.ts --reporter=list
+// (lynox-internal: mint the cookie via pro/scripts/mint-staging-cookie.sh.)
 
 import { test, expect } from '@playwright/test';
 
 const COOKIE = process.env['STAGING_COOKIE'] ?? '';
+const BASE = process.env['SMOKE_BASE_URL'] ?? 'http://localhost:3000';
+const BASE_URL = new URL(BASE);
 
 test.skip(!COOKIE, 'STAGING_COOKIE env var is required');
 
@@ -36,10 +38,10 @@ test.beforeEach(async ({ context }) => {
 		{
 			name: 'lynox_session',
 			value: COOKIE,
-			domain: 'engine.lynox.cloud',
+			domain: BASE_URL.hostname,
 			path: '/',
 			httpOnly: false,
-			secure: true,
+			secure: BASE_URL.protocol === 'https:',
 		},
 	]);
 });
@@ -88,7 +90,7 @@ test('draft reply pane exposes the Send-Later dropdown', async ({ page }) => {
 test('integrations page shows push-notification prefs (toggle + quiet hours + throttle)', async ({ page, context }) => {
 	// Grant Notification permission so the Push card renders the
 	// "subscribed" sub-block — that's where the new Phase-4 prefs live.
-	await context.grantPermissions(['notifications'], { origin: 'https://engine.lynox.cloud' });
+	await context.grantPermissions(['notifications'], { origin: BASE_URL.origin });
 	const resp = await page.goto('/app/settings/integrations');
 	expect(resp?.status(), 'integrations page status').toBeLessThan(400);
 	await page.waitForLoadState('networkidle');

@@ -4,18 +4,19 @@
 # For regular releases prefer ./scripts/cut-release.sh X.Y.Z which bumps
 # versions, creates PRs, polls for merge, tags, and delegates docker + npm
 # publish to the release.yml workflow on tag push. This script exists only
-# for manual out-of-band docker rebuilds (homelab, debugging, pilot hotfix).
+# for manual out-of-band docker rebuilds (homelab, debugging, hotfix).
+#
+# Build + push only. Deployment/rollout is handled by the release pipeline,
+# not from this public script.
 #
 # Usage:
 #   ./scripts/build-docker.sh              # uses version from package.json
 #   ./scripts/build-docker.sh 1.2.3        # explicit version override
 #   ./scripts/build-docker.sh --dry-run    # show what would happen
-#   ./scripts/build-docker.sh --deploy     # also deploy pilots + managed after push
 #
 # Prerequisites:
 #   - Run on amd64 build server (not Mac/ARM64)
 #   - docker login ghcr.io done
-#   - For --deploy: SSH access to control plane (root@<control-plane-host>)
 #
 # Tags produced:
 #   ghcr.io/lynox-ai/lynox:1.2.3     (exact version — immutable)
@@ -30,12 +31,10 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Parse args
 DRY_RUN=false
-DEPLOY=false
 VERSION=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --deploy) DEPLOY=true ;;
     *) VERSION="$arg" ;;
   esac
 done
@@ -81,61 +80,4 @@ docker push "$TAG_LATEST"
 
 echo ""
 echo "Image pushed."
-
-# ── Deploy ──────────────────────────────────────────────────────────
-
-PILOT_COMPOSE="/opt/lynox-pilot"
-
-if ! $DEPLOY; then
-  echo ""
-  echo "To deploy, re-run with --deploy or manually:"
-  echo "  # Pilots"
-  echo "  docker tag $TAG_LATEST lynox:webui"
-  echo "  cd $PILOT_COMPOSE && docker compose up -d --force-recreate \$LYNOX_PILOT_TENANTS"
-  echo "  # Managed (per instance)"
-  echo "  ssh \$LYNOX_CONTROL_PLANE_SSH 'TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \\"
-  echo "    curl -s -X POST http://localhost:4000/admin/instances/<ID>/redeploy -H \"Authorization: Bearer \$TOKEN\"'"
-  exit 0
-fi
-
-# Deploy path — enforce env vars now, not at build/push time
-: "${LYNOX_CONTROL_PLANE_SSH:?Set LYNOX_CONTROL_PLANE_SSH=root@your-host}"
-: "${LYNOX_PILOT_TENANTS:?Set LYNOX_PILOT_TENANTS to space-separated tenant container names}"
-CONTROL_PLANE="$LYNOX_CONTROL_PLANE_SSH"
-
-echo ""
-echo "=== Deploying pilots ==="
-docker tag "$TAG_LATEST" lynox:webui
-cd "$PILOT_COMPOSE" && docker compose up -d --force-recreate $LYNOX_PILOT_TENANTS
-cd "$ROOT_DIR"
-
-echo ""
-echo "=== Deploying managed instances ==="
-# Fetch instance IDs from control plane, redeploy each one.
-# This requires SSH access to the control plane — if running on the build
-# server (homelab) which may not have it, print manual commands instead.
-if ssh -o ConnectTimeout=5 -o BatchMode=yes "$CONTROL_PLANE" true 2>/dev/null; then
-  INSTANCE_IDS=$(ssh "$CONTROL_PLANE" 'TOKEN=$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
-    curl -sf http://localhost:4000/admin/instances -H "Authorization: Bearer $TOKEN"' \
-    | node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{JSON.parse(d).forEach(i=>console.log(i.id))})")
-
-  if [[ -z "$INSTANCE_IDS" ]]; then
-    echo "  Warning: No managed instances found"
-  else
-    for ID in $INSTANCE_IDS; do
-      echo -n "  Redeploying $ID... "
-      ssh "$CONTROL_PLANE" "TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \
-        curl -sf -X POST http://localhost:4000/admin/instances/$ID/redeploy \
-          -H \"Authorization: Bearer \$TOKEN\"" && echo "ok" || echo "FAILED"
-    done
-  fi
-else
-  echo "  No SSH access to control plane from this machine."
-  echo "  Run from a machine with access:"
-  echo "    ssh $CONTROL_PLANE 'TOKEN=\$(grep MANAGED_ADMIN_TOKEN /opt/lynox-managed/.env | cut -d= -f2) && \\"
-  echo "      for ID in \$(curl -sf http://localhost:4000/admin/instances -H \"Authorization: Bearer \$TOKEN\" | node -e \"process.stdin.resume();let d=\\\"\\\";process.stdin.on(\\\"data\\\",c=>d+=c);process.stdin.on(\\\"end\\\",()=>{JSON.parse(d).forEach(i=>console.log(i.id))})\"); do \\"
-  echo "        curl -sf -X POST http://localhost:4000/admin/instances/\$ID/redeploy -H \"Authorization: Bearer \$TOKEN\" && echo \"Redeployed \$ID\"; done'"
-fi
-
-echo ""
-echo "=== Release $VERSION complete ==="
+echo "Deployment/rollout is driven by the release pipeline (release.yml), not from here."
