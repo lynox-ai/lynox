@@ -130,8 +130,11 @@ function measureStaticPrefixTokens(): number {
  * Budget for the full static cacheable prefix (system prompt + all static
  * prompt suffixes + every builtin tool definition), in estimated tokens.
  * Baseline 17107 → +~15 % headroom → 19674.
+ * 2026-06-03: deliberate bump to 19900 — added the `edit_file` tool definition
+ * (targeted file/artifact edits, replaces full rewrites → net token WIN at
+ * runtime) plus artifact-revision + high-stakes-grounding prompt guidance.
  */
-const STATIC_PREFIX_BUDGET = 19674;
+const STATIC_PREFIX_BUDGET = 19900;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
