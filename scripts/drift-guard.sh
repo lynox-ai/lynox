@@ -49,7 +49,12 @@ exists_path() {
   [ -e "$p" ] && return 0
   local esc
   esc="$(printf '%s' "$p" | sed 's/[.[\*^$/]/\\&/g')"
-  printf '%s\n' "$ALL_TRACKED" | grep -qE "(^|/)${esc}(/|\$)" && return 0
+  # Here-string, not `printf | grep -q`: under `set -o pipefail`, grep -q closing
+  # the pipe early on a match sends SIGPIPE to printf (exit 141), which pipefail
+  # then propagates as the pipeline's status — so `&& return 0` would not fire and
+  # an existing path would be falsely reported dead (intermittent, list-size/timing
+  # dependent). A here-string has no producer process, so no SIGPIPE.
+  grep -qE "(^|/)${esc}(/|\$)" <<< "$ALL_TRACKED" && return 0
   return 1
 }
 
