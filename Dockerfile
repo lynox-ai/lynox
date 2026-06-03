@@ -92,11 +92,16 @@ RUN git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp
     && cp build/ggml/src/libggml*.so.0* /usr/local/lib/ \
     && ldconfig
 
+# `-f` (--fail) + `--retry-all-errors`: HuggingFace intermittently serves a tiny
+# HTML error page (HTTP 4xx/5xx) instead of the model; without --fail, curl saved
+# that page and the sha256 check failed the whole build (recurring flake, 3× on
+# 2026-06-03). --fail rejects the error response and --retry retries it; sha256sum
+# stays as the final integrity gate.
 RUN mkdir -p /usr/share/whisper \
-    && curl -L -o /usr/share/whisper/ggml-base.bin \
+    && curl -fL --retry 5 --retry-delay 3 --retry-all-errors -o /usr/share/whisper/ggml-base.bin \
        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
     && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe /usr/share/whisper/ggml-base.bin" | sha256sum -c - \
-    && curl -L -o /usr/share/whisper/ggml-tiny.bin \
+    && curl -fL --retry 5 --retry-delay 3 --retry-all-errors -o /usr/share/whisper/ggml-tiny.bin \
        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
     && echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 /usr/share/whisper/ggml-tiny.bin" | sha256sum -c -
 
