@@ -1,5 +1,5 @@
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
-import { MODEL_MAP, getDefaultMaxTokens, getModelId } from '../../types/index.js';
+import { MODEL_MAP, getDefaultMaxTokens, getModelId, normalizeTier } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
 import type { AgentConfig } from '../../types/index.js';
@@ -206,7 +206,10 @@ async function executeThinker(
   // falling through to role defaults. Today only the `deep` tier is gated —
   // non-Pro tenants requesting `deep` get a silent downgrade to `balanced` so
   // role defaults + budget caps stay predictable.
-  const gatedOverride = applyTierGate(spec.model as ModelTier | undefined, userConfig.account_tier);
+  // Normalize agent-supplied tier at this input boundary — a spawn spec may
+  // carry a legacy Anthropic-brand name (`sonnet`/`opus`/`haiku`) which would
+  // otherwise reach getModelId/MODEL_MAP unresolved.
+  const gatedOverride = applyTierGate(normalizeTier(spec.model), userConfig.account_tier);
   const modelTier = (gatedOverride ?? resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier;
   // Profile overrides model ID + provider; otherwise use Claude tier resolution
   const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider());
@@ -501,7 +504,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const cfg = loadConfig();
     const cfgTier = cfg.default_tier;
     const totalEstimate = input.agents.reduce((sum, spec) => {
-      const gated = applyTierGate(spec.model as ModelTier | undefined, cfg.account_tier);
+      const gated = applyTierGate(normalizeTier(spec.model), cfg.account_tier);
       const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
       const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'balanced') as ModelTier;
       const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['balanced'];

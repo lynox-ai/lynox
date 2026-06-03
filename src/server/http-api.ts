@@ -1674,7 +1674,12 @@ export class LynoxHTTPApi {
       // divided real tokensIn by a stale 200k while the engine had
       // applied a different cap. Single source of truth via models.ts.
       const userCap = engine.getUserConfig().max_context_window_tokens;
-      const modelId = MODEL_MAP[tier];
+      // Fallback guards against a tier that slipped past normalization (e.g. a
+      // legacy `model_tier` restored from a pre-rename thread) resolving to
+      // undefined and crashing effectiveContextWindow. Root fix is at the
+      // restore boundary in session-store; this keeps the resume path from
+      // 500ing if any future boundary is missed.
+      const modelId = MODEL_MAP[tier] ?? MODEL_MAP['balanced'];
       jsonResponse(res, 201, {
         sessionId,
         model: tier,
