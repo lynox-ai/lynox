@@ -15,6 +15,15 @@
 		return SENSITIVE_PATTERNS.some(p => p.test(file));
 	}
 
+	// Artifact files live at <lynox-dir>/artifacts/<id>.<ext>. Surfacing that
+	// raw internal path ("../home/.../.lynox/artifacts/…") in the review reads
+	// as a leaky implementation detail to a non-dev user — show a friendly
+	// "Artefakt · <id>.<ext>" label instead. Plain file edits keep their path.
+	function displayLabel(file: string): string {
+		const m = file.match(/[/\\]\.lynox[/\\]artifacts[/\\]([^/\\]+)$/);
+		return m ? `${t('changeset.artifact_file')} ${m[1]}` : file;
+	}
+
 	let {
 		files,
 		onReview,
@@ -97,7 +106,7 @@
 					<span class="inline-block rounded px-1.5 py-0.5 text-[10px] font-mono uppercase {f.status === 'added' ? 'bg-success/15 text-success' : 'bg-accent/15 text-accent-text'}">
 						{f.status === 'added' ? t('changeset.new_file') : t('changeset.modified_file')}
 					</span>
-					<span class="flex-1 text-xs font-mono text-text truncate">{f.file}</span>
+					<span class="flex-1 text-xs font-mono text-text truncate">{displayLabel(f.file)}</span>
 					{#if sensitive}
 						<span class="rounded px-1.5 py-0.5 text-[10px] font-mono uppercase bg-danger/15 text-danger border border-danger/20">
 							{t('changeset.sensitive_warning')}
