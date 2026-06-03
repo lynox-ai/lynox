@@ -8,6 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
+	import { deckFrameHeight } from '../utils/artifact-frame.js';
 
 	interface Props {
 		content: string;
@@ -247,7 +248,19 @@
 	const ICON_OPEN_GALLERY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 2h5v5M14 2L8 8M11 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V6a1 1 0 011-1h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 	/** Injected into artifact iframes — posts height via postMessage for cross-origin resize */
-	const RESIZE_SCRIPT = '<script>(function(){function s(){parent.postMessage({type:"lynox-resize",h:document.documentElement.scrollHeight},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
+	// `deck` flag: a 100vh/dvh slide-deck collapses scrollHeight (absolute /
+	// overflow-hidden, viewport-pinned content) so the parent can't size it from
+	// the measured height. We flag it when BOTH a viewport-height unit is present
+	// AND scrollHeight stays within the current viewport (a long min-height:100vh
+	// page that actually flows tall reports a large scrollHeight → not a deck →
+	// normal sizing keeps working). The parent then sizes by aspect ratio.
+	// The deck regex + `sh<=vh+8` guard are the sandbox-isolated mirror of
+	// `isViewportDeck` in lib/utils/artifact-frame.ts — keep them identical. The
+	// viewport-unit scan is cached (`vu`) since style text doesn't change after
+	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
+	// instead of re-walking the whole DOM. (String backslashes are doubled so the
+	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
+	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0;parent.postMessage({type:"lynox-resize",h:sh,deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
 
 	// ── Event delegation ─────────────────────────────────────
 
@@ -649,11 +662,21 @@ window.addEventListener('afterprint', function () { window.close(); });
 		function handleMessage(e: MessageEvent) {
 			if (e.data?.type !== 'lynox-resize') return;
 			const h = e.data.h;
-			if (typeof h !== 'number' || h <= 0) return;
+			const deck = e.data.deck === true;
+			// A deck legitimately reports a collapsed height — only bail on a bad
+			// height for the normal (non-deck) flow path.
+			if (!deck && (typeof h !== 'number' || h <= 0)) return;
 			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
 			for (const iframe of iframes) {
 				if (iframe.contentWindow === e.source) {
-					iframe.style.height = `${Math.max(h, 200)}px`;
+					if (deck) {
+						// 100vh slide-decks: size by 16:9 of the rendered width instead of
+						// the collapsed scrollHeight (old Math.max(h,200) clamped to 200px).
+						const w = iframe.clientWidth || iframe.getBoundingClientRect().width;
+						iframe.style.height = `${deckFrameHeight(w, window.innerHeight)}px`;
+					} else {
+						iframe.style.height = `${Math.max(h, 200)}px`;
+					}
 					break;
 				}
 			}
