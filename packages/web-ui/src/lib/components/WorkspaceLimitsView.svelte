@@ -87,8 +87,7 @@
 		if (!loaded) return;
 		// Drop the HTTP rate-cap entirely when blank/zero so the engine falls back
 		// to its built-in default (200/hr) rather than persisting a 0-cap that
-		// would brick every HTTP-tool call. Same defensive pattern as
-		// SystemSettings.saveHttpRateLimit() pre-extraction.
+		// would brick every HTTP-tool call.
 		const raw = config.max_http_requests_per_hour;
 		const httpCap: { max_http_requests_per_hour?: number } = {};
 		if (typeof raw === 'number' && raw > 0 && Number.isFinite(raw)) {

@@ -86,8 +86,10 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
  * and behaviour-drift in managed-EU tenants.
  *   fast     → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
- *   balanced → mistral-large-2512     (workhorse, tool-use, 6× cheaper than Anthropic balanced tier)
- *   deep     → magistral-medium-2509  (reasoning-heavy, batch-suitable)
+ *   balanced → ministral-14b-2512     (near-large quality at ~6× lower cost)
+ *   deep     → mistral-large-2512     (Mistral quality leader, tool-use)
+ * (Keep this block in sync with MISTRAL_MODEL_MAP below — the values are
+ *  pinned by tests/doc-drift.test.ts.)
  *
  * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
  * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).

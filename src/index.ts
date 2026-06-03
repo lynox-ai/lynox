@@ -250,11 +250,6 @@ Options:
 
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required for anthropic provider)
-<<<<<<< Updated upstream
-  ANTHROPIC_BASE_URL            Custom API endpoint (for proxies)
-  LYNOX_LLM_PROVIDER            LLM provider: anthropic | openai | custom
-                                (Mistral is openai + ANTHROPIC_BASE_URL=https://api.mistral.ai/v1)
-=======
   ANTHROPIC_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.mistral.ai/v1)
   MISTRAL_API_KEY               Mistral API key (provider: openai with Mistral endpoint)
   OPENAI_API_KEY                Bearer for generic OpenAI-compatible endpoints (experimental)
@@ -262,7 +257,6 @@ Environment:
   LYNOX_LLM_PROVIDER            LLM provider: anthropic | openai | custom | vertex
                                 Only anthropic and openai (with Mistral endpoint) are tested.
                                 custom (Anthropic-compat proxy) and vertex are wired but experimental.
->>>>>>> Stashed changes
   LYNOX_VAULT_KEY               AES-256 key for the secrets vault (critical — cannot be recovered if lost)
   LYNOX_DATA_DIR                Override data directory (same as --data-dir)
   LYNOX_HTTP_PORT               HTTP API port (default: 3100 locally, 3000 in Docker)

@@ -177,7 +177,7 @@ export const SCENARIOS: readonly BenchScenario[] = [
       'Schlägt Fix vor: Migration vor `docker compose up` ausführen, oder ins Entrypoint einbauen',
       'Kein Aufschlag von unverwandten Fehlerquellen (z.B. Netzwerk, Pull)',
     ],
-    referenceAnswer: 'Root-Cause: Die Migration `0021_add_mail_provider.sql` wurde lokal geschrieben, aber nicht auf der Produktions-DB angewendet — der frische Container erwartet die Spalte `mail_provider`, findet sie aber nicht (errorMissingColumn). Fix: Migration VOR dem `docker compose up --build` gegen die DB laufen lassen (`psql -U managed -d lynox_managed < 0021_add_mail_provider.sql`). Grundsätzlich: Migrationen immer vor Container-Rebuild anwenden, sonst crasht der fresh-build Container beim Boot.',
+    referenceAnswer: 'Root-Cause: Die Migration `0021_add_mail_provider.sql` wurde lokal geschrieben, aber nicht auf der Produktions-DB angewendet — der frische Container erwartet die Spalte `mail_provider`, findet sie aber nicht (errorMissingColumn). Fix: Migration VOR dem `docker compose up --build` gegen die DB laufen lassen (`psql -U appuser -d appdb < 0021_add_mail_provider.sql`). Grundsätzlich: Migrationen immer vor Container-Rebuild anwenden, sonst crasht der fresh-build Container beim Boot.',
     maxIterations: 2,
     timeoutMs: 60_000,
   },

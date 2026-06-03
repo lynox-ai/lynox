@@ -16,7 +16,7 @@ pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
 npx vitest run       # ~200 test files (src + tests/)
-npx vitest run tests/online/  # 22 real API tests
+npx vitest run tests/online/  # 10 test files (real API)
 
 # Web UI (@lynox-ai/web-ui)
 cd packages/web-ui && pnpm run dev        # standalone dev server (needs Engine running: `lynox` or `lynox --http-api`)
@@ -35,7 +35,7 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 - `src/core/` — ~95 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream-handler, docker-installer, approval-dialog, changeset-review, dag-visualizer, markdown, interactive)
-- `src/tools/` — 31 builtin tool functions across 16 modules (incl. api_setup, artifact_save/list/delete) + permission guard
+- `src/tools/builtin/` — 31 builtin tool functions across 16 modules (incl. api_setup, artifact_save/list/delete); `src/tools/` holds the registry + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, DuckDuckGo HTML-scrape fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/src/content/docs/setup/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/src/content/docs/archive/whatsapp-inbox.md`.)
 - `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see core PR #536.)
@@ -45,7 +45,7 @@ Engine (singleton) + Session (per-conversation) + ThreadStore (persistent thread
 
 SvelteKit 2 + Svelte 5 + Tailwind v4. Dual-purpose: standalone app + component library.
 
-- `src/lib/components/` — ~75 components, ~55 exported via `lib/index.ts` for `pro/pwa` consumers. Entry points: ChatView (interleaved blocks), AppShell, SettingsIndex, ChannelHub, IntelligenceHub, AutomationHub, InboxView. Full authoritative list in `packages/web-ui/src/lib/index.ts`.
+- `src/lib/components/` — ~75 components, ~75 exports via `lib/index.ts` for `pro/pwa` consumers. Entry points: ChatView (interleaved blocks), AppShell, SettingsIndex, ChannelHub, IntelligenceHub, AutomationHub, InboxView. Full authoritative list in `packages/web-ui/src/lib/index.ts`.
 - `src/lib/stores/chat.svelte.ts` — SSE streaming chat store with configurable API base, thread resume, interleaved ContentBlock rendering (text + tool_call blocks in chronological order)
 - `src/lib/stores/threads.svelte.ts` — Thread list store (load, archive, delete, rename)
 - `src/lib/stores/artifacts.svelte.ts` — Artifact gallery store (save, load, delete)
@@ -102,8 +102,8 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/int
 
 ## Git
 
-- Pre-commit: typecheck
-- Pre-push: gitleaks + pattern-scan + security-scan
+- Pre-commit: typecheck + hex-guard
+- Pre-push: gitleaks + pattern-scan + security-scan + public-repo-guard (internal-infra leaks) + drift-guard (doc/code drift) + positioning-guard (copy vs POSITIONING.md). All three guards re-run as required CI checks so `--no-verify` can't bypass them.
 - Commits: English, imperative, first line <70 chars
 
 ## Docker

@@ -221,11 +221,11 @@ export interface LynoxUserConfig {
   language?: string | undefined;
   organization_id?: string | undefined;
   client_id?: string | undefined;
-  /** Enable changeset review mode: backup files before write, review post-run. Default: true for interactive CLI. */
+  /** Enable changeset review mode: backup files before write, review post-run. Default: true for single-task CLI runs. */
   changeset_review?: boolean | undefined;
   /** Enable Haiku auto-classification for memory scope selection. Default: true when >1 scope active. */
   memory_auto_scope?: boolean | undefined;
-  /** Show auto-greeting on interactive REPL start. Default: true */
+  /** Show auto-greeting on session start (web UI / HTTP API). Default: true */
   greeting?: boolean | undefined;
   /** Deprecated 2026-05-24 — Tavily backend retired. Field retained as
    *  `string | undefined` for migration-import compatibility with older

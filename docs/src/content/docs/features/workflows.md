@@ -9,12 +9,14 @@ sidebar:
 
 lynox has four built-in roles, each optimized for a different type of work:
 
-| Role | Model | Strengths | Restrictions |
-|------|-------|-----------|-------------|
-| **Researcher** | Sonnet | Deep analysis, source citation, thorough exploration | Read-only — can't modify files or run commands |
-| **Creator** | Sonnet | Content creation, writing, tone adaptation | No system commands |
-| **Operator** | Haiku | Fast status checks, concise reporting | Tool-restricted (bash + read tools allowed; no write tools) |
-| **Collector** | Haiku | Structured Q&A, data gathering | Minimal tools — memory and user interaction only |
+| Role | Tier | Strengths | Restrictions |
+|------|------|-----------|-------------|
+| **Researcher** | `balanced` | Deep analysis, source citation, thorough exploration | Read-only — can't modify files or run commands |
+| **Creator** | `balanced` | Content creation, writing, tone adaptation | No system commands |
+| **Operator** | `fast` | Fast status checks, concise reporting | Tool-restricted (bash + read tools allowed; no write tools) |
+| **Collector** | `fast` | Structured Q&A, data gathering | Minimal tools — memory and user interaction only |
+
+Tiers are provider-agnostic (`deep` / `balanced` / `fast`) and resolve to the active provider's models — e.g. on Mistral `balanced` → `ministral-14b-2512`. They are **not** tied to Anthropic model names.
 
 ### Switching roles
 
@@ -23,7 +25,7 @@ In the Web UI or CLI, switch roles by telling lynox:
 - *"Switch to researcher mode"*
 - *"Act as operator and check the status of..."*
 
-The role determines which model is used, what tools are available, and how autonomous lynox operates. The default mode uses Sonnet with full tool access.
+The role determines which model tier is used, what tools are available, and how autonomous lynox operates. The default mode uses the `balanced` tier with full tool access.
 
 ## Background Tasks
 

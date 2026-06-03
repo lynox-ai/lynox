@@ -47,7 +47,7 @@ export interface RunRecord {
   kind: 'llm' | 'voice_stt' | 'voice_tts' | null;
   // Generic usage counter whose meaning depends on `kind`:
   //   'llm'        → total tokens (in + out); historically 0, read tokens_in/out instead
-  //   'voice_stt'  → seconds of input audio (0 until providers surface duration; see TODO in http-api)
+  //   'voice_stt'  → seconds of input audio (0 until providers surface duration)
   //   'voice_tts'  → characters of synthesized text
   units: number;
   created_at: string;

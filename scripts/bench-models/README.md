@@ -1,7 +1,14 @@
-# lynox Model Bench
+# lynox Model Bench (legacy)
+
+> **Legacy — single-model Claude Pareto harness.** For the current cross-provider,
+> tool-using benchmark (the one behind the published bench page) use
+> **`scripts/set-bench/`**, which is the canonical suite. `bench-models.ts` is kept
+> for the Claude-only effort/thinking Pareto sweep and is not deleted.
 
 Compare Claude models and configs across realistic scenarios to find
-Pareto-optimal sweet spots.
+Pareto-optimal sweet spots. The matrix below documents the original Phase 1 slice;
+the live `scenarios.ts`/`configs.ts` have since grown to ~14 scenarios across
+Phases 1–3 and include Opus 4.7 configs — run `--list` for the current set.
 
 ## Running
 

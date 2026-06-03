@@ -18,7 +18,6 @@ vitest.bench.config.ts
 # Dev files
 .github/
 .lynox/
-.lynox/
 .claude/
 *.png
 docs/
@@ -32,7 +31,6 @@ pnpm-workspace.yaml
 
 # Docker
 Dockerfile
-entrypoint.sh
 entrypoint-webui.sh
 docker-compose.yml
 
