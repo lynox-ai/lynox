@@ -32,6 +32,15 @@ pre-push:
       skip:
         - merge
         - rebase
+    positioning-guard:
+      # Keep public hero/landing copy + the npm description aligned with
+      # POSITIONING.md (Vocabulary → Avoid): no legacy category labels
+      # ("AI engine", "agent runtime"), no OSI-flavoured "open source", no
+      # tired "The AI that…" patterns. Tightly scoped to copy surfaces.
+      run: bash scripts/positioning-guard.sh
+      skip:
+        - merge
+        - rebase
 
 pre-commit:
   commands:

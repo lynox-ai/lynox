@@ -102,8 +102,8 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/int
 
 ## Git
 
-- Pre-commit: typecheck
-- Pre-push: gitleaks + pattern-scan + security-scan
+- Pre-commit: typecheck + hex-guard
+- Pre-push: gitleaks + pattern-scan + security-scan + public-repo-guard (internal-infra leaks) + drift-guard (doc/code drift) + positioning-guard (copy vs POSITIONING.md). All three guards re-run as required CI checks so `--no-verify` can't bypass them.
 - Commits: English, imperative, first line <70 chars
 
 ## Docker
