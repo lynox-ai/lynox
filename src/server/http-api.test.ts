@@ -1384,6 +1384,28 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    it('PUT strips env-pinned provider fields instead of persisting/rejecting them (H-001)', async () => {
+      // When LYNOX_LLM_PROVIDER is set the provider is env-controlled; a user
+      // PUT of provider/api_base_url/openai_model_id must NOT persist (it would
+      // surface as the wrong configured provider in the UI + export while the
+      // runtime stays env-pinned). The fields are stripped before validation +
+      // save, so provider:'openai' WITHOUT api_base_url does NOT 400 on the
+      // openai cross-field check (it would, were the field not stripped).
+      vi.stubEnv('LYNOX_LLM_PROVIDER', 'openai');
+      try {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ provider: 'openai', default_tier: 'balanced' }),
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
+
     it('PUT in managed mode rejects locked-field changes', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
       try {
