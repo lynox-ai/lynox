@@ -54,10 +54,10 @@
 
 	async function revealAccessToken(): Promise<void> {
 		try {
-			const res = await fetch(`${getApiBase()}/access-token`);
+			const res = await fetch(`${getApiBase()}/auth/token?reveal=true`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			const body = (await res.json()) as { token: string | null };
-			accessToken = body.token;
+			const body = (await res.json()) as { token?: string | null };
+			accessToken = body.token ?? null;
 			accessTokenRevealed = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('system.token_failed'), 'error', 5000);

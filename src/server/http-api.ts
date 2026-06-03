@@ -2966,6 +2966,20 @@ export class LynoxHTTPApi {
       // attempt 403s on the security gate rather than 400ing on the cross-
       // field check (preserves the "managed reject names the field" contract).
       const incoming = parsed.data as Record<string, unknown>;
+      // Env-pinned provider (LYNOX_LLM_PROVIDER set): the provider + its endpoint
+      // fields are controlled by the env, never config.json, and the runtime masks
+      // any user value. The Web UI re-sends every field on every save, so a naive
+      // 403 would break legitimate no-op saves of OTHER fields — instead STRIP the
+      // env-controlled fields from the persisted update. Without this, a user PUT
+      // (or curl) persists e.g. provider:'anthropic' into config.json where it's
+      // masked at runtime but surfaces in the LLM-settings UI + /api/export as the
+      // (wrong) configured provider/residency — the H-001 corruption. Silent strip,
+      // not reject: these fields have no effect under an env-pin anyway.
+      if (process.env['LYNOX_LLM_PROVIDER']) {
+        delete incoming['provider'];
+        delete incoming['api_base_url'];
+        delete incoming['openai_model_id'];
+      }
       if (incoming['provider'] === 'openai') {
         const apiBaseUrl = incoming['api_base_url'];
         if (typeof apiBaseUrl !== 'string' || apiBaseUrl.trim() === '') {

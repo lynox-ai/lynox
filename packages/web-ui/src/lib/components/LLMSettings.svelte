@@ -470,7 +470,18 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(update),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (!res.ok) {
+				// Surface the server's named reason (e.g. "provider:'openai' requires
+				// openai_model_id") instead of a bare "HTTP 400" — otherwise a save
+				// that fails validation looks like a silent no-op (H-007: OpenAI-compat
+				// save with no model-id swallowed the 400). Falls back to the status.
+				let reason = `HTTP ${res.status}`;
+				try {
+					const errBody = (await res.json()) as { error?: string; disclosure?: string };
+					if (typeof errBody.error === 'string' && errBody.error) reason = errBody.error;
+				} catch { /* non-JSON body — keep the status string */ }
+				throw new Error(reason);
+			}
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
