@@ -52,6 +52,7 @@ import {
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
+import { buildPostCompactionMessages } from './compaction-messages.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -64,10 +65,18 @@ import type { DataStore } from './data-store.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 
+/** Context-usage % above which auto-compaction fires. Raising this + a
+ *  user-triggered "prepare & compact" path is a separate follow-up; this PR
+ *  only fixes the summary itself. */
+const AUTO_COMPACT_PERCENT = 75;
+
 /** Per-run overrides — applied via agent setters, never mutate session state. */
 export interface RunOptions {
   effort?: EffortLevel | undefined;
   thinking?: ThinkingMode | undefined;
+  /** Suppress ALL tools for this run — used by compaction so the summarization
+   *  turn returns the summary as TEXT instead of wandering off to a tool. */
+  noTools?: boolean | undefined;
 }
 
 export interface SessionOptions {
@@ -557,7 +566,10 @@ export class Session {
       // Per-turn precise time, outside the hour-truncated cached system
       // prompt so the model gets wallclock-accuracy without breaking
       // Anthropic's prompt cache.
-      const result = await this.agent.send(withCurrentTimePrefix(task, this._userTimezone ?? undefined));
+      const result = await this.agent.send(
+        withCurrentTimePrefix(task, this._userTimezone ?? undefined),
+        { suppressTools: runOptions?.noTools === true },
+      );
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
       if (!this._briefingConsumed && this.briefing) {
@@ -781,7 +793,7 @@ export class Session {
    * reset messages, and inject the summary as synthetic context.
    * Used by CLI /compact command and auto-compaction.
    */
-  async compact(focus?: string): Promise<{ success: boolean; summary: string }> {
+  async compact(focus?: string, opts?: { confirmScope?: boolean }): Promise<{ success: boolean; summary: string }> {
     // Phase 2 Context Hygiene: clear blobs retained at the *previous*
     // compaction first. A blob is recallable only until the next compaction —
     // this clear is what hard-drops the prior window and is the sole bound on
@@ -795,11 +807,15 @@ export class Session {
 
     // Structured compaction: a lossy prose summary used to drop artifacts and
     // open tasks, leaving the agent unable to continue. Name what must survive.
-    const base = 'Summarize the conversation so far so work can continue without the full history. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
+    const base = 'Summarize the conversation so far so work can continue without the full history. Reply with the summary itself as plain text — do NOT call any tool and do NOT save it as an artifact; this text IS the surviving context. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
     const prompt = focus ? `${base}\nGive extra weight to: ${focus}.` : base;
     let summary = '';
     try {
-      summary = await this.run(prompt);
+      // noTools: the summary MUST come back as text. With tools available the
+      // agent would sometimes save the summary as an artifact and reply with a
+      // useless pointer ("saved as artifact …"), so the injected context lost
+      // the open task and continuity broke (observed live 2026-06-03).
+      summary = await this.run(prompt, { noTools: true });
     } catch {
       // Compaction prompt failed — reset anyway to free context
     }
@@ -814,27 +830,9 @@ export class Session {
 
     this.reset();
     if (summary) {
-      const messages: BetaMessageParam[] = [
-        { role: 'user' as const, content: 'What have we discussed so far?' },
-        { role: 'assistant' as const, content: `[Conversation summary]\n${summary}` },
-      ];
-      // D2 stub-with-a-handle: tell the agent which large tool results from
-      // before the summary are still re-fetchable, one descriptor per id.
-      if (handles.length > 0) {
-        const lines = handles.map(h => `- recall_tool_result("${h.id}") — ${h.descriptor}`);
-        messages.push(
-          {
-            role: 'user' as const,
-            content: 'Are any large tool results from before the summary still available?',
-          },
-          {
-            role: 'assistant' as const,
-            content:
-              `[Recallable tool results]\nThese large tool outputs from before the summary were set aside and can be re-fetched verbatim with recall_tool_result("<id>"). They remain available only until the next compaction:\n${lines.join('\n')}`,
-          },
-        );
-      }
-      this.loadMessages(messages);
+      this.loadMessages(
+        buildPostCompactionMessages(summary, handles, { confirmScope: opts?.confirmScope }),
+      );
       return { success: true, summary };
     }
     return { success: false, summary: '' };
@@ -857,18 +855,21 @@ export class Session {
   }
 
   /**
-   * Auto-compact if context usage exceeds 75%.
+   * Auto-compact if context usage exceeds AUTO_COMPACT_PERCENT.
    * Runs after each successful run() to prevent context overflow.
    * Guard flag prevents recursive compaction since compact() calls run().
    */
   private async _autoCompactIfNeeded(): Promise<void> {
     if (this._isCompacting || !this.agent) return;
     const usagePercent = this.getContextUsagePercent();
-    if (usagePercent <= 75) return;
+    if (usagePercent <= AUTO_COMPACT_PERCENT) return;
 
     this._isCompacting = true;
     try {
-      const result = await this.compact();
+      // confirmScope: this compaction fires mid-task (unprompted), so steer the
+      // agent to restate the task and confirm scope on its next turn instead of
+      // silently rebuilding from the lossy summary.
+      const result = await this.compact(undefined, { confirmScope: true });
       if (result.success) {
         // Persist a visible marker so the compaction isn't invisible on reload
         // /export (the agent otherwise appears to silently drop the earlier

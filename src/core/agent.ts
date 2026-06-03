@@ -120,6 +120,14 @@ export class Agent implements IAgent {
    */
   private readonly _excludeSet: ReadonlySet<string>;
   /**
+   * Transient: suppress ALL tools for the duration of one `send()` (set from
+   * its `suppressTools` option, reset in the finally). Used by compaction so the
+   * summarization turn must return the summary as TEXT and can't wander off to
+   * call a tool (e.g. save the summary as an artifact and reply with a useless
+   * pointer — observed live 2026-06-03, which broke continuity post-compaction).
+   */
+  private _suppressTools = false;
+  /**
    * Filtered view of `tools` honouring `excludeTools`. Use this for any
    * propagation to sub-agents (spawn_agent) or pipeline child-agents so
    * disabled tools cannot be re-introduced by descending the agent tree.
@@ -471,7 +479,7 @@ export class Agent implements IAgent {
     return this._estimateOccupancyTokens(0);
   }
 
-  async send(userMessage: string | unknown[]): Promise<string> {
+  async send(userMessage: string | unknown[], opts?: { suppressTools?: boolean }): Promise<string> {
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
@@ -481,6 +489,7 @@ export class Agent implements IAgent {
     this.abortController = new AbortController();
     this.continuationCount = 0;
     this._loopToolCount = 0;
+    this._suppressTools = opts?.suppressTools === true;
     try {
       return await this._loop();
     } catch (err: unknown) {
@@ -513,6 +522,7 @@ export class Agent implements IAgent {
         this._pendingMemory = [];
       }
       this.abortController = null;
+      this._suppressTools = false;
     }
   }
 
@@ -754,15 +764,18 @@ export class Agent implements IAgent {
     // web_search is an Anthropic-direct-only server-side tool — not supported on Vertex AI or custom.
     // Disabled when web_research (SearXNG / DDG fallback) is registered to avoid redundant search tools.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
-    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch
+    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !this._suppressTools
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
-    const rawTools = [
-      ...this.tools
-        .filter(t => !this._excludeSet.has(t.definition.name))
-        .map(t => t.definition),
-      ...builtinTools,
-    ];
+    // Tools fully suppressed for this turn (compaction summary must be TEXT).
+    const rawTools = this._suppressTools
+      ? []
+      : [
+          ...this.tools
+            .filter(t => !this._excludeSet.has(t.definition.name))
+            .map(t => t.definition),
+          ...builtinTools,
+        ];
     // Strip eager_input_streaming for non-direct-Anthropic providers (Vertex/Custom don't support it)
     const toolsDef = !this.isNonDirectAnthropic
       ? rawTools

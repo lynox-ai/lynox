@@ -383,6 +383,7 @@ describe('Engine + Session (Orchestrator)', () => {
       // is hour-truncated. See prompts.ts:withCurrentTimePrefix.
       expect(mockSend).toHaveBeenCalledWith(
         expect.stringMatching(/^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\nHello$/),
+        { suppressTools: false },
       );
     });
 
