@@ -1072,7 +1072,7 @@ visibility for capability-based visibility.
   must confirm the managed host's ssh-keys directory has
   `id_ed25519` (0600, uid 1000) + `id_ed25519.pub` (0644, uid
   1000) before the first `docker compose up -d --build managed`.
-  The old named volume `lynox-managed_ssh-keys` becomes orphaned
+  The old named SSH-keys volume becomes orphaned
   and can be removed with `docker volume rm` at leisure.
 - **Capability probe**: callers of `GET /api/config` will see a
   new `capabilities` object in the response. Existing consumers
