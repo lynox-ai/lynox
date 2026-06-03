@@ -811,6 +811,26 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(joined).not.toContain('read_file');
     });
 
+    it('runs the summary with tools suppressed and frames it as an authoritative record', async () => {
+      const { session } = await createEngineAndSession();
+      mockSend.mockClear();
+      mockLoadMessages.mockClear();
+      // run() is NOT spied here — we want the real noTools threading through to send().
+      mockSend.mockResolvedValueOnce('**Open task**: wait for the user to say "go"');
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+      // noTools wiring: the summarization turn must suppress ALL tools so the
+      // summary comes back as text, never an artifact pointer.
+      expect(mockSend).toHaveBeenCalledWith(expect.any(String), { suppressTools: true });
+      // Framing: summary injected as an AUTHORITATIVE user record (ground truth),
+      // not the agent's own un-backed assistant claim.
+      const loaded = mockLoadMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; content: string }>;
+      expect(loaded[0]!.role).toBe('user');
+      expect(loaded[0]!.content).toContain('FAITHFUL, AUTHORITATIVE record');
+      expect(loaded[0]!.content).toContain('Open task');
+    });
+
     it('recall_tool_result round-trips the evicted payload by id', async () => {
       const { session } = await createEngineAndSession();
       const payload = 'D'.repeat(6_000);
