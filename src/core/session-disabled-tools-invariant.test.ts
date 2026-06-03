@@ -136,6 +136,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   bashTool: { definition: { name: 'bash' }, handler: vi.fn() },
   readFileTool: { definition: { name: 'read_file' }, handler: vi.fn() },
   writeFileTool: { definition: { name: 'write_file' }, handler: vi.fn() },
+  editFileTool: { definition: { name: 'edit_file' }, handler: vi.fn() },
   memoryStoreTool: { definition: { name: 'memory_store' }, handler: vi.fn() },
   memoryRecallTool: { definition: { name: 'memory_recall' }, handler: vi.fn() },
   memoryDeleteTool: { definition: { name: 'memory_delete' }, handler: vi.fn() },

@@ -129,6 +129,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   bashTool: { definition: { name: 'bash' }, handler: vi.fn() },
   readFileTool: { definition: { name: 'read_file' }, handler: vi.fn() },
   writeFileTool: { definition: { name: 'write_file' }, handler: vi.fn() },
+  editFileTool: { definition: { name: 'edit_file' }, handler: vi.fn() },
   memoryStoreTool: { definition: { name: 'memory_store' }, handler: vi.fn() },
   memoryRecallTool: { definition: { name: 'memory_recall' }, handler: vi.fn() },
   memoryDeleteTool: { definition: { name: 'memory_delete' }, handler: vi.fn() },
@@ -345,10 +346,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 31 builtin always; +1 `web_research` from the DuckDuckGo HTML-scrape
-      // fallback that lands whenever SearXNG isn't configured;
-      // +5 mail tools when vault is available.
-      expect([32, 37]).toContain(mockRegister.mock.calls.length);
+      // 32 builtin always (incl. edit_file); +1 `web_research` from the
+      // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
+      // configured; +5 mail tools when vault is available.
+      expect([33, 38]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -467,10 +468,10 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 31 builtin always; +1 `web_research` from the DuckDuckGo HTML-scrape
-      // fallback that lands whenever SearXNG isn't configured;
-      // +5 mail tools when vault is available.
-      expect([32, 37]).toContain(mockRegister.mock.calls.length);
+      // 32 builtin always (incl. edit_file); +1 `web_research` from the
+      // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
+      // configured; +5 mail tools when vault is available.
+      expect([33, 38]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
