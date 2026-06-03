@@ -1,7 +1,7 @@
 <script lang="ts">
 	// PRD-HN-LAUNCH-HARDENING tier-1 item 5.
 	// Renders ONLY when the engine reports `public_demo: true` (set on the
-	// engine.lynox.cloud container via `LYNOX_PUBLIC_DEMO=true`). Customer
+	// engine.lynox.cloud container via `LYNOX_PUBLIC_DEMO=true`). Customer  public-repo-guard:allow public demo host
 	// self-host stays clean — env var is absent, banner never shows.
 	//
 	// Dismissible via the X button; the choice is sticky in localStorage so

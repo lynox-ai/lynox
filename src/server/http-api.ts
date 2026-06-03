@@ -2573,8 +2573,8 @@ export class LynoxHTTPApi {
         managed: normalizeBillingTier(process.env['LYNOX_MANAGED_MODE']) ?? null,
         // PRD-HN-LAUNCH-HARDENING tier-1 item 5: surface a public-demo flag so
         // the Web UI can render a "shared instance, no real data" banner on
-        // engine.lynox.cloud for HackerNews launch week. Off by default — only
-        // engine.lynox.cloud (operated by lynox AI) sets this env. Customer
+        // engine.lynox.cloud for HackerNews launch week. Off by default — only  public-repo-guard:allow public demo host
+        // the lynox-operated demo engine sets this env. Customer
         // self-host stays clean.
         public_demo: process.env['LYNOX_PUBLIC_DEMO'] === 'true',
         // Provider hints for SetupBanner restore (added 2026-05-27 to fix G5

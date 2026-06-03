@@ -756,7 +756,7 @@
 				</div>
 			</header>
 
-			<!-- HN-launch public-demo banner (engine.lynox.cloud only;
+			<!-- HN-launch public-demo banner (engine.lynox.cloud only; public-repo-guard:allow public demo host
 				controlled by LYNOX_PUBLIC_DEMO env on the engine). Sits ABOVE
 				SetupBanner so the "shared instance, no real data" warning is the
 				very first thing visible — beats the API-key wizard prompt to the
