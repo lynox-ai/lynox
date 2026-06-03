@@ -101,19 +101,6 @@ function findTextPart(node: MessageStructureObject | undefined, mime: 'text/plai
   return undefined;
 }
 
-/** Find a BODYSTRUCTURE node by its IMAP part id (e.g. '1', '1.2'). */
-function findPartById(node: MessageStructureObject | undefined, part: string): MessageStructureObject | undefined {
-  if (!node) return undefined;
-  if (node.part === part) return node;
-  if (node.childNodes) {
-    for (const child of node.childNodes) {
-      const found = findPartById(child, part);
-      if (found) return found;
-    }
-  }
-  return undefined;
-}
-
 /**
  * Sanitize an attachment filename.
  *
@@ -766,11 +753,20 @@ export class ImapSmtpProvider implements MailProvider {
     let snippetText = '';
     const partBuf = msg.bodyParts?.get('1');
     if (partBuf) {
-      // Multipart: part '1' is a child node. Single-part: the root node holds
-      // the encoding (it has no `.part`), so fall back to bodyStructure.
-      const part1 = findPartById(msg.bodyStructure, '1') ?? msg.bodyStructure;
-      const decodedBytes = decodeTransferEncoding(partBuf, part1?.encoding);
-      const decoded = decodeBuffer(decodedBytes, part1?.parameters?.['charset']);
+      // Resolve the encoding/charset from the actual text part — the SAME way
+      // the full-body path (downloadPartAsText) does, via findTextPart. The
+      // earlier findPartById('1') lookup missed single-part messages (the root
+      // text node has no `.part='1'`), so its encoding fell through to 7bit and
+      // base64/QP snippets leaked raw into the list + THREAD-VERLAUF + the
+      // cold-start-persisted snippet. findTextPart returns the text/plain (or
+      // text/html) node — which carries `.encoding` for both single- and
+      // multipart — exactly the node BODY[1] was fetched from.
+      const textNode =
+        findTextPart(msg.bodyStructure, 'text/plain') ??
+        findTextPart(msg.bodyStructure, 'text/html') ??
+        msg.bodyStructure;
+      const decodedBytes = decodeTransferEncoding(partBuf, textNode?.encoding);
+      const decoded = decodeBuffer(decodedBytes, textNode?.parameters?.['charset']);
       // If the part was actually HTML (e.g. message has only text/html as part 1),
       // strip it down before snippeting.
       const looksHtml = /<[a-z!/][\s\S]*?>/i.test(decoded.slice(0, 200));

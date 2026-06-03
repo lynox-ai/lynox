@@ -160,7 +160,10 @@
 {#if inline}
 	<div class="border-t border-border pt-4" aria-label={t('inbox.context_sidebar_title')}>
 		<h3 class="mb-3 text-[12px] font-medium text-text">{t('inbox.context_sidebar_title')}</h3>
-		<div class="space-y-5 sm:grid sm:grid-cols-2 sm:gap-x-8 sm:gap-y-5 sm:space-y-0">
+		<!-- Single-column stacked: the context reads top-to-bottom in the reading
+			pane's scroll, like THREAD-VERLAUF above it. A 2-col grid here looked
+			torn (sender left, threads floating mid-page) — feedback 2026-06-03. -->
+		<div class="space-y-5">
 			{@render sections()}
 		</div>
 	</div>

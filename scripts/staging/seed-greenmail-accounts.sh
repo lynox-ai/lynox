@@ -24,17 +24,23 @@ set -euo pipefail
 
 ENGINE_URL="${ENGINE_URL:-https://engine.lynox.cloud}"
 GREENMAIL_HOST="${GREENMAIL_HOST:-control-staging.lynox.cloud}"
+# Which managed instance's HTTP secret to use (admin scope for POST
+# /api/mail/accounts). Defaults to the engine.lynox.cloud branch-sandbox, but
+# any QA-fleet tenant works — they share the tenant host whose IP the greenmail
+# firewall allowlist already covers. Set INSTANCE_ID + ENGINE_URL together, e.g.
+#   INSTANCE_ID=852vskubsqtgrz05f93pn ENGINE_URL=https://qa-managed.lynox.cloud
+INSTANCE_ID="${INSTANCE_ID:-96w887doddigx7qdr3gtl}"
 
-# Pull the engine's LYNOX_HTTP_SECRET via the existing SSH chain. In
+# Pull the instance's LYNOX_HTTP_SECRET via the existing SSH chain. In
 # single-token mode this secret has admin scope, which #338's gating on
 # POST /api/mail/accounts now requires.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "Resolving staging engine HTTP secret via control-staging chain…"
+echo "Resolving instance HTTP secret ($INSTANCE_ID) via control-staging chain…"
 SECRET=$(
   ssh -i ~/.ssh/lynox-staging -o ConnectTimeout=5 root@control-staging.lynox.cloud \
     "docker compose -f /opt/lynox-managed/docker-compose.staging.yml exec -T postgres \
      psql -U managed -d lynox_managed -At -c \
-     \"SELECT instance_secret FROM managed_instances WHERE id = '96w887doddigx7qdr3gtl'\"" \
+     \"SELECT instance_secret FROM managed_instances WHERE id = '${INSTANCE_ID}'\"" \
   | tr -d '\r'
 )
 if [ -z "$SECRET" ]; then
