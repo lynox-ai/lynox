@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.8.1 — 2026-06-03
+
+Stabilization patch from the first `/release-harden` run (3-tier canary-verified). 7 commits, all fixes.
+
+### Fixed
+
+- **Env-pinned managed instances no longer persist a stray provider/endpoint change.** A `PUT /api/config` of `provider`/`api_base_url`/`openai_model_id` was stored (masked at runtime by the env-pin) and surfaced the *wrong* provider + data-residency in LLM Settings and `/api/export` — e.g. an EU-Mistral tenant showing "Anthropic / US". Those env-controlled fields are now stripped from the persisted update when `LYNOX_LLM_PROVIDER` is set. (#650, H-001)
+- **OpenAI-compatible provider save now surfaces the server's validation error** (e.g. "provider:'openai' requires openai_model_id") instead of failing silently and looking like a no-op. (#650, H-007)
+- **Workspace access-token reveal fixed** — it called a non-existent route (`/api/access-token` → 404); now uses `GET /api/auth/token?reveal=true` (mirrors the vault-key reveal). (#650, H-012)
+- **Tier-rename copy cleanup**: dropped the stale "magistral" tier-claim from provider help-copy + first-run pickers, made the keyless empty-state key-hint provider-agnostic, and canonicalized the `/api/config` `managed` field (`starter`→`hosted`). (#648)
+
 ## 1.8.0 — 2026-06-03
 
 Provider-agnostic tier model + canonical billing-tier consolidation. 16 commits since v1.7.9.
