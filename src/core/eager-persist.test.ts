@@ -4,7 +4,7 @@
 // guarantees intact.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { persistAgentMessages, persistFailedTurnDisplay } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
 import type { ThreadStore, DisplayNoteInput } from './thread-store.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
@@ -210,5 +210,35 @@ describe('persistFailedTurnDisplay (B-full)', () => {
     const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
     const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { detail: string } };
     expect(note._lynox_note.detail).toBe('a b');
+  });
+});
+
+describe('persistCompactionMarker', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns false when threadStore is null', () => {
+    expect(persistCompactionMarker(null, 's1')).toBe(false);
+  });
+
+  it('appends a display-only context_compacted note after existing messages', () => {
+    const m = makeFailMockStore({ total: 12 });
+    const ok = persistCompactionMarker(m.store, 's1');
+    expect(ok).toBe(true);
+    // Appended at MAX(seq)+1 = total count, so it sorts after surviving rows.
+    expect(m.appendDisplayNotes).toHaveBeenCalledWith('s1', expect.any(Array), 12);
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes[0]!.content as { _lynox_note: { code: string } };
+    expect(notes[0]!.role).toBe('assistant');
+    expect(note._lynox_note.code).toBe('context_compacted');
+    expect(m.updateThread).toHaveBeenCalledWith('s1', { message_count: 13 });
+  });
+
+  it('returns false (never throws) when the store errors', () => {
+    const store = {
+      getMessageCount: vi.fn().mockImplementation(() => { throw new Error('SQLite locked'); }),
+    } as unknown as Parameters<typeof persistCompactionMarker>[0];
+    expect(persistCompactionMarker(store, 's1')).toBe(false);
   });
 });

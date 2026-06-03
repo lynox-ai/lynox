@@ -100,6 +100,33 @@ export type FailedTurnDisplayOutcome =
  * branches are unit-testable. Fire-and-forget by contract; returns an outcome
  * enum for tests only.
  */
+/**
+ * Persist a visible, display-only marker recording that the conversation was
+ * compacted (history summarized to free context). Without it, compaction is
+ * invisible on reload/export — the user sees the agent silently "lose" the
+ * earlier conversation (lynox marktanalyse transcript, 2026-06-03). The marker
+ * is display_only=1 so it renders as a banner but never re-enters API context.
+ * Returns whether a marker was appended (tests inspect it; Session ignores it).
+ */
+export function persistCompactionMarker(
+  threadStore: ThreadStore | null,
+  sessionId: string,
+): boolean {
+  if (!threadStore) return false;
+  try {
+    const totalCount = threadStore.getMessageCount(sessionId);
+    threadStore.appendDisplayNotes(
+      sessionId,
+      [{ role: 'assistant', content: buildDisplayNoteContent('context_compacted') }],
+      totalCount,
+    );
+    threadStore.updateThread(sessionId, { message_count: totalCount + 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedTurnDisplayOutcome {
   const { threadStore, sessionId, startSeq, task, error } = input;
   if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };

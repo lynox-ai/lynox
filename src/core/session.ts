@@ -51,7 +51,7 @@ import {
 } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
-import { persistAgentMessages, persistFailedTurnDisplay } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -869,13 +869,19 @@ export class Session {
     this._isCompacting = true;
     try {
       const result = await this.compact();
-      if (result.success && this.onStream) {
-        void this.onStream({
-          type: 'context_compacted',
-          summary: result.summary,
-          previousUsagePercent: usagePercent,
-          agent: this.agent.name,
-        });
+      if (result.success) {
+        // Persist a visible marker so the compaction isn't invisible on reload
+        // /export (the agent otherwise appears to silently drop the earlier
+        // conversation). Best-effort — never block the loop.
+        persistCompactionMarker(this.engine.getThreadStore(), this.sessionId);
+        if (this.onStream) {
+          void this.onStream({
+            type: 'context_compacted',
+            summary: result.summary,
+            previousUsagePercent: usagePercent,
+            agent: this.agent.name,
+          });
+        }
       }
     } catch {
       // Auto-compaction failed — not fatal, hard truncation will handle it
