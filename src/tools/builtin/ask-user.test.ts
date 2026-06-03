@@ -248,4 +248,26 @@ describe('askUserTool', () => {
 
     expect(toolContext.pendingStepHint).toEqual({ model: 'deep' });
   });
+
+  it('accepts a questions-only batch with no top-level question', async () => {
+    const promptTabs = vi.fn().mockResolvedValue(['4 beta users', 'EN global']);
+    const agent = makeAgent({ promptUser: vi.fn(), promptTabs });
+
+    const result = await askUserTool.handler({
+      questions: [
+        { question: 'Traction?' },
+        { question: 'Geography?' },
+      ],
+    }, agent);
+
+    expect(promptTabs).toHaveBeenCalled();
+    expect(result).toContain('Traction?: 4 beta users');
+  });
+
+  it('throws an actionable error when neither question nor questions is given', async () => {
+    const agent = makeAgent({ promptUser: vi.fn() });
+    await expect(
+      askUserTool.handler({} as Parameters<typeof askUserTool.handler>[0], agent),
+    ).rejects.toThrow(/provide either `question`.*or a non-empty `questions`/);
+  });
 });

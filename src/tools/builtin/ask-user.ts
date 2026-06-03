@@ -4,7 +4,7 @@ import type { ToolEntry, IAgent, TabQuestion, StepHint } from '../../types/index
 type AskUserOption = string | { label: string; hint?: StepHint | undefined };
 
 interface AskUserInput {
-  question: string;
+  question?: string | undefined;
   options?: AskUserOption[] | undefined;
   questions?: Array<{ question: string; header?: string; options?: AskUserOption[] }> | undefined;
 }
@@ -49,7 +49,7 @@ function assertOptionsArray(
 export const askUserTool: ToolEntry<AskUserInput> = {
   definition: {
     name: 'ask_user',
-    description: 'Ask the user a question and wait for their response. ALWAYS provide `options` when the set of possible answers is finite (e.g., yes/no, a list of files, deployment targets). Free-text only when the answer is truly open-ended.',
+    description: 'Ask the user one or more questions and wait for their response. Provide EITHER `question` (a single question) OR `questions` (a batch shown as tabs) — not both. ALWAYS provide `options` when the set of possible answers is finite (e.g., yes/no, a list of files, deployment targets). Free-text only when the answer is truly open-ended.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -116,7 +116,10 @@ export const askUserTool: ToolEntry<AskUserInput> = {
           description: 'Multiple questions shown as sequential tabs with navigation',
         },
       },
-      required: ['question'],
+      // Neither field is hard-required at the schema level: a call is valid
+      // with `question` OR `questions`. The handler enforces "at least one"
+      // with an actionable message — the old `required: ['question']` made
+      // questions-only batches fail with a cryptic schema error.
     },
   },
   handler: async (input: AskUserInput, agent: IAgent): Promise<string> => {
@@ -172,8 +175,15 @@ export const askUserTool: ToolEntry<AskUserInput> = {
       return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
     }
 
+    // Single-question path: reached only when no `questions` batch was given,
+    // so `question` must be present here.
+    const question = input.question;
+    if (typeof question !== 'string' || question.trim() === '') {
+      throw new Error('ask_user: provide either `question` (a single question) or a non-empty `questions` array.');
+    }
+
     const labels = input.options && input.options.length > 0 ? [...toLabels(input.options), '\x00'] : undefined;
-    const answer = await agent.promptUser(input.question, labels);
+    const answer = await agent.promptUser(question, labels);
 
     // Store hint for selected option (applied at next session.run())
     const hint = findHint(input.options, answer);
