@@ -347,4 +347,52 @@ describe('editFileTool', () => {
       ),
     ).rejects.toThrow(/outside allowed directories|edit_file/);
   });
+
+  it('errors when old_string equals new_string (no-op guard)', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'unchanged', 'utf-8');
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'unchanged', new_string: 'unchanged' }, makeAgent()),
+    ).rejects.toThrow(/identical/);
+  });
+
+  it('enforces the per-session write-byte limit on net growth', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'x', 'utf-8');
+    // Seed the counter just below the cap so a tiny net growth tips it over.
+    testCounters.writeBytes = 100 * 1024 * 1024;
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'x', new_string: 'xy' }, makeAgent()),
+    ).rejects.toThrow(/write limit/);
+  });
+
+  it('edits an artifact in-place in CLI/headless mode (no active workspace)', async () => {
+    // Regression: without an active workspace the write path basename-strips
+    // into ~/.lynox/workspace/, which broke the advertised "read_file the
+    // artifact path, then edit_file it" flow for CLI (artifacts live at
+    // ~/.lynox/artifacts/<id>.html, outside the workspace dir).
+    const d = await makeTempDir();
+    const prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = d;
+    try {
+      clearTenantWorkspace(); // ensure isWorkspaceActive() === false
+      mkdirSync(join(d, 'artifacts'), { recursive: true });
+      const p = join(d, 'artifacts', 'abcdef12.html');
+      writeFileSync(p, '<p>Price: CHF 99</p>', 'utf-8');
+
+      const res = await editFileTool.handler(
+        { path: p, old_string: 'CHF 99', new_string: 'CHF 149' },
+        makeAgent(),
+      );
+      expect(res).toContain('1 replacement');
+      expect(await readFile(p, 'utf-8')).toBe('<p>Price: CHF 149</p>');
+    } finally {
+      if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    }
+  });
 });

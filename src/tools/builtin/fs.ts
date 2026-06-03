@@ -1,5 +1,5 @@
 import { openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
-import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
+import { dirname, resolve, basename, join, isAbsolute, relative } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
@@ -43,6 +43,17 @@ interface EditFileInput {
 function resolveWritablePath(rawPath: string): string {
   if (isWorkspaceActive()) {
     return validatePath(resolve(rawPath), 'write');
+  }
+  // CLI/headless (no isolation): artifacts live at ~/.lynox/artifacts/<id>.html,
+  // NOT under the workspace dir. Honour an absolute path inside the artifacts
+  // root as-is so the advertised "read_file the artifact path, then edit_file
+  // it" flow works here too instead of basename-stripping into ~/.lynox/workspace/.
+  const artRootRaw = resolve(join(getLynoxDir(), 'artifacts'));
+  const artRoot = existsSync(artRootRaw) ? realpathSync(artRootRaw) : artRootRaw;
+  const absRaw = resolve(rawPath);
+  const relToArt = relative(artRoot, absRaw);
+  if (relToArt !== '' && !relToArt.startsWith('..') && !isAbsolute(relToArt)) {
+    return absRaw;
   }
   const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
   const resolved = resolve(join(getLynoxDir(), 'workspace'), name);
