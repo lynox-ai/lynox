@@ -500,8 +500,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.entities': { de: 'Entities', en: 'Entities' },
 	'status.today': { de: 'heute', en: 'today' },
 	'status.runs': { de: 'Runs', en: 'runs' },
-	'status.context': { de: 'Kontext', en: 'Context' },
-	'chat.context_tokens': { de: 'Tokens', en: 'tokens' },
 	'chat.context_auto_compact_imminent': { de: 'Auto-Komprimierung steht an', en: 'auto-compaction imminent' },
 	'chat.compact_now': { de: 'Zusammenfassen & komprimieren', en: 'Summarize & compact' },
 	'chat.compact_in_progress': { de: 'Komprimiere…', en: 'Compacting…' },
