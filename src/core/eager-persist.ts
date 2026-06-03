@@ -119,3 +119,30 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
     return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };
   }
 }
+
+/**
+ * Persist a visible, display-only marker recording that the conversation was
+ * compacted (history summarized to free context). Without it, compaction is
+ * invisible on reload/export — the user sees the agent silently "lose" the
+ * earlier conversation (lynox marktanalyse transcript, 2026-06-03). The marker
+ * is display_only=1 so it renders as a banner but never re-enters API context.
+ * Returns whether a marker was appended (tests inspect it; Session ignores it).
+ */
+export function persistCompactionMarker(
+  threadStore: ThreadStore | null,
+  sessionId: string,
+): boolean {
+  if (!threadStore) return false;
+  try {
+    const totalCount = threadStore.getMessageCount(sessionId);
+    threadStore.appendDisplayNotes(
+      sessionId,
+      [{ role: 'assistant', content: buildDisplayNoteContent('context_compacted') }],
+      totalCount,
+    );
+    threadStore.updateThread(sessionId, { message_count: totalCount + 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
