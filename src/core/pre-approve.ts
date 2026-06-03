@@ -48,6 +48,7 @@ export function extractMatchString(toolName: string, input: unknown): string {
     case 'bash':
       return typeof obj['command'] === 'string' ? obj['command'] : '';
     case 'write_file':
+    case 'edit_file':
     case 'read_file':
       return typeof obj['path'] === 'string' ? obj['path'] : '';
     case 'http_request':

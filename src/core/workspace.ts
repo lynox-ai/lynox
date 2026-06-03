@@ -2,6 +2,7 @@ import { existsSync, realpathSync, lstatSync } from 'node:fs';
 import { resolve, dirname, basename, join, isAbsolute, relative } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync } from './atomic-write.js';
+import { getLynoxDir } from './config.js';
 
 let _cachedDir: string | null | undefined;
 let _tenantOverride: string | null = null;
@@ -79,10 +80,22 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
   // Check workspace + /tmp (resolve /tmp via realpath for macOS /private/tmp)
   const realTmp = existsSync('/tmp') ? realpathSync('/tmp') : '/tmp';
 
-  // Block writes through symlinks pointing outside workspace
+  // Artifacts dir is read+write accessible: artifact storage lives outside the
+  // per-context workspace (so it's gallery-global across threads/contexts) but
+  // on the same persistent volume. Exposing it lets the agent read/edit its own
+  // artifacts with the standard file tools instead of full-document rewrites.
+  const artRootRaw = join(getLynoxDir(), 'artifacts');
+  const realArtRoot = existsSync(artRootRaw) ? realpathSync(artRootRaw) : artRootRaw;
+
+  // Block writes through symlinks pointing outside the allowed roots
   if (existsSync(resolved) && operation === 'write') {
     const stat = lstatSync(resolved);
-    if (stat.isSymbolicLink() && !isPathWithin(real, ws) && !isPathWithin(real, realTmp)) {
+    if (
+      stat.isSymbolicLink() &&
+      !isPathWithin(real, ws) &&
+      !isPathWithin(real, realTmp) &&
+      !isPathWithin(real, realArtRoot)
+    ) {
       throw new Error(
         `Path '${filePath}' is a symlink to '${real}' which is outside the workspace. ` +
         `Symlink writes are blocked when workspace isolation is active.`,
@@ -90,7 +103,7 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
     }
   }
 
-  if (isPathWithin(real, ws) || isPathWithin(real, realTmp)) {
+  if (isPathWithin(real, ws) || isPathWithin(real, realTmp) || isPathWithin(real, realArtRoot)) {
     return real;
   }
 
@@ -104,8 +117,8 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
   }
 
   const allowed = operation === 'write'
-    ? `${ws} and /tmp`
-    : `${ws}, /tmp, and ${READ_ONLY_ROOTS.join(', ')}`;
+    ? `${ws}, /tmp, and ${realArtRoot}`
+    : `${ws}, /tmp, ${realArtRoot}, and ${READ_ONLY_ROOTS.join(', ')}`;
   throw new Error(
     `Path '${filePath}' resolves to '${real}' which is outside allowed directories (${allowed}). ` +
     `${operation === 'write' ? 'Write' : 'Read'} operations are restricted when workspace isolation is active.`,

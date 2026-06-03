@@ -3,7 +3,7 @@ import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readFileTool, writeFileTool } from './fs.js';
+import { readFileTool, writeFileTool, editFileTool } from './fs.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 import type { SessionCounters } from '../../types/index.js';
 
@@ -275,5 +275,149 @@ describe('writeFileTool', () => {
         writeFileTool.handler({ path: join(d, 'c.txt'), content: chunk }, makeAgent()),
       ).rejects.toThrow(/Session write limit/);
     });
+  });
+});
+
+describe('editFileTool', () => {
+  it('replaces a unique occurrence and reports 1 replacement', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, '# Title\n\nPrice: CHF 99\n\nEnd.', 'utf-8');
+
+    const res = await editFileTool.handler(
+      { path: p, old_string: 'CHF 99', new_string: 'CHF 149' },
+      makeAgent(),
+    );
+    expect(res).toContain('1 replacement');
+    expect(await readFile(p, 'utf-8')).toBe('# Title\n\nPrice: CHF 149\n\nEnd.');
+  });
+
+  it('errors when old_string is not found', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'hello', 'utf-8');
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'missing', new_string: 'x' }, makeAgent()),
+    ).rejects.toThrow(/not found/);
+  });
+
+  it('errors on ambiguous match without replace_all', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'a a a', 'utf-8');
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'a', new_string: 'b' }, makeAgent()),
+    ).rejects.toThrow(/matches 3 times/);
+  });
+
+  it('replace_all replaces every occurrence', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'a a a', 'utf-8');
+    const res = await editFileTool.handler(
+      { path: p, old_string: 'a', new_string: 'b', replace_all: true },
+      makeAgent(),
+    );
+    expect(res).toContain('3 replacements');
+    expect(await readFile(p, 'utf-8')).toBe('b b b');
+  });
+
+  it('errors when the file does not exist', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    await expect(
+      editFileTool.handler(
+        { path: join(d, 'nope.md'), old_string: 'x', new_string: 'y' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/does not exist/);
+  });
+
+  it('rejects writes outside the workspace boundary', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    await expect(
+      editFileTool.handler(
+        { path: '/etc/hosts', old_string: 'localhost', new_string: 'evil' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/outside allowed directories|edit_file/);
+  });
+
+  it('errors when old_string equals new_string (no-op guard)', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'unchanged', 'utf-8');
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'unchanged', new_string: 'unchanged' }, makeAgent()),
+    ).rejects.toThrow(/identical/);
+  });
+
+  it('enforces the per-session write-byte limit on net growth', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'x', 'utf-8');
+    // Seed the counter just below the cap so a tiny net growth tips it over.
+    testCounters.writeBytes = 100 * 1024 * 1024;
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'x', new_string: 'xy' }, makeAgent()),
+    ).rejects.toThrow(/write limit/);
+  });
+
+  it('edits an artifact in-place in CLI/headless mode (no active workspace)', async () => {
+    // Regression: without an active workspace the write path basename-strips
+    // into ~/.lynox/workspace/, which broke the advertised "read_file the
+    // artifact path, then edit_file it" flow for CLI (artifacts live at
+    // ~/.lynox/artifacts/<id>.html, outside the workspace dir).
+    const d = await makeTempDir();
+    const prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = d;
+    try {
+      clearTenantWorkspace(); // ensure isWorkspaceActive() === false
+      mkdirSync(join(d, 'artifacts'), { recursive: true });
+      const p = join(d, 'artifacts', 'abcdef12.html');
+      writeFileSync(p, '<p>Price: CHF 99</p>', 'utf-8');
+
+      const res = await editFileTool.handler(
+        { path: p, old_string: 'CHF 99', new_string: 'CHF 149' },
+        makeAgent(),
+      );
+      expect(res).toContain('1 replacement');
+      expect(await readFile(p, 'utf-8')).toBe('<p>Price: CHF 149</p>');
+    } finally {
+      if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    }
+  });
+
+  it('does not follow a symlink inside artifacts that escapes the dir (CLI mode)', async () => {
+    const d = await makeTempDir();
+    const prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = d;
+    try {
+      clearTenantWorkspace();
+      mkdirSync(join(d, 'artifacts'), { recursive: true });
+      // Secret OUTSIDE the artifacts dir; a symlink inside it points there.
+      const secret = join(d, 'secret.txt');
+      writeFileSync(secret, 'SENSITIVE', 'utf-8');
+      const link = join(d, 'artifacts', 'evil.html');
+      await symlink(secret, link);
+
+      // The containment check resolves the symlink first → escapes artRoot →
+      // falls through to workspace-basename, where the file doesn't exist.
+      await expect(
+        editFileTool.handler({ path: link, old_string: 'SENSITIVE', new_string: 'PWNED' }, makeAgent()),
+      ).rejects.toThrow(/does not exist|edit_file/);
+      expect(await readFile(secret, 'utf-8')).toBe('SENSITIVE');
+    } finally {
+      if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    }
   });
 });

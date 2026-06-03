@@ -34,6 +34,7 @@ import {
   bashTool,
   readFileTool,
   writeFileTool,
+  editFileTool,
   memoryStoreTool,
   memoryRecallTool,
   memoryDeleteTool,
@@ -895,6 +896,7 @@ export class Engine {
       .register(bashTool)
       .register(readFileTool)
       .register(writeFileTool)
+      .register(editFileTool)
       .register(memoryStoreTool)
       .register(memoryRecallTool)
       .register(memoryDeleteTool)

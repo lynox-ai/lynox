@@ -46,7 +46,13 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     });
 
     const action = input.id ? 'Updated' : 'Saved';
-    return `${action} artifact "${artifact.title}" (id: ${artifact.id})`;
+    const path = store.pathFor(artifact.id);
+    return (
+      `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).\n` +
+      `File: ${path}\n` +
+      `To revise it, read_file this path and apply a targeted edit (find/replace) instead of ` +
+      `re-sending the whole document — the gallery picks up the change automatically.`
+    );
   },
 };
 

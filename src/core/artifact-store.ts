@@ -6,7 +6,7 @@
  * individual content files in ~/.lynox/artifacts/.
  */
 import { join, resolve } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 
@@ -24,6 +24,9 @@ export interface ArtifactMeta {
   createdAt: string;
   updatedAt: string;
   threadId: string;
+  /** Bumped on every save AND on every external edit (file tools / bash)
+   *  detected by reconcile(). Legacy entries without it normalize to 1. */
+  version: number;
 }
 
 export interface Artifact extends ArtifactMeta {
@@ -45,11 +48,63 @@ export class ArtifactStore {
   private loadIndex(): void {
     try {
       if (existsSync(this.indexPath)) {
-        this.index = JSON.parse(readFileSync(this.indexPath, 'utf-8')) as ArtifactMeta[];
+        const raw = JSON.parse(readFileSync(this.indexPath, 'utf-8')) as ArtifactMeta[];
+        // Normalize legacy entries that predate the `version` field.
+        this.index = raw.map(m => ({ ...m, version: m.version ?? 1 }));
       }
     } catch {
       this.index = [];
     }
+  }
+
+  /**
+   * Read-through reconciliation: artifacts live at a fixed path the agent can
+   * reach with the standard file tools (read_file / edit / bash). When a
+   * content file is edited externally, its mtime moves ahead of the index —
+   * we detect that here and bump version + updatedAt so the gallery stays
+   * truthful without a filesystem watcher. Also adopts content files created
+   * directly via file tools (named `<id>.html`). Called on every list()/get().
+   */
+  private reconcile(): void {
+    let changed = false;
+
+    for (const meta of this.index) {
+      let p: string;
+      try { p = this.contentPath(meta.id); } catch { continue; }
+      if (!existsSync(p)) continue;
+      const mtimeMs = statSync(p).mtimeMs;
+      const indexedMs = Date.parse(meta.updatedAt);
+      // 1s tolerance: our own writeFileSync sets mtime ~= updatedAt.
+      if (Number.isFinite(indexedMs) && mtimeMs > indexedMs + 1000) {
+        meta.updatedAt = new Date(mtimeMs).toISOString();
+        meta.version += 1;
+        changed = true;
+      }
+    }
+
+    // Adopt orphan content files (well-formed `<id>.html`) dropped in directly.
+    let entries: string[];
+    try { entries = readdirSync(this.dir); } catch { entries = []; }
+    for (const f of entries) {
+      if (!f.endsWith('.html')) continue;
+      const id = f.slice(0, -'.html'.length);
+      if (!SAFE_ID.test(id) || this.index.some(a => a.id === id)) continue;
+      const st = statSync(join(this.dir, f));
+      const iso = new Date(st.mtimeMs).toISOString();
+      this.index.push({
+        id, title: id, description: '', type: 'html',
+        createdAt: iso, updatedAt: iso, threadId: '', version: 1,
+      });
+      changed = true;
+    }
+
+    if (changed) this.saveIndex();
+  }
+
+  /** Absolute path of an artifact's content file — surfaced to the agent so it
+   *  can read/edit artifacts with the standard file tools. */
+  pathFor(id: string): string {
+    return this.contentPath(id);
   }
 
   private saveIndex(): void {
@@ -73,6 +128,7 @@ export class ArtifactStore {
       existing.description = opts.description ?? existing.description;
       existing.type = opts.type ?? existing.type;
       existing.updatedAt = now;
+      existing.version += 1;
       writeFileSync(this.contentPath(existing.id), opts.content, 'utf-8');
       this.saveIndex();
       return { ...existing, content: opts.content };
@@ -88,6 +144,7 @@ export class ArtifactStore {
       createdAt: now,
       updatedAt: now,
       threadId: opts.threadId ?? '',
+      version: 1,
     };
     this.index.push(meta);
     writeFileSync(this.contentPath(id), opts.content, 'utf-8');
@@ -96,6 +153,7 @@ export class ArtifactStore {
   }
 
   get(id: string): Artifact | null {
+    this.reconcile();
     const meta = this.index.find(a => a.id === id);
     if (!meta) return null;
     try {
@@ -107,6 +165,7 @@ export class ArtifactStore {
   }
 
   list(): ArtifactMeta[] {
+    this.reconcile();
     return [...this.index].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 

@@ -10,6 +10,9 @@ export interface ArtifactMeta {
 	createdAt: string;
 	updatedAt: string;
 	threadId: string;
+	/** Optional for back-compat with older API responses that predate the
+	 *  field; bumped on every save and on every external file-tool edit. */
+	version?: number;
 }
 
 export interface Artifact extends ArtifactMeta {
