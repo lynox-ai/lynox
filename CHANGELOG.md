@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 1.8.2 — 2026-06-03
+
+Bug-fix patch: a chat-resume regression on legacy model tiers, a spurious managed run-block, and an inbox decode + context-pane redesign.
+
+### Fixed
+
+- **Chat is visible immediately on thread resume again.** Managed threads carrying a legacy `model_tier` (`sonnet`/`opus`/`haiku`, pre-rename) returned a 500 on resume, so the conversation only appeared after a manual page refresh. The legacy tier is now normalized (`normalizeTier`) on the resume path.
+- **No more spurious "Managed control plane unreachable" run-blocks.** A managed tenant could fail-closed and block a run even when the control plane was up; a proactive credit heartbeat keeps the status fresh and the message was softened.
+- **Mail bodies decode correctly in the reader.** Body parts are now decoded by their Content-Transfer-Encoding (base64 / quoted-printable) and the declared charset is honored, so encoded or non-UTF-8 mail no longer leaks raw `=20`/base64 text into the inbox (also fixes the single-part snippet path).
+- **Inbox reader can't collapse to one-character-per-line.** The reading pane now has a floored minimum width.
+
+### Changed
+
+- **Inbox context moved below the mail body.** The mail-context (recent threads, follow-ups, outbound, reminders) is now a stacked single-column section that scrolls beneath the message instead of a right-hand sidebar — a cleaner read on both desktop and mobile.
+
+### Internal
+
+- Published the 2026-05-30 fairness-fixed Set-Bench run. (#652)
+
 ## 1.8.1 — 2026-06-03
 
 Stabilization patch from the first `/release-harden` run (3-tier canary-verified). 7 commits, all fixes.
