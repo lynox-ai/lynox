@@ -23,6 +23,15 @@ pre-push:
       skip:
         - merge
         - rebase
+    drift-guard:
+      # Catch the mechanizable slices of doc/code drift gitleaks + public-repo-
+      # guard don't: committed merge-conflict markers, removed features (Telegram
+      # /WhatsApp/MCP) reappearing in live docs, and dead `path/file` references
+      # in CLAUDE.md / docs / READMEs. Re-run by CI so --no-verify can't bypass.
+      run: bash scripts/drift-guard.sh
+      skip:
+        - merge
+        - rebase
 
 pre-commit:
   commands:

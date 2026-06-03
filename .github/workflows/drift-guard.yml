@@ -1,0 +1,26 @@
+name: Drift Guard
+
+# Catches the mechanizable slices of documentation/code drift that gitleaks +
+# public-repo-guard don't: committed merge-conflict markers, removed features
+# reappearing in live docs, and dead path references in CLAUDE.md / docs /
+# READMEs. The lefthook pre-push hook runs the same scan locally; this job is
+# the unbypassable gate (`git push --no-verify` skips the hook, not this).
+# Make it a required status check on main.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  drift-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked tree for mechanizable drift
+        run: bash scripts/drift-guard.sh

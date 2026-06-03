@@ -28,7 +28,7 @@ For a full audit of the running code, run `pnpm run security` (security scan + v
 
 ## SSRF protection
 
-Every outbound URL from the agent flows through `fetchWithValidatedRedirects` in `src/core/url-guard.ts`:
+Every outbound URL from the agent flows through `fetchWithPublicRedirects` in `src/core/network-guard.ts`:
 
 - DNS is resolved once; the connection is pinned to the validated IP at TCP-connect time (rebind-safe).
 - Each redirect hop is re-validated against the same allowlist.
