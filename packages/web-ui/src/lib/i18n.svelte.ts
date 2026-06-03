@@ -766,6 +766,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'changeset.new_file': { de: 'neu', en: 'new' },
 	'changeset.modified_file': { de: 'geändert', en: 'modified' },
+	'changeset.artifact_file': { de: 'Artefakt ·', en: 'Artifact ·' },
 	'changeset.loading': { de: 'Änderungen laden...', en: 'Loading changes...' },
 	'changeset.sensitive_warning': { de: 'Sensitiver Pfad', en: 'Sensitive path' },
 	'changeset.review_pending': { de: 'Bitte prüfe die ausstehenden Änderungen bevor du weiterschreibst.', en: 'Please review the pending changes before sending another message.' },
