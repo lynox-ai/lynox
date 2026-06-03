@@ -8,7 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight } from '../artifact-frame.js';
+	import { deckFrameHeight } from '../utils/artifact-frame.js';
 
 	interface Props {
 		content: string;
@@ -254,7 +254,13 @@
 	// AND scrollHeight stays within the current viewport (a long min-height:100vh
 	// page that actually flows tall reports a large scrollHeight → not a deck →
 	// normal sizing keeps working). The parent then sizes by aspect ratio.
-	const RESIZE_SCRIPT = '<script>(function(){function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0,dk=false;try{dk=/100(?:vh|dvh|svh|lvh)/i.test(st())&&vh>0&&sh<=vh+8}catch(x){}parent.postMessage({type:"lynox-resize",h:sh,deck:dk},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
+	// The deck regex + `sh<=vh+8` guard are the sandbox-isolated mirror of
+	// `isViewportDeck` in lib/utils/artifact-frame.ts — keep them identical. The
+	// viewport-unit scan is cached (`vu`) since style text doesn't change after
+	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
+	// instead of re-walking the whole DOM. (String backslashes are doubled so the
+	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
+	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0;parent.postMessage({type:"lynox-resize",h:sh,deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
 
 	// ── Event delegation ─────────────────────────────────────
 

@@ -11,7 +11,10 @@
  * regex + the `scrollHeight <= viewport` guard in sync with that string.
  */
 
-const VIEWPORT_HEIGHT_UNIT = /100(?:vh|dvh|svh|lvh)/i;
+// Anchored so a longer number ending in `100vh` (e.g. `1100vh`) doesn't match —
+// the leading `[^\d.]` rejects a preceding digit/decimal, `\b` the trailing unit.
+// Mirror of the inline regex in MarkdownRenderer.svelte's RESIZE_SCRIPT.
+const VIEWPORT_HEIGHT_UNIT = /(?:^|[^\d.])100(?:vh|dvh|svh|lvh)\b/i;
 
 /**
  * True when the iframe content is a viewport-pinned deck: it declares a

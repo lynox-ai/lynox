@@ -24,6 +24,17 @@ describe('isViewportDeck', () => {
 	it('returns false when the viewport height is unknown (0)', () => {
 		expect(isViewportDeck('.s{height:100vh}', 0, 0)).toBe(false);
 	});
+
+	it('pins the +8 collapse tolerance at its boundary', () => {
+		expect(isViewportDeck('.s{height:100vh}', 408, 400)).toBe(true); // == vh+8
+		expect(isViewportDeck('.s{height:100vh}', 409, 400)).toBe(false); // just over
+	});
+
+	it('does NOT match a longer number ending in 100vh (anchored regex)', () => {
+		// `1100vh` / `2100dvh` contain the substring `100vh` but must not flag.
+		expect(isViewportDeck('.s{height:1100vh}', 150, 150)).toBe(false);
+		expect(isViewportDeck('.s{width:2100dvh}', 150, 150)).toBe(false);
+	});
 });
 
 describe('deckFrameHeight', () => {
@@ -45,5 +56,11 @@ describe('deckFrameHeight', () => {
 	it('falls back to sane defaults for non-positive inputs', () => {
 		// width→640 ⇒ 360 (after floor); viewport→800 ⇒ ceil 680. 360 ≤ 680.
 		expect(deckFrameHeight(0, 0)).toBe(360);
+	});
+
+	it('takes the ceiling when aspect exactly equals it', () => {
+		// 960*9/16 = 540; ceil = 0.85*round? 0.85*635.3→ pick vh so ceil==540:
+		// 540 / 0.85 = 635.29 → round(635*0.85)=540. aspect==ceil → 540.
+		expect(deckFrameHeight(960, 635)).toBe(540);
 	});
 });
