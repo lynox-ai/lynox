@@ -179,22 +179,29 @@ export function createManagedHook(): LynoxHooks {
         `[lynox] Managed hook initialized: allowed=${allowed}, instance=${instanceId}, flushInterval=${flushIntervalMs}ms, staleThreshold=${staleThresholdMs}ms, resyncInterval=${resyncIntervalMs}ms\n`,
       );
       flushTimer = setInterval(() => { void flush(); }, flushIntervalMs);
-      // Periodic re-sync when denied OR when the cached state is stale —
-      // picks up credit pack purchases AND recovers from CP outages once
-      // connectivity returns. Without the staleness clause the resync only
-      // fired when `allowed` was already false, so a fail-closed engine
-      // could never re-allow itself even after the CP came back up.
-      resyncTimer = setInterval(() => {
-        if (!allowed || isStale()) void syncStatus();
-      }, resyncIntervalMs);
+      // Heartbeat re-sync on a fixed cadence that is always shorter than the
+      // staleness threshold (resyncIntervalMs targets staleThreshold/2). This
+      // is UNCONDITIONAL on purpose: an IDLE tenant produces no usage reports,
+      // so flush() early-returns and never refreshes lastSyncedAtMs — leaving
+      // syncStatus() as the only thing that resets the staleness clock. The
+      // previous `if (!allowed || isStale())` guard meant the clock was only
+      // reset AFTER it had already gone stale, so a perfectly healthy idle
+      // tenant oscillated fresh->stale->resync every staleThreshold and any
+      // run that landed in the stale window was wrongly fail-closed with
+      // "control plane unreachable". A proactive heartbeat keeps the cached
+      // state fresh, still picks up credit-pack purchases, and still recovers
+      // a denied/failed-boot state once the CP is reachable again. The
+      // fail-closed contract is intact: if the CP is genuinely unreachable,
+      // the heartbeats fail, lastSyncedAtMs freezes, and isStale() denies new
+      // runs after the threshold.
+      resyncTimer = setInterval(() => { void syncStatus(); }, resyncIntervalMs);
     },
 
     onBeforeRun(_runId: string, _context: RunContext) {
       if (isStale()) {
         throw new Error(
-          'Managed control plane unreachable — credit status is stale and the engine is fail-closed for safety. ' +
-          'New runs will resume automatically once the control plane comes back online. ' +
-          'Status: https://status.lynox.cloud',
+          'Managed control plane temporarily unreachable — credit status could not be confirmed and the engine paused new runs for safety. ' +
+          'This usually clears within a minute; runs resume automatically once the control plane responds again.',
         );
       }
       if (!allowed) {

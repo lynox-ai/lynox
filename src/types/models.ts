@@ -183,6 +183,13 @@ export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic')
  * Returns the input unchanged if already a base model ID or tier alias.
  */
 export function normalizeModelId(model: string): string {
+  // Defense-in-depth: capability lookups route through here and are
+  // contractually "safe on unknown ids" (modelCapabilityOrFallback returns a
+  // fallback rather than throwing). A missed tier-normalization boundary can
+  // hand us undefined (e.g. MODEL_MAP[<legacy-tier>] → undefined); guard so it
+  // degrades to the fallback capability instead of a `.replace of undefined`
+  // TypeError → 500.
+  if (typeof model !== 'string') return '';
   // Strip Vertex AI version suffix: '@YYYYMMDD'
   return model.replace(/@\d{8}$/, '');
 }

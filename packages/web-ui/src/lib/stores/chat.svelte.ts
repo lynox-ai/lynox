@@ -2024,7 +2024,13 @@ export async function resumeThread(threadId: string): Promise<void> {
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
 		if (!res.ok) {
-			chatError = t('chat.error_connection');
+			// The server responded with an error status (not a dropped
+			// connection) — opening the conversation failed. Don't blame the
+			// user's internet; point at the recovery that actually works (a
+			// reload uses the GET messages path, which sidesteps the resume
+			// session-open). The fetch-rejected case (real connectivity loss)
+			// still falls through to the catch → error_connection.
+			chatError = t('chat.error_open_thread');
 			return;
 		}
 		const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };

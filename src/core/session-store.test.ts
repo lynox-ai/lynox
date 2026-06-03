@@ -50,6 +50,61 @@ describe('SessionStore', () => {
       // Opts from second call are ignored since session already exists
       expect(engine.createSession).toHaveBeenCalledTimes(1);
     });
+
+    // Regression: resuming a thread persisted BEFORE the 2026-05-29 tier rename
+    // stored a legacy Anthropic-brand `model_tier` ('sonnet'/'opus'/'haiku').
+    // An un-normalized cast let those reach MODEL_MAP[tier] → undefined →
+    // `normalizeModelId(undefined).replace` → 500 on POST /api/sessions, so
+    // clicking a pre-rename thread showed an empty chat until a full refresh.
+    // The whole resume branch was previously untested (getThreadStore mocked
+    // to null), which is exactly why the reset-to-clean QA fleet never hit it.
+    it('normalizes a legacy persisted model_tier on resume', () => {
+      const store = new SessionStore();
+      const threadStore = {
+        getThread: vi.fn().mockReturnValue({
+          id: 'thread-legacy',
+          title: 't',
+          model_tier: 'sonnet', // legacy alias for 'balanced'
+          context_id: null,
+          summary: null,
+          skip_extraction: 0,
+        }),
+        getMessages: vi.fn().mockReturnValue([]),
+      };
+      const engine = {
+        createSession: vi.fn().mockImplementation(() => makeMockSession()),
+        getThreadStore: vi.fn().mockReturnValue(threadStore),
+      } as unknown as Engine;
+
+      expect(() => store.getOrCreate('thread-legacy', engine)).not.toThrow();
+      expect(engine.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'thread-legacy', model: 'balanced' }),
+      );
+    });
+
+    it('passes a canonical tier through unchanged on resume', () => {
+      const store = new SessionStore();
+      const threadStore = {
+        getThread: vi.fn().mockReturnValue({
+          id: 'thread-canonical',
+          title: 't',
+          model_tier: 'deep',
+          context_id: null,
+          summary: null,
+          skip_extraction: 0,
+        }),
+        getMessages: vi.fn().mockReturnValue([]),
+      };
+      const engine = {
+        createSession: vi.fn().mockImplementation(() => makeMockSession()),
+        getThreadStore: vi.fn().mockReturnValue(threadStore),
+      } as unknown as Engine;
+
+      store.getOrCreate('thread-canonical', engine);
+      expect(engine.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'deep' }),
+      );
+    });
   });
 
   describe('reset', () => {

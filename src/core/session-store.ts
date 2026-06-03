@@ -1,7 +1,7 @@
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { Session, SessionOptions } from './session.js';
 import type { Engine } from './engine.js';
-import type { ModelTier } from '../types/index.js';
+import { normalizeTier } from '../types/index.js';
 import type { ThreadRecord } from './thread-store.js';
 
 const VERBATIM_THRESHOLD = 80;
@@ -53,7 +53,7 @@ async function generateThreadSummary(
   engine: Engine, threadId: string, messages: BetaMessageParam[],
 ): Promise<void> {
   try {
-    const summarySession = engine.createSession({ model: 'haiku' as ModelTier });
+    const summarySession = engine.createSession({ model: 'fast' });
     const formatted = formatMessagesForSummary(messages.slice(0, -RECENT_COUNT));
     const prompt = `Summarize this conversation concisely in 3-5 paragraphs. Focus on: what was discussed, decisions made, current state of work, and any pending items.\n\n${formatted.slice(0, 30_000)}`;
     const summary = await summarySession.run(prompt);
@@ -96,7 +96,16 @@ export class SessionStore {
         session = engine.createSession({
           ...opts,
           sessionId,
-          model: (thread.model_tier as ModelTier) ?? opts?.model,
+          // Normalize the persisted tier at this restore boundary. Threads
+          // created before the 2026-05-29 tier rename store legacy
+          // Anthropic-brand names (`sonnet`/`opus`/`haiku`) in `model_tier`;
+          // an un-normalized cast let those reach `MODEL_MAP[tier]` (→
+          // undefined → `normalizeModelId(undefined).replace` → 500) on the
+          // POST /api/sessions resume path, so clicking a pre-rename thread
+          // showed an empty chat until a full refresh (which uses the GET
+          // messages path that skips this lookup). normalizeTier falls back
+          // to opts/config default for anything unrecognized.
+          model: normalizeTier(thread.model_tier) ?? opts?.model,
         });
 
         // Load messages: verbatim if short, summary + recent if long
