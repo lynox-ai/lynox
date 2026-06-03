@@ -134,6 +134,34 @@ describe.skipIf(!greenmailUp)('GreenMail E2E (live IMAPS+SMTPS)', () => {
     expect(full.text).toContain(body);
   });
 
+  it('round-trips a UTF-8 body with umlauts (CTE decode: base64/QP → plaintext)', async () => {
+    // nodemailer encodes non-ASCII bodies with Content-Transfer-Encoding
+    // (base64 or quoted-printable). The IMAP fetch must decode the CTE
+    // BEFORE charset, otherwise the body leaks as raw base64/QP.
+    const subject = `lynox-test-${String(Date.now())}-utf8`;
+    const body = 'Grüße aus München — über alle Maßen schön. ä ö ü ß';
+
+    await aliceProvider.send({
+      to: [{ address: BOB }],
+      subject,
+      text: body,
+    });
+
+    await waitFor(async () => {
+      const envelopes = await bobProvider.list({ limit: 50 });
+      return envelopes.some(e => e.subject === subject);
+    });
+
+    const envelopes = await bobProvider.list({ limit: 50 });
+    const target = envelopes.find(e => e.subject === subject);
+    expect(target).toBeDefined();
+
+    const full = await bobProvider.fetch({ uid: target!.uid });
+    expect(full.text).toContain('Grüße aus München');
+    expect(full.text).toContain('über alle Maßen schön');
+    expect(full.text).toContain('ä ö ü ß');
+  });
+
   it('search() returns the message via IMAP SEARCH SUBJECT', async () => {
     const tag = `gm-search-${String(Date.now())}`;
     await aliceProvider.send({

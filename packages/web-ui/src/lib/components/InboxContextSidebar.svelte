@@ -9,8 +9,10 @@
 	interface Props {
 		itemId: string | null;
 		onClose?: (() => void) | undefined;
+		/** Render stacked below the mail body (no border-l / full-height / close button). */
+		inline?: boolean;
 	}
-	const { itemId, onClose }: Props = $props();
+	const { itemId, onClose, inline = false }: Props = $props();
 
 	let context = $state<InboxContext | null>(null);
 	let loading = $state(false);
@@ -64,21 +66,8 @@
 	}
 </script>
 
-<aside class="flex h-full flex-col border-l border-border bg-bg" aria-label={t('inbox.context_sidebar_title')}>
-	<header class="flex items-center justify-between border-b border-border px-4 py-3">
-		<h3 class="text-[12px] font-medium text-text">{t('inbox.context_sidebar_title')}</h3>
-		{#if onClose}
-			<button
-				type="button"
-				class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-subtle hover:text-text hover:border-border-hover"
-				onclick={onClose}
-				aria-label={t('inbox.context_sidebar_close')}
-			>×</button>
-		{/if}
-	</header>
-
-	<div class="flex-1 overflow-y-auto px-4 py-3 space-y-5">
-		{#if loading && context === null}
+{#snippet sections()}
+	{#if loading && context === null}
 			<div class="space-y-2" aria-busy="true">
 				<div class="h-3 w-1/2 animate-pulse rounded bg-bg-subtle"></div>
 				<div class="h-3 w-3/4 animate-pulse rounded bg-bg-subtle"></div>
@@ -166,5 +155,31 @@
 				</section>
 			{/if}
 		{/if}
+{/snippet}
+
+{#if inline}
+	<div class="border-t border-border pt-4" aria-label={t('inbox.context_sidebar_title')}>
+		<h3 class="mb-3 text-[12px] font-medium text-text">{t('inbox.context_sidebar_title')}</h3>
+		<div class="space-y-5 sm:grid sm:grid-cols-2 sm:gap-x-8 sm:gap-y-5 sm:space-y-0">
+			{@render sections()}
+		</div>
 	</div>
-</aside>
+{:else}
+	<aside class="flex h-full flex-col border-l border-border bg-bg" aria-label={t('inbox.context_sidebar_title')}>
+		<header class="flex items-center justify-between border-b border-border px-4 py-3">
+			<h3 class="text-[12px] font-medium text-text">{t('inbox.context_sidebar_title')}</h3>
+			{#if onClose}
+				<button
+					type="button"
+					class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-subtle hover:text-text hover:border-border-hover"
+					onclick={onClose}
+					aria-label={t('inbox.context_sidebar_close')}
+				>×</button>
+			{/if}
+		</header>
+
+		<div class="flex-1 overflow-y-auto px-4 py-3 space-y-5">
+			{@render sections()}
+		</div>
+	</aside>
+{/if}
