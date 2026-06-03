@@ -676,7 +676,16 @@
 		<div
 			class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 min-w-0 overflow-hidden"
 		>
-			<div class="flex flex-1 flex-col min-w-0 overflow-hidden relative">
+			<!-- lg:min-w floor: the reader is the only flex-shrinkable column in
+				this row (zone-rail, list, and the context sidebar are all
+				shrink-0). Without a floor, an open context column + expanded app
+				nav at intermediate widths (~1100-1300px) squeezed the reader to a
+				few px and the parent's overflow-hidden clipped it — so the subject
+				+ body wrapped one character per line (reported 2026-06-03). The
+				floor keeps the reader readable; the secondary context column
+				yields/clips first instead. Inert on wide viewports where the
+				reader is already wider. -->
+			<div class="flex flex-1 flex-col min-w-0 lg:min-w-[380px] overflow-hidden relative">
 				{#if readingOpen}
 					<InboxReadingPane
 						onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
