@@ -19,6 +19,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'artifacts.confirm_delete': { de: 'Dieses Artifact wirklich löschen?', en: 'Delete this artifact?' },
 	'artifacts.back': { de: 'Zurück', en: 'Back' },
+	'artifacts.updated': { de: 'Aktualisiert', en: 'Updated' },
 	'artifacts.back_to_chat': { de: 'Zurück zum Chat', en: 'Back to chat' },
 	'artifacts.saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
 	'artifacts.saved_chip': { de: 'In Artefakten gespeichert', en: 'Saved to artifacts' },

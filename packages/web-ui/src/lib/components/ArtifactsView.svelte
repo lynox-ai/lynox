@@ -87,6 +87,10 @@
 		return new Date(iso).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
 	}
 
+	function formatDateTime(iso: string): string {
+		return new Date(iso).toLocaleString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+	}
+
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
 	function injectCsp(html: string): string {
@@ -223,6 +227,7 @@
 		<div class="flex items-center gap-3 px-4 md:px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
 			<button type="button" class="text-text-muted hover:text-text text-sm p-1" onclick={goBack}>← {openedFromChat ? t('artifacts.back_to_chat') : t('artifacts.back')}</button>
 			<h2 class="text-sm font-medium text-text flex-1 truncate">{selected.title}</h2>
+			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1} · v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
 			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>Export</button>
 		</div>
