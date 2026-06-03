@@ -87,7 +87,10 @@ function buildProvider(address: string, type: MailAccountType = 'personal'): Mai
  */
 async function injectRaw(opts: {
   envelope: { from: string; to: string };
-  raw: string;
+  // Buffer when the body's on-the-wire bytes must NOT be UTF-8-re-encoded
+  // (e.g. a genuine ISO-8859-1 body). nodemailer writes a string `raw` as
+  // UTF-8, which would silently turn a Latin-1 fixture into a UTF-8 one.
+  raw: string | Buffer;
 }): Promise<void> {
   const transport = nodemailer.createTransport({
     host: HOST,
@@ -186,8 +189,12 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — adversarial mailbox fixtures', 
       ``,
       ``,
     ].join('\r\n');
-    const bodyBytes = Buffer.from('Grüße — café', 'latin1');
-    const raw = Buffer.concat([Buffer.from(rawHeaders, 'ascii'), bodyBytes]).toString('binary');
+    // "—" (U+2014) isn't representable in Latin-1; keep the body to chars that
+    // round-trip so the fixture's bytes actually match its declared charset.
+    const bodyBytes = Buffer.from('Grüße aus dem café', 'latin1');
+    // Pass the raw message as a Buffer so nodemailer writes the Latin-1 bytes
+    // verbatim — a string would be UTF-8-encoded and defeat the test's intent.
+    const raw = Buffer.concat([Buffer.from(rawHeaders, 'ascii'), bodyBytes]);
 
     await injectRaw({ envelope: { from: EVE, to: FRANK }, raw });
 
