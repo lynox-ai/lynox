@@ -100,6 +100,26 @@ export type FailedTurnDisplayOutcome =
  * branches are unit-testable. Fire-and-forget by contract; returns an outcome
  * enum for tests only.
  */
+export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedTurnDisplayOutcome {
+  const { threadStore, sessionId, startSeq, task, error } = input;
+  if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };
+  try {
+    const footprint = threadStore.markDisplayOnlyFrom(sessionId, startSeq);
+    const notes: { role: 'user' | 'assistant'; content: unknown }[] = [];
+    if (!footprint.hadUserMessage) notes.push({ role: 'user', content: task });
+    notes.push({
+      role: 'assistant',
+      content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error))),
+    });
+    const totalCount = threadStore.getMessageCount(sessionId);
+    threadStore.appendDisplayNotes(sessionId, notes, totalCount);
+    threadStore.updateThread(sessionId, { message_count: totalCount + notes.length });
+    return { kind: 'persisted', appended: notes.length, flipped: footprint.marked };
+  } catch (err) {
+    return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };
+  }
+}
+
 /**
  * Persist a visible, display-only marker recording that the conversation was
  * compacted (history summarized to free context). Without it, compaction is
@@ -124,25 +144,5 @@ export function persistCompactionMarker(
     return true;
   } catch {
     return false;
-  }
-}
-
-export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedTurnDisplayOutcome {
-  const { threadStore, sessionId, startSeq, task, error } = input;
-  if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };
-  try {
-    const footprint = threadStore.markDisplayOnlyFrom(sessionId, startSeq);
-    const notes: { role: 'user' | 'assistant'; content: unknown }[] = [];
-    if (!footprint.hadUserMessage) notes.push({ role: 'user', content: task });
-    notes.push({
-      role: 'assistant',
-      content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error))),
-    });
-    const totalCount = threadStore.getMessageCount(sessionId);
-    threadStore.appendDisplayNotes(sessionId, notes, totalCount);
-    threadStore.updateThread(sessionId, { message_count: totalCount + notes.length });
-    return { kind: 'persisted', appended: notes.length, flipped: footprint.marked };
-  } catch (err) {
-    return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };
   }
 }
