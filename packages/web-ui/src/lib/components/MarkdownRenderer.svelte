@@ -142,13 +142,15 @@
 		const safeTitle = escapeHtml(displayTitle);
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
-		return `<div class="artifact-container artifact-md" data-md="${encodedMd}" data-title="${safeTitle}">
-			<div class="artifact-toolbar">
+		return `<div class="artifact-container artifact-md artifact-collapsed" data-md="${encodedMd}" data-title="${safeTitle}">
+			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
+				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
-				<span class="artifact-md-title">${safeTitle}</span>
+				<span class="artifact-title">${safeTitle}</span>
 				<button class="artifact-btn" data-action="open-gallery" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>
 				<button class="artifact-btn" data-action="download-md" title="Download as .md">${ICON_DOWNLOAD}</button>
 				<button class="artifact-btn" data-action="print-pdf" title="Print / Save as PDF">${ICON_PRINT}</button>
+				<span class="artifact-chevron">${ICON_CHEVRON}</span>
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -183,11 +185,13 @@
 		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
 		const lines = body.split('\n');
 		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
-		return `<div class="artifact-container artifact-data" data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}">
-			<div class="artifact-toolbar">
+		return `<div class="artifact-container artifact-data artifact-collapsed" data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}">
+			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
+				<span class="artifact-type-icon">${artifactTypeIcon(type)}</span>
 				<span class="artifact-label">${meta.label}</span>
-				<span class="artifact-md-title">${safeTitle}</span>
+				<span class="artifact-title">${safeTitle}</span>
 				<button class="artifact-btn" data-action="download-data" title="Download .${meta.ext}">${ICON_DOWNLOAD}</button>
+				<span class="artifact-chevron">${ICON_CHEVRON}</span>
 			</div>
 			<pre class="artifact-data-body"><code>${preview}</code></pre>
 		</div>`;
@@ -218,17 +222,22 @@
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
+		const typeMatch = code.match(/<!--\s*type:\s*([a-z]+)\s*-->/i);
+		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
+		const typeLabel = typeKey.toUpperCase();
 
 		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}">
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
-				<span class="artifact-label">${safeTitle}</span>
-				<span class="artifact-toggle-hint">Click to open</span>
+				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
+				<span class="artifact-label">${typeLabel}</span>
+				<span class="artifact-title">${safeTitle}</span>
 				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
 				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>
 				<button class="artifact-btn" data-action="download-html" title="Download .html source">${ICON_CODE}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
+				<span class="artifact-chevron">${ICON_CHEVRON}</span>
 			</div>
 			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
@@ -246,6 +255,26 @@
 	const ICON_PRINT = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 2.5h7v3.5M4.5 11.5H3A1.5 1.5 0 011.5 10V7A1.5 1.5 0 013 5.5h10A1.5 1.5 0 0114.5 7v3a1.5 1.5 0 01-1.5 1.5h-1.5M4.5 9.5h7V14h-7V9.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	// External-link / "open in another view" icon — arrow exiting a frame.
 	const ICON_OPEN_GALLERY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 2h5v5M14 2L8 8M11 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V6a1 1 0 011-1h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+	// Chevron — the universal expand/collapse affordance on the pill row;
+	// rotates 90° when the artifact is expanded (CSS).
+	const ICON_CHEVRON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+	// Per-type leading icon shown in the collapsed pill. Keeps the pill
+	// scannable at a glance (frame=html/svg, branches=mermaid, lines=doc,
+	// grid=data) before the type label even reads.
+	const ICON_TYPE_FRAME = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12" stroke="currentColor" stroke-width="1.3"/></svg>`;
+	const ICON_TYPE_DOC = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 2h5l3 3v9H4V2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M6 7h4M6 9.5h4M6 12h2.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>`;
+	const ICON_TYPE_GRID = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M2 6.5h12M2 9.5h12M6.5 3v10" stroke="currentColor" stroke-width="1.1"/></svg>`;
+	const ICON_TYPE_FLOW = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="3.5" rx="0.5" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="10.5" width="5" height="3.5" rx="0.5" stroke="currentColor" stroke-width="1.2"/><path d="M4.5 5.5v3a2 2 0 002 2h2.5" stroke="currentColor" stroke-width="1.2"/></svg>`;
+
+	function artifactTypeIcon(type: string): string {
+		switch (type) {
+			case 'markdown': return ICON_TYPE_DOC;
+			case 'csv': case 'tsv': case 'json': case 'text': return ICON_TYPE_GRID;
+			case 'mermaid': return ICON_TYPE_FLOW;
+			default: return ICON_TYPE_FRAME; // html / svg
+		}
+	}
 
 	/** Injected into artifact iframes — posts height via postMessage for cross-origin resize */
 	// `deck` flag: a 100vh/dvh slide-deck collapses scrollHeight (absolute /
@@ -1117,28 +1146,51 @@ window.addEventListener('afterprint', function () { window.close(); });
 		color: var(--color-accent-text);
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
-		margin-right: auto;
+		flex-shrink: 0;
 	}
 
-	/* Markdown artifacts: same container chrome as iframe artifacts but
-	   body is inline rendered markdown. Expanded by default — prose is
-	   meant to be read inline, not gated behind a toggle. */
+	/* Per-type leading icon in the pill row (frame/doc/grid/flow). */
+	div :global(.artifact-type-icon) {
+		display: inline-flex;
+		align-items: center;
+		color: var(--color-accent-text);
+		line-height: 0;
+		flex-shrink: 0;
+	}
+
+	/* Artifact name — takes the remaining width and truncates so a long
+	   title never blows out the collapsed pill. */
+	div :global(.artifact-title) {
+		font-size: 0.75rem;
+		color: var(--color-text);
+		font-weight: 500;
+		margin-right: auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* Chevron: the universal expand affordance; rotates 90° when expanded. */
+	div :global(.artifact-chevron) {
+		display: inline-flex;
+		align-items: center;
+		color: var(--color-text-subtle);
+		line-height: 0;
+		flex-shrink: 0;
+		transition: transform 0.15s;
+	}
+	div :global(.artifact-container:not(.artifact-collapsed) .artifact-chevron) {
+		transform: rotate(90deg);
+	}
+
+	/* Markdown artifacts: same container chrome as iframe artifacts, body is
+	   inline rendered markdown when expanded. */
 	div :global(.artifact-md) {
 		background: var(--color-bg-subtle);
 	}
 	div :global(.artifact-md .artifact-toolbar) {
 		border-bottom: 1px solid var(--color-border);
-	}
-	/* Reset the label's margin-right:auto inside .artifact-md so the
-	   "Markdown" badge sits next to the title on the left. */
-	div :global(.artifact-md .artifact-label) {
-		margin-right: 0;
-	}
-	div :global(.artifact-md-title) {
-		font-size: 0.75rem;
-		color: var(--color-text);
-		font-weight: 500;
-		margin-right: auto;
 	}
 	div :global(.artifact-md-body) {
 		padding: 0.75rem 1rem;
@@ -1209,16 +1261,38 @@ window.addEventListener('afterprint', function () { window.close(); });
 		background: var(--color-bg-elevated);
 		color-scheme: light dark;
 	}
-	div :global(.artifact-collapsed .artifact-frame) {
+	/* ── Collapsed pill (all types) ──────────────────────────
+	   Every artifact renders inline first as a compact, clickable pill:
+	   icon · TYPE · title · chevron. The body (iframe / markdown / data)
+	   and the per-artifact action buttons only appear once expanded, so
+	   the chat stream stays quiet and the full preview is one click away.
+	   Expanding removes .artifact-collapsed → the container falls back to
+	   the full bordered card. */
+	div :global(.artifact-collapsed) {
+		display: flex;
+		width: fit-content;
+		max-width: 100%;
+		border-radius: 999px;
+		background: var(--color-bg-subtle);
+	}
+	div :global(.artifact-collapsed .artifact-toolbar) {
+		border-bottom: none;
+		background: transparent;
+		border-radius: 999px;
+		min-width: 0;
+		flex: 1;
+	}
+	div :global(.artifact-collapsed:hover) {
+		border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
+	}
+	/* Hide the body + the action buttons while collapsed — only the
+	   icon/type/title/chevron make up the pill. */
+	div :global(.artifact-collapsed .artifact-frame),
+	div :global(.artifact-collapsed .artifact-md-body),
+	div :global(.artifact-collapsed .artifact-data-body) {
 		display: none;
 	}
-	div :global(.artifact-toggle-hint) {
-		font-size: 0.625rem;
-		color: var(--color-text-subtle);
-		margin-right: auto;
-		transition: opacity 0.15s;
-	}
-	div :global(.artifact-container:not(.artifact-collapsed) .artifact-toggle-hint) {
+	div :global(.artifact-collapsed .artifact-btn) {
 		display: none;
 	}
 	div :global(.artifact-close-btn) {
