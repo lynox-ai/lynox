@@ -55,14 +55,15 @@ REST/SSE endpoints exposed by this server.
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (required for the anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API endpoint (for proxies) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `vertex` \| `custom` \| `openai` |
+| `MISTRAL_API_KEY` | Mistral API key (required for the mistral provider — EU data residency) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `mistral` \| `custom` \| `openai` \| `vertex` (legacy — wired for existing config.json setups, no longer offered by the installer/wizard) |
 | `LYNOX_VAULT_KEY` | AES-256 key for the secrets vault (critical — cannot be recovered if lost) |
 | `LYNOX_DATA_DIR` | Override data directory (same as `--data-dir`) |
 | `LYNOX_HTTP_PORT` | HTTP API port (default: `3100`) |
 | `LYNOX_HTTP_SECRET` | HTTP API Bearer token (enables network binding) |
 | `LYNOX_WEBUI_URL` | Web UI URL to open (default: `http://localhost:5173`) |
-| `GCP_PROJECT_ID` | Google Cloud project (for `provider: vertex`) |
-| `CLOUD_ML_REGION` | Vertex AI region (e.g. `europe-west4`, `us-east5`) |
+| `GCP_PROJECT_ID` | Google Cloud project (for legacy `provider: vertex`) |
+| `CLOUD_ML_REGION` | Vertex AI region (e.g. `europe-west4`, `us-east5`) — legacy `provider: vertex` only |
 | `SEARXNG_URL` | SearXNG instance for web search (Docker: `http://searxng:8080`). Without it, `web_research` falls back to a best-effort DuckDuckGo HTML scrape. |
 
 ## Exit Codes

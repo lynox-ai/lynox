@@ -18,7 +18,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | | **Claude (Anthropic)** ✅ tested | **Mistral (EU)** ✅ tested | **Other OpenAI-compatible** ⚠ experimental | **Custom Anthropic-compat proxy** ⚠ experimental |
 |---|---|---|---|---|
 | **Setup** | API key | API key | API key + base URL | Proxy URL |
-| **AI quality** | Claude | Mistral Large / Ministral / Magistral | Model-dependent | Model-dependent |
+| **AI quality** | Claude | Mistral Large / Ministral | Model-dependent | Model-dependent |
 | **Recommended for** | Default choice — best agent-loop quality | EU data sovereignty | Local / hosted experiments | Multi-provider routing via LiteLLM |
 | **Tested on every release** | ✅ | ✅ | ❌ | ❌ |
 | | | | | |

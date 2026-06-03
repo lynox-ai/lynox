@@ -18,14 +18,18 @@ pnpm preview    # Preview production build
 
 ```
 docs/
-├── astro.config.mjs        # Starlight config (sidebar, branding)
+├── astro.config.mjs        # Starlight config (autogenerate sidebar, branding)
 ├── src/
 │   ├── content/
-│   │   └── docs/           # All documentation (Markdown)
-│   │       ├── index.mdx   # Landing page
-│   │       ├── getting-started.md
-│   │       ├── architecture.md
-│   │       └── ...
+│   │   └── docs/           # All documentation, organized by category
+│   │       ├── index.mdx          # Landing page
+│   │       ├── getting-started/
+│   │       ├── daily-use/
+│   │       ├── features/
+│   │       ├── setup/
+│   │       ├── developers/
+│   │       ├── integrations/
+│   │       └── archive/
 │   ├── assets/             # Logo, images
 │   └── styles/
 │       └── custom.css      # lynox brand colors
@@ -34,9 +38,9 @@ docs/
 
 ## Adding a new page
 
-1. Create a `.md` file in `src/content/docs/`
-2. Add frontmatter: `title` and `description`
-3. Add the slug to the sidebar in `astro.config.mjs`
+1. Drop a `.md` file into the right category dir under `src/content/docs/`
+2. Add frontmatter: `title`, `description`, and `sidebar.order`
+3. The sidebar is `autogenerate` — no manual `astro.config.mjs` edit needed
 
 ## Deployment
 

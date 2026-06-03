@@ -173,9 +173,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'system.save_failed':           { de: 'Speichern fehlgeschlagen.',                                                    en: 'Save failed.' },
 	'system.saving':                { de: 'Speichere …',                                                                  en: 'Saving …' },
 	'system.save_button':           { de: 'Speichern',                                                                    en: 'Save' },
-	// PRD-IA-V2 P1-PR-A1 — temporary home for HTTP rate-cap until P3-PR-B moves it to /workspace/limits.
+	// HTTP rate-cap heading — canonical home is WorkspaceLimitsView (/settings/workspace/limits).
 	'system.http_rate_heading':     { de: 'HTTP-Limit',                                                                    en: 'HTTP rate limit' },
-	'system.http_rate_temp_home':   { de: 'Hinweis: dieser Schalter zieht später nach Einstellungen → Workspace → Limits.', en: 'Note: this control moves to Settings → Workspace → Limits in a later release.' },
 	// PRD-IA-V2 P3-PR-X — `cost_limits.hard_*` and `cost_limits.hard.*`
 	// (except `managed_notice`) were CostLimits-only. They are removed; the
 	// only remaining `hard.*` key is `managed_notice` (kept above, still used

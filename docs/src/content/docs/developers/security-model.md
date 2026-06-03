@@ -93,6 +93,6 @@ Run `npx vitest run tests/security/` for the security-specific test suite. Cover
 
 ## Out of scope
 
-- Multi-tenant isolation on a shared host. lynox engine is **single-tenant by design** — one process per tenant. Tenant isolation in the managed offering comes from the container boundary (Docker), not from in-process partitioning. See `pro/CLAUDE.md` for the managed-hosting architecture.
+- Multi-tenant isolation on a shared host. lynox engine is **single-tenant by design** — one process per tenant. Tenant isolation in the managed offering comes from the container boundary (Docker), not from in-process partitioning.
 - Anti-fingerprinting / anti-tracking in the Web UI. The Web UI is meant for the operator's own browser; we don't try to defeat fingerprinting from a hostile host.
 - LLM provider exfiltration risk. Conversation content goes to the configured LLM provider (Anthropic, Mistral, BYOK). See [`/privacy`](https://lynox.ai/privacy) and the [DPA](https://lynox.ai/dpa) for the data-transfer story.

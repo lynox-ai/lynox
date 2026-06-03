@@ -305,7 +305,8 @@ POST /api/sessions/:id/changeset/review   # Accept/rollback file changes
 ### Other
 
 ```
-POST /api/transcribe              # Transcribe audio (base64)
+POST /api/transcribe              # Transcribe audio → text (STT, base64 in)
+POST /api/speak                   # Synthesize text → speech (TTS, SSE audio stream; needs MISTRAL_API_KEY)
 GET  /api/thread-insights         # Thread analytics
 GET  /api/patterns                # Detected patterns
 GET  /api/metrics                 # Metrics data
