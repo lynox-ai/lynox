@@ -1,4 +1,4 @@
-import { openSync, closeSync, fstatSync, readSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
@@ -28,6 +28,36 @@ interface ReadFileInput {
 interface WriteFileInput {
   path: string;
   content: string;
+}
+
+interface EditFileInput {
+  path: string;
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean | undefined;
+}
+
+/** Resolve + boundary-validate a writable path with the same rules as
+ *  write_file: validatePath when workspace isolation is active, else
+ *  workspace-relative + escape-symlink rejection. */
+function resolveWritablePath(rawPath: string): string {
+  if (isWorkspaceActive()) {
+    return validatePath(resolve(rawPath), 'write');
+  }
+  const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
+  const resolved = resolve(join(getLynoxDir(), 'workspace'), name);
+  if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
+    const realTarget = realpathSync(resolved);
+    const parentDir = realpathSync(dirname(resolved));
+    if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
+      throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
+    }
+  }
+  return existsSync(resolved)
+    ? realpathSync(resolved)
+    : existsSync(dirname(resolved))
+      ? join(realpathSync(dirname(resolved)), basename(resolved))
+      : resolved;
 }
 
 export const readFileTool: ToolEntry<ReadFileInput> = {
@@ -163,6 +193,62 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
     } catch (err: unknown) {
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new Error(`write_file: ${cause.message}`, { cause });
+    }
+  },
+};
+
+export const editFileTool: ToolEntry<EditFileInput> = {
+  definition: {
+    name: 'edit_file',
+    description:
+      'Make a targeted edit to an existing file by replacing an exact string — far cheaper than rewriting the whole file with write_file. ' +
+      '`old_string` must match the file exactly (including whitespace) and be unique unless `replace_all` is true. ' +
+      'Prefer this for revising artifacts (read_file the path returned by artifact_save first), long documents, configs, or code.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: { type: 'string', description: 'Absolute path to the file to edit' },
+        old_string: { type: 'string', description: 'Exact text to find. Must be unique in the file unless replace_all is set.' },
+        new_string: { type: 'string', description: 'Text to replace it with' },
+        replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default: false)' },
+      },
+      required: ['path', 'old_string', 'new_string'],
+    },
+  },
+  handler: async (input: EditFileInput, agent: IAgent): Promise<string> => {
+    try {
+      const realPath = resolveWritablePath(input.path);
+      if (!existsSync(realPath)) {
+        throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+      }
+      if (input.old_string === input.new_string) {
+        throw new Error('old_string and new_string are identical — nothing to change.');
+      }
+      const original = readFileSync(realPath, 'utf-8');
+      const segments = original.split(input.old_string);
+      const matches = segments.length - 1;
+      if (matches === 0) {
+        throw new Error('old_string not found. Read the file first and copy the exact text, including whitespace.');
+      }
+      const replaceAll = input.replace_all === true;
+      if (matches > 1 && !replaceAll) {
+        throw new Error(`old_string matches ${matches} times — add surrounding context to make it unique, or set replace_all: true.`);
+      }
+      const updated = segments.join(input.new_string);
+
+      // Charge only the net growth against the write budget (an edit usually
+      // shrinks or barely grows the file — unlike a full write_file rewrite).
+      const delta = Math.max(0, Buffer.byteLength(updated, 'utf-8') - Buffer.byteLength(original, 'utf-8'));
+      if (agent.sessionCounters.writeBytes + delta > MAX_WRITE_BYTES_PER_SESSION) {
+        throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
+      }
+      writeFileSync(realPath, updated, 'utf-8');
+      agent.sessionCounters.writeBytes += delta;
+      const n = replaceAll ? matches : 1;
+      return `Edited ${realPath} (${n} replacement${n === 1 ? '' : 's'})`;
+    } catch (err: unknown) {
+      const cause = err instanceof Error ? err : new Error(String(err));
+      throw new Error(`edit_file: ${cause.message}`, { cause });
     }
   },
 };

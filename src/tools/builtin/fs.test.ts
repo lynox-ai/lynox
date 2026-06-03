@@ -3,7 +3,7 @@ import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readFileTool, writeFileTool } from './fs.js';
+import { readFileTool, writeFileTool, editFileTool } from './fs.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 import type { SessionCounters } from '../../types/index.js';
 
@@ -275,5 +275,76 @@ describe('writeFileTool', () => {
         writeFileTool.handler({ path: join(d, 'c.txt'), content: chunk }, makeAgent()),
       ).rejects.toThrow(/Session write limit/);
     });
+  });
+});
+
+describe('editFileTool', () => {
+  it('replaces a unique occurrence and reports 1 replacement', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, '# Title\n\nPrice: CHF 99\n\nEnd.', 'utf-8');
+
+    const res = await editFileTool.handler(
+      { path: p, old_string: 'CHF 99', new_string: 'CHF 149' },
+      makeAgent(),
+    );
+    expect(res).toContain('1 replacement');
+    expect(await readFile(p, 'utf-8')).toBe('# Title\n\nPrice: CHF 149\n\nEnd.');
+  });
+
+  it('errors when old_string is not found', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'hello', 'utf-8');
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'missing', new_string: 'x' }, makeAgent()),
+    ).rejects.toThrow(/not found/);
+  });
+
+  it('errors on ambiguous match without replace_all', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'a a a', 'utf-8');
+    await expect(
+      editFileTool.handler({ path: p, old_string: 'a', new_string: 'b' }, makeAgent()),
+    ).rejects.toThrow(/matches 3 times/);
+  });
+
+  it('replace_all replaces every occurrence', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'doc.md');
+    writeFileSync(p, 'a a a', 'utf-8');
+    const res = await editFileTool.handler(
+      { path: p, old_string: 'a', new_string: 'b', replace_all: true },
+      makeAgent(),
+    );
+    expect(res).toContain('3 replacements');
+    expect(await readFile(p, 'utf-8')).toBe('b b b');
+  });
+
+  it('errors when the file does not exist', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    await expect(
+      editFileTool.handler(
+        { path: join(d, 'nope.md'), old_string: 'x', new_string: 'y' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/does not exist/);
+  });
+
+  it('rejects writes outside the workspace boundary', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    await expect(
+      editFileTool.handler(
+        { path: '/etc/hosts', old_string: 'localhost', new_string: 'evil' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/outside allowed directories|edit_file/);
   });
 });

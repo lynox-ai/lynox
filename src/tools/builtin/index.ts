@@ -1,5 +1,5 @@
 export { bashTool } from './bash.js';
-export { readFileTool, writeFileTool } from './fs.js';
+export { readFileTool, writeFileTool, editFileTool } from './fs.js';
 export { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, memoryListTool, memoryPromoteTool } from './memory.js';
 export { spawnAgentTool } from './spawn.js';
 export { askUserTool } from './ask-user.js';

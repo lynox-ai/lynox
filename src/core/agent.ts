@@ -915,7 +915,7 @@ export class Agent implements IAgent {
    * `src/tools/registry.ts`.
    */
   private static readonly INTERNAL_TOOLS = new Set([
-    'write_file', 'batch_files',
+    'write_file', 'edit_file', 'batch_files',
     'memory_store', 'memory_recall', 'memory_update', 'memory_delete', 'memory_list', 'memory_promote',
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
@@ -999,27 +999,35 @@ export class Agent implements IAgent {
       };
     }
 
-    // Changeset mode: backup before write, skip permission prompt for write_file
+    // Changeset mode: backup before write, skip permission prompt for write_file/edit_file
     // Only active when workspace is active (session.ts guards this).
-    if (tc.name === 'write_file' && this.changesetManager?.active) {
+    const mutatesFile = tc.name === 'write_file' || tc.name === 'edit_file';
+    if (mutatesFile && this.changesetManager?.active) {
       const input = tc.input as { path?: string };
       if (input.path) {
         this.changesetManager.backupBeforeWrite(resolve(input.path));
         // Skip diff preview and permission prompt — review happens post-run
       }
-    } else if (tc.name === 'write_file' && this.promptUser) {
-      // Show diff preview for write_file before permission prompt (non-changeset mode)
+    } else if (mutatesFile && this.promptUser) {
+      // Show diff preview before permission prompt (non-changeset mode)
       try {
-        const input = tc.input as { path?: string; content?: string };
-        if (input.path && typeof input.content === 'string') {
+        const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
+        if (input.path) {
           let existing = '';
           try {
             existing = readFileSync(input.path, 'utf-8');
           } catch {
             // File doesn't exist — will show NEW FILE header
           }
-          const diff = renderDiffHunks(existing, input.content);
-          process.stderr.write(`\n${diff}`);
+          let updated: string | undefined;
+          if (tc.name === 'write_file' && typeof input.content === 'string') {
+            updated = input.content;
+          } else if (tc.name === 'edit_file' && typeof input.old_string === 'string' && typeof input.new_string === 'string') {
+            updated = existing.split(input.old_string).join(input.new_string);
+          }
+          if (updated !== undefined) {
+            process.stderr.write(`\n${renderDiffHunks(existing, updated)}`);
+          }
         }
       } catch {
         // Diff preview is best-effort — never block the tool
@@ -1031,7 +1039,7 @@ export class Agent implements IAgent {
     // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
     // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
     const selfConfirming = tool?.requiresConfirmation === true;
-    const danger = (tc.name === 'write_file' && this.changesetManager?.active)
+    const danger = (mutatesFile && this.changesetManager?.active)
       ? null
       : isDangerous(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
