@@ -578,8 +578,8 @@ export async function runDockerInstaller(): Promise<void> {
 
       const modelChoice = await select([
         { label: 'mistral-large-2512', value: 'mistral-large-2512', hint: 'recommended — pinned snapshot' },
+        { label: 'ministral-14b-2512', value: 'ministral-14b-2512', hint: 'balanced cost/quality' },
         { label: 'ministral-8b-2512', value: 'ministral-8b-2512', hint: 'low-cost orchestration' },
-        { label: 'magistral-medium-2509', value: 'magistral-medium-2509', hint: 'reasoning specialist' },
         { label: 'codestral-latest', value: 'codestral-latest', hint: 'code-focused' },
       ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'mistral-large-2512';
       envVars['OPENAI_MODEL_ID'] = modelChoice;

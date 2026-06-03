@@ -1585,14 +1585,16 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET treats LYNOX_MANAGED_MODE=starter (BYOK) as non-managed for capability gating', async () => {
+    it('GET normalizes legacy LYNOX_MANAGED_MODE=starter to canonical hosted, still non-managed for capability gating', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
       try {
         const res = await jsonFetch('/api/config');
         expect(res.status).toBe(200);
         const body = await res.json() as Record<string, unknown>;
-        // managed tier surfaced for UI tier-awareness, but BYOK gets full editability
-        expect(body['managed']).toBe('starter');
+        // Legacy env value 'starter' is normalized to the canonical tier 'hosted'
+        // on output (un-re-synced pre-rename tenants carry the legacy env); BYOK
+        // still gets full editability (capability gating is unchanged).
+        expect(body['managed']).toBe('hosted');
         const caps = body['capabilities'] as Record<string, unknown>;
         expect(caps['can_set_provider']).toBe(true);
         expect(caps['can_set_limits']).toBe(true);

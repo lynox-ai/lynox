@@ -29,7 +29,7 @@ import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability, normalizeTier } from '../types/index.js';
-import { isHostedInstance, cpSuppliesLLMKey } from './billing-tier.js';
+import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 
@@ -2560,7 +2560,12 @@ export class LynoxHTTPApi {
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {
         provider,
-        managed: process.env['LYNOX_MANAGED_MODE'] ?? null,
+        // Emit the CANONICAL billing tier (hosted/managed/managed_pro). Legacy
+        // values — `starter` (→hosted) or `eu` (→managed) — still live in the
+        // LYNOX_MANAGED_MODE env on pre-rename tenants that haven't been
+        // re-synced; normalizing here means every Web UI consumer sees the
+        // canonical id regardless of provisioning vintage. null on self-host.
+        managed: normalizeBillingTier(process.env['LYNOX_MANAGED_MODE']) ?? null,
         // PRD-HN-LAUNCH-HARDENING tier-1 item 5: surface a public-demo flag so
         // the Web UI can render a "shared instance, no real data" banner on
         // engine.lynox.cloud for HackerNews launch week. Off by default — only
@@ -2748,7 +2753,11 @@ export class LynoxHTTPApi {
       const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {
-        redacted['managed'] = tier;
+        // Emit the CANONICAL tier (starter→hosted, eu→managed) so every Web UI
+        // consumer sees canonical ids regardless of provisioning vintage — a
+        // pre-rename tenant still carries LYNOX_MANAGED_MODE=starter until it's
+        // re-synced. cpSuppliesLLMKey above already normalizes internally.
+        redacted['managed'] = normalizeBillingTier(tier) ?? tier;
       }
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop

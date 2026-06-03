@@ -370,8 +370,8 @@
 									class={inputClass}
 								>
 									<option value="mistral-large-2512">mistral-large-2512 (recommended)</option>
+									<option value="ministral-14b-2512">ministral-14b-2512 (balanced cost/quality)</option>
 									<option value="ministral-8b-2512">ministral-8b-2512 (low-cost orchestration)</option>
-									<option value="magistral-medium-2509">magistral-medium-2509 (reasoning specialist)</option>
 									<option value="codestral-latest">codestral-latest (code-focused)</option>
 								</select>
 							</div>
