@@ -320,7 +320,7 @@ Minor — **Magic-Link OTP + Settings v3 inline-merge + Stripe-portal stopgap**.
 
 ### Internal
 
-- **Mailpit on staging-CP (pro #150)** — Outbound mail sink for OTP / magic-link / dunning testing on `control-staging.lynox.cloud`.
+- **Mailpit on staging-CP (pro #150)** — Outbound mail sink for OTP / magic-link / dunning testing on the staging control plane.
 - **Deps bump (#475)** — Minor-and-patch group, 12 updates.
 
 ## 1.5.2 — 2026-05-18
@@ -634,7 +634,7 @@ Major feature release: Unified Inbox (Phase 1–4) ships as the new default mail
 
 ### Security (Wave 1)
 
-This release closes 13 Critical/High findings from the codebase-wide audit run on 2026-05-13. All five Wave 1 PRs (#328, #329, #330 in core; #117, #118 in pro) ship together. See the Changed/Fixed sections above for #328/#329/#330; pro's #117 splits `MANAGED_ADMIN_TOKEN` so an admin-token leak no longer forges customer sessions or Google OAuth state, and #118 envelope-encrypts the four operator-sensitive Postgres columns (`instance_secret`, `restic_password`, `backup_repo_password`, `ssh_private_key`) with AES-256-GCM keyed off the new **required** `MANAGED_SECRETS_MASTER_KEY` env var.
+This release closes 13 Critical/High findings from the codebase-wide audit run on 2026-05-13. All five Wave 1 PRs (#328, #329, #330 in core; #117, #118 in pro) ship together. See the Changed/Fixed sections above for #328/#329/#330; pro's #117 splits the managed admin token so an admin-token leak no longer forges customer sessions or Google OAuth state, and #118 envelope-encrypts four operator-sensitive Postgres columns with AES-256-GCM keyed off the new **required** `MANAGED_SECRETS_MASTER_KEY` env var.
 
 Production deploy of the pro changes requires:
 1. Generating the prod `MANAGED_SECRETS_MASTER_KEY` (`openssl rand -hex 32`) and backing it up to the secret store BEFORE deploying — losing this key makes all tenant backups un-decryptable.
@@ -1056,12 +1056,10 @@ visibility for capability-based visibility.
 - **Mistral voice-catalog pagination**: Mistral caps `page_size`
   at 10 regardless of query param. The parser now loops pages
   1..N so the full 30-voice catalog reaches the UI.
-- **Managed-hosting compose file** bind-mounts SSH keys from
-  `/opt/lynox-managed/ssh-keys` on the host instead of a named
-  Docker volume. A named volume could come up empty after
-  `up --build`, sending the control plane into a crash loop
-  (2026-04-21 incident). Aligns with what
-  `docker-compose.staging.yml` was already doing.
+- **Managed-hosting compose file** bind-mounts SSH keys from a
+  fixed host path instead of a named Docker volume. A named volume
+  could come up empty after `up --build`, sending the control plane
+  into a crash loop (2026-04-21 incident).
 
 ### Migration notes
 
@@ -1071,7 +1069,7 @@ visibility for capability-based visibility.
   `kind=null` which aggregates as `llm`.
 - **Managed control-plane compose**: the first rebuild after
   this version bumps the SSH-keys mount to a bind-mount. Operators
-  must confirm `/opt/lynox-managed/ssh-keys/` on the host has
+  must confirm the managed host's ssh-keys directory has
   `id_ed25519` (0600, uid 1000) + `id_ed25519.pub` (0644, uid
   1000) before the first `docker compose up -d --build managed`.
   The old named volume `lynox-managed_ssh-keys` becomes orphaned

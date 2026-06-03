@@ -2,9 +2,9 @@
 	Account → Billing (Settings v3 PR 4 Item 10, originally 2026-05-19;
 	stopgap UX revision for v1.6.0, also 2026-05-19).
 
-	V1 shipped a CTA pointing at `control.lynox.cloud/checkout/account` —
+	V1 shipped a CTA pointing at `control.lynox.cloud/checkout/account` —  public-repo-guard:allow (public managed-service host, billing UX note)
 	broken in practice because the CP route is cookie-gated (`customerAuth`)
-	and tenant-subdomain browsers don't share cookies with control.lynox.cloud.
+	and tenant-subdomain browsers don't share cookies with the CP origin.
 	Customer saw raw `{"error":"Authentication required..."}` JSON instead of
 	a portal. Captured during a canary verify on a pilot instance.
 

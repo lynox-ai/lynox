@@ -14,6 +14,15 @@ pre-push:
       fail_text: "Potential secrets detected in staged files"
     security-scan:
       run: sh scripts/security-scan.sh
+    public-repo-guard:
+      # Block internal infra / control-plane / ops leaks (staging hostnames,
+      # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —
+      # the class gitleaks doesn't catch. Scans the whole tracked tree; the
+      # CI job re-runs it so `git push --no-verify` can't slip a leak past.
+      run: bash scripts/public-repo-guard.sh
+      skip:
+        - merge
+        - rebase
 
 pre-commit:
   commands:

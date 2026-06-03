@@ -1,0 +1,27 @@
+name: Public-Repo Guard
+
+# Blocks internal infrastructure / control-plane / ops leaks from landing in
+# this PUBLIC, source-available repo — the class gitleaks doesn't catch
+# (staging hostnames, CP DB schema, SSH-as-root chains, internal paths).
+#
+# This is the authoritative gate: the lefthook pre-push hook runs the same
+# scan locally for fast feedback, but `git push --no-verify` bypasses it —
+# this job cannot be bypassed. Make it a required status check on main.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  public-repo-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked tree for internal-infra leaks
+        run: bash scripts/public-repo-guard.sh

@@ -7,7 +7,7 @@
  * **Staging-only** — needs a real session cookie + the deployed
  * Settings-Refactor routes (cost-limits, /api/llm/test, etc.). Run via:
  *
- *   STAGING_URL=https://engine.lynox.cloud \
+ *   STAGING_URL=https://your-staging-engine.example.com \
  *   STAGING_COOKIE='lynox_session=...' \
  *   npx playwright test tests/smoke/settings-refactor.spec.ts --reporter=list
  *
@@ -18,7 +18,7 @@
  */
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 
-const BASE = process.env.STAGING_URL ?? 'https://engine.lynox.cloud';
+const BASE = process.env.STAGING_URL ?? 'http://localhost:3000';
 const COOKIE = process.env.STAGING_COOKIE ?? '';
 const cookieHeader = COOKIE ? { Cookie: COOKIE } : {};
 

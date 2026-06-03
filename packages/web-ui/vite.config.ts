@@ -32,7 +32,7 @@ export default defineConfig({
 	// Vite's default envPrefix is `VITE_`. SvelteKit uses `PUBLIC_*` for its
 	// own $env/static/public mechanism, but plain `import.meta.env.PUBLIC_*`
 	// would otherwise resolve to undefined and the canary flag silently
-	// degrades (caught when staging engine.lynox.cloud rendered without the
+	// degrades (caught when staging engine.lynox.cloud rendered without the  public-repo-guard:allow staging host, incident note
 	// pipeline-status-v2 bar despite the build-arg being passed). Adding
 	// PUBLIC_ here makes both the SvelteKit $env path and the plain
 	// import.meta.env path agree.

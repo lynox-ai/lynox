@@ -269,7 +269,7 @@ jobs:
   # Cross-repo dispatch to lynox-pro for production web + control plane deploy.
   # Pro listens for `engine-release-published` via:
   #   - release-web.yml           — wrangler pages deploy lynox-web --branch=main
-  #   - release-control-plane.yml — rsync + migrate + rebuild control.lynox.cloud
+  #   - release-control-plane.yml — rsync + migrate + rebuild the control plane
   # Keeps the prod admin token + control plane SSH key out of this public repo.
   #
   # Gate: the GitHub Release publication is itself the intentional gate.

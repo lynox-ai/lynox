@@ -534,7 +534,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'banner.api_key_missing': { de: 'Kein LLM-Provider konfiguriert — KI-Antworten sind deaktiviert.', en: 'No LLM provider configured — AI responses are disabled.' },
 	'banner.api_key_action': { de: 'Einrichten', en: 'Set up' },
 	'banner.dismiss': { de: 'Ausblenden', en: 'Dismiss' },
-	// Public-demo banner — shown on engine.lynox.cloud during HackerNews launch
+	// Public-demo banner — shown on engine.lynox.cloud during HackerNews launch  public-repo-guard:allow public demo host
 	// week when LYNOX_PUBLIC_DEMO=true is set on the engine container. Wording
 	// is written natively per language (not translated). Dismissible, sticky in
 	// localStorage. See PRD-HN-LAUNCH-HARDENING tier-1 item 5.

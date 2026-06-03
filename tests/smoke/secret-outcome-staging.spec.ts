@@ -1,16 +1,16 @@
 /**
- * Manual e2e for the v29 secret-outcome refactor (run against engine.lynox.cloud).
+ * Manual e2e for the v29 secret-outcome refactor (run against a staging engine).
  *
  * This is NOT wired into CI — invoke via:
  *
- *   STAGING_COOKIE=$(bash scripts/mint-staging-cookie.sh) \
- *   SMOKE_BASE_URL=https://engine.lynox.cloud \
+ *   STAGING_COOKIE=<lynox_session value> \
+ *   SMOKE_BASE_URL=https://your-staging-engine.example.com \
  *   pnpm exec playwright test tests/smoke/secret-outcome-staging.spec.ts \
  *     --project=chromium --reporter=list
  *
- * Env var names match the sibling smoke specs (phase4-visual.spec.ts) and
- * scripts/mint-staging-cookie.sh — keep aligned to avoid the third name
- * drift this comment exists to prevent.
+ * Env var names match the sibling smoke spec (phase4-visual.spec.ts) — keep
+ * aligned to avoid name drift. (lynox-internal: mint the cookie via
+ * pro/scripts/mint-staging-cookie.sh.)
  *
  * What it verifies:
  *   1. The app actually loads under cookie auth on staging.
@@ -29,7 +29,7 @@
 
 import { test, expect } from '@playwright/test';
 
-const STAGING = process.env['SMOKE_BASE_URL'] ?? 'https://engine.lynox.cloud';
+const STAGING = process.env['SMOKE_BASE_URL'] ?? 'http://localhost:3000';
 const COOKIE = process.env['STAGING_COOKIE'] ?? '';
 
 // Single skip at describe level — one clean reason in the report instead of

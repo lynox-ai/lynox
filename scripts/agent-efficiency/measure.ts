@@ -10,17 +10,17 @@
  * 2-5 call before merging.
  *
  * Usage:
- *   AE_COOKIE=$(scripts/mint-staging-cookie.sh) \
- *     npx tsx scripts/agent-efficiency/measure.ts                # n=3 vs staging
+ *   AE_COOKIE=<lynox_session value> \
+ *     npx tsx scripts/agent-efficiency/measure.ts                # n=3 vs localhost
  *   ... measure.ts --n 5                                         # 5 repeats
- *   ... measure.ts --target https://engine.lynox.cloud           # explicit target
+ *   ... measure.ts --target https://your-engine.example.com      # explicit target
  *   ... measure.ts --scenario weather-simple                     # one scenario
  *   ... measure.ts --compare baselines/baseline-<ISO>.json       # D3 gate diff
  *   ... measure.ts --list                                        # list scenarios
  *
  * Auth: the `lynox_session` cookie value via `AE_COOKIE` (preferred —
  * keeps the secret out of argv / process listings) or `--cookie <v>`.
- * Mint it with `scripts/mint-staging-cookie.sh`; NEVER commit the value.
+ * Supply a valid session cookie for your target engine; NEVER commit it.
  *
  * Cost: a full n=3 run spends a few dollars of real LLM cost on the
  * target engine. That is the explicit, authorized Phase-0 deliverable.
@@ -51,7 +51,7 @@ import type {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BASELINES_DIR = join(__dirname, 'baselines');
-const DEFAULT_TARGET = 'https://engine.lynox.cloud';
+const DEFAULT_TARGET = 'http://localhost:3000';
 
 const ZERO_USAGE: TurnUsage = {
   tokensIn: 0,
@@ -109,7 +109,7 @@ function getCookie(): string {
   if (!c || c.trim().length === 0) {
     throw new Error(
       'No session cookie. Set AE_COOKIE (preferred) or pass --cookie. ' +
-        'Mint it with: scripts/mint-staging-cookie.sh',
+        'Supply a valid lynox_session cookie for your target engine.',
     );
   }
   return c.trim();
