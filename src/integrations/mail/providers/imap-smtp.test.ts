@@ -216,6 +216,32 @@ describe('ImapSmtpProvider — list', () => {
     expect(arg.all).toBeUndefined();
   });
 
+  it('decodes the snippet from a base64-CTE part (UTF-8 umlaut) — feeds inbox cold-start body snapshot', async () => {
+    const original = 'Grüße aus München — über alle Maßen schön.';
+    const b64 = Buffer.from(original, 'utf-8').toString('base64');
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      {
+        ...makeFetchMessage({
+          uid: 1,
+          bodyStructure: {
+            type: 'multipart/mixed',
+            childNodes: [
+              { type: 'text/plain', part: '1', size: 200, encoding: 'base64', parameters: { charset: 'utf-8' } },
+            ],
+          },
+        }),
+        bodyParts: new Map([['1', Buffer.from(b64, 'ascii')]]),
+      } as FetchMessageObject,
+    ]));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const envelopes = await provider.list({ limit: 10 });
+
+    expect(envelopes[0]?.snippet).toBe(original);
+    expect(envelopes[0]?.snippet).not.toContain('Gr'.concat(b64.slice(2, 8)));
+  });
+
   it('caps the limit at the default ceiling', async () => {
     probe.search.mockResolvedValue(Array.from({ length: 100 }, (_, i) => i + 1));
     probe.fetch.mockImplementation(() => asyncIterFrom([]));

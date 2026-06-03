@@ -101,6 +101,19 @@ function findTextPart(node: MessageStructureObject | undefined, mime: 'text/plai
   return undefined;
 }
 
+/** Find a BODYSTRUCTURE node by its IMAP part id (e.g. '1', '1.2'). */
+function findPartById(node: MessageStructureObject | undefined, part: string): MessageStructureObject | undefined {
+  if (!node) return undefined;
+  if (node.part === part) return node;
+  if (node.childNodes) {
+    for (const child of node.childNodes) {
+      const found = findPartById(child, part);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Sanitize an attachment filename.
  *
@@ -745,11 +758,19 @@ export class ImapSmtpProvider implements MailProvider {
       typeof internal === 'string' ? new Date(internal) :
       new Date(0);
 
-    // Extract snippet from BODYPART '1' if requested in the fetch
+    // Extract snippet from BODYPART '1' if requested in the fetch. Decode the
+    // part's Content-Transfer-Encoding BEFORE charset — the BODYSTRUCTURE node
+    // for part '1' carries the encoding/charset. Without this the snippet (and
+    // the body snapshot persisted by inbox cold-start, which reads list()) is
+    // raw base64/quoted-printable instead of plaintext.
     let snippetText = '';
     const partBuf = msg.bodyParts?.get('1');
     if (partBuf) {
-      const decoded = decodeBuffer(partBuf, undefined);
+      // Multipart: part '1' is a child node. Single-part: the root node holds
+      // the encoding (it has no `.part`), so fall back to bodyStructure.
+      const part1 = findPartById(msg.bodyStructure, '1') ?? msg.bodyStructure;
+      const decodedBytes = decodeTransferEncoding(partBuf, part1?.encoding);
+      const decoded = decodeBuffer(decodedBytes, part1?.parameters?.['charset']);
       // If the part was actually HTML (e.g. message has only text/html as part 1),
       // strip it down before snippeting.
       const looksHtml = /<[a-z!/][\s\S]*?>/i.test(decoded.slice(0, 200));
