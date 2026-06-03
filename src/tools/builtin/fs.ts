@@ -51,9 +51,18 @@ function resolveWritablePath(rawPath: string): string {
   const artRootRaw = resolve(join(getLynoxDir(), 'artifacts'));
   const artRoot = existsSync(artRootRaw) ? realpathSync(artRootRaw) : artRootRaw;
   const absRaw = resolve(rawPath);
-  const relToArt = relative(artRoot, absRaw);
+  // Resolve symlinks on the FINAL path before the containment check so a
+  // symlink planted inside the artifacts dir (evil.html → /etc/passwd) can't
+  // redirect the write outside it. A target that escapes artRoot fails the
+  // relative()-check and falls through to the workspace-relative branch below.
+  const realAbs = existsSync(absRaw)
+    ? realpathSync(absRaw)
+    : existsSync(dirname(absRaw))
+      ? join(realpathSync(dirname(absRaw)), basename(absRaw))
+      : absRaw;
+  const relToArt = relative(artRoot, realAbs);
   if (relToArt !== '' && !relToArt.startsWith('..') && !isAbsolute(relToArt)) {
-    return absRaw;
+    return realAbs;
   }
   const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
   const resolved = resolve(join(getLynoxDir(), 'workspace'), name);

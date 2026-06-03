@@ -395,4 +395,29 @@ describe('editFileTool', () => {
       else process.env['LYNOX_DATA_DIR'] = prevDataDir;
     }
   });
+
+  it('does not follow a symlink inside artifacts that escapes the dir (CLI mode)', async () => {
+    const d = await makeTempDir();
+    const prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = d;
+    try {
+      clearTenantWorkspace();
+      mkdirSync(join(d, 'artifacts'), { recursive: true });
+      // Secret OUTSIDE the artifacts dir; a symlink inside it points there.
+      const secret = join(d, 'secret.txt');
+      writeFileSync(secret, 'SENSITIVE', 'utf-8');
+      const link = join(d, 'artifacts', 'evil.html');
+      await symlink(secret, link);
+
+      // The containment check resolves the symlink first → escapes artRoot →
+      // falls through to workspace-basename, where the file doesn't exist.
+      await expect(
+        editFileTool.handler({ path: link, old_string: 'SENSITIVE', new_string: 'PWNED' }, makeAgent()),
+      ).rejects.toThrow(/does not exist|edit_file/);
+      expect(await readFile(secret, 'utf-8')).toBe('SENSITIVE');
+    } finally {
+      if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    }
+  });
 });
