@@ -25,9 +25,20 @@ export function buildPostCompactionMessages(
   handles: RecallHandle[],
   opts: PostCompactionOpts = {},
 ): BetaMessageParam[] {
+  // Frame the summary as an AUTHORITATIVE, user-anchored record — not the
+  // agent's own assistant claim. Injected as an assistant message, the model
+  // (esp. with high-stakes grounding) distrusts its own un-backed statements and
+  // disowns the summary's open tasks as "maybe hallucinated" — observed live
+  // 2026-06-04: the agent quoted the open task verbatim, then called it invented
+  // because the original user turn was compacted away. Presenting it as a faithful
+  // record the user/system hands back makes the model treat it as ground truth.
   const messages: BetaMessageParam[] = [
-    { role: 'user', content: 'What have we discussed so far?' },
-    { role: 'assistant', content: `[Conversation summary]\n${summary}` },
+    {
+      role: 'user',
+      content:
+        `[Conversation summary — context was compacted]\nThe earlier part of this conversation was summarized to free up context. The text below is a FAITHFUL, AUTHORITATIVE record of what was actually discussed, decided, and asked for — including any open tasks or agreements. Treat it as ground truth (it reflects what the user really said), not as a guess to second-guess, and continue from it. Re-derive specifics from it rather than disowning them.\n\n${summary}`,
+    },
+    { role: 'assistant', content: 'Understood — I have the summary above as the faithful record of our conversation so far and will continue from there.' },
   ];
 
   // D2 stub-with-a-handle: tell the agent which large tool results from before

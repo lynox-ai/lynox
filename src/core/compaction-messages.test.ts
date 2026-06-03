@@ -2,13 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 
 describe('buildPostCompactionMessages', () => {
-  it('wraps the summary as a user/assistant pair', () => {
+  it('frames the summary as an authoritative user-anchored record', () => {
     const msgs = buildPostCompactionMessages('decisions: X; open task: Y', []);
     expect(msgs).toHaveLength(2);
-    expect(msgs[0]).toEqual({ role: 'user', content: 'What have we discussed so far?' });
+    // Summary lives in a USER message (faithful record) so the agent trusts it
+    // as ground truth rather than disowning it as its own un-backed claim.
+    expect(msgs[0]!.role).toBe('user');
+    expect(msgs[0]!.content).toContain('FAITHFUL, AUTHORITATIVE record');
+    expect(msgs[0]!.content).toContain('decisions: X; open task: Y');
     expect(msgs[1]!.role).toBe('assistant');
-    expect(msgs[1]!.content).toContain('[Conversation summary]');
-    expect(msgs[1]!.content).toContain('decisions: X; open task: Y');
   });
 
   it('appends a recall block (one line per handle) when blobs were evicted', () => {
@@ -42,7 +44,7 @@ describe('buildPostCompactionMessages', () => {
   it('orders summary → recall → steer', () => {
     const msgs = buildPostCompactionMessages('summary', [{ id: 'tr-1', descriptor: 'd' }], { confirmScope: true });
     const text = msgs.map(m => String(m.content)).join('\n');
-    expect(text.indexOf('[Conversation summary]')).toBeLessThan(text.indexOf('[Recallable tool results]'));
+    expect(text.indexOf('[Conversation summary')).toBeLessThan(text.indexOf('[Recallable tool results]'));
     expect(text.indexOf('[Recallable tool results]')).toBeLessThan(text.indexOf('[Post-compaction check]'));
   });
 });
