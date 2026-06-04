@@ -455,6 +455,15 @@
 	let recording = $state(false);
 	let promptAnswer = $state('');
 	let selectedOptions = $state<string[]>([]);
+	// Clear the multi-select working set whenever the ACTIVE prompt changes, so a
+	// selection from a prompt that was replaced without a click (server timeout →
+	// next ask_user, or a thread switch) can't leak pre-checked into the next
+	// multi-select prompt (pr-review #676). Keyed on promptId — toggling within
+	// the same prompt doesn't re-run this.
+	$effect(() => {
+		void pendingPermission?.promptId;
+		selectedOptions = [];
+	});
 	let answeredPrompts = $state<{ question: string; answer: string }[]>([]);
 
 	// Prompt timeout countdown
@@ -2569,8 +2578,8 @@
 							<button
 								onclick={() => toggleOption(option)}
 								aria-pressed={isSel}
-								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-all {isSel ? 'border-accent bg-accent/15 text-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-accent hover:bg-accent/10'}"
-							>{isSel ? '✓ ' : ''}{option}</button>
+								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-all {isSel ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-accent hover:bg-accent/10'}"
+							>{option}</button>
 						{/each}
 					</div>
 					<div class="flex items-center gap-2 mt-1">
