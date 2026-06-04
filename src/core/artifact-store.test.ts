@@ -129,6 +129,9 @@ describe('ArtifactStore', () => {
     expect(versions).toHaveLength(10);
     expect(versions[0]).toBe(14);  // newest prior
     expect(versions[versions.length - 1]).toBe(5); // oldest kept (14..5)
+    // The load-bearing contract: a pruned-away version is genuinely gone.
+    expect(store.restore(a.id, 4)).toBeNull(); // v4 was pruned
+    expect(store.restore(a.id, 5)?.content).toBe('gen-4'); // v5 (kept) restores its content
   });
 
   it('removes version snapshots when the artifact is deleted', () => {

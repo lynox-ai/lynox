@@ -146,6 +146,10 @@ export class ArtifactStore {
   }
 
   private listVersionNumbers(id: string): number[] {
+    // Defensive: every internal caller already holds a stored SAFE_ID, but
+    // this guards the public history() path so an unvalidated id can never be
+    // interpolated into the RegExp below. SAFE_ID's charset is regex-literal.
+    if (!SAFE_ID.test(id)) return [];
     let entries: string[];
     try { entries = readdirSync(this.versionsDir()); } catch { return []; }
     const re = new RegExp(`^${id}\\.v(\\d+)\\.html$`);
