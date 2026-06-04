@@ -2042,7 +2042,14 @@ describe('LynoxHTTPApi', () => {
     it('GET /api/history/cost/daily returns cost data', async () => {
       const res = await jsonFetch('/api/history/cost/daily?days=7');
       expect(res.status).toBe(200);
-      expect(mockHistoryGetCostByDay).toHaveBeenCalledWith(7);
+      // tzOffsetMin defaults to 0 (UTC) when the client omits it.
+      expect(mockHistoryGetCostByDay).toHaveBeenCalledWith(7, { tzOffsetMin: 0 });
+    });
+
+    it('GET /api/history/cost/daily threads the client tz offset through', async () => {
+      const res = await jsonFetch('/api/history/cost/daily?days=7&tzOffsetMin=-120');
+      expect(res.status).toBe(200);
+      expect(mockHistoryGetCostByDay).toHaveBeenCalledWith(7, { tzOffsetMin: -120 });
     });
   });
 
