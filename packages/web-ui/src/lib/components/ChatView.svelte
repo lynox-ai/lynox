@@ -455,6 +455,15 @@
 	let recording = $state(false);
 	let promptAnswer = $state('');
 	let selectedOptions = $state<string[]>([]);
+	// Clear the multi-select working set whenever the ACTIVE prompt changes, so a
+	// selection from a prompt that was replaced without a click (server timeout →
+	// next ask_user, or a thread switch) can't leak pre-checked into the next
+	// multi-select prompt (pr-review #676). Keyed on promptId — toggling within
+	// the same prompt doesn't re-run this.
+	$effect(() => {
+		void pendingPermission?.promptId;
+		selectedOptions = [];
+	});
 	let answeredPrompts = $state<{ question: string; answer: string }[]>([]);
 
 	// Prompt timeout countdown
@@ -975,7 +984,7 @@
 		setupSaving = false;
 	}
 
-	function answerPrompt(answer: string) {
+	function answerPrompt(answer: string, display?: string) {
 		// Batch mode handles both v1 (sequential) and v2 (tabs). The v2 path
 		// has no pendingPermission — it has pendingTabsPrompt instead — so we
 		// must NOT early-return on !pendingPermission in batch mode.
@@ -1012,7 +1021,7 @@
 		// were stacking the entire decision history above the active prompt
 		// and pushing the chat off-screen. Users only need the last answer
 		// to reconsider via the "edit" button below.
-		answeredPrompts = [{ question: pendingPermission.question, answer }];
+		answeredPrompts = [{ question: pendingPermission.question, answer: display ?? answer }];
 		// Permission-guard answers ('y'/'n') hand off to a tool that takes
 		// seconds to run. The store clears `pendingPermission` synchronously
 		// inside replyPermission(), so without this we'd swap straight from
@@ -1027,6 +1036,20 @@
 		selectedOptions = [];
 		promptAnswer = '';
 		replyPermission(answer);
+	}
+
+	/** Toggle an option in/out of the multi-select working set. */
+	function toggleOption(option: string) {
+		selectedOptions = selectedOptions.includes(option)
+			? selectedOptions.filter(o => o !== option)
+			: [...selectedOptions, option];
+	}
+
+	/** Submit a multi-select answer: the wire payload is a JSON array (robust —
+	 *  labels with commas survive); the answered-chip shows a readable join. */
+	function submitMultiSelect() {
+		if (selectedOptions.length === 0) return;
+		answerPrompt(JSON.stringify(selectedOptions), selectedOptions.join(', '));
 	}
 
 	async function submitBatch() {
@@ -2564,6 +2587,26 @@
 					<div class="flex flex-wrap gap-2">
 						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
 						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
+					</div>
+				{:else if pendingPermission.multiSelect && visibleOptions.length > 0}
+					<!-- Multi-select: toggle several, then Send. -->
+					<div class="flex flex-wrap gap-2">
+						{#each visibleOptions as option}
+							{@const isSel = selectedOptions.includes(option)}
+							<button
+								onclick={() => toggleOption(option)}
+								aria-pressed={isSel}
+								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-all {isSel ? 'border-accent bg-accent/15 text-accent-text' : 'border-border bg-bg text-text-muted hover:text-text hover:border-accent hover:bg-accent/10'}"
+							>{option}</button>
+						{/each}
+					</div>
+					<div class="flex items-center gap-2 mt-1">
+						<button
+							onclick={submitMultiSelect}
+							disabled={selectedOptions.length === 0}
+							class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent hover:bg-accent/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+						>{t('chat.send')}{selectedOptions.length > 0 ? ` (${selectedOptions.length})` : ''}</button>
+						<button onclick={() => answerPrompt('__dismissed__')} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.skip')}</button>
 					</div>
 				{:else if visibleOptions.length > 0}
 					<div class="flex flex-wrap gap-2">

@@ -22,6 +22,10 @@ export interface TabQuestion {
 export interface PromptMeta {
   stepId?: string | undefined;
   stepTask?: string | undefined;
+  /** Render the option pills as MULTI-select (toggle several, then an explicit
+   *  Send) instead of single-select auto-send. The answer comes back as a
+   *  JSON-encoded string[] of the chosen labels. Default false. */
+  multiSelect?: boolean | undefined;
 }
 
 export type PromptUserFn = (question: string, options?: string[], meta?: PromptMeta) => Promise<string>;

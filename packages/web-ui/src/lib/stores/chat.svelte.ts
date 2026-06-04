@@ -174,6 +174,9 @@ export interface PermissionPrompt {
 	receivedAt?: number;
 	/** Persistent prompt ID (for resumable prompts) */
 	promptId?: string;
+	/** When true, render the options as multi-select (toggle several + Send)
+	 *  instead of single-click auto-send. */
+	multiSelect?: boolean;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -1213,6 +1216,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
 				promptId: data['promptId'] as string | undefined,
+				multiSelect: data['multi_select'] === true,
 			};
 			break;
 		case 'prompt_tabs': {

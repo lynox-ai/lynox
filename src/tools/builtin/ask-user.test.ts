@@ -49,6 +49,53 @@ describe('askUserTool', () => {
     expect(promptUser).toHaveBeenCalledWith('What color?', undefined);
   });
 
+  describe('multiSelect', () => {
+    it('passes the multiSelect meta and joins a JSON-array answer for the model', async () => {
+      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['red', 'blue']));
+      const agent = makeAgent({ promptUser });
+      const result = await askUserTool.handler(
+        { question: 'Which apply?', options: ['red', 'blue', 'green'], multiSelect: true },
+        agent,
+      );
+      expect(result).toBe('red, blue');
+      // meta arg carries multiSelect; single-select calls would omit it.
+      expect(promptUser).toHaveBeenCalledWith('Which apply?', ['red', 'blue', 'green', '\x00'], { multiSelect: true });
+    });
+
+    it('applies a step hint only when exactly one option was selected', async () => {
+      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['deep']));
+      const agent = makeAgent({ promptUser });
+      await askUserTool.handler(
+        { question: 'Tier?', options: [{ label: 'deep', hint: { model: 'deep' } }], multiSelect: true },
+        agent,
+      );
+      expect(agent.toolContext.pendingStepHint).toEqual({ model: 'deep' });
+    });
+
+    it('does NOT apply a hint when multiple are selected', async () => {
+      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['deep', 'fast']));
+      const agent = makeAgent({ promptUser });
+      await askUserTool.handler(
+        { question: 'Tiers?', options: [{ label: 'deep', hint: { model: 'deep' } }, 'fast'], multiSelect: true },
+        agent,
+      );
+      expect(agent.toolContext.pendingStepHint).toBeNull();
+    });
+
+    it('passes through __dismissed__ and an empty selection as dismissed', async () => {
+      const dismissed = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, dismissed)).toBe('__dismissed__');
+      const empty = makeAgent({ promptUser: vi.fn().mockResolvedValue(JSON.stringify([])) });
+      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, empty)).toBe('__dismissed__');
+    });
+
+    it('falls back to the raw answer when a legacy client returns a non-JSON string', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('red') });
+      const result = await askUserTool.handler({ question: 'q', options: ['red'], multiSelect: true }, agent);
+      expect(result).toBe('red');
+    });
+  });
+
   it('passes string options to promptUser', async () => {
     const promptUser = vi.fn().mockResolvedValue('blue');
     const agent = makeAgent({ promptUser });
