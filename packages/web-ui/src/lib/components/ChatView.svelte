@@ -1500,6 +1500,13 @@
 		inputText = '';
 		pendingFiles = [];
 		if (textareaEl) textareaEl.style.height = 'auto';
+		// Re-arm + pin to bottom for the user's own dispatch BEFORE sending, so
+		// the new bubble (whether it runs now or queues behind an active stream)
+		// reliably pulls the view down — even if the user had scrolled up while
+		// the assistant was streaming. The window outlives the async bubble +
+		// stream growth; sendMessage awaits the full run, so pinning here (not
+		// after) is what makes it robust.
+		pinToBottomFor(1500);
 		await sendMessage(task || t('chat.analyze_files'), files);
 	}
 
@@ -1592,15 +1599,26 @@
 		pinFrame = requestAnimationFrame(pinToBottomStep);
 	}
 
+	// Re-arm autoscroll and keep the view pinned to the bottom for a short
+	// window — long enough for async-growing content (a new bubble, markdown,
+	// artifacts) to settle. Used on thread-open AND on the user's own send/
+	// queue: a turn the user just dispatched should always pull the view down,
+	// even if they had scrolled up mid-stream (the queued-message edge case
+	// where the stick-to-bottom used to break — rafael 2026-06-04).
+	function pinToBottomFor(ms: number): void {
+		autoScroll = true;
+		userScrollLock = false;
+		pinUntil = performance.now() + ms;
+		if (pinFrame === null) pinFrame = requestAnimationFrame(pinToBottomStep);
+	}
+
 	$effect(() => {
 		const tid = currentSessionId;
 		if (!tid || tid === lastOpenedThread) return;
 		lastOpenedThread = tid;
 		// A freshly opened thread re-engages auto-scroll even if the user had
 		// scrolled up in the previously viewed thread.
-		autoScroll = true;
-		pinUntil = performance.now() + 1200;
-		if (pinFrame === null) pinFrame = requestAnimationFrame(pinToBottomStep);
+		pinToBottomFor(1200);
 		// Cancel the pin loop when the component unmounts or another thread is
 		// opened mid-pin, so a stale loop can't touch a torn-down node or
 		// extend the pin window onto the next thread.

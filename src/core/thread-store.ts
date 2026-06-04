@@ -233,6 +233,18 @@ export class ThreadStore {
     return row?.cnt ?? 0;
   }
 
+  /** Next seq to assign when appending — `MAX(seq)+1`, NOT `COUNT(*)`.
+   *  Count-based seq reuses values after any row deletion (seq collision +
+   *  silent reorder on the `ORDER BY seq` load). MAX+1 stays strictly
+   *  monotonic and crash-safe regardless of deletions. Equals getMessageCount()
+   *  on an append-only thread; diverges (safely) once a row is ever removed. */
+  getNextSeq(threadId: string): number {
+    const row = this.db.prepare(
+      'SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM thread_messages WHERE thread_id = ?',
+    ).get(threadId) as { next: number } | undefined;
+    return row?.next ?? 0;
+  }
+
   /**
    * Attach a JSON token/cost rollup to a thread's most recent assistant
    * message. Called once per run at run-end so the per-message usage footer

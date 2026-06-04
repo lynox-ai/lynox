@@ -228,6 +228,12 @@ function newQueueId(): string {
 interface PersistedChat {
 	sessionId: string | null;
 	threads: Record<string, ChatMessage[]>;
+	/** Per-thread pending send-queue (messages typed while a run streamed).
+	 *  Persisted WITHOUT file payloads — file-bearing queued messages stay
+	 *  in-memory only (base64 would blow the localStorage quota and take the
+	 *  whole snapshot down with it); on reload their bubble is reconciled to
+	 *  `failed` so the user re-sends rather than seeing a silently-stuck pill. */
+	queues?: Record<string, { id: string; task: string }[]>;
 }
 
 function readPersistedRoot(): PersistedChat {
@@ -248,9 +254,15 @@ function readPersistedRoot(): PersistedChat {
 		return {
 			sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
 			threads: raw.threads ?? {},
+			...(raw.queues ? { queues: raw.queues } : {}),
 		};
 	} catch { /* corrupt data */ }
 	return { sessionId: null, threads: {} };
+}
+
+/** Restore a thread's pending send-queue (text-only entries — see PersistedChat.queues). */
+function loadPersistedQueue(threadId: string): QueuedMessage[] {
+	return (readPersistedRoot().queues?.[threadId] ?? []).map((q) => ({ id: q.id, task: q.task }));
 }
 
 function writePersistedRoot(root: PersistedChat): void {
@@ -288,8 +300,9 @@ function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
  */
 export function dropPersistedThread(threadId: string): void {
 	const root = readPersistedRoot();
-	if (threadId in root.threads) {
+	if (threadId in root.threads || root.queues?.[threadId]) {
 		delete root.threads[threadId];
+		if (root.queues) delete root.queues[threadId];
 		if (root.sessionId === threadId) root.sessionId = null;
 		writePersistedRoot(root);
 	}
@@ -318,6 +331,15 @@ function persistChatNow(): void {
 	root.sessionId = sessionId;
 	if (sessionId) {
 		root.threads[sessionId] = messages;
+		// Persist the pending send-queue alongside the messages so a reload
+		// mid-stream doesn't strand a queued turn (rafael 2026-06-04). File-
+		// bearing entries are dropped here — see PersistedChat.queues.
+		const fileless = messageQueue
+			.filter((q) => !q.files || q.files.length === 0)
+			.map((q) => ({ id: q.id, task: q.task }));
+		root.queues = root.queues ?? {};
+		if (fileless.length > 0) root.queues[sessionId] = fileless;
+		else if (root.queues[sessionId]) delete root.queues[sessionId];
 	}
 	writePersistedRoot(root);
 }
@@ -565,6 +587,9 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const id = newQueueId();
 		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id });
 		messageQueue.push({ id, task, files });
+		// Flush immediately so a reload before the next persist tick (or before
+		// the run ends) can recover the queued turn instead of losing it.
+		persistChatNow();
 		return;
 	}
 
@@ -941,6 +966,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// Process queue: send next queued message
 	if (messageQueue.length > 0) {
 		const next = messageQueue.shift()!;
+		persistChatNow(); // queue shrank — keep the durable copy in sync
 		// Small delay so the UI updates before next run starts
 		setTimeout(() => { void _executeRun(next.task, next.files, undefined, undefined, next.id); }, 100);
 	}
@@ -2031,7 +2057,21 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;
-	messageQueue = [];
+	// Restore any pending send-queue for this thread (durable across reload).
+	messageQueue = loadPersistedQueue(threadId);
+	// Reconcile restored bubbles: a `queued` bubble with no matching live queue
+	// entry (file-bearing — not persisted — or lost before the flush) is marked
+	// `failed` so the user can re-send instead of staring at a pill that will
+	// never go through.
+	{
+		const liveIds = new Set(messageQueue.map((q) => q.id));
+		for (const m of messages) {
+			if (m.queued && (m.queueId === undefined || !liveIds.has(m.queueId))) {
+				m.queued = false;
+				m.failed = true;
+			}
+		}
+	}
 	contextBudget = null;
 	runStartedAt = null;
 	runPromptCount = 0;
@@ -2133,6 +2173,15 @@ export async function resumeThread(threadId: string): Promise<void> {
 		// Check for a pending prompt that survived a disconnect/refresh
 		if (gen === _resumeGeneration) {
 			await checkPendingPrompt();
+		}
+
+		// Drain a restored send-queue: a turn typed while the previous session
+		// streamed, then carried across a reload. Only when this resume is still
+		// current, the thread is idle, and there's no pending prompt blocking.
+		if (gen === _resumeGeneration && !isStreaming && !pendingChangeset && messageQueue.length > 0) {
+			const next = messageQueue.shift()!;
+			persistChatNow();
+			setTimeout(() => { void _executeRun(next.task, next.files, undefined, undefined, next.id); }, 100);
 		}
 	} catch (err: unknown) {
 		// Silently ignore abort errors from superseded requests

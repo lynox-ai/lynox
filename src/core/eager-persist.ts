@@ -44,6 +44,7 @@ export function persistAgentMessages(input: EagerPersistInput): EagerPersistOutc
     // identical until a failed turn has persisted its first note.
     const apiCount = threadStore.getApiMessageCount(sessionId);
     const totalCount = threadStore.getMessageCount(sessionId);
+    const seqFloor = threadStore.getNextSeq(sessionId);
 
     // In-memory buffer below SQLite floor means `_truncateHistory` ran and
     // dropped earlier messages from the agent's view. SQLite still owns the
@@ -62,9 +63,10 @@ export function persistAgentMessages(input: EagerPersistInput): EagerPersistOutc
 
     const delta = allMessages.slice(apiCount);
     // Combined append + message_count rollup in one transaction — one fsync
-    // under WAL per checkpoint instead of two. message_count tracks all rows
-    // (API + display) so the thread list / "N messages" count stays accurate.
-    threadStore.appendMessages(sessionId, delta, totalCount, {
+    // under WAL per checkpoint instead of two. Seqs start at MAX(seq)+1 (crash-
+    // safe, deletion-safe); message_count tracks all rows (API + display) so the
+    // thread list / "N messages" count stays accurate.
+    threadStore.appendMessages(sessionId, delta, seqFloor, {
       message_count: totalCount + delta.length,
     });
     return { kind: 'appended', deltaLength: delta.length, newTotal: totalCount + delta.length };
@@ -112,7 +114,7 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
       content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error))),
     });
     const totalCount = threadStore.getMessageCount(sessionId);
-    threadStore.appendDisplayNotes(sessionId, notes, totalCount);
+    threadStore.appendDisplayNotes(sessionId, notes, threadStore.getNextSeq(sessionId));
     threadStore.updateThread(sessionId, { message_count: totalCount + notes.length });
     return { kind: 'persisted', appended: notes.length, flipped: footprint.marked };
   } catch (err) {
@@ -138,7 +140,7 @@ export function persistCompactionMarker(
     threadStore.appendDisplayNotes(
       sessionId,
       [{ role: 'assistant', content: buildDisplayNoteContent('context_compacted') }],
-      totalCount,
+      threadStore.getNextSeq(sessionId),
     );
     threadStore.updateThread(sessionId, { message_count: totalCount + 1 });
     return true;

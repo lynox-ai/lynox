@@ -64,6 +64,37 @@ describe('ArtifactStore', () => {
     expect(store.get(orphanId)?.content).toBe('<p>dropped in</p>');
   });
 
+  it('backs up the previous content and reports overwrite info on update', () => {
+    const a = store.save({ title: 'Deck', content: 'A'.repeat(1000) });
+    expect(a.overwrite).toBeUndefined(); // create → no overwrite
+
+    const b = store.save({ id: a.id, title: 'Deck', content: 'B'.repeat(1200) });
+    expect(b.overwrite).toBeDefined();
+    expect(b.overwrite?.previousVersion).toBe(1);
+    expect(b.overwrite?.previousBytes).toBe(1000);
+    expect(b.overwrite?.newBytes).toBe(1200);
+    expect(b.overwrite?.significant).toBe(false); // grew, not a destructive shrink
+    // Prior content recoverable from the backup.
+    expect(readFileSync(b.overwrite!.backupPath, 'utf-8')).toBe('A'.repeat(1000));
+    expect(b.overwrite?.backupPath).toBe(store.backupPathFor(a.id));
+  });
+
+  it('flags a destructive shrink (content <50% of prior) as significant', () => {
+    const a = store.save({ title: 'Deck', content: 'X'.repeat(2000) });
+    const b = store.save({ id: a.id, title: 'Deck', content: 'tiny' });
+    expect(b.overwrite?.significant).toBe(true);
+    // The good prior version is still recoverable.
+    expect(readFileSync(b.overwrite!.backupPath, 'utf-8')).toBe('X'.repeat(2000));
+  });
+
+  it('does not adopt the .bak backup as a phantom artifact', () => {
+    const a = store.save({ title: 'Doc', content: 'one' });
+    store.save({ id: a.id, title: 'Doc', content: 'two' });
+    // Only the real artifact is listed — the <id>.bak file is ignored.
+    expect(store.list().filter(m => m.id === a.id)).toHaveLength(1);
+    expect(store.list()).toHaveLength(1);
+  });
+
   it('normalizes legacy index entries without a version field to 1', () => {
     const a = store.save({ title: 'Doc', content: 'x' });
     // Rewrite index.json stripping the version field (legacy shape).
