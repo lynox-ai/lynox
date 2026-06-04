@@ -1870,11 +1870,26 @@ export class LynoxHTTPApi {
 
       let aborted = false;
 
-      // Wire streaming
+      // ── Per-run identity + resumable event buffer ──
+      // `runId` identifies this run to the client-queryable registry
+      // (GET /api/runs/active) and the resumable stream endpoint
+      // (GET /api/runs/:runId/stream). The buffer is engine-owned (outlives
+      // this request), so a headless run keeps filling it after the SSE closes
+      // and a reconnecting client can replay-then-tail (Tier 2).
+      const runId = randomUUID();
+      const runBuffer = this.engine?.getRunBufferManager()?.create(runId) ?? null;
+
+      // Wire streaming. Every rendered event is appended to the buffer (which
+      // assigns a monotonic seq) and emitted with an `id:` line so a client can
+      // resume from `?since=<lastSeq>`. The buffer append happens even while
+      // `aborted` (the SSE is dead but the headless run keeps producing events
+      // for a reconnecting subscriber).
       session.onStream = async (event: StreamEvent) => {
+        const seq = runBuffer?.append(event);
         if (aborted) return;
         const data = JSON.stringify(event);
-        res.write(`event: ${event.type}\ndata: ${data}\n\n`);
+        const idLine = seq != null ? `id: ${seq}\n` : '';
+        res.write(`${idLine}event: ${event.type}\ndata: ${data}\n\n`);
       };
 
       // Sync streamHandler to toolContext so workflow progress events reach the SSE stream
@@ -1897,12 +1912,10 @@ export class LynoxHTTPApi {
       }
 
       // ── Run registry wiring (SQLite-backed, survives SSE disconnects) ──
-      // A per-run id distinct from session.currentRunId: it identifies this run
-      // to the client-queryable registry (GET /api/runs/active) and, in Tier 2,
-      // the resumable stream endpoint. Tier 1 keeps execution in this handler;
-      // the registry is an additive status mirror alongside runningSessions.
+      // The registry is an additive status mirror alongside runningSessions;
+      // execution still lives in this handler (Tier 1) while the buffer above
+      // enables resumable re-attach (Tier 2). `runId` is created above.
       const runRegistry = this.engine?.getRunRegistry();
-      const runId = randomUUID();
 
       // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
       const promptStore = this.engine?.getPromptStore();
@@ -2158,6 +2171,10 @@ export class LynoxHTTPApi {
         // from the registry. The transcript persists in thread_messages. A
         // process crash never reaches here, leaving the row for the boot-sweep.
         runRegistry?.remove(runId);
+        // End + drop the resumable buffer: notifies any live `/stream`
+        // subscribers to close, then frees the ring (the durable transcript
+        // persists regardless).
+        this.engine?.getRunBufferManager()?.remove(runId);
       }
     }));
 
@@ -2184,6 +2201,66 @@ export class LynoxHTTPApi {
         };
       });
       jsonResponse(res, 200, { runs });
+    }));
+
+    // GET /runs/:runId/stream?since=<seq> — resumable SSE re-attach (Tier 2).
+    // Replays buffered events newer than `since`, then live-tails new appends,
+    // emitting `id:` lines so the client can resume again from the last seq.
+    // Ownership (S3, D-S3): an unknown / not-live runId returns 404 — never 403
+    // (no existence oracle). The buffer is the liveness source of truth: it
+    // exists only while the run is live, so a completed/never-existed run 404s.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/:runId/stream', async (req, res, params) => {
+      const runId = params['runId'] ?? '';
+      const buffer = this.engine?.getRunBufferManager()?.get(runId);
+      if (!buffer) { jsonResponse(res, 404, { error: 'run not found' }); return; }
+
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const sinceRaw = parseInt(url.searchParams.get('since') ?? '0', 10);
+      const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'X-lynox-AI-Generated': 'true',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      const write = (seq: number, event: StreamEvent): void => {
+        if (res.writableEnded) return;
+        res.write(`id: ${seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+
+      // Heartbeat keeps proxies from idling the connection closed (mirrors /run).
+      const keepalive = setInterval(() => {
+        if (!res.writableEnded) res.write(`event: heartbeat\ndata: ${JSON.stringify({ sentAt: Date.now() })}\n\n`);
+      }, 10_000);
+
+      // 1) Replay everything newer than `since` (catch up to the live tail).
+      //    No `await` between replay and subscribe → atomic w.r.t. the event
+      //    loop, so no appended event can slip through the gap.
+      for (const e of buffer.replaySince(since)) write(e.seq, e.event);
+
+      // 2) Subscribe for the live tail. onEnd fires when the run completes →
+      //    emit a terminal `done` (the full result lives in the persisted
+      //    transcript; the re-subscribed client only needs the completion
+      //    signal) and close.
+      let ended = false;
+      const finish = (): void => {
+        if (ended) return;
+        ended = true;
+        clearInterval(keepalive);
+        if (!res.writableEnded) {
+          res.write(`event: done\ndata: ${JSON.stringify({ resumed: true })}\n\n`);
+          res.end();
+        }
+      };
+      const unsub = buffer.subscribe((e) => write(e.seq, e.event), finish);
+
+      req.on('close', () => {
+        clearInterval(keepalive);
+        unsub();
+      });
     }));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect

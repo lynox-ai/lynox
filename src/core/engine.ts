@@ -238,6 +238,7 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
+  private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
@@ -767,6 +768,17 @@ export class Engine {
         process.stderr.write(`[lynox] RunRegistry init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._runRegistry = null;
       }
+    }
+
+    // Initialize the resumable run-event buffer manager (pure in-memory, no DB).
+    // Bridges the live gap between eager-persist checkpoints and "now" so a
+    // reconnecting client can replay-then-tail in-flight activity (Tier 2).
+    try {
+      const { RunBufferManager } = await import('./run-buffer.js');
+      this._runBufferManager = new RunBufferManager();
+    } catch (err) {
+      process.stderr.write(`[lynox] RunBufferManager init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      this._runBufferManager = null;
     }
 
     // Initialize security audit trail (subscribes to guard/security channels)
@@ -1475,6 +1487,7 @@ export class Engine {
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
   getPromptStore(): import('./prompt-store.js').PromptStore | null { return this._promptStore; }
   getRunRegistry(): import('./run-registry.js').RunRegistry | null { return this._runRegistry; }
+  getRunBufferManager(): import('./run-buffer.js').RunBufferManager | null { return this._runBufferManager; }
   getSecurityAudit(): import('./security-audit.js').SecurityAudit | null { return this.securityAudit; }
 
   /** Returns true if CRM tables (contacts/deals) contain actual records. */

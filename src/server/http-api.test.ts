@@ -124,6 +124,7 @@ vi.mock('../core/engine.js', () => ({
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getPromptStore = vi.fn().mockReturnValue(null);
     this.getRunRegistry = vi.fn().mockReturnValue(null);
+    this.getRunBufferManager = vi.fn().mockReturnValue(null);
     this.getArtifactStore = vi.fn().mockReturnValue({
       save: vi.fn((opts: { title: string; content: string; type?: string }) => ({
         id: 'a1b2c3d4', title: opts.title, content: opts.content,
@@ -1148,6 +1149,60 @@ describe('LynoxHTTPApi', () => {
         await new Promise<void>((r) => setTimeout(r, 10));
       }
       expect(runningSessions.has('disc-noprompt')).toBe(false);
+    });
+  });
+
+  // Tier 2 PR-D: resumable run-event stream. The buffer is engine-owned, so the
+  // endpoint replays buffered events since `?since=` then live-tails, and an
+  // unknown/not-live runId 404s (no existence oracle, D-S3).
+  describe('GET /api/runs/:runId/stream', () => {
+    it('404s for an unknown / not-live runId (no buffer)', async () => {
+      const res = await jsonFetch('/api/runs/no-such-run/stream');
+      expect(res.status).toBe(404);
+    });
+
+    it('replays events since `since`, live-tails new appends, and ends on completion', async () => {
+      const { RunBufferManager } = await import('../core/run-buffer.js');
+      const mgr = new RunBufferManager();
+      const engineRef = (api as unknown as { engine: { getRunBufferManager: () => unknown } }).engine;
+      const orig = engineRef.getRunBufferManager;
+      engineRef.getRunBufferManager = (): unknown => mgr;
+
+      const buf = mgr.create('stream-run');
+      buf.append({ type: 'text', text: 'hello', agent: 'main' });            // seq 1
+      buf.append({ type: 'tool_call', name: 'x', input: {}, agent: 'main' }); // seq 2
+
+      try {
+        const res = await fetch(`${baseUrl}/api/runs/stream-run/stream?since=1`, { headers: authHeaders() });
+        expect(res.status).toBe(200);
+        const reader = res.body!.getReader();
+        const dec = new TextDecoder();
+
+        // Schedule a live append, then run completion, WHILE we read
+        // continuously — avoids a read() that blocks past a fixed time budget.
+        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 3
+        setTimeout(() => mgr.remove('stream-run'), 400); // ends buffer → terminal done
+
+        let sse = '';
+        const t0 = Date.now();
+        while (Date.now() - t0 < 5000) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          sse += dec.decode(value, { stream: true });
+          if (sse.includes('event: done')) break;
+        }
+        await reader.cancel();
+
+        // since=1 → replay seq 2 only (NOT seq 1); live seq 3 tails; done on completion.
+        expect(sse).toContain('id: 2');
+        expect(sse).toContain('tool_call');
+        expect(sse).not.toContain('id: 1');
+        expect(sse).toContain('id: 3');
+        expect(sse).toContain('event: done');
+      } finally {
+        engineRef.getRunBufferManager = orig;
+        mgr.remove('stream-run');
+      }
     });
   });
 

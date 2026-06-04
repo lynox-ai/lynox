@@ -384,6 +384,10 @@ let currentToolStartedAt = $state<number | null>(null);
 // server during an active run. Drives the "Verbindung scheint langsam"
 // hint when the gap grows beyond the server heartbeat interval.
 let lastEventAt = $state<number | null>(null);
+// Highest run-event `seq` (from SSE `id:` lines) applied to the current stream.
+// PR-D captures it; PR-E uses it as `?since=` to resume `GET /api/runs/:runId/stream`
+// after a disconnect — replay-then-tail, never re-run the task. Reset per run.
+let lastAppliedSeq = 0;
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
@@ -862,6 +866,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
+	lastAppliedSeq = 0; // fresh run → reset the resume checkpoint
 
 	try {
 		while (true) {
@@ -873,15 +878,23 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			buffer = lines.pop() ?? '';
 
 			let eventType = '';
+			let eventSeq = 0;
 			for (const line of lines) {
-				if (line.startsWith('event: ')) {
+				if (line.startsWith('id: ')) {
+					// PR-D: resumable-stream seq. Captured here so a future
+					// re-subscribe (PR-E) can resume with `?since=lastAppliedSeq`.
+					const s = parseInt(line.slice(4), 10);
+					if (Number.isFinite(s)) eventSeq = s;
+				} else if (line.startsWith('event: ')) {
 					eventType = line.slice(7);
 				} else if (line.startsWith('data: ') && eventType) {
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
 						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx);
+						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed SSE events */ }
 					eventType = '';
+					eventSeq = 0;
 				}
 			}
 		}
@@ -1866,6 +1879,11 @@ export function getCurrentToolStartedAt(): number | null {
  *  Used to detect "connection seems slow" without a hard disconnect. */
 export function getLastEventAt(): number | null {
 	return lastEventAt;
+}
+/** Highest run-event seq applied to the current stream — the `?since=` value a
+ * resumable re-subscribe uses to replay-then-tail after a disconnect (PR-E). */
+export function getLastAppliedSeq(): number {
+	return lastAppliedSeq;
 }
 export function getQueueLength() {
 	return messageQueue.length;
