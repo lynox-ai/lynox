@@ -123,6 +123,7 @@ vi.mock('../core/engine.js', () => ({
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getPromptStore = vi.fn().mockReturnValue(null);
+    this.getRunRegistry = vi.fn().mockReturnValue(null);
     this.getArtifactStore = vi.fn().mockReturnValue({
       save: vi.fn((opts: { title: string; content: string; type?: string }) => ({
         id: 'a1b2c3d4', title: opts.title, content: opts.content,

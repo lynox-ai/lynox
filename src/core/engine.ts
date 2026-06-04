@@ -237,6 +237,7 @@ export class Engine {
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
@@ -749,6 +750,22 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] PromptStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._promptStore = null;
+      }
+    }
+
+    // Initialize run registry (shares DB connection with RunHistory). On a clean
+    // boot, any run still marked live in a previous process was killed by the
+    // restart — sweep it to 'interrupted' so the client shows a banner + Retry
+    // instead of going blind (no cross-restart resume).
+    if (this.runHistory) {
+      try {
+        const { RunRegistry } = await import('./run-registry.js');
+        this._runRegistry = new RunRegistry(this.runHistory.getDb());
+        const swept = this._runRegistry.sweepInterrupted();
+        if (swept > 0) process.stderr.write(`[lynox] run-registry: swept ${swept} interrupted run(s) from a previous process\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] RunRegistry init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        this._runRegistry = null;
       }
     }
 
@@ -1457,6 +1474,7 @@ export class Engine {
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
   getPromptStore(): import('./prompt-store.js').PromptStore | null { return this._promptStore; }
+  getRunRegistry(): import('./run-registry.js').RunRegistry | null { return this._runRegistry; }
   getSecurityAudit(): import('./security-audit.js').SecurityAudit | null { return this.securityAudit; }
 
   /** Returns true if CRM tables (contacts/deals) contain actual records. */

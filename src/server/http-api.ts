@@ -1896,6 +1896,14 @@ export class LynoxHTTPApi {
         }
       }
 
+      // ── Run registry wiring (SQLite-backed, survives SSE disconnects) ──
+      // A per-run id distinct from session.currentRunId: it identifies this run
+      // to the client-queryable registry (GET /api/runs/active) and, in Tier 2,
+      // the resumable stream endpoint. Tier 1 keeps execution in this handler;
+      // the registry is an additive status mirror alongside runningSessions.
+      const runRegistry = this.engine?.getRunRegistry();
+      const runId = randomUUID();
+
       // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
       const promptStore = this.engine?.getPromptStore();
       // AbortController for the session — used to cancel prompt polling on disconnect
@@ -2044,6 +2052,9 @@ export class LynoxHTTPApi {
           // want the stale clock to start counting.
           const slot = this.runningSessions.get(sessionId);
           if (slot) slot.lastEventAt = Date.now();
+          // Mirror liveness into the registry so /api/runs/active + stale-run
+          // detection see a fresh heartbeat for this run.
+          runRegistry?.touch(runId);
         }
       }, 10_000);
 
@@ -2095,6 +2106,10 @@ export class LynoxHTTPApi {
         session.abort();
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
+      // Register the run as live (replaces any prior/interrupted row for this
+      // thread). A crash before the finally leaves this row 'running' → the
+      // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
+      runRegistry?.start(sessionId, runId);
       try {
         const result = await session.run(task, runOptions);
         if (!aborted) {
@@ -2116,7 +2131,36 @@ export class LynoxHTTPApi {
         clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
+        // Run reached a terminal state (done/error/abort-completion) — drop it
+        // from the registry. The transcript persists in thread_messages. A
+        // process crash never reaches here, leaving the row for the boot-sweep.
+        runRegistry?.remove(runId);
       }
+    }));
+
+    // GET /runs/active — client-queryable live-run state for the nav indicator.
+    // Returns every registry row (running + interrupted; done/error are already
+    // removed), so a reloaded client can re-attach a "still working" indicator
+    // and surface interrupted runs (banner + Retry). `awaiting_input` is derived
+    // from a pending prompt rather than tracked as a separate write, keeping the
+    // registry a simple liveness mirror with a single source of truth for
+    // "blocked on the user". Whole-tenant (single-tenant engine, no per-user
+    // scoping — see PRD-RUN-RESILIENCE N5).
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (_req, res) => {
+      const registry = this.engine?.getRunRegistry();
+      if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
+      const promptStoreForRuns = this.engine?.getPromptStore();
+      const runs = registry.getActive().map((r) => {
+        const awaiting = r.status === 'running' && !!promptStoreForRuns?.getPending(r.thread_id);
+        return {
+          runId: r.run_id,
+          threadId: r.thread_id,
+          status: awaiting ? 'awaiting_input' : r.status,
+          startedAt: r.started_at,
+          lastActivity: r.last_activity,
+        };
+      });
+      jsonResponse(res, 200, { runs });
     }));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
