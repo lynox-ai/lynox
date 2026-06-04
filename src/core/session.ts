@@ -83,6 +83,10 @@ export interface RunOptions {
   /** Suppress ALL tools for this run — used by compaction so the summarization
    *  turn returns the summary as TEXT instead of wandering off to a tool. */
   noTools?: boolean | undefined;
+  /** Internal/system run (e.g. compaction summary) — NOT a user-initiated turn.
+   *  Skips the synchronous user-message persist so an internal prompt never
+   *  lands in the visible thread as a user row. */
+  internal?: boolean | undefined;
 }
 
 export interface SessionOptions {
@@ -577,12 +581,45 @@ export class Session {
       this.agent.setKnowledgeContext('');
     }
 
+    // Per-turn precise time, outside the hour-truncated cached system prompt so
+    // the model gets wallclock-accuracy without breaking Anthropic's prompt
+    // cache. Computed once so the durable persist below and the agent buffer
+    // carry byte-identical user content (keeps the count-based eager-persist
+    // delta aligned — no duplicate row).
+    const userContent = withCurrentTimePrefix(task, this._userTimezone ?? undefined);
+
+    // Seq floor for this run's footprint — captured BEFORE the durable persist
+    // so the failed-turn catch flips exactly the rows this run created.
+    const runStartSeq = threadStore?.getNextSeq(this.sessionId) ?? startMessageCount;
+
+    // DURABLE USER TURN: persist the user message synchronously, before the
+    // model runs. Eager-persist only checkpoints AFTER the first assistant
+    // reply, so an abort/disconnect/process-restart before that first
+    // checkpoint (stale-run takeover, navigate-away, queued send) used to lose
+    // the user turn entirely while later assistant replies survived — the
+    // continued-session prompts that vanished on reload (rafael 2026-06-04,
+    // lynox Marktanalyse). Idempotent with eager-persist: the count-based
+    // delta slice sees this row already on disk and skips it. Skipped for
+    // internal runs (compaction summary) so a system prompt never shows as a
+    // user message.
+    if (threadStore && runOptions?.internal !== true) {
+      try {
+        const totalBefore = threadStore.getMessageCount(this.sessionId);
+        threadStore.appendMessages(
+          this.sessionId,
+          [{ role: 'user', content: userContent as BetaMessageParam['content'] }],
+          runStartSeq,
+          { message_count: totalBefore + 1 },
+        );
+      } catch {
+        // Fire-and-forget — eager-persist still covers the happy path; never
+        // block the run on a persistence hiccup.
+      }
+    }
+
     try {
-      // Per-turn precise time, outside the hour-truncated cached system
-      // prompt so the model gets wallclock-accuracy without breaking
-      // Anthropic's prompt cache.
       const result = await this.agent.send(
-        withCurrentTimePrefix(task, this._userTimezone ?? undefined),
+        userContent,
         { suppressTools: runOptions?.noTools === true },
       );
 
@@ -658,8 +695,9 @@ export class Session {
           const totalCount = threadStore.getMessageCount(this.sessionId);
           const newMessages = allMessages.slice(apiCount);
           if (newMessages.length > 0) {
-            // Combined append + rollup in one transaction (P1).
-            threadStore.appendMessages(this.sessionId, newMessages, totalCount, {
+            // Combined append + rollup in one transaction (P1). Seqs start at
+            // MAX(seq)+1 (deletion-safe), message_count tracks total rows.
+            threadStore.appendMessages(this.sessionId, newMessages, threadStore.getNextSeq(this.sessionId), {
               message_count: totalCount + newMessages.length,
               total_tokens: this.usage.input_tokens + this.usage.output_tokens,
               total_cost_usd: costUsd,
@@ -761,9 +799,12 @@ export class Session {
       // localizable failure note. None of these re-enter the prompt because the
       // resume hydration filters display_only=1 (session-store.ts).
       persistFailedTurnDisplay({
+        // runStartSeq is the seq of this run's first row (the durably-persisted
+        // user message). Flipping from here marks exactly this run's footprint
+        // display-only — and won't double-add the user message (already on disk).
         threadStore,
         sessionId: this.sessionId,
-        startSeq: startMessageCount,
+        startSeq: runStartSeq,
         task,
         error: err,
       });
@@ -830,7 +871,7 @@ export class Session {
       // agent would sometimes save the summary as an artifact and reply with a
       // useless pointer ("saved as artifact …"), so the injected context lost
       // the open task and continuity broke (observed live 2026-06-03).
-      summary = await this.run(prompt, { noTools: true });
+      summary = await this.run(prompt, { noTools: true, internal: true });
     } catch {
       // Compaction prompt failed — reset anyway to free context
     }

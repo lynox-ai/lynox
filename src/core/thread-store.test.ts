@@ -107,6 +107,46 @@ describe('ThreadStore.appendMessages with threadUpdates (P1 contract)', () => {
   });
 });
 
+describe('ThreadStore.getNextSeq (deletion-safe seq assignment)', () => {
+  let db: Database.Database;
+  let store: ThreadStore;
+
+  beforeEach(() => {
+    db = freshDb();
+    store = new ThreadStore(db);
+    store.createThread('t1');
+  });
+
+  it('returns 0 for an empty thread', () => {
+    expect(store.getNextSeq('t1')).toBe(0);
+  });
+
+  it('returns MAX(seq)+1, equal to the row count on an append-only thread', () => {
+    store.appendMessages('t1', [makeMessage('user', 'a'), makeMessage('assistant', 'b')], 0, { message_count: 2 });
+    expect(store.getNextSeq('t1')).toBe(2);
+    expect(store.getMessageCount('t1')).toBe(2);
+  });
+
+  it('stays MAX(seq)+1 after a mid-thread row deletion — where COUNT(*) would reuse a seq and collide', () => {
+    store.appendMessages('t1', [
+      makeMessage('user', 'a'),     // seq 0
+      makeMessage('assistant', 'b'), // seq 1
+      makeMessage('user', 'c'),     // seq 2
+    ], 0, { message_count: 3 });
+    // Delete the middle row: COUNT(*) drops to 2 (would reuse seq 2), but the
+    // surviving MAX(seq) is still 2, so the next seq must be 3 — no collision.
+    db.prepare('DELETE FROM thread_messages WHERE thread_id = ? AND seq = ?').run('t1', 1);
+    expect(store.getMessageCount('t1')).toBe(2); // count-based seq would be 2 → collide with surviving seq 2
+    expect(store.getNextSeq('t1')).toBe(3);      // MAX(seq)+1 stays monotonic
+  });
+
+  it('keeps display-only rows in the seq space (next seq sorts after a trailing note)', () => {
+    store.appendMessages('t1', [makeMessage('user', 'a')], 0, { message_count: 1 });
+    store.appendDisplayNotes('t1', [{ role: 'assistant', content: 'compacted' }], store.getNextSeq('t1'));
+    expect(store.getNextSeq('t1')).toBe(2);
+  });
+});
+
 describe('ThreadStore.setMessageUsage', () => {
   let db: Database.Database;
   let store: ThreadStore;

@@ -26,6 +26,12 @@ function makeMockThreadStore(opts?: {
       if (opts?.getCountThrows) throw new Error('SQLite locked');
       return count;
     }),
+    // MAX(seq)+1 — equals the row count on these append-only fixtures (no
+    // deletions), so existing startSeq assertions hold unchanged.
+    getNextSeq: vi.fn().mockImplementation((): number => {
+      if (opts?.getCountThrows) throw new Error('SQLite locked');
+      return count;
+    }),
     appendMessages: vi.fn().mockImplementation((_tid: string, msgs: BetaMessageParam[], _start: number, updates?: { message_count?: number }) => {
       if (opts?.appendThrows) throw new Error('SQLite full');
       count += msgs.length;
@@ -162,8 +168,10 @@ function makeFailMockStore(opts?: { hadUserMessage?: boolean; marked?: number; t
   const updateThread = vi.fn();
   const markDisplayOnlyFrom = vi.fn().mockReturnValue({ marked: opts?.marked ?? 0, hadUserMessage: opts?.hadUserMessage ?? false });
   const getMessageCount = vi.fn().mockReturnValue(opts?.total ?? 0);
-  const store = { appendDisplayNotes, updateThread, markDisplayOnlyFrom, getMessageCount } as unknown as ThreadStore;
-  return { store, appendDisplayNotes, updateThread, markDisplayOnlyFrom, getMessageCount };
+  // MAX(seq)+1 == row count on append-only fixtures.
+  const getNextSeq = vi.fn().mockReturnValue(opts?.total ?? 0);
+  const store = { appendDisplayNotes, updateThread, markDisplayOnlyFrom, getMessageCount, getNextSeq } as unknown as ThreadStore;
+  return { store, appendDisplayNotes, updateThread, markDisplayOnlyFrom, getMessageCount, getNextSeq };
 }
 
 describe('persistFailedTurnDisplay (B-full)', () => {
