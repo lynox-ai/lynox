@@ -90,8 +90,21 @@
 	let summaryMTD = $state<UsageSummary | null>(null);
 	let summary7d = $state<UsageSummary | null>(null);
 	let summary30d = $state<UsageSummary | null>(null);
+	// Rolling daily cost in the user's LOCAL timezone — the single source for the
+	// "Heute" tile AND the 14-day chart, shared with the StatusBar footer so the
+	// two never disagree on "today" (rafael 2026-06-04). Deriving these from the
+	// month-to-date `daily` tail showed the wrong day + stale dates early in the
+	// month; a rolling tz-aware fetch is what "last 14 days ending today" means.
+	let dailyRolling = $state<Array<{ day: string; cost_usd: number; run_count: number }>>([]);
 	let overviewLoading = $state(true);
 	let overviewError = $state('');
+
+	/** YYYY-MM-DD for the user's LOCAL today, matching the server's tz-shifted
+	 *  bucket key (see /history/cost/daily tzOffsetMin). */
+	function localTodayKey(): string {
+		const d = new Date();
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+	}
 
 	async function fetchSummary(period: Period): Promise<UsageSummary | null> {
 		try {
@@ -106,10 +119,14 @@
 	async function loadOverview(): Promise<void> {
 		overviewLoading = true;
 		overviewError = '';
-		const [mtd, sevenDay, thirtyDay] = await Promise.all([
+		const tz = new Date().getTimezoneOffset();
+		const [mtd, sevenDay, thirtyDay, daily] = await Promise.all([
 			fetchSummary('current'),
 			fetchSummary('7d'),
 			fetchSummary('30d'),
+			fetch(`${getApiBase()}/history/cost/daily?days=14&tzOffsetMin=${tz}`)
+				.then(r => r.ok ? r.json() as Promise<Array<{ day: string; cost_usd: number; run_count: number }>> : [])
+				.catch(() => []),
 		]);
 		if (!mtd && !sevenDay && !thirtyDay) {
 			overviewError = t('common.load_failed');
@@ -117,6 +134,7 @@
 		summaryMTD = mtd;
 		summary7d = sevenDay;
 		summary30d = thirtyDay;
+		dailyRolling = daily;
 		overviewLoading = false;
 	}
 
@@ -125,13 +143,13 @@
 	});
 
 	// ── Derived KPI rollups ───────────────────────────────────────────────
-	// Today = last entry of MTD's daily array (calendar-month rolling forward).
-	// `/usage/summary?period=today` doesn't exist; deriving from `daily` keeps
-	// the request count to three and Footer + Dashboard reading the same SSoT.
+	// Today = the LOCAL-today bucket from the rolling daily feed (same source +
+	// tz as the footer), NOT the MTD daily tail — which early in the month
+	// pointed at a mid-month/zero bucket and disagreed with the footer.
 	const todayCents = $derived.by(() => {
-		if (!summaryMTD || summaryMTD.daily.length === 0) return 0;
-		const last = summaryMTD.daily[summaryMTD.daily.length - 1];
-		return last?.cost_cents ?? 0;
+		const key = localTodayKey();
+		const row = dailyRolling.find(r => r.day === key);
+		return row ? Math.round(row.cost_usd * 100) : 0;
 	});
 	const totalRunsMTD = $derived(
 		(summaryMTD?.by_model ?? []).reduce((sum, m) => sum + m.run_count, 0),
@@ -152,11 +170,17 @@
 		&& totalRuns30d === 0,
 	);
 
-	// ── 14-day bar chart (from MTD daily, take last 14 entries) ───────────
-	const chartDays = $derived.by(() => {
-		const all = summaryMTD?.daily ?? [];
-		return all.slice(-14);
-	});
+	// ── 14-day bar chart: last 14 LOCAL days ending today (rolling, tz-aware) ──
+	// The daily feed is DESC (newest first); reverse to ascending and shape it
+	// like the old MTD entries ({date, cost_cents}) so the chart markup is
+	// unchanged. This is what "14 days" should mean — not the tail of the
+	// month-to-date array (which showed stale May dates on June 4).
+	const chartDays = $derived.by(() =>
+		[...dailyRolling]
+			.reverse()
+			.slice(-14)
+			.map(r => ({ date: r.day, cost_cents: Math.round(r.cost_usd * 100) })),
+	);
 	const maxChartCents = $derived(
 		Math.max(1, ...chartDays.map(d => d.cost_cents)),
 	);

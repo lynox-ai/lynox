@@ -92,7 +92,7 @@
 			const [healthRes, tasksRes, dailyRes, providersRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
 				fetch(`${getApiBase()}/tasks?status=in_progress`).catch(() => null),
-				fetch(`${getApiBase()}/history/cost/daily?days=1`).catch(() => null),
+				fetch(`${getApiBase()}/history/cost/daily?days=1&tzOffsetMin=${new Date().getTimezoneOffset()}`).catch(() => null),
 				fetch(`${getApiBase()}/providers/status`).catch(() => null),
 			]);
 
@@ -168,7 +168,13 @@
 
 			if (dailyRes?.ok) {
 				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number }>;
-				const today = new Date().toISOString().slice(0, 10);
+				// Match the LOCAL calendar day (the endpoint now buckets by local
+				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
+				// pick the wrong/empty bucket near the day boundary (rafael's
+				// footer-vs-dashboard "today" mismatch). Build YYYY-MM-DD from
+				// local date parts so it lines up with the server's bucket key.
+				const d = new Date();
+				const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 				const todayRow = rows.find(r => r.day === today);
 				todayCost = todayRow?.cost_usd ?? 0;
 				todayRuns = todayRow?.run_count ?? 0;

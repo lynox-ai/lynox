@@ -3129,7 +3129,13 @@ export class LynoxHTTPApi {
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
-      const data = history.getCostByDay(days);
+      // Optional client timezone offset (JS Date.getTimezoneOffset() convention,
+      // UTC+2 → -120) so day buckets group by the user's LOCAL calendar day —
+      // the footer + dashboard then agree on "today" instead of UTC-bucketing
+      // (rafael 2026-06-04: footer $3.15 vs dashboard $1.83). Clamped to ±14h.
+      const rawTz = parseInt(url.searchParams.get('tzOffsetMin') ?? '0', 10) || 0;
+      const tzOffsetMin = Math.min(Math.max(rawTz, -14 * 60), 14 * 60);
+      const data = history.getCostByDay(days, { tzOffsetMin });
       jsonResponse(res, 200, data);
     });
 
