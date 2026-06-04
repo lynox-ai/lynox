@@ -76,9 +76,10 @@ describe('Agent Security Audit', () => {
 
     it('HTTP redirect SSRF protection on watch fetch', () => {
       const workerContent = readFileSync(join(SRC, 'core/worker-loop.ts'), 'utf-8');
-      // The fetch call in executeWatch must disable redirect following to prevent
-      // SSRF via redirect to internal endpoints (e.g. 169.254.169.254, localhost)
-      expect(workerContent, 'worker-loop.ts must set redirect option on fetch').toMatch(/redirect\s*:\s*['"]error['"]/);
+      // executeWatch fetches through fetchPinned, which never follows redirects, so
+      // a 3xx to an internal endpoint (e.g. 169.254.169.254, localhost) cannot be
+      // chased — superseding the old explicit `redirect: 'error'` on a bare fetch.
+      expect(workerContent, 'worker-loop.ts must fetch watch URLs via fetchPinned').toContain('fetchPinned(config.url');
     });
 
     it('memory extraction scans for injection', () => {
@@ -168,11 +169,11 @@ describe('Agent Security Audit', () => {
 
     it('watch task fetch has SSRF protection', () => {
       const workerContent = readFileSync(join(SRC, 'core/worker-loop.ts'), 'utf-8');
-      expect(workerContent).toContain('localhost');
-      expect(workerContent).toContain('127.0.0.1');
-      // DNS-based SSRF protection: resolves hostname and checks actual IP ranges
-      expect(workerContent, 'worker-loop.ts must use DNS lookup for SSRF checks').toContain('lookup');
-      expect(workerContent).toContain('private URLs are not allowed');
+      // The watch fetch goes through fetchPinned (resolves DNS once, rejects
+      // private/internal IPs, pins the socket to that IP), and must NOT use a bare
+      // fetch() that would re-resolve DNS independently (rebind window).
+      expect(workerContent, 'worker-loop.ts must use fetchPinned for watch URLs').toContain('fetchPinned(config.url');
+      expect(workerContent, 'worker-loop.ts must not bare-fetch the watch URL').not.toContain('fetch(config.url,');
     });
 
     it('INTERNAL_TOOLS must NOT include external tool handlers (inverted allowlist)', () => {

@@ -40,8 +40,9 @@ if [ "$WRAP_OK" = true ]; then
   echo "✓ External tools wrap untrusted content"
 fi
 
-# Check SSRF protection on worker watch
-if ! grep -q '127.0.0.1' src/core/worker-loop.ts; then
+# Check SSRF protection on worker watch — the watch fetch must go through
+# fetchPinned (resolves once, rejects private IPs, pins the socket to that IP).
+if ! grep -q 'fetchPinned' src/core/worker-loop.ts; then
   echo "❌ worker-loop.ts missing SSRF protection"
   ERRORS=$((ERRORS + 1))
 else
@@ -64,8 +65,9 @@ else
   echo "✓ Debug subscriber masks token patterns"
 fi
 
-# Check HTTP redirect protection in worker-loop (SSRF via redirect)
-if ! grep -q "redirect.*error" src/core/worker-loop.ts; then
+# Check HTTP redirect protection in worker-loop (SSRF via redirect) — fetchPinned
+# never follows redirects, so its presence also covers this.
+if ! grep -q "fetchPinned" src/core/worker-loop.ts; then
   echo "❌ worker-loop.ts missing redirect protection on fetch (SSRF via redirect)"
   ERRORS=$((ERRORS + 1))
 else
