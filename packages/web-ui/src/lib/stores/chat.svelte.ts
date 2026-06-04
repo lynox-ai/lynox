@@ -397,6 +397,10 @@ function emitCompletedTextBlock(content: string, key: string): void {
 let sessionModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
+// Set when the engine offers a "prepare & compact" at the prepare threshold
+// (~80%); cleared on compaction or when context drops. Drives the banner's
+// compact affordance + a one-time agent suggestion.
+let compactionOffer = $state<number | null>(null);
 // Hosting tier of this instance. `null` = not yet probed; any non-null
 // string = probe completed. Values mirror LYNOX_MANAGED_MODE: 'managed',
 // 'managed_pro', 'eu' = instance-supplied LLM; 'starter', 'hosted', '' =
@@ -1455,9 +1459,16 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'changeset_ready':
 			void fetchChangeset();
 			break;
+		case 'compaction_offer': {
+			// Engine reached the prepare threshold — surface a calm offer (banner
+			// button + one-time agent suggestion). Not a forced action.
+			compactionOffer = (data['usagePercent'] as number | undefined) ?? null;
+			break;
+		}
 		case 'context_compacted': {
 			const prevPct = data['previousUsagePercent'] as number | undefined;
 			contextBudget = null;
+			compactionOffer = null;
 			// Persistent inline marker in the transcript — a 5s toast alone
 			// left users unsure whether compaction had lost their context.
 			messages.push({ role: 'assistant', content: '', compactionNote: { previousPercent: prevPct ?? 0 } });
@@ -1697,8 +1708,16 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 			return { ok: false, error: detail };
 		}
 		const data = await res.json() as { ok: boolean; summary: string };
+		// Show the same visible marker as an auto-compaction so a user-triggered
+		// compaction is transparent in the transcript (the manual /compact path has
+		// no active SSE to stream context_compacted). The server also persisted it.
+		if (data.ok) {
+			const prevPct = contextBudget?.usagePercent ?? 0;
+			messages.push({ role: 'assistant', content: '', compactionNote: { previousPercent: prevPct } });
+		}
 		// Reset local state so the UI reflects the compacted server-side view.
 		contextBudget = null;
+		compactionOffer = null;
 		return { ok: data.ok };
 	} catch (err) {
 		return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1879,6 +1898,11 @@ export function getContextWindow() {
 }
 export function getContextBudget() {
 	return contextBudget;
+}
+/** Usage % at which the engine offered "prepare & compact", or null if no
+ *  pending offer. Drives the banner's compact affordance + agent suggestion. */
+export function getCompactionOffer() {
+	return compactionOffer;
 }
 export function getRetryStatus() {
 	return retryStatus;
