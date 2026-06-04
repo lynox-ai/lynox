@@ -5429,16 +5429,24 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Validate targetUrl is HTTPS (or localhost for testing)
+      // Validate targetUrl is a public HTTPS endpoint before opening the stream.
+      // The transfer fetches below additionally go through fetchPinned, which
+      // re-resolves + pins to that public IP — closing the DNS-rebind window and
+      // blocking SSRF to internal/private targets (incl. cloud metadata).
+      const { fetchPinned, assertPublicUrl } = await import('../core/network-guard.js');
       try {
-        const parsed = new URL(targetUrl);
-        const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || /^192\.168\./.test(parsed.hostname);
-        if (parsed.protocol !== 'https:' && !isLocal) {
+        if (new URL(targetUrl).protocol !== 'https:') {
           errorResponse(res, 400, 'targetUrl must use HTTPS');
           return;
         }
       } catch {
         errorResponse(res, 400, 'Invalid targetUrl');
+        return;
+      }
+      try {
+        await assertPublicUrl(targetUrl);
+      } catch {
+        errorResponse(res, 400, 'targetUrl must resolve to a public host');
         return;
       }
 
@@ -5467,7 +5475,7 @@ export class LynoxHTTPApi {
         // 2. ECDH Handshake with target
         sendEvent('progress', { phase: 'handshake', message: 'Establishing secure connection...' });
 
-        const hsRes = await fetch(`${targetUrl}/api/migration/handshake`, {
+        const hsRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
           headers: { 'X-Migration-Token': migrationToken, 'Accept': 'application/json' },
         });
         if (!hsRes.ok) {
@@ -5503,7 +5511,7 @@ export class LynoxHTTPApi {
           'X-Migration-Token': migrationToken,
         };
 
-        const completeRes = await fetch(`${targetUrl}/api/migration/handshake`, {
+        const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
           method: 'POST',
           headers: migrationHeaders,
           body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
@@ -5523,7 +5531,7 @@ export class LynoxHTTPApi {
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
-        const mRes = await fetch(`${targetUrl}/api/migration/manifest`, {
+        const mRes = await fetchPinned(`${targetUrl}/api/migration/manifest`, {
           method: 'POST',
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
@@ -5539,7 +5547,7 @@ export class LynoxHTTPApi {
             total: chunks.length,
           });
 
-          const cRes = await fetch(`${targetUrl}/api/migration/chunk`, {
+          const cRes = await fetchPinned(`${targetUrl}/api/migration/chunk`, {
             method: 'POST',
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
@@ -5549,7 +5557,7 @@ export class LynoxHTTPApi {
 
         // 6. Restore
         sendEvent('progress', { phase: 'restoring', message: 'Restoring data on target...' });
-        const rRes = await fetch(`${targetUrl}/api/migration/restore`, {
+        const rRes = await fetchPinned(`${targetUrl}/api/migration/restore`, {
           method: 'POST',
           headers: migrationHeaders,
         });

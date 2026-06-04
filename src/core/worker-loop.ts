@@ -9,8 +9,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { lookup } from 'node:dns/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { fetchPinned } from './network-guard.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TaskRecord } from '../types/index.js';
@@ -430,47 +430,15 @@ export class WorkerLoop {
       return;
     }
 
-    // SSRF protection: only allow http/https, block internal networks (with DNS resolution)
-    const parsedUrl = new URL(config.url);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      throw new Error(`Watch task: only HTTP/HTTPS URLs allowed, got ${parsedUrl.protocol}`);
-    }
-    const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, '');
-    // Check hostname string first
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
-      throw new Error('Watch task: internal/private URLs are not allowed');
-    }
-    // Resolve DNS and check the actual IP
-    try {
-      const { address } = await lookup(hostname);
-      const mapped = address.startsWith('::ffff:') ? address.slice(7) : address;
-      const v4Parts = mapped.split('.');
-      if (v4Parts.length === 4 && v4Parts.every(p => /^\d{1,3}$/.test(p))) {
-        const [a, b] = v4Parts.map(Number) as [number, number, number, number];
-        if (a === 127 || a === 10 || a === 0 || a >= 224
-            || (a === 172 && b >= 16 && b <= 31)
-            || (a === 192 && b === 168)
-            || (a === 169 && b === 254)
-            || (a === 100 && b >= 64 && b <= 127)) {
-          throw new Error('Watch task: internal/private URLs are not allowed');
-        }
-      }
-      const normalized = address.toLowerCase();
-      if (normalized === '::1' || normalized === '::' || /^fe[89ab]/.test(normalized) || /^f[cd]/.test(normalized)) {
-        throw new Error('Watch task: internal/private URLs are not allowed');
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('not allowed')) throw err;
-      throw new Error(`Watch task: DNS resolution failed for ${hostname}`);
-    }
-
-    // Direct HTTP fetch — no LLM needed, saves ~$0.001 per check
+    // Direct HTTP fetch — no LLM needed, saves ~$0.001 per check.
+    // fetchPinned resolves DNS once, rejects private/internal IPs, and pins the
+    // socket to that IP (closing the rebind window) + never follows redirects,
+    // so it subsumes the protocol/host/IP SSRF checks we used to hand-roll here.
     let fetchResult: string;
     try {
-      const res = await fetch(config.url, {
+      const res = await fetchPinned(config.url, {
         signal: AbortSignal.timeout(30_000),
         headers: { 'User-Agent': 'lynox-watch/1.0' },
-        redirect: 'error',  // Prevent SSRF via redirect to internal endpoints
       });
       if (!res.ok) {
         throw new Error(`HTTP ${String(res.status)} ${res.statusText}`);
