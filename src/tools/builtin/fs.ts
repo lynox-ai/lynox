@@ -4,6 +4,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
+import { checkWriteContent } from '../../core/output-guard.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -179,6 +180,10 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       if (agent.sessionCounters.writeBytes + contentBytes > MAX_WRITE_BYTES_PER_SESSION) {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
+      // Block writing known-malicious payloads (reverse shells, miners, cron/SSH
+      // persistence) — e.g. content laundered in from an untrusted tool result.
+      const writeCheck = checkWriteContent(input.content, input.path);
+      if (!writeCheck.safe) throw new Error(writeCheck.warning);
       // Without active workspace: ALL paths → ~/.lynox/workspace/ (strip leading /)
       // With active workspace: resolve normally (validatePath enforces boundaries)
       let resolved: string;
@@ -255,6 +260,11 @@ export const editFileTool: ToolEntry<EditFileInput> = {
         throw new Error(`old_string matches ${matches} times — add surrounding context to make it unique, or set replace_all: true.`);
       }
       const updated = segments.join(input.new_string);
+
+      // Scan the post-edit content too, so an edit can't assemble a malicious
+      // payload that a single write_file would have been blocked from creating.
+      const writeCheck = checkWriteContent(updated, realPath);
+      if (!writeCheck.safe) throw new Error(writeCheck.warning);
 
       // Charge only the net growth against the write budget (an edit usually
       // shrinks or barely grows the file — unlike a full write_file rewrite).

