@@ -128,10 +128,9 @@
 		return /<!--\s*type:\s*markdown\s*-->/i.test(code);
 	}
 
-	/** Build a markdown-typed artifact: same chrome as the iframe variant
-	 *  (container + toolbar + label) but body is rendered markdown, not an
-	 *  iframe. Expanded by default because markdown carries no script risk
-	 *  and hiding prose behind a "Click to open" toggle hurts readability.
+	/** Build a markdown-typed artifact: same collapsed-pill chrome as the iframe
+	 *  variant (container + toolbar + label), but the body is rendered markdown,
+	 *  not an iframe. Collapsed by default like every type (lazy-expand pill).
 	 *  The raw markdown source is embedded as `data-md` so the toolbar
 	 *  buttons can produce a .md download and a print-to-PDF popup from the
 	 *  original text (not the rendered HTML). */
@@ -322,9 +321,9 @@
 			if (container) {
 				container.classList.toggle('artifact-collapsed');
 				const expanded = !container.classList.contains('artifact-collapsed');
-					// Keep the chevron button's aria-expanded in sync for screen readers.
-					container.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(expanded));
-					if (expanded) {
+				// Keep the chevron button's aria-expanded in sync for screen readers.
+				container.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(expanded));
+				if (expanded) {
 					// Delay so browser lays out the iframe before measuring
 					requestAnimationFrame(() => resizeArtifactFrame(container));
 				}
