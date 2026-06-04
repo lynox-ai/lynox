@@ -15,6 +15,12 @@
 # --- Stage 1: Build Engine ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-engine
 WORKDIR /app
+# Disable lefthook in the build: its dev-dep postinstall runs `lefthook install`
+# which needs a git repo/binary that isn't in this stage, failing the build on a
+# cold install-layer cache (the `|| true` on our own `prepare` doesn't cover the
+# package's own postinstall). LEFTHOOK=0 makes lefthook skip — git hooks are a
+# dev-machine concern, never needed in an image build.
+ENV LEFTHOOK=0
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -40,6 +46,8 @@ WORKDIR /app
 # this via --build-arg BUILD_SHA=$GITHUB_SHA in staging.yml.
 ARG BUILD_SHA=
 ENV BUILD_SHA=${BUILD_SHA}
+# See build-engine stage: skip lefthook's git-dependent postinstall in the build.
+ENV LEFTHOOK=0
 
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
