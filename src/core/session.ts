@@ -99,6 +99,7 @@ export interface SessionOptions {
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
+  costGuard?: import('../types/index.js').CostGuardConfig | undefined;
 }
 
 /**
@@ -136,6 +137,7 @@ export class Session {
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
+    costGuard?: import('../types/index.js').CostGuardConfig | undefined;
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
@@ -251,6 +253,9 @@ export class Session {
     }
     if (opts?.autonomy) {
       this.agentOverrides.autonomy = opts.autonomy;
+    }
+    if (opts?.costGuard) {
+      this.agentOverrides.costGuard = opts.costGuard;
     }
     this._createAgent();
 
@@ -1155,6 +1160,7 @@ export class Session {
       effort: this._effort,
       maxTokens: this._maxTokens,
       memory: engine.getMemory() ?? undefined,
+      costGuard: this.agentOverrides.costGuard,
       onStream: streamHandler,
       // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
       // each stable point in the agent loop (after assistant reply, after

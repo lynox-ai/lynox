@@ -90,7 +90,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parent_task_id: { type: 'string', description: 'Parent task ID for subtasks' },
         schedule: { type: 'string', description: 'Cron schedule for recurring tasks. Standard cron (e.g. \'0 8 * * *\' for daily at 8am) or shorthand (\'30m\', \'1h\', \'6h\', \'1d\'). For a one-shot future task use run_at instead.' },
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
-        watch_interval_minutes: { type: 'number', description: 'How often to check the watched URL (in minutes). Default: 60.' },
+        watch_interval_minutes: { type: 'number', minimum: 5, description: 'How often to check the watched URL (in minutes). Default: 60. Minimum: 5.' },
         workflow_id: { type: 'string', description: 'ID of a stored workflow to execute on this schedule.' },
       },
       required: ['title'],
@@ -156,7 +156,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       }
 
       if (input.watch_url) {
-        const intervalMinutes = input.watch_interval_minutes ?? 60;
+        // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
+        // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
+        const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
         const task = managerRef.createWatch({
           ...baseParams,
           watchUrl: input.watch_url,

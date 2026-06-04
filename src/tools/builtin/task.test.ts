@@ -114,6 +114,23 @@ describe('Task Tools', () => {
       expect(result).toContain('Task created');
     });
 
+    it('floors a too-small watch interval at 5 minutes', async () => {
+      const result = await taskCreateTool.handler(
+        { title: 'Watch', watch_url: 'https://example.com', watch_interval_minutes: 1 },
+        makeAgent(),
+      );
+      expect(result).toContain('Watch task created');
+      expect(result).toContain('every 5min');
+    });
+
+    it('keeps a watch interval that is already above the floor', async () => {
+      const result = await taskCreateTool.handler(
+        { title: 'Watch', watch_url: 'https://example.com', watch_interval_minutes: 30 },
+        makeAgent(),
+      );
+      expect(result).toContain('every 30min');
+    });
+
     it('should not flag unrelated JSON-like snippets in description', async () => {
       const result = await taskCreateTool.handler(
         {

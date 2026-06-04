@@ -19,6 +19,10 @@ import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
+// Per-run ceiling on a watch's change-analysis session — it is a single
+// summarization turn, so a low cap bounds runaway LLM spend on a misbehaving
+// watch (e.g. a page that changes every tick) without affecting normal use.
+const WATCH_ANALYSIS_MAX_USD = 0.5;
 const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost control)
 
 /** Per-task execution context available via AsyncLocalStorage. */
@@ -465,6 +469,7 @@ export class WorkerLoop {
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
+      costGuard: { maxBudgetUSD: WATCH_ANALYSIS_MAX_USD },
     });
     const workerProfile3 = this.engine.getUserConfig().worker_profile;
     if (workerProfile3) {
