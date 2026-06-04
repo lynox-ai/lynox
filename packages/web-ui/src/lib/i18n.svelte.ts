@@ -13,6 +13,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Artifacts
 	'artifacts.title': { de: 'Artefakte', en: 'Artifacts' },
 	'artifacts.items': { de: 'Einträge', en: 'items' },
+	'artifacts.version_hint': { de: 'Version — frühere Stände sind wiederherstellbar', en: 'Version — earlier states can be restored' },
 	'artifacts.loading': { de: 'Lade Artifacts...', en: 'Loading artifacts...' },
 	'artifacts.empty': { de: 'Noch keine Artifacts gespeichert. Der Agent erstellt hier Dashboards, Diagramme und Reports.', en: 'No saved artifacts yet. The agent creates dashboards, diagrams, and reports here.' },
 	'artifacts.delete': { de: 'Löschen', en: 'Delete' },

@@ -11,7 +11,7 @@
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { t } from '../i18n.svelte.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	let selected = $state<Artifact | null>(null);
@@ -84,7 +84,12 @@
 	}
 
 	function formatDate(iso: string): string {
-		return new Date(iso).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
+		// Date AND time — "updated" without a time read as stale on a doc edited
+		// minutes ago (rafael 2026-06-04). Locale-aware so it matches the UI.
+		const locale = getLocale() === 'de' ? 'de-CH' : 'en-GB';
+		return new Date(iso).toLocaleString(locale, {
+			day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+		});
 	}
 
 	function formatDateTime(iso: string): string {
@@ -181,6 +186,9 @@
 								{/if}
 								<div class="flex items-center gap-2 mt-2">
 									<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{artifact.type}</span>
+									{#if (artifact.version ?? 1) > 1}
+										<span class="text-[10px] font-mono text-text-subtle" title={t('artifacts.version_hint')}>v{artifact.version}</span>
+									{/if}
 									<span class="text-[10px] text-text-subtle">{formatDate(artifact.updatedAt)}</span>
 								</div>
 							</div>
