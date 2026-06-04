@@ -24,6 +24,17 @@
 		return m ? `${t('changeset.artifact_file')} ${m[1]}` : file;
 	}
 
+	// The unified-diff +++/--- header lines carry the same raw artifact path
+	// the row label hides; rewrite them through displayLabel so the expanded
+	// diff doesn't leak the internal "/…/.lynox/artifacts/<id>" layout. Plain
+	// file edits keep their path (displayLabel is a no-op for non-artifacts).
+	function displayDiffLine(line: string): string {
+		const m = line.match(/^(\+\+\+|---) (.+)$/);
+		if (!m) return line;
+		const path = (m[2] ?? '').split('\t')[0] ?? '';
+		return `${m[1]} ${displayLabel(path)}`;
+	}
+
 	let {
 		files,
 		onReview,
@@ -119,7 +130,7 @@
 				<!-- Expanded diff -->
 				{#if expandedFile === f.file}
 					<div class="px-4 pb-3">
-						<pre class="rounded-[var(--radius-sm)] bg-bg p-3 text-xs font-mono overflow-x-auto max-h-96 overflow-y-auto border border-border/50">{#each f.diff.split('\n') as line}{#if line.startsWith('+++') || line.startsWith('---')}<span class="text-text-muted font-bold">{line}</span>
+						<pre class="rounded-[var(--radius-sm)] bg-bg p-3 text-xs font-mono overflow-x-auto max-h-96 overflow-y-auto border border-border/50">{#each f.diff.split('\n') as line}{#if line.startsWith('+++') || line.startsWith('---')}<span class="text-text-muted font-bold">{displayDiffLine(line)}</span>
 {:else if line.startsWith('@@')}<span class="text-accent-text">{line}</span>
 {:else if line.startsWith('+')}<span class="text-success">{line}</span>
 {:else if line.startsWith('-')}<span class="text-danger">{line}</span>
