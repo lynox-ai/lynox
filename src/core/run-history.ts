@@ -1105,6 +1105,28 @@ export class RunHistory {
     });
   }
 
+  /**
+   * Canonical per-thread totals — the SINGLE source of truth for a thread's
+   * cumulative cost/tokens. Sums every recorded run for the session (LLM +
+   * voice + spawned sub-runs, excluding only in-flight `running` rows), so it
+   * matches the per-thread group total shown in Run History.
+   *
+   * `threads.total_cost_usd` used to be OVERWRITTEN with the last run's cost
+   * each turn (session.ts) — a 20-run thread showed one turn's spend. Stamping
+   * the thread row from this getter at run-end makes it self-healing: any
+   * historically-wrong value is corrected on the thread's next run.
+   */
+  getThreadTotals(sessionId: string): { cost_usd: number; tokens_in: number; tokens_out: number } {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COALESCE(SUM(tokens_in), 0) as tokens_in,
+             COALESCE(SUM(tokens_out), 0) as tokens_out
+      FROM runs
+      WHERE session_id = ? AND status != 'running'
+    `).get(sessionId) as { cost_usd: number; tokens_in: number; tokens_out: number } | undefined;
+    return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
+  }
+
   getStats(): RunStats {
     const totals = this.db.prepare(`
       SELECT COUNT(*) as total_runs,

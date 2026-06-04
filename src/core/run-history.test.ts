@@ -138,6 +138,29 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getThreadTotals sums cost + tokens across ALL runs in a session (the per-thread SSOT)', () => {
+    const h = createHistory();
+    const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r1, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, durationMs: 1000, status: 'completed' });
+    const r2 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 2', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r2, { tokensIn: 200, tokensOut: 80, costUsd: 0.04, durationMs: 2000, status: 'completed' });
+    // A spawned sub-run + a voice run in the same session also count toward the
+    // thread's spend (matches the Run History per-thread group total).
+    const child = h.insertRun({ sessionId: 'thread-1', taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: r2, spawnDepth: 1 });
+    h.updateRun(child, { tokensIn: 10, tokensOut: 5, costUsd: 0.005, durationMs: 100, status: 'completed' });
+    // A run in a different session must NOT leak in.
+    const other = h.insertRun({ sessionId: 'thread-2', taskText: 'other', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(other, { tokensIn: 999, tokensOut: 999, costUsd: 9.99, durationMs: 1, status: 'completed' });
+
+    const totals = h.getThreadTotals('thread-1');
+    expect(totals.cost_usd).toBeCloseTo(0.055, 6); // 0.01 + 0.04 + 0.005, NOT just the last turn
+    expect(totals.tokens_in).toBe(310);
+    expect(totals.tokens_out).toBe(135);
+    // Empty / unknown session → zeros, never throws.
+    expect(h.getThreadTotals('nope')).toEqual({ cost_usd: 0, tokens_in: 0, tokens_out: 0 });
+    h.close();
+  });
+
   it('returns recent runs', () => {
     const h = createHistory();
     for (let i = 0; i < 5; i++) {
