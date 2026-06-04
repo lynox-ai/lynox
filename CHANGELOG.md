@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.9.0 — 2026-06-04
+
+Trust-and-recovery release: chat turns and artifacts never silently vanish, cost tracking shows one consistent number everywhere, artifacts gain a real version history, and `ask_user` can offer multiple answers.
+
+### Features
+- **Artifact version history** — every save snapshots the version it replaces (up to 10), with new `artifact_history` / `artifact_restore` tools so an accidental overwrite is recoverable. Gallery cards now show the updated time + a version badge. (#677)
+- **ask_user multi-select** — opt-in `multiSelect` lets you toggle several answer pills and Send, instead of one-click-and-done. Single-select is unchanged. (#676)
+
+### Fixes
+- **Durable chat turns** — a user message is now persisted at run start, so an abort / reload / queued send mid-stream can't lose it (continued-session prompts no longer disappear). Queued messages survive a reload; the scroll stays pinned on send. (#673)
+- **Cost tracking, one source of truth** — the footer, the dashboard "today" tile, and the 14-day chart now agree (local-timezone day buckets); the histogram ends on today instead of stale dates; per-thread cost reflects the full thread; headline run counts are your chat turns (voice + sub-runs counted separately). (#674)
+
 ## 1.8.3 — 2026-06-04
 
 Feature release: artifacts become first-class editable files, a calmer and more trustworthy context-compaction flow, and a round of agent-tool security hardening.
