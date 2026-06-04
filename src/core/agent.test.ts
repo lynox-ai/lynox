@@ -429,6 +429,38 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);
     });
 
+    // ENGINE-10 regression (rafael prod 2026-06-05): a dangling `tool_use`
+    // (assistant tool_use with no following tool_result) that reaches the API
+    // 400s "tool_use ids were found without tool_result blocks", and because
+    // the broken pair persists, EVERY subsequent turn 400s — bricking the
+    // thread. sanitizeToolPairs runs on resume-hydration, but in-run drift /
+    // truncation / apiOnly-flip can re-introduce one. The agent must sanitize
+    // the outbound history right before each API call, so a dangling tool_use
+    // can never reach Anthropic regardless of how it got into the array.
+    it('strips a dangling tool_use from the history before the API call (ENGINE-10)', async () => {
+      mockProcess.mockResolvedValueOnce(endTurnResponse('recovered'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+
+      // Inject a dangling tool_use directly (loadMessages would sanitize it, so
+      // we bypass it to simulate in-run drift / a persisted broken pair).
+      (agent as unknown as { messages: unknown[] }).messages = [
+        { role: 'user', content: 'do a thing' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_DANGLING', name: 'web_research', input: {} }] },
+      ];
+
+      const result = await agent.send('what happened?');
+      expect(result).toBe('recovered'); // no 400 — the turn completes
+
+      // The dangling tool_use must be gone from the persisted in-memory history.
+      const hasDangling = agent.getMessages().some(
+        (m) => Array.isArray(m.content) && m.content.some(
+          (b) => (b as { type?: string; id?: string }).type === 'tool_use'
+            && (b as { id?: string }).id === 'toolu_DANGLING',
+        ),
+      );
+      expect(hasDangling).toBe(false);
+    });
+
     it('thinking blocks are stripped from message history', async () => {
       mockProcess.mockResolvedValueOnce(thinkingResponse('Let me think...', 'Result'));
 

@@ -793,6 +793,19 @@ export class Agent implements IAgent {
     const overheadTokens = systemTokens + toolTokens;
     this._truncateHistory(overheadTokens);
 
+    // Defensive tool-pair guard, right before send. `sanitizeToolPairs` already
+    // runs on resume-hydration (loadMessages), but a dangling `tool_use` /
+    // orphan `tool_result` can still reach this point another way: in-run drift
+    // (a tool that failed to append its result), a truncation above that split
+    // a pair across the drop boundary, or an `apiOnly` hydration whose
+    // display-only flip severed one half of a pair. ANY of these makes Anthropic
+    // 400 ("tool_use ids were found without tool_result blocks"), and because
+    // the broken pair persists, EVERY subsequent turn 400s — bricking the
+    // thread (prod incident ENGINE-10, rafael 2026-06-05). Sanitizing the
+    // outbound array here closes the whole 400 class regardless of how the
+    // drift arose. Runs once per API call (O(n)), negligible vs the LLM round-trip.
+    this.messages = sanitizeToolPairs(this.messages);
+
     // Pre-call context-budget estimate: real prompt size of the last call plus
     // a char-estimate of only the messages appended since (see
     // _estimateOccupancyTokens). Superseded by the exact post-call figure a
