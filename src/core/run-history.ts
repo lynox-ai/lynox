@@ -1154,12 +1154,57 @@ export class RunHistory {
 
   // === Cost queries (Sprint 5) ===
 
-  getCostByDay(days: number): Array<{ day: string; cost_usd: number; run_count: number }> {
+  /**
+   * Daily cost buckets for the last `days` calendar days **ending today in the
+   * user's local timezone**. `created_at` is stored UTC; a Zurich user (UTC+2)
+   * who ran something at 00:30 local expects it under today, not yesterday's
+   * UTC bucket. `tzOffsetMin` is the JS `Date.getTimezoneOffset()` convention
+   * (UTC+2 → -120); we shift each timestamp by `-tzOffsetMin` minutes before
+   * bucketing so `date()` groups by the local calendar day, and bound the
+   * window by the same shifted clock. Omitting the offset preserves the old
+   * UTC behaviour. This is the spine of footer↔dashboard "today" agreement.
+   */
+  getCostByDay(days: number, opts?: { tzOffsetMin?: number }): Array<{ day: string; cost_usd: number; run_count: number }> {
+    // Bucket key is tz-shifted (local calendar day); the WINDOW predicate is
+    // left exactly as before (`created_at >= datetime('now','-N days')`) so the
+    // budget-enforcement path (session-budget.ts → checkPersistentBudget) that
+    // also calls this keeps identical row-inclusion semantics. Only the day
+    // GROUPING moves to the user's local day. mod = minutes to add to UTC.
+    const mod = `${-(opts?.tzOffsetMin ?? 0)} minutes`;
     return this.db.prepare(`
-      SELECT date(created_at) as day, COALESCE(SUM(cost_usd), 0) as cost_usd, COUNT(*) as run_count
-      FROM runs WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
-      GROUP BY date(created_at) ORDER BY day DESC
-    `).all(`-${days} days`) as Array<{ day: string; cost_usd: number; run_count: number }>;
+      SELECT date(created_at, ?) as day,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COUNT(*) as run_count
+      FROM runs
+      WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
+      GROUP BY date(created_at, ?) ORDER BY day DESC
+    `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number; run_count: number }>;
+  }
+
+  /**
+   * "User-turn" run count for a window — the headline number a person reads as
+   * "my runs". Excludes voice (TTS/STT) and spawned/batch sub-runs, which are
+   * machinery, not chat turns the user took. `kind` NULL = legacy llm row.
+   * Window is bounded by local-day boundaries via the same tz shift as
+   * getCostByDay. Returns user-turn count + the excluded breakdown so the UI
+   * can show voice/sub-runs separately instead of inflating the headline.
+   */
+  getRunCounts(days: number, opts?: { tzOffsetMin?: number }): { user_turns: number; voice: number; sub_runs: number } {
+    void opts; // tz offset not needed for a count over a rolling-day window
+    const row = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND spawn_depth = 0 AND run_type != 'batch_item' THEN 1 ELSE 0 END) as user_turns,
+        SUM(CASE WHEN kind IN ('voice_tts','voice_stt') THEN 1 ELSE 0 END) as voice,
+        SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND (spawn_depth > 0 OR run_type = 'batch_item') THEN 1 ELSE 0 END) as sub_runs
+      FROM runs
+      WHERE created_at >= datetime('now', ?)
+        AND status NOT IN ('running', 'failed')
+    `).get(`-${days} days`) as { user_turns: number | null; voice: number | null; sub_runs: number | null } | undefined;
+    return {
+      user_turns: row?.user_turns ?? 0,
+      voice: row?.voice ?? 0,
+      sub_runs: row?.sub_runs ?? 0,
+    };
   }
 
   getCostByModel(): ModelBreakdownEntry[] {
