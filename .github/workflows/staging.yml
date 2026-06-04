@@ -10,16 +10,13 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # Matrix split: each platform builds on its native arch runner — no QEMU.
-  # Each matrix job pushes its image by digest only (no human-readable tag
-  # yet); the `manifest` job below stitches both digests into the final
-  # `:staging` + `:staging-${sha}` tags. Pattern documented at
-  # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
-  #
-  # Multi-arch coverage closes BI-003: Apple Silicon developers pulling
-  # `:staging` for testing get a native arm64 layer instead of "no matching
-  # manifest" / amd64 emulation. The release workflow already shipped
-  # multi-arch via QEMU; this brings staging to parity AND faster.
+  # amd64-only build (see the matrix comment): builds on the native amd64 runner
+  # and pushes by digest; the `manifest` job below stitches that single digest
+  # into the `:staging` + `:staging-${sha}` tags. Kept as the push-by-digest +
+  # manifest pattern (not a direct tag push) so re-introducing arm64 later is a
+  # one-line matrix add. Pattern: https://docs.docker.com/build/ci/github-actions/multi-platform/
+  # Staging deploys to the staging engine host (Hetzner = amd64); arm64 lives in
+  # release.yml, where Apple-Silicon `:latest` pulls actually matter.
   build:
     # Burst of merges (e.g. 4 squash-merges seconds apart) used to fan out into
     # 4 parallel builds + 4 staging redeploys, with the final `:staging` tag
@@ -29,9 +26,8 @@ jobs:
     # `workflow_dispatch` rerun (operator recovering a transient failure) is
     # not racing a regular push, and vice versa.
     #
-    # With the matrix split, each arch gets its own concurrency group so a
-    # newer push cancels its own pair; manifest has its own scoped group
-    # below.
+    # The single matrix entry gets its own concurrency group; manifest has its
+    # own scoped group below.
     concurrency:
       group: staging-build-${{ github.event_name }}-${{ matrix.arch_tag }}
       cancel-in-progress: true
@@ -42,12 +38,17 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # amd64 only: staging redeploys to the staging engine host (Hetzner = amd64),
+          # which never uses an arm64 layer. The arm64 build existed solely so an
+          # Apple-Silicon dev could `docker pull :staging` locally — a workflow we
+          # don't use (we test via the staging engine host or local `pnpm dev`). Dropping
+          # it makes the staging deploy a single native build with no arm64-runner
+          # queue + no manifest wait. Multi-arch stays in release.yml (npm `:latest`,
+          # where Apple-Silicon pulls genuinely matter). Kept as a 1-entry matrix so
+          # the push-by-digest + manifest + dispatch chain below is untouched.
           - platform: linux/amd64
             runner: ubuntu-24.04
             arch_tag: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch_tag: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -170,7 +171,7 @@ jobs:
       # `:staging-<sha>` companion tag is sparse: any commit whose build was
       # cancelled mid-burst won't have one. Treat `:staging-<sha>` as
       # best-effort archival, never as a stable rollback target.
-      - name: Create multi-arch manifest
+      - name: Create manifest tags
         env:
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
@@ -181,8 +182,8 @@ jobs:
             digest_name="$(basename "$f")"
             DIGEST_REFS+=("ghcr.io/lynox-ai/lynox@sha256:${digest_name}")
           done
-          if [ "${#DIGEST_REFS[@]}" -ne 2 ]; then
-            echo "Expected 2 digests (amd64+arm64), got ${#DIGEST_REFS[@]}: ${DIGEST_REFS[*]}"
+          if [ "${#DIGEST_REFS[@]}" -ne 1 ]; then
+            echo "Expected 1 digest (amd64), got ${#DIGEST_REFS[@]}: ${DIGEST_REFS[*]}"
             exit 1
           fi
           for TAG in \
@@ -193,17 +194,15 @@ jobs:
             echo "::endgroup::"
           done
 
-      # Verify the multi-arch manifest landed — fails the workflow if either
-      # arch is missing. Pre-launch we cannot ship a workflow that silently
-      # regresses to single-arch (BI-003 carry-over).
-      - name: Verify multi-arch manifest
+      # Verify the manifest landed with the amd64 image (the only arch staging
+      # ships — see the matrix comment above). Multi-arch lives in release.yml.
+      - name: Verify manifest
         run: |
           set -euo pipefail
           INSPECT=$(docker buildx imagetools inspect "ghcr.io/lynox-ai/lynox:staging" --raw)
           echo "$INSPECT"
           echo "$INSPECT" | grep -q '"architecture": "amd64"' || { echo "amd64 missing from manifest"; exit 1; }
-          echo "$INSPECT" | grep -q '"architecture": "arm64"' || { echo "arm64 missing from manifest"; exit 1; }
-          echo "Multi-arch manifest verified: amd64 + arm64 both present."
+          echo "Manifest verified: amd64 present."
 
   # Separate job — deliberately NOT in the build/manifest concurrency
   # group, so a newer push that cancels an in-flight build cannot also
