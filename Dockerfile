@@ -100,18 +100,17 @@ RUN git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp
     && cp build/ggml/src/libggml*.so.0* /usr/local/lib/ \
     && ldconfig
 
-# `-f` (--fail) + `--retry-all-errors`: HuggingFace intermittently serves a tiny
-# HTML error page (HTTP 4xx/5xx) instead of the model; without --fail, curl saved
-# that page and the sha256 check failed the whole build (recurring flake, 3× on
-# 2026-06-03). --fail rejects the error response and --retry retries it; sha256sum
-# stays as the final integrity gate.
+# Whisper STT model: pulled from OUR GitHub release mirror, not HuggingFace.
+# HF intermittently served HTTP errors and the model download flaked the build
+# repeatedly (~5× on 2026-06-03/04, blocking CI/staging/canary). The model is
+# mirrored once to the `whisper-models` release (pinned by the sha256 below).
+# Only the `base` model is shipped — it transcribes all clip lengths; the prior
+# `tiny` model was just a short-clip speed optimisation that whisper-cpp.ts
+# already treats as optional (falls back to base). -f --retry guards the mirror.
 RUN mkdir -p /usr/share/whisper \
     && curl -fL --retry 5 --retry-delay 3 --retry-all-errors -o /usr/share/whisper/ggml-base.bin \
-       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
-    && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe /usr/share/whisper/ggml-base.bin" | sha256sum -c - \
-    && curl -fL --retry 5 --retry-delay 3 --retry-all-errors -o /usr/share/whisper/ggml-tiny.bin \
-       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
-    && echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 /usr/share/whisper/ggml-tiny.bin" | sha256sum -c -
+       https://github.com/lynox-ai/lynox/releases/download/whisper-models/ggml-base.bin \
+    && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe /usr/share/whisper/ggml-base.bin" | sha256sum -c -
 
 # --- Stage 5: Production image ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS production
@@ -127,7 +126,6 @@ COPY --from=whisper-build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY --from=whisper-build /usr/local/lib/libwhisper* /usr/local/lib/
 COPY --from=whisper-build /usr/local/lib/libggml* /usr/local/lib/
 COPY --from=whisper-build /usr/share/whisper/ggml-base.bin /usr/share/whisper/ggml-base.bin
-COPY --from=whisper-build /usr/share/whisper/ggml-tiny.bin /usr/share/whisper/ggml-tiny.bin
 RUN ldconfig
 
 # Harden: remove package managers, shells, SUID binaries
