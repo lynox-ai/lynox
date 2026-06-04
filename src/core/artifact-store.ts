@@ -12,6 +12,11 @@ import { getLynoxDir } from './config.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
+/** How many prior versions to retain per artifact. A small ring — enough to
+ *  recover from an accidental clobber (the "v2 → v7 wrong-name" case) without
+ *  growing the store unbounded. Oldest beyond this are pruned on each save. */
+const MAX_VERSIONS = 10;
+
 /** `csv`/`tsv`/`json`/`text` are downloadable data files — they render in the
  *  chat as a code preview with a download button, not as an HTML iframe. */
 export type ArtifactType = 'html' | 'mermaid' | 'svg' | 'markdown' | 'csv' | 'tsv' | 'json' | 'text';
@@ -42,8 +47,9 @@ export interface ArtifactOverwrite {
   previousVersion: number;
   previousBytes: number;
   newBytes: number;
-  /** The prior content, snapshotted to this path before the overwrite —
-   *  recover with read_file. One level deep (overwritten on each save). */
+  /** The prior content, snapshotted into the version history before the
+   *  overwrite (a `versions/<id>.v<n>.html` file) — recover with read_file or
+   *  artifact_restore. Up to MAX_VERSIONS steps are kept. */
   backupPath: string;
   /** Large replacement (content shrank to <50% of the previous size) — a
    *  likely accidental full-rewrite worth a second look. */
@@ -124,12 +130,68 @@ export class ArtifactStore {
     return this.contentPath(id);
   }
 
-  /** Path of the one-level backup written before an overwrite. */
-  backupPathFor(id: string): string {
+  private versionsDir(): string {
+    return join(this.dir, 'versions');
+  }
+
+  /** Path of a stored prior version. Versions live in a `versions/` subdir so
+   *  reconcile()'s top-level `<id>.html` orphan scan never sees them. */
+  private versionPath(id: string, n: number): string {
     if (!SAFE_ID.test(id)) throw new Error(`Invalid artifact ID: ${id}`);
-    const p = resolve(this.dir, `${id}.bak`);
-    if (!p.startsWith(this.dir)) throw new Error('Path traversal detected');
+    if (!Number.isInteger(n) || n < 1) throw new Error(`Invalid version: ${n}`);
+    const dir = this.versionsDir();
+    const p = resolve(dir, `${id}.v${n}.html`);
+    if (!p.startsWith(dir)) throw new Error('Path traversal detected');
     return p;
+  }
+
+  private listVersionNumbers(id: string): number[] {
+    let entries: string[];
+    try { entries = readdirSync(this.versionsDir()); } catch { return []; }
+    const re = new RegExp(`^${id}\\.v(\\d+)\\.html$`);
+    const out: number[] = [];
+    for (const f of entries) {
+      const m = re.exec(f);
+      if (m) out.push(parseInt(m[1]!, 10));
+    }
+    return out;
+  }
+
+  /** Snapshot content as version `n`, then prune to the newest MAX_VERSIONS. */
+  private snapshotVersion(id: string, n: number, content: string): string {
+    mkdirSync(this.versionsDir(), { recursive: true });
+    const p = this.versionPath(id, n);
+    writeFileSync(p, content, 'utf-8');
+    const nums = this.listVersionNumbers(id).sort((a, b) => b - a);
+    for (const old of nums.slice(MAX_VERSIONS)) {
+      try { unlinkSync(this.versionPath(id, old)); } catch { /* already gone */ }
+    }
+    return p;
+  }
+
+  /** Prior versions available for rollback, newest first. Captures save()-path
+   *  overwrites; external file-tool edits bump the version but can't be
+   *  snapshotted retroactively (the prior bytes are already gone from disk). */
+  history(id: string): Array<{ version: number; bytes: number; savedAt: string }> {
+    return this.listVersionNumbers(id)
+      .sort((a, b) => b - a)
+      .map(n => {
+        const st = statSync(this.versionPath(id, n));
+        return { version: n, bytes: st.size, savedAt: new Date(st.mtimeMs).toISOString() };
+      });
+  }
+
+  /** Roll an artifact back to a stored prior version. The restore is itself a
+   *  save(), so the CURRENT content is snapshotted first (rollback is
+   *  reversible) and the artifact bumps to a fresh version. Returns null if the
+   *  artifact or that version is missing. */
+  restore(id: string, version: number): Artifact | null {
+    const meta = this.index.find(a => a.id === id);
+    if (!meta) return null;
+    let content: string;
+    try { content = readFileSync(this.versionPath(id, version), 'utf-8'); }
+    catch { return null; }
+    return this.save({ id, title: meta.title, content, type: meta.type, description: meta.description });
   }
 
   private saveIndex(): void {
@@ -154,12 +216,13 @@ export class ArtifactStore {
       // trace). Best-effort — a missing/unreadable prior file never blocks.
       const previousVersion = existing.version;
       let previousBytes = 0;
-      let backupWritten = false;
+      let backupPath = '';
       try {
         const prev = readFileSync(this.contentPath(existing.id), 'utf-8');
         previousBytes = Buffer.byteLength(prev, 'utf-8');
-        writeFileSync(this.backupPathFor(existing.id), prev, 'utf-8');
-        backupWritten = true;
+        // Snapshot the version being replaced into the history ring (supersedes
+        // the old single .bak — now up to MAX_VERSIONS recoverable steps).
+        backupPath = this.snapshotVersion(existing.id, previousVersion, prev);
       } catch { /* no prior content to back up */ }
 
       existing.title = opts.title || existing.title;
@@ -175,7 +238,7 @@ export class ArtifactStore {
         previousVersion,
         previousBytes,
         newBytes,
-        backupPath: backupWritten ? this.backupPathFor(existing.id) : '',
+        backupPath,
         // Shrank to under half the prior size → likely a destructive rewrite.
         significant: previousBytes > 0 && newBytes < previousBytes * 0.5,
       };
@@ -222,6 +285,9 @@ export class ArtifactStore {
     if (idx === -1) return false;
     this.index.splice(idx, 1);
     try { unlinkSync(this.contentPath(id)); } catch { /* file may not exist */ }
+    for (const n of this.listVersionNumbers(id)) {
+      try { unlinkSync(this.versionPath(id, n)); } catch { /* already gone */ }
+    }
     this.saveIndex();
     return true;
   }
