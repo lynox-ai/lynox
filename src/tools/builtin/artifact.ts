@@ -128,3 +128,70 @@ export const artifactDeleteTool: ToolEntry<ArtifactDeleteInput> = {
     return deleted ? `Deleted artifact ${input.id}.` : `Artifact ${input.id} not found.`;
   },
 };
+
+interface ArtifactHistoryInput {
+  id: string;
+}
+
+interface ArtifactRestoreInput {
+  id: string;
+  version: number;
+}
+
+export const artifactHistoryTool: ToolEntry<ArtifactHistoryInput> = {
+  definition: {
+    name: 'artifact_history',
+    description: "List an artifact's prior versions (newest first) so you can recover an earlier draft after an overwrite. Roll back with artifact_restore.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        id: { type: 'string', description: 'Artifact ID' },
+      },
+      required: ['id'],
+    },
+  },
+  handler: async (input: ArtifactHistoryInput, agent: IAgent): Promise<string> => {
+    const store = agent.toolContext.artifactStore;
+    if (!store) return 'Artifact store not available.';
+    const current = store.get(input.id);
+    if (!current) return `Artifact ${input.id} not found.`;
+    const hist = store.history(input.id);
+    if (hist.length === 0) {
+      return `Artifact "${current.title}" is at v${current.version} with no earlier versions stored yet.`;
+    }
+    const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
+    const lines = hist.map(h => `  v${h.version} · ${kb(h.bytes)} · saved ${h.savedAt.slice(0, 16).replace('T', ' ')}`);
+    return (
+      `"${current.title}" (id: ${input.id}) — current v${current.version}.\n` +
+      `Prior versions (newest first):\n${lines.join('\n')}\n` +
+      `Roll back with artifact_restore { id: "${input.id}", version: <n> }.`
+    );
+  },
+};
+
+export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
+  definition: {
+    name: 'artifact_restore',
+    description: 'Restore an artifact to a prior version (from artifact_history). Reversible — the current content is snapshotted first.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        id: { type: 'string', description: 'Artifact ID' },
+        version: { type: 'number', description: 'Version number to restore (from artifact_history)' },
+      },
+      required: ['id', 'version'],
+    },
+  },
+  handler: async (input: ArtifactRestoreInput, agent: IAgent): Promise<string> => {
+    const store = agent.toolContext.artifactStore;
+    if (!store) return 'Artifact store not available.';
+    const restored = store.restore(input.id, input.version);
+    if (!restored) {
+      return `Could not restore — artifact ${input.id} or version ${String(input.version)} not found. Use artifact_history to see available versions.`;
+    }
+    return (
+      `Restored "${restored.title}" to the content of v${input.version} ` +
+      `(now saved as v${restored.version}, id: ${restored.id}). The previous content is kept in history, so this is reversible.`
+    );
+  },
+};

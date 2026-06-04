@@ -85,6 +85,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactSaveTool: { name: 'artifact_save' },
   artifactListTool: { name: 'artifact_list' },
   artifactDeleteTool: { name: 'artifact_delete' },
+  artifactHistoryTool: { name: 'artifact_history' },
+  artifactRestoreTool: { name: 'artifact_restore' },
   recallToolResultTool: { name: 'recall_tool_result' },
 }));
 

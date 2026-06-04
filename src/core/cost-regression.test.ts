@@ -133,8 +133,11 @@ function measureStaticPrefixTokens(): number {
  * 2026-06-03: deliberate bump to 19900 — added the `edit_file` tool definition
  * (targeted file/artifact edits, replaces full rewrites → net token WIN at
  * runtime) plus artifact-revision + high-stakes-grounding prompt guidance.
+ * 2026-06-04: bump to 20000 — added `artifact_history` + `artifact_restore`
+ * (version recovery after an accidental overwrite). Descriptions kept lean so
+ * the two tools net only ~52 tokens on the per-turn prefix; measured 19952.
  */
-const STATIC_PREFIX_BUDGET = 19900;
+const STATIC_PREFIX_BUDGET = 20000;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

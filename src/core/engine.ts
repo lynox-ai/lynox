@@ -62,6 +62,8 @@ import {
   artifactSaveTool,
   artifactListTool,
   artifactDeleteTool,
+  artifactHistoryTool,
+  artifactRestoreTool,
   recallToolResultTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
@@ -972,7 +974,9 @@ export class Engine {
       this.registry
         .register(artifactSaveTool)
         .register(artifactListTool)
-        .register(artifactDeleteTool);
+        .register(artifactDeleteTool)
+        .register(artifactHistoryTool)
+        .register(artifactRestoreTool);
     } catch (err) {
       process.stderr.write(`[lynox] ArtifactStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._artifactStore = null;

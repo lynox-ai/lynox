@@ -161,6 +161,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactSaveTool: { definition: { name: 'artifact_save' }, handler: vi.fn() },
   artifactListTool: { definition: { name: 'artifact_list' }, handler: vi.fn() },
   artifactDeleteTool: { definition: { name: 'artifact_delete' }, handler: vi.fn() },
+  artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
+  artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
 }));
 
@@ -349,7 +351,7 @@ describe('Engine + Session (Orchestrator)', () => {
       // 32 builtin always (incl. edit_file); +1 `web_research` from the
       // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
       // configured; +5 mail tools when vault is available.
-      expect([33, 38]).toContain(mockRegister.mock.calls.length);
+      expect([35, 40]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -472,7 +474,7 @@ describe('Engine + Session (Orchestrator)', () => {
       // 32 builtin always (incl. edit_file); +1 `web_research` from the
       // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
       // configured; +5 mail tools when vault is available.
-      expect([33, 38]).toContain(mockRegister.mock.calls.length);
+      expect([35, 40]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
