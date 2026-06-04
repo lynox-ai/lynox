@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { PromptStore, PromptConflictError } from './prompt-store.js';
 
 /** Build a fresh SQLite instance with just the pending_prompts schema the
- * PromptStore depends on. Mirrors migrations v25 + v27 (post-rewrite). */
+ * PromptStore depends on. Mirrors migrations v25 + v27 + v29 + v33 (post-rewrite). */
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
   const stmts = [
@@ -20,6 +20,7 @@ function makeDb(): Database.Database {
       answer TEXT,
       answer_saved INTEGER,
       answer_error TEXT,
+      multi_select INTEGER,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       answered_at TEXT,
@@ -55,6 +56,17 @@ describe('PromptStore', () => {
       const row = await wait;
       expect(row?.status).toBe('answered');
       expect(row?.answer).toBe('yes');
+    });
+
+    it('persists multi_select so a reconnect can restore it (v33)', () => {
+      const multiId = store.insertAskUser('s1', 'pick some?', ['a', 'b', 'c'], true);
+      expect(store.getById(multiId)?.multi_select).toBe(1);
+      expect(store.getPending('s1')?.multi_select).toBe(1);
+      // Default + explicit-false stay NULL (single-select), unchanged for pre-v33 callers.
+      const singleId = store.insertAskUser('s2', 'pick one?', ['a', 'b']);
+      expect(store.getById(singleId)?.multi_select).toBeNull();
+      const falseId = store.insertAskUser('s3', 'pick one?', ['a', 'b'], false);
+      expect(store.getById(falseId)?.multi_select).toBeNull();
     });
 
     it('resolves immediately if already answered (fast path)', async () => {

@@ -1905,7 +1905,7 @@ export class LynoxHTTPApi {
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
       session.promptUser = async (question: string, options?: string[], meta?: PromptMeta): Promise<string> => {
         if (!promptStore) return 'n'; // fallback if store unavailable
-        const promptId = promptStore.insertAskUser(sessionId, question, options);
+        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true);
         hasActivePendingPrompt = true;
         // Best-effort SSE notification (client may not be connected).
         if (!aborted && !res.writableEnded) {
@@ -2134,6 +2134,9 @@ export class LynoxHTTPApi {
         kind: isTabs ? 'tabs' : row.prompt_type === 'ask_secret' ? 'secret' : 'single',
         question: row.question,
         options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
+        // Restore the multi-select-pills opt-in (v33) so a reconnect mid-prompt
+        // re-renders multi-select instead of degrading to single-select.
+        multiSelect: row.multi_select === 1,
         questions: row.questions_json ? JSON.parse(row.questions_json) as unknown[] : undefined,
         partialAnswers: row.partial_answers_json ? JSON.parse(row.partial_answers_json) as unknown[] : undefined,
         secretName: row.secret_name,

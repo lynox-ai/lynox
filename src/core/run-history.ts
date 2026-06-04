@@ -735,6 +735,14 @@ const MIGRATIONS: string[] = [
   // normal turn), so existing threads are unchanged.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (32);
    ALTER TABLE thread_messages ADD COLUMN display_only INTEGER NOT NULL DEFAULT 0;`,
+
+  // v33: Persist the multi-select flag for resumable ask_user prompts. A
+  // single-question ask_user can opt into multi-select pills (meta.multiSelect):
+  // the flag was sent in the live SSE `prompt` event but never stored, so a
+  // reconnect via /pending-prompt re-rendered it as single-select. Nullable add:
+  // pre-v33 rows + ordinary single-select prompts read as NULL (= single-select).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (33);
+   ALTER TABLE pending_prompts ADD COLUMN multi_select INTEGER;`,
 ];
 
 export class RunHistory {

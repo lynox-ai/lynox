@@ -1676,6 +1676,9 @@ export async function checkPendingPrompt(): Promise<void> {
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
 				promptId: data['promptId'] as string | undefined,
+				// Restore multi-select pills on reconnect (v33) — without this the
+				// prompt degraded to single-select after a reload mid-prompt.
+				multiSelect: data['multiSelect'] === true,
 			};
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {

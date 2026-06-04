@@ -1002,6 +1002,7 @@ describe('LynoxHTTPApi', () => {
         answer TEXT,
         answer_saved INTEGER,
         answer_error TEXT,
+        multi_select INTEGER,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1091,7 +1092,7 @@ describe('LynoxHTTPApi', () => {
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
         question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
-        answer TEXT, answer_saved INTEGER, answer_error TEXT,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
