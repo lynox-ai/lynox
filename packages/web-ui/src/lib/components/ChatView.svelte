@@ -33,6 +33,7 @@
 		removeQueuedMessage,
 		getSessionModel,
 		getContextBudget,
+		getCompactionOffer,
 		getContextWindow,
 		getPendingChangeset,
 		getChangesetLoading,
@@ -1357,6 +1358,7 @@
 	const ready = $derived(hasApiKey !== false);
 	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
+	const compactionOffer = $derived(getCompactionOffer());
 	const ctxWindow = $derived(getContextWindow());
 	const compacting = $derived(getIsCompacting());
 
@@ -1667,12 +1669,6 @@
 	/** Base input tokens = full input minus both cache buckets. */
 	function baseInput(u: UsageInfo): number {
 		return Math.max(0, u.tokensIn - u.cacheRead - u.cacheWrite);
-	}
-
-	function formatK(n: number): string {
-		if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
-		if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
-		return String(n);
 	}
 
 	function autoResize(e: Event) {
@@ -2640,20 +2636,21 @@
 		</div>
 	{/if}
 
-	<!-- Context-usage banner (only renders at ≥60 %, silent below).
-	     Tone: amber up to 90 % (advisory — "context filling up"), red only
-	     at ≥95 % (genuine "auto-compact about to fire"). Pre-fix this went
-	     red at 75 % and rendered as "Kontext: 423 %" when the denominator
-	     was stale — users read it as an error. Now the displayed percent is
-	     clamped to 100 (no scary 4xx %) and the colour only escalates when
-	     auto-compact is actually imminent. The triangle icon was the other
-	     "error" signal; replaced with a softer chat-pressure pictogram. -->
-	{#if ctxBudget && ctxBudget.usagePercent >= 60}
-		{@const rawPct = ctxBudget.usagePercent}
+	<!-- "Prepare & compact" offer bar. Driven by the engine's one-shot
+	     `compaction_offer` event (fired at the ~80 % prepare threshold), NOT a
+	     raw percentage — so it reads as the agent offering, not a scary alert.
+	     Calm/informational by default; only escalates to a warning tone as it
+	     approaches the ~90 % auto-compact safety net. Replaces the old banner
+	     that turned amber from 60 % up (rafael: "mega scary, kam superfrüh").
+	     The button triggers a user-controlled compaction (compactNow → /compact)
+	     so the user compacts at a good moment instead of being auto-compacted
+	     mid-task. -->
+	{#if compactionOffer !== null || (ctxBudget && ctxBudget.usagePercent >= 80)}
+		{@const rawPct = compactionOffer ?? ctxBudget?.usagePercent ?? 80}
 		{@const pct = Math.min(rawPct, 100)}
-		{@const critical = rawPct >= 95}
+		{@const nearNet = rawPct >= 88}
 		<div
-			class="border-t {critical ? 'border-warning/40 bg-warning/15 text-warning' : 'border-warning/20 bg-warning/5 text-warning/90'} px-4 py-1.5 text-xs"
+			class="border-t {nearNet ? 'border-warning/30 bg-warning/10 text-warning/90' : 'border-border bg-bg-subtle text-text-subtle'} px-4 py-1.5 text-xs"
 			role="status"
 			aria-live="polite"
 		>
@@ -2661,25 +2658,16 @@
 				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M8 7h8m-8 4h8m-8 4h5m6 5l-3-3v-2a2 2 0 00-2-2H6a2 2 0 00-2-2V6a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2h-2z" />
 				</svg>
-				<span class="font-mono tabular-nums">{t('status.context')}: {pct}%</span>
-				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">·</span>
-				<span class="opacity-70 font-mono tabular-nums hidden sm:inline">{formatK(ctxBudget.totalTokens)} / {formatK(ctxBudget.maxTokens)} {t('chat.context_tokens')}</span>
-				{#if critical}
+				<span class="hidden sm:inline">{t('chat.context_offer')}</span>
+				<span class="font-mono tabular-nums opacity-70">{pct}%</span>
+				{#if nearNet}
 					<span class="opacity-80 hidden md:inline">— {t('chat.context_auto_compact_imminent')}</span>
 				{/if}
-				<!--
-					Manual-compact escape hatch. Auto-compact fires at 75% between
-					turns, but a single turn can push context from 60% → 90%+ when
-					a tool returns a massive payload (DataForSEO ranked_keywords
-					is the canonical case). Giving the user an explicit "compact
-					now" button lets them reclaim the window before the next
-					send, without waiting for the next turn boundary.
-				-->
 				<button
 					type="button"
 					onclick={handleCompactClick}
 					disabled={compacting || isStreaming}
-					class="ml-auto rounded-[var(--radius-sm)] border border-current/40 px-2 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+					class="ml-auto shrink-0 rounded-[var(--radius-sm)] border border-current/40 px-2 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 					title={isStreaming ? t('chat.context_auto_compact_imminent') : t('chat.compact_now')}
 				>
 					{compacting ? t('chat.compact_in_progress') : t('chat.compact_now')}

@@ -65,10 +65,16 @@ import type { DataStore } from './data-store.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 
-/** Context-usage % above which auto-compaction fires. Raising this + a
- *  user-triggered "prepare & compact" path is a separate follow-up; this PR
- *  only fixes the summary itself. */
-const AUTO_COMPACT_PERCENT = 75;
+/** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
+ *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
+ *  up (the UI surfaces a compact button + a one-time agent offer); auto only catches
+ *  a runaway that would otherwise hard-truncate. Raised from 75% — compacting eagerly
+ *  threw away ~50k of usable window on a 200k model and forced a lossy summary mid-task. */
+const AUTO_COMPACT_PERCENT = 90;
+/** Context-usage % at which the UI surfaces a calm "prepare & compact" offer
+ *  (banner button + a one-time `compaction_offer` stream event). Below this, no
+ *  compaction signal at all. */
+const COMPACT_PREPARE_PERCENT = 80;
 
 /** Per-run overrides — applied via agent setters, never mutate session state. */
 export interface RunOptions {
@@ -142,6 +148,10 @@ export class Session {
   private _changesetManager: ChangesetManager | null = null;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   private _isCompacting = false;
+  /** One-shot guard: the "prepare & compact" offer is streamed once per fill,
+   *  reset when usage drops back below COMPACT_PREPARE_PERCENT or after a
+   *  compaction, so it can re-offer on the next fill but doesn't nag every turn. */
+  private _compactionOffered = false;
   onStream: StreamHandler | null = null;
   private _promptUser: PromptUserFn | null = null;
   private _promptTabs: PromptTabsFn | null = null;
@@ -833,6 +843,11 @@ export class Session {
       this.loadMessages(
         buildPostCompactionMessages(summary, handles, { confirmScope: opts?.confirmScope }),
       );
+      // Persist the visible marker for BOTH paths (auto + manual /compact) so a
+      // user-triggered compaction is just as transparent on reload/export as an
+      // automatic one. Best-effort — never block. (The live UI marker is streamed
+      // by _autoCompactIfNeeded for auto, and pushed by compactNow() for manual.)
+      persistCompactionMarker(this.engine.getThreadStore(), this.sessionId);
       return { success: true, summary };
     }
     return { success: false, summary: '' };
@@ -855,15 +870,39 @@ export class Session {
   }
 
   /**
-   * Auto-compact if context usage exceeds AUTO_COMPACT_PERCENT.
-   * Runs after each successful run() to prevent context overflow.
-   * Guard flag prevents recursive compaction since compact() calls run().
+   * After each run(), manage context pressure in two tiers:
+   *  - ≥ AUTO_COMPACT_PERCENT (90): last-resort auto-compact (with confirmScope)
+   *    so a runaway never hard-truncates.
+   *  - [COMPACT_PREPARE_PERCENT, AUTO): offer "prepare & compact" ONCE (a stream
+   *    event the UI surfaces as a calm suggestion + button) so the USER compacts
+   *    at a good moment instead of the system silently doing it mid-task.
+   * Guard flag prevents recursion since compact() calls run().
    */
   private async _autoCompactIfNeeded(): Promise<void> {
     if (this._isCompacting || !this.agent) return;
     const usagePercent = this.getContextUsagePercent();
-    if (usagePercent <= AUTO_COMPACT_PERCENT) return;
 
+    // Below the prepare point: nothing to do; arm the one-shot offer for the
+    // next time the context fills up again.
+    if (usagePercent < COMPACT_PREPARE_PERCENT) {
+      this._compactionOffered = false;
+      return;
+    }
+
+    // Prepare zone [80, 90): offer once, never auto-compact — the user (or a
+    // fresh turn) triggers compactNow() at a moment that suits them.
+    if (usagePercent < AUTO_COMPACT_PERCENT) {
+      if (!this._compactionOffered) {
+        this._compactionOffered = true;
+        if (this.onStream) {
+          void this.onStream({ type: 'compaction_offer', usagePercent, agent: this.agent.name });
+        }
+      }
+      return;
+    }
+
+    // Safety net (≥90): the user ignored the offer and kept going — compact now
+    // to avoid hard truncation.
     this._isCompacting = true;
     try {
       // confirmScope: this compaction fires mid-task (unprompted), so steer the
@@ -871,10 +910,9 @@ export class Session {
       // silently rebuilding from the lossy summary.
       const result = await this.compact(undefined, { confirmScope: true });
       if (result.success) {
-        // Persist a visible marker so the compaction isn't invisible on reload
-        // /export (the agent otherwise appears to silently drop the earlier
-        // conversation). Best-effort — never block the loop.
-        persistCompactionMarker(this.engine.getThreadStore(), this.sessionId);
+        this._compactionOffered = false;
+        // compact() already persisted the visible marker; here we also stream
+        // the live context_compacted event (the SSE is active during auto-compaction).
         if (this.onStream) {
           void this.onStream({
             type: 'context_compacted',

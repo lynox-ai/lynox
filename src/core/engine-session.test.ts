@@ -907,4 +907,63 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(JSON.stringify(synthetic)).not.toContain('recall_tool_result');
     });
   });
+
+  describe('compaction pressure: prepare-offer vs safety-net', () => {
+    type AutoCompact = { _autoCompactIfNeeded(): Promise<void> };
+
+    it('offers compaction ONCE in the prepare zone [80,90) and does NOT auto-compact', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<{ type: string; usagePercent?: number }> = [];
+      session.onStream = (e) => { events.push(e as { type: string }); return Promise.resolve(); };
+      vi.spyOn(session, 'getContextUsagePercent').mockReturnValue(83);
+      const compactSpy = vi.spyOn(session, 'compact');
+
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded();
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded(); // still 83% — must not re-offer
+
+      const offers = events.filter(e => e.type === 'compaction_offer');
+      expect(offers).toHaveLength(1);
+      expect(offers[0]!.usagePercent).toBe(83);
+      expect(compactSpy).not.toHaveBeenCalled();
+    });
+
+    it('re-arms the offer after usage drops back below the prepare threshold', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<{ type: string }> = [];
+      session.onStream = (e) => { events.push(e as { type: string }); return Promise.resolve(); };
+      const usage = vi.spyOn(session, 'getContextUsagePercent');
+
+      usage.mockReturnValue(82);
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded(); // offer #1
+      usage.mockReturnValue(40);
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded(); // drop → re-arm
+      usage.mockReturnValue(85);
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded(); // offer #2
+
+      expect(events.filter(e => e.type === 'compaction_offer')).toHaveLength(2);
+    });
+
+    it('auto-compacts as a last-resort safety net at >=90% (with confirmScope)', async () => {
+      const { session } = await createEngineAndSession();
+      vi.spyOn(session, 'getContextUsagePercent').mockReturnValue(92);
+      const compactSpy = vi.spyOn(session, 'compact').mockResolvedValue({ success: true, summary: 'S' });
+
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded();
+
+      expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true });
+    });
+
+    it('does nothing below the prepare threshold', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<{ type: string }> = [];
+      session.onStream = (e) => { events.push(e as { type: string }); return Promise.resolve(); };
+      vi.spyOn(session, 'getContextUsagePercent').mockReturnValue(50);
+      const compactSpy = vi.spyOn(session, 'compact');
+
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded();
+
+      expect(events.filter(e => e.type === 'compaction_offer')).toHaveLength(0);
+      expect(compactSpy).not.toHaveBeenCalled();
+    });
+  });
 });
