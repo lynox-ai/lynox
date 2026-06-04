@@ -80,6 +80,7 @@
 	}
 	let stats = $state<{
 		total_runs?: number;
+		user_turn_runs?: number;
 		total_cost_usd?: number;
 		avg_duration_ms?: number;
 		cost_by_model?: ModelBreakdownEntry[];
@@ -264,7 +265,7 @@
 		showCostChart = !showCostChart;
 		if (!showCostChart || costData.length > 0) return;
 		try {
-			const res = await fetch(`${getApiBase()}/history/cost/daily?days=30`);
+			const res = await fetch(`${getApiBase()}/history/cost/daily?days=30&tzOffsetMin=${new Date().getTimezoneOffset()}`);
 			if (res.ok) costData = ((await res.json()) as CostDay[]);
 		} catch {
 			/* silently fail */
@@ -368,7 +369,7 @@
 		<div class="flex items-center gap-4">
 			{#if stats}
 				<div class="flex gap-4 text-xs text-text-muted">
-					<span>{stats.total_runs ?? 0} {t('history.runs')}</span>
+					<span title="{stats.total_runs ?? 0} total incl. voice + sub-runs">{stats.user_turn_runs ?? stats.total_runs ?? 0} {t('history.runs')}</span>
 					<span>{formatCost(stats.total_cost_usd ?? 0)} {t('history.total')}</span>
 					<span>{t('history.avg_duration')} {((stats.avg_duration_ms ?? 0) / 1000).toFixed(1)}s</span>
 				</div>

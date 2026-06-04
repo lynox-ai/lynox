@@ -694,19 +694,30 @@ export class Session {
           const apiCount = threadStore.getApiMessageCount(this.sessionId);
           const totalCount = threadStore.getMessageCount(this.sessionId);
           const newMessages = allMessages.slice(apiCount);
+          // Per-thread cost/tokens = SUM over run_history for this session (the
+          // single source of truth), NOT this run's cost. The column used to be
+          // overwritten with the last run's cost each turn, so a multi-turn
+          // thread under-reported its spend (rafael 2026-06-04). This run is
+          // already recorded in run_history (updateRun above), so the sum
+          // includes it; stamping it here self-heals historically-wrong rows.
+          const threadTotals = runHistory ? runHistory.getThreadTotals(this.sessionId) : null;
+          const rollupTokens = threadTotals
+            ? threadTotals.tokens_in + threadTotals.tokens_out
+            : this.usage.input_tokens + this.usage.output_tokens;
+          const rollupCost = threadTotals ? threadTotals.cost_usd : costUsd;
           if (newMessages.length > 0) {
             // Combined append + rollup in one transaction (P1). Seqs start at
             // MAX(seq)+1 (deletion-safe), message_count tracks total rows.
             threadStore.appendMessages(this.sessionId, newMessages, threadStore.getNextSeq(this.sessionId), {
               message_count: totalCount + newMessages.length,
-              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
-              total_cost_usd: costUsd,
+              total_tokens: rollupTokens,
+              total_cost_usd: rollupCost,
             });
           } else {
             // Eager already persisted — just stamp the cost/token rollup.
             threadStore.updateThread(this.sessionId, {
-              total_tokens: this.usage.input_tokens + this.usage.output_tokens,
-              total_cost_usd: costUsd,
+              total_tokens: rollupTokens,
+              total_cost_usd: rollupCost,
             });
           }
           if (startMessageCount === 0) {

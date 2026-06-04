@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory, hashTask } from './run-history.js';
 
 describe('RunHistory', () => {
@@ -138,6 +139,69 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getThreadTotals sums cost + tokens across ALL runs in a session (the per-thread SSOT)', () => {
+    const h = createHistory();
+    const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r1, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, durationMs: 1000, status: 'completed' });
+    const r2 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 2', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r2, { tokensIn: 200, tokensOut: 80, costUsd: 0.04, durationMs: 2000, status: 'completed' });
+    // A spawned sub-run + a voice run in the same session also count toward the
+    // thread's spend (matches the Run History per-thread group total).
+    const child = h.insertRun({ sessionId: 'thread-1', taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: r2, spawnDepth: 1 });
+    h.updateRun(child, { tokensIn: 10, tokensOut: 5, costUsd: 0.005, durationMs: 100, status: 'completed' });
+    // A run in a different session must NOT leak in.
+    const other = h.insertRun({ sessionId: 'thread-2', taskText: 'other', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(other, { tokensIn: 999, tokensOut: 999, costUsd: 9.99, durationMs: 1, status: 'completed' });
+
+    const totals = h.getThreadTotals('thread-1');
+    expect(totals.cost_usd).toBeCloseTo(0.055, 6); // 0.01 + 0.04 + 0.005, NOT just the last turn
+    expect(totals.tokens_in).toBe(310);
+    expect(totals.tokens_out).toBe(135);
+    // Empty / unknown session → zeros, never throws.
+    expect(h.getThreadTotals('nope')).toEqual({ cost_usd: 0, tokens_in: 0, tokens_out: 0 });
+    h.close();
+  });
+
+  it('getCostByDay buckets by the LOCAL day under a tz offset — proves the shift at a day edge', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'tz.db');
+    const h = new RunHistory(dbPath);
+    const r = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r, { tokensIn: 1, tokensOut: 1, costUsd: 0.03, durationMs: 1, status: 'completed' });
+    h.close();
+    // Pin created_at to a fixed UTC time 30 min BEFORE midnight, so a +2h local
+    // shift crosses into the next calendar day. A wide window keeps the row in
+    // scope regardless of the test clock — the assertion is purely the BUCKET.
+    const raw = new BetterSqlite3(dbPath);
+    raw.prepare("UPDATE runs SET created_at = '2026-06-04 23:30:00' WHERE id = ?").run(r);
+    raw.close();
+
+    const h2 = new RunHistory(dbPath);
+    const utc = h2.getCostByDay(3650, { tzOffsetMin: 0 });
+    const local = h2.getCostByDay(3650, { tzOffsetMin: -120 }); // Zurich summer = UTC+2
+    expect(utc[0]!.day).toBe('2026-06-04');   // UTC bucket
+    expect(local[0]!.day).toBe('2026-06-05'); // shifted into the next LOCAL day
+    expect(local[0]!.cost_usd).toBeCloseTo(0.03, 6);
+    h2.close();
+  });
+
+  it('getStats user_turn_runs excludes voice + sub-runs (the headline RC-7 count)', () => {
+    // (getRunCounts was removed as dead code — the user-turn headline is served
+    // by getCostByDay.user_turns + getStats.user_turn_runs, both covered.)
+    const h = createHistory();
+    const t = h.insertRun({ sessionId: 's', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(t, { tokensIn: 1, tokensOut: 1, costUsd: 0.01, durationMs: 1, status: 'completed' });
+    const voice = h.insertRun({ sessionId: 's', taskText: 'tts', modelTier: 'balanced', modelId: 'voxtral-tts', kind: 'voice_tts' });
+    h.updateRun(voice, { tokensIn: 0, tokensOut: 0, costUsd: 0.002, durationMs: 1, status: 'completed' });
+    const sub = h.insertRun({ sessionId: 's', taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: t, spawnDepth: 1 });
+    h.updateRun(sub, { tokensIn: 1, tokensOut: 1, costUsd: 0.005, durationMs: 1, status: 'completed' });
+    const stats = h.getStats();
+    expect(stats.total_runs).toBe(3);
+    expect(stats.user_turn_runs).toBe(1);
+    h.close();
+  });
+
   it('returns recent runs', () => {
     const h = createHistory();
     for (let i = 0; i < 5; i++) {
@@ -167,16 +231,29 @@ describe('RunHistory', () => {
   it('computes stats', () => {
     const h = createHistory();
     const id1 = h.insertRun({ taskText: 'Task 1', modelTier: 'deep', modelId: 'claude-opus-4-6' });
-    const id2 = h.insertRun({ taskText: 'Task 2', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+    // A Mistral model as a real chat turn — proves cost_by_model is a dynamic
+    // GROUP BY model_id (Anthropic AND Mistral AND voice all aggregate), not a
+    // fixed roster.
+    const id2 = h.insertRun({ taskText: 'Task 2', modelTier: 'balanced', modelId: 'mistral-large-2512' });
 
     h.updateRun(id1, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, durationMs: 1000, status: 'completed' });
     h.updateRun(id2, { tokensIn: 200, tokensOut: 100, costUsd: 0.02, durationMs: 2000, status: 'completed' });
 
+    // Add a voice run + a spawned sub-run: total_runs counts them, the headline
+    // user_turn_runs does not (RC-7 — "N runs" = chat turns).
+    const v = h.insertRun({ taskText: 'tts', modelTier: 'balanced', modelId: 'voxtral-tts', kind: 'voice_tts' });
+    h.updateRun(v, { tokensIn: 0, tokensOut: 0, costUsd: 0.002, durationMs: 10, status: 'completed' });
+    const sub = h.insertRun({ taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: id2, spawnDepth: 1 });
+    h.updateRun(sub, { tokensIn: 1, tokensOut: 1, costUsd: 0.001, durationMs: 10, status: 'completed' });
+
     const stats = h.getStats();
-    expect(stats.total_runs).toBe(2);
-    expect(stats.total_tokens_in).toBe(300);
-    expect(stats.total_cost_usd).toBeCloseTo(0.03);
-    expect(stats.cost_by_model).toHaveLength(2);
+    expect(stats.total_runs).toBe(4);       // all rows
+    expect(stats.user_turn_runs).toBe(2);   // only the 2 chat turns
+    expect(stats.total_tokens_in).toBe(301);
+    expect(stats.total_cost_usd).toBeCloseTo(0.033);
+    expect(stats.cost_by_model).toHaveLength(4); // opus, mistral-large-2512, voxtral-tts, m
+    // Mistral LLM model aggregates exactly like the Anthropic ones.
+    expect(stats.cost_by_model.find(m => m.model_id === 'mistral-large-2512')).toBeDefined();
     h.close();
   });
 

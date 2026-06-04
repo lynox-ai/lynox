@@ -65,6 +65,9 @@ export interface ToolCallRecord {
 
 export interface RunStats {
   total_runs: number;
+  /** Chat turns the user took — excludes voice + spawned/batch sub-runs. The
+   *  headline "N runs" number; total_runs stays the all-rows count. */
+  user_turn_runs: number;
   total_tokens_in: number;
   total_tokens_out: number;
   total_cost_usd: number;
@@ -1105,15 +1108,38 @@ export class RunHistory {
     });
   }
 
+  /**
+   * Canonical per-thread totals — the SINGLE source of truth for a thread's
+   * cumulative cost/tokens. Sums every recorded run for the session (LLM +
+   * voice + spawned sub-runs, excluding only in-flight `running` rows), so it
+   * matches the per-thread group total shown in Run History.
+   *
+   * `threads.total_cost_usd` used to be OVERWRITTEN with the last run's cost
+   * each turn (session.ts) — a 20-run thread showed one turn's spend. Stamping
+   * the thread row from this getter at run-end makes it self-healing: any
+   * historically-wrong value is corrected on the thread's next run.
+   */
+  getThreadTotals(sessionId: string): { cost_usd: number; tokens_in: number; tokens_out: number } {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COALESCE(SUM(tokens_in), 0) as tokens_in,
+             COALESCE(SUM(tokens_out), 0) as tokens_out
+      FROM runs
+      WHERE session_id = ? AND status != 'running'
+    `).get(sessionId) as { cost_usd: number; tokens_in: number; tokens_out: number } | undefined;
+    return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
+  }
+
   getStats(): RunStats {
     const totals = this.db.prepare(`
       SELECT COUNT(*) as total_runs,
+             SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND spawn_depth = 0 AND run_type != 'batch_item' THEN 1 ELSE 0 END) as user_turn_runs,
              COALESCE(SUM(tokens_in), 0) as total_tokens_in,
              COALESCE(SUM(tokens_out), 0) as total_tokens_out,
              COALESCE(SUM(cost_usd), 0) as total_cost_usd,
              COALESCE(AVG(duration_ms), 0) as avg_duration_ms
       FROM runs WHERE status NOT IN ('running', 'failed')
-    `).get() as { total_runs: number; total_tokens_in: number; total_tokens_out: number; total_cost_usd: number; avg_duration_ms: number };
+    `).get() as { total_runs: number; user_turn_runs: number | null; total_tokens_in: number; total_tokens_out: number; total_cost_usd: number; avg_duration_ms: number };
 
     const costByModel = this.db.prepare(`
       SELECT model_id,
@@ -1127,18 +1153,42 @@ export class RunHistory {
       GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
 
-    return { ...totals, cost_by_model: costByModel };
+    return { ...totals, user_turn_runs: totals.user_turn_runs ?? 0, cost_by_model: costByModel };
   }
 
   // === Cost queries (Sprint 5) ===
 
-  getCostByDay(days: number): Array<{ day: string; cost_usd: number; run_count: number }> {
+  /**
+   * Daily cost buckets for the last `days` calendar days **ending today in the
+   * user's local timezone**. `created_at` is stored UTC; a Zurich user (UTC+2)
+   * who ran something at 00:30 local expects it under today, not yesterday's
+   * UTC bucket. `tzOffsetMin` is the JS `Date.getTimezoneOffset()` convention
+   * (UTC+2 → -120); we shift each timestamp by `-tzOffsetMin` minutes before
+   * bucketing so `date()` groups by the local calendar day, and bound the
+   * window by the same shifted clock. Omitting the offset preserves the old
+   * UTC behaviour. This is the spine of footer↔dashboard "today" agreement.
+   */
+  getCostByDay(days: number, opts?: { tzOffsetMin?: number }): Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }> {
+    // Bucket key is tz-shifted (local calendar day); the WINDOW predicate is
+    // left exactly as before (`created_at >= datetime('now','-N days')`) so the
+    // budget-enforcement path (session-budget.ts → checkPersistentBudget) that
+    // also calls this keeps identical row-inclusion semantics. Only the day
+    // GROUPING moves to the user's local day. mod = minutes to add to UTC.
+    // `user_turns` (chat turns, excl. voice + spawned/batch sub-runs) is the
+    // headline "N runs" count; `run_count` stays all-rows for callers that need
+    // the full count.
+    const mod = `${-(opts?.tzOffsetMin ?? 0)} minutes`;
     return this.db.prepare(`
-      SELECT date(created_at) as day, COALESCE(SUM(cost_usd), 0) as cost_usd, COUNT(*) as run_count
-      FROM runs WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
-      GROUP BY date(created_at) ORDER BY day DESC
-    `).all(`-${days} days`) as Array<{ day: string; cost_usd: number; run_count: number }>;
+      SELECT date(created_at, ?) as day,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COUNT(*) as run_count,
+             SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND spawn_depth = 0 AND run_type != 'batch_item' THEN 1 ELSE 0 END) as user_turns
+      FROM runs
+      WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
+      GROUP BY date(created_at, ?) ORDER BY day DESC
+    `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
   }
+
 
   getCostByModel(): ModelBreakdownEntry[] {
     return this.db.prepare(`

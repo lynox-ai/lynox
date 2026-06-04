@@ -29,6 +29,7 @@
 	// ── Dashboard data ──────────────────────────────────
 	interface Stats {
 		total_runs?: number;
+		user_turn_runs?: number;
 		total_cost_usd?: number;
 		avg_duration_ms?: number;
 		cost_by_model?: Array<{ model_id: string; cost_usd: number; run_count: number }>;
@@ -73,7 +74,7 @@
 		try {
 			const [statsRes, costRes, tasksRes, patternsRes, threadsRes] = await Promise.all([
 				fetch(`${getApiBase()}/history/stats`),
-				fetch(`${getApiBase()}/history/cost/daily?days=14`),
+				fetch(`${getApiBase()}/history/cost/daily?days=14&tzOffsetMin=${new Date().getTimezoneOffset()}`),
 				fetch(`${getApiBase()}/tasks`),
 				fetch(`${getApiBase()}/patterns`).catch(() => null),
 				fetch(`${getApiBase()}/thread-insights?limit=10`).catch(() => null),
@@ -159,7 +160,7 @@
 						</div>
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 							<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('hub.activity.total_runs')}</p>
-							<p class="text-2xl font-light text-text mt-1">{stats?.total_runs ?? 0}</p>
+							<p class="text-2xl font-light text-text mt-1" title="{stats?.total_runs ?? 0} total incl. voice + sub-runs">{stats?.user_turn_runs ?? stats?.total_runs ?? 0}</p>
 						</div>
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
 							<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('hub.activity.avg_speed')}</p>
