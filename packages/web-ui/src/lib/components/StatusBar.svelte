@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
+	import { parseActiveRuns, countLiveRuns } from '../utils/active-runs.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
@@ -51,6 +52,10 @@
 	// name when no description is available.
 	let apiStatusTooltip = $state('');
 	let activeTasks = $state(0);
+	// Live chat runs (running + awaiting_input) — distinct from `activeTasks`
+	// (WorkerLoop background tasks). Kept separate so the bar never conflates a
+	// streaming chat run with a scheduled task. Only shown when > 0.
+	let liveRuns = $state(0);
 	let todayCost = $state(0);
 	let todayRuns = $state(0);
 	let panelOpen = $state(false);
@@ -89,11 +94,12 @@
 
 	async function poll() {
 		try {
-			const [healthRes, tasksRes, dailyRes, providersRes] = await Promise.all([
+			const [healthRes, tasksRes, dailyRes, providersRes, runsRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
 				fetch(`${getApiBase()}/tasks?status=in_progress`).catch(() => null),
 				fetch(`${getApiBase()}/history/cost/daily?days=1&tzOffsetMin=${new Date().getTimezoneOffset()}`).catch(() => null),
 				fetch(`${getApiBase()}/providers/status`).catch(() => null),
+				fetch(`${getApiBase()}/runs/active`).catch(() => null),
 			]);
 
 			engineOk = healthRes?.ok ?? false;
@@ -164,6 +170,16 @@
 			if (tasksRes?.ok) {
 				const data = (await tasksRes.json()) as { tasks: unknown[] };
 				activeTasks = data.tasks.length;
+			}
+
+			if (runsRes?.ok) {
+				// Shared parser + count rule with the nav dot (utils/active-runs):
+				// counts running + awaiting_input, excludes interrupted.
+				liveRuns = countLiveRuns(parseActiveRuns(await runsRes.json()));
+			} else {
+				// Unreachable engine (null), 5xx, or 404 (older engine) → clear, so
+				// the pulsing live-run pill never lingers during an outage.
+				liveRuns = 0;
 			}
 
 			if (dailyRes?.ok) {
@@ -368,6 +384,18 @@
 	</span>
 
 	<span class="text-border">|</span>
+
+	<!-- Live chat runs — only shown when > 0. Distinct from Active Tasks so a
+		 streaming run is never conflated with a WorkerLoop task. Pulsing dot +
+		 role=status announces the live count to AT without overloading the
+		 tasks counter. -->
+	{#if liveRuns > 0}
+		<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" role="status" aria-label="{liveRuns} {t('status.runs_active')}">
+			<span class="inline-block h-1.5 w-1.5 rounded-full bg-accent motion-safe:animate-pulse"></span>
+			<span class="text-accent-text">{liveRuns}</span> {t('status.runs_active')}
+		</span>
+		<span class="text-border">|</span>
+	{/if}
 
 	<!-- Active Tasks -->
 	<a href="/app/hub?section=tasks" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">

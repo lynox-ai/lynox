@@ -2058,42 +2058,65 @@ export class LynoxHTTPApi {
         }
       }, 10_000);
 
-      // Abort on client disconnect or timeout (30 min max)
+      // Wall-clock backstop (30 min max). Fires for a still-streaming run AND
+      // for a headless run whose client already disconnected (disconnect≠abort
+      // leaves this armed). `res.destroyed` guards the post-disconnect case so
+      // we never call res.end() on a torn-down socket.
       const streamTimeout = setTimeout(() => {
         aborted = true;
         clearInterval(keepaliveTimer);
         sessionAbortController.abort();
         session.abort();
-        if (!res.writableEnded) res.end();
+        if (!res.writableEnded && !res.destroyed) res.end();
       }, 30 * 60_000);
 
       req.on('close', () => {
-        clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
+        // Stop writing to the dead socket — `onStream` no-ops while `aborted`
+        // (L1875), so the run can keep computing without write-after-close. We
+        // do NOT clear `streamTimeout` here: it stays armed as the headless
+        // wall-clock backstop below (the prompt branch drops it explicitly).
         aborted = true;
         // Mark this run's stream as dead so a fresh /run on the same session
         // can take it over if the agent is parked on a pending prompt.
         const slot = this.runningSessions.get(sessionId);
         if (slot) slot.streamAlive = false;
-        // If a prompt is pending, do NOT abort the session —
-        // the agent loop stays alive polling SQLite for an answer.
-        // The user can reconnect and answer the prompt.
-        if (!hasActivePendingPrompt) {
-          sessionAbortController.abort();
-          session.abort();
-        } else {
-          // Orphan watchdog: bound how long a closed-stream slot can hold
-          // the running-session entry while waiting on a pending prompt.
-          // Pre-1.5.0 the slot could sit `streamAlive=false` up to PROMPT_TTL
-          // (24h), pinning a runningSessions entry + open SQLite handles
-          // until the prompt expired. Now: 10 min after stream close, if
-          // nobody reconnected (streamAlive still false), trigger the
-          // takeover so the prompt expires and the slot frees.
-          setTimeout(() => {
-            const liveSlot = this.runningSessions.get(sessionId);
-            if (liveSlot && !liveSlot.streamAlive) liveSlot.takeover();
-          }, ORPHAN_PROMPT_WATCHDOG_MS);
+        // Orphan watchdog (armed in BOTH branches). 10 min after the stream
+        // dies, if the run is parked on a still-pending prompt that nobody
+        // reconnected to answer, free the slot. Pre-1.5.0 such a slot could sit
+        // `streamAlive=false` up to PROMPT_TTL (24h), pinning a runningSessions
+        // entry + open SQLite handles until the prompt expired.
+        //
+        // The `getPending` guard is what makes this safe to arm unconditionally:
+        // it fires takeover ONLY for a genuinely stuck, dead-stream prompt —
+        // never against a headless run that is productively computing (no
+        // pending prompt) or whose prompt was already answered via reconnect
+        // (getPending now empty). This also bounds the prompt-fires-AFTER-a
+        // -headless-disconnect case at 10 min; the close-time
+        // `hasActivePendingPrompt` snapshot alone would leave it to the 30-min
+        // streamTimeout.
+        setTimeout(() => {
+          const liveSlot = this.runningSessions.get(sessionId);
+          if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
+            liveSlot.takeover();
+          }
+        }, ORPHAN_PROMPT_WATCHDOG_MS);
+        if (hasActivePendingPrompt) {
+          // Already parked on a prompt at close → the agent loop is blocked on
+          // the prompt (not computing), so the 30-min compute backstop is moot.
+          // Drop it; the orphan watchdog above bounds the wait. The user can
+          // reconnect and answer (the loop keeps polling SQLite).
+          clearTimeout(streamTimeout);
         }
+        // else: RUNNING with no prompt → Tier-1 disconnect≠abort. Do NOT abort
+        // the session; let it finish headless. Eager-persist keeps the
+        // transcript durable and the run registry keeps reporting it via
+        // GET /api/runs/active, so a reload re-attaches (re-reads
+        // /threads/:id/messages + sees the live run) instead of going blind —
+        // this is the v1.9.0 reload-blind fix. The 30-min streamTimeout stays
+        // armed as the wall-clock backstop (it aborts the session + ends res),
+        // so a hung headless run can't leak; the finally clears it on natural
+        // completion. PRD-RUN-RESILIENCE D2.
       });
 
       // Run

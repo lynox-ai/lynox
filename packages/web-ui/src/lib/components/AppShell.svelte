@@ -4,7 +4,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId, getSkipExtraction, toggleSkipExtraction } from '../stores/chat.svelte.js';
-	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh } from '../stores/threads.svelte.js';
+	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -362,11 +362,13 @@
 
 	// Auto-refresh threads when tab regains focus (cross-device sync)
 	let stopVisibilityRefresh: (() => void) | undefined;
+	let stopActiveRunsPoll: (() => void) | undefined;
 
 	// Auto-expand section matching current route on mount.
 	onMount(() => {
 		void loadThreads();
 		stopVisibilityRefresh = startVisibilityRefresh();
+		stopActiveRunsPoll = startActiveRunsPoll();
 		const match = nav.find(item => isExpandable(item) && isParentActive(item));
 		if (match) {
 			expandedSection = match.href;
@@ -400,8 +402,17 @@
 
 	onDestroy(() => {
 		stopVisibilityRefresh?.();
+		stopActiveRunsPoll?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 	});
+
+	/** Accessible label for the live-run status dot (no text in the row — the
+	 * dot + aria-label carry the meaning so the cramped row stays scannable). */
+	function runStatusLabel(status: 'running' | 'awaiting_input' | 'interrupted'): string {
+		if (status === 'awaiting_input') return t('threads.run_awaiting');
+		if (status === 'interrupted') return t('threads.run_interrupted');
+		return t('threads.run_running');
+	}
 
 	$effect(() => {
 		function handleEscape(e: KeyboardEvent) {
@@ -509,6 +520,7 @@
 								<ul class="mt-1 flex-1 space-y-0.5 min-h-0 overflow-y-auto scrollbar-none" aria-label={t('threads.recent')}>
 									{#each visibleThreads as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
+											{@const runStatus = getRunStatus(thread.id)}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
 												<!-- Swipe archive action (mobile). Icon only — the previous full
 													 "Archivieren" label clipped to "chivieren" at narrow widths. -->
@@ -533,6 +545,33 @@
 														? 'bg-accent/10 text-accent-text'
 														: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 												>
+													<!-- Live-run status dot. No text — space is tight, so the
+														 pulse + aria-label carry the meaning. Leading slot so it
+														 aligns vertically across rows and is scannable at a glance;
+														 renders nothing when the thread has no active run (no
+														 layout shift for the common case). running = accent pulse,
+														 awaiting_input = amber ping (needs you), interrupted =
+														 steady danger (Retry). -->
+													{#if runStatus}
+														<span
+															class="shrink-0 pl-2 flex items-center"
+															role="status"
+															aria-label={runStatusLabel(runStatus)}
+															title={runStatusLabel(runStatus)}
+															data-run-status={runStatus}
+														>
+															<span class="relative inline-flex h-2 w-2">
+																{#if runStatus === 'awaiting_input'}
+																	<span class="absolute inline-flex h-full w-full rounded-full bg-warning/70 opacity-75 motion-safe:animate-ping"></span>
+																	<span class="relative inline-flex h-2 w-2 rounded-full bg-warning"></span>
+																{:else if runStatus === 'interrupted'}
+																	<span class="relative inline-flex h-2 w-2 rounded-full bg-danger"></span>
+																{:else}
+																	<span class="relative inline-flex h-2 w-2 rounded-full bg-accent motion-safe:animate-pulse"></span>
+																{/if}
+															</span>
+														</span>
+													{/if}
 													{#if renamingThreadId === thread.id}
 													<input
 														type="text"

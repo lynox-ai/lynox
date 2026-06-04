@@ -1080,6 +1080,75 @@ describe('LynoxHTTPApi', () => {
       }
       expect(runningSessions.has('run-bookkeeping')).toBe(false);
     });
+
+    // disconnect≠abort (PR-C / PRD-RUN-RESILIENCE D2): a client disconnect
+    // mid-run with NO pending prompt must NOT abort the session. The run keeps
+    // executing headless so a reload can re-attach (eager-persist transcript +
+    // GET /api/runs/active) instead of going blind — the v1.9.0 reload-blind
+    // bug. Pre-fix, req.on('close') called session.abort() whenever no prompt
+    // was pending, killing the in-flight run on every reload.
+    it('does NOT abort a running session when the client disconnects with no pending prompt', async () => {
+      // A run that stays in-flight until we release it, so we can disconnect
+      // mid-run deterministically (no reliance on real agent timing).
+      let release!: () => void;
+      const inFlight = new Promise<string>((resolve) => { release = () => resolve('headless-done'); });
+      mockSessionRun.mockReturnValueOnce(inFlight);
+
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean }>;
+      }).runningSessions;
+
+      // Drive the disconnect by emitting 'close' on the server-side request
+      // object directly, captured via the server's 'request' event. This
+      // exercises the REAL production close handler deterministically — undici/
+      // raw-socket close timing against this server is non-deterministic (the
+      // same reason the stale-run takeover test above injects state directly).
+      const http = await import('node:http');
+      const server = (api as unknown as { server: import('node:http').Server }).server;
+      let serverReq: import('node:http').IncomingMessage | undefined;
+      const captureReq = (req: import('node:http').IncomingMessage): void => {
+        if (req.url?.includes('/sessions/disc-noprompt/run')) serverReq = req;
+      };
+      server.on('request', captureReq);
+
+      const url = new URL(`${baseUrl}/api/sessions/disc-noprompt/run`);
+      const clientReq = http.request({
+        hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+        agent: false,
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      });
+      clientReq.on('error', () => { /* socket teardown on close — expected */ });
+      clientReq.on('response', (res) => { res.on('data', () => { /* drain */ }); });
+      clientReq.end(JSON.stringify({ task: 'long-running', protocol: 1 }));
+
+      try {
+        // Wait until the run is registered server-side (handler reached the
+        // point past req.on('close') registration).
+        for (let i = 0; i < 200; i++) {
+          if (runningSessions.has('disc-noprompt') && serverReq) break;
+          await new Promise<void>((r) => setTimeout(r, 10));
+        }
+        expect(runningSessions.has('disc-noprompt')).toBe(true);
+        expect(serverReq).toBeDefined();
+
+        // Client disconnects mid-run → fire the server's close handler.
+        serverReq!.emit('close');
+
+        const slot = runningSessions.get('disc-noprompt');
+        expect(slot?.streamAlive).toBe(false);            // close handler ran...
+        expect(mockSessionAbort).not.toHaveBeenCalled();  // ...but did NOT abort.
+      } finally {
+        server.off('request', captureReq);
+        clientReq.destroy();
+        // Release the headless run so the handler's finally cleans up the slot.
+        release();
+      }
+      for (let i = 0; i < 200; i++) {
+        if (!runningSessions.has('disc-noprompt')) break;
+        await new Promise<void>((r) => setTimeout(r, 10));
+      }
+      expect(runningSessions.has('disc-noprompt')).toBe(false);
+    });
   });
 
   // v29: /secret-saved must distinguish managed_blocked from user-cancel, and
