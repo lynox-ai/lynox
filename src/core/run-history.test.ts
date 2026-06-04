@@ -223,16 +223,29 @@ describe('RunHistory', () => {
   it('computes stats', () => {
     const h = createHistory();
     const id1 = h.insertRun({ taskText: 'Task 1', modelTier: 'deep', modelId: 'claude-opus-4-6' });
-    const id2 = h.insertRun({ taskText: 'Task 2', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+    // A Mistral model as a real chat turn — proves cost_by_model is a dynamic
+    // GROUP BY model_id (Anthropic AND Mistral AND voice all aggregate), not a
+    // fixed roster.
+    const id2 = h.insertRun({ taskText: 'Task 2', modelTier: 'balanced', modelId: 'mistral-large-2512' });
 
     h.updateRun(id1, { tokensIn: 100, tokensOut: 50, costUsd: 0.01, durationMs: 1000, status: 'completed' });
     h.updateRun(id2, { tokensIn: 200, tokensOut: 100, costUsd: 0.02, durationMs: 2000, status: 'completed' });
 
+    // Add a voice run + a spawned sub-run: total_runs counts them, the headline
+    // user_turn_runs does not (RC-7 — "N runs" = chat turns).
+    const v = h.insertRun({ taskText: 'tts', modelTier: 'balanced', modelId: 'voxtral-tts', kind: 'voice_tts' });
+    h.updateRun(v, { tokensIn: 0, tokensOut: 0, costUsd: 0.002, durationMs: 10, status: 'completed' });
+    const sub = h.insertRun({ taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: id2, spawnDepth: 1 });
+    h.updateRun(sub, { tokensIn: 1, tokensOut: 1, costUsd: 0.001, durationMs: 10, status: 'completed' });
+
     const stats = h.getStats();
-    expect(stats.total_runs).toBe(2);
-    expect(stats.total_tokens_in).toBe(300);
-    expect(stats.total_cost_usd).toBeCloseTo(0.03);
-    expect(stats.cost_by_model).toHaveLength(2);
+    expect(stats.total_runs).toBe(4);       // all rows
+    expect(stats.user_turn_runs).toBe(2);   // only the 2 chat turns
+    expect(stats.total_tokens_in).toBe(301);
+    expect(stats.total_cost_usd).toBeCloseTo(0.033);
+    expect(stats.cost_by_model).toHaveLength(4); // opus, mistral-large-2512, voxtral-tts, m
+    // Mistral LLM model aggregates exactly like the Anthropic ones.
+    expect(stats.cost_by_model.find(m => m.model_id === 'mistral-large-2512')).toBeDefined();
     h.close();
   });
 

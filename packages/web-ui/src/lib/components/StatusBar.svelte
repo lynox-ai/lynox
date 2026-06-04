@@ -167,7 +167,7 @@
 			}
 
 			if (dailyRes?.ok) {
-				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number }>;
+				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
 				// Match the LOCAL calendar day (the endpoint now buckets by local
 				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
 				// pick the wrong/empty bucket near the day boundary (rafael's
@@ -177,7 +177,9 @@
 				const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 				const todayRow = rows.find(r => r.day === today);
 				todayCost = todayRow?.cost_usd ?? 0;
-				todayRuns = todayRow?.run_count ?? 0;
+				// Headline "N runs today" = chat turns the user took, not voice
+				// renders or spawned sub-runs (which inflated the count).
+				todayRuns = todayRow?.user_turns ?? 0;
 			}
 		} catch { /* silent */ }
 	}
