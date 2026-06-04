@@ -12,5 +12,5 @@ export { planTaskTool } from './plan-task.js';
 export { dataStoreCreateTool, dataStoreInsertTool, dataStoreQueryTool, dataStoreListTool, dataStoreDeleteTool, dataStoreDropTool } from './data-store.js';
 export { saveWorkflowTool } from './process.js';
 export { apiSetupTool } from './api-setup.js';
-export { artifactSaveTool, artifactListTool, artifactDeleteTool } from './artifact.js';
+export { artifactSaveTool, artifactListTool, artifactDeleteTool, artifactHistoryTool, artifactRestoreTool } from './artifact.js';
 export { recallToolResultTool } from './recall-tool-result.js';

@@ -133,8 +133,12 @@ function measureStaticPrefixTokens(): number {
  * 2026-06-03: deliberate bump to 19900 — added the `edit_file` tool definition
  * (targeted file/artifact edits, replaces full rewrites → net token WIN at
  * runtime) plus artifact-revision + high-stakes-grounding prompt guidance.
+ * 2026-06-04: bump to 20100 — this release adds `artifact_history` +
+ * `artifact_restore` (version recovery; ~52 tokens) AND the ask_user
+ * `multiSelect` schema property + description growth (~66 tokens). They ship
+ * together; the combined static prefix measures 20018. Descriptions kept lean.
  */
-const STATIC_PREFIX_BUDGET = 19900;
+const STATIC_PREFIX_BUDGET = 20100;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
