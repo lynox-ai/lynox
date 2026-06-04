@@ -128,10 +128,9 @@
 		return /<!--\s*type:\s*markdown\s*-->/i.test(code);
 	}
 
-	/** Build a markdown-typed artifact: same chrome as the iframe variant
-	 *  (container + toolbar + label) but body is rendered markdown, not an
-	 *  iframe. Expanded by default because markdown carries no script risk
-	 *  and hiding prose behind a "Click to open" toggle hurts readability.
+	/** Build a markdown-typed artifact: same collapsed-pill chrome as the iframe
+	 *  variant (container + toolbar + label), but the body is rendered markdown,
+	 *  not an iframe. Collapsed by default like every type (lazy-expand pill).
 	 *  The raw markdown source is embedded as `data-md` so the toolbar
 	 *  buttons can produce a .md download and a print-to-PDF popup from the
 	 *  original text (not the rendered HTML). */
@@ -150,7 +149,7 @@
 				<button class="artifact-btn" data-action="open-gallery" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>
 				<button class="artifact-btn" data-action="download-md" title="Download as .md">${ICON_DOWNLOAD}</button>
 				<button class="artifact-btn" data-action="print-pdf" title="Print / Save as PDF">${ICON_PRINT}</button>
-				<span class="artifact-chevron">${ICON_CHEVRON}</span>
+				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -191,7 +190,7 @@
 				<span class="artifact-label">${meta.label}</span>
 				<span class="artifact-title">${safeTitle}</span>
 				<button class="artifact-btn" data-action="download-data" title="Download .${meta.ext}">${ICON_DOWNLOAD}</button>
-				<span class="artifact-chevron">${ICON_CHEVRON}</span>
+				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
 			</div>
 			<pre class="artifact-data-body"><code>${preview}</code></pre>
 		</div>`;
@@ -237,7 +236,7 @@
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
-				<span class="artifact-chevron">${ICON_CHEVRON}</span>
+				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
 			</div>
 			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
 			<div class="artifact-source-wrap hidden"></div>
@@ -321,7 +320,10 @@
 			const container = toggleTarget.closest('.artifact-container') as HTMLElement;
 			if (container) {
 				container.classList.toggle('artifact-collapsed');
-				if (!container.classList.contains('artifact-collapsed')) {
+				const expanded = !container.classList.contains('artifact-collapsed');
+				// Keep the chevron button's aria-expanded in sync for screen readers.
+				container.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(expanded));
+				if (expanded) {
 					// Delay so browser lays out the iframe before measuring
 					requestAnimationFrame(() => resizeArtifactFrame(container));
 				}
@@ -1172,6 +1174,8 @@ window.addEventListener('afterprint', function () { window.close(); });
 	}
 
 	/* Chevron: the universal expand affordance; rotates 90° when expanded. */
+	/* A real <button> so the collapsed pill is keyboard-operable (Tab → focus,
+	   Enter/Space → toggle via click delegation); reset native button chrome. */
 	div :global(.artifact-chevron) {
 		display: inline-flex;
 		align-items: center;
@@ -1179,6 +1183,19 @@ window.addEventListener('afterprint', function () { window.close(); });
 		line-height: 0;
 		flex-shrink: 0;
 		transition: transform 0.15s;
+		background: none;
+		border: none;
+		padding: 0;
+		margin: 0;
+		cursor: pointer;
+	}
+	div :global(.artifact-chevron:hover) {
+		color: var(--color-text);
+	}
+	div :global(.artifact-chevron:focus-visible) {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+		border-radius: 2px;
 	}
 	div :global(.artifact-container:not(.artifact-collapsed) .artifact-chevron) {
 		transform: rotate(90deg);
