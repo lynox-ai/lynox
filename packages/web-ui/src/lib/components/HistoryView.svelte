@@ -265,7 +265,7 @@
 		showCostChart = !showCostChart;
 		if (!showCostChart || costData.length > 0) return;
 		try {
-			const res = await fetch(`${getApiBase()}/history/cost/daily?days=30`);
+			const res = await fetch(`${getApiBase()}/history/cost/daily?days=30&tzOffsetMin=${new Date().getTimezoneOffset()}`);
 			if (res.ok) costData = ((await res.json()) as CostDay[]);
 		} catch {
 			/* silently fail */

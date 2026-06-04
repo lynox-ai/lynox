@@ -1189,31 +1189,6 @@ export class RunHistory {
     `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
   }
 
-  /**
-   * "User-turn" run count for a window — the headline number a person reads as
-   * "my runs". Excludes voice (TTS/STT) and spawned/batch sub-runs, which are
-   * machinery, not chat turns the user took. `kind` NULL = legacy llm row.
-   * Window is bounded by local-day boundaries via the same tz shift as
-   * getCostByDay. Returns user-turn count + the excluded breakdown so the UI
-   * can show voice/sub-runs separately instead of inflating the headline.
-   */
-  getRunCounts(days: number, opts?: { tzOffsetMin?: number }): { user_turns: number; voice: number; sub_runs: number } {
-    void opts; // tz offset not needed for a count over a rolling-day window
-    const row = this.db.prepare(`
-      SELECT
-        SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND spawn_depth = 0 AND run_type != 'batch_item' THEN 1 ELSE 0 END) as user_turns,
-        SUM(CASE WHEN kind IN ('voice_tts','voice_stt') THEN 1 ELSE 0 END) as voice,
-        SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND (spawn_depth > 0 OR run_type = 'batch_item') THEN 1 ELSE 0 END) as sub_runs
-      FROM runs
-      WHERE created_at >= datetime('now', ?)
-        AND status NOT IN ('running', 'failed')
-    `).get(`-${days} days`) as { user_turns: number | null; voice: number | null; sub_runs: number | null } | undefined;
-    return {
-      user_turns: row?.user_turns ?? 0,
-      voice: row?.voice ?? 0,
-      sub_runs: row?.sub_runs ?? 0,
-    };
-  }
 
   getCostByModel(): ModelBreakdownEntry[] {
     return this.db.prepare(`

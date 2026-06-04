@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory, hashTask } from './run-history.js';
 
 describe('RunHistory', () => {
@@ -161,36 +162,43 @@ describe('RunHistory', () => {
     h.close();
   });
 
-  it('getRunCounts splits user-turns from voice + sub-runs (headline = user-turns only)', () => {
-    const h = createHistory();
-    // 2 real chat turns (llm, top-level)
-    const t1 = h.insertRun({ sessionId: 's', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
-    h.updateRun(t1, { tokensIn: 1, tokensOut: 1, costUsd: 0.01, durationMs: 1, status: 'completed' });
-    const t2 = h.insertRun({ sessionId: 's', taskText: 'turn 2', modelTier: 'balanced', modelId: 'm' });
-    h.updateRun(t2, { tokensIn: 1, tokensOut: 1, costUsd: 0.01, durationMs: 1, status: 'completed' });
-    // a spawned sub-run + a voice run — machinery, NOT headline turns
-    const sub = h.insertRun({ sessionId: 's', taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: t2, spawnDepth: 1 });
-    h.updateRun(sub, { tokensIn: 1, tokensOut: 1, costUsd: 0.005, durationMs: 1, status: 'completed' });
-    const voice = h.insertRun({ sessionId: 's', taskText: 'tts', modelTier: 'balanced', modelId: 'voxtral-tts', kind: 'voice_tts' });
-    h.updateRun(voice, { tokensIn: 0, tokensOut: 0, costUsd: 0.002, durationMs: 1, status: 'completed' });
-
-    const counts = h.getRunCounts(1);
-    expect(counts.user_turns).toBe(2); // only the 2 chat turns
-    expect(counts.voice).toBe(1);
-    expect(counts.sub_runs).toBe(1);
-    h.close();
-  });
-
-  it('getCostByDay buckets by local calendar day under a tz offset', () => {
-    const h = createHistory();
+  it('getCostByDay buckets by the LOCAL day under a tz offset — proves the shift at a day edge', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'tz.db');
+    const h = new RunHistory(dbPath);
     const r = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
     h.updateRun(r, { tokensIn: 1, tokensOut: 1, costUsd: 0.03, durationMs: 1, status: 'completed' });
-    // Zurich summer = UTC+2 → getTimezoneOffset() = -120. The bucket key must be
-    // a YYYY-MM-DD string and include today's run regardless of the shift.
-    const local = h.getCostByDay(2, { tzOffsetMin: -120 });
-    expect(local.length).toBeGreaterThan(0);
-    expect(local[0]!.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(local.reduce((s, d) => s + d.cost_usd, 0)).toBeCloseTo(0.03, 6);
+    h.close();
+    // Pin created_at to a fixed UTC time 30 min BEFORE midnight, so a +2h local
+    // shift crosses into the next calendar day. A wide window keeps the row in
+    // scope regardless of the test clock — the assertion is purely the BUCKET.
+    const raw = new BetterSqlite3(dbPath);
+    raw.prepare("UPDATE runs SET created_at = '2026-06-04 23:30:00' WHERE id = ?").run(r);
+    raw.close();
+
+    const h2 = new RunHistory(dbPath);
+    const utc = h2.getCostByDay(3650, { tzOffsetMin: 0 });
+    const local = h2.getCostByDay(3650, { tzOffsetMin: -120 }); // Zurich summer = UTC+2
+    expect(utc[0]!.day).toBe('2026-06-04');   // UTC bucket
+    expect(local[0]!.day).toBe('2026-06-05'); // shifted into the next LOCAL day
+    expect(local[0]!.cost_usd).toBeCloseTo(0.03, 6);
+    h2.close();
+  });
+
+  it('getStats user_turn_runs excludes voice + sub-runs (the headline RC-7 count)', () => {
+    // (getRunCounts was removed as dead code — the user-turn headline is served
+    // by getCostByDay.user_turns + getStats.user_turn_runs, both covered.)
+    const h = createHistory();
+    const t = h.insertRun({ sessionId: 's', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(t, { tokensIn: 1, tokensOut: 1, costUsd: 0.01, durationMs: 1, status: 'completed' });
+    const voice = h.insertRun({ sessionId: 's', taskText: 'tts', modelTier: 'balanced', modelId: 'voxtral-tts', kind: 'voice_tts' });
+    h.updateRun(voice, { tokensIn: 0, tokensOut: 0, costUsd: 0.002, durationMs: 1, status: 'completed' });
+    const sub = h.insertRun({ sessionId: 's', taskText: 'sub', modelTier: 'balanced', modelId: 'm', spawnParentId: t, spawnDepth: 1 });
+    h.updateRun(sub, { tokensIn: 1, tokensOut: 1, costUsd: 0.005, durationMs: 1, status: 'completed' });
+    const stats = h.getStats();
+    expect(stats.total_runs).toBe(3);
+    expect(stats.user_turn_runs).toBe(1);
     h.close();
   });
 
