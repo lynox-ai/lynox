@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 1.8.3 — 2026-06-04
+
+Feature release: artifacts become first-class editable files, a calmer and more trustworthy context-compaction flow, and a round of agent-tool security hardening.
+
+### Added
+
+- **Artifacts are real, editable source files.** The agent can now treat an artifact as a file it reads and edits in place (`edit_file`) with grounding discipline, instead of regenerating the whole thing — edits update the existing artifact, no orphans or duplicates.
+- **Inline artifacts render as a collapsed pill.** Artifacts in the chat stream show as a compact pill that lazy-expands on click (and is keyboard-operable), instead of dumping a large inline blob.
+- **A visible "context compacted" marker.** When a conversation is summarized, a calm marker now persists in the thread so it's clear what happened — artifacts, decisions and the through-line are kept.
+- **Prepare-and-compact flow.** Compaction is now offered later and more calmly (a quiet, user-triggered bar near the threshold) rather than an alarming early banner.
+
+### Fixed
+
+- **Compaction summaries are reliable.** The summary now runs with tools disabled and authoritative framing, so it can't wander into tool calls or disown its own summary — the open task survives the compaction.
+- **100vh deck artifacts render at 16:9** instead of collapsing to a ~200px sliver.
+- **Changeset review is tidier.** Friendly artifact labels + viewer-meta spacing, and the diff `+++`/`---` headers no longer surface the internal artifact path.
+- **The artifact pill is keyboard-operable** (focusable, Enter/Space toggles).
+- **`ask_user` accepts a questions-only batch** (the hard "must include a question" requirement is dropped).
+- **Docker build flake killed** — the Whisper base model is mirrored and the tiny model dropped, ending the intermittent Hugging-Face build failure.
+
+### Security
+
+- **Watch + migration-export fetches go through the pinned network guard.** Outbound requests from the watch loop and the migration/export path now resolve-once + pin the socket + refuse redirects, closing an SSRF surface (no hand-rolled denylist, no localhost carve-out).
+- **Watch tasks are cost-bounded.** The watch interval is floored at 5 minutes and the analysis session carries a hard budget cap.
+- **Malicious-write guard wired into `write_file`/`edit_file`** — write content is scanned and rejected if it matches known malicious patterns.
+
+### Internal
+
+- Public-repo leak-guard + removal of internal staging/ops tooling from the public repo; drift-guard + positioning-guard added as required CI checks.
+- Staging image builds amd64-only; gitleaks + pattern-scan moved from pre-push to pre-commit.
+
 ## 1.8.2 — 2026-06-03
 
 Bug-fix patch: a chat-resume regression on legacy model tiers, a spurious managed run-block, and an inbox decode + context-pane redesign.
