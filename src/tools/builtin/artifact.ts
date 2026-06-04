@@ -47,12 +47,37 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
 
     const action = input.id ? 'Updated' : 'Saved';
     const path = store.pathFor(artifact.id);
-    return (
-      `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).\n` +
-      `File: ${path}\n` +
+    const lines = [
+      `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`,
+      `File: ${path}`,
+    ];
+
+    // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
+    // instead of silently clobbering a good version (rafael 2026-06-04).
+    const ow = artifact.overwrite;
+    if (ow) {
+      const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
+      const pct = ow.previousBytes > 0
+        ? ` (${ow.newBytes >= ow.previousBytes ? '+' : ''}${Math.round((ow.newBytes - ow.previousBytes) / ow.previousBytes * 100)}%)`
+        : '';
+      lines.push(
+        `Replaced v${ow.previousVersion}: ${kb(ow.previousBytes)} → ${kb(ow.newBytes)}${pct}.` +
+        (ow.backupPath ? ` Previous version backed up to ${ow.backupPath} — read_file it to recover.` : ''),
+      );
+      if (ow.significant) {
+        lines.push(
+          `⚠ Large rewrite — the new content is less than half the previous size. ` +
+          `If you meant to make a targeted change rather than replace the whole document, ` +
+          `recover from the backup above and apply a find/replace edit instead.`,
+        );
+      }
+    }
+
+    lines.push(
       `To revise it, read_file this path and apply a targeted edit (find/replace) instead of ` +
-      `re-sending the whole document — the gallery picks up the change automatically.`
+      `re-sending the whole document — the gallery picks up the change automatically.`,
     );
+    return lines.join('\n');
   },
 };
 
@@ -72,8 +97,12 @@ export const artifactListTool: ToolEntry<ArtifactListInput> = {
     const artifacts = store.list();
     if (artifacts.length === 0) return 'No saved artifacts.';
 
+    // Include the on-disk path so a revise/read doesn't guess it wrong — the
+    // agent burned two failed read_file calls + a `find` guessing the path in
+    // the lynox Marktanalyse thread (rafael 2026-06-04).
     return artifacts.map(a =>
-      `[${a.type}] ${a.id} "${a.title}"${a.description ? ` — ${a.description}` : ''} (updated ${a.updatedAt.slice(0, 10)})`
+      `[${a.type}] ${a.id} "${a.title}" (v${a.version}, updated ${a.updatedAt.slice(0, 10)})` +
+      `${a.description ? ` — ${a.description}` : ''}\n  path: ${store.pathFor(a.id)}`
     ).join('\n');
   },
 };

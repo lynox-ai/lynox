@@ -31,6 +31,23 @@ export interface ArtifactMeta {
 
 export interface Artifact extends ArtifactMeta {
   content: string;
+  /** Populated ONLY when save() overwrote an existing artifact. Lets the
+   *  caller surface the overwrite (and a recovery path) instead of silently
+   *  replacing good content — the "v2 → v7 wrong-name clobber" failure mode
+   *  (rafael 2026-06-04, lynox Marktanalyse). Absent on create. */
+  overwrite?: ArtifactOverwrite;
+}
+
+export interface ArtifactOverwrite {
+  previousVersion: number;
+  previousBytes: number;
+  newBytes: number;
+  /** The prior content, snapshotted to this path before the overwrite —
+   *  recover with read_file. One level deep (overwritten on each save). */
+  backupPath: string;
+  /** Large replacement (content shrank to <50% of the previous size) — a
+   *  likely accidental full-rewrite worth a second look. */
+  significant: boolean;
 }
 
 export class ArtifactStore {
@@ -107,6 +124,14 @@ export class ArtifactStore {
     return this.contentPath(id);
   }
 
+  /** Path of the one-level backup written before an overwrite. */
+  backupPathFor(id: string): string {
+    if (!SAFE_ID.test(id)) throw new Error(`Invalid artifact ID: ${id}`);
+    const p = resolve(this.dir, `${id}.bak`);
+    if (!p.startsWith(this.dir)) throw new Error('Path traversal detected');
+    return p;
+  }
+
   private saveIndex(): void {
     writeFileSync(this.indexPath, JSON.stringify(this.index, null, 2), 'utf-8');
   }
@@ -123,7 +148,20 @@ export class ArtifactStore {
     const now = new Date().toISOString();
 
     if (existing) {
-      // Update existing artifact
+      // Update existing artifact. Snapshot the prior content to a one-level
+      // backup BEFORE overwriting so an accidental full-rewrite is recoverable
+      // (rafael 2026-06-04: a later session clobbered a good version with no
+      // trace). Best-effort — a missing/unreadable prior file never blocks.
+      const previousVersion = existing.version;
+      let previousBytes = 0;
+      let backupWritten = false;
+      try {
+        const prev = readFileSync(this.contentPath(existing.id), 'utf-8');
+        previousBytes = Buffer.byteLength(prev, 'utf-8');
+        writeFileSync(this.backupPathFor(existing.id), prev, 'utf-8');
+        backupWritten = true;
+      } catch { /* no prior content to back up */ }
+
       existing.title = opts.title || existing.title;
       existing.description = opts.description ?? existing.description;
       existing.type = opts.type ?? existing.type;
@@ -131,7 +169,17 @@ export class ArtifactStore {
       existing.version += 1;
       writeFileSync(this.contentPath(existing.id), opts.content, 'utf-8');
       this.saveIndex();
-      return { ...existing, content: opts.content };
+
+      const newBytes = Buffer.byteLength(opts.content, 'utf-8');
+      const overwrite: ArtifactOverwrite = {
+        previousVersion,
+        previousBytes,
+        newBytes,
+        backupPath: backupWritten ? this.backupPathFor(existing.id) : '',
+        // Shrank to under half the prior size → likely a destructive rewrite.
+        significant: previousBytes > 0 && newBytes < previousBytes * 0.5,
+      };
+      return { ...existing, content: opts.content, overwrite };
     }
 
     // Create new artifact
