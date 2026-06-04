@@ -7,6 +7,11 @@ interface AskUserInput {
   question?: string | undefined;
   options?: AskUserOption[] | undefined;
   questions?: Array<{ question: string; header?: string; options?: AskUserOption[] }> | undefined;
+  /** Single-question only: let the user pick MULTIPLE options (toggle + Send)
+   *  instead of one-click-and-done. The answer comes back as a comma-joined
+   *  list of the chosen labels. Use when several options can legitimately apply
+   *  at once. Ignored for the `questions` batch form. */
+  multiSelect?: boolean | undefined;
 }
 
 /** Extract display label from a plain string or option object. */
@@ -78,6 +83,10 @@ export const askUserTool: ToolEntry<AskUserInput> = {
             ],
           },
           description: 'Choices for the user to select from. Each option can be a plain string or an object with { label, hint? } for step configuration.',
+        },
+        multiSelect: {
+          type: 'boolean',
+          description: 'Single-question only: allow the user to select MULTIPLE options (they toggle several, then press Send) instead of one-click. Use when several options can apply at once. Default false.',
         },
         questions: {
           type: 'array',
@@ -183,7 +192,29 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     }
 
     const labels = input.options && input.options.length > 0 ? [...toLabels(input.options), '\x00'] : undefined;
-    const answer = await agent.promptUser(question, labels);
+    // Only pass the meta arg in the multi-select case so single-select calls
+    // stay byte-identical to before (2 args) — no back-compat surprise.
+    const answer = input.multiSelect
+      ? await agent.promptUser(question, labels, { multiSelect: true })
+      : await agent.promptUser(question, labels);
+
+    // Multi-select answers come back as a JSON-encoded string[] of labels.
+    // Present them to the model as a clean comma-joined list; a step hint only
+    // applies when exactly one option was chosen (hints are single-choice).
+    if (input.multiSelect && answer !== '__dismissed__') {
+      let selected: string[] | null = null;
+      try {
+        const parsed = JSON.parse(answer) as unknown;
+        if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string')) selected = parsed as string[];
+      } catch { /* not JSON — a legacy single-select client; fall through */ }
+      if (selected) {
+        if (selected.length === 1) {
+          const hint = findHint(input.options, selected[0]!);
+          if (hint) agent.toolContext.pendingStepHint = hint;
+        }
+        return selected.length > 0 ? selected.join(', ') : '__dismissed__';
+      }
+    }
 
     // Store hint for selected option (applied at next session.run())
     const hint = findHint(input.options, answer);

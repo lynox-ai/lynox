@@ -1912,6 +1912,11 @@ export class LynoxHTTPApi {
           const data = JSON.stringify({
             promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS,
             step_id: meta?.stepId, step_task: meta?.stepTask,
+            // Multi-select pills (toggle several + Send). The client posts the
+            // chosen labels back as a JSON array string via the normal /reply;
+            // the ask_user tool parses it. A reconnect mid-prompt (which loads
+            // /pending-prompt without this flag) degrades to single-select.
+            multi_select: meta?.multiSelect === true ? true : undefined,
           });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
