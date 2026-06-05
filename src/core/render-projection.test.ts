@@ -275,3 +275,39 @@ describe('sanitizeNoteDetail', () => {
     expect(sanitizeNoteDetail('429 Too Many Requests')).toBe('429 Too Many Requests');
   });
 });
+
+describe('thinking-only placeholder suppression', () => {
+  it('suppresses an assistant turn whose only content is the [...] placeholder', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'hi'),
+      rec(2, 'assistant', [{ type: 'text', text: '[…]' }]),
+    ]);
+    // Only the user message survives — the placeholder bubble is dropped.
+    expect(out).toHaveLength(1);
+    expect(out[0]!.role).toBe('user');
+  });
+
+  it('suppresses an assistant turn with empty text and no tools', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'hi'),
+      rec(2, 'assistant', [{ type: 'text', text: '' }]),
+    ]);
+    expect(out).toHaveLength(1);
+  });
+
+  it('keeps a tool-only assistant turn (no text but real tool calls)', () => {
+    const out = projectMessages([
+      rec(1, 'assistant', [{ type: 'tool_use', id: 'tu1', name: 'web_research', input: { q: 'x' } }]),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.toolCalls?.[0]?.name).toBe('web_research');
+  });
+
+  it('keeps a normal assistant turn that merely contains the placeholder substring', () => {
+    const out = projectMessages([
+      rec(1, 'assistant', [{ type: 'text', text: 'Here is the answer […] and more.' }]),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.content).toContain('answer');
+  });
+});

@@ -36,6 +36,7 @@ import type { ToolCallTracker } from './output-guard.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
+import { THINKING_ONLY_PLACEHOLDER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -579,7 +580,7 @@ export class Agent implements IAgent {
         role: 'assistant',
         content: contentForHistory.length > 0
           ? contentForHistory
-          : [{ type: 'text', text: '[…]' }],
+          : [{ type: 'text', text: THINKING_ONLY_PLACEHOLDER }],
       });
       // F-Eager-Persist: checkpoint after each assistant message so the
       // ThreadStore has the latest turn even if the process dies before the
