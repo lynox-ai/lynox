@@ -7,6 +7,13 @@ export const channels = {
   spawnStart:   channel('lynox:spawn:start'),
   spawnEnd:     channel('lynox:spawn:end'),
   costWarning:  channel('lynox:cost:warning'),
+  /**
+   * Emitted when the warm-cache-miss detector fires — prompt caching that
+   * should have hit read back almost nothing, the immediate signal that the
+   * cacheable prefix went unstable (the dominant silent cost regression):
+   *   { agent, model, realInput, cacheRead, cacheWrite, expectedMin, threadId? }
+   */
+  cacheHealth:  channel('lynox:cache:health'),
   preApprovalMatch:     channel('lynox:preapproval:match'),
   preApprovalExhausted: channel('lynox:preapproval:exhausted'),
   preApprovalExpired:   channel('lynox:preapproval:expired'),
