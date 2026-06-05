@@ -125,6 +125,7 @@ vi.mock('../core/engine.js', () => ({
     this.getPromptStore = vi.fn().mockReturnValue(null);
     this.getRunRegistry = vi.fn().mockReturnValue(null);
     this.getRunBufferManager = vi.fn().mockReturnValue(null);
+    this.getRunExecutor = vi.fn().mockReturnValue(null);
     this.getArtifactStore = vi.fn().mockReturnValue({
       save: vi.fn((opts: { title: string; content: string; type?: string }) => ({
         id: 'a1b2c3d4', title: opts.title, content: opts.content,
@@ -1203,6 +1204,122 @@ describe('LynoxHTTPApi', () => {
         engineRef.getRunBufferManager = orig;
         mgr.remove('stream-run');
       }
+    });
+  });
+
+  // Tier 2 PR-E: run executor (concurrency cap + abort-by-id) and the active-run
+  // seq field. The cap bounds parallel-run cost (AC6); DELETE aborts a live run
+  // or acks an interrupted one (AC10); /active carries lastPersistedSeq so a
+  // reload can re-attach from the durable boundary.
+  describe('Tier 2 run executor', () => {
+    async function withRegistry(
+      test: (reg: import('../core/run-registry.js').RunRegistry, db: import('better-sqlite3').Database) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.exec(`CREATE TABLE active_runs (
+        run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running'
+          CHECK(status IN ('running','awaiting_input','done','error','interrupted')),
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_activity TEXT NOT NULL DEFAULT (datetime('now')),
+        last_event_seq INTEGER NOT NULL DEFAULT 0,
+        last_persisted_seq INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`);
+      const { RunRegistry } = await import('../core/run-registry.js');
+      const reg = new RunRegistry(db);
+      const engineRef = (api as unknown as { engine: { getRunRegistry: () => unknown } }).engine;
+      const orig = engineRef.getRunRegistry;
+      engineRef.getRunRegistry = (): unknown => reg;
+      try { await test(reg, db); } finally { engineRef.getRunRegistry = orig; db.close(); }
+    }
+
+    async function withExecutor(
+      cap: number,
+      test: (ex: import('../core/run-executor.js').RunExecutor) => Promise<void>,
+    ): Promise<void> {
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(cap);
+      const engineRef = (api as unknown as { engine: { getRunExecutor: () => unknown } }).engine;
+      const orig = engineRef.getRunExecutor;
+      engineRef.getRunExecutor = (): unknown => ex;
+      try { await test(ex); } finally { engineRef.getRunExecutor = orig; }
+    }
+
+    it('POST /run returns 429 run_queue_full when the executor is at capacity', async () => {
+      await withExecutor(1, async (ex) => {
+        ex.acquire('other-run', 'other-thread', () => {}); // fill the single slot
+        const res = await jsonFetch('/api/sessions/cap-test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'hi' }),
+        });
+        expect(res.status).toBe(429);
+        const body = await res.json() as { error: string; capacity: number };
+        expect(body.error).toBe('run_queue_full');
+        expect(body.capacity).toBe(1);
+      });
+    });
+
+    it('DELETE /api/runs/:runId aborts a live run and invokes its abort handle', async () => {
+      await withExecutor(5, async (ex) => {
+        const abortSpy = vi.fn();
+        ex.acquire('live-run', 'thread-1', abortSpy);
+        const res = await jsonFetch('/api/runs/live-run', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ aborted: true, runId: 'live-run' });
+        expect(abortSpy).toHaveBeenCalledOnce();
+      });
+    });
+
+    it('DELETE /api/runs/:runId acks an interrupted (not-live) run by removing it', async () => {
+      await withRegistry(async (reg) => {
+        await withExecutor(5, async () => {
+          reg.start('thread-2', 'int-run');
+          reg.sweepInterrupted(); // mark it interrupted (not in the executor's live set)
+          expect(reg.getByRunId('int-run')?.status).toBe('interrupted');
+          const res = await jsonFetch('/api/runs/int-run', { method: 'DELETE' });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ aborted: false, dismissed: true });
+          expect(reg.getByRunId('int-run')).toBeUndefined(); // removed
+        });
+      });
+    });
+
+    it('DELETE /api/runs/:runId 404s for an unknown run (no live + no registry row)', async () => {
+      await withRegistry(async () => {
+        await withExecutor(5, async () => {
+          const res = await jsonFetch('/api/runs/ghost', { method: 'DELETE' });
+          expect(res.status).toBe(404);
+        });
+      });
+    });
+
+    it('DELETE /api/runs/:runId does NOT remove a `running` registry row that is not live (404, no silent clear)', async () => {
+      await withRegistry(async (reg) => {
+        await withExecutor(5, async () => {
+          // A 'running' row with no matching executor slot is an inconsistency —
+          // it must NOT be silently removed (it could still be live on a path
+          // that bypassed acquire); only 'interrupted' rows are ack-removable.
+          reg.start('thread-x', 'running-not-live');
+          expect(reg.getByRunId('running-not-live')?.status).toBe('running');
+          const res = await jsonFetch('/api/runs/running-not-live', { method: 'DELETE' });
+          expect(res.status).toBe(404);
+          expect(reg.getByRunId('running-not-live')).toBeDefined(); // NOT removed
+        });
+      });
+    });
+
+    it('GET /api/runs/active surfaces lastPersistedSeq for re-attach', async () => {
+      await withRegistry(async (reg) => {
+        reg.start('thread-3', 'seq-run');
+        reg.touch('seq-run', { lastPersistedSeq: 42 });
+        const res = await jsonFetch('/api/runs/active');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { runs: { runId: string; lastPersistedSeq: number }[] };
+        const row = body.runs.find((r) => r.runId === 'seq-run');
+        expect(row?.lastPersistedSeq).toBe(42);
+      });
     });
   });
 

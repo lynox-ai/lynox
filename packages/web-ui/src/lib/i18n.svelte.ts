@@ -611,6 +611,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.busy_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.busy_cancel_title': { de: 'Vorherigen Vorgang abbrechen und neu starten', en: 'Cancel the previous task and start over' },
 	'chat.busy_aborted': { de: 'Vorgang abgebrochen — du kannst jetzt eine neue Nachricht senden.', en: 'Task cancelled — you can send a new message now.' },
+	'chat.run_interrupted': { de: 'Dieser Lauf wurde durch einen Neustart unterbrochen und konnte nicht fortgesetzt werden.', en: 'This run was interrupted by a restart and could not be resumed.' },
+	'chat.run_interrupted_retry': { de: 'Erneut versuchen', en: 'Retry' },
 
 	// Chat
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },

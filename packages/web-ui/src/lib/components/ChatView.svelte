@@ -45,6 +45,9 @@
 		getPendingPrompt,
 		getRunStartedAt,
 		getRunPromptCount,
+		getRunInterrupted,
+		retryInterruptedRun,
+		dismissInterruptedRun,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
@@ -1376,6 +1379,7 @@
 	const pendingSecret = $derived(getPendingSecretPrompt());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
+	const runInterrupted = $derived(getRunInterrupted());
 	const retryStatus = $derived(getRetryStatus());
 	const isOffline = $derived(getIsOffline());
 	const ready = $derived(hasApiKey !== false);
@@ -2378,6 +2382,19 @@
 							</button>
 						{/if}
 						<button onclick={clearError} class="text-xs opacity-60 hover:opacity-100">{t('common.ok')}</button>
+					</div>
+				</div>
+			{/if}
+
+			{#if runInterrupted}
+				<div role="status" class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-warning flex items-center justify-between gap-3">
+					<span class="flex-1">{t('chat.run_interrupted')}</span>
+					<div class="flex items-center gap-2 shrink-0">
+						<button
+							onclick={() => { void retryInterruptedRun(); }}
+							class="rounded-[var(--radius-sm)] border border-warning/40 bg-warning/20 px-2.5 py-1 text-xs font-medium hover:bg-warning/30 transition-colors"
+						>{t('chat.run_interrupted_retry')}</button>
+						<button onclick={() => { void dismissInterruptedRun(); }} class="text-xs opacity-60 hover:opacity-100">{t('common.ok')}</button>
 					</div>
 				</div>
 			{/if}

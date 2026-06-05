@@ -62,6 +62,7 @@ export const LynoxUserConfigSchema = z.object({
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),
   max_session_cost_usd: z.number().optional(),
+  max_concurrent_runs:  z.number().optional(),
   embedding_provider:   z.enum(['onnx', 'local']).optional(),
   plugins:              z.record(z.string(), z.boolean()).optional(),
   agents_dir:           z.string().optional(),

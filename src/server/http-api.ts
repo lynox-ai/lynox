@@ -1738,6 +1738,20 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Global concurrency cap (Tier 2, AC6). Bound how many chat runs execute
+      // at once across all threads — many parallel headless runs would otherwise
+      // blow LLM cost + run-buffer memory (R3). Fail fast here (before the LLM
+      // preflight + SSE headers) with a typed 429 the client surfaces as "too
+      // many runs". The real reservation is executor.acquire() once the runId
+      // exists; this early check is a fail-fast (a benign TOCTOU under the cap
+      // is harmless on a single-tenant engine). A run already on THIS session is
+      // a 409 above, so this only trips on a 6th *distinct* thread's run.
+      const runExecutor = this.engine?.getRunExecutor();
+      if (runExecutor?.atCapacity()) {
+        jsonResponse(res, 429, { error: 'run_queue_full', capacity: runExecutor.capacity });
+        return;
+      }
+
       const b = body as Record<string, unknown> | null;
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
@@ -1785,9 +1799,12 @@ export class LynoxHTTPApi {
       const runThinking = b?.['thinking'] === 'disabled'
         ? { type: 'disabled' as const }
         : undefined;
-      const runOptions = runEffort || runThinking
-        ? { ...(runEffort ? { effort: runEffort } : {}), ...(runThinking ? { thinking: runThinking } : {}) }
-        : undefined;
+      // Always an object so the Tier-2 eager-persist checkpoint hook can be
+      // attached below (once runId + buffer exist). effort/thinking stay optional.
+      const runOptions: import('../core/session.js').RunOptions = {
+        ...(runEffort ? { effort: runEffort } : {}),
+        ...(runThinking ? { thinking: runThinking } : {}),
+      };
 
       // User's IANA timezone for the per-turn `[Now: …]` marker. The client
       // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
@@ -1916,6 +1933,17 @@ export class LynoxHTTPApi {
       // execution still lives in this handler (Tier 1) while the buffer above
       // enables resumable re-attach (Tier 2). `runId` is created above.
       const runRegistry = this.engine?.getRunRegistry();
+
+      // Tier-2 resumable re-attach: at each eager-persist checkpoint, stamp the
+      // run buffer's current high-water seq as `last_persisted_seq`. A
+      // reconnecting client reads it (atomically with the transcript via
+      // GET /threads/:id/messages) and replays `GET /runs/:runId/stream?since=`
+      // from exactly the durable boundary — the in-flight (not-yet-persisted)
+      // turn lives in the buffer above that seq, the persisted turns below it,
+      // so the replay never double-renders what the transcript already showed.
+      runOptions.onPersistCheckpoint = () => {
+        if (runBuffer) runRegistry?.touch(runId, { lastPersistedSeq: runBuffer.currentSeq() });
+      };
 
       // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
       const promptStore = this.engine?.getPromptStore();
@@ -2142,11 +2170,20 @@ export class LynoxHTTPApi {
         session.abort();
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
-      // Register the run as live (replaces any prior/interrupted row for this
-      // thread). A crash before the finally leaves this row 'running' → the
-      // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
-      runRegistry?.start(sessionId, runId);
       try {
+        // Reserve a concurrency slot + register the abort handle so the run can
+        // be aborted by id from any connection (DELETE /api/runs/:runId) —
+        // including a headless run whose original SSE is already gone. `takeover`
+        // is the same expire-prompt + abort path the stale-run reclaim uses (for
+        // a headless run `aborted` is already true, so no terminal is owed).
+        // INSIDE the try so a throw from runRegistry.start (SQLite busy/disk-full)
+        // still hits the finally's release() — otherwise the slot would leak and
+        // after `maxConcurrent` such failures every /run would 429 forever.
+        runExecutor?.acquire(runId, sessionId, takeover);
+        // Register the run as live (replaces any prior/interrupted row for this
+        // thread). A crash before the finally leaves this row 'running' → the
+        // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
+        runRegistry?.start(sessionId, runId);
         const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
@@ -2167,6 +2204,9 @@ export class LynoxHTTPApi {
         clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
+        // Free the concurrency slot + abort handle (idempotent). The next queued
+        // /run can now reserve a slot.
+        runExecutor?.release(runId);
         // Run reached a terminal state (done/error/abort-completion) — drop it
         // from the registry. The transcript persists in thread_messages. A
         // process crash never reaches here, leaving the row for the boot-sweep.
@@ -2198,9 +2238,41 @@ export class LynoxHTTPApi {
           status: awaiting ? 'awaiting_input' : r.status,
           startedAt: r.started_at,
           lastActivity: r.last_activity,
+          // Durable replay boundary — the client re-attaches with `?since=` this
+          // to GET /runs/:runId/stream after a reload (Tier 2).
+          lastPersistedSeq: r.last_persisted_seq,
         };
       });
       jsonResponse(res, 200, { runs });
+    }));
+
+    // DELETE /runs/:runId — abort a live run by id (AC10). Works from any
+    // connection, including for a headless run whose original SSE is gone (the
+    // executor holds the abort handle independent of the request). 404 if no
+    // such run is live — the executor's active set is the liveness oracle, same
+    // as the buffer for /stream (no existence leak). The run's own finally then
+    // tears down registry + buffer as the session unwinds.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/runs/:runId', async (_req, res, params) => {
+      const runId = params['runId'] ?? '';
+      const executor = this.engine?.getRunExecutor();
+      const registry = this.engine?.getRunRegistry();
+      // Live run → abort it (the run's own finally then clears registry + buffer
+      // as the session unwinds). Not live but present in the registry → it's an
+      // interrupted row the client is acking; remove it so the nav dot + banner
+      // clear. Neither → 404 (no existence oracle).
+      const wasLive = executor?.abort(runId) ?? false;
+      if (wasLive) { jsonResponse(res, 200, { aborted: true, runId }); return; }
+      // Not live → only an INTERRUPTED row may be acked/removed. A 'running' row
+      // that isn't in the executor's live set is an inconsistency we must NOT
+      // silently clear (it could still be live on a path that bypassed acquire);
+      // leave it for the boot-sweep / its own finally and report not-found.
+      const row = registry?.getByRunId(runId);
+      if (row?.status === 'interrupted') {
+        registry?.remove(runId);
+        jsonResponse(res, 200, { aborted: false, dismissed: true, runId });
+        return;
+      }
+      jsonResponse(res, 404, { error: 'run not found' });
     }));
 
     // GET /runs/:runId/stream?since=<seq> — resumable SSE re-attach (Tier 2).
@@ -2610,7 +2682,27 @@ export class LynoxHTTPApi {
       // tool-use blocks, strip safety wrappers for display, flatten into the
       // UI-ready shape that mirrors the client's ChatMessage.
       const messages = projectMessages(records);
-      jsonResponse(res, 200, { messages });
+      // Resumable re-attach (Tier 2, AC2/AC3): read this thread's live run
+      // SYNCHRONOUSLY in the same tick as the transcript above. Two synchronous
+      // reads can't be interleaved by an eager-persist checkpoint (which runs on
+      // the same event loop), so the returned `lastPersistedSeq` is exactly the
+      // durable boundary of THIS transcript — the client replays the buffer from
+      // there with no gap and no double-render. `interrupted` tells the client to
+      // show a Retry banner instead of re-attaching a dead run.
+      const registry = this.engine?.getRunRegistry();
+      let activeRun: { runId: string; status: string; lastPersistedSeq: number } | null = null;
+      if (registry) {
+        const row = registry.getActive().find((r) => r.thread_id === params['id']);
+        if (row) {
+          const awaiting = row.status === 'running' && !!this.engine?.getPromptStore()?.getPending(row.thread_id);
+          activeRun = {
+            runId: row.run_id,
+            status: awaiting ? 'awaiting_input' : row.status,
+            lastPersistedSeq: row.last_persisted_seq,
+          };
+        }
+      }
+      jsonResponse(res, 200, { messages, activeRun });
     }));
 
     // ── Memory ──

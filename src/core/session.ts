@@ -87,6 +87,11 @@ export interface RunOptions {
    *  Skips the synchronous user-message persist so an internal prompt never
    *  lands in the visible thread as a user row. */
   internal?: boolean | undefined;
+  /** Fired right after each eager-persist checkpoint. The HTTP layer uses it to
+   *  stamp the run buffer's current seq as `last_persisted_seq` in the run
+   *  registry, so a reconnecting client can replay-then-tail from exactly the
+   *  durable boundary (Tier-2 resumable re-attach, no double-render). */
+  onPersistCheckpoint?: (() => void) | undefined;
 }
 
 export interface SessionOptions {
@@ -147,6 +152,11 @@ export class Session {
   private briefing: string | undefined;
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
+  /** Per-run hook fired right after each eager-persist checkpoint so the HTTP
+   *  layer can record the run buffer's high-water seq as `last_persisted_seq`
+   *  (Tier-2 resumable re-attach uses it as the replay `?since=`). Stashed for
+   *  the run's duration; cleared in the run() finally. */
+  private _onPersistCheckpoint: (() => void) | null = null;
   private runToolCallSeq = 0;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
@@ -494,6 +504,9 @@ export class Session {
       if (runOptions?.thinking !== undefined) this.agent.setThinking(runOptions.thinking);
     }
 
+    // Stash the eager-persist checkpoint hook for this run (cleared in finally).
+    this._onPersistCheckpoint = runOptions?.onPersistCheckpoint ?? null;
+
     const model = getModelId(this._model, getActiveProvider());
     const startTime = Date.now();
     this.runToolCallSeq = 0;
@@ -823,6 +836,7 @@ export class Session {
       throw err;
     } finally {
       this.currentRunId = null;
+      this._onPersistCheckpoint = null;
       if (this.agent) {
         this.agent.currentRunId = undefined;
         // Restore per-run overrides to session defaults
@@ -1019,6 +1033,13 @@ export class Session {
       sessionId: this.sessionId,
       allMessages: this.agent.getMessages(),
     });
+    // Stamp the durable boundary (run buffer high-water seq) into the run
+    // registry so a reconnecting client replays from exactly here (Tier 2).
+    // After persistAgentMessages so the seq can never claim more is durable
+    // than actually was. Best-effort — never let a checkpoint hook break a run.
+    if (this._onPersistCheckpoint) {
+      try { this._onPersistCheckpoint(); } catch { /* checkpoint hook is additive */ }
+    }
   }
 
   // ── Model / Effort / Thinking ──
