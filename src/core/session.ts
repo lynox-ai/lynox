@@ -790,11 +790,49 @@ export class Session {
 
       if (runHistory && this.currentRunId) {
         try {
+          // Record the tokens this run actually spent BEFORE it failed/aborted.
+          // Without this, an interrupted or errored run records cost 0, so its
+          // real spend (the tokens were billed by the provider) silently drops
+          // out of the thread + daily totals — under-reporting cost. With the
+          // resilience work making interrupts common, this is a material gap
+          // (rafael 2026-06-05). usageBefore/model are the same anchors the
+          // success path uses; partial deltas are >= 0 (this.usage only grows).
+          const tokensIn = this.usage.input_tokens - usageBefore.input_tokens;
+          const tokensOut = this.usage.output_tokens - usageBefore.output_tokens;
+          const cacheRead = this.usage.cache_read_input_tokens - usageBefore.cache_read_input_tokens;
+          const cacheWrite = this.usage.cache_creation_input_tokens - usageBefore.cache_creation_input_tokens;
+          const costUsd = calculateCost(model, {
+            input_tokens: tokensIn,
+            output_tokens: tokensOut,
+            cache_creation_input_tokens: cacheWrite,
+            cache_read_input_tokens: cacheRead,
+          });
           runHistory.updateRun(this.currentRunId, {
             responseText: getErrorMessage(err),
+            tokensIn,
+            tokensOut,
+            tokensCacheRead: cacheRead,
+            tokensCacheWrite: cacheWrite,
+            costUsd,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: 'failed',
+          });
+        } catch {
+          // Fire-and-forget
+        }
+      }
+
+      // Keep the per-thread cost/token rollup in sync after a failed/interrupted
+      // run too — getThreadTotals now sums this run's partial spend, so stamp
+      // the thread total (and self-heal historically-wrong rows). Mirrors the
+      // success-path rollup; guarded so a persistence hiccup never masks `err`.
+      if (threadStore && runHistory) {
+        try {
+          const threadTotals = runHistory.getThreadTotals(this.sessionId);
+          threadStore.updateThread(this.sessionId, {
+            total_tokens: threadTotals.tokens_in + threadTotals.tokens_out,
+            total_cost_usd: threadTotals.cost_usd,
           });
         } catch {
           // Fire-and-forget
