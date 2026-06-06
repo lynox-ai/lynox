@@ -78,14 +78,18 @@
 	// Back action for the fullscreen preview: return to the chat when the
 	// artifact was deep-linked from there, otherwise close back to the gallery.
 	function goBack() {
-		// Block the deep-link $effect from re-opening + drop any lingering ?id=
-		// so the close can't be raced/resurrected (the "Zurück geht nicht" bug).
+		// Block the deep-link $effect from re-opening so the close can't be
+		// raced/resurrected (the "Zurück geht nicht" bug).
 		deepLinkConsumed = true;
-		if ($page.url.searchParams.has('id')) {
+		closePreview();
+		if (openedFromChat) {
+			// goto('/app') already navigates away from any ?id= URL — one nav.
+			void goto('/app');
+		} else if ($page.url.searchParams.has('id')) {
+			// Gallery case with a lingering ?id=: strip it so a reload/back can't
+			// re-open. Single goto; no competing navigation.
 			void goto('/app/artifacts', { replaceState: true, keepFocus: true, noScroll: true });
 		}
-		if (openedFromChat) void goto('/app');
-		else closePreview();
 	}
 
 	async function handleDelete(id: string) {
