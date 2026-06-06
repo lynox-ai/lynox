@@ -13,6 +13,8 @@
 	import { page } from '$app/stores';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import { addToast } from '../stores/toast.svelte.js';
+	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 
 	let selected = $state<Artifact | null>(null);
 	// True when `selected` was opened via the chat deep-link (?id=…) — drives
@@ -140,6 +142,15 @@
 		URL.revokeObjectURL(link.href);
 	}
 
+	/** Save as PDF via the browser print pipeline — same path as the inline
+	 *  artifact bubble, so the gallery exports identically. */
+	function handlePdf(a: Artifact) {
+		const ok = a.type === 'markdown'
+			? printMarkdownDocument(a.content, a.title)
+			: printHtmlDocument(a.content);
+		if (!ok) addToast(t('artifacts.popup_blocked'), 'error', 5000);
+	}
+
 	$effect(() => {
 		function handleEscape(e: KeyboardEvent) {
 			if (e.key !== 'Escape') return;
@@ -237,7 +248,10 @@
 			<h2 class="text-sm font-medium text-text flex-1 truncate">{selected.title}</h2>
 			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1}{' · '}v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
-			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>Export</button>
+			{#if selected.type === 'html' || selected.type === 'markdown'}
+				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => handlePdf(selected!)}>{t('artifacts.save_pdf')}</button>
+			{/if}
+			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.download_file')}</button>
 		</div>
 
 		<!-- Artifact content -->
