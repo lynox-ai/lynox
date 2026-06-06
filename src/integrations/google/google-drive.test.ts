@@ -147,6 +147,50 @@ describe('google_drive tool', () => {
       expect(result).toContain('File uploaded');
       expect(result).toContain('uploaded1');
     });
+
+    it('declares Content-Transfer-Encoding: base64 for a binary upload and strips whitespace', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
+      const tool = createDriveTool(auth);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'bin1', name: 'doc.pdf', mimeType: 'application/pdf' }),
+      });
+
+      await tool.handler({
+        action: 'upload',
+        file_name: 'doc.pdf',
+        content: 'JVBE Ri0=', // base64 with a space to prove it gets stripped
+        content_encoding: 'base64',
+        mime_type: 'application/pdf',
+      }, createMockAgent('Yes'));
+
+      const body = String(mockFetch.mock.calls.at(-1)?.[1]?.body ?? '');
+      expect(body).toContain('Content-Transfer-Encoding: base64');
+      expect(body).toContain('Content-Type: application/pdf');
+      expect(body).toContain('JVBERi0=');       // whitespace stripped
+      expect(body).not.toContain('JVBE Ri0=');  // not the raw spaced form
+    });
+
+    it('does NOT add a transfer-encoding header for a normal text upload', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
+      const tool = createDriveTool(auth);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 't1', name: 't.txt', mimeType: 'text/plain' }),
+      });
+
+      await tool.handler({
+        action: 'upload',
+        file_name: 't.txt',
+        content: 'Hello World',
+      }, createMockAgent('Yes'));
+
+      const body = String(mockFetch.mock.calls.at(-1)?.[1]?.body ?? '');
+      expect(body).not.toContain('Content-Transfer-Encoding');
+      expect(body).toContain('Hello World');
+    });
   });
 
   describe('list', () => {
