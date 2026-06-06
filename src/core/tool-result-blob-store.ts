@@ -15,6 +15,20 @@ import type {
  */
 export const DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS = 4_096;
 
+/**
+ * Max number of retained blobs across compaction windows. Beyond this the
+ * least-recently-used blobs are evicted. Replaces the old clear-on-every-
+ * compaction as one half of the memory bound.
+ */
+export const DEFAULT_BLOB_STORE_MAX_ENTRIES = 64;
+
+/**
+ * Max total retained payload bytes across compaction windows. 8 MB mirrors the
+ * engine's MAX_BUFFER_BYTES ceiling and is the dominant half of the memory
+ * bound (a few huge dumps hit the byte cap long before the entry count).
+ */
+export const DEFAULT_BLOB_STORE_MAX_BYTES = 8 * 1_024 * 1_024;
+
 /** One retained tool result, keyed by a short stable id in the blob store. */
 export interface ToolResultBlob {
   /** Tool name the result came from (e.g. `http_request`) — best-effort. */
@@ -63,11 +77,15 @@ function buildDescriptor(tool: string, payload: string): string {
  * post-compaction synthetic context lists those ids with a one-line
  * descriptor, and the `recall_tool_result` builtin re-fetches a payload by id.
  *
- * Lifetime: the store is cleared at the START of the next `compact()`, so a
- * blob is recallable only until the conversation is compacted again — it is
- * "hard-dropped past a compaction reset". This once-per-compaction clear is
- * the sole bound on memory: the store can never grow unbounded because every
- * compaction empties it before re-filling.
+ * Lifetime: blobs are CARRIED FORWARD across compaction windows. A blob stays
+ * recallable through multiple compactions (a long chat can recall a file dump
+ * fetched many summaries ago), and `compact()` calls `pruneToCap()` after each
+ * eviction so the store still cannot grow unbounded — the least-recently-used
+ * blobs are dropped once the entry/byte cap is exceeded. `get()` re-inserts on
+ * a hit, so a blob the agent keeps recalling outlives one it set aside and
+ * forgot. (Previously the store was cleared at the start of every `compact()`,
+ * hard-dropping every blob past a single window — too aggressive for long
+ * chats; the LRU cap replaces that as the memory bound.)
  *
  * Owned by the Session and threaded into the main Agent so the
  * `recall_tool_result` tool handler (which only has `agent` access) can read
@@ -76,15 +94,31 @@ function buildDescriptor(tool: string, payload: string): string {
 export class ToolResultBlobStore {
   private readonly blobs = new Map<string, ToolResultBlob>();
   private seq = 0;
+  /** Running sum of retained payload bytes — the byte half of the LRU cap. */
+  private totalBytes = 0;
 
   /** Number of retained blobs. */
   get size(): number {
     return this.blobs.size;
   }
 
-  /** Retrieve a retained blob by id, or undefined if dropped / never existed. */
+  /** Total retained payload bytes (test/observability hook). */
+  get bytes(): number {
+    return this.totalBytes;
+  }
+
+  /**
+   * Retrieve a retained blob by id, or undefined if dropped / never existed.
+   * On a hit the entry is re-inserted (moved to the end of the map) so it
+   * counts as most-recently-used: a blob the agent keeps recalling is the last
+   * to be LRU-evicted when `pruneToCap()` runs.
+   */
   get(id: string): ToolResultBlob | undefined {
-    return this.blobs.get(id);
+    const blob = this.blobs.get(id);
+    if (blob === undefined) return undefined;
+    this.blobs.delete(id);
+    this.blobs.set(id, blob);
+    return blob;
   }
 
   /** All retained blobs in insertion order, paired with their ids. */
@@ -99,6 +133,27 @@ export class ToolResultBlobStore {
    */
   clear(): void {
     this.blobs.clear();
+    this.totalBytes = 0;
+  }
+
+  /**
+   * Bound the store after eviction by dropping the least-recently-used blobs
+   * until it fits within `maxEntries` AND `maxBytes`. This REPLACES the old
+   * clear-on-every-compaction as the memory bound: blobs survive across
+   * compaction windows (so a recall works two+ compactions later), but the
+   * store can still never grow without limit. Map iteration is insertion order
+   * and `get()` re-inserts on a hit, so the front of the map is the least-
+   * recently used — exactly what we evict first.
+   */
+  pruneToCap(
+    maxEntries: number = DEFAULT_BLOB_STORE_MAX_ENTRIES,
+    maxBytes: number = DEFAULT_BLOB_STORE_MAX_BYTES,
+  ): void {
+    for (const [id, blob] of this.blobs) {
+      if (this.blobs.size <= maxEntries && this.totalBytes <= maxBytes) break;
+      this.blobs.delete(id);
+      this.totalBytes -= blob.payload.length;
+    }
   }
 
   /** Mint the next short stable id. Ids are unique within a store instance. */
@@ -145,6 +200,7 @@ export class ToolResultBlobStore {
         const id = this.nextId();
         const descriptor = buildDescriptor(tool, payload);
         this.blobs.set(id, { tool, descriptor, payload });
+        this.totalBytes += payload.length;
         handles.push({ id, descriptor });
       }
     }
