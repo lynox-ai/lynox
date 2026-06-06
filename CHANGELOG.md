@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 1.10.0 — 2026-06-06
+
+Resilience-and-cost release: chat runs survive reloads and disconnects, long threads stop silently losing messages, the prompt cache works again (large cost drop on long conversations), and a batch of mobile/artifact UX fixes.
+
+### Features
+- **Run resilience** — a chat run is no longer tied to its browser connection. Reload or disconnect and the run keeps going headless; the nav shows a live-run indicator, runs are resumable via a replayable event stream (`/api/runs/:id/stream?since=`), a run registry sweeps orphaned runs on boot, and a concurrency-capped executor lets the client re-attach to an in-flight run. (#679–#684)
+- **Drag-and-drop file upload** onto the chat. (#687)
+- **Artifact export + mobile fullscreen** — print/export an artifact, a fixed mobile fullscreen view (safe-area + sticky close), and gallery fit-to-width on mobile. (#688)
+- **ask_user multi-select** now survives a reconnect. (#679)
+
+### Fixes
+- **Prompt-cache cost** — a per-turn knowledge block and hour-precision date in the cached prefix were re-breaking the cache every turn, re-billing the whole history (quadratic cost). The prefix is stable again → large cost reduction on long threads.
+- **Post-compaction data loss** — assistant messages no longer disappear from long/compacted threads on reload, mobile, or export; persistence now uses an identity high-water-mark instead of a disk-count floor.
+- **Dangling tool_use (ENGINE-10)** — tool-pairs are sanitized before every API send, so a partial turn can't brick a thread; previously bricked threads self-heal on the next successful turn. (#683)
+- **Compaction blob carry-forward** — tool-result blobs survive compaction via an LRU cap instead of being cleared. (#685)
+- **Google Drive binary uploads** + steering deliverables to artifacts. (#689)
+- **Managed copy sweep** — cleaner managed-facing settings copy (tool blurbs, reranker, privacy back-button, api-setup-v2). (#686)
+- **Mobile nav** — a new chat shows in history immediately, and the first tap no longer collapses or opens the chat-history list (synthetic touch hover ignored). Desktop footer decluttered; message cost/token stats render reliably.
+
+### Internal
+- Migrations v33 (`pending_prompts.multi_select`) and v34 (`active_runs` table) — both additive and forward-only.
+- Client-side PDF export was reverted (it can't faithfully render JS-navigated decks); a server-side PDF export is a planned follow-up.
+
 ## 1.9.0 — 2026-06-04
 
 Trust-and-recovery release: chat turns and artifacts never silently vanish, cost tracking shows one consistent number everywhere, artifacts gain a real version history, and `ask_user` can offer multiple answers.
