@@ -856,7 +856,7 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(recalled).toBe(payload);
     });
 
-    it('clears the store at the next compaction so an old handle is hard-dropped', async () => {
+    it('carries a blob forward across a second compaction so recall still works', async () => {
       const { session } = await createEngineAndSession();
       mockGetMessages.mockReturnValue(historyWithBigResult());
       vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
@@ -868,12 +868,13 @@ describe('Engine + Session (Orchestrator)', () => {
       const store = agent.toolResultBlobStore!;
       expect(store.get('tr-1')).toBeDefined();
 
-      // Second compaction with no large results — start-of-compact clear must
-      // hard-drop the prior window's blob.
+      // Second compaction with no new large results — the prior window's blob is
+      // CARRIED FORWARD (no start-of-compact clear), so it stays recallable two
+      // compactions later (the W5 fix; previously this hard-dropped it).
       mockGetMessages.mockReturnValue([{ role: 'assistant', content: 'short' }]);
       await session.compact();
-      expect(store.get('tr-1')).toBeUndefined();
-      expect(store.size).toBe(0);
+      expect(store.get('tr-1')).toBeDefined();
+      expect(store.size).toBe(1);
     });
 
     it('honors a custom tool_result_blob_threshold_chars from userConfig', async () => {
