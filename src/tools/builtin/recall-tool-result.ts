@@ -28,9 +28,8 @@ export const recallToolResultTool: ToolEntry<RecallToolResultInput> = {
       'After the conversation is summarized, big tool outputs (API responses, file ' +
       'reads, search results) are replaced by short recall handles like "tr-3". Call ' +
       'this with that id to get the full original payload back. Handles stay valid across ' +
-      'later compactions. If the id is no longer available (the recall store filled up and ' +
-      'dropped the least-recently-used, or it never existed) you get a clear notice — re-run ' +
-      'the original tool call instead.',
+      'compactions. If the id is gone (the store filled and dropped the oldest, or it never ' +
+      'existed) you get a clear notice — re-run the original tool call instead.',
     input_schema: {
       type: 'object' as const,
       properties: {
