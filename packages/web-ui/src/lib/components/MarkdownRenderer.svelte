@@ -674,12 +674,18 @@
 				if (iframe.contentWindow === e.source) {
 					// Remember the content's intrinsic width so fullscreen can fit-to-width
 					// a wide doc (e.g. an A4-print artifact) instead of clipping it.
-					if (typeof w === 'number' && w > 0) iframe.dataset['cw'] = String(w);
+					if (typeof w === 'number' && w > 0) {
+						iframe.dataset['cw'] = String(w);
+						// If the artifact is ALREADY fullscreen, a late width measurement
+						// (expand fired before the first resize message → cw was 0 → no fit)
+						// lets us fit-to-width now instead of leaving the doc clipped.
+						if (iframe.closest('.artifact-fullscreen')) applyFullscreenFit(iframe, true);
+					}
 					if (deck) {
 						// 100vh slide-decks: size by 16:9 of the rendered width instead of
 						// the collapsed scrollHeight (old Math.max(h,200) clamped to 200px).
-						const w = iframe.clientWidth || iframe.getBoundingClientRect().width;
-						iframe.style.height = `${deckFrameHeight(w, window.innerHeight)}px`;
+						const deckW = iframe.clientWidth || iframe.getBoundingClientRect().width;
+						iframe.style.height = `${deckFrameHeight(deckW, window.innerHeight)}px`;
 					} else {
 						iframe.style.height = `${Math.max(h, 200)}px`;
 					}
