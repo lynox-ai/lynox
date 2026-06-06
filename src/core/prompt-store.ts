@@ -32,6 +32,11 @@ export interface PendingPromptRow {
   partial_answers_json: string | null;
   secret_name: string | null;
   secret_key_type: string | null;
+  /** 1 when a single-question ask_user opted into multi-select pills
+   * (meta.multiSelect). NULL for ordinary single-select prompts, tabs, and
+   * secrets — and for every pre-v33 row. Lets a reconnect via /pending-prompt
+   * restore multi-select instead of degrading to single-select. */
+  multi_select: number | null;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -95,8 +100,9 @@ export class PromptStore {
   // ── Insert ──────────────────────────────────────────────────────────────
 
   /** Insert a single-question ask_user prompt. Throws PromptConflictError if
-   * this session already has a pending prompt. */
-  insertAskUser(sessionId: string, question: string, options?: string[]): string {
+   * this session already has a pending prompt. `multiSelect` persists the
+   * multi-select-pills opt-in so a reconnect can restore it (v33). */
+  insertAskUser(sessionId: string, question: string, options?: string[], multiSelect?: boolean): string {
     return this._insert({
       sessionId,
       promptType: 'ask_user',
@@ -105,6 +111,7 @@ export class PromptStore {
       questionsJson: null,
       secretName: null,
       secretKeyType: null,
+      multiSelect: multiSelect === true,
     });
   }
 
@@ -122,6 +129,7 @@ export class PromptStore {
       questionsJson: JSON.stringify(questions),
       secretName: null,
       secretKeyType: null,
+      multiSelect: false,
     });
   }
 
@@ -134,6 +142,7 @@ export class PromptStore {
       questionsJson: null,
       secretName: name,
       secretKeyType: keyType ?? null,
+      multiSelect: false,
     });
   }
 
@@ -145,6 +154,7 @@ export class PromptStore {
     questionsJson: string | null;
     secretName: string | null;
     secretKeyType: string | null;
+    multiSelect: boolean;
   }): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
@@ -162,6 +172,7 @@ export class PromptStore {
         null, // answer_saved
         'pending',
         expiresAt,
+        args.multiSelect ? 1 : null,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -333,8 +344,8 @@ export class PromptStore {
     return (this._stmtInsert ??= this.db.prepare(`
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json,
-         secret_name, secret_key_type, answer, answer_saved, status, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

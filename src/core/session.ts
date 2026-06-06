@@ -87,6 +87,11 @@ export interface RunOptions {
    *  Skips the synchronous user-message persist so an internal prompt never
    *  lands in the visible thread as a user row. */
   internal?: boolean | undefined;
+  /** Fired right after each eager-persist checkpoint. The HTTP layer uses it to
+   *  stamp the run buffer's current seq as `last_persisted_seq` in the run
+   *  registry, so a reconnecting client can replay-then-tail from exactly the
+   *  durable boundary (Tier-2 resumable re-attach, no double-render). */
+  onPersistCheckpoint?: (() => void) | undefined;
 }
 
 export interface SessionOptions {
@@ -147,6 +152,11 @@ export class Session {
   private briefing: string | undefined;
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
+  /** Per-run hook fired right after each eager-persist checkpoint so the HTTP
+   *  layer can record the run buffer's high-water seq as `last_persisted_seq`
+   *  (Tier-2 resumable re-attach uses it as the replay `?since=`). Stashed for
+   *  the run's duration; cleared in the run() finally. */
+  private _onPersistCheckpoint: (() => void) | null = null;
   private runToolCallSeq = 0;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
@@ -494,6 +504,9 @@ export class Session {
       if (runOptions?.thinking !== undefined) this.agent.setThinking(runOptions.thinking);
     }
 
+    // Stash the eager-persist checkpoint hook for this run (cleared in finally).
+    this._onPersistCheckpoint = runOptions?.onPersistCheckpoint ?? null;
+
     const model = getModelId(this._model, getActiveProvider());
     const startTime = Date.now();
     this.runToolCallSeq = 0;
@@ -602,6 +615,7 @@ export class Session {
     // delta slice sees this row already on disk and skips it. Skipped for
     // internal runs (compaction summary) so a system prompt never shows as a
     // user message.
+    let userTurnPrePersisted = false;
     if (threadStore && runOptions?.internal !== true) {
       try {
         const totalBefore = threadStore.getMessageCount(this.sessionId);
@@ -611,6 +625,7 @@ export class Session {
           runStartSeq,
           { message_count: totalBefore + 1 },
         );
+        userTurnPrePersisted = true;
       } catch {
         // Fire-and-forget — eager-persist still covers the happy path; never
         // block the run on a persistence hiccup.
@@ -620,7 +635,12 @@ export class Session {
     try {
       const result = await this.agent.send(
         userContent,
-        { suppressTools: runOptions?.noTools === true },
+        {
+          suppressTools: runOptions?.noTools === true,
+          // Tell the agent its first pushed user message is already on disk, so
+          // the identity-based eager-persist delta won't write it a second time.
+          userMessagePrePersisted: userTurnPrePersisted,
+        },
       );
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
@@ -684,16 +704,16 @@ export class Session {
       // know token counts; those are only computed here at run-end) plus
       // the first-run title — both gated on the START count, not the now
       // (`startMessageCount === 0` = "thread was empty when this run began").
-      if (threadStore) {
+      if (threadStore && this.agent) {
         try {
-          const allMessages = this.saveMessages();
-          // Slice against the API-row count (display-only B-full notes aren't
-          // in agent.messages); start new seqs at the total row count so they
-          // sort after any interleaved display note. Identical until a failed
-          // turn has persisted a note. See eager-persist.ts for the rationale.
-          const apiCount = threadStore.getApiMessageCount(this.sessionId);
+          const agent = this.agent;
+          // Delta computed by IDENTITY (agent persisted high-water-mark), not by
+          // a disk-row count floor — the floor dropped post-compaction /
+          // post-resume assistant turns (data-loss in long chats). New seqs
+          // start at MAX(seq)+1 so they sort after the full on-disk history that
+          // compaction keeps. See eager-persist.ts for the rationale.
+          const newMessages = agent.getUnpersistedTail();
           const totalCount = threadStore.getMessageCount(this.sessionId);
-          const newMessages = allMessages.slice(apiCount);
           // Per-thread cost/tokens = SUM over run_history for this session (the
           // single source of truth), NOT this run's cost. The column used to be
           // overwritten with the last run's cost each turn, so a multi-turn
@@ -713,6 +733,9 @@ export class Session {
               total_tokens: rollupTokens,
               total_cost_usd: rollupCost,
             });
+            // Advance the identity mark so a back-to-back eager checkpoint (or
+            // the next run) sees these rows as already durable.
+            agent.markPersisted(newMessages.length);
           } else {
             // Eager already persisted — just stamp the cost/token rollup.
             threadStore.updateThread(this.sessionId, {
@@ -790,11 +813,49 @@ export class Session {
 
       if (runHistory && this.currentRunId) {
         try {
+          // Record the tokens this run actually spent BEFORE it failed/aborted.
+          // Without this, an interrupted or errored run records cost 0, so its
+          // real spend (the tokens were billed by the provider) silently drops
+          // out of the thread + daily totals — under-reporting cost. With the
+          // resilience work making interrupts common, this is a material gap
+          // (rafael 2026-06-05). usageBefore/model are the same anchors the
+          // success path uses; partial deltas are >= 0 (this.usage only grows).
+          const tokensIn = this.usage.input_tokens - usageBefore.input_tokens;
+          const tokensOut = this.usage.output_tokens - usageBefore.output_tokens;
+          const cacheRead = this.usage.cache_read_input_tokens - usageBefore.cache_read_input_tokens;
+          const cacheWrite = this.usage.cache_creation_input_tokens - usageBefore.cache_creation_input_tokens;
+          const costUsd = calculateCost(model, {
+            input_tokens: tokensIn,
+            output_tokens: tokensOut,
+            cache_creation_input_tokens: cacheWrite,
+            cache_read_input_tokens: cacheRead,
+          });
           runHistory.updateRun(this.currentRunId, {
             responseText: getErrorMessage(err),
+            tokensIn,
+            tokensOut,
+            tokensCacheRead: cacheRead,
+            tokensCacheWrite: cacheWrite,
+            costUsd,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: 'failed',
+          });
+        } catch {
+          // Fire-and-forget
+        }
+      }
+
+      // Keep the per-thread cost/token rollup in sync after a failed/interrupted
+      // run too — getThreadTotals now sums this run's partial spend, so stamp
+      // the thread total (and self-heal historically-wrong rows). Mirrors the
+      // success-path rollup; guarded so a persistence hiccup never masks `err`.
+      if (threadStore && runHistory) {
+        try {
+          const threadTotals = runHistory.getThreadTotals(this.sessionId);
+          threadStore.updateThread(this.sessionId, {
+            total_tokens: threadTotals.tokens_in + threadTotals.tokens_out,
+            total_cost_usd: threadTotals.cost_usd,
           });
         } catch {
           // Fire-and-forget
@@ -823,6 +884,7 @@ export class Session {
       throw err;
     } finally {
       this.currentRunId = null;
+      this._onPersistCheckpoint = null;
       if (this.agent) {
         this.agent.currentRunId = undefined;
         // Restore per-run overrides to session defaults
@@ -861,11 +923,11 @@ export class Session {
    * Used by CLI /compact command and auto-compaction.
    */
   async compact(focus?: string, opts?: { confirmScope?: boolean }): Promise<{ success: boolean; summary: string }> {
-    // Phase 2 Context Hygiene: clear blobs retained at the *previous*
-    // compaction first. A blob is recallable only until the next compaction —
-    // this clear is what hard-drops the prior window and is the sole bound on
-    // the store's memory (it can never grow across more than one window).
-    this._toolResultBlobStore.clear();
+    // Phase 2 Context Hygiene: do NOT clear the blob store here. Blobs retained
+    // at earlier compactions are CARRIED FORWARD so a `recall_tool_result` still
+    // works two+ compactions later (the old clear-on-every-compaction hard-
+    // dropped them past a single window — too aggressive for long chats). The
+    // memory bound is now an explicit LRU cap applied after eviction below.
 
     // Snapshot the pre-summary history. Large tool results live here; the
     // summary run below only *appends* (the summary prompt + reply), so the
@@ -893,7 +955,15 @@ export class Session {
     // mid-conversation — so the warm prompt cache is untouched between turns.
     const thresholdChars = this.engine.getUserConfig().tool_result_blob_threshold_chars
       ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
-    const handles = this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);
+    this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);
+    // Bound the carried-forward store by LRU after adding this window's blobs.
+    this._toolResultBlobStore.pruneToCap();
+    // List EVERY currently-retained blob (prior windows carried forward + this
+    // window's new evictions), so a blob that survived an earlier compaction
+    // stays discoverable + recallable — not just the ones evicted this round.
+    const handles = this._toolResultBlobStore
+      .entries()
+      .map(({ id, blob }) => ({ id, descriptor: blob.descriptor }));
 
     this.reset();
     if (summary) {
@@ -1012,13 +1082,26 @@ export class Session {
    */
   private _persistMessages(): void {
     if (!this.agent) return;
+    const agent = this.agent;
     // Outcome is intentionally ignored — fire-and-forget contract; helper
     // catches its own errors and returns an outcome enum for tests only.
+    // Delta is computed by IDENTITY (the agent's persisted high-water-mark),
+    // so post-compaction / post-resume turns are persisted instead of dropped
+    // by a stale row-count floor. The mark advances only after the write
+    // commits, so a failed append is retried on the next checkpoint.
     persistAgentMessages({
       threadStore: this.engine.getThreadStore(),
       sessionId: this.sessionId,
-      allMessages: this.agent.getMessages(),
+      delta: agent.getUnpersistedTail(),
+      onPersisted: (count) => agent.markPersisted(count),
     });
+    // Stamp the durable boundary (run buffer high-water seq) into the run
+    // registry so a reconnecting client replays from exactly here (Tier 2).
+    // After persistAgentMessages so the seq can never claim more is durable
+    // than actually was. Best-effort — never let a checkpoint hook break a run.
+    if (this._onPersistCheckpoint) {
+      try { this._onPersistCheckpoint(); } catch { /* checkpoint hook is additive */ }
+    }
   }
 
   // ── Model / Effort / Thinking ──

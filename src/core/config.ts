@@ -63,7 +63,7 @@ export function loadConfig(): LynoxUserConfig {
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
     'default_tier', 'thinking_mode', 'effort_level',
-    'max_session_cost_usd', 'embedding_provider', 'plugins',
+    'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider', 'plugins',
     'organization_id', 'client_id',
     'changeset_review', 'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',

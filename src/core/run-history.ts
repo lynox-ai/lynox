@@ -735,6 +735,36 @@ const MIGRATIONS: string[] = [
   // normal turn), so existing threads are unchanged.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (32);
    ALTER TABLE thread_messages ADD COLUMN display_only INTEGER NOT NULL DEFAULT 0;`,
+
+  // v33: Persist the multi-select flag for resumable ask_user prompts. A
+  // single-question ask_user can opt into multi-select pills (meta.multiSelect):
+  // the flag was sent in the live SSE `prompt` event but never stored, so a
+  // reconnect via /pending-prompt re-rendered it as single-select. Nullable add:
+  // pre-v33 rows + ordinary single-select prompts read as NULL (= single-select).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (33);
+   ALTER TABLE pending_prompts ADD COLUMN multi_select INTEGER;`,
+  // v34: Active-run registry mirror. Chat runs need a client-queryable,
+  // restart-survivable record of which thread has a live run (GET
+  // /api/runs/active + the nav indicator), independent of the SSE connection
+  // that is today the only liveness signal (in-memory runningSessions). On a
+  // clean boot the engine sweeps any rows left 'running'/'awaiting_input' to
+  // 'interrupted' — a restart kills the in-flight run, there is no cross-restart
+  // resume. No PII: status, seqs and timestamps only. The *_seq columns default
+  // 0 and are populated once the resumable event buffer lands (Tier 2).
+  // (v33 = pending_prompts.multi_select, shipped in a sibling PR.)
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (34);
+   CREATE TABLE IF NOT EXISTS active_runs (
+     run_id TEXT PRIMARY KEY,
+     thread_id TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'running'
+       CHECK(status IN ('running','awaiting_input','done','error','interrupted')),
+     started_at TEXT NOT NULL DEFAULT (datetime('now')),
+     last_activity TEXT NOT NULL DEFAULT (datetime('now')),
+     last_event_seq INTEGER NOT NULL DEFAULT 0,
+     last_persisted_seq INTEGER NOT NULL DEFAULT 0,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX IF NOT EXISTS idx_active_runs_thread ON active_runs(thread_id);`,
 ];
 
 export class RunHistory {

@@ -1,5 +1,62 @@
 import { describe, it, expect } from 'vitest';
-import { isViewportDeck, deckFrameHeight } from './artifact-frame.js';
+import { isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview, ARTIFACT_FIT_SCRIPT } from './artifact-frame.js';
+
+describe('injectArtifactPreview', () => {
+	it('injects head extras + a default viewport + the fit script into a full doc', () => {
+		const out = injectArtifactPreview('<html><head><title>T</title></head><body>hi</body></html>', '<meta name="csp">');
+		expect(out).toContain('<meta name="csp">');
+		expect(out).toContain('width=device-width');
+		expect(out).toContain(ARTIFACT_FIT_SCRIPT);
+		// head extras go inside <head>, the script before </body>
+		expect(out.indexOf('<meta name="csp">')).toBeLessThan(out.indexOf('</head>'));
+		expect(out.indexOf(ARTIFACT_FIT_SCRIPT)).toBeLessThan(out.indexOf('</body>'));
+	});
+
+	it('does NOT add a second viewport when the artifact already declares one', () => {
+		const out = injectArtifactPreview('<html><head><meta name="viewport" content="width=600"></head><body>x</body></html>', '<meta name="csp">');
+		expect(out.match(/name=["']viewport["']/gi)?.length).toBe(1);
+		expect(out).toContain('width=600');
+	});
+
+	it('handles a bare fragment (no <head>/<body>)', () => {
+		const out = injectArtifactPreview('<div>frag</div>', '<meta name="csp">');
+		expect(out.startsWith('<meta name="csp">')).toBe(true);
+		expect(out).toContain('width=device-width');
+		expect(out.endsWith(ARTIFACT_FIT_SCRIPT)).toBe(true);
+	});
+
+	it('the fit script sets viewport width to the content width (fit-to-width), not device-width', () => {
+		// It must set width=<cw> + initial-scale=dev/cw so a wide doc fits the phone
+		// natively with pinch-zoom — never reset to device-width (would re-clip).
+		expect(ARTIFACT_FIT_SCRIPT).toContain('width="+cw+"');
+		expect(ARTIFACT_FIT_SCRIPT).toContain('initial-scale="+s');
+		expect(ARTIFACT_FIT_SCRIPT).toContain('cw>dev+4');
+	});
+});
+
+describe('computeFitZoom', () => {
+	it('scales a wide A4 doc down to the phone frame width', () => {
+		// 794px A4 content in a 390px frame → ~0.49 zoom.
+		const z = computeFitZoom(794, 390);
+		expect(z).toBeCloseTo(390 / 794, 5);
+	});
+
+	it('returns null when the content already fits', () => {
+		expect(computeFitZoom(380, 390)).toBeNull();
+		expect(computeFitZoom(390, 390)).toBeNull();
+	});
+
+	it('ignores sub-pixel overflow (4px slack)', () => {
+		expect(computeFitZoom(393, 390)).toBeNull();
+		expect(computeFitZoom(395, 390)).not.toBeNull();
+	});
+
+	it('returns null for degenerate dimensions', () => {
+		expect(computeFitZoom(0, 390)).toBeNull();
+		expect(computeFitZoom(794, 0)).toBeNull();
+		expect(computeFitZoom(-1, 390)).toBeNull();
+	});
+});
 
 describe('isViewportDeck', () => {
 	it('flags a 100vh deck whose scrollHeight collapsed to the viewport', () => {

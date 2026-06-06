@@ -15,6 +15,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { toolBlurb } from '../utils/tool-blurb.js';
 
 	interface Tool { name: string; description: string }
 	interface CategorizedTool extends Tool { categoryKey: string }
@@ -56,6 +57,11 @@
 	];
 	const FALLBACK_CATEGORY = { key: 'other', labelKey: 'tools.category.other' };
 
+	// Internal-plumbing tools the user shouldn't see (or toggle) in this list —
+	// they're engine mechanics, not user-facing capabilities. recall_tool_result
+	// is pure compaction internals ("re-fetch a blob dropped past a compaction").
+	const HIDDEN_TOOLS = new Set<string>(['recall_tool_result']);
+
 	// Display order — communication-first because that's the most common
 	// "I want to lock this down" target; system + other at the bottom.
 	const CATEGORY_ORDER = [
@@ -74,6 +80,7 @@
 	const grouped = $derived.by((): CategoryGroup[] => {
 		const buckets = new Map<string, CategoryGroup>();
 		for (const tool of tools) {
+			if (HIDDEN_TOOLS.has(tool.name)) continue;
 			const { key, labelKey } = categorize(tool.name);
 			let group = buckets.get(key);
 			if (!group) {
@@ -164,7 +171,7 @@
 							<div class="flex-1 min-w-0">
 								<span class="font-mono text-sm font-medium">{tool.name}</span>
 								{#if tool.description}
-									<span class="block text-xs text-text-muted mt-0.5">{tool.description}</span>
+									<span class="block text-xs text-text-muted mt-0.5">{toolBlurb(tool.description)}</span>
 								{/if}
 							</div>
 							<!-- Right-aligned iOS-style switch (replaces left-aligned checkbox). -->

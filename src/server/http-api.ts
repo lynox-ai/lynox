@@ -1738,6 +1738,20 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Global concurrency cap (Tier 2, AC6). Bound how many chat runs execute
+      // at once across all threads — many parallel headless runs would otherwise
+      // blow LLM cost + run-buffer memory (R3). Fail fast here (before the LLM
+      // preflight + SSE headers) with a typed 429 the client surfaces as "too
+      // many runs". The real reservation is executor.acquire() once the runId
+      // exists; this early check is a fail-fast (a benign TOCTOU under the cap
+      // is harmless on a single-tenant engine). A run already on THIS session is
+      // a 409 above, so this only trips on a 6th *distinct* thread's run.
+      const runExecutor = this.engine?.getRunExecutor();
+      if (runExecutor?.atCapacity()) {
+        jsonResponse(res, 429, { error: 'run_queue_full', capacity: runExecutor.capacity });
+        return;
+      }
+
       const b = body as Record<string, unknown> | null;
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
@@ -1785,9 +1799,12 @@ export class LynoxHTTPApi {
       const runThinking = b?.['thinking'] === 'disabled'
         ? { type: 'disabled' as const }
         : undefined;
-      const runOptions = runEffort || runThinking
-        ? { ...(runEffort ? { effort: runEffort } : {}), ...(runThinking ? { thinking: runThinking } : {}) }
-        : undefined;
+      // Always an object so the Tier-2 eager-persist checkpoint hook can be
+      // attached below (once runId + buffer exist). effort/thinking stay optional.
+      const runOptions: import('../core/session.js').RunOptions = {
+        ...(runEffort ? { effort: runEffort } : {}),
+        ...(runThinking ? { thinking: runThinking } : {}),
+      };
 
       // User's IANA timezone for the per-turn `[Now: …]` marker. The client
       // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
@@ -1870,11 +1887,26 @@ export class LynoxHTTPApi {
 
       let aborted = false;
 
-      // Wire streaming
+      // ── Per-run identity + resumable event buffer ──
+      // `runId` identifies this run to the client-queryable registry
+      // (GET /api/runs/active) and the resumable stream endpoint
+      // (GET /api/runs/:runId/stream). The buffer is engine-owned (outlives
+      // this request), so a headless run keeps filling it after the SSE closes
+      // and a reconnecting client can replay-then-tail (Tier 2).
+      const runId = randomUUID();
+      const runBuffer = this.engine?.getRunBufferManager()?.create(runId) ?? null;
+
+      // Wire streaming. Every rendered event is appended to the buffer (which
+      // assigns a monotonic seq) and emitted with an `id:` line so a client can
+      // resume from `?since=<lastSeq>`. The buffer append happens even while
+      // `aborted` (the SSE is dead but the headless run keeps producing events
+      // for a reconnecting subscriber).
       session.onStream = async (event: StreamEvent) => {
+        const seq = runBuffer?.append(event);
         if (aborted) return;
         const data = JSON.stringify(event);
-        res.write(`event: ${event.type}\ndata: ${data}\n\n`);
+        const idLine = seq !== undefined ? `id: ${seq}\n` : '';
+        res.write(`${idLine}event: ${event.type}\ndata: ${data}\n\n`);
       };
 
       // Sync streamHandler to toolContext so workflow progress events reach the SSE stream
@@ -1896,6 +1928,23 @@ export class LynoxHTTPApi {
         }
       }
 
+      // ── Run registry wiring (SQLite-backed, survives SSE disconnects) ──
+      // The registry is an additive status mirror alongside runningSessions;
+      // execution still lives in this handler (Tier 1) while the buffer above
+      // enables resumable re-attach (Tier 2). `runId` is created above.
+      const runRegistry = this.engine?.getRunRegistry();
+
+      // Tier-2 resumable re-attach: at each eager-persist checkpoint, stamp the
+      // run buffer's current high-water seq as `last_persisted_seq`. A
+      // reconnecting client reads it (atomically with the transcript via
+      // GET /threads/:id/messages) and replays `GET /runs/:runId/stream?since=`
+      // from exactly the durable boundary — the in-flight (not-yet-persisted)
+      // turn lives in the buffer above that seq, the persisted turns below it,
+      // so the replay never double-renders what the transcript already showed.
+      runOptions.onPersistCheckpoint = () => {
+        if (runBuffer) runRegistry?.touch(runId, { lastPersistedSeq: runBuffer.currentSeq() });
+      };
+
       // ── Prompt wiring (SQLite-backed, survives SSE disconnects) ──
       const promptStore = this.engine?.getPromptStore();
       // AbortController for the session — used to cancel prompt polling on disconnect
@@ -1905,7 +1954,7 @@ export class LynoxHTTPApi {
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
       session.promptUser = async (question: string, options?: string[], meta?: PromptMeta): Promise<string> => {
         if (!promptStore) return 'n'; // fallback if store unavailable
-        const promptId = promptStore.insertAskUser(sessionId, question, options);
+        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true);
         hasActivePendingPrompt = true;
         // Best-effort SSE notification (client may not be connected).
         if (!aborted && !res.writableEnded) {
@@ -2044,45 +2093,71 @@ export class LynoxHTTPApi {
           // want the stale clock to start counting.
           const slot = this.runningSessions.get(sessionId);
           if (slot) slot.lastEventAt = Date.now();
+          // Mirror liveness into the registry so /api/runs/active + stale-run
+          // detection see a fresh heartbeat for this run.
+          runRegistry?.touch(runId);
         }
       }, 10_000);
 
-      // Abort on client disconnect or timeout (30 min max)
+      // Wall-clock backstop (30 min max). Fires for a still-streaming run AND
+      // for a headless run whose client already disconnected (disconnect≠abort
+      // leaves this armed). `res.destroyed` guards the post-disconnect case so
+      // we never call res.end() on a torn-down socket.
       const streamTimeout = setTimeout(() => {
         aborted = true;
         clearInterval(keepaliveTimer);
         sessionAbortController.abort();
         session.abort();
-        if (!res.writableEnded) res.end();
+        if (!res.writableEnded && !res.destroyed) res.end();
       }, 30 * 60_000);
 
       req.on('close', () => {
-        clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
+        // Stop writing to the dead socket — `onStream` no-ops while `aborted`
+        // (L1875), so the run can keep computing without write-after-close. We
+        // do NOT clear `streamTimeout` here: it stays armed as the headless
+        // wall-clock backstop below (the prompt branch drops it explicitly).
         aborted = true;
         // Mark this run's stream as dead so a fresh /run on the same session
         // can take it over if the agent is parked on a pending prompt.
         const slot = this.runningSessions.get(sessionId);
         if (slot) slot.streamAlive = false;
-        // If a prompt is pending, do NOT abort the session —
-        // the agent loop stays alive polling SQLite for an answer.
-        // The user can reconnect and answer the prompt.
-        if (!hasActivePendingPrompt) {
-          sessionAbortController.abort();
-          session.abort();
-        } else {
-          // Orphan watchdog: bound how long a closed-stream slot can hold
-          // the running-session entry while waiting on a pending prompt.
-          // Pre-1.5.0 the slot could sit `streamAlive=false` up to PROMPT_TTL
-          // (24h), pinning a runningSessions entry + open SQLite handles
-          // until the prompt expired. Now: 10 min after stream close, if
-          // nobody reconnected (streamAlive still false), trigger the
-          // takeover so the prompt expires and the slot frees.
-          setTimeout(() => {
-            const liveSlot = this.runningSessions.get(sessionId);
-            if (liveSlot && !liveSlot.streamAlive) liveSlot.takeover();
-          }, ORPHAN_PROMPT_WATCHDOG_MS);
+        // Orphan watchdog (armed in BOTH branches). 10 min after the stream
+        // dies, if the run is parked on a still-pending prompt that nobody
+        // reconnected to answer, free the slot. Pre-1.5.0 such a slot could sit
+        // `streamAlive=false` up to PROMPT_TTL (24h), pinning a runningSessions
+        // entry + open SQLite handles until the prompt expired.
+        //
+        // The `getPending` guard is what makes this safe to arm unconditionally:
+        // it fires takeover ONLY for a genuinely stuck, dead-stream prompt —
+        // never against a headless run that is productively computing (no
+        // pending prompt) or whose prompt was already answered via reconnect
+        // (getPending now empty). This also bounds the prompt-fires-AFTER-a
+        // -headless-disconnect case at 10 min; the close-time
+        // `hasActivePendingPrompt` snapshot alone would leave it to the 30-min
+        // streamTimeout.
+        setTimeout(() => {
+          const liveSlot = this.runningSessions.get(sessionId);
+          if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
+            liveSlot.takeover();
+          }
+        }, ORPHAN_PROMPT_WATCHDOG_MS);
+        if (hasActivePendingPrompt) {
+          // Already parked on a prompt at close → the agent loop is blocked on
+          // the prompt (not computing), so the 30-min compute backstop is moot.
+          // Drop it; the orphan watchdog above bounds the wait. The user can
+          // reconnect and answer (the loop keeps polling SQLite).
+          clearTimeout(streamTimeout);
         }
+        // else: RUNNING with no prompt → Tier-1 disconnect≠abort. Do NOT abort
+        // the session; let it finish headless. Eager-persist keeps the
+        // transcript durable and the run registry keeps reporting it via
+        // GET /api/runs/active, so a reload re-attaches (re-reads
+        // /threads/:id/messages + sees the live run) instead of going blind —
+        // this is the v1.9.0 reload-blind fix. The 30-min streamTimeout stays
+        // armed as the wall-clock backstop (it aborts the session + ends res),
+        // so a hung headless run can't leak; the finally clears it on natural
+        // completion. PRD-RUN-RESILIENCE D2.
       });
 
       // Run
@@ -2096,6 +2171,19 @@ export class LynoxHTTPApi {
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
+        // Reserve a concurrency slot + register the abort handle so the run can
+        // be aborted by id from any connection (DELETE /api/runs/:runId) —
+        // including a headless run whose original SSE is already gone. `takeover`
+        // is the same expire-prompt + abort path the stale-run reclaim uses (for
+        // a headless run `aborted` is already true, so no terminal is owed).
+        // INSIDE the try so a throw from runRegistry.start (SQLite busy/disk-full)
+        // still hits the finally's release() — otherwise the slot would leak and
+        // after `maxConcurrent` such failures every /run would 429 forever.
+        runExecutor?.acquire(runId, sessionId, takeover);
+        // Register the run as live (replaces any prior/interrupted row for this
+        // thread). A crash before the finally leaves this row 'running' → the
+        // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
+        runRegistry?.start(sessionId, runId);
         const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
@@ -2116,7 +2204,135 @@ export class LynoxHTTPApi {
         clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
+        // Free the concurrency slot + abort handle (idempotent). The next queued
+        // /run can now reserve a slot.
+        runExecutor?.release(runId);
+        // Run reached a terminal state (done/error/abort-completion) — drop it
+        // from the registry. The transcript persists in thread_messages. A
+        // process crash never reaches here, leaving the row for the boot-sweep.
+        runRegistry?.remove(runId);
+        // End + drop the resumable buffer: notifies any live `/stream`
+        // subscribers to close, then frees the ring (the durable transcript
+        // persists regardless).
+        this.engine?.getRunBufferManager()?.remove(runId);
       }
+    }));
+
+    // GET /runs/active — client-queryable live-run state for the nav indicator.
+    // Returns every registry row (running + interrupted; done/error are already
+    // removed), so a reloaded client can re-attach a "still working" indicator
+    // and surface interrupted runs (banner + Retry). `awaiting_input` is derived
+    // from a pending prompt rather than tracked as a separate write, keeping the
+    // registry a simple liveness mirror with a single source of truth for
+    // "blocked on the user". Whole-tenant (single-tenant engine, no per-user
+    // scoping — see PRD-RUN-RESILIENCE N5).
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/active', async (_req, res) => {
+      const registry = this.engine?.getRunRegistry();
+      if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
+      const promptStoreForRuns = this.engine?.getPromptStore();
+      const runs = registry.getActive().map((r) => {
+        const awaiting = r.status === 'running' && !!promptStoreForRuns?.getPending(r.thread_id);
+        return {
+          runId: r.run_id,
+          threadId: r.thread_id,
+          status: awaiting ? 'awaiting_input' : r.status,
+          startedAt: r.started_at,
+          lastActivity: r.last_activity,
+          // Durable replay boundary — the client re-attaches with `?since=` this
+          // to GET /runs/:runId/stream after a reload (Tier 2).
+          lastPersistedSeq: r.last_persisted_seq,
+        };
+      });
+      jsonResponse(res, 200, { runs });
+    }));
+
+    // DELETE /runs/:runId — abort a live run by id (AC10). Works from any
+    // connection, including for a headless run whose original SSE is gone (the
+    // executor holds the abort handle independent of the request). 404 if no
+    // such run is live — the executor's active set is the liveness oracle, same
+    // as the buffer for /stream (no existence leak). The run's own finally then
+    // tears down registry + buffer as the session unwinds.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/runs/:runId', async (_req, res, params) => {
+      const runId = params['runId'] ?? '';
+      const executor = this.engine?.getRunExecutor();
+      const registry = this.engine?.getRunRegistry();
+      // Live run → abort it (the run's own finally then clears registry + buffer
+      // as the session unwinds). Not live but present in the registry → it's an
+      // interrupted row the client is acking; remove it so the nav dot + banner
+      // clear. Neither → 404 (no existence oracle).
+      const wasLive = executor?.abort(runId) ?? false;
+      if (wasLive) { jsonResponse(res, 200, { aborted: true, runId }); return; }
+      // Not live → only an INTERRUPTED row may be acked/removed. A 'running' row
+      // that isn't in the executor's live set is an inconsistency we must NOT
+      // silently clear (it could still be live on a path that bypassed acquire);
+      // leave it for the boot-sweep / its own finally and report not-found.
+      const row = registry?.getByRunId(runId);
+      if (row?.status === 'interrupted') {
+        registry?.remove(runId);
+        jsonResponse(res, 200, { aborted: false, dismissed: true, runId });
+        return;
+      }
+      jsonResponse(res, 404, { error: 'run not found' });
+    }));
+
+    // GET /runs/:runId/stream?since=<seq> — resumable SSE re-attach (Tier 2).
+    // Replays buffered events newer than `since`, then live-tails new appends,
+    // emitting `id:` lines so the client can resume again from the last seq.
+    // Ownership (S3, D-S3): an unknown / not-live runId returns 404 — never 403
+    // (no existence oracle). The buffer is the liveness source of truth: it
+    // exists only while the run is live, so a completed/never-existed run 404s.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/:runId/stream', async (req, res, params) => {
+      const runId = params['runId'] ?? '';
+      const buffer = this.engine?.getRunBufferManager()?.get(runId);
+      if (!buffer) { jsonResponse(res, 404, { error: 'run not found' }); return; }
+
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const sinceRaw = parseInt(url.searchParams.get('since') ?? '0', 10);
+      const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'X-lynox-AI-Generated': 'true',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      const write = (seq: number, event: StreamEvent): void => {
+        if (res.writableEnded) return;
+        res.write(`id: ${seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+
+      // Heartbeat keeps proxies from idling the connection closed (mirrors /run).
+      const keepalive = setInterval(() => {
+        if (!res.writableEnded) res.write(`event: heartbeat\ndata: ${JSON.stringify({ sentAt: Date.now() })}\n\n`);
+      }, 10_000);
+
+      // 1) Replay everything newer than `since` (catch up to the live tail).
+      //    No `await` between replay and subscribe → atomic w.r.t. the event
+      //    loop, so no appended event can slip through the gap.
+      for (const e of buffer.replaySince(since)) write(e.seq, e.event);
+
+      // 2) Subscribe for the live tail. onEnd fires when the run completes →
+      //    emit a terminal `done` (the full result lives in the persisted
+      //    transcript; the re-subscribed client only needs the completion
+      //    signal) and close.
+      let ended = false;
+      const finish = (): void => {
+        if (ended) return;
+        ended = true;
+        clearInterval(keepalive);
+        if (!res.writableEnded) {
+          res.write(`event: done\ndata: ${JSON.stringify({ resumed: true })}\n\n`);
+          res.end();
+        }
+      };
+      const unsub = buffer.subscribe((e) => write(e.seq, e.event), finish);
+
+      req.on('close', () => {
+        clearInterval(keepalive);
+        unsub();
+      });
     }));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
@@ -2134,6 +2350,9 @@ export class LynoxHTTPApi {
         kind: isTabs ? 'tabs' : row.prompt_type === 'ask_secret' ? 'secret' : 'single',
         question: row.question,
         options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
+        // Restore the multi-select-pills opt-in (v33) so a reconnect mid-prompt
+        // re-renders multi-select instead of degrading to single-select.
+        multiSelect: row.multi_select === 1,
         questions: row.questions_json ? JSON.parse(row.questions_json) as unknown[] : undefined,
         partialAnswers: row.partial_answers_json ? JSON.parse(row.partial_answers_json) as unknown[] : undefined,
         secretName: row.secret_name,
@@ -2463,7 +2682,27 @@ export class LynoxHTTPApi {
       // tool-use blocks, strip safety wrappers for display, flatten into the
       // UI-ready shape that mirrors the client's ChatMessage.
       const messages = projectMessages(records);
-      jsonResponse(res, 200, { messages });
+      // Resumable re-attach (Tier 2, AC2/AC3): read this thread's live run
+      // SYNCHRONOUSLY in the same tick as the transcript above. Two synchronous
+      // reads can't be interleaved by an eager-persist checkpoint (which runs on
+      // the same event loop), so the returned `lastPersistedSeq` is exactly the
+      // durable boundary of THIS transcript — the client replays the buffer from
+      // there with no gap and no double-render. `interrupted` tells the client to
+      // show a Retry banner instead of re-attaching a dead run.
+      const registry = this.engine?.getRunRegistry();
+      let activeRun: { runId: string; status: string; lastPersistedSeq: number } | null = null;
+      if (registry) {
+        const row = registry.getActive().find((r) => r.thread_id === params['id']);
+        if (row) {
+          const awaiting = row.status === 'running' && !!this.engine?.getPromptStore()?.getPending(row.thread_id);
+          activeRun = {
+            runId: row.run_id,
+            status: awaiting ? 'awaiting_input' : row.status,
+            lastPersistedSeq: row.last_persisted_seq,
+          };
+        }
+      }
+      jsonResponse(res, 200, { messages, activeRun });
     }));
 
     // ── Memory ──

@@ -384,6 +384,10 @@ let currentToolStartedAt = $state<number | null>(null);
 // server during an active run. Drives the "Verbindung scheint langsam"
 // hint when the gap grows beyond the server heartbeat interval.
 let lastEventAt = $state<number | null>(null);
+// Highest run-event `seq` (from SSE `id:` lines) applied to the current stream.
+// PR-D captures it; PR-E uses it as `?since=` to resume `GET /api/runs/:runId/stream`
+// after a disconnect — replay-then-tail, never re-run the task. Reset per run.
+let lastAppliedSeq = 0;
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
@@ -398,6 +402,20 @@ let runStartedAt = $state<number | null>(null);
 // — it's read inside the SSE handler, never rendered directly.
 let runStartAt: number | null = null;
 let runPromptCount = $state(0);
+// Tier-2: set when the resumed thread's run was `interrupted` (the engine
+// restarted mid-run — no cross-restart resume). Drives a Retry banner in the
+// chat view. Cleared on retry/dismiss and at the start of every resume.
+let runInterrupted = $state<{ runId: string } | null>(null);
+// Tier-2: true while re-attached to a live run's resumable stream after a
+// reload (GET /api/runs/:runId/stream). Lets the UI distinguish a fresh send
+// from a resumed view if needed; isStreaming already gates the activity bar.
+let isReattached = false;
+// Monotonic owner token for the shared streaming state (isStreaming/activity/
+// tool indicators). Every stream producer (_executeRun + reattachRun) claims a
+// fresh epoch at start; a producer only clears the shared state in its finally
+// if it is STILL the owner — so an ending re-attach can't switch off the
+// activity bar of a fresh send that started on the same thread meanwhile.
+let streamEpoch = 0;
 let chatError = $state<string | null>(null);
 let chatErrorDetail = $state<string | null>(null);
 let authError = $state(false);
@@ -667,6 +685,9 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	const assistantIdx = messages.length;
 	messages.push({ role: 'assistant', content: '', toolCalls: [] });
 
+	// Claim ownership of the shared streaming state so an in-flight re-attach
+	// that ends mid-send can't switch off this run's activity indicators.
+	streamEpoch++;
 	isStreaming = true;
 	// Seed liveness markers so a stale value from the previous run can't
 	// flash "Verbindung scheint langsam" for the first ~20s of this run.
@@ -862,6 +883,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
+	lastAppliedSeq = 0; // fresh run → reset the resume checkpoint
 
 	try {
 		while (true) {
@@ -873,15 +895,23 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			buffer = lines.pop() ?? '';
 
 			let eventType = '';
+			let eventSeq = 0;
 			for (const line of lines) {
-				if (line.startsWith('event: ')) {
+				if (line.startsWith('id: ')) {
+					// PR-D: resumable-stream seq. Captured here so a future
+					// re-subscribe (PR-E) can resume with `?since=lastAppliedSeq`.
+					const s = parseInt(line.slice(4), 10);
+					if (Number.isFinite(s)) eventSeq = s;
+				} else if (line.startsWith('event: ')) {
 					eventType = line.slice(7);
 				} else if (line.startsWith('data: ') && eventType) {
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
 						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx);
+						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed SSE events */ }
 					eventType = '';
+					eventSeq = 0;
 				}
 			}
 		}
@@ -989,6 +1019,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		const ttfbMs = Date.now() - runStartAt;
 		runStartAt = null;
 		msg.usage = { ...(msg.usage ?? { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }), ttfbMs };
+		// Surface the thread in the nav AS SOON AS the run produces output — a
+		// brand-new chat's user message is persisted by now (message_count ≥ 1),
+		// but the nav list otherwise only refreshes at run END, so a new chat
+		// stayed invisible (and its live run-status dot couldn't show) for the
+		// whole first turn (rafael 2026-06-05). One-shot, so it's one extra
+		// thread-list fetch per run.
+		void loadThreads();
 	}
 
 	switch (type) {
@@ -1676,6 +1713,9 @@ export async function checkPendingPrompt(): Promise<void> {
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
 				promptId: data['promptId'] as string | undefined,
+				// Restore multi-select pills on reconnect (v33) — without this the
+				// prompt degraded to single-select after a reload mid-prompt.
+				multiSelect: data['multiSelect'] === true,
 			};
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {
@@ -1864,6 +1904,11 @@ export function getCurrentToolStartedAt(): number | null {
 export function getLastEventAt(): number | null {
 	return lastEventAt;
 }
+/** Highest run-event seq applied to the current stream — the `?since=` value a
+ * resumable re-subscribe uses to replay-then-tail after a disconnect (PR-E). */
+export function getLastAppliedSeq(): number {
+	return lastAppliedSeq;
+}
 export function getQueueLength() {
 	return messageQueue.length;
 }
@@ -2032,6 +2077,150 @@ export function getSessionId() {
 let _resumeGeneration = 0;
 let _resumeController: AbortController | null = null;
 
+export function getRunInterrupted(): { runId: string } | null {
+	return runInterrupted;
+}
+
+/** Ack an interrupted run (clear the registry row so the nav dot + banner
+ * disappear). The run is already dead — there is no cross-restart resume. */
+export async function dismissInterruptedRun(): Promise<void> {
+	const runId = runInterrupted?.runId;
+	runInterrupted = null;
+	if (!runId) return;
+	try { await fetch(`${getApiBase()}/runs/${runId}`, { method: 'DELETE' }); } catch { /* best-effort ack */ }
+}
+
+/** Retry an interrupted run: ack the dead one, then re-send the last user turn
+ * as a fresh run (there is no cross-restart resume — the partial output stays
+ * in the transcript as history). */
+export async function retryInterruptedRun(): Promise<void> {
+	let lastUserText = '';
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
+	}
+	await dismissInterruptedRun();
+	if (lastUserText) await sendMessage(lastUserText);
+}
+
+/**
+ * Re-attach to a live run's resumable event stream after a reload/thread-switch
+ * (Tier 2). The transcript already shows the run's persisted turns up to
+ * `since` (= lastPersistedSeq, read atomically with the transcript); this
+ * replays buffered events strictly newer than `since` and live-tails the rest,
+ * so the in-flight turn streams in without re-running the task and without
+ * double-rendering anything the transcript already showed (AC2/AC3).
+ *
+ * The assistant placeholder is created LAZILY on the first content event, so an
+ * already-finished run (404 / immediate `done`) or an awaiting-input run (no
+ * events until the user answers) never leaves an empty bubble.
+ */
+async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
+	// userIdx for handleSSEEvent's error path = the last user message.
+	let userIdx = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i]?.role === 'user') { userIdx = i; break; }
+	}
+
+	let assistantIdx = -1;
+	const ensureAssistant = (): void => {
+		if (assistantIdx >= 0) return;
+		messages.push({ role: 'assistant', content: '' });
+		assistantIdx = messages.length - 1;
+	};
+
+	let res: Response;
+	try {
+		res = await fetch(`${getApiBase()}/runs/${runId}/stream?since=${since}`);
+	} catch {
+		return; // network drop — nav poll still reflects the run; user can reload
+	}
+	// 404 = the run completed between the transcript read and this re-attach
+	// (benign race) — the transcript already has it; nothing to stream.
+	if (!res.ok || !res.body) return;
+	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
+
+	const myEpoch = ++streamEpoch;
+	isStreaming = true;
+	isReattached = true;
+	lastAppliedSeq = since;
+	streamingActivity = 'thinking';
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buf = '';
+	// True only when the stream ended with the buffer's terminal `done` (run
+	// complete). On a drop/supersede this stays false so the finally does NOT
+	// auto-reconcile-then-reattach — that could spin against a still-live run;
+	// the nav poll + the next user action recover instead.
+	let completedNormally = false;
+	try {
+		let outerDone = false;
+		while (!outerDone) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (gen !== _resumeGeneration) break; // superseded by a newer resume
+			buf += decoder.decode(value, { stream: true });
+			const lines = buf.split('\n');
+			buf = lines.pop() ?? '';
+			let eventType = '';
+			let eventSeq = 0;
+			for (const line of lines) {
+				if (line.startsWith('id: ')) {
+					const s = parseInt(line.slice(4), 10);
+					if (Number.isFinite(s)) eventSeq = s;
+				} else if (line.startsWith('event: ')) {
+					eventType = line.slice(7);
+				} else if (line.startsWith('data: ') && eventType) {
+					if (eventType === 'done') { outerDone = true; completedNormally = true; eventType = ''; continue; }
+					if (eventType === 'heartbeat') { lastEventAt = Date.now(); eventType = ''; eventSeq = 0; continue; }
+					try {
+						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+						ensureAssistant();
+						handleSSEEvent(eventType, data, assistantIdx, userIdx);
+						if (eventSeq > 0) lastAppliedSeq = eventSeq;
+					} catch { /* skip malformed */ }
+					eventType = '';
+					eventSeq = 0;
+				}
+			}
+		}
+	} catch {
+		// Re-attach stream dropped — leave what streamed in place; the nav poll
+		// keeps reflecting the run and a further reload re-attaches again.
+	} finally {
+		try { await reader.cancel(); } catch { /* already closed */ }
+		// Only clear the shared streaming state if we are STILL its owner — a
+		// fresh send (_executeRun) or a newer re-attach bumps streamEpoch and
+		// takes ownership, and must not have its activity bar switched off by
+		// this finally. Same idea as the gen guard, but covers a same-thread
+		// fresh send (which does NOT bump _resumeGeneration).
+		if (streamEpoch === myEpoch) {
+			isReattached = false;
+			isStreaming = false;
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			streamingToolPhase = null;
+		}
+		// Drop an empty placeholder (run had already finished / produced nothing).
+		if (assistantIdx >= 0 && !messages[assistantIdx]?.content && !messages[assistantIdx]?.blocks?.length) {
+			messages.splice(assistantIdx, 1);
+		}
+		// Reconcile to the AUTHORITATIVE persisted transcript once the re-attach
+		// ends and we still own the view. The re-attach replayed buffered stream
+		// events for immediacy but cannot carry the run's terminal `done.usage`
+		// (authoritative per-run cost — replayed turn_end events would otherwise
+		// inflate the footer 3-6x), the fail-closed `done.result` reason, or the
+		// post-run changeset signal. The persisted message carries the correct
+		// usage + any failure note; re-fetch it and surface a pending changeset.
+		if (completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {
+			await reconcileThread();
+			void fetchChangeset();
+		}
+		persistChat();
+	}
+}
+
 export async function resumeThread(threadId: string): Promise<void> {
 	// Race-condition guard: if another resumeThread call starts, this one aborts
 	const gen = ++_resumeGeneration;
@@ -2079,8 +2268,17 @@ export async function resumeThread(threadId: string): Promise<void> {
 	contextBudget = null;
 	runStartedAt = null;
 	runPromptCount = 0;
+	runInterrupted = null;
 	clearContext();
 	persistChatNow();
+
+	// The thread's live run, captured from the messages endpoint (atomic with
+	// the transcript) and consumed after checkPendingPrompt to re-attach.
+	let resumeActiveRun: { runId: string; status: string; lastPersistedSeq: number } | null = null;
+	// True only when we adopted the server transcript (not the kept-local copy);
+	// the re-attach `since` aligns to the server transcript, so we re-attach only
+	// in that case to avoid a local/server seq mismatch.
+	let adoptedServer = false;
 
 	try {
 		// Create backend session from persisted thread
@@ -2145,7 +2343,13 @@ export async function resumeThread(threadId: string): Promise<void> {
 				usage?: UsageInfo;
 				note?: { code: string; detail?: string };
 			}
-			const msgData = (await msgRes.json()) as { messages: ServerRenderedMessage[] };
+			const msgData = (await msgRes.json()) as {
+				messages: ServerRenderedMessage[];
+				// Tier-2: the thread's live run, read atomically with the transcript
+				// so `lastPersistedSeq` is exactly this transcript's durable boundary.
+				activeRun?: { runId: string; status: string; lastPersistedSeq: number } | null;
+			};
+			resumeActiveRun = msgData.activeRun ?? null;
 			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
 				msgData.messages.map((m) => {
 					const cm: ChatMessage = {
@@ -2169,6 +2373,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// means the server caught up; use it.
 			if (serverMessages.length >= localMessages.length) {
 				messages = serverMessages;
+				adoptedServer = true;
 			}
 		}
 
@@ -2179,10 +2384,30 @@ export async function resumeThread(threadId: string): Promise<void> {
 			await checkPendingPrompt();
 		}
 
+		// Re-attach to a live run (Tier 2): replay-then-tail the in-flight
+		// activity so a reload mid-run keeps showing the agent working instead of
+		// going blind. Only when we adopted the SERVER transcript — its
+		// `lastPersistedSeq` aligns to that exact transcript, so the replay has no
+		// gap and no double-render (AC2/AC3). An `interrupted` run (engine
+		// restarted mid-run) gets a Retry banner instead — there is no resume.
+		let reattaching = false;
+		if (gen === _resumeGeneration && resumeActiveRun && adoptedServer) {
+			if (resumeActiveRun.status === 'interrupted') {
+				runInterrupted = { runId: resumeActiveRun.runId };
+			} else if (
+				(resumeActiveRun.status === 'running' || resumeActiveRun.status === 'awaiting_input') &&
+				!isStreaming
+			) {
+				reattaching = true;
+				void reattachRun(threadId, resumeActiveRun.runId, resumeActiveRun.lastPersistedSeq, gen);
+			}
+		}
+
 		// Drain a restored send-queue: a turn typed while the previous session
 		// streamed, then carried across a reload. Only when this resume is still
-		// current, the thread is idle, and there's no pending prompt blocking.
-		if (gen === _resumeGeneration && !isStreaming && !pendingChangeset && messageQueue.length > 0) {
+		// current, the thread is idle, there's no pending prompt blocking, and
+		// we're not re-attaching to a live run (the queued turn drains after it).
+		if (gen === _resumeGeneration && !isStreaming && !reattaching && !pendingChangeset && messageQueue.length > 0) {
 			const next = messageQueue.shift()!;
 			persistChatNow();
 			setTimeout(() => { void _executeRun(next.task, next.files, undefined, undefined, next.id); }, 100);
@@ -2233,7 +2458,10 @@ export async function reconcileThread(): Promise<void> {
 			usage?: UsageInfo;
 			note?: { code: string; detail?: string };
 		}
-		const data = (await res.json()) as { messages: ServerRenderedMessage[] };
+		const data = (await res.json()) as {
+			messages: ServerRenderedMessage[];
+			activeRun?: { runId: string; status: string; lastPersistedSeq: number } | null;
+		};
 		const serverMessages: ChatMessage[] = dropEmptyUserMessages(
 			data.messages.map((m) => {
 				const cm: ChatMessage = {
@@ -2250,9 +2478,25 @@ export async function reconcileThread(): Promise<void> {
 		// Mirror resumeThread's mid-persist guard: only swap when the server
 		// has caught up to the local snapshot. A shorter server list means a
 		// turn is still being persisted; keep local until it lands.
+		let adopted = false;
 		if (serverMessages.length >= messages.length) {
 			messages = serverMessages;
+			adopted = true;
 			persistChatNow();
+		}
+		// A remount that lands here (rather than the full resumeThread path) must
+		// also re-attach a live run, else the user stays blind to in-flight
+		// activity until a full thread-switch. Same guards as resumeThread: only
+		// on the adopted server transcript, not already streaming/re-attached.
+		if (adopted && data.activeRun && tid === sessionId) {
+			if (data.activeRun.status === 'interrupted') {
+				runInterrupted = { runId: data.activeRun.runId };
+			} else if (
+				(data.activeRun.status === 'running' || data.activeRun.status === 'awaiting_input') &&
+				!isStreaming && !isReattached
+			) {
+				void reattachRun(tid, data.activeRun.runId, data.activeRun.lastPersistedSeq, _resumeGeneration);
+			}
 		}
 	} catch {
 		// Network hiccup is non-fatal — the local snapshot is still readable

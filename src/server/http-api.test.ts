@@ -123,6 +123,9 @@ vi.mock('../core/engine.js', () => ({
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getPromptStore = vi.fn().mockReturnValue(null);
+    this.getRunRegistry = vi.fn().mockReturnValue(null);
+    this.getRunBufferManager = vi.fn().mockReturnValue(null);
+    this.getRunExecutor = vi.fn().mockReturnValue(null);
     this.getArtifactStore = vi.fn().mockReturnValue({
       save: vi.fn((opts: { title: string; content: string; type?: string }) => ({
         id: 'a1b2c3d4', title: opts.title, content: opts.content,
@@ -1002,6 +1005,7 @@ describe('LynoxHTTPApi', () => {
         answer TEXT,
         answer_saved INTEGER,
         answer_error TEXT,
+        multi_select INTEGER,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1078,6 +1082,245 @@ describe('LynoxHTTPApi', () => {
       }
       expect(runningSessions.has('run-bookkeeping')).toBe(false);
     });
+
+    // disconnect≠abort (PR-C / PRD-RUN-RESILIENCE D2): a client disconnect
+    // mid-run with NO pending prompt must NOT abort the session. The run keeps
+    // executing headless so a reload can re-attach (eager-persist transcript +
+    // GET /api/runs/active) instead of going blind — the v1.9.0 reload-blind
+    // bug. Pre-fix, req.on('close') called session.abort() whenever no prompt
+    // was pending, killing the in-flight run on every reload.
+    it('does NOT abort a running session when the client disconnects with no pending prompt', async () => {
+      // A run that stays in-flight until we release it, so we can disconnect
+      // mid-run deterministically (no reliance on real agent timing).
+      let release!: () => void;
+      const inFlight = new Promise<string>((resolve) => { release = () => resolve('headless-done'); });
+      mockSessionRun.mockReturnValueOnce(inFlight);
+
+      const runningSessions = (api as unknown as {
+        runningSessions: Map<string, { streamAlive: boolean }>;
+      }).runningSessions;
+
+      // Drive the disconnect by emitting 'close' on the server-side request
+      // object directly, captured via the server's 'request' event. This
+      // exercises the REAL production close handler deterministically — undici/
+      // raw-socket close timing against this server is non-deterministic (the
+      // same reason the stale-run takeover test above injects state directly).
+      const http = await import('node:http');
+      const server = (api as unknown as { server: import('node:http').Server }).server;
+      let serverReq: import('node:http').IncomingMessage | undefined;
+      const captureReq = (req: import('node:http').IncomingMessage): void => {
+        if (req.url?.includes('/sessions/disc-noprompt/run')) serverReq = req;
+      };
+      server.on('request', captureReq);
+
+      const url = new URL(`${baseUrl}/api/sessions/disc-noprompt/run`);
+      const clientReq = http.request({
+        hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+        agent: false,
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      });
+      clientReq.on('error', () => { /* socket teardown on close — expected */ });
+      clientReq.on('response', (res) => { res.on('data', () => { /* drain */ }); });
+      clientReq.end(JSON.stringify({ task: 'long-running', protocol: 1 }));
+
+      try {
+        // Wait until the run is registered server-side (handler reached the
+        // point past req.on('close') registration).
+        for (let i = 0; i < 200; i++) {
+          if (runningSessions.has('disc-noprompt') && serverReq) break;
+          await new Promise<void>((r) => setTimeout(r, 10));
+        }
+        expect(runningSessions.has('disc-noprompt')).toBe(true);
+        expect(serverReq).toBeDefined();
+
+        // Client disconnects mid-run → fire the server's close handler.
+        serverReq!.emit('close');
+
+        const slot = runningSessions.get('disc-noprompt');
+        expect(slot?.streamAlive).toBe(false);            // close handler ran...
+        expect(mockSessionAbort).not.toHaveBeenCalled();  // ...but did NOT abort.
+      } finally {
+        server.off('request', captureReq);
+        clientReq.destroy();
+        // Release the headless run so the handler's finally cleans up the slot.
+        release();
+      }
+      for (let i = 0; i < 200; i++) {
+        if (!runningSessions.has('disc-noprompt')) break;
+        await new Promise<void>((r) => setTimeout(r, 10));
+      }
+      expect(runningSessions.has('disc-noprompt')).toBe(false);
+    });
+  });
+
+  // Tier 2 PR-D: resumable run-event stream. The buffer is engine-owned, so the
+  // endpoint replays buffered events since `?since=` then live-tails, and an
+  // unknown/not-live runId 404s (no existence oracle, D-S3).
+  describe('GET /api/runs/:runId/stream', () => {
+    it('404s for an unknown / not-live runId (no buffer)', async () => {
+      const res = await jsonFetch('/api/runs/no-such-run/stream');
+      expect(res.status).toBe(404);
+    });
+
+    it('replays events since `since`, live-tails new appends, and ends on completion', async () => {
+      const { RunBufferManager } = await import('../core/run-buffer.js');
+      const mgr = new RunBufferManager();
+      const engineRef = (api as unknown as { engine: { getRunBufferManager: () => unknown } }).engine;
+      const orig = engineRef.getRunBufferManager;
+      engineRef.getRunBufferManager = (): unknown => mgr;
+
+      const buf = mgr.create('stream-run');
+      buf.append({ type: 'text', text: 'hello', agent: 'main' });            // seq 1
+      buf.append({ type: 'tool_call', name: 'x', input: {}, agent: 'main' }); // seq 2
+
+      try {
+        const res = await fetch(`${baseUrl}/api/runs/stream-run/stream?since=1`, { headers: authHeaders() });
+        expect(res.status).toBe(200);
+        const reader = res.body!.getReader();
+        const dec = new TextDecoder();
+
+        // Schedule a live append, then run completion, WHILE we read
+        // continuously — avoids a read() that blocks past a fixed time budget.
+        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 3
+        setTimeout(() => mgr.remove('stream-run'), 400); // ends buffer → terminal done
+
+        let sse = '';
+        const t0 = Date.now();
+        while (Date.now() - t0 < 5000) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          sse += dec.decode(value, { stream: true });
+          if (sse.includes('event: done')) break;
+        }
+        await reader.cancel();
+
+        // since=1 → replay seq 2 only (NOT seq 1); live seq 3 tails; done on completion.
+        expect(sse).toContain('id: 2');
+        expect(sse).toContain('tool_call');
+        expect(sse).not.toContain('id: 1');
+        expect(sse).toContain('id: 3');
+        expect(sse).toContain('event: done');
+      } finally {
+        engineRef.getRunBufferManager = orig;
+        mgr.remove('stream-run');
+      }
+    });
+  });
+
+  // Tier 2 PR-E: run executor (concurrency cap + abort-by-id) and the active-run
+  // seq field. The cap bounds parallel-run cost (AC6); DELETE aborts a live run
+  // or acks an interrupted one (AC10); /active carries lastPersistedSeq so a
+  // reload can re-attach from the durable boundary.
+  describe('Tier 2 run executor', () => {
+    async function withRegistry(
+      test: (reg: import('../core/run-registry.js').RunRegistry, db: import('better-sqlite3').Database) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.exec(`CREATE TABLE active_runs (
+        run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running'
+          CHECK(status IN ('running','awaiting_input','done','error','interrupted')),
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_activity TEXT NOT NULL DEFAULT (datetime('now')),
+        last_event_seq INTEGER NOT NULL DEFAULT 0,
+        last_persisted_seq INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`);
+      const { RunRegistry } = await import('../core/run-registry.js');
+      const reg = new RunRegistry(db);
+      const engineRef = (api as unknown as { engine: { getRunRegistry: () => unknown } }).engine;
+      const orig = engineRef.getRunRegistry;
+      engineRef.getRunRegistry = (): unknown => reg;
+      try { await test(reg, db); } finally { engineRef.getRunRegistry = orig; db.close(); }
+    }
+
+    async function withExecutor(
+      cap: number,
+      test: (ex: import('../core/run-executor.js').RunExecutor) => Promise<void>,
+    ): Promise<void> {
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(cap);
+      const engineRef = (api as unknown as { engine: { getRunExecutor: () => unknown } }).engine;
+      const orig = engineRef.getRunExecutor;
+      engineRef.getRunExecutor = (): unknown => ex;
+      try { await test(ex); } finally { engineRef.getRunExecutor = orig; }
+    }
+
+    it('POST /run returns 429 run_queue_full when the executor is at capacity', async () => {
+      await withExecutor(1, async (ex) => {
+        ex.acquire('other-run', 'other-thread', () => {}); // fill the single slot
+        const res = await jsonFetch('/api/sessions/cap-test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'hi' }),
+        });
+        expect(res.status).toBe(429);
+        const body = await res.json() as { error: string; capacity: number };
+        expect(body.error).toBe('run_queue_full');
+        expect(body.capacity).toBe(1);
+      });
+    });
+
+    it('DELETE /api/runs/:runId aborts a live run and invokes its abort handle', async () => {
+      await withExecutor(5, async (ex) => {
+        const abortSpy = vi.fn();
+        ex.acquire('live-run', 'thread-1', abortSpy);
+        const res = await jsonFetch('/api/runs/live-run', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ aborted: true, runId: 'live-run' });
+        expect(abortSpy).toHaveBeenCalledOnce();
+      });
+    });
+
+    it('DELETE /api/runs/:runId acks an interrupted (not-live) run by removing it', async () => {
+      await withRegistry(async (reg) => {
+        await withExecutor(5, async () => {
+          reg.start('thread-2', 'int-run');
+          reg.sweepInterrupted(); // mark it interrupted (not in the executor's live set)
+          expect(reg.getByRunId('int-run')?.status).toBe('interrupted');
+          const res = await jsonFetch('/api/runs/int-run', { method: 'DELETE' });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ aborted: false, dismissed: true });
+          expect(reg.getByRunId('int-run')).toBeUndefined(); // removed
+        });
+      });
+    });
+
+    it('DELETE /api/runs/:runId 404s for an unknown run (no live + no registry row)', async () => {
+      await withRegistry(async () => {
+        await withExecutor(5, async () => {
+          const res = await jsonFetch('/api/runs/ghost', { method: 'DELETE' });
+          expect(res.status).toBe(404);
+        });
+      });
+    });
+
+    it('DELETE /api/runs/:runId does NOT remove a `running` registry row that is not live (404, no silent clear)', async () => {
+      await withRegistry(async (reg) => {
+        await withExecutor(5, async () => {
+          // A 'running' row with no matching executor slot is an inconsistency —
+          // it must NOT be silently removed (it could still be live on a path
+          // that bypassed acquire); only 'interrupted' rows are ack-removable.
+          reg.start('thread-x', 'running-not-live');
+          expect(reg.getByRunId('running-not-live')?.status).toBe('running');
+          const res = await jsonFetch('/api/runs/running-not-live', { method: 'DELETE' });
+          expect(res.status).toBe(404);
+          expect(reg.getByRunId('running-not-live')).toBeDefined(); // NOT removed
+        });
+      });
+    });
+
+    it('GET /api/runs/active surfaces lastPersistedSeq for re-attach', async () => {
+      await withRegistry(async (reg) => {
+        reg.start('thread-3', 'seq-run');
+        reg.touch('seq-run', { lastPersistedSeq: 42 });
+        const res = await jsonFetch('/api/runs/active');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { runs: { runId: string; lastPersistedSeq: number }[] };
+        const row = body.runs.find((r) => r.runId === 'seq-run');
+        expect(row?.lastPersistedSeq).toBe(42);
+      });
+    });
   });
 
   // v29: /secret-saved must distinguish managed_blocked from user-cancel, and
@@ -1091,7 +1334,7 @@ describe('LynoxHTTPApi', () => {
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
         question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
-        answer TEXT, answer_saved INTEGER, answer_error TEXT,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();

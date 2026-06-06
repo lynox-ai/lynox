@@ -43,6 +43,7 @@ vi.mock('./observability.js', () => ({
     toolStart: { publish: vi.fn() },
     toolEnd: { publish: vi.fn() },
     contentTruncation: { hasSubscribers: true, publish: vi.fn() },
+    cacheHealth: { publish: vi.fn() },
     // H-024 shadow mode: ToolCallTracker.checkAnomaly publishes here on
     // detection. `hasSubscribers: true` so the gate inside checkAnomaly fires.
     securityFlagged: { hasSubscribers: true, publish: vi.fn() },

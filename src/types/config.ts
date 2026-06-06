@@ -210,6 +210,11 @@ export interface LynoxUserConfig {
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
   max_session_cost_usd?: number | undefined;
+  /** Max chat runs executing concurrently across all threads (Tier-2 run
+   *  executor). Bounds LLM-cost blast + run-buffer memory from many parallel
+   *  headless runs. A fresh dispatch past this is refused with HTTP 429
+   *  (`run_queue_full`). Defaults to 5. */
+  max_concurrent_runs?: number | undefined;
   embedding_provider?: 'onnx' | 'local' | undefined;
   plugins?: Record<string, boolean> | undefined;
   agents_dir?: string | undefined;

@@ -196,9 +196,17 @@ export function modelIdentityContext(provider: string | undefined | null, modelI
  */
 export function currentDateContext(): string {
   const now = new Date();
-  const iso = now.toISOString().slice(0, 13) + ':00:00Z';
+  // DAY precision (not hour) — this string is the head of the cached system
+  // prefix, and prompt caching is a *prefix* cache: anything that changes here
+  // re-bills the whole conversation. Hour precision busted the cache at every
+  // hour boundary (rafael 2026-06-05: "the cache busts when I continue after a
+  // while"); day precision busts at most once, at UTC midnight, and only for a
+  // chat active across it. The precise wallclock the model needs for "now"/"in
+  // 5 min" comes from the `[Now: …Z]` marker prepended to every user message,
+  // which lives OUTSIDE the cache — so coarsening this costs no accuracy.
+  const date = now.toISOString().slice(0, 10);
   const weekday = now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
-  return `\n\n**Now (hour-precision)**: ${iso} (${weekday} UTC). For sub-hour scheduling ("in 5 min", "now"), use the precise \`[Now: …Z]\` line at the start of each user message instead — that's wallclock-accurate while this hour-truncated value can lag by up to 59 minutes.
+  return `\n\n**Today**: ${date} (${weekday} UTC). For the precise current time and any sub-day scheduling ("in 5 min", "now", "tonight"), use the \`[Now: …Z]\` line at the start of each user message — it is wallclock-accurate and carries the user's local time + timezone.
 
 **Time-of-day rule (storage vs. display).** When the marker contains a \`user local …\` clause:
 - **Tool inputs are ALWAYS UTC ISO 8601.** \`task_create.run_at\`, \`task_update.run_at\`, \`due_date\`, \`schedule\` (cron is UTC), and any other ISO field — compute by adding the offset to the user's request, then write the value with a \`Z\` suffix. Example with \`[Now: 2026-05-05T11:55:00Z; user local 2026-05-05 13:55:00 Europe/Zurich]\` and "in 5 minutes" → \`run_at: "2026-05-05T12:00:00Z"\` (NOT \`14:00:00Z\` — that would be the local clock written as UTC, off by the tz offset).

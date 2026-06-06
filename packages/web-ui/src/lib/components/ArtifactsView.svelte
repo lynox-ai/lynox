@@ -13,6 +13,9 @@
 	import { page } from '$app/stores';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import { addToast } from '../stores/toast.svelte.js';
+	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
+	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
 
 	let selected = $state<Artifact | null>(null);
 	// True when `selected` was opened via the chat deep-link (?id=…) — drives
@@ -21,7 +24,10 @@
 	let confirmDelete = $state<string | null>(null);
 	let deleteDialogRef = $state<HTMLDivElement | null>(null);
 	let deleteDialogTrigger: HTMLElement | null = null;
-	let deepLinkConsumed = false;
+	// $state (not a plain let) so the deep-link $effect re-evaluates its guard
+	// when goBack() marks it consumed — otherwise a stale ?id= could race the
+	// close and "resurrect" the preview ("Zurück geht nicht").
+	let deepLinkConsumed = $state(false);
 
 	const artifacts = $derived(getArtifacts());
 	const isLoading = $derived(getIsLoadingArtifacts());
@@ -73,8 +79,18 @@
 	// Back action for the fullscreen preview: return to the chat when the
 	// artifact was deep-linked from there, otherwise close back to the gallery.
 	function goBack() {
-		if (openedFromChat) void goto('/app');
-		else closePreview();
+		// Block the deep-link $effect from re-opening so the close can't be
+		// raced/resurrected (the "Zurück geht nicht" bug).
+		deepLinkConsumed = true;
+		closePreview();
+		if (openedFromChat) {
+			// goto('/app') already navigates away from any ?id= URL — one nav.
+			void goto('/app');
+		} else if ($page.url.searchParams.has('id')) {
+			// Gallery case with a lingering ?id=: strip it so a reload/back can't
+			// re-open. Single goto; no competing navigation.
+			void goto('/app/artifacts', { replaceState: true, keepFocus: true, noScroll: true });
+		}
 	}
 
 	async function handleDelete(id: string) {
@@ -98,9 +114,10 @@
 
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
-	function injectCsp(html: string): string {
-		if (html.includes('<head')) return html.replace(/<head[^>]*>/, `$&${CSP_META}`);
-		return `${CSP_META}${html}`;
+	/** CSP + a default viewport + the fit-to-width script so a wide artifact (A4
+	 *  contract / deck) is fully visible on mobile. Logic in artifact-frame.ts. */
+	function injectArtifactPreview(html: string): string {
+		return injectArtifactFit(html, CSP_META);
 	}
 
 	function typeIcon(type: string): string {
@@ -138,6 +155,18 @@
 		link.download = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
 		link.click();
 		URL.revokeObjectURL(link.href);
+	}
+
+	/** Save as PDF via the browser print pipeline — same path as the inline
+	 *  artifact bubble, so the gallery exports identically. */
+	// "Drucken" = the browser print pipeline (selectable PDF on desktop). A real
+	// one-tap mobile PDF DOWNLOAD is a server-side follow-up (client-side
+	// html2canvas can't faithfully render decks / hangs on complex HTML).
+	function handlePrint(a: Artifact) {
+		const ok = a.type === 'markdown'
+			? printMarkdownDocument(a.content, a.title)
+			: printHtmlDocument(a.content);
+		if (!ok) addToast(t('artifacts.popup_blocked'), 'error', 5000);
 	}
 
 	$effect(() => {
@@ -233,18 +262,24 @@
 	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label={selected.title} style="padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);">
 		<!-- Toolbar -->
 		<div class="flex items-center gap-3 px-4 md:px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
-			<button type="button" class="text-text-muted hover:text-text text-sm p-1" onclick={goBack}>← {openedFromChat ? t('artifacts.back_to_chat') : t('artifacts.back')}</button>
+			<button type="button" class="text-text-muted hover:text-text text-sm py-2 pr-3 pl-1 -ml-1 min-h-[2.75rem] flex items-center shrink-0" onclick={goBack}>← {openedFromChat ? t('artifacts.back_to_chat') : t('artifacts.back')}</button>
 			<h2 class="text-sm font-medium text-text flex-1 truncate">{selected.title}</h2>
 			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1}{' · '}v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
-			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>Export</button>
+			{#if selected.type === 'html' || selected.type === 'markdown'}
+				<!-- Print = selectable PDF on desktop; hidden on mobile where iOS
+				     blocks auto-print (a real mobile PDF download is a server-side
+				     follow-up). Mobile keeps "Datei" (raw download). -->
+				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 hidden sm:inline-block" onclick={() => handlePrint(selected!)}>{t('artifacts.print')}</button>
+			{/if}
+			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.download_file')}</button>
 		</div>
 
 		<!-- Artifact content -->
 		<div class="flex-1 overflow-hidden">
 			{#if selected.type === 'html' || selected.type === 'svg'}
 				<iframe
-					srcdoc={injectCsp(selected.content)}
+					srcdoc={injectArtifactPreview(selected.content)}
 					sandbox="allow-scripts"
 					class="w-full h-full border-none bg-bg-elevated"
 					title={selected.title}

@@ -45,6 +45,9 @@
 		getPendingPrompt,
 		getRunStartedAt,
 		getRunPromptCount,
+		getRunInterrupted,
+		retryInterruptedRun,
+		dismissInterruptedRun,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
@@ -452,6 +455,9 @@
 	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
 	let pendingFiles = $state<FileAttachment[]>([]);
+	// Drag-n-drop file upload: true while a file is dragged over the chat. The
+	// drop goes through the same addFile() path as the paperclip + paste.
+	let isDragging = $state(false);
 	let recording = $state(false);
 	let promptAnswer = $state('');
 	let selectedOptions = $state<string[]>([]);
@@ -658,6 +664,28 @@
 			addFile(file);
 		}
 		input.value = '';
+	}
+
+	/** True only when the drag actually carries files (not text selections). */
+	function dragHasFiles(e: DragEvent): boolean {
+		return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+	}
+
+	function handleDragOver(e: DragEvent) {
+		if (!ready || !dragHasFiles(e)) return;
+		// preventDefault is REQUIRED for the drop event to fire at all.
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+		isDragging = true;
+	}
+
+	function handleDrop(e: DragEvent) {
+		if (!dragHasFiles(e)) { isDragging = false; return; }
+		e.preventDefault();
+		isDragging = false;
+		for (const file of e.dataTransfer?.files ?? []) {
+			addFile(file);
+		}
 	}
 
 	function removeFile(idx: number) {
@@ -1376,6 +1404,7 @@
 	const pendingSecret = $derived(getPendingSecretPrompt());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
+	const runInterrupted = $derived(getRunInterrupted());
 	const retryStatus = $derived(getRetryStatus());
 	const isOffline = $derived(getIsOffline());
 	const ready = $derived(hasApiKey !== false);
@@ -1837,7 +1866,28 @@
 	{/if}
 {/snippet}
 
-<div class="flex h-full flex-col">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="relative flex h-full flex-col" ondragover={handleDragOver}>
+	{#if isDragging}
+		<!-- Drag-n-drop overlay. Covers the whole chat so a file dropped
+		     anywhere lands in the composer (same path as the paperclip + paste).
+		     The overlay element owns dragleave/drop so child elements don't
+		     cause flicker. -->
+		<div
+			class="absolute inset-0 z-30 flex items-center justify-center bg-bg/80 backdrop-blur-sm"
+			ondragover={handleDragOver}
+			ondragleave={() => (isDragging = false)}
+			ondrop={handleDrop}
+			role="presentation"
+		>
+			<div class="pointer-events-none flex flex-col items-center gap-2 rounded-[var(--radius-md)] border-2 border-dashed border-accent px-8 py-6 text-accent">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+				</svg>
+				<span class="text-sm font-medium">{t('chat.drop_files')}</span>
+			</div>
+		</div>
+	{/if}
 	<!-- Messages — wrapped in a relative flex column so the floating
 	     scroll-to-bottom button can anchor to the viewport's lower-right
 	     without overlapping the composer below. -->
@@ -2378,6 +2428,19 @@
 							</button>
 						{/if}
 						<button onclick={clearError} class="text-xs opacity-60 hover:opacity-100">{t('common.ok')}</button>
+					</div>
+				</div>
+			{/if}
+
+			{#if runInterrupted}
+				<div role="status" class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-warning flex items-center justify-between gap-3">
+					<span class="flex-1">{t('chat.run_interrupted')}</span>
+					<div class="flex items-center gap-2 shrink-0">
+						<button
+							onclick={() => { void retryInterruptedRun(); }}
+							class="rounded-[var(--radius-sm)] border border-warning/40 bg-warning/20 px-2.5 py-1 text-xs font-medium hover:bg-warning/30 transition-colors"
+						>{t('chat.run_interrupted_retry')}</button>
+						<button onclick={() => { void dismissInterruptedRun(); }} class="text-xs opacity-60 hover:opacity-100">{t('common.ok')}</button>
 					</div>
 				</div>
 			{/if}

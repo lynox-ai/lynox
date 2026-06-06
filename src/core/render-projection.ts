@@ -1,6 +1,17 @@
 import type { ThreadMessageRecord } from './thread-store.js';
 
 /**
+ * Placeholder substituted by the agent for a thinking-only turn — a turn whose
+ * entire output budget went to extended thinking, leaving no text. The agent
+ * persists this so the message JSON stays valid for Anthropic (an empty
+ * assistant content array is rejected), but it is a persistence artifact, NOT
+ * something the user should see — `projectMessages` suppresses it (rafael
+ * 2026-06-05: a "[…]" bubble at the end of a long chat). Shared so the agent's
+ * substitution and this filter can never drift apart.
+ */
+export const THINKING_ONLY_PLACEHOLDER = '[…]';
+
+/**
  * UI-ready projection of stored thread messages.
  *
  * The storage layer keeps raw Anthropic `BetaMessageParam` shape (role + content
@@ -286,6 +297,19 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
         if (block.id) toolCallById.set(block.id, tc);
       }
       // thinking blocks + any unknown types: drop silently for render projection
+    }
+
+    // Suppress a thinking-only persistence artifact: an assistant turn with no
+    // tool calls whose only text is the placeholder (or empty). It carries no
+    // information for the user — rendering it shows a confusing empty "[…]"
+    // bubble. Its cost still lives in the thread total. Guard the empty-text
+    // case to turns whose raw content is ALL text blocks: a turn that produced
+    // an image / document / server-tool / other non-text block projects to
+    // empty text here (those block types aren't rendered in this loop) but is a
+    // REAL message and must NOT be dropped.
+    const allBlocksAreText = content.every((b) => b.type === 'text');
+    if (toolCalls.length === 0 && (textAccum === THINKING_ONLY_PLACEHOLDER || (textAccum.trim() === '' && allBlocksAreText))) {
+      continue;
     }
 
     const msg: RenderedMessage = {

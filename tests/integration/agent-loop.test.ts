@@ -45,6 +45,7 @@ vi.mock('../../src/core/observability.js', () => ({
   channels: {
     toolStart: { publish: vi.fn() },
     toolEnd: { publish: vi.fn() },
+    cacheHealth: { publish: vi.fn() },
   },
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));

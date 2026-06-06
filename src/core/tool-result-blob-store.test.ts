@@ -5,6 +5,8 @@ import {
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
 } from './tool-result-blob-store.js';
 
+const T = DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
+
 /** Build an assistant message containing one tool_use block. */
 function toolUseMsg(id: string, name: string): BetaMessageParam {
   return {
@@ -155,5 +157,81 @@ describe('ToolResultBlobStore', () => {
   it('returns undefined for an unknown id', () => {
     const store = new ToolResultBlobStore();
     expect(store.get('tr-999')).toBeUndefined();
+  });
+});
+
+describe('ToolResultBlobStore — carry-forward across compactions (W5)', () => {
+  // Mutation-verified: under the OLD clear-on-every-compaction behaviour the
+  // first window's blob would be gone after the second eviction. Carry-forward
+  // keeps it recallable, which is the whole point of the fix.
+  it('keeps a prior window blob recallable after a second eviction window (no clear)', () => {
+    const store = new ToolResultBlobStore();
+    // Window 1
+    store.evictFrom([toolUseMsg('tu-1', 'http_request'), toolResultMsg('tu-1', 'A'.repeat(5_000))], T);
+    const firstId = store.entries()[0]!.id;
+    // Window 2 — mirrors the new compact() flow: evict again WITHOUT clear().
+    store.evictFrom([toolUseMsg('tu-2', 'web_research'), toolResultMsg('tu-2', 'B'.repeat(5_000))], T);
+
+    expect(store.size).toBe(2);
+    // The first window's blob survives into the second window.
+    expect(store.get(firstId)?.payload).toBe('A'.repeat(5_000));
+  });
+
+  it('lists carried-forward blobs in entries() so they stay discoverable', () => {
+    const store = new ToolResultBlobStore();
+    store.evictFrom([toolUseMsg('tu-1', 'http_request'), toolResultMsg('tu-1', 'A'.repeat(5_000))], T);
+    store.evictFrom([toolUseMsg('tu-2', 'web_research'), toolResultMsg('tu-2', 'B'.repeat(5_000))], T);
+    // This is exactly what compact() now passes to buildPostCompactionMessages.
+    const handles = store.entries().map(({ id, blob }) => ({ id, descriptor: blob.descriptor }));
+    expect(handles).toHaveLength(2);
+    expect(handles[0]!.descriptor).toContain('http_request');
+  });
+
+  it('pruneToCap drops the least-recently-used blob beyond the entry cap', () => {
+    const store = new ToolResultBlobStore();
+    // 3 blobs, cap of 2 → the oldest (tr-1) is evicted.
+    for (let i = 1; i <= 3; i++) {
+      store.evictFrom([toolUseMsg(`tu-${i}`, 'http_request'), toolResultMsg(`tu-${i}`, String(i).repeat(5_000))], T);
+    }
+    store.pruneToCap(2, Number.MAX_SAFE_INTEGER);
+    expect(store.size).toBe(2);
+    expect(store.get('tr-1')).toBeUndefined();
+    expect(store.get('tr-3')).toBeDefined();
+  });
+
+  it('LRU bump via get() protects a recently-recalled blob from pruning', () => {
+    const store = new ToolResultBlobStore();
+    for (let i = 1; i <= 3; i++) {
+      store.evictFrom([toolUseMsg(`tu-${i}`, 'http_request'), toolResultMsg(`tu-${i}`, String(i).repeat(5_000))], T);
+    }
+    // Recall the OLDEST (tr-1) → it becomes most-recently-used.
+    expect(store.get('tr-1')).toBeDefined();
+    // Cap to 2 → now tr-2 (the new oldest) is evicted, tr-1 survives.
+    store.pruneToCap(2, Number.MAX_SAFE_INTEGER);
+    expect(store.get('tr-1')).toBeDefined();
+    expect(store.get('tr-2')).toBeUndefined();
+  });
+
+  it('pruneToCap enforces the byte cap (a few huge dumps)', () => {
+    const store = new ToolResultBlobStore();
+    const tenKb = 'x'.repeat(10_000);
+    for (let i = 1; i <= 3; i++) {
+      store.evictFrom([toolUseMsg(`tu-${i}`, 'http_request'), toolResultMsg(`tu-${i}`, tenKb)], T);
+    }
+    expect(store.bytes).toBe(30_000);
+    // Byte cap of 25 KB → drop oldest until under: tr-1 goes (20 KB left ≤ 25 KB).
+    store.pruneToCap(Number.MAX_SAFE_INTEGER, 25_000);
+    expect(store.size).toBe(2);
+    expect(store.bytes).toBe(20_000);
+    expect(store.get('tr-1')).toBeUndefined();
+  });
+
+  it('clear() resets the byte counter too', () => {
+    const store = new ToolResultBlobStore();
+    store.evictFrom([toolUseMsg('tu-1', 'http_request'), toolResultMsg('tu-1', 'A'.repeat(5_000))], T);
+    expect(store.bytes).toBe(5_000);
+    store.clear();
+    expect(store.bytes).toBe(0);
+    expect(store.size).toBe(0);
   });
 });

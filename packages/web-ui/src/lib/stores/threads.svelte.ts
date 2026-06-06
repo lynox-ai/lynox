@@ -2,6 +2,7 @@ import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { dropPersistedThread } from './chat.svelte.js';
+import { parseActiveRuns, type ActiveRunStatus } from '../utils/active-runs.js';
 
 export interface Thread {
 	id: string;
@@ -18,6 +19,52 @@ export interface Thread {
 
 let threads = $state<Thread[]>([]);
 let isLoading = $state(false);
+
+/** Per-thread live-run status for the nav indicator. Only the three states the
+ * nav surfaces are tracked; `done`/`error` runs are already gone from the
+ * registry. `awaiting_input` is derived server-side from a pending prompt. */
+export type ThreadRunStatus = ActiveRunStatus;
+let runStatusByThread = $state<Record<string, ThreadRunStatus>>({});
+
+/** Live-run status for a thread, or `undefined` when the thread has no active
+ * run. Drives the pulsing status dot in the thread-history nav. */
+export function getRunStatus(id: string): ThreadRunStatus | undefined {
+	return runStatusByThread[id];
+}
+
+async function pollActiveRuns(): Promise<void> {
+	// Build the next map; an unreachable/erroring engine (network throw, 5xx,
+	// or a 404 on an older engine) yields an EMPTY map so stale "Agent working"
+	// dots clear rather than pulsing forever during an outage. The indicator
+	// means "runs the engine currently reports as live" — no report → none.
+	let next: Record<string, ThreadRunStatus> = {};
+	try {
+		const res = await fetch(`${getApiBase()}/runs/active`);
+		if (res.ok) {
+			for (const run of parseActiveRuns(await res.json())) {
+				next[run.threadId] = run.status;
+			}
+		}
+	} catch {
+		// Non-critical — the indicator is additive; never block the UI on it.
+		next = {};
+	}
+	runStatusByThread = next;
+}
+
+/** Poll GET /api/runs/active so the nav can mark threads with a live run.
+ * Returns a stop function. Polling is light (one tiny JSON GET) and pauses
+ * implicitly when the tab is hidden via the visibility re-poll. */
+export function startActiveRunsPoll(intervalMs = 4000): () => void {
+	void pollActiveRuns();
+	const timer = setInterval(() => { void pollActiveRuns(); }, intervalMs);
+	const onVisible = () => { if (document.visibilityState === 'visible') void pollActiveRuns(); };
+	if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
+	return () => {
+		clearInterval(timer);
+		if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
+	};
+}
 
 /** Callback invoked when the active thread is removed (archived/deleted). Consumer should navigate away. */
 let _onActiveThreadRemoved: ((id: string) => void) | null = null;

@@ -4,7 +4,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId, getSkipExtraction, toggleSkipExtraction } from '../stores/chat.svelte.js';
-	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh } from '../stores/threads.svelte.js';
+	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -39,6 +39,14 @@
 	let railHovered = $state(false);
 	let railLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 	const railExpanded = $derived(railPinned || railHovered);
+	// Desktop = the persistent rail (≥ md). On mobile the full-width drawer shows
+	// the threads list based on the DRAWER being open (sidebarOpen), NOT hover/pin
+	// — otherwise Option A (no touch-hover) would hide mobile chat-history, and a
+	// desktop pin leaked via localStorage would expand it under a tapping finger.
+	let isDesktop = $state(false);
+	let railMq: MediaQueryList | null = null;
+	const onRailMq = () => { isDesktop = railMq?.matches ?? false; };
+	const navExpanded = $derived(isDesktop ? railExpanded : sidebarOpen);
 
 	function focusOnMount(node: HTMLElement) { node.focus(); }
 
@@ -324,9 +332,12 @@
 				return;
 			}
 			expandedSection = item.href;
-		} else {
-			expandedSection = null;
 		}
+		// Leaf items: do NOT collapse an open section here. Tearing down the
+		// expanded chat-history (a transition:slide subtree) synchronously inside
+		// the tap competed with the <a href> navigation on touch, so the first tap
+		// only collapsed and a second was needed to navigate. Let the native link
+		// navigate; the open section is harmless and closes on its own next toggle.
 		sidebarOpen = false;
 	}
 
@@ -362,11 +373,13 @@
 
 	// Auto-refresh threads when tab regains focus (cross-device sync)
 	let stopVisibilityRefresh: (() => void) | undefined;
+	let stopActiveRunsPoll: (() => void) | undefined;
 
 	// Auto-expand section matching current route on mount.
 	onMount(() => {
 		void loadThreads();
 		stopVisibilityRefresh = startVisibilityRefresh();
+		stopActiveRunsPoll = startActiveRunsPoll();
 		const match = nav.find(item => isExpandable(item) && isParentActive(item));
 		if (match) {
 			expandedSection = match.href;
@@ -376,6 +389,9 @@
 		try {
 			railPinned = localStorage.getItem('lynox-rail-pinned') === '1';
 		} catch { /* localStorage may be blocked; collapsed default is fine */ }
+		railMq = window.matchMedia('(min-width: 768px)');
+		isDesktop = railMq.matches;
+		railMq.addEventListener('change', onRailMq);
 	});
 
 	function togglePin(): void {
@@ -387,6 +403,13 @@
 	}
 
 	function onRailEnter(): void {
+		// Ignore the synthetic `mouseenter` iOS Safari fires on a touch tap. On a
+		// touch device the rail-hover concept doesn't apply (the mobile drawer is
+		// full-width), and a stray hover flips railExpanded → the chat-history
+		// slides open UNDER the finger and shoves the tapped nav item away, so the
+		// first tap doesn't navigate (the double-tap bug). Only real pointers hover.
+		if (typeof window !== 'undefined' &&
+			!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		railHovered = true;
 	}
@@ -400,8 +423,18 @@
 
 	onDestroy(() => {
 		stopVisibilityRefresh?.();
+		stopActiveRunsPoll?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
+		railMq?.removeEventListener('change', onRailMq);
 	});
+
+	/** Accessible label for the live-run status dot (no text in the row — the
+	 * dot + aria-label carry the meaning so the cramped row stays scannable). */
+	function runStatusLabel(status: 'running' | 'awaiting_input' | 'interrupted'): string {
+		if (status === 'awaiting_input') return t('threads.run_awaiting');
+		if (status === 'interrupted') return t('threads.run_interrupted');
+		return t('threads.run_running');
+	}
 
 	$effect(() => {
 		function handleEscape(e: KeyboardEvent) {
@@ -466,7 +499,7 @@
 					<div class="flex-1 min-w-0 {railExpanded ? '' : 'md:hidden'}">
 						<span>{t(item.labelKey)}</span>
 					</div>
-					{#if isExpandable(item) && railExpanded}
+					{#if isExpandable(item) && navExpanded}
 						<Icon
 							name="chevron_right"
 							size="xs"
@@ -482,13 +515,13 @@
 				 min-h-0 on every ancestor in this flex chain so the inner thread
 				 <ul> scrolls instead of pushing the pinned group off-screen. -->
 			{#if chatItem}
-				<div class="px-2 flex flex-col min-h-0 {railExpanded && expandedSection === chatItem.href ? 'flex-1' : 'shrink-0'}">
+				<div class="px-2 flex flex-col min-h-0 {navExpanded && expandedSection === chatItem.href ? 'flex-1' : 'shrink-0'}">
 					<!-- Parent nav item -->
 					{@render navParent(chatItem)}
 
 					<!-- Sub-items: threads list (Chat only). Only when expanded —
 						 collapsed rail hides the threads dropdown to save space. -->
-					{#if railExpanded && expandedSection === chatItem.href && chatItem.type === 'threads'}
+					{#if navExpanded && expandedSection === chatItem.href && chatItem.type === 'threads'}
 						<div transition:slide={{ duration: 150 }} class="flex-1 flex flex-col min-h-0">
 							{#if getThreads().length > 0}
 								<!-- Thread search: client-side filter on title. Tiny enough to drop
@@ -509,6 +542,7 @@
 								<ul class="mt-1 flex-1 space-y-0.5 min-h-0 overflow-y-auto scrollbar-none" aria-label={t('threads.recent')}>
 									{#each visibleThreads as thread (thread.id)}
 											{@const isThreadActive = getSessionId() === thread.id}
+											{@const runStatus = getRunStatus(thread.id)}
 											<li class="relative overflow-hidden rounded-[var(--radius-sm)]">
 												<!-- Swipe archive action (mobile). Icon only — the previous full
 													 "Archivieren" label clipped to "chivieren" at narrow widths. -->
@@ -533,6 +567,33 @@
 														? 'bg-accent/10 text-accent-text'
 														: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 												>
+													<!-- Live-run status dot. No text — space is tight, so the
+														 pulse + aria-label carry the meaning. Leading slot so it
+														 aligns vertically across rows and is scannable at a glance;
+														 renders nothing when the thread has no active run (no
+														 layout shift for the common case). running = accent pulse,
+														 awaiting_input = amber ping (needs you), interrupted =
+														 steady danger (Retry). -->
+													{#if runStatus}
+														<span
+															class="shrink-0 pl-2 flex items-center"
+															role="status"
+															aria-label={runStatusLabel(runStatus)}
+															title={runStatusLabel(runStatus)}
+															data-run-status={runStatus}
+														>
+															<span class="relative inline-flex h-2 w-2">
+																{#if runStatus === 'awaiting_input'}
+																	<span class="absolute inline-flex h-full w-full rounded-full bg-warning/70 opacity-75 motion-safe:animate-ping"></span>
+																	<span class="relative inline-flex h-2 w-2 rounded-full bg-warning"></span>
+																{:else if runStatus === 'interrupted'}
+																	<span class="relative inline-flex h-2 w-2 rounded-full bg-danger"></span>
+																{:else}
+																	<span class="relative inline-flex h-2 w-2 rounded-full bg-accent motion-safe:animate-pulse"></span>
+																{/if}
+															</span>
+														</span>
+													{/if}
 													{#if renamingThreadId === thread.id}
 													<input
 														type="text"

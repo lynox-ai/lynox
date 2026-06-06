@@ -14,6 +14,7 @@ interface DriveInput {
   file_path?: string | undefined;
   file_name?: string | undefined;
   content?: string | undefined;
+  content_encoding?: 'utf8' | 'base64' | undefined;
   mime_type?: string | undefined;
   target_folder_id?: string | undefined;
   email?: string | undefined;
@@ -94,7 +95,7 @@ export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
     },
     definition: {
       name: 'google_drive',
-      description: 'Interact with Google Drive: search files, read/download content, upload files, create Google Docs, list folder contents, move files, share files. Use action "search" with a query, "read" with file_id to get content (auto-exports Google Docs as text), "upload" with content and file_name, "create_doc" to create a Google Doc from text, "list" with folder_id, "move" with file_id and target_folder_id, "share" with file_id, email, and role.',
+      description: 'Interact with Google Drive: search files, read/download content, upload files, create Google Docs, list folder contents, move files, share files. Use action "search" with a query, "read" with file_id to get content (auto-exports Google Docs as text), "upload" with content and file_name (for a binary file — PDF, image, zip — base64-encode the bytes and set content_encoding:"base64" + the mime_type), "create_doc" to create a Google Doc from text, "list" with folder_id, "move" with file_id and target_folder_id, "share" with file_id, email, and role.',
       eager_input_streaming: true,
       input_schema: {
         type: 'object' as const,
@@ -122,11 +123,16 @@ export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
           },
           content: {
             type: 'string',
-            description: 'Text content (for: upload, create_doc)',
+            description: 'Content (for: upload, create_doc). For a BINARY file (PDF, image, zip, …) base64-encode the bytes and set content_encoding:"base64" — passing binary as a plain string corrupts it.',
+          },
+          content_encoding: {
+            type: 'string',
+            enum: ['utf8', 'base64'],
+            description: 'Encoding of `content` for upload. "base64" decodes the content to real bytes (use for any binary file). Defaults to "utf8" (text).',
           },
           mime_type: {
             type: 'string',
-            description: 'MIME type for upload (default: text/plain)',
+            description: 'MIME type for upload (default: text/plain). Set it for binary uploads, e.g. application/pdf, image/png.',
           },
           target_folder_id: {
             type: 'string',
@@ -273,11 +279,26 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
 async function handleUpload(auth: GoogleAuth, input: DriveInput): Promise<string> {
   if (!input.content) return 'Error: "content" is required for action "upload".';
 
+  const isBase64 = input.content_encoding === 'base64';
   const metadata: Record<string, unknown> = {
     name: input.file_name ?? 'Untitled',
-    mimeType: input.mime_type ?? 'text/plain',
+    mimeType: input.mime_type ?? (isBase64 ? 'application/octet-stream' : 'text/plain'),
   };
   if (input.folder_id) metadata['parents'] = [input.folder_id];
+
+  // Binary uploads: declare Content-Transfer-Encoding: base64 so Drive decodes
+  // the payload to real bytes. Strip a leading data-URI prefix (a common model
+  // habit: "data:application/pdf;base64,JVBER…") and all whitespace first, so
+  // the \r\n multipart line-joining can't corrupt it and Drive doesn't decode
+  // the prefix as garbage. Without this, base64 content was stored verbatim as
+  // text and binary files (PDF, images) came out broken.
+  const mediaContentType = input.mime_type ?? (isBase64 ? 'application/octet-stream' : 'text/plain');
+  const mediaBody = isBase64
+    ? input.content.replace(/^\s*data:[^;,]*;base64,/i, '').replace(/\s+/g, '')
+    : input.content;
+  const mediaPartHeaders = isBase64
+    ? `Content-Type: ${mediaContentType}\r\nContent-Transfer-Encoding: base64`
+    : `Content-Type: ${mediaContentType}`;
 
   const boundary = '---lynox-upload-boundary---';
   const body = [
@@ -286,9 +307,9 @@ async function handleUpload(auth: GoogleAuth, input: DriveInput): Promise<string
     '',
     JSON.stringify(metadata),
     `--${boundary}`,
-    `Content-Type: ${input.mime_type ?? 'text/plain'}`,
+    mediaPartHeaders,
     '',
-    input.content,
+    mediaBody,
     `--${boundary}--`,
   ].join('\r\n');
 

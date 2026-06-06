@@ -237,6 +237,9 @@ export class Engine {
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
+  private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
+  private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
@@ -750,6 +753,49 @@ export class Engine {
         process.stderr.write(`[lynox] PromptStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._promptStore = null;
       }
+    }
+
+    // Initialize run registry (shares DB connection with RunHistory). On a clean
+    // boot, any run still marked live in a previous process was killed by the
+    // restart — sweep it to 'interrupted' so the client shows a banner + Retry
+    // instead of going blind (no cross-restart resume).
+    if (this.runHistory) {
+      try {
+        const { RunRegistry } = await import('./run-registry.js');
+        this._runRegistry = new RunRegistry(this.runHistory.getDb());
+        const swept = this._runRegistry.sweepInterrupted();
+        if (swept > 0) process.stderr.write(`[lynox] run-registry: swept ${swept} interrupted run(s) from a previous process\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] RunRegistry init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        this._runRegistry = null;
+      }
+    }
+
+    // Initialize the resumable run-event buffer manager (pure in-memory, no DB).
+    // Bridges the live gap between eager-persist checkpoints and "now" so a
+    // reconnecting client can replay-then-tail in-flight activity (Tier 2).
+    try {
+      const { RunBufferManager } = await import('./run-buffer.js');
+      this._runBufferManager = new RunBufferManager();
+    } catch (err) {
+      process.stderr.write(`[lynox] RunBufferManager init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      this._runBufferManager = null;
+    }
+
+    // Initialize the run executor — the engine-owned concurrency cap + abort
+    // registry for chat runs (Tier 2). Bounds how many runs execute at once
+    // (cost/memory blast) and lets a run be aborted by id from any connection
+    // (DELETE /api/runs/:runId). Execution itself stays in the HTTP handler
+    // (headless after disconnect, PR-C); this is the global accounting seam.
+    try {
+      const { RunExecutor, DEFAULT_MAX_CONCURRENT_RUNS } = await import('./run-executor.js');
+      const cap = this.userConfig.max_concurrent_runs;
+      this._runExecutor = new RunExecutor(
+        typeof cap === 'number' && cap > 0 ? cap : DEFAULT_MAX_CONCURRENT_RUNS,
+      );
+    } catch (err) {
+      process.stderr.write(`[lynox] RunExecutor init failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      this._runExecutor = null;
     }
 
     // Initialize security audit trail (subscribes to guard/security channels)
@@ -1457,6 +1503,9 @@ export class Engine {
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
   getCRM(): import('./crm.js').CRM | null { return this._crm; }
   getPromptStore(): import('./prompt-store.js').PromptStore | null { return this._promptStore; }
+  getRunRegistry(): import('./run-registry.js').RunRegistry | null { return this._runRegistry; }
+  getRunBufferManager(): import('./run-buffer.js').RunBufferManager | null { return this._runBufferManager; }
+  getRunExecutor(): import('./run-executor.js').RunExecutor | null { return this._runExecutor; }
   getSecurityAudit(): import('./security-audit.js').SecurityAudit | null { return this.securityAudit; }
 
   /** Returns true if CRM tables (contacts/deals) contain actual records. */

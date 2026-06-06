@@ -163,7 +163,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
 export const writeFileTool: ToolEntry<WriteFileInput> = {
   definition: {
     name: 'write_file',
-    description: 'Write content to a file, creating directories as needed.',
+    description: 'Write content to a file in the workspace, creating directories as needed. For something the user should see/download (a document, report, dataset), prefer `artifact_save` — it shows in the gallery with preview + export; write_file lands in the easily-missed files area.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
