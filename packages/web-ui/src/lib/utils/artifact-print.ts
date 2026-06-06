@@ -151,7 +151,13 @@ async function renderHtmlToCanvas(rawHtml: string, width = 800): Promise<HTMLCan
   tmp.srcdoc = clean;
   document.body.appendChild(tmp);
   try {
-    await new Promise<void>((resolve) => { tmp.onload = () => resolve(); });
+    // Bound the load wait: if `onload` never fires (parser edge case), don't
+    // hang forever — proceed after 5s and let html2canvas capture whatever
+    // rendered, so the caller's busy flag always clears.
+    await Promise.race([
+      new Promise<void>((resolve) => { tmp.onload = () => resolve(); }),
+      new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+    ]);
     await new Promise((r) => setTimeout(r, 400));
     const doc = tmp.contentDocument;
     if (!doc?.body) return null;
