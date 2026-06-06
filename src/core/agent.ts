@@ -189,6 +189,18 @@ export class Agent implements IAgent {
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
   private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
   private messages: BetaMessageParam[] = [];
+  /** Persisted high-water-mark BY IDENTITY: how many leading entries of the
+   *  CURRENT `this.messages` buffer are already durable on disk. The persist
+   *  delta is `this.messages.slice(_persistedMark)` — NOT a slice against a
+   *  disk-row COUNT, which silently drops new turns whenever the buffer is no
+   *  longer a prefix-superset of disk (post-compaction the buffer collapses to
+   *  a synthetic summary; long-thread resume loads only summary+recent). The
+   *  mark is reset on every buffer rebuild (`reset`/`loadMessages`) and shifted
+   *  in lock-step when `_truncateHistory` front-drops already-persisted history,
+   *  so the genuinely-new tail is the ONLY thing ever persisted, and an
+   *  already-on-disk truncated tail is never re-persisted. See
+   *  `getUnpersistedTail`/`markPersisted`. */
+  private _persistedMark = 0;
   private abortController: AbortController | null = null;
   private _msgLenCache = 0;
   private _msgLenVersion = -1;
@@ -410,6 +422,7 @@ export class Agent implements IAgent {
 
   reset(): void {
     this.messages = [];
+    this._persistedMark = 0;
     this._lastRealInputTokens = undefined;
     this._lastRealAtMsgCount = 0;
   }
@@ -418,11 +431,34 @@ export class Agent implements IAgent {
     return [...this.messages];
   }
 
+  /** Count of leading buffer entries already known durable on disk. The
+   *  persist delta is everything after this mark. See `_persistedMark`. */
+  getUnpersistedTail(): BetaMessageParam[] {
+    return this.messages.slice(this._persistedMark);
+  }
+
+  /** Advance the persisted mark after the caller has durably written the tail.
+   *  `count` is the number of tail messages persisted (typically the length of
+   *  the array returned by `getUnpersistedTail` at the same buffer state). The
+   *  mark never exceeds the current buffer length (guards against a stale count
+   *  if the buffer shrank between read and write). */
+  markPersisted(count: number): void {
+    this._persistedMark = Math.min(this._persistedMark + count, this.messages.length);
+  }
+
   loadMessages(messages: BetaMessageParam[]): void {
     // Rehydrated histories can have drifted tool_use/tool_result pairs
     // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
     // so normalise at the single entry point for external history.
     this.messages = sanitizeToolPairs(messages);
+    // Everything just loaded is "already accounted for": it is EITHER the
+    // post-compaction synthetic summary (the real messages stay on disk and
+    // must NOT be re-persisted) OR the summary+recent tail loaded FROM disk on
+    // resume. Marking the whole loaded buffer as persisted means only turns
+    // appended AFTER this load are treated as new. Without this, the count-floor
+    // slice silently dropped every post-compaction / post-resume assistant turn
+    // (data-loss in long, compacted chats — prod export 2026-06-06).
+    this._persistedMark = this.messages.length;
     // Rehydrated history invalidates the last real-usage anchor.
     this._lastRealInputTokens = undefined;
     this._lastRealAtMsgCount = 0;
@@ -511,13 +547,22 @@ export class Agent implements IAgent {
     return this._estimateOccupancyTokens(0);
   }
 
-  async send(userMessage: string | unknown[], opts?: { suppressTools?: boolean }): Promise<string> {
+  async send(
+    userMessage: string | unknown[],
+    opts?: { suppressTools?: boolean; userMessagePrePersisted?: boolean },
+  ): Promise<string> {
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
       ? userMessage as BetaMessageParam['content']
       : userMessage;
     this.messages.push({ role: 'user', content });
+    // The Session writes the user turn durably BEFORE the run (so a crash before
+    // the first checkpoint can't lose it). Advance the mark over it so the
+    // identity-based eager-persist delta doesn't write a DUPLICATE user row.
+    if (opts?.userMessagePrePersisted === true) {
+      this._persistedMark = this.messages.length;
+    }
     this.abortController = new AbortController();
     this.continuationCount = 0;
     this._loopToolCount = 0;
@@ -530,6 +575,7 @@ export class Agent implements IAgent {
         // Drop only partial assistant content (e.g. tool_use without a
         // matching tool_result) which would cause a 400 on the next call.
         this.messages.length = snapshot + 1;
+        this._persistedMark = Math.min(this._persistedMark, this.messages.length);
         return '';
       }
       // Non-abort error (e.g. provider connection failure): fully roll the API
@@ -546,6 +592,7 @@ export class Agent implements IAgent {
       // (display_only=1 rows) — and role-alternation is trivially valid because
       // nothing partial remains.
       this.messages.length = snapshot;
+      this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
     } finally {
       // Drain fire-and-forget memory extraction so the stream isn't orphaned (avoids 499)
@@ -752,6 +799,13 @@ export class Agent implements IAgent {
         if (!hasToolResult) break;
         adjustedTail++;
       }
+      // Preserve the new-tail count across the rebuild: truncation only ever
+      // front-drops OLD (already-persisted) history, never the genuinely-new
+      // tail, so the count of unpersisted messages is invariant. Re-deriving the
+      // mark from `length - unpersistedTail` keeps it correct despite the
+      // synthetic placeholder reshuffling indices — index math against the raw
+      // drop count would mis-place it.
+      const unpersistedTail = this.messages.length - this._persistedMark;
       const head = this.messages.slice(0, 1);
       const tail = this.messages.slice(-adjustedTail);
       const dropped = this.messages.length - 1 - adjustedTail;
@@ -760,6 +814,7 @@ export class Agent implements IAgent {
         { role: 'user' as const, content: `[${dropped} earlier message(s) were removed to stay within message count limit]` },
         ...tail,
       ];
+      this._persistedMark = Math.max(0, this.messages.length - unpersistedTail);
     }
 
     const totalTokens = this._estimateOccupancyTokens(overheadTokens);
@@ -784,6 +839,9 @@ export class Agent implements IAgent {
         if (!hasToolResult) break;
         keep++;
       }
+      // See the count-cap rebuild above — the unpersisted-tail count is
+      // invariant under front-drop truncation, so re-derive the mark from it.
+      const unpersistedTail = this.messages.length - this._persistedMark;
       const head = this.messages.slice(0, 1);
       const tail = this.messages.slice(-keep);
       const dropped = this.messages.length - 1 - keep;
@@ -796,6 +854,7 @@ export class Agent implements IAgent {
         },
         ...tail,
       ];
+      this._persistedMark = Math.max(0, this.messages.length - unpersistedTail);
 
       if (this.onStream && dropped > 0) {
         const newUsage = (this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens) / maxCtx * 100;
@@ -882,7 +941,13 @@ export class Agent implements IAgent {
     // thread (prod incident ENGINE-10, rafael 2026-06-05). Sanitizing the
     // outbound array here closes the whole 400 class regardless of how the
     // drift arose. Runs once per API call (O(n)), negligible vs the LLM round-trip.
+    // Sanitizing can DROP messages, so preserve the persisted mark by identity:
+    // the trailing new (unpersisted) user/tool-result turns never carry orphan
+    // blocks, so the unpersisted-tail count is invariant here too. Clamp keeps
+    // the mark valid if any leading (already-persisted) message was dropped.
+    const unpersistedTailBeforeSanitize = this.messages.length - this._persistedMark;
     this.messages = sanitizeToolPairs(this.messages);
+    this._persistedMark = Math.max(0, this.messages.length - unpersistedTailBeforeSanitize);
 
     // Build the outbound array AFTER truncation + sanitize: a cache breakpoint
     // on the last persisted block + the ephemeral grounding tail, applied to a

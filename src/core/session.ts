@@ -615,6 +615,7 @@ export class Session {
     // delta slice sees this row already on disk and skips it. Skipped for
     // internal runs (compaction summary) so a system prompt never shows as a
     // user message.
+    let userTurnPrePersisted = false;
     if (threadStore && runOptions?.internal !== true) {
       try {
         const totalBefore = threadStore.getMessageCount(this.sessionId);
@@ -624,6 +625,7 @@ export class Session {
           runStartSeq,
           { message_count: totalBefore + 1 },
         );
+        userTurnPrePersisted = true;
       } catch {
         // Fire-and-forget — eager-persist still covers the happy path; never
         // block the run on a persistence hiccup.
@@ -633,7 +635,12 @@ export class Session {
     try {
       const result = await this.agent.send(
         userContent,
-        { suppressTools: runOptions?.noTools === true },
+        {
+          suppressTools: runOptions?.noTools === true,
+          // Tell the agent its first pushed user message is already on disk, so
+          // the identity-based eager-persist delta won't write it a second time.
+          userMessagePrePersisted: userTurnPrePersisted,
+        },
       );
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
@@ -697,16 +704,16 @@ export class Session {
       // know token counts; those are only computed here at run-end) plus
       // the first-run title — both gated on the START count, not the now
       // (`startMessageCount === 0` = "thread was empty when this run began").
-      if (threadStore) {
+      if (threadStore && this.agent) {
         try {
-          const allMessages = this.saveMessages();
-          // Slice against the API-row count (display-only B-full notes aren't
-          // in agent.messages); start new seqs at the total row count so they
-          // sort after any interleaved display note. Identical until a failed
-          // turn has persisted a note. See eager-persist.ts for the rationale.
-          const apiCount = threadStore.getApiMessageCount(this.sessionId);
+          const agent = this.agent;
+          // Delta computed by IDENTITY (agent persisted high-water-mark), not by
+          // a disk-row count floor — the floor dropped post-compaction /
+          // post-resume assistant turns (data-loss in long chats). New seqs
+          // start at MAX(seq)+1 so they sort after the full on-disk history that
+          // compaction keeps. See eager-persist.ts for the rationale.
+          const newMessages = agent.getUnpersistedTail();
           const totalCount = threadStore.getMessageCount(this.sessionId);
-          const newMessages = allMessages.slice(apiCount);
           // Per-thread cost/tokens = SUM over run_history for this session (the
           // single source of truth), NOT this run's cost. The column used to be
           // overwritten with the last run's cost each turn, so a multi-turn
@@ -726,6 +733,9 @@ export class Session {
               total_tokens: rollupTokens,
               total_cost_usd: rollupCost,
             });
+            // Advance the identity mark so a back-to-back eager checkpoint (or
+            // the next run) sees these rows as already durable.
+            agent.markPersisted(newMessages.length);
           } else {
             // Eager already persisted — just stamp the cost/token rollup.
             threadStore.updateThread(this.sessionId, {
@@ -1072,12 +1082,18 @@ export class Session {
    */
   private _persistMessages(): void {
     if (!this.agent) return;
+    const agent = this.agent;
     // Outcome is intentionally ignored — fire-and-forget contract; helper
     // catches its own errors and returns an outcome enum for tests only.
+    // Delta is computed by IDENTITY (the agent's persisted high-water-mark),
+    // so post-compaction / post-resume turns are persisted instead of dropped
+    // by a stale row-count floor. The mark advances only after the write
+    // commits, so a failed append is retried on the next checkpoint.
     persistAgentMessages({
       threadStore: this.engine.getThreadStore(),
       sessionId: this.sessionId,
-      allMessages: this.agent.getMessages(),
+      delta: agent.getUnpersistedTail(),
+      onPersisted: (count) => agent.markPersisted(count),
     });
     // Stamp the durable boundary (run buffer high-water seq) into the run
     // registry so a reconnecting client replays from exactly here (Tier 2).
