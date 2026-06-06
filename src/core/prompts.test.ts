@@ -16,17 +16,21 @@ afterEach(() => {
 });
 
 describe('currentDateContext', () => {
-  it('truncates the current ISO timestamp to the hour', () => {
-    // Stub Date so the test is deterministic across all minute boundaries.
-    // Hour-truncation is what keeps the Anthropic prompt cache key stable
-    // for the full hour — losing that defeats the whole point of the
-    // helper, so the contract is worth pinning explicitly.
+  it('truncates the current timestamp to the DAY (cache-stable across hours)', () => {
+    // Day-precision is what keeps the Anthropic prompt cache key stable across
+    // the whole day. This string is the head of the cached prefix, so any
+    // change re-bills the entire conversation — hour precision busted the cache
+    // at every hour boundary (rafael 2026-06-05). The precise wallclock lives
+    // in the per-turn `[Now: …Z]` marker, outside the cache, so coarsening here
+    // costs no accuracy. Pinning the contract explicitly.
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-05T08:41:23.456Z'));
     const ctx = currentDateContext();
-    expect(ctx).toContain('2026-05-05T08:00:00Z');
+    expect(ctx).toContain('2026-05-05');
+    expect(ctx).not.toContain('08:00'); // no hour component at all
     expect(ctx).not.toContain('08:41');
     expect(ctx).toContain('Tuesday');
+    vi.useRealTimers();
   });
 
   it('mentions the per-turn fallback so the model knows where to read precise time', () => {

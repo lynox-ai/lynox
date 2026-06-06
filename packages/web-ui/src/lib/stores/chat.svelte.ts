@@ -1019,6 +1019,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		const ttfbMs = Date.now() - runStartAt;
 		runStartAt = null;
 		msg.usage = { ...(msg.usage ?? { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }), ttfbMs };
+		// Surface the thread in the nav AS SOON AS the run produces output — a
+		// brand-new chat's user message is persisted by now (message_count ≥ 1),
+		// but the nav list otherwise only refreshes at run END, so a new chat
+		// stayed invisible (and its live run-status dot couldn't show) for the
+		// whole first turn (rafael 2026-06-05). One-shot, so it's one extra
+		// thread-list fetch per run.
+		void loadThreads();
 	}
 
 	switch (type) {

@@ -60,6 +60,9 @@ vi.mock('../../core/observability.js', () => ({
     // publish to channels.securityInjection when a payload trips the
     // injection detector. Stub it so the test channel exists.
     securityInjection: { publish: vi.fn(), hasSubscribers: false },
+    // Sub-agents run a real Agent loop; the warm-cache-miss detector publishes
+    // here when it fires, so the channel must exist even if never tripped.
+    cacheHealth: { publish: vi.fn() },
   },
 }));
 
