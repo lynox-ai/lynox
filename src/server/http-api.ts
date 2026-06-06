@@ -1905,7 +1905,7 @@ export class LynoxHTTPApi {
         const seq = runBuffer?.append(event);
         if (aborted) return;
         const data = JSON.stringify(event);
-        const idLine = seq != null ? `id: ${seq}\n` : '';
+        const idLine = seq !== undefined ? `id: ${seq}\n` : '';
         res.write(`${idLine}event: ${event.type}\ndata: ${data}\n\n`);
       };
 
