@@ -8,7 +8,8 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, computeFitZoom } from '../utils/artifact-frame.js';
+	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 
 	interface Props {
 		content: string;
@@ -209,10 +210,16 @@
 		const bg = theme === 'light' ? '#ffffff' : '#0a0a1a';
 		const fg = theme === 'light' ? '#0b0b14' : '#e8e8f0';
 		const defaultStyles = `<style>body{background:${bg};color:${fg};font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		const overflowFix = `<style>html,body{overflow-x:hidden!important;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
+		// overflow-x:auto (not hidden) so a wide document (e.g. an A4-print HTML
+		// artifact) can be PANNED on mobile instead of being clipped off-screen.
+		const overflowFix = `<style>html,body{overflow-x:auto;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
 		let fullHtml: string;
 		if (clean.includes('<html')) {
-			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${overflowFix}`);
+			// Inject a viewport meta if the artifact's own <html> lacks one, so it
+			// lays out for the device width on mobile instead of desktop-wide.
+			const viewportMeta = /name=["']viewport["']/i.test(clean)
+				? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
+			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${viewportMeta}${overflowFix}`);
 			fullHtml = fullHtml.includes('</body>') ? fullHtml.replace('</body>', `${RESIZE_SCRIPT}</body>`) : fullHtml + RESIZE_SCRIPT;
 		} else {
 			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}${overflowFix}</head><body>${clean}${RESIZE_SCRIPT}</body></html>`;
@@ -233,6 +240,7 @@
 				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
 				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>
 				<button class="artifact-btn" data-action="download-html" title="Download .html source">${ICON_CODE}</button>
+				<button class="artifact-btn" data-action="print-pdf" title="Save as PDF">${ICON_PRINT}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
 				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
@@ -288,7 +296,7 @@
 	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
 	// instead of re-walking the whole DOM. (String backslashes are doubled so the
 	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
-	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0;parent.postMessage({type:"lynox-resize",h:sh,deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
+	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0,bw=document.body?document.body.scrollWidth:0;parent.postMessage({type:"lynox-resize",h:sh,w:Math.max(document.documentElement.scrollWidth,bw),deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
 
 	// ── Event delegation ─────────────────────────────────────
 
@@ -352,7 +360,12 @@
 			else if (action === 'download-html') handleHtmlDownload(container);
 			else if (action === 'download-data') handleDataDownload(container);
 			else if (action === 'download-md') handleMarkdownDownload(container);
-			else if (action === 'print-pdf') handleMarkdownPrint(container);
+			// One "Save as PDF" action for both document types — HTML artifacts
+			// (data-html) print their rendered source, markdown its rendered body.
+			else if (action === 'print-pdf') {
+				if (container.dataset['html']) handleHtmlPrint(container);
+				else handleMarkdownPrint(container);
+			}
 			else if (action === 'open-gallery') void handleMarkdownOpenGallery(container);
 		}
 	}
@@ -425,85 +438,23 @@
 		const md = decodeDataMd(container);
 		if (!md) { addToast('PDF export failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'Artifact';
-		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(md), { async: false }) as string);
-		const html = buildPrintDocument(title, rendered);
-		const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-		const url = URL.createObjectURL(blob);
-		const win = window.open(url, '_blank');
-		if (!win) {
+		if (!printMarkdownDocument(md, title)) {
 			addToast('Popup blocked — allow popups for this site to print', 'error');
-			URL.revokeObjectURL(url);
-			return;
 		}
-		// Popup owns its blob URL; revoke after a minute so memory doesn't leak
-		// even if the user closes the window without dismissing the print dialog.
-		setTimeout(() => URL.revokeObjectURL(url), 60_000);
 	}
 
-	/*
-	 * Print stylesheet — INTENTIONALLY fixed light-on-white regardless of
-	 * UI theme. "Save as PDF" should produce a printable document. Hex
-	 * values below are exempt from the hex-guard allowlist.
-	 */
-	function buildPrintDocument(title: string, renderedBody: string): string {
-		const safeTitle = escapeHtml(title);
-		return `<!DOCTYPE html>
-<html lang="de">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${safeTitle}</title>
-<style>
-@page { margin: 2cm; }
-* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
-body {
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-	font-size: 11pt;
-	line-height: 1.55;
-	color: #1a1a1a;
-	background: #fff;
-	max-width: 18cm;
-	margin: 2rem auto;
-	padding: 0 1rem;
-}
-h1, h2, h3, h4, h5, h6 { color: #000; line-height: 1.25; margin: 1.5em 0 0.5em; }
-h1 { font-size: 1.9em; border-bottom: 2px solid #000; padding-bottom: 0.2em; }
-h2 { font-size: 1.4em; }
-h3 { font-size: 1.15em; }
-p { margin: 0.7em 0; }
-ul, ol { margin: 0.7em 0; padding-left: 1.6em; }
-li { margin: 0.2em 0; }
-a { color: #0057b0; text-decoration: underline; word-break: break-word; }
-pre, code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-code { background: #f3f3f5; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
-pre { background: #f5f5f7; border: 1px solid #e6e6ea; border-radius: 4px; padding: 0.8em 1em; overflow-x: auto; white-space: pre-wrap; font-size: 0.85em; }
-pre code { background: transparent; padding: 0; }
-table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
-th, td { border: 1px solid #d0d0d6; padding: 0.4em 0.7em; text-align: left; vertical-align: top; }
-th { background: #f5f5f7; font-weight: 600; }
-blockquote { border-left: 3px solid #c0c0c8; padding: 0.1em 1em; color: #555; margin: 1em 0; }
-hr { border: none; border-top: 1px solid #d0d0d6; margin: 2em 0; }
-img { max-width: 100%; height: auto; }
-@media print {
-	body { max-width: none; margin: 0; padding: 0; }
-	a { color: #000; }
-	pre, table, blockquote, img { break-inside: avoid; }
-	h1, h2, h3 { break-after: avoid; }
-}
-</style>
-</head>
-<body>
-<h1>${safeTitle}</h1>
-${renderedBody}
-<script>
-window.addEventListener('load', function () {
-	setTimeout(function () { window.print(); }, 150);
-});
-window.addEventListener('afterprint', function () { window.close(); });
-<\/script>
-</body>
-</html>`;
+	/** Save an HTML artifact as PDF via the browser print pipeline. The source is
+	 *  sanitized (scripts stripped) but keeps its styles, so a styled document
+	 *  like a contract prints with full fidelity + selectable text. */
+	function handleHtmlPrint(container: HTMLElement) {
+		const encoded = container.dataset['html'] ?? '';
+		let raw = '';
+		try { raw = encoded ? decodeURIComponent(escape(atob(encoded))) : ''; }
+		catch { raw = ''; }
+		if (!raw) { addToast('PDF export failed', 'error'); return; }
+		if (!printHtmlDocument(raw)) {
+			addToast('Popup blocked — allow popups for this site to print', 'error');
+		}
 	}
 
 	function exportMermaidPng(btn: Element) {
@@ -570,13 +521,33 @@ window.addEventListener('afterprint', function () { window.close(); });
 	}
 
 	function handleArtifactExpand(container: HTMLElement) {
+		const entering = !container.classList.contains('artifact-fullscreen');
 		container.classList.toggle('artifact-fullscreen');
+		document.body.style.overflow = entering ? 'hidden' : '';
+		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
+		if (iframe) applyFullscreenFit(iframe, entering);
+	}
 
-		if (container.classList.contains('artifact-fullscreen')) {
-			document.body.style.overflow = 'hidden';
-		} else {
-			document.body.style.overflow = '';
+	/** Fit a wide artifact (e.g. an A4-print HTML doc) to the fullscreen frame
+	 *  width via CSS zoom so the whole page is visible on a narrow phone instead
+	 *  of being clipped — the iframe's `scrolling="no"` means it can't be panned.
+	 *  Reverted on collapse; a no-op for content that already fits. */
+	function applyFullscreenFit(iframe: HTMLIFrameElement, entering: boolean) {
+		if (!entering) {
+			iframe.style.width = '';
+			iframe.style.removeProperty('zoom');
+			return;
 		}
+		// rAF so the fullscreen layout (frame width) is settled before measuring.
+		requestAnimationFrame(() => {
+			const cw = Number(iframe.dataset['cw'] ?? 0);
+			const frameW = iframe.parentElement?.clientWidth ?? iframe.clientWidth;
+			const zoom = computeFitZoom(cw, frameW);
+			if (zoom !== null) {
+				iframe.style.width = `${cw}px`;
+				iframe.style.setProperty('zoom', String(zoom));
+			}
+		});
 	}
 
 	/** Render artifact to canvas via html2canvas in a temporary iframe */
@@ -693,6 +664,7 @@ window.addEventListener('afterprint', function () { window.close(); });
 		function handleMessage(e: MessageEvent) {
 			if (e.data?.type !== 'lynox-resize') return;
 			const h = e.data.h;
+			const w = e.data.w;
 			const deck = e.data.deck === true;
 			// A deck legitimately reports a collapsed height — only bail on a bad
 			// height for the normal (non-deck) flow path.
@@ -700,11 +672,20 @@ window.addEventListener('afterprint', function () { window.close(); });
 			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
 			for (const iframe of iframes) {
 				if (iframe.contentWindow === e.source) {
+					// Remember the content's intrinsic width so fullscreen can fit-to-width
+					// a wide doc (e.g. an A4-print artifact) instead of clipping it.
+					if (typeof w === 'number' && w > 0) {
+						iframe.dataset['cw'] = String(w);
+						// If the artifact is ALREADY fullscreen, a late width measurement
+						// (expand fired before the first resize message → cw was 0 → no fit)
+						// lets us fit-to-width now instead of leaving the doc clipped.
+						if (iframe.closest('.artifact-fullscreen')) applyFullscreenFit(iframe, true);
+					}
 					if (deck) {
 						// 100vh slide-decks: size by 16:9 of the rendered width instead of
 						// the collapsed scrollHeight (old Math.max(h,200) clamped to 200px).
-						const w = iframe.clientWidth || iframe.getBoundingClientRect().width;
-						iframe.style.height = `${deckFrameHeight(w, window.innerHeight)}px`;
+						const deckW = iframe.clientWidth || iframe.getBoundingClientRect().width;
+						iframe.style.height = `${deckFrameHeight(deckW, window.innerHeight)}px`;
 					} else {
 						iframe.style.height = `${Math.max(h, 200)}px`;
 					}
@@ -1347,11 +1328,30 @@ window.addEventListener('afterprint', function () { window.close(); });
 		border: none;
 		display: flex;
 		flex-direction: column;
+		/* Clear the iOS status bar / Dynamic Island + home indicator — without
+		   this the toolbar (and its close button) render UNDER the notch on
+		   mobile and become unreachable ("no way back"). bg fills the inset. */
+		background: var(--color-bg);
+		padding-top: env(safe-area-inset-top, 0px);
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+		padding-left: env(safe-area-inset-left, 0px);
+		padding-right: env(safe-area-inset-right, 0px);
+	}
+	/* Keep the toolbar pinned + give the close button a real mobile tap target. */
+	div :global(.artifact-fullscreen .artifact-toolbar) {
+		position: sticky;
+		top: 0;
+		flex-shrink: 0;
+	}
+	div :global(.artifact-fullscreen .artifact-close-btn) {
+		min-width: 2.5rem;
+		min-height: 2.5rem;
 	}
 	div :global(.artifact-fullscreen .artifact-frame) {
 		flex: 1;
 		height: auto;
 		overflow: auto;
+		-webkit-overflow-scrolling: touch;
 	}
 	div :global(.artifact-fullscreen .artifact-source-wrap) {
 		flex: 1;
