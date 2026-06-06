@@ -27,9 +27,10 @@ export const recallToolResultTool: ToolEntry<RecallToolResultInput> = {
       'Re-fetch a large tool result that was set aside during a context compaction. ' +
       'After the conversation is summarized, big tool outputs (API responses, file ' +
       'reads, search results) are replaced by short recall handles like "tr-3". Call ' +
-      'this with that id to get the full original payload back. If the id is no longer ' +
-      'available (it was dropped past a later compaction, or never existed) you get a ' +
-      'clear notice — re-run the original tool call instead.',
+      'this with that id to get the full original payload back. Handles stay valid across ' +
+      'later compactions. If the id is no longer available (the recall store filled up and ' +
+      'dropped the least-recently-used, or it never existed) you get a clear notice — re-run ' +
+      'the original tool call instead.',
     input_schema: {
       type: 'object' as const,
       properties: {
