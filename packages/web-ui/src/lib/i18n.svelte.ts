@@ -23,8 +23,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.updated': { de: 'Aktualisiert', en: 'Updated' },
 	'artifacts.save_pdf': { de: 'Als PDF', en: 'Save as PDF' },
 	'artifacts.print': { de: 'Drucken', en: 'Print' },
-	'artifacts.pdf_busy': { de: 'PDF …', en: 'PDF …' },
-	'artifacts.pdf_failed': { de: 'PDF konnte nicht erstellt werden', en: 'Could not create PDF' },
 	'artifacts.download_file': { de: 'Datei', en: 'Download' },
 	'artifacts.popup_blocked': { de: 'Popup blockiert — erlaube Popups, um zu drucken', en: 'Popup blocked — allow popups to print' },
 	'artifacts.toggle_preview': { de: 'Vorschau ein-/ausklappen', en: 'Toggle preview' },

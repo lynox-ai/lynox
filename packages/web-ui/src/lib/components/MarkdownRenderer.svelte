@@ -9,7 +9,7 @@
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, computeFitZoom } from '../utils/artifact-frame.js';
-	import { downloadHtmlPdf, downloadMarkdownPdf } from '../utils/artifact-print.js';
+	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 
 	interface Props {
 		content: string;
@@ -363,8 +363,8 @@
 			// One "Save as PDF" action for both document types — HTML artifacts
 			// (data-html) print their rendered source, markdown its rendered body.
 			else if (action === 'print-pdf') {
-				if (container.dataset['html']) void handleHtmlPrint(container);
-				else void handleMarkdownPrint(container);
+				if (container.dataset['html']) handleHtmlPrint(container);
+				else handleMarkdownPrint(container);
 			}
 			else if (action === 'open-gallery') void handleMarkdownOpenGallery(container);
 		}
@@ -434,28 +434,26 @@
 	 *  "Save as PDF" (Desktop) or "Save to Files" (iOS Safari share sheet).
 	 *  Pure-browser flow — no dependency, PDF output has selectable text,
 	 *  tables render natively. */
-	/** "Als PDF" on a markdown bubble → one-tap rasterized DOWNLOAD (works on
-	 *  mobile, where the browser-print pipeline is blocked by iOS). */
-	async function handleMarkdownPrint(container: HTMLElement) {
+	function handleMarkdownPrint(container: HTMLElement) {
 		const md = decodeDataMd(container);
 		if (!md) { addToast('PDF export failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'Artifact';
-		try {
-			if (!(await downloadMarkdownPdf(md, title))) addToast('PDF export failed', 'error');
-		} catch { addToast('PDF export failed', 'error'); }
+		if (!printMarkdownDocument(md, title)) {
+			addToast('Popup blocked — allow popups for this site to print', 'error');
+		}
 	}
 
-	/** "Als PDF" on an HTML bubble → one-tap rasterized DOWNLOAD (mobile-friendly;
-	 *  for selectable text use the gallery's "Drucken"). */
-	async function handleHtmlPrint(container: HTMLElement) {
+	/** Print an HTML artifact via the browser print pipeline (selectable PDF on
+	 *  desktop). The source is sanitized (scripts stripped) but keeps its styles. */
+	function handleHtmlPrint(container: HTMLElement) {
 		const encoded = container.dataset['html'] ?? '';
 		let raw = '';
 		try { raw = encoded ? decodeURIComponent(escape(atob(encoded))) : ''; }
 		catch { raw = ''; }
 		if (!raw) { addToast('PDF export failed', 'error'); return; }
-		try {
-			if (!(await downloadHtmlPdf(raw, container.dataset['title'] ?? 'Artifact'))) addToast('PDF export failed', 'error');
-		} catch { addToast('PDF export failed', 'error'); }
+		if (!printHtmlDocument(raw)) {
+			addToast('Popup blocked — allow popups for this site to print', 'error');
+		}
 	}
 
 	function exportMermaidPng(btn: Element) {

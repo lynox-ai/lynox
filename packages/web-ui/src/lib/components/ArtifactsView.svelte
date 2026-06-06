@@ -14,7 +14,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { printHtmlDocument, printMarkdownDocument, downloadHtmlPdf, downloadMarkdownPdf } from '../utils/artifact-print.js';
+	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
 
 	let selected = $state<Artifact | null>(null);
@@ -159,25 +159,9 @@
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
 	 *  artifact bubble, so the gallery exports identically. */
-	let pdfBusy = $state(false);
-
-	// "Als PDF" = a real one-tap DOWNLOAD (rasterized, works on mobile — lands in
-	// Files). "Drucken" = the browser print pipeline (selectable text, desktop).
-	async function handleDownloadPdf(a: Artifact) {
-		if (pdfBusy) return;
-		pdfBusy = true;
-		try {
-			const ok = a.type === 'markdown'
-				? await downloadMarkdownPdf(a.content, a.title)
-				: await downloadHtmlPdf(a.content, a.title);
-			if (!ok) addToast(t('artifacts.pdf_failed'), 'error', 5000);
-		} catch {
-			addToast(t('artifacts.pdf_failed'), 'error', 5000);
-		} finally {
-			pdfBusy = false;
-		}
-	}
-
+	// "Drucken" = the browser print pipeline (selectable PDF on desktop). A real
+	// one-tap mobile PDF DOWNLOAD is a server-side follow-up (client-side
+	// html2canvas can't faithfully render decks / hangs on complex HTML).
 	function handlePrint(a: Artifact) {
 		const ok = a.type === 'markdown'
 			? printMarkdownDocument(a.content, a.title)
@@ -283,7 +267,9 @@
 			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1}{' · '}v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
 			{#if selected.type === 'html' || selected.type === 'markdown'}
-				<button type="button" disabled={pdfBusy} class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 disabled:opacity-50" onclick={() => handleDownloadPdf(selected!)}>{pdfBusy ? t('artifacts.pdf_busy') : t('artifacts.save_pdf')}</button>
+				<!-- Print = selectable PDF on desktop; hidden on mobile where iOS
+				     blocks auto-print (a real mobile PDF download is a server-side
+				     follow-up). Mobile keeps "Datei" (raw download). -->
 				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 hidden sm:inline-block" onclick={() => handlePrint(selected!)}>{t('artifacts.print')}</button>
 			{/if}
 			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.download_file')}</button>
