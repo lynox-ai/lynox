@@ -1353,6 +1353,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Reranker (post-search relevance scorer; Anthropic-only today)
 	'integrations.reranker_title': { de: 'Relevanz-Reranker', en: 'Relevance reranker' },
 	'integrations.reranker_desc': { de: 'Bewertet Suchtreffer per Haiku gegen die Suchintention und verwirft Off-Topic-Treffer. Opt-in via LYNOX_SEARCH_RERANK=true.', en: 'Scores search results against query intent via Haiku and drops off-topic hits. Opt-in via LYNOX_SEARCH_RERANK=true.' },
+	'integrations.reranker_desc_managed': { de: 'Bewertet Suchtreffer per Haiku gegen die Suchintention und verwirft Off-Topic-Treffer.', en: 'Scores search results against query intent via Haiku and drops off-topic hits.' },
+	'integrations.reranker_managed_off': { de: 'Vom Anbieter vorkonfiguriert', en: 'Pre-configured by your host' },
 	'integrations.reranker_active': { de: 'Aktiv (Anthropic Haiku)', en: 'Active (Anthropic Haiku)' },
 	'integrations.reranker_available_off': { de: 'Verfügbar — setze LYNOX_SEARCH_RERANK=true zum Aktivieren', en: 'Available — set LYNOX_SEARCH_RERANK=true to enable' },
 	'integrations.reranker_unsupported': { de: 'Aktuell nur mit Anthropic verfügbar', en: 'Currently available with Anthropic only' },
