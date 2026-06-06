@@ -23,7 +23,10 @@
 	let confirmDelete = $state<string | null>(null);
 	let deleteDialogRef = $state<HTMLDivElement | null>(null);
 	let deleteDialogTrigger: HTMLElement | null = null;
-	let deepLinkConsumed = false;
+	// $state (not a plain let) so the deep-link $effect re-evaluates its guard
+	// when goBack() marks it consumed — otherwise a stale ?id= could race the
+	// close and "resurrect" the preview ("Zurück geht nicht").
+	let deepLinkConsumed = $state(false);
 
 	const artifacts = $derived(getArtifacts());
 	const isLoading = $derived(getIsLoadingArtifacts());
@@ -75,6 +78,12 @@
 	// Back action for the fullscreen preview: return to the chat when the
 	// artifact was deep-linked from there, otherwise close back to the gallery.
 	function goBack() {
+		// Block the deep-link $effect from re-opening + drop any lingering ?id=
+		// so the close can't be raced/resurrected (the "Zurück geht nicht" bug).
+		deepLinkConsumed = true;
+		if ($page.url.searchParams.has('id')) {
+			void goto('/app/artifacts', { replaceState: true, keepFocus: true, noScroll: true });
+		}
 		if (openedFromChat) void goto('/app');
 		else closePreview();
 	}
@@ -244,7 +253,7 @@
 	<div class="fixed inset-0 z-[9999] bg-bg flex flex-col" role="dialog" aria-modal="true" aria-label={selected.title} style="padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);">
 		<!-- Toolbar -->
 		<div class="flex items-center gap-3 px-4 md:px-5 py-3 border-b border-border bg-bg-subtle shrink-0">
-			<button type="button" class="text-text-muted hover:text-text text-sm p-1" onclick={goBack}>← {openedFromChat ? t('artifacts.back_to_chat') : t('artifacts.back')}</button>
+			<button type="button" class="text-text-muted hover:text-text text-sm py-2 pr-3 pl-1 -ml-1 min-h-[2.75rem] flex items-center shrink-0" onclick={goBack}>← {openedFromChat ? t('artifacts.back_to_chat') : t('artifacts.back')}</button>
 			<h2 class="text-sm font-medium text-text flex-1 truncate">{selected.title}</h2>
 			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1}{' · '}v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>

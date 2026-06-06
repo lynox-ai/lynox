@@ -529,23 +529,33 @@
 	}
 
 	/** Fit a wide artifact (e.g. an A4-print HTML doc) to the fullscreen frame
-	 *  width via CSS zoom so the whole page is visible on a narrow phone instead
-	 *  of being clipped — the iframe's `scrolling="no"` means it can't be panned.
-	 *  Reverted on collapse; a no-op for content that already fits. */
+	 *  width so the whole page is visible on a narrow phone instead of being
+	 *  clipped. Uses `transform: scale()` (NOT CSS `zoom`, which iOS-Safari
+	 *  ignores → the prior fix didn't work on iPhone): the frame is laid out at
+	 *  its intrinsic content width then scaled down; the scaled box drives the
+	 *  container's scroll area. Reverted on collapse; a no-op for content that
+	 *  already fits. */
 	function applyFullscreenFit(iframe: HTMLIFrameElement, entering: boolean) {
 		if (!entering) {
 			iframe.style.width = '';
-			iframe.style.removeProperty('zoom');
+			iframe.style.transform = '';
+			iframe.style.transformOrigin = '';
 			return;
 		}
 		// rAF so the fullscreen layout (frame width) is settled before measuring.
 		requestAnimationFrame(() => {
 			const cw = Number(iframe.dataset['cw'] ?? 0);
 			const frameW = iframe.parentElement?.clientWidth ?? iframe.clientWidth;
-			const zoom = computeFitZoom(cw, frameW);
-			if (zoom !== null) {
+			const scale = computeFitZoom(cw, frameW);
+			if (scale !== null) {
 				iframe.style.width = `${cw}px`;
-				iframe.style.setProperty('zoom', String(zoom));
+				iframe.style.transformOrigin = 'top left';
+				iframe.style.transform = `scale(${scale})`;
+			} else {
+				// Already fits — clear any stale transform from a previous fit.
+				iframe.style.width = '';
+				iframe.style.transform = '';
+				iframe.style.transformOrigin = '';
 			}
 		});
 	}
@@ -1328,6 +1338,12 @@
 		border: none;
 		display: flex;
 		flex-direction: column;
+		/* The container itself scrolls (sticky toolbar stays pinned) so a wide
+		   artifact scaled-to-fit-width via transform on the frame drives THIS
+		   scroll area — the scaled box is exactly the viewport width, so no
+		   horizontal clipping, and a tall doc scrolls vertically. */
+		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
 		/* Clear the iOS status bar / Dynamic Island + home indicator — without
 		   this the toolbar (and its close button) render UNDER the notch on
 		   mobile and become unreachable ("no way back"). bg fills the inset. */
@@ -1348,10 +1364,11 @@
 		min-height: 2.5rem;
 	}
 	div :global(.artifact-fullscreen .artifact-frame) {
-		flex: 1;
-		height: auto;
-		overflow: auto;
-		-webkit-overflow-scrolling: touch;
+		/* flex:none so the inline content-height (set by the resize handler) wins
+		   and the CONTAINER scrolls, not the frame. width:100% by default; the
+		   fit-to-width path overrides width + transform-scale. */
+		flex: none;
+		width: 100%;
 	}
 	div :global(.artifact-fullscreen .artifact-source-wrap) {
 		flex: 1;
