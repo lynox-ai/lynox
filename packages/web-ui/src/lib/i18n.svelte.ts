@@ -708,6 +708,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.use_keyboard_dictation': { de: 'Tipp: Nutze die Diktierfunktion deiner Tastatur (🎙️) für schnellste Spracheingabe.', en: 'Tip: Use your keyboard dictation (🎙️) for the fastest voice input.' },
 	'chat.voice_processing': { de: 'Wird verarbeitet…', en: 'Processing…' },
 	'chat.attach_file': { de: 'Datei anhängen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
+	'chat.drop_files': { de: 'Dateien hier ablegen', en: 'Drop files here' },
 	'chat.voice_input': { de: 'Spracheingabe', en: 'Voice input' },
 	'chat.voice_stop': { de: 'Aufnahme stoppen und senden', en: 'Stop recording and send' },
 	'chat.transcribing': { de: 'Wird transkribiert…', en: 'Transcribing…' },
