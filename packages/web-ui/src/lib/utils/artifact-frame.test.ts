@@ -1,5 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { isViewportDeck, deckFrameHeight } from './artifact-frame.js';
+import { isViewportDeck, deckFrameHeight, computeFitZoom } from './artifact-frame.js';
+
+describe('computeFitZoom', () => {
+	it('scales a wide A4 doc down to the phone frame width', () => {
+		// 794px A4 content in a 390px frame → ~0.49 zoom.
+		const z = computeFitZoom(794, 390);
+		expect(z).toBeCloseTo(390 / 794, 5);
+	});
+
+	it('returns null when the content already fits', () => {
+		expect(computeFitZoom(380, 390)).toBeNull();
+		expect(computeFitZoom(390, 390)).toBeNull();
+	});
+
+	it('ignores sub-pixel overflow (4px slack)', () => {
+		expect(computeFitZoom(393, 390)).toBeNull();
+		expect(computeFitZoom(395, 390)).not.toBeNull();
+	});
+
+	it('returns null for degenerate dimensions', () => {
+		expect(computeFitZoom(0, 390)).toBeNull();
+		expect(computeFitZoom(794, 0)).toBeNull();
+		expect(computeFitZoom(-1, 390)).toBeNull();
+	});
+});
 
 describe('isViewportDeck', () => {
 	it('flags a 100vh deck whose scrollHeight collapsed to the viewport', () => {

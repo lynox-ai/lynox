@@ -8,7 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, computeFitZoom } from '../utils/artifact-frame.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 
 	interface Props {
@@ -296,7 +296,7 @@
 	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
 	// instead of re-walking the whole DOM. (String backslashes are doubled so the
 	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
-	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0;parent.postMessage({type:"lynox-resize",h:sh,deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
+	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0;parent.postMessage({type:"lynox-resize",h:sh,w:document.documentElement.scrollWidth,deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
 
 	// ── Event delegation ─────────────────────────────────────
 
@@ -521,13 +521,33 @@
 	}
 
 	function handleArtifactExpand(container: HTMLElement) {
+		const entering = !container.classList.contains('artifact-fullscreen');
 		container.classList.toggle('artifact-fullscreen');
+		document.body.style.overflow = entering ? 'hidden' : '';
+		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
+		if (iframe) applyFullscreenFit(iframe, entering);
+	}
 
-		if (container.classList.contains('artifact-fullscreen')) {
-			document.body.style.overflow = 'hidden';
-		} else {
-			document.body.style.overflow = '';
+	/** Fit a wide artifact (e.g. an A4-print HTML doc) to the fullscreen frame
+	 *  width via CSS zoom so the whole page is visible on a narrow phone instead
+	 *  of being clipped — the iframe's `scrolling="no"` means it can't be panned.
+	 *  Reverted on collapse; a no-op for content that already fits. */
+	function applyFullscreenFit(iframe: HTMLIFrameElement, entering: boolean) {
+		if (!entering) {
+			iframe.style.width = '';
+			iframe.style.removeProperty('zoom');
+			return;
 		}
+		// rAF so the fullscreen layout (frame width) is settled before measuring.
+		requestAnimationFrame(() => {
+			const cw = Number(iframe.dataset['cw'] ?? 0);
+			const frameW = iframe.parentElement?.clientWidth ?? iframe.clientWidth;
+			const zoom = computeFitZoom(cw, frameW);
+			if (zoom !== null) {
+				iframe.style.width = `${cw}px`;
+				iframe.style.setProperty('zoom', String(zoom));
+			}
+		});
 	}
 
 	/** Render artifact to canvas via html2canvas in a temporary iframe */
@@ -644,6 +664,7 @@
 		function handleMessage(e: MessageEvent) {
 			if (e.data?.type !== 'lynox-resize') return;
 			const h = e.data.h;
+			const w = e.data.w;
 			const deck = e.data.deck === true;
 			// A deck legitimately reports a collapsed height — only bail on a bad
 			// height for the normal (non-deck) flow path.
@@ -651,6 +672,9 @@
 			const iframes = document.querySelectorAll('.artifact-frame') as NodeListOf<HTMLIFrameElement>;
 			for (const iframe of iframes) {
 				if (iframe.contentWindow === e.source) {
+					// Remember the content's intrinsic width so fullscreen can fit-to-width
+					// a wide doc (e.g. an A4-print artifact) instead of clipping it.
+					if (typeof w === 'number' && w > 0) iframe.dataset['cw'] = String(w);
 					if (deck) {
 						// 100vh slide-decks: size by 16:9 of the rendered width instead of
 						// the collapsed scrollHeight (old Math.max(h,200) clamped to 200px).

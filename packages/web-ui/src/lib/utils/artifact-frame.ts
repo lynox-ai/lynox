@@ -43,3 +43,16 @@ export function deckFrameHeight(width: number, viewportHeight: number): number {
 	const ceil = Math.round((viewportHeight > 0 ? viewportHeight : 800) * 0.85);
 	return Math.min(Math.max(aspect, 360), ceil);
 }
+
+/**
+ * CSS `zoom` factor to fit a wide artifact document to the fullscreen frame
+ * width, or `null` when it already fits (no scaling needed). Used so an
+ * A4-print HTML artifact (fixed ~794px wide) scales down to be fully visible on
+ * a narrow phone instead of being clipped off-screen. A 4px slack avoids
+ * zooming for sub-pixel overflow.
+ */
+export function computeFitZoom(contentWidth: number, frameWidth: number): number | null {
+	if (!(contentWidth > 0) || !(frameWidth > 0)) return null;
+	if (contentWidth <= frameWidth + 4) return null;
+	return frameWidth / contentWidth;
+}
