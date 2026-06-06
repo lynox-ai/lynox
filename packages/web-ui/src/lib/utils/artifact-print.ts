@@ -18,7 +18,16 @@ import { fixMarkdownPreprocessing } from './markdown-preprocess.js';
  * to inline here.
  */
 export function injectPrintScaffold(html: string): string {
-  const style = '<style>@page{margin:1.5cm}@media print{html,body{margin:0}}</style>';
+  // @page margins + print page-break hygiene so a multi-page document (e.g. an
+  // A4 contract) doesn't split tables/figures/headings across pages or leave
+  // orphan/widow lines — the prior "zeilenumbrüche schlecht" report.
+  const style =
+    '<style>@page{margin:1.5cm}@media print{' +
+    'html,body{margin:0}' +
+    'tr,img,pre,figure,blockquote{break-inside:avoid}' +
+    'h1,h2,h3,h4,h5,h6{break-after:avoid;break-inside:avoid}' +
+    'p,li{orphans:3;widows:3}' +
+    '}</style>';
   // Split the closing-script-tag literal so bundlers/inline-HTML parsers don't
   // terminate the surrounding module/markup early.
   const script =

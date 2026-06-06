@@ -528,24 +528,55 @@
 		if (iframe) applyFullscreenFit(iframe, entering);
 	}
 
+	/** Clear every inline style applyFullscreenFit may have set. Idempotent —
+	 *  safe to call on collapse, on ESC, and on the no-fit branch. */
+	function clearFullscreenFit(iframe: HTMLIFrameElement) {
+		iframe.style.width = '';
+		iframe.style.height = '';
+		iframe.style.transform = '';
+		iframe.style.transformOrigin = '';
+		iframe.style.marginRight = '';
+		iframe.style.marginBottom = '';
+	}
+
 	/** Fit a wide artifact (e.g. an A4-print HTML doc) to the fullscreen frame
-	 *  width via CSS zoom so the whole page is visible on a narrow phone instead
-	 *  of being clipped — the iframe's `scrolling="no"` means it can't be panned.
-	 *  Reverted on collapse; a no-op for content that already fits. */
+	 *  width so the whole page is visible on a narrow phone instead of being
+	 *  clipped. Uses `transform: scale()` (NOT CSS `zoom`, which iOS-Safari
+	 *  ignores → the prior fix didn't work on iPhone). A CSS transform is
+	 *  paint-only and does NOT shrink the element's layout box, so we lay the
+	 *  frame out at its intrinsic size, scale from the top-left, then pull the
+	 *  reclaimed width/height back with NEGATIVE MARGINS — otherwise the
+	 *  intrinsic-width box overflows the container horizontally (the exact
+	 *  clipping we're fixing) and leaves dead scroll space below. Reverted on
+	 *  collapse; a no-op for content that already fits. */
 	function applyFullscreenFit(iframe: HTMLIFrameElement, entering: boolean) {
 		if (!entering) {
-			iframe.style.width = '';
-			iframe.style.removeProperty('zoom');
+			clearFullscreenFit(iframe);
 			return;
 		}
 		// rAF so the fullscreen layout (frame width) is settled before measuring.
 		requestAnimationFrame(() => {
 			const cw = Number(iframe.dataset['cw'] ?? 0);
+			// Intrinsic content height = the height the resize handler already set
+			// on the inline frame (the fullscreen CSS doesn't override it). Read it
+			// BEFORE we mutate height below.
+			const ch = parseFloat(iframe.style.height) || 0;
 			const frameW = iframe.parentElement?.clientWidth ?? iframe.clientWidth;
-			const zoom = computeFitZoom(cw, frameW);
-			if (zoom !== null) {
-				iframe.style.width = `${cw}px`;
-				iframe.style.setProperty('zoom', String(zoom));
+			const scale = computeFitZoom(cw, frameW);
+			if (scale === null) {
+				// Already fits — clear any stale fit from a previous open.
+				clearFullscreenFit(iframe);
+				return;
+			}
+			iframe.style.width = `${cw}px`;
+			iframe.style.transformOrigin = 'top left';
+			iframe.style.transform = `scale(${scale})`;
+			// Collapse the unscaled layout box to the scaled size so the container
+			// sees exactly frameW × (ch·scale): no horizontal overflow, no dead gap.
+			iframe.style.marginRight = `${-(cw - cw * scale)}px`;
+			if (ch > 0) {
+				iframe.style.height = `${ch}px`;
+				iframe.style.marginBottom = `${-(ch - ch * scale)}px`;
 			}
 		});
 	}
@@ -653,6 +684,11 @@
 			if (fs) {
 				fs.classList.remove('artifact-fullscreen');
 				document.body.style.overflow = '';
+				// Revert the fit-to-width transform/width/margins — otherwise the
+				// now-inline frame is left scaled + overflowing (button-collapse
+				// reverts via handleArtifactExpand; ESC must too).
+				const iframe = fs.querySelector('.artifact-frame') as HTMLIFrameElement | null;
+				if (iframe) applyFullscreenFit(iframe, false);
 			}
 		}
 		window.addEventListener('keydown', handleEscape);
@@ -1328,6 +1364,12 @@
 		border: none;
 		display: flex;
 		flex-direction: column;
+		/* The container itself scrolls (sticky toolbar stays pinned) so a wide
+		   artifact scaled-to-fit-width via transform on the frame drives THIS
+		   scroll area — the scaled box is exactly the viewport width, so no
+		   horizontal clipping, and a tall doc scrolls vertically. */
+		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
 		/* Clear the iOS status bar / Dynamic Island + home indicator — without
 		   this the toolbar (and its close button) render UNDER the notch on
 		   mobile and become unreachable ("no way back"). bg fills the inset. */
@@ -1348,10 +1390,11 @@
 		min-height: 2.5rem;
 	}
 	div :global(.artifact-fullscreen .artifact-frame) {
-		flex: 1;
-		height: auto;
-		overflow: auto;
-		-webkit-overflow-scrolling: touch;
+		/* flex:none so the inline content-height (set by the resize handler) wins
+		   and the CONTAINER scrolls, not the frame. width:100% by default; the
+		   fit-to-width path overrides width + transform-scale. */
+		flex: none;
+		width: 100%;
 	}
 	div :global(.artifact-fullscreen .artifact-source-wrap) {
 		flex: 1;

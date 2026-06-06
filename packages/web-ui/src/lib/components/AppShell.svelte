@@ -324,9 +324,12 @@
 				return;
 			}
 			expandedSection = item.href;
-		} else {
-			expandedSection = null;
 		}
+		// Leaf items: do NOT collapse an open section here. Tearing down the
+		// expanded chat-history (a transition:slide subtree) synchronously inside
+		// the tap competed with the <a href> navigation on touch, so the first tap
+		// only collapsed and a second was needed to navigate. Let the native link
+		// navigate; the open section is harmless and closes on its own next toggle.
 		sidebarOpen = false;
 	}
 

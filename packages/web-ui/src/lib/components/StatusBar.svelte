@@ -367,9 +367,8 @@
 	report a non-zero value for the gesture pad (some macOS Safari builds). -->
 <div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 overflow-x-auto scrollbar-none">
 	<!-- Engine Status (clickable) -->
-	<button onclick={togglePanel} class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
+	<button onclick={togglePanel} class="flex items-center px-2.5 py-1 hover:text-text transition-colors shrink-0" aria-label={engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} title={engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}>
+		<span class="inline-block h-2 w-2 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 	</button>
 
 	<span class="text-border">|</span>
@@ -378,9 +377,9 @@
 		all configured providers. Tooltip surfaces the failing provider's
 		description (e.g. "Mistral AI: Last run failed") so the user knows
 		which provider is degraded without opening the status panel. -->
-	<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" title={apiStatusTooltip || providerName}>
+	<span class="flex items-center gap-1.5 px-2.5 py-1 shrink-0" title="{providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}">
 		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
-		{providerName} · {apiStatusLabel()}
+		{providerName}
 	</span>
 
 	<span class="text-border">|</span>
@@ -390,16 +389,17 @@
 		 role=status announces the live count to AT without overloading the
 		 tasks counter. -->
 	{#if liveRuns > 0}
-		<span class="flex items-center gap-1.5 px-3 py-1 shrink-0" role="status" aria-label="{liveRuns} {t('status.runs_active')}">
+		<span class="flex items-center gap-1 px-2 py-1 shrink-0" role="status" aria-label="{liveRuns} {t('status.runs_active')}" title={t('status.runs_active')}>
 			<span class="inline-block h-1.5 w-1.5 rounded-full bg-accent motion-safe:animate-pulse"></span>
-			<span class="text-accent-text">{liveRuns}</span> {t('status.runs_active')}
+			<span class="text-accent-text">{liveRuns}</span>
 		</span>
 		<span class="text-border">|</span>
 	{/if}
 
 	<!-- Active Tasks -->
-	<a href="/app/hub?section=tasks" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		<span class="text-accent-text">{activeTasks}</span> {t('status.tasks_active')}
+	<a href="/app/hub?section=tasks" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" aria-label="{activeTasks} {t('status.tasks_active')}" title={t('status.tasks_active')}>
+		<svg class="h-3 w-3" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="2" y="3" width="12" height="2" rx="1"/><rect x="2" y="7" width="12" height="2" rx="1"/><rect x="2" y="11" width="8" height="2" rx="1"/></svg>
+		<span class="text-accent-text">{activeTasks}</span>
 	</a>
 
 	<span class="text-border">|</span>
@@ -408,8 +408,8 @@
 	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target moves
 	     from the legacy hub cost-limits route to /app/activity. Edit-limits
 	     SSoT now lives in /app/settings/workspace/limits (P3-PR-X). -->
-	<a href="/app/activity" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		{formatCost(todayCost)} {t('status.today')}
+	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" aria-label="{formatCost(todayCost)} · {t('status.today')}" title="{formatCost(todayCost)} · {t('status.today')}">
+		{formatCost(todayCost)}
 	</a>
 
 	<span class="text-border">|</span>
@@ -417,8 +417,9 @@
 	<!-- Today's Runs — points to Activity History tab.
 	     Per PRD-IA-CONSOLIDATION-V2 P2-PR-B the target moves from the
 	     legacy hub activity-tab query to /app/activity?tab=history. -->
-	<a href="/app/activity?tab=history" class="flex items-center gap-1.5 px-3 py-1 hover:text-text transition-colors shrink-0">
-		{todayRuns} {t('status.runs')} {t('status.today')}
+	<a href="/app/activity?tab=history" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" aria-label="{todayRuns} {t('status.runs')} · {t('status.today')}" title="{todayRuns} {t('status.runs')} · {t('status.today')}">
+		<svg class="h-3 w-3" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9 1.5 3.5 9H7l-1 5.5L12.5 7H9l.5-5.5z"/></svg>
+		<span>{todayRuns}</span>
 	</a>
 
 	<span class="text-border">|</span>
