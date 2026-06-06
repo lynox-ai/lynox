@@ -37,10 +37,20 @@ function mintSessionCookie(secret: string): string {
 }
 
 async function authenticate(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.evaluate((cookie) => {
-    document.cookie = `lynox_session=${cookie}; path=/; max-age=2592000`;
-  }, mintSessionCookie(SMOKE_SECRET));
+  // The engine sets `lynox_session` httpOnly, so `document.cookie` can't install
+  // it (JS cannot write an httpOnly cookie). Set it at the CONTEXT level instead,
+  // which bypasses that restriction. `secure` follows the origin's protocol so a
+  // plain-http smoke target still sends the cookie.
+  await page.goto('/login');
+  const origin = new URL(page.url()).origin;
+  await page.context().addCookies([{
+    name: 'lynox_session',
+    value: mintSessionCookie(SMOKE_SECRET),
+    url: origin,
+    httpOnly: true,
+    secure: origin.startsWith('https'),
+    sameSite: 'Lax',
+  }]);
 }
 
 /** Start a run that takes long enough to reload INTO (a multi-step task). */
