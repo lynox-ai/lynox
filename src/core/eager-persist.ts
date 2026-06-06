@@ -13,62 +13,56 @@ export interface EagerPersistInput {
    *  thread store wired (e.g. CLI-mode without persistence). */
   threadStore: ThreadStore | null;
   sessionId: string;
-  allMessages: BetaMessageParam[];
+  /** The genuinely-NEW tail of the agent buffer — `agent.getUnpersistedTail()`.
+   *  This is the delta computed by IDENTITY (a persisted high-water-mark that
+   *  the agent shifts in lock-step with truncation), NOT by slicing against a
+   *  disk-row count. The count-floor slice silently dropped post-compaction /
+   *  post-resume assistant turns because after those events the buffer is no
+   *  longer a prefix-superset of disk (data-loss in long, compacted chats —
+   *  prod export 2026-06-06). */
+  delta: BetaMessageParam[];
+  /** Called with the number of rows actually appended once the write commits,
+   *  so the agent can advance its persisted mark. Not called on noop/error. */
+  onPersisted?: ((count: number) => void) | undefined;
 }
 
 export type EagerPersistOutcome =
   | { kind: 'noop'; reason: 'no-threadstore' | 'no-new-messages' }
-  | { kind: 'shrink-skip'; bufferLength: number; floorLength: number }
   | { kind: 'appended'; deltaLength: number; newTotal: number }
   | { kind: 'error'; error: Error };
 
 /**
- * Append any new messages from the in-memory buffer into the ThreadStore.
- * Idempotent: re-reads `getMessageCount` fresh on every call, so duplicate
- * fires (eager checkpoint + end-of-run persist) are no-ops.
+ * Append the agent buffer's unpersisted tail into the ThreadStore. The delta is
+ * computed by the agent BY IDENTITY (its persisted high-water-mark), so this
+ * helper no longer guesses "what is new" from a row-count floor — the floor
+ * assumption ("buffer is a prefix-superset of disk") is false after compaction
+ * or a long-thread resume, which is exactly when assistant turns were dropped.
  *
- * Returns an outcome enum instead of throwing — callers are fire-and-forget
- * by contract, but a typed outcome makes the helper testable. The Session
- * wrapper ignores the outcome; tests inspect it.
+ * Idempotent across the eager-checkpoint + end-of-run double-fire: once the
+ * first call advances the agent's mark, the second sees an empty delta and
+ * no-ops. Returns an outcome enum instead of throwing — callers are
+ * fire-and-forget by contract, but a typed outcome makes the helper testable.
  */
 export function persistAgentMessages(input: EagerPersistInput): EagerPersistOutcome {
-  const { threadStore, sessionId, allMessages } = input;
+  const { threadStore, sessionId, delta, onPersisted } = input;
   if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };
 
   try {
-    // `agent.messages` only ever holds API messages — B-full display-only
-    // rows (failed-turn notes) live in SQLite but never in the buffer. So the
-    // slice floor + shrink guard compare against the API-row count, while the
-    // new rows' seq starts at the TOTAL row count so seqs stay monotonic and
-    // never collide with an interleaved display note. The two counts are
-    // identical until a failed turn has persisted its first note.
-    const apiCount = threadStore.getApiMessageCount(sessionId);
-    const totalCount = threadStore.getMessageCount(sessionId);
-    const seqFloor = threadStore.getNextSeq(sessionId);
-
-    // In-memory buffer below SQLite floor means `_truncateHistory` ran and
-    // dropped earlier messages from the agent's view. SQLite still owns the
-    // full history — disk truth wins. Log once at warn-level so a divergent
-    // thread doesn't go silently stale, then skip.
-    if (allMessages.length < apiCount) {
-      console.warn(
-        `[session] in-memory buffer (${String(allMessages.length)}) shorter than persisted API floor (${String(apiCount)}) for thread ${sessionId} — skipping eager persist; disk remains source of truth`,
-      );
-      return { kind: 'shrink-skip', bufferLength: allMessages.length, floorLength: apiCount };
-    }
-
-    if (allMessages.length === apiCount) {
+    if (delta.length === 0) {
       return { kind: 'noop', reason: 'no-new-messages' };
     }
 
-    const delta = allMessages.slice(apiCount);
-    // Combined append + message_count rollup in one transaction — one fsync
-    // under WAL per checkpoint instead of two. Seqs start at MAX(seq)+1 (crash-
-    // safe, deletion-safe); message_count tracks all rows (API + display) so the
-    // thread list / "N messages" count stays accurate.
+    // message_count tracks ALL rows (API + B-full display-only); new seqs start
+    // at MAX(seq)+1 (crash-safe, deletion-safe) so they sort after any
+    // interleaved display note AND after the full pre-compaction history that
+    // stays on disk. Combined append + message_count rollup in one transaction
+    // — one fsync under WAL per checkpoint.
+    const totalCount = threadStore.getMessageCount(sessionId);
+    const seqFloor = threadStore.getNextSeq(sessionId);
     threadStore.appendMessages(sessionId, delta, seqFloor, {
       message_count: totalCount + delta.length,
     });
+    onPersisted?.(delta.length);
     return { kind: 'appended', deltaLength: delta.length, newTotal: totalCount + delta.length };
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };

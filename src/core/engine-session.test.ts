@@ -40,6 +40,12 @@ vi.mock('./agent.js', () => ({
     this.abort = mockAbort;
     // @ts-expect-error mock constructor
     this.getMessages = mockGetMessages;
+    // @ts-expect-error mock constructor — identity-based persist seam. The mock
+    // never appends in-loop, so the unpersisted tail is empty (nothing new to
+    // write) and markPersisted is a no-op; mirrors a fully-checkpointed buffer.
+    this.getUnpersistedTail = vi.fn().mockReturnValue([]);
+    // @ts-expect-error mock constructor
+    this.markPersisted = vi.fn();
     // @ts-expect-error mock constructor — mirrors the pre-PR1 char-estimate so
     // Session.getContextUsagePercent behaves identically under the mock.
     this.getEstimatedOccupancyTokens = () => JSON.stringify(mockGetMessages() ?? []).length / 3.5;
@@ -385,7 +391,9 @@ describe('Engine + Session (Orchestrator)', () => {
       // is hour-truncated. See prompts.ts:withCurrentTimePrefix.
       expect(mockSend).toHaveBeenCalledWith(
         expect.stringMatching(/^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\nHello$/),
-        { suppressTools: false },
+        // `userMessagePrePersisted` flags whether the durable pre-run user write
+        // succeeded so the identity-based eager-persist won't duplicate the row.
+        expect.objectContaining({ suppressTools: false }),
       );
     });
 
@@ -824,7 +832,9 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(result.success).toBe(true);
       // noTools wiring: the summarization turn must suppress ALL tools so the
       // summary comes back as text, never an artifact pointer.
-      expect(mockSend).toHaveBeenCalledWith(expect.any(String), { suppressTools: true });
+      // Internal (compaction) run skips the durable user write, so
+      // `userMessagePrePersisted` is false; assert only the suppressTools wiring.
+      expect(mockSend).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ suppressTools: true }));
       // Framing: summary injected as an AUTHORITATIVE user record (ground truth),
       // not the agent's own un-backed assistant claim.
       const loaded = mockLoadMessages.mock.calls.at(-1)?.[0] as Array<{ role: string; content: string }>;

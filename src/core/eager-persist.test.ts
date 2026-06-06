@@ -1,7 +1,9 @@
-// T1 from /pr-review #456: regression-pin for the eager-persist helper.
-// Walks the four contract cases the helper has to honour so any future
-// refactor of `_persistMessages` keeps the idempotency + shrink-handling
-// guarantees intact.
+// T1 from /pr-review #456 (updated 2026-06-06): regression-pin for the
+// eager-persist helper. The helper now appends a delta computed BY IDENTITY
+// (the agent's persisted high-water-mark) instead of slicing against a disk-row
+// count floor — the floor silently dropped post-compaction / post-resume
+// assistant turns (data-loss in long chats). These cases pin the new contract:
+// append-the-delta, no-op on empty, idempotency via onPersisted, error-swallow.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
@@ -19,15 +21,8 @@ function makeMockThreadStore(opts?: {
       if (opts?.getCountThrows) throw new Error('SQLite locked');
       return count;
     }),
-    // No display-only rows in these fixtures, so the API count tracks the
-    // total count exactly — mirrors the production invariant that the two
-    // diverge only after a failed turn has persisted a display note.
-    getApiMessageCount: vi.fn().mockImplementation((): number => {
-      if (opts?.getCountThrows) throw new Error('SQLite locked');
-      return count;
-    }),
     // MAX(seq)+1 — equals the row count on these append-only fixtures (no
-    // deletions), so existing startSeq assertions hold unchanged.
+    // deletions), so startSeq assertions are stable.
     getNextSeq: vi.fn().mockImplementation((): number => {
       if (opts?.getCountThrows) throw new Error('SQLite locked');
       return count;
@@ -53,45 +48,33 @@ describe('persistAgentMessages', () => {
     const result = persistAgentMessages({
       threadStore: null,
       sessionId: 's1',
-      allMessages: [msg('user', 'hi')],
+      delta: [msg('user', 'hi')],
     });
     expect(result).toEqual({ kind: 'noop', reason: 'no-threadstore' });
   });
 
-  it('returns noop("no-new-messages") when in-memory buffer == SQLite floor', () => {
+  it('returns noop("no-new-messages") when the delta is empty', () => {
     const store = makeMockThreadStore({ initialCount: 3 });
+    const onPersisted = vi.fn();
     const result = persistAgentMessages({
       threadStore: store,
       sessionId: 's1',
-      allMessages: [msg('user', 'a'), msg('assistant', 'b'), msg('user', 'c')],
+      delta: [],
+      onPersisted,
     });
     expect(result).toEqual({ kind: 'noop', reason: 'no-new-messages' });
     expect(store.appendMessages).not.toHaveBeenCalled();
+    expect(onPersisted).not.toHaveBeenCalled();
   });
 
-  it('returns noop when in-memory buffer is empty and floor is 0', () => {
-    const store = makeMockThreadStore({ initialCount: 0 });
-    const result = persistAgentMessages({
-      threadStore: store,
-      sessionId: 's1',
-      allMessages: [],
-    });
-    expect(result.kind).toBe('noop');
-    expect(store.appendMessages).not.toHaveBeenCalled();
-  });
-
-  it('appends only the delta when in-memory buffer is larger than floor', () => {
+  it('appends the whole delta and advances the mark via onPersisted', () => {
     const store = makeMockThreadStore({ initialCount: 2 });
-    const allMessages = [
-      msg('user', 'old1'),
-      msg('assistant', 'old2'),
-      msg('user', 'new1'),
-      msg('assistant', 'new2'),
-    ];
+    const onPersisted = vi.fn();
     const result = persistAgentMessages({
       threadStore: store,
       sessionId: 's1',
-      allMessages,
+      delta: [msg('user', 'new1'), msg('assistant', 'new2')],
+      onPersisted,
     });
 
     expect(result).toEqual({ kind: 'appended', deltaLength: 2, newTotal: 4 });
@@ -99,67 +82,69 @@ describe('persistAgentMessages', () => {
     expect(store.appendMessages).toHaveBeenCalledWith(
       's1',
       [msg('user', 'new1'), msg('assistant', 'new2')],
-      2, // startSeq = existingCount = 2
+      2, // startSeq = MAX(seq)+1 = existing count
       { message_count: 4 },
     );
+    expect(onPersisted).toHaveBeenCalledWith(2);
   });
 
-  it('skips with warn when in-memory buffer is shorter than persisted floor (shrink case)', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const store = makeMockThreadStore({ initialCount: 10 });
+  it('persists a delta even when the on-disk count is FAR LARGER than the buffer (post-compaction)', () => {
+    // The bug: after compaction the agent buffer collapses to ~2 synthetic
+    // messages while disk still holds the full pre-compaction history (e.g. 70
+    // rows). The old count-floor slice saw buffer<floor → shrink-skip → the new
+    // assistant turn was NEVER written. The identity delta persists it; the new
+    // rows get seqs starting at MAX(seq)+1 so they sort after the kept history.
+    const store = makeMockThreadStore({ initialCount: 70 });
+    const onPersisted = vi.fn();
     const result = persistAgentMessages({
       threadStore: store,
       sessionId: 's1',
-      allMessages: [msg('user', 'only_recent_5')],
+      // summary(assistant, already-marked, NOT in delta) + new user + new asst
+      delta: [msg('user', 'continue please'), msg('assistant', 'here you go')],
+      onPersisted,
     });
-
-    expect(result).toEqual({ kind: 'shrink-skip', bufferLength: 1, floorLength: 10 });
-    expect(store.appendMessages).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0]![0]).toContain('shorter than persisted API floor');
-    expect(warnSpy.mock.calls[0]![0]).toContain('s1');
+    expect(result).toEqual({ kind: 'appended', deltaLength: 2, newTotal: 72 });
+    expect(store.appendMessages).toHaveBeenCalledWith(
+      's1',
+      [msg('user', 'continue please'), msg('assistant', 'here you go')],
+      70, // startSeq = MAX(seq)+1 = sorts after the kept history
+      { message_count: 72 },
+    );
+    expect(onPersisted).toHaveBeenCalledWith(2);
   });
 
   it('returns error outcome (no rethrow) when getMessageCount throws', () => {
     const store = makeMockThreadStore({ getCountThrows: true });
+    const onPersisted = vi.fn();
     const result = persistAgentMessages({
       threadStore: store,
       sessionId: 's1',
-      allMessages: [msg('user', 'hi')],
+      delta: [msg('user', 'hi')],
+      onPersisted,
     });
     expect(result.kind).toBe('error');
     if (result.kind === 'error') {
       expect(result.error.message).toBe('SQLite locked');
     }
     expect(store.appendMessages).not.toHaveBeenCalled();
+    // Mark must NOT advance on a failed write — the turn is retried next time.
+    expect(onPersisted).not.toHaveBeenCalled();
   });
 
-  it('returns error outcome (no rethrow) when appendMessages throws', () => {
+  it('returns error outcome (no rethrow) when appendMessages throws — mark not advanced', () => {
     const store = makeMockThreadStore({ initialCount: 0, appendThrows: true });
+    const onPersisted = vi.fn();
     const result = persistAgentMessages({
       threadStore: store,
       sessionId: 's1',
-      allMessages: [msg('user', 'hi')],
+      delta: [msg('user', 'hi')],
+      onPersisted,
     });
     expect(result.kind).toBe('error');
     if (result.kind === 'error') {
       expect(result.error.message).toBe('SQLite full');
     }
-  });
-
-  it('is idempotent — second call after the first sees no-new-messages', () => {
-    const store = makeMockThreadStore({ initialCount: 1 });
-    const allMessages = [msg('user', 'a'), msg('assistant', 'b')];
-
-    const first = persistAgentMessages({ threadStore: store, sessionId: 's1', allMessages });
-    expect(first.kind).toBe('appended');
-    expect(store.appendMessages).toHaveBeenCalledTimes(1);
-
-    // Second call with the same buffer — floor has advanced via the mock's
-    // append callback, so the delta is now empty.
-    const second = persistAgentMessages({ threadStore: store, sessionId: 's1', allMessages });
-    expect(second).toEqual({ kind: 'noop', reason: 'no-new-messages' });
-    expect(store.appendMessages).toHaveBeenCalledTimes(1);
+    expect(onPersisted).not.toHaveBeenCalled();
   });
 });
 
