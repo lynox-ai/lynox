@@ -14,7 +14,8 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
+	import { printHtmlDocument, printMarkdownDocument, downloadHtmlPdf, downloadMarkdownPdf } from '../utils/artifact-print.js';
+	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
 
 	let selected = $state<Artifact | null>(null);
 	// True when `selected` was opened via the chat deep-link (?id=…) — drives
@@ -113,9 +114,10 @@
 
 	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
-	function injectCsp(html: string): string {
-		if (html.includes('<head')) return html.replace(/<head[^>]*>/, `$&${CSP_META}`);
-		return `${CSP_META}${html}`;
+	/** CSP + a default viewport + the fit-to-width script so a wide artifact (A4
+	 *  contract / deck) is fully visible on mobile. Logic in artifact-frame.ts. */
+	function injectArtifactPreview(html: string): string {
+		return injectArtifactFit(html, CSP_META);
 	}
 
 	function typeIcon(type: string): string {
@@ -157,7 +159,26 @@
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
 	 *  artifact bubble, so the gallery exports identically. */
-	function handlePdf(a: Artifact) {
+	let pdfBusy = $state(false);
+
+	// "Als PDF" = a real one-tap DOWNLOAD (rasterized, works on mobile — lands in
+	// Files). "Drucken" = the browser print pipeline (selectable text, desktop).
+	async function handleDownloadPdf(a: Artifact) {
+		if (pdfBusy) return;
+		pdfBusy = true;
+		try {
+			const ok = a.type === 'markdown'
+				? await downloadMarkdownPdf(a.content, a.title)
+				: await downloadHtmlPdf(a.content, a.title);
+			if (!ok) addToast(t('artifacts.pdf_failed'), 'error', 5000);
+		} catch {
+			addToast(t('artifacts.pdf_failed'), 'error', 5000);
+		} finally {
+			pdfBusy = false;
+		}
+	}
+
+	function handlePrint(a: Artifact) {
 		const ok = a.type === 'markdown'
 			? printMarkdownDocument(a.content, a.title)
 			: printHtmlDocument(a.content);
@@ -262,7 +283,8 @@
 			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1}{' · '}v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
 			{#if selected.type === 'html' || selected.type === 'markdown'}
-				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => handlePdf(selected!)}>{t('artifacts.save_pdf')}</button>
+				<button type="button" disabled={pdfBusy} class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 disabled:opacity-50" onclick={() => handleDownloadPdf(selected!)}>{pdfBusy ? t('artifacts.pdf_busy') : t('artifacts.save_pdf')}</button>
+				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 hidden sm:inline-block" onclick={() => handlePrint(selected!)}>{t('artifacts.print')}</button>
 			{/if}
 			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.download_file')}</button>
 		</div>
@@ -271,7 +293,7 @@
 		<div class="flex-1 overflow-hidden">
 			{#if selected.type === 'html' || selected.type === 'svg'}
 				<iframe
-					srcdoc={injectCsp(selected.content)}
+					srcdoc={injectArtifactPreview(selected.content)}
 					sandbox="allow-scripts"
 					class="w-full h-full border-none bg-bg-elevated"
 					title={selected.title}
