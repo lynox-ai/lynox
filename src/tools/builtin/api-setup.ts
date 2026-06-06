@@ -731,7 +731,7 @@ function emitBootstrapProgress(agent: IAgent, phase: 'fetching_docs' | 'extracti
 
 async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string> {
   if (!isFeatureEnabled('api-setup-v2')) {
-    return 'Error: docs_url bootstrap is gated behind the `api-setup-v2` feature flag (off by default). Set LYNOX_FEATURE_API_SETUP_V2=1 to enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
+    return 'Error: docs_url bootstrap requires the `api-setup-v2` feature, which is ON by default but has been disabled here (LYNOX_FEATURE_API_SETUP_V2=0). Remove that override to re-enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
   }
 
   emitBootstrapProgress(agent, 'fetching_docs');

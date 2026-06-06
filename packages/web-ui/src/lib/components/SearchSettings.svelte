@@ -150,12 +150,16 @@
 			<div class="flex items-center justify-between mb-2">
 				<div>
 					<h2 class="font-medium">{t('integrations.reranker_title')}</h2>
-					<p class="text-xs text-text-muted mt-1">{t('integrations.reranker_desc')}</p>
+					<!-- Managed users can't set env vars, so they get a desc without the
+					     LYNOX_SEARCH_RERANK opt-in instruction (hosting controls it). -->
+					<p class="text-xs text-text-muted mt-1">{isManaged() ? t('integrations.reranker_desc_managed') : t('integrations.reranker_desc')}</p>
 				</div>
 				{#if !rerankerCap.supported}
 					<span class="text-xs text-text-subtle">{t('integrations.reranker_unsupported')}</span>
 				{:else if rerankerCap.enabled}
 					<span class="text-xs text-success">{t('integrations.reranker_active')}</span>
+				{:else if isManaged()}
+					<span class="text-xs text-text-subtle">{t('integrations.reranker_managed_off')}</span>
 				{:else}
 					<span class="text-xs text-text-subtle">{t('integrations.reranker_available_off')}</span>
 				{/if}

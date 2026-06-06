@@ -959,8 +959,11 @@ describe('api_setup tool', () => {
         { action: 'bootstrap', docs_url: 'https://docs.dataforseo.com/v3/' },
         agent as never,
       );
-      expect(result).toContain('feature flag');
+      // The error names the flag and states it is ON by default (disabled only
+      // by an explicit LYNOX_FEATURE_API_SETUP_V2=0 override) — not "off by default".
       expect(result).toContain('api-setup-v2');
+      expect(result).toContain('ON by default');
+      expect(result).not.toContain('off by default');
       // Gate runs before any emitBootstrapProgress call, so streamHandler must stay untouched.
       expect(events.filter(e => e.type === 'tool_progress')).toEqual([]);
     });
