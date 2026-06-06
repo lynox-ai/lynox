@@ -300,10 +300,15 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     }
 
     // Suppress a thinking-only persistence artifact: an assistant turn with no
-    // tool calls whose only text is the placeholder (or nothing at all). It
-    // carries no information for the user — rendering it shows a confusing
-    // empty "[…]" bubble. Its cost still lives in the thread total.
-    if (toolCalls.length === 0 && (textAccum === THINKING_ONLY_PLACEHOLDER || textAccum.trim() === '')) {
+    // tool calls whose only text is the placeholder (or empty). It carries no
+    // information for the user — rendering it shows a confusing empty "[…]"
+    // bubble. Its cost still lives in the thread total. Guard the empty-text
+    // case to turns whose raw content is ALL text blocks: a turn that produced
+    // an image / document / server-tool / other non-text block projects to
+    // empty text here (those block types aren't rendered in this loop) but is a
+    // REAL message and must NOT be dropped.
+    const allBlocksAreText = content.every((b) => b.type === 'text');
+    if (toolCalls.length === 0 && (textAccum === THINKING_ONLY_PLACEHOLDER || (textAccum.trim() === '' && allBlocksAreText))) {
       continue;
     }
 

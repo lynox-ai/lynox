@@ -604,10 +604,15 @@ export class Agent implements IAgent {
         // inside the cache TTL — reads back almost nothing from cache. It does
         // NOT fire on a cold start (no prior call) or a post-TTL resume (gap
         // beyond the grace window), both of which legitimately read zero.
+        // Gated to providers that actually do prompt caching: custom/openai
+        // proxies (e.g. Mistral) strip cache_control and never report
+        // cache_read, so without this gate the detector would cry wolf on
+        // EVERY warm turn of an entire provider class. Anthropic-direct and
+        // Vertex both report cache_read, so both keep the detector.
         const now = Date.now();
         const prevPrompt = this._lastRealInputTokens ?? 0;
         const gapMs = this._lastCallAt > 0 ? now - this._lastCallAt : Infinity;
-        if (Agent.isWarmCacheMiss(prevPrompt, realInput, cacheRead, gapMs)) {
+        if (!this.isCustomProxy && Agent.isWarmCacheMiss(prevPrompt, realInput, cacheRead, gapMs)) {
           const expectedMin = Math.round(prevPrompt * Agent.CACHE_HEALTH_MIN_HIT_RATIO);
           const detail = `prompt-cache likely broken: a warm ~${Math.round(realInput / 1000)}k-token prompt read only ${cacheRead} cached tokens (expected ≳${expectedMin}). A volatile prefix re-bills the whole history every turn.`;
           channels.cacheHealth.publish({

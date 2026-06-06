@@ -310,4 +310,14 @@ describe('thinking-only placeholder suppression', () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.content).toContain('answer');
   });
+
+  it('does NOT suppress a turn that carries a non-text block (image/document/server-tool)', () => {
+    // These block types project to empty text here (the loop only renders
+    // text/tool_use), but they are REAL messages and must survive.
+    const out = projectMessages([
+      rec(1, 'assistant', [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'x' } }]),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.role).toBe('assistant');
+  });
 });
