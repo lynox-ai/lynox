@@ -172,6 +172,28 @@ describe('google_drive tool', () => {
       expect(body).not.toContain('JVBE Ri0=');  // not the raw spaced form
     });
 
+    it('strips a leading data-URI prefix from base64 content', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
+      const tool = createDriveTool(auth);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'bin2', name: 'img.png', mimeType: 'image/png' }),
+      });
+
+      await tool.handler({
+        action: 'upload',
+        file_name: 'img.png',
+        content: 'data:image/png;base64,iVBORw0KGgo=', // common model habit
+        content_encoding: 'base64',
+        mime_type: 'image/png',
+      }, createMockAgent('Yes'));
+
+      const body = String(mockFetch.mock.calls.at(-1)?.[1]?.body ?? '');
+      expect(body).toContain('iVBORw0KGgo=');        // real base64 survives
+      expect(body).not.toContain('data:image/png');  // the prefix is gone
+    });
+
     it('does NOT add a transfer-encoding header for a normal text upload', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
       const tool = createDriveTool(auth);

@@ -287,11 +287,15 @@ async function handleUpload(auth: GoogleAuth, input: DriveInput): Promise<string
   if (input.folder_id) metadata['parents'] = [input.folder_id];
 
   // Binary uploads: declare Content-Transfer-Encoding: base64 so Drive decodes
-  // the payload to real bytes. Strip whitespace from the base64 first so the
-  // \r\n multipart line-joining can't corrupt it. Without this, base64 content
-  // was stored verbatim as text and binary files (PDF, images) came out broken.
+  // the payload to real bytes. Strip a leading data-URI prefix (a common model
+  // habit: "data:application/pdf;base64,JVBER…") and all whitespace first, so
+  // the \r\n multipart line-joining can't corrupt it and Drive doesn't decode
+  // the prefix as garbage. Without this, base64 content was stored verbatim as
+  // text and binary files (PDF, images) came out broken.
   const mediaContentType = input.mime_type ?? (isBase64 ? 'application/octet-stream' : 'text/plain');
-  const mediaBody = isBase64 ? input.content.replace(/\s+/g, '') : input.content;
+  const mediaBody = isBase64
+    ? input.content.replace(/^\s*data:[^;,]*;base64,/i, '').replace(/\s+/g, '')
+    : input.content;
   const mediaPartHeaders = isBase64
     ? `Content-Type: ${mediaContentType}\r\nContent-Transfer-Encoding: base64`
     : `Content-Type: ${mediaContentType}`;
