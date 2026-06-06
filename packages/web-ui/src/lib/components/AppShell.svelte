@@ -39,6 +39,14 @@
 	let railHovered = $state(false);
 	let railLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 	const railExpanded = $derived(railPinned || railHovered);
+	// Desktop = the persistent rail (≥ md). On mobile the full-width drawer shows
+	// the threads list based on the DRAWER being open (sidebarOpen), NOT hover/pin
+	// — otherwise Option A (no touch-hover) would hide mobile chat-history, and a
+	// desktop pin leaked via localStorage would expand it under a tapping finger.
+	let isDesktop = $state(false);
+	let railMq: MediaQueryList | null = null;
+	const onRailMq = () => { isDesktop = railMq?.matches ?? false; };
+	const navExpanded = $derived(isDesktop ? railExpanded : sidebarOpen);
 
 	function focusOnMount(node: HTMLElement) { node.focus(); }
 
@@ -381,6 +389,9 @@
 		try {
 			railPinned = localStorage.getItem('lynox-rail-pinned') === '1';
 		} catch { /* localStorage may be blocked; collapsed default is fine */ }
+		railMq = window.matchMedia('(min-width: 768px)');
+		isDesktop = railMq.matches;
+		railMq.addEventListener('change', onRailMq);
 	});
 
 	function togglePin(): void {
@@ -392,6 +403,13 @@
 	}
 
 	function onRailEnter(): void {
+		// Ignore the synthetic `mouseenter` iOS Safari fires on a touch tap. On a
+		// touch device the rail-hover concept doesn't apply (the mobile drawer is
+		// full-width), and a stray hover flips railExpanded → the chat-history
+		// slides open UNDER the finger and shoves the tapped nav item away, so the
+		// first tap doesn't navigate (the double-tap bug). Only real pointers hover.
+		if (typeof window !== 'undefined' &&
+			!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		railHovered = true;
 	}
@@ -407,6 +425,7 @@
 		stopVisibilityRefresh?.();
 		stopActiveRunsPoll?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
+		railMq?.removeEventListener('change', onRailMq);
 	});
 
 	/** Accessible label for the live-run status dot (no text in the row — the
@@ -480,7 +499,7 @@
 					<div class="flex-1 min-w-0 {railExpanded ? '' : 'md:hidden'}">
 						<span>{t(item.labelKey)}</span>
 					</div>
-					{#if isExpandable(item) && railExpanded}
+					{#if isExpandable(item) && navExpanded}
 						<Icon
 							name="chevron_right"
 							size="xs"
@@ -496,13 +515,13 @@
 				 min-h-0 on every ancestor in this flex chain so the inner thread
 				 <ul> scrolls instead of pushing the pinned group off-screen. -->
 			{#if chatItem}
-				<div class="px-2 flex flex-col min-h-0 {railExpanded && expandedSection === chatItem.href ? 'flex-1' : 'shrink-0'}">
+				<div class="px-2 flex flex-col min-h-0 {navExpanded && expandedSection === chatItem.href ? 'flex-1' : 'shrink-0'}">
 					<!-- Parent nav item -->
 					{@render navParent(chatItem)}
 
 					<!-- Sub-items: threads list (Chat only). Only when expanded —
 						 collapsed rail hides the threads dropdown to save space. -->
-					{#if railExpanded && expandedSection === chatItem.href && chatItem.type === 'threads'}
+					{#if navExpanded && expandedSection === chatItem.href && chatItem.type === 'threads'}
 						<div transition:slide={{ duration: 150 }} class="flex-1 flex flex-col min-h-0">
 							{#if getThreads().length > 0}
 								<!-- Thread search: client-side filter on title. Tiny enough to drop
