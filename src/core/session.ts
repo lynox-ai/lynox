@@ -913,11 +913,11 @@ export class Session {
    * Used by CLI /compact command and auto-compaction.
    */
   async compact(focus?: string, opts?: { confirmScope?: boolean }): Promise<{ success: boolean; summary: string }> {
-    // Phase 2 Context Hygiene: clear blobs retained at the *previous*
-    // compaction first. A blob is recallable only until the next compaction —
-    // this clear is what hard-drops the prior window and is the sole bound on
-    // the store's memory (it can never grow across more than one window).
-    this._toolResultBlobStore.clear();
+    // Phase 2 Context Hygiene: do NOT clear the blob store here. Blobs retained
+    // at earlier compactions are CARRIED FORWARD so a `recall_tool_result` still
+    // works two+ compactions later (the old clear-on-every-compaction hard-
+    // dropped them past a single window — too aggressive for long chats). The
+    // memory bound is now an explicit LRU cap applied after eviction below.
 
     // Snapshot the pre-summary history. Large tool results live here; the
     // summary run below only *appends* (the summary prompt + reply), so the
@@ -945,7 +945,15 @@ export class Session {
     // mid-conversation — so the warm prompt cache is untouched between turns.
     const thresholdChars = this.engine.getUserConfig().tool_result_blob_threshold_chars
       ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
-    const handles = this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);
+    this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);
+    // Bound the carried-forward store by LRU after adding this window's blobs.
+    this._toolResultBlobStore.pruneToCap();
+    // List EVERY currently-retained blob (prior windows carried forward + this
+    // window's new evictions), so a blob that survived an earlier compaction
+    // stays discoverable + recallable — not just the ones evicted this round.
+    const handles = this._toolResultBlobStore
+      .entries()
+      .map(({ id, blob }) => ({ id, descriptor: blob.descriptor }));
 
     this.reset();
     if (summary) {

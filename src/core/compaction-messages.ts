@@ -53,7 +53,7 @@ export function buildPostCompactionMessages(
       {
         role: 'assistant',
         content:
-          `[Recallable tool results]\nThese large tool outputs from before the summary were set aside and can be re-fetched verbatim with recall_tool_result("<id>"). They remain available only until the next compaction:\n${lines.join('\n')}`,
+          `[Recallable tool results]\nThese large tool outputs from before the summary were set aside and can be re-fetched verbatim with recall_tool_result("<id>"). They stay re-fetchable across later compactions; only the least-recently-used are dropped once the recall store is full:\n${lines.join('\n')}`,
       },
     );
   }
