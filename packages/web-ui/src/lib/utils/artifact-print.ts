@@ -7,6 +7,8 @@
 
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
 import { fixMarkdownPreprocessing } from './markdown-preprocess.js';
 
 /**
@@ -127,4 +129,73 @@ ${renderedBody}
 export function printMarkdownDocument(md: string, title: string): boolean {
   const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(md), { async: false }) as string);
   return openPrintWindow(injectPrintScaffold(buildMarkdownPrintDocument(title || 'Artifact', rendered)));
+}
+
+// ── Direct one-tap PDF download (mobile-friendly) ─────────────────────────────
+// The print pipeline above is great on DESKTOP (selectable text) but poor on
+// mobile (iOS blocks auto-print, no direct download). For a one-tap download
+// that works on a phone, we rasterize the rendered artifact (html2canvas) into a
+// multi-page A4 PDF (jsPDF). Not selectable, but a real .pdf file lands in Files.
+
+function sanitizeFilename(title: string): string {
+  return (title || 'artifact').replace(/[^\w\-. ]+/g, '_').replace(/\s+/g, '_').slice(0, 80) || 'artifact';
+}
+
+/** Render arbitrary (sanitized) artifact HTML to a canvas in an off-screen
+ *  same-origin iframe. Scripts are stripped first so allow-same-origin is safe. */
+async function renderHtmlToCanvas(rawHtml: string, width = 800): Promise<HTMLCanvasElement | null> {
+  const clean = DOMPurify.sanitize(rawHtml, { WHOLE_DOCUMENT: true, ADD_TAGS: ['style', 'link', 'meta'] }) as unknown as string;
+  const tmp = document.createElement('iframe');
+  tmp.setAttribute('sandbox', 'allow-same-origin');
+  tmp.style.cssText = `position:fixed;left:-9999px;top:0;width:${width}px;height:600px;border:none`;
+  tmp.srcdoc = clean;
+  document.body.appendChild(tmp);
+  try {
+    await new Promise<void>((resolve) => { tmp.onload = () => resolve(); });
+    await new Promise((r) => setTimeout(r, 400));
+    const doc = tmp.contentDocument;
+    if (!doc?.body) return null;
+    return await html2canvas(doc.body, { backgroundColor: '#ffffff', scale: 2, useCORS: true, width, windowWidth: width });
+  } finally {
+    tmp.remove();
+  }
+}
+
+/** Slice a tall canvas into A4 pages and trigger a .pdf download. */
+function canvasToPdfDownload(canvas: HTMLCanvasElement, title: string): void {
+  const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const imgW = pageW;
+  const imgH = (canvas.height / canvas.width) * imgW;
+  const img = canvas.toDataURL('image/jpeg', 0.92);
+  let heightLeft = imgH;
+  let position = 0;
+  pdf.addImage(img, 'JPEG', 0, position, imgW, imgH);
+  heightLeft -= pageH;
+  while (heightLeft > 0) {
+    position -= pageH;
+    pdf.addPage();
+    pdf.addImage(img, 'JPEG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+  }
+  pdf.save(`${sanitizeFilename(title)}.pdf`);
+}
+
+/** One-tap PDF DOWNLOAD of an HTML artifact (rasterized, mobile-friendly). */
+export async function downloadHtmlPdf(rawHtml: string, title: string): Promise<boolean> {
+  const canvas = await renderHtmlToCanvas(rawHtml);
+  if (!canvas) return false;
+  canvasToPdfDownload(canvas, title);
+  return true;
+}
+
+/** One-tap PDF DOWNLOAD of a markdown artifact (rendered via the print
+ *  stylesheet, then rasterized). For selectable text, use printMarkdownDocument. */
+export async function downloadMarkdownPdf(md: string, title: string): Promise<boolean> {
+  const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(md), { async: false }) as string);
+  const canvas = await renderHtmlToCanvas(buildMarkdownPrintDocument(title || 'Artifact', rendered));
+  if (!canvas) return false;
+  canvasToPdfDownload(canvas, title);
+  return true;
 }
