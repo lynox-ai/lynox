@@ -137,8 +137,12 @@ function measureStaticPrefixTokens(): number {
  * `artifact_restore` (version recovery; ~52 tokens) AND the ask_user
  * `multiSelect` schema property + description growth (~66 tokens). They ship
  * together; the combined static prefix measures 20018. Descriptions kept lean.
+ * 2026-06-06: bump to 20140 — round-2 adds a lean `artifact_save` directive
+ * (~31 tokens) steering HTML/slide-deck artifacts to be mobile-ready (fluid
+ * widths) + light unless asked, fixing the "presentations dark + not mobile-
+ * ready" report at its root. Cheap now that the prefix is cache-read priced.
  */
-const STATIC_PREFIX_BUDGET = 20100;
+const STATIC_PREFIX_BUDGET = 20140;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
