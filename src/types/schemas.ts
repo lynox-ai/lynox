@@ -55,6 +55,16 @@ export const LynoxUserConfigSchema = z.object({
     name:     z.string().min(1).max(64),
     base_url: HttpUrlSchema.max(2048),
   })).catch([]).optional(),
+  // Server-persisted record of custom (non-allowlisted) endpoint disclosures
+  // the user explicitly accepted (GDPR Art-28 controller-responsibility
+  // transfer). Replaces the old client-only sessionStorage flag so the
+  // acceptance survives a reload / new device and is auditable. Host +
+  // timestamp only — never the key. `.catch([])` keeps a malformed manual
+  // edit from bricking config-load (same gentle-degrade as custom_endpoints).
+  accepted_custom_endpoints: z.array(z.object({
+    host:        z.string().min(1).max(255),
+    accepted_at: z.string().min(1).max(64),
+  })).max(100).catch([]).optional(),
   gcp_project_id:       z.string().optional(),
   gcp_region:           z.string().optional(),
   openai_model_id:      z.string().optional(),

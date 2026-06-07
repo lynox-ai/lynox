@@ -278,3 +278,22 @@ describe('LynoxUserConfigSchema — max_context_window_tokens', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('LynoxUserConfigSchema — accepted_custom_endpoints (W3 server-persisted disclosure)', () => {
+  it('accepts an array of {host, accepted_at} records', () => {
+    const result = LynoxUserConfigSchema.safeParse({
+      accepted_custom_endpoints: [{ host: 'my-litellm.example.com', accepted_at: '2026-06-07T12:00:00.000Z' }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('gently degrades a malformed record to [] instead of bricking config-load', () => {
+    // Same `.catch([])` contract as custom_endpoints — a hand-edited config
+    // with a bad acceptance row must not lock the user out of Settings.
+    const result = LynoxUserConfigSchema.safeParse({
+      accepted_custom_endpoints: [{ host: 123, accepted_at: null }],
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.accepted_custom_endpoints).toEqual([]);
+  });
+});
