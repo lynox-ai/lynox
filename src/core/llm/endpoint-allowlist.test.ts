@@ -51,9 +51,6 @@ describe('isAllowlistedEndpoint — pattern-allowed hosts', () => {
   it('allows Azure OpenAI deployments (my-deploy.openai.azure.com)', () => {
     expect(isAllowlistedEndpoint('https://my-deploy.openai.azure.com/openai/deployments/gpt-4')).toBe(true);
   });
-  it('allows AWS Bedrock regional endpoints (bedrock.us-east-1.amazonaws.com)', () => {
-    expect(isAllowlistedEndpoint('https://bedrock.us-east-1.amazonaws.com')).toBe(true);
-  });
   it('allows RFC1918 192.168/16', () => {
     expect(isAllowlistedEndpoint('http://192.168.1.42:8080')).toBe(true);
   });
@@ -94,6 +91,19 @@ describe('isAllowlistedEndpoint — rejects non-allowlisted hosts', () => {
   });
   it('rejects suffix-spoof of amazonaws.com', () => {
     expect(isAllowlistedEndpoint('https://bedrock.us-east-1.amazonaws.com.evil.example')).toBe(false);
+  });
+  // Bedrock was removed as a provider; the `*.amazonaws.com` apex pattern is
+  // gone. A former Bedrock host — and, critically, any self-hosted model behind
+  // a default AWS hostname — must now fall through to the controller-shift
+  // disclosure instead of being silently allowlisted.
+  it('rejects former AWS Bedrock host (provider removed)', () => {
+    expect(isAllowlistedEndpoint('https://bedrock.us-east-1.amazonaws.com')).toBe(false);
+  });
+  it('rejects self-hosted model on a default EC2 hostname', () => {
+    expect(isAllowlistedEndpoint('https://ec2-3-120-55-7.compute-1.amazonaws.com:8000/v1')).toBe(false);
+  });
+  it('rejects self-hosted model on a SageMaker hostname', () => {
+    expect(isAllowlistedEndpoint('https://runtime.sagemaker.eu-central-1.amazonaws.com/endpoints/x/invocations')).toBe(false);
   });
   it('rejects 10.example.com (legitimate-looking but wrong shape)', () => {
     // 10.example.com is a public DNS name, not an RFC1918 IP — the regex is
