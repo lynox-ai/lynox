@@ -920,7 +920,7 @@
 				{t('endpoint_disclosure_title')}
 			</h3>
 			<p class="text-sm">
-				{t('endpoint_disclosure_body').replace('{hostname}', disclosureHostname(pendingDisclosureUrl))}
+				{t('endpoint_disclosure_body').replaceAll('{hostname}', disclosureHostname(pendingDisclosureUrl))}
 			</p>
 			<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded break-all whitespace-pre-wrap">{pendingDisclosureUrl}</pre>
 			<label class="flex items-start gap-2 text-sm cursor-pointer">
