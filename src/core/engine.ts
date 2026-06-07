@@ -681,9 +681,34 @@ export class Engine {
    * `endpoint-boot-gate.test.ts` can pin the contract without instantiating
    * an Engine.
    */
+  /**
+   * True if `baseUrl`'s host has a server-persisted disclosure acceptance in
+   * the user config (`accepted_custom_endpoints`). Such a host was explicitly
+   * accepted through the PUT /api/config gate (the sole path that can ADD an
+   * entry — it requires `confirm_custom_endpoint`), so it counts as accepted
+   * at reload/boot too, NOT only when the `LYNOX_CUSTOM_ENDPOINT_ACCEPTED`
+   * env flag is set. This is what makes a UI/API custom-endpoint save reload
+   * cleanly instead of throwing; the gate that guards ADDING a host is
+   * unchanged, so this cannot be used to bypass acceptance.
+   */
+  private _isPersistedAcceptedEndpoint(baseUrl: string | undefined): boolean {
+    if (!baseUrl) return false;
+    const accepted = this.userConfig.accepted_custom_endpoints;
+    if (!accepted || accepted.length === 0) return false;
+    try {
+      const host = new URL(baseUrl).hostname;
+      return accepted.some((e) => e.host === host);
+    } catch {
+      return false;
+    }
+  }
+
   private _enforceEndpointAllowlist(): void {
     const baseUrl = this.userConfig.api_base_url;
-    const decision = evaluateEndpointBootGate(baseUrl, process.env['LYNOX_CUSTOM_ENDPOINT_ACCEPTED']);
+    const acceptedFlag = this._isPersistedAcceptedEndpoint(baseUrl)
+      ? 'true'
+      : process.env['LYNOX_CUSTOM_ENDPOINT_ACCEPTED'];
+    const decision = evaluateEndpointBootGate(baseUrl, acceptedFlag);
     if (decision === 'skip' || decision === 'allowlisted') return;
     if (decision === 'refuse') {
       const msg = buildBootRefusalMessage(baseUrl ?? '');

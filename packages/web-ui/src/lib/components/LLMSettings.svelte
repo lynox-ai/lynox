@@ -8,12 +8,14 @@
 	(ANTHROPIC_API_KEY, MISTRAL_API_KEY, OPENAI_API_KEY) — switching providers
 	does NOT delete keys, so users can flip back without re-entering.
 
-	Tier-awareness audit (Settings v3 Item 2, 2026-05-19):
+	Tier-awareness audit (Settings v3 Item 2, 2026-05-19; api_base_url row
+	corrected 2026-06-07 — BYOK CAN set a custom endpoint, gated by the
+	disclosure modal, NOT blocked):
 	| Setting               | Self-host | BYOK | Managed |
 	|-----------------------|-----------|------|---------|
 	| provider tile pick    | ✓         | ✓    | ✓ curated allowlist (Anthropic + Mistral) |
 	| api_key field         | ✓         | ✓    | ✗ CP supplies → hidden |
-	| api_base_url (custom) | ✓         | ✗    | ✗ locks.custom_provider_endpoints |
+	| api_base_url (custom) | ✓         | ✓ (disclosure-gated) | ✗ locks.custom_provider_endpoints |
 	| gcp_project_id/region | ✓         | ✗    | ✗ vertex retired in-product |
 	| default_tier          | ✓         | ✓    | ✓        |
 	| custom_endpoints reg. | ✓         | ✓    | ✗ locks.custom_endpoints |
@@ -73,6 +75,10 @@
 		default_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
+		// Server-persisted disclosure acceptances for non-allowlisted custom
+		// endpoints (host + timestamp). Read from /api/config; replaces the old
+		// per-tab sessionStorage flag so acceptance survives reload / new device.
+		accepted_custom_endpoints?: { host: string; accepted_at: string }[];
 		// Self-host: env vars that override on-disk config every time the engine
 		// reloads. If `env_overrides.provider` is true, the user picking a
 		// different provider tile + Save will succeed against config.json but
@@ -409,13 +415,17 @@
 		if (provider !== 'custom' && provider !== 'openai') return false;
 		if (!url || url.trim().length === 0) return false;
 		if (isAllowlistedEndpoint(url)) return false;
-		if (typeof sessionStorage === 'undefined') return true;
-		return !sessionStorage.getItem(`llm_disclosure_accepted:${url}`);
+		// Acceptance is now SERVER-persisted (config.accepted_custom_endpoints),
+		// so it survives reload / a new device — the old sessionStorage flag was
+		// per-tab and lost on refresh. Re-prompt only if THIS host has no
+		// recorded acceptance.
+		return !isHostAlreadyAccepted(url);
 	}
 
-	function markDisclosureAccepted(url: string): void {
-		if (typeof sessionStorage === 'undefined') return;
-		try { sessionStorage.setItem(`llm_disclosure_accepted:${url}`, '1'); } catch { /* ignore quota */ }
+	/** True if the URL's host already has a server-persisted disclosure acceptance. */
+	function isHostAlreadyAccepted(url: string): boolean {
+		const host = disclosureHostname(url);
+		return (config.accepted_custom_endpoints ?? []).some((e) => e.host === host);
 	}
 
 	async function saveConfig(): Promise<void> {
@@ -465,10 +475,24 @@
 			// Advanced / Memory / Context-Window have moved to /settings/llm/advanced
 			// and /settings/llm/memory (PRD-IA-V2 P3-PR-C) — their save paths live on
 			// those views and PUT the same /api/config endpoint.
+			//
+			// confirm_custom_endpoint:true tells the server-side liability gate to
+			// accept (and server-persist) a non-allowlisted endpoint. We only reach
+			// runSaveConfig after shouldShowDisclosure passed — i.e. the host is
+			// allowlisted, already accepted, or just accepted in the modal — so it
+			// is always correct to assert acceptance here for a non-allowlisted URL.
+			const url = config.api_base_url;
+			const needsConfirm =
+				(activeProvider === 'custom' || activeProvider === 'openai') &&
+				typeof url === 'string' && url.trim().length > 0 &&
+				!isAllowlistedEndpoint(url);
+			const body = needsConfirm
+				? { ...update, confirm_custom_endpoint: true }
+				: update;
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(update),
+				body: JSON.stringify(body),
 			});
 			if (!res.ok) {
 				// Surface the server's named reason (e.g. "provider:'openai' requires
@@ -481,6 +505,15 @@
 					if (typeof errBody.error === 'string' && errBody.error) reason = errBody.error;
 				} catch { /* non-JSON body — keep the status string */ }
 				throw new Error(reason);
+			}
+			// Mirror the server-recorded acceptance locally so the modal doesn't
+			// re-fire for this host before the next config reload.
+			if (needsConfirm && typeof url === 'string') {
+				const host = disclosureHostname(url);
+				const prior = config.accepted_custom_endpoints ?? [];
+				if (!prior.some((e) => e.host === host)) {
+					config.accepted_custom_endpoints = [...prior, { host, accepted_at: new Date().toISOString() }];
+				}
 			}
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
@@ -887,7 +920,7 @@
 				{t('endpoint_disclosure_title')}
 			</h3>
 			<p class="text-sm">
-				{t('endpoint_disclosure_body').replace('{hostname}', disclosureHostname(pendingDisclosureUrl))}
+				{t('endpoint_disclosure_body').replaceAll('{hostname}', disclosureHostname(pendingDisclosureUrl))}
 			</p>
 			<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded break-all whitespace-pre-wrap">{pendingDisclosureUrl}</pre>
 			<label class="flex items-start gap-2 text-sm cursor-pointer">
@@ -903,10 +936,10 @@
 				<button type="button"
 					disabled={!disclosureAccepted}
 					onclick={() => {
-						const url = pendingDisclosureUrl!;
 						pendingDisclosureUrl = null;
 						disclosureAccepted = false;
-						markDisclosureAccepted(url);
+						// Acceptance is recorded server-side by the PUT below
+						// (confirm_custom_endpoint:true) — no client-only flag.
 						void runSaveConfig();
 					}}
 					class="px-3 py-1.5 text-sm bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">

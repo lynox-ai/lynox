@@ -191,6 +191,15 @@ export interface LynoxUserConfig {
    * Pure UI state; the engine still reads `api_base_url` as before.
    */
   custom_endpoints?: ReadonlyArray<{ id: string; name: string; base_url: string }> | undefined;
+  /**
+   * Server-persisted disclosure acceptances for non-allowlisted custom
+   * endpoints (host + ISO timestamp). Written by PUT /api/config when the
+   * controller-responsibility gate accepts a custom endpoint; the engine's
+   * reload/boot allowlist gate honours a host listed here (a durable record
+   * of a prior explicit acceptance) so a saved custom endpoint reloads
+   * cleanly. Replaces the old per-tab sessionStorage flag.
+   */
+  accepted_custom_endpoints?: ReadonlyArray<{ host: string; accepted_at: string }> | undefined;
   /** GCP project ID for Vertex AI provider. */
   gcp_project_id?: string | undefined;
   /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */

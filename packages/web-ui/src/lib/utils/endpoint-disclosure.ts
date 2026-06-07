@@ -29,7 +29,11 @@ const ALLOWLISTED_HOSTS: ReadonlySet<string> = new Set<string>([
 
 const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
   /\.openai\.azure\.com$/,
-  /\.amazonaws\.com$/,
+  // NOTE: deliberately NO `*.amazonaws.com` — kept in sync with the engine
+  // twin (src/core/llm/endpoint-allowlist.ts), which dropped it in core #691
+  // (a too-broad suffix vouched for any AWS host / Bedrock proxy). Without
+  // this sync the client would skip the disclosure modal for an amazonaws
+  // host while the server still 400s it → a dead-end save the user can't accept.
   /^192\.168\.\d{1,3}\.\d{1,3}$/,
   /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/,
   /^172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}$/,

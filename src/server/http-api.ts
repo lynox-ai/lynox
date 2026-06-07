@@ -260,6 +260,12 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
  * the CP doesn't manage). Returns null when accepted, a 403-reason string
  * otherwise.
  */
+// The curated providers a Managed tenant may select. NOTE: 'openai' here is
+// NOT "use OpenAI" — it is the OpenAI-compatible PROTOCOL slot that the
+// curated **Mistral** preset rides (Mistral speaks the OpenAI wire format).
+// It is only accepted when paired with a Mistral host (below), so the real
+// curated set is { Anthropic, Mistral }. There is no path to actual OpenAI
+// or any other free-text endpoint on Managed.
 const MANAGED_CURATED_PROVIDERS = new Set<string>(['anthropic', 'openai']);
 const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
   'https://api.mistral.ai/v1',
@@ -3263,6 +3269,7 @@ export class LynoxHTTPApi {
       // any non-HTTP write-path (config.json edit, vault rotation) is still
       // gated before the LLM client is rebuilt.
       const incomingBaseUrl = incoming['api_base_url'];
+      let acceptedHostToRecord: string | null = null;
       if (typeof incomingBaseUrl === 'string' && incomingBaseUrl.trim().length > 0) {
         const acceptedFlag = confirmCustomEndpoint
           ? 'true'
@@ -3276,6 +3283,13 @@ export class LynoxHTTPApi {
           });
           return;
         }
+        // A non-allowlisted endpoint that passed the gate = an explicit
+        // disclosure acceptance. Persist {host, accepted_at} server-side
+        // (below, into the merged config) so it survives reload / new device
+        // and is auditable — replacing the old sessionStorage-only flag.
+        if (decision === 'accepted') {
+          try { acceptedHostToRecord = new URL(incomingBaseUrl).hostname; } catch { /* malformed — skip */ }
+        }
       }
       // Merge with existing config so partial updates don't lose other fields
       const existing = readUserConfig() as Record<string, unknown>;
@@ -3286,6 +3300,15 @@ export class LynoxHTTPApi {
           delete merged[key]; // explicit null = delete field
         } else {
           merged[key] = value;
+        }
+      }
+      // Record the disclosure acceptance (dedup by host) into the durable config.
+      if (acceptedHostToRecord) {
+        const prior = Array.isArray(merged['accepted_custom_endpoints'])
+          ? (merged['accepted_custom_endpoints'] as Array<{ host: string; accepted_at: string }>)
+          : [];
+        if (!prior.some((e) => e.host === acceptedHostToRecord)) {
+          merged['accepted_custom_endpoints'] = [...prior, { host: acceptedHostToRecord, accepted_at: new Date().toISOString() }];
         }
       }
       saveUserConfig(merged);

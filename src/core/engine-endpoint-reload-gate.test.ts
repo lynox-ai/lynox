@@ -132,6 +132,18 @@ const BASELINE_ANTHROPIC: LynoxUserConfig = {
   provider: 'anthropic',
 };
 
+// Same non-allowlisted host, but with a SERVER-PERSISTED disclosure acceptance
+// (W3). The reload gate must treat the persisted record as acceptance — equal
+// to the env flag — so a UI/API custom-endpoint save reloads cleanly (it was
+// throwing a 500 before W3; the http-api test masked it by mocking reload).
+const NON_ALLOWLISTED_PERSISTED_ACCEPTED: LynoxUserConfig = {
+  provider: 'openai',
+  api_base_url: 'https://my-litellm.example.com/v1',
+  openai_model_id: 'gpt-4o-mini',
+  api_key: 'sk-byok-key',
+  accepted_custom_endpoints: [{ host: 'my-litellm.example.com', accepted_at: '2026-06-07T12:00:00.000Z' }],
+};
+
 // ── Shared setup ──────────────────────────────────────────────────────────
 
 let stderrWrite: ReturnType<typeof vi.spyOn>;
@@ -203,6 +215,36 @@ describe('Engine.reloadUserConfig — Wave 5d allowlist gate', () => {
     );
     expect(warningCalls.length).toBeGreaterThan(0);
     expect((warningCalls[0]![0] as string)).toContain('my-litellm.example.com');
+  });
+
+  it('non-allowlisted base_url + server-persisted acceptance (no env flag) → succeeds + WARNING (W3)', async () => {
+    // The host is recorded in accepted_custom_endpoints, so the reload gate
+    // honours it like the env flag — this is what makes a confirmed custom-
+    // endpoint save reload as 200 instead of throwing a 500.
+    const engine = makeEngine();
+    mockLoadConfig.mockReturnValueOnce(NON_ALLOWLISTED_PERSISTED_ACCEPTED);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-byok-key');
+
+    await expect(engine.reloadUserConfig()).resolves.toBeUndefined();
+
+    const warningCalls = stderrWrite.mock.calls.filter(c =>
+      typeof c[0] === 'string' && (c[0] as string).includes('WARNING'),
+    );
+    expect(warningCalls.length).toBeGreaterThan(0);
+    expect((warningCalls[0]![0] as string)).toContain('my-litellm.example.com');
+  });
+
+  it('persisted acceptance for a DIFFERENT host does not vouch for the active url → still throws (W3)', async () => {
+    // Guard: the record must match the active host. A stale/other-host record
+    // must not let an unrelated non-allowlisted url through.
+    const engine = makeEngine();
+    mockLoadConfig.mockReturnValueOnce({
+      ...NON_ALLOWLISTED_PERSISTED_ACCEPTED,
+      accepted_custom_endpoints: [{ host: 'some-other-host.example.org', accepted_at: '2026-06-07T12:00:00.000Z' }],
+    });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-byok-key');
+
+    await expect(engine.reloadUserConfig()).rejects.toThrow(/my-litellm\.example\.com/);
   });
 
   it('gate fires BEFORE the LLM client is rebuilt (defense-in-depth ordering)', async () => {

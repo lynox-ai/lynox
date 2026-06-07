@@ -2014,6 +2014,30 @@ describe('LynoxHTTPApi', () => {
         const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
         expect(lastCall).toBeDefined();
         expect(lastCall![0]).not.toHaveProperty('confirm_custom_endpoint');
+        // W3: the disclosure acceptance is now SERVER-persisted into the saved
+        // config (host + timestamp), not just a client sessionStorage flag.
+        const saved = lastCall![0] as { accepted_custom_endpoints?: Array<{ host: string; accepted_at: string }> };
+        expect(saved.accepted_custom_endpoints).toBeDefined();
+        expect(saved.accepted_custom_endpoints!.some((e) => e.host === 'my-litellm.example.com')).toBe(true);
+        expect(saved.accepted_custom_endpoints!.every((e) => typeof e.accepted_at === 'string')).toBe(true);
+      });
+
+      it('PUT for an ALLOWLISTED base_url does NOT record an acceptance (no nag/record for vetted endpoints)', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            provider: 'openai',
+            api_base_url: 'https://api.mistral.ai/v1',
+            openai_model_id: 'mistral-large-latest',
+            confirm_custom_endpoint: true,
+          }),
+        });
+        expect(res.status).toBe(200);
+        const { saveUserConfig } = await import('../core/config.js');
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        const saved = lastCall![0] as { accepted_custom_endpoints?: unknown };
+        // Allowlisted hosts are in lynox's DPA → no controller-transfer record.
+        expect(saved.accepted_custom_endpoints).toBeUndefined();
       });
 
       it('PUT with non-allowlisted base_url + LYNOX_CUSTOM_ENDPOINT_ACCEPTED=true env → 200 (operator-side acceptance)', async () => {

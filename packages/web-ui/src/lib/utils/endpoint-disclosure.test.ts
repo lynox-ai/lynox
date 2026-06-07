@@ -23,9 +23,15 @@ describe('isAllowlistedEndpoint (web-ui twin)', () => {
     expect(isAllowlistedEndpoint('http://localhost:11434')).toBe(true);
   });
 
-  it('Azure OpenAI + AWS Bedrock patterns pass', () => {
+  it('Azure OpenAI pattern passes', () => {
     expect(isAllowlistedEndpoint('https://acme.openai.azure.com/openai')).toBe(true);
-    expect(isAllowlistedEndpoint('https://bedrock-runtime.us-east-1.amazonaws.com')).toBe(true);
+  });
+
+  it('AWS *.amazonaws.com is NOT allowlisted → fires the disclosure (parity with engine, core #691)', () => {
+    // The too-broad `*.amazonaws.com` suffix was dropped from the engine twin
+    // in core #691 (it vouched for any AWS host / Bedrock proxy). The client
+    // twin must agree, else the user hits a server 400 they can't accept.
+    expect(isAllowlistedEndpoint('https://bedrock-runtime.us-east-1.amazonaws.com')).toBe(false);
   });
 
   it('RFC1918 LAN patterns pass', () => {
