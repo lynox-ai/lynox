@@ -123,4 +123,47 @@ export class SecurityAudit {
       return [];
     }
   }
+
+  /**
+   * Content-free aggregate of security events over a time window, grouped by
+   * the non-content dimensions only. Used by the managed control plane's
+   * abuse-detection poll: it must reveal WHETHER guards are firing and how
+   * often, never WHAT triggered them.
+   *
+   * The projection is an explicit column list — `input_preview` and `detail`
+   * (the only two columns that can carry customer content) are never selected,
+   * so this method is structurally incapable of leaking content even if the
+   * caller serialises the whole result. This is the security invariant the
+   * `/api/security/events/aggregate` endpoint relies on; the regression test
+   * asserts the keys can never appear.
+   */
+  getContentFreeAggregates(windowHours = 24): SecurityEventAggregate[] {
+    try {
+      const stmt = this.db.prepare(
+        `SELECT event_type, tool_name, decision, autonomy_level,
+                COUNT(*) as count, MAX(created_at) as last_seen
+         FROM security_events
+         WHERE created_at >= datetime('now', '-' || ? || ' hours')
+         GROUP BY event_type, tool_name, decision, autonomy_level
+         ORDER BY count DESC`,
+      );
+      return stmt.all(windowHours) as SecurityEventAggregate[];
+    } catch {
+      return [];
+    }
+  }
+}
+
+/**
+ * One row of {@link SecurityAudit.getContentFreeAggregates}. Every field is a
+ * non-content dimension (enum/identifier/timestamp/count) — there is no slot
+ * for `input_preview` or `detail`.
+ */
+export interface SecurityEventAggregate {
+  event_type: string;
+  tool_name: string | null;
+  decision: string;
+  autonomy_level: string | null;
+  count: number;
+  last_seen: string;
 }

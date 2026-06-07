@@ -5273,6 +5273,38 @@ export class LynoxHTTPApi {
       }
     }));
 
+    // ── Security-event aggregates (abuse detection, content-free) ──────
+    //
+    // GET /api/security/events/aggregate?hours=24
+    //
+    // Admin-scoped. Returns ONLY non-content dimensions + counts of fired
+    // security guards (event_type, tool_name, decision, autonomy_level,
+    // count, last_seen). It deliberately never exposes `input_preview` or
+    // `detail` — the underlying `getContentFreeAggregates` uses an explicit
+    // column projection, so customer content cannot leak through this route.
+    //
+    // The managed control plane polls this with the instance's admin bearer
+    // token (single-token mode: LYNOX_HTTP_SECRET grants admin) to detect a
+    // tenant whose guards are firing abnormally often, WITHOUT reading any
+    // conversation/tool content. See pro admin-visibility-policy.md.
+    this.addStatic('admin', 'GET /api/security/events/aggregate', async (req, res) => {
+      const audit = typeof engine.getSecurityAudit === 'function' ? engine.getSecurityAudit() : null;
+      if (!audit) {
+        jsonResponse(res, 200, { window_hours: 0, generated_at: new Date().toISOString(), aggregates: [] });
+        return;
+      }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const rawHours = Number.parseInt(url.searchParams.get('hours') ?? '24', 10);
+      // Clamp to [1, 168] (1 hour … 7 days); fall back to 24 on garbage input.
+      const windowHours = Number.isFinite(rawHours) ? Math.min(168, Math.max(1, rawHours)) : 24;
+      const aggregates = audit.getContentFreeAggregates(windowHours);
+      jsonResponse(res, 200, {
+        window_hours: windowHours,
+        generated_at: new Date().toISOString(),
+        aggregates,
+      });
+    });
+
     // ── GDPR Data Export & Erasure ─────────────────────────────────
 
     // GET /api/export — GDPR Art. 15 (Right of Access) + Art. 20 (Data Portability)

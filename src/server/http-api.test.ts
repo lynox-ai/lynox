@@ -122,6 +122,12 @@ vi.mock('../core/engine.js', () => ({
       complete: mockTaskComplete,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    this.getSecurityAudit = vi.fn().mockReturnValue({
+      // Content-free aggregate rows only — no input_preview/detail by construction.
+      getContentFreeAggregates: vi.fn().mockReturnValue([
+        { event_type: 'content_blocked', tool_name: 'bash', decision: 'blocked', autonomy_level: 'autonomous', count: 3, last_seen: '2026-06-07T00:00:00.000Z' },
+      ]),
+    });
     this.getPromptStore = vi.fn().mockReturnValue(null);
     this.getRunRegistry = vi.fn().mockReturnValue(null);
     this.getRunBufferManager = vi.fn().mockReturnValue(null);
@@ -2603,6 +2609,52 @@ describe('LynoxHTTPApi', () => {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
+    });
+
+    // ── Security-event aggregates (abuse detection) ─────────────────────
+    it('GET /api/security/events/aggregate requires a bearer token (401 without)', async () => {
+      const res = await fetch(`${baseUrl}/api/security/events/aggregate`);
+      expect(res.status).toBe(401);
+    });
+
+    it('GET /api/security/events/aggregate rejects a user token when an admin secret is set (403)', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-aggz');
+      try {
+        // TEST_SECRET → user scope; this is an admin-scoped route.
+        const res = await jsonFetch('/api/security/events/aggregate');
+        expect(res.status).toBe(403);
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    it('GET /api/security/events/aggregate returns content-free aggregates for an admin', async () => {
+      // Single-token mode: TEST_SECRET grants admin (no LYNOX_HTTP_ADMIN_SECRET set).
+      const res = await jsonFetch('/api/security/events/aggregate?hours=24');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        window_hours: number;
+        generated_at: string;
+        aggregates: Array<Record<string, unknown>>;
+      };
+      expect(body.window_hours).toBe(24);
+      expect(Array.isArray(body.aggregates)).toBe(true);
+      // The payload must never carry the two content-bearing columns.
+      const raw = JSON.stringify(body);
+      expect(raw).not.toContain('input_preview');
+      expect(raw).not.toContain('"detail"');
+      for (const agg of body.aggregates) {
+        expect(agg).not.toHaveProperty('input_preview');
+        expect(agg).not.toHaveProperty('detail');
+      }
+    });
+
+    it('GET /api/security/events/aggregate clamps an out-of-range hours param', async () => {
+      const res = await jsonFetch('/api/security/events/aggregate?hours=99999');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { window_hours: number };
+      expect(body.window_hours).toBe(168); // clamped to 7-day max
     });
 
     // Managed-BYOK fix (HN-launch blocker): cookie users on a managed-tier
