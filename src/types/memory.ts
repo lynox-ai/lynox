@@ -146,24 +146,9 @@ export interface KnowledgeGraphStats {
   entityCount: number;
   relationCount: number;
   communityCount: number;
-  patternCount: number;
 }
 
-// === Pattern Engine ===
-
-export type PatternType = 'sequence' | 'preference' | 'schedule' | 'anti-pattern';
-
-export interface PatternRecord {
-  id: string;
-  patternType: PatternType;
-  description: string;
-  evidenceCount: number;
-  confidence: number;
-  lastSeenAt: string;
-  metadata: Record<string, unknown>;
-  isActive: boolean;
-  createdAt: string;
-}
+// === Metrics ===
 
 export type MetricWindow = 'daily' | 'weekly' | 'all_time';
 
@@ -247,13 +232,7 @@ export interface IKnowledgeLayer {
   gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult>;
   stats(): Promise<KnowledgeGraphStats>;
 
-  // === Pattern Engine ===
-
-  getPatterns(opts?: {
-    patternType?: PatternType | undefined;
-    activeOnly?: boolean | undefined;
-    limit?: number | undefined;
-  }): PatternRecord[];
+  // === Metrics ===
 
   getMetrics(metricName?: string | undefined, window?: MetricWindow | undefined): MetricRecord[];
 

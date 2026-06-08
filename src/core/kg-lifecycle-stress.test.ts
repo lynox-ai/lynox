@@ -944,7 +944,6 @@ describe('Phase 9: Final Stats & Integrity', () => {
     expect(stats.memoryCount).toBeGreaterThan(0);
     expect(stats.entityCount).toBeGreaterThanOrEqual(0);
     expect(typeof stats.relationCount).toBe('number');
-    expect(typeof stats.patternCount).toBe('number');
     expect(typeof stats.communityCount).toBe('number');
   });
 
@@ -963,10 +962,7 @@ describe('Phase 9: Final Stats & Integrity', () => {
     }
   });
 
-  it('patterns and metrics APIs return arrays', () => {
-    const patterns = layer.getPatterns();
-    expect(Array.isArray(patterns)).toBe(true);
-
+  it('metrics API returns array', () => {
     const metrics = layer.getMetrics();
     expect(Array.isArray(metrics)).toBe(true);
   });

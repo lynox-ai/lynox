@@ -10,8 +10,6 @@ import type {
   KnowledgeRetrievalResult,
   KnowledgeGraphStats,
   KnowledgeGcResult,
-  PatternType,
-  PatternRecord,
   MetricWindow,
   MetricRecord,
 } from '../types/index.js';
@@ -24,7 +22,7 @@ import { extractEntities } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { detectContradictions, hasHeuristicContradiction } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
-import { PatternEngine } from './pattern-engine.js';
+import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import { channels } from './observability.js';
 
@@ -35,7 +33,7 @@ const DEDUP_THRESHOLD = 0.95;
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
- * ContradictionDetector + PatternEngine + RunHistory (for insights).
+ * ContradictionDetector + KpiEngine + RunHistory (for insights).
  */
 export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly db: AgentMemoryDb;
@@ -43,7 +41,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly entityResolver: EntityResolver;
   private readonly retrievalEngine: RetrievalEngine;
   private anthropicClient: Anthropic | undefined;
-  private readonly patternEngine: PatternEngine | null;
+  private readonly kpiEngine: KpiEngine | null;
   private readonly runHistory: RunHistory | null;
   /** Tool-call extractor (Haiku + strict schema). Default since v1.3.4; opt-out via LYNOX_KG_EXTRACTOR=v1. */
   private readonly useV2Extractor: boolean;
@@ -63,7 +61,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
-    this.patternEngine = runHistory ? new PatternEngine(runHistory, this.db) : null;
+    this.kpiEngine = runHistory ? new KpiEngine(runHistory, this.db) : null;
     this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] !== 'v1';
   }
 
@@ -365,51 +363,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   formatRetrievalContext(
     result: KnowledgeRetrievalResult,
     maxChars?: number | undefined,
-    query?: string | undefined,
+    _query?: string | undefined,
   ): string {
-    let context = this.retrievalEngine.formatContext(result, maxChars);
-
-    // Inject active patterns filtered by query relevance
-    const extras = this._formatIntelligenceContext(query);
-    if (extras && context) {
-      context = context.replace('</relevant_context>', `${extras}\n</relevant_context>`);
-    } else if (extras && !context) {
-      context = `<relevant_context>\n${extras}\n</relevant_context>`;
-    }
-
-    return context;
-  }
-
-  /** Format active patterns as context for the agent, filtered by query relevance. */
-  private _formatIntelligenceContext(query?: string | undefined): string {
-    const patterns = this.db.getPatterns({ activeOnly: true, limit: 20 });
-    const strongPatterns = patterns.filter(p => p.confidence >= 0.6 && p.evidence_count >= 3);
-    if (strongPatterns.length === 0) return '';
-
-    let selected = strongPatterns;
-
-    if (query) {
-      const queryTokens = new Set(
-        query.toLowerCase().split(/\s+/).filter(w => w.length > 3),
-      );
-      const scored = strongPatterns.map(p => {
-        const descTokens = p.description.toLowerCase().split(/\s+/);
-        const overlap = descTokens.filter(w => queryTokens.has(w)).length;
-        return { pattern: p, overlap };
-      });
-      const relevant = scored.filter(s => s.overlap > 0);
-      selected = relevant.length > 0
-        ? relevant.sort((a, b) => b.overlap - a.overlap).slice(0, 5).map(s => s.pattern)
-        : strongPatterns.slice(0, 3);
-    } else {
-      selected = strongPatterns.slice(0, 5);
-    }
-
-    const lines = selected.map(p => {
-      const seen = p.last_seen_at.slice(0, 10);
-      return `- [${p.pattern_type}] ${p.description} (${(p.confidence * 100).toFixed(0)}% confidence, ${p.evidence_count}x observed, last ${seen})`;
-    });
-    return `<learned_patterns>\n${lines.join('\n')}\n</learned_patterns>`;
+    return this.retrievalEngine.formatContext(result, maxChars);
   }
 
   // === Entity Operations ===
@@ -508,25 +464,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       entityCount: this.db.getEntityCount(),
       relationCount: this.db.getRelationCount(),
       communityCount: 0,
-      patternCount: this.db.getPatternCount(),
     };
   }
 
-  // === Pattern Engine ===
-
-  getPatterns(opts?: {
-    patternType?: PatternType | undefined;
-    activeOnly?: boolean | undefined;
-    limit?: number | undefined;
-  }): PatternRecord[] {
-    return this.db.getPatterns(opts).map(r => ({
-      id: r.id, patternType: r.pattern_type as PatternType,
-      description: r.description, evidenceCount: r.evidence_count,
-      confidence: r.confidence, lastSeenAt: r.last_seen_at,
-      metadata: JSON.parse(r.metadata) as Record<string, unknown>,
-      isActive: r.is_active === 1, createdAt: r.created_at,
-    }));
-  }
+  // === Metrics ===
 
   getMetrics(metricName?: string | undefined, window?: MetricWindow | undefined): MetricRecord[] {
     return this.db.getMetrics(metricName, window).map(r => ({
@@ -539,12 +480,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   // === Intelligence Layer ===
 
-  /** Run pattern detection + KPI computation. Called periodically by engine. */
+  /** Run KPI computation. Called periodically by engine. */
   runIntelligence(): void {
-    if (!this.patternEngine) return;
+    if (!this.kpiEngine) return;
     try {
-      this.patternEngine.detectPatterns();
-      this.patternEngine.computeKPIs();
+      this.kpiEngine.computeKPIs();
     } catch { /* non-critical */ }
   }
 

@@ -79,7 +79,6 @@ describe('KnowledgeLayer', () => {
     const stats = await layer.stats();
     expect(stats.memoryCount).toBeGreaterThanOrEqual(1);
     expect(stats.entityCount).toBeGreaterThanOrEqual(0);
-    expect(typeof stats.patternCount).toBe('number');
   });
 
   // --- Retrieve ---
@@ -113,13 +112,6 @@ describe('KnowledgeLayer', () => {
   it('resolves entity after store', async () => {
     const entity = await layer.resolveEntity('Thomas', [scope]);
     expect(entity === null || typeof entity.canonicalName === 'string').toBe(true);
-  });
-
-  // --- Patterns ---
-
-  it('returns patterns (empty initially)', () => {
-    const patterns = layer.getPatterns();
-    expect(Array.isArray(patterns)).toBe(true);
   });
 
   // --- Metrics ---
@@ -202,11 +194,10 @@ describe('KnowledgeLayer', () => {
 
   // --- Format ---
 
-  it('returns context even for empty retrieval results (patterns/episodes injected)', () => {
+  it('returns context (string) even for empty retrieval results', () => {
     const ctx = layer.formatRetrievalContext({
       memories: [], entities: [], contextGraph: '',
     });
-    // May contain intelligence context (patterns, recent episodes) from prior tests
     expect(typeof ctx).toBe('string');
   });
 

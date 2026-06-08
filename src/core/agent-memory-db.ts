@@ -5,7 +5,7 @@
  * Uses better-sqlite3 (already a project dependency) with WAL mode.
  *
  * Tables: memories, entities, relations, mentions, cooccurrences, supersedes,
- *         thread_insights, patterns, metrics.
+ *         thread_insights, metrics.
  */
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
@@ -74,18 +74,6 @@ export interface CooccurrenceRow {
   entity_b_id: string;
   count: number;
   last_seen_at: string;
-}
-
-export interface PatternRow {
-  id: string;
-  pattern_type: string;
-  description: string;
-  evidence_count: number;
-  confidence: number;
-  last_seen_at: string;
-  metadata: string;  // JSON
-  is_active: number;
-  created_at: string;
 }
 
 export interface MetricRow {
@@ -198,18 +186,6 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL
    );
 
-   CREATE TABLE IF NOT EXISTS patterns (
-     id TEXT PRIMARY KEY,
-     pattern_type TEXT NOT NULL,
-     description TEXT NOT NULL,
-     evidence_count INTEGER NOT NULL DEFAULT 1,
-     confidence REAL NOT NULL DEFAULT 0.5,
-     last_seen_at TEXT NOT NULL,
-     metadata TEXT NOT NULL DEFAULT '{}',
-     is_active INTEGER NOT NULL DEFAULT 1,
-     created_at TEXT NOT NULL
-   );
-
    CREATE TABLE IF NOT EXISTS metrics (
      id TEXT PRIMARY KEY,
      metric_name TEXT NOT NULL,
@@ -232,7 +208,6 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_mentions_entity ON mentions(entity_id);
    CREATE INDEX IF NOT EXISTS idx_episodes_run ON episodes(run_id);
    CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at);
-   CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type, is_active);
    CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(metric_name, window);`,
 
   // v2: Drop episodes table (data now lives in RunHistory)
@@ -245,6 +220,11 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (3);
    ALTER TABLE memories ADD COLUMN source_thread_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_memories_thread ON memories(source_thread_id);`,
+
+  // v4: Drop patterns table (behavioral pattern-detection removed — dead feature)
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (4);
+   DROP INDEX IF EXISTS idx_patterns_type;
+   DROP TABLE IF EXISTS patterns;`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -881,53 +861,6 @@ export class AgentMemoryDb {
 
     const relations = this.getEntityRelations(entityId);
     return { entities: entityRows, relations };
-  }
-
-  // ── Pattern Operations ────────────────────────────────────────
-
-  createPattern(props: {
-    patternType: string;
-    description: string;
-    confidence?: number | undefined;
-    metadata?: Record<string, unknown> | undefined;
-  }): string {
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO patterns (id, pattern_type, description, evidence_count, confidence,
-        last_seen_at, metadata, is_active, created_at)
-      VALUES (?, ?, ?, 1, ?, ?, ?, 1, ?)
-    `).run(id, props.patternType, props.description, props.confidence ?? 0.5,
-      now, JSON.stringify(props.metadata ?? {}), now);
-    return id;
-  }
-
-  incrementPatternEvidence(patternId: string): void {
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE patterns SET evidence_count = evidence_count + 1, last_seen_at = ?,
-        confidence = MIN(confidence + 0.05, 1.0) WHERE id = ?
-    `).run(now, patternId);
-  }
-
-  getPatterns(opts?: {
-    patternType?: string | undefined;
-    activeOnly?: boolean | undefined;
-    limit?: number | undefined;
-  }): PatternRow[] {
-    const clauses: string[] = [];
-    const params: unknown[] = [];
-    if (opts?.patternType) { clauses.push('pattern_type = ?'); params.push(opts.patternType); }
-    if (opts?.activeOnly !== false) { clauses.push('is_active = 1'); }
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    const limit = Math.min(opts?.limit ?? 50, 200);
-    params.push(limit);
-    return this.db.prepare(`SELECT * FROM patterns ${where} ORDER BY confidence DESC LIMIT ?`).all(...params) as PatternRow[];
-  }
-
-  getPatternCount(): number {
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM patterns WHERE is_active = 1').get() as { cnt: number };
-    return row.cnt;
   }
 
   // ── Metric Operations ─────────────────────────────────────────
