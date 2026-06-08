@@ -1,6 +1,6 @@
 # lynox Sub-processors
 
-**Last reviewed: 2026-06-07**
+**Last reviewed: 2026-06-08**
 
 This file is the canonical, repo-checked-in list of sub-processors engaged for the **lynox Managed Hosting** service (`engine.lynox.cloud` / `*.lynox.cloud` tenant instances).
 
@@ -11,7 +11,7 @@ The website page <https://lynox.ai/subprocessors> and this file mirror the custo
 | Sub-processor | Purpose | Location | Transfer mechanism |
 |---|---|---|---|
 | Anthropic, PBC | Primary LLM inference (Claude family, direct API) | United States | EU-US Data Privacy Framework + SCCs (Module 2/3, 2021/914); zero-retention contractual commitment |
-| Mistral AI SAS | LLM inference for chat, agent workflows, mail-triage classification, and memory consolidation (Mistral catalog: large/medium/small/magistral/ministral/codestral/nemo, direct API). Selected as primary provider by EU-residency customers and as secondary/fallback by others. | France (EU) | EU; zero-retention contractual commitment |
+| Mistral AI SAS | LLM inference for chat, agent workflows, mail-triage classification, and memory consolidation. The managed tiers route to Mistral Large (`mistral-large-2512`) and the Ministral edge models (`ministral-14b-2512` / `ministral-8b-2512`), via the direct API. Selected as primary provider by EU-residency customers and as secondary/fallback by others. | France (EU) | EU; zero-retention contractual commitment |
 | Stripe, Inc. | Payment processing and subscription billing | United States / EU | EU-US Data Privacy Framework + SCCs |
 | Hetzner Online GmbH | Server infrastructure — shared tenant hosts (isolated container per customer); dedicated VPS available as Enterprise upgrade | Germany (EU) | EU |
 | Brevo (Sendinblue SAS) | Transactional email delivery (SMTP relay) and contact list management | EU (France/Germany) | EU |
