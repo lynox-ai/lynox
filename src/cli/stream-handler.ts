@@ -153,7 +153,11 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
           + (event.usage.cache_read_input_tokens ?? 0);
         const outTok = event.usage.output_tokens;
         const tokens = `${inTok.toLocaleString()} in / ${outTok.toLocaleString()} out`;
-        const maxCtx = getContextWindow(state.currentModelId);
+        // Prefer the effective window the engine injects on turn_end (real
+        // per-tier native window + user cap; correct for managed Mistral 262k,
+        // self-host/BYOK declared, opus 1M). Fall back to the id-based lookup
+        // only if a client sent no window (lost frame / older engine).
+        const maxCtx = event.contextWindow ?? getContextWindow(state.currentModelId);
         const pctRaw = Math.min(100, (inTok / maxCtx) * 100);
         const pct = Math.round(pctRaw * 10) / 10;
         const filled = Math.round(pct / 10);

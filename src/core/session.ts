@@ -990,16 +990,22 @@ export class Session {
   getContextUsagePercent(): number {
     if (!this.agent) return 0;
     const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
-    const userConfig = this.engine.getUserConfig();
-    const userCap = userConfig.max_context_window_tokens;
     // agent.model may carry a [1m] suffix; MODEL_MAP[tier] would strip it.
-    // Pass provider + declared window so a custom/BYOK/self-host model meters
-    // against its real native window, not the 200k id-fallback.
-    const maxCtx = effectiveContextWindow(this.agent.model, userCap, {
+    const maxCtx = this._displayContextWindow(this.agent.model);
+    return Math.round(estimatedTokens / maxCtx * 100);
+  }
+
+  /** Effective context window for display/metering across all tiers — the user
+   *  cap applied on top of the real native window (provider + declared window
+   *  resolved via the SSOT so a custom/BYOK/self-host model meters against its
+   *  true size, not the 200k id-fallback). Shared by getContextUsagePercent
+   *  and the turn_end stream event so the CLI footer + web UI can't drift. */
+  private _displayContextWindow(modelId: string): number {
+    const userConfig = this.engine.getUserConfig();
+    return effectiveContextWindow(modelId, userConfig.max_context_window_tokens, {
       provider: this._profileOverride?.provider ?? userConfig.provider,
       declaredWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
     });
-    return Math.round(estimatedTokens / maxCtx * 100);
   }
 
   /**
@@ -1221,6 +1227,10 @@ export class Session {
       if (event.type === 'turn_end') {
         // Inject actual model so the client can compute correct costs
         (event as { model?: string }).model = model;
+        // Inject the effective context window so the CLI footer (+ any client)
+        // meters usage against the real per-tier window instead of a hardcoded
+        // 200k — managed Mistral 262k, self-host/BYOK declared, user-cap, etc.
+        (event as { contextWindow?: number }).contextWindow = this._displayContextWindow(model);
         this.usage.input_tokens += event.usage.input_tokens;
         this.usage.output_tokens += event.usage.output_tokens;
         this.usage.cache_creation_input_tokens += event.usage.cache_creation_input_tokens ?? 0;
