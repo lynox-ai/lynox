@@ -795,13 +795,17 @@
 					with the unified default-tier picker above + the tier-set summary
 					block below — single source of truth, lynox routes per turn.
 				-->
-			{:else if activeProvider === 'custom'}
+			{:else if activeProvider === 'custom' || activeCatalogKey === 'openai-compat'}
 				<!--
-					Custom (Anthropic-compatible) endpoints have no enumerated model
-					catalog (see core/src/core/llm/catalog.ts:158) — model id is
-					free-text routed by the proxy. The legacy ConfigView lost this
-					field entirely, leaving custom users stuck with whatever the
-					wizard set. P1-PR-A1 surfaces it explicitly.
+					Free-text endpoints with no enumerated model catalog need an
+					explicit model id. Two tiles qualify: the Anthropic-compatible
+					"custom" provider, AND the generic OpenAI-compatible endpoint
+					(preset_id 'openai-compat', models: []) — both route the model
+					id straight to the proxy (see core/src/core/llm/catalog.ts).
+					The backend rejects provider:'openai' without openai_model_id
+					(http-api.ts), so without this field the openai-compat tile
+					could never save (HTTP 400). Mistral / Anthropic / Vertex have
+					catalogs and use the tier picker above instead.
 				-->
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.custom_model_id')}</span>
