@@ -2912,6 +2912,15 @@
 				{/if}
 			{/if}
 		</div>
+		<!-- EU AI Act Art. 50 §1: persistent "interacting with AI" disclosure
+		     (the per-message AI badge is the primary signal; this reinforces it +
+		     carries the §8 output caveat). Yields the hint slot to the transient
+		     voice/queue notices so only one line shows at a time. -->
+		{#if !recording && !transcribing && !(isStreaming && queueLength > 0)}
+			<p class="mt-1.5 max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto text-[11px] text-text-subtle px-3 leading-snug text-center">
+				{t('chat.ai_disclaimer')}
+			</p>
+		{/if}
 		{#if (recording || transcribing) && voicePrivacyKey}
 			<p class="mt-1.5 max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto text-[11px] text-text-subtle px-3 leading-snug">
 				{t(voicePrivacyKey)}
