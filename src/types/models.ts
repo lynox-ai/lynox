@@ -594,8 +594,10 @@ export function modelCapability(model: string): ModelCapability | undefined {
 }
 
 /** Backstop for unknown model ids. Matches the pre-registry hard-coded
- *  fallbacks in getContextWindow / getDefaultMaxTokens / getMaxContinuations. */
-const FALLBACK_CAPABILITY = {
+ *  fallbacks in getContextWindow / getDefaultMaxTokens / getMaxContinuations.
+ *  Exported so server-side synthetic-model shapes (e.g. /api/config
+ *  active_model for a declared self-host window) reference one source. */
+export const FALLBACK_CAPABILITY = {
   contextWindow: 200_000,
   defaultMaxOutput: 16_000,
   maxContinuations: 10,

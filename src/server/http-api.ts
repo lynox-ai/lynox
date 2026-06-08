@@ -28,7 +28,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, getModelId, modelCapability, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
@@ -3122,8 +3122,8 @@ export class LynoxHTTPApi {
           tier: activeTier,
           provider: activeProvider,
           contextWindow: activeNativeWindow,
-          defaultMaxOutput: 16_000,
-          maxContinuations: 10,
+          defaultMaxOutput: FALLBACK_CAPABILITY.defaultMaxOutput,
+          maxContinuations: FALLBACK_CAPABILITY.maxContinuations,
           features: { vision: false, extendedThinking: false, toolUse: false, promptCaching: false, pdfInput: false },
           uiLabel: activeModelId,
         };
