@@ -69,7 +69,7 @@ export type StreamEvent =
   | { type: 'spawn_progress'; elapsedS: number; running: string[];
       lastToolBySub: Record<string, string>; agent: string }
   | { type: 'spawn_child_done'; subAgent: string; ok: boolean; elapsedS: number; agent: string }
-  | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; agent: string }
+  | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; contextWindow?: number | undefined; agent: string }
   | { type: 'error';       message: string;                        agent: string }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }

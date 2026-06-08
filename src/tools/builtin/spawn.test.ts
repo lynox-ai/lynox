@@ -115,6 +115,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     getAvailableTools: () => tools,
     getExcludedToolNames: () => [],
     getMaxContextWindowTokens: () => undefined,
+    getNativeContextWindow: () => undefined,
     ...overrides,
   };
 }

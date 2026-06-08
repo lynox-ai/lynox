@@ -68,6 +68,10 @@ export const LynoxUserConfigSchema = z.object({
   gcp_project_id:       z.string().optional(),
   gcp_region:           z.string().optional(),
   openai_model_id:      z.string().optional(),
+  // Self-host native window for an openai-compat model not in the registry.
+  // Same bound as max_context_window_tokens. Managed is blocked from setting
+  // it via MANAGED_USER_WRITABLE_CONFIG, not here.
+  openai_context_window: z.number().int().positive().max(1_000_000).optional(),
   default_tier:         ModelTierSchema.optional(),
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),

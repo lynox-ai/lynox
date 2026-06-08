@@ -28,7 +28,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, getModelId, modelCapability, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
@@ -1679,17 +1679,25 @@ export class LynoxHTTPApi {
       // the UI — staging 2026-05-18 saw "Kontext: 423%" because the UI
       // divided real tokensIn by a stale 200k while the engine had
       // applied a different cap. Single source of truth via models.ts.
-      const userCap = engine.getUserConfig().max_context_window_tokens;
-      // Fallback guards against a tier that slipped past normalization (e.g. a
+      const sessionUserConfig = engine.getUserConfig();
+      const userCap = sessionUserConfig.max_context_window_tokens;
+      // Resolve the id under the ACTIVE provider, not the Anthropic MODEL_MAP —
+      // otherwise a managed-Mistral / self-host session reported the Claude
+      // window (200k) instead of its real one. The `?? MODEL_MAP[...]` fallback
+      // still guards against a tier that slipped past normalization (e.g. a
       // legacy `model_tier` restored from a pre-rename thread) resolving to
-      // undefined and crashing effectiveContextWindow. Root fix is at the
-      // restore boundary in session-store; this keeps the resume path from
-      // 500ing if any future boundary is missed.
-      const modelId = MODEL_MAP[tier] ?? MODEL_MAP['balanced'];
+      // undefined and crashing effectiveContextWindow.
+      const sessionProvider = getActiveProvider();
+      const modelId = getModelId(tier, sessionProvider) ?? MODEL_MAP[tier] ?? MODEL_MAP['balanced'];
       jsonResponse(res, 201, {
         sessionId,
         model: tier,
-        contextWindow: effectiveContextWindow(modelId, userCap),
+        // Provider + declared window so custom/BYOK/self-host (and managed
+        // Mistral) report their real native window via the resolver SSOT.
+        contextWindow: effectiveContextWindow(modelId, userCap, {
+          provider: sessionProvider,
+          declaredWindow: sessionUserConfig.openai_context_window,
+        }),
         threadId: sessionId,
         resumed: !!threadId && !!thread,
       });
@@ -3080,6 +3088,12 @@ export class LynoxHTTPApi {
       const activeTier = config.default_tier ?? 'balanced';
       const activeModelId = getModelId(activeTier, activeProvider);
       const activeCap = modelCapability(activeModelId);
+      // SSOT window resolution: a declared `openai_context_window` (self-host)
+      // wins; else the registry; else an honest default — and crucially NOT a
+      // Claude window when an openai/custom tier resolver fell back to an
+      // Anthropic id. Same helper the agent + /api/sessions use, so the radio
+      // filter can't drift from what the engine actually trims against.
+      const activeNativeWindow = resolveNativeContextWindow(activeModelId, activeProvider, config.openai_context_window);
       if (activeCap) {
         redacted['active_model'] = {
           id: activeCap.id,
@@ -3089,15 +3103,34 @@ export class LynoxHTTPApi {
           // Anthropic id (no MISTRAL_MODEL_MAP bootstrap) still reports
           // `'openai'` to the UI for tier-awareness gating.
           provider: activeProvider,
-          contextWindow: activeCap.contextWindow,
+          // Resolver, not `activeCap.contextWindow`: honours a declared
+          // self-host window and dodges the Anthropic-fallback Claude window.
+          contextWindow: activeNativeWindow,
           defaultMaxOutput: activeCap.defaultMaxOutput,
           maxContinuations: activeCap.maxContinuations,
           features: activeCap.features,
           uiLabel: activeCap.uiLabel,
         };
+      } else if (config.openai_context_window !== undefined && config.openai_context_window > 0) {
+        // Unknown id BUT the operator declared a native window (self-host
+        // openai-compat). Surface a minimal active_model so the UI filters its
+        // context-window radios against the REAL window instead of the legacy
+        // static list. Features unknown → all-false (assert no capability we
+        // can't verify; UI reads them defensively via optional-chaining).
+        redacted['active_model'] = {
+          id: activeModelId,
+          tier: activeTier,
+          provider: activeProvider,
+          contextWindow: activeNativeWindow,
+          defaultMaxOutput: FALLBACK_CAPABILITY.defaultMaxOutput,
+          maxContinuations: FALLBACK_CAPABILITY.maxContinuations,
+          features: { vision: false, extendedThinking: false, toolUse: false, promptCaching: false, pdfInput: false },
+          uiLabel: activeModelId,
+        };
       } else {
-        // Unknown id (legacy custom-endpoint model or registry gap). UI falls
-        // back to the legacy static radio list. Surface for support tracing.
+        // Unknown id, no declared window (legacy custom-endpoint model or
+        // registry gap). UI falls back to the legacy static radio list.
+        // Surface for support tracing.
         console.warn(`[http-api] /config: no MODEL_CAPABILITIES entry for ${activeModelId} (tier=${activeTier}, provider=${activeProvider})`);
       }
       // Bugsink-toggle UX requires the page to know whether a DSN is

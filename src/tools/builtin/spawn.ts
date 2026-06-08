@@ -321,6 +321,10 @@ async function executeThinker(
     // Inherit the user's context-window cap so a spawned researcher running
     // on a 1M-native model still respects the user's 200k preference.
     maxContextWindowTokens: parentAgent.getMaxContextWindowTokens(),
+    // Declared native window: a spawn-time profile's `context_window` wins,
+    // else inherit the parent's so a sub-agent on the same custom/BYOK/self-host
+    // model trims against the real window, not the 200k id-fallback.
+    nativeContextWindow: profile?.context_window ?? parentAgent.getNativeContextWindow(),
     // Profile overrides provider credentials; otherwise INHERIT from parent
     // agent (runtime config), not from loadConfig() (config.json file).
     // Closes the staging bug where managed-tier UI provider-switch isn't

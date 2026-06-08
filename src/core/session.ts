@@ -990,10 +990,22 @@ export class Session {
   getContextUsagePercent(): number {
     if (!this.agent) return 0;
     const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
-    const userCap = this.engine.getUserConfig().max_context_window_tokens;
     // agent.model may carry a [1m] suffix; MODEL_MAP[tier] would strip it.
-    const maxCtx = effectiveContextWindow(this.agent.model, userCap);
+    const maxCtx = this._displayContextWindow(this.agent.model);
     return Math.round(estimatedTokens / maxCtx * 100);
+  }
+
+  /** Effective context window for display/metering across all tiers — the user
+   *  cap applied on top of the real native window (provider + declared window
+   *  resolved via the SSOT so a custom/BYOK/self-host model meters against its
+   *  true size, not the 200k id-fallback). Shared by getContextUsagePercent
+   *  and the turn_end stream event so the CLI footer + web UI can't drift. */
+  private _displayContextWindow(modelId: string): number {
+    const userConfig = this.engine.getUserConfig();
+    return effectiveContextWindow(modelId, userConfig.max_context_window_tokens, {
+      provider: this._profileOverride?.provider ?? userConfig.provider,
+      declaredWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
+    });
   }
 
   /**
@@ -1215,6 +1227,10 @@ export class Session {
       if (event.type === 'turn_end') {
         // Inject actual model so the client can compute correct costs
         (event as { model?: string }).model = model;
+        // Inject the effective context window so the CLI footer (+ any client)
+        // meters usage against the real per-tier window instead of a hardcoded
+        // 200k — managed Mistral 262k, self-host/BYOK declared, user-cap, etc.
+        (event as { contextWindow?: number }).contextWindow = this._displayContextWindow(model);
         this.usage.input_tokens += event.usage.input_tokens;
         this.usage.output_tokens += event.usage.output_tokens;
         this.usage.cache_creation_input_tokens += event.usage.cache_creation_input_tokens ?? 0;
@@ -1328,6 +1344,11 @@ export class Session {
       // below the model's native window (LLM Advanced UI offers 200k/500k/1M
       // at `/app/settings/llm/advanced` post P3-PR-X).
       maxContextWindowTokens: userConfig.max_context_window_tokens,
+      // Declared native window for a custom/BYOK/self-host model whose id the
+      // registry doesn't know: a named profile's `context_window`, else the
+      // self-host `openai_context_window`. Undefined for managed/Anthropic
+      // (registry knows the size). Lets the agent trim against the real window.
+      nativeContextWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
       // Provider-aware key resolution via [[provider-keys]] — pre-1.5.2 this
       // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
       apiKey: this._profileOverride?.api_key ?? resolveProviderApiKey({

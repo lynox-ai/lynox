@@ -8,6 +8,7 @@ import {
   getOpenAIModelMap,
   setOpenAIModelResolver,
   effectiveContextWindow,
+  resolveNativeContextWindow,
   normalizeTier,
   MISTRAL_MODEL_MAP,
   MISTRAL_API_BASE,
@@ -264,6 +265,47 @@ describe('effectiveContextWindow', () => {
     // A cap exactly at the floor stays; a cap comfortably above is untouched.
     expect(effectiveContextWindow('claude-sonnet-4-6', 32_000)).toBe(32_000);
     expect(effectiveContextWindow('claude-sonnet-4-6', 120_000)).toBe(120_000);
+  });
+
+  it('uses a declared native window over the id (custom/BYOK/self-host)', () => {
+    // Unknown self-host id would otherwise fall back to 200k; the declared
+    // window wins and the user cap still clamps on top.
+    expect(effectiveContextWindow('my-self-host-ministral', undefined, { provider: 'openai', declaredWindow: 262_144 })).toBe(262_144);
+    expect(effectiveContextWindow('my-self-host-ministral', 500_000, { provider: 'openai', declaredWindow: 262_144 })).toBe(262_144);
+    expect(effectiveContextWindow('my-self-host-ministral', 100_000, { provider: 'openai', declaredWindow: 262_144 })).toBe(100_000);
+  });
+});
+
+describe('resolveNativeContextWindow', () => {
+  it('lets an explicitly declared window win over everything (self-host / BYOK)', () => {
+    expect(resolveNativeContextWindow('whatever-id', 'openai', 131_072)).toBe(131_072);
+    // Declared even overrides a known registry id (operator knows their pin).
+    expect(resolveNativeContextWindow('claude-sonnet-4-6', 'custom', 131_072)).toBe(131_072);
+  });
+
+  it('returns the registry window for a known id (managed Mistral, direct Anthropic)', () => {
+    // managed: getModelId(balanced, openai) → ministral-14b-2512 (provider openai), 262k.
+    expect(resolveNativeContextWindow('ministral-14b-2512', 'openai', undefined)).toBe(262_144);
+    expect(resolveNativeContextWindow('mistral-large-2512', 'openai', undefined)).toBe(256_000);
+    expect(resolveNativeContextWindow('claude-opus-4-6', 'anthropic', undefined)).toBe(1_000_000);
+  });
+
+  it('does NOT trust an Anthropic id under a custom provider (the fallback trap)', () => {
+    // Self-host with no openai_model_id → getModelId falls back to an Anthropic
+    // id. Trusting it would surface a Claude window for a self-host model.
+    // Resolver returns the honest 200k default instead of opus 1M.
+    expect(resolveNativeContextWindow('claude-opus-4-6', 'openai', undefined)).toBe(200_000);
+    expect(resolveNativeContextWindow('claude-opus-4-6', 'custom', undefined)).toBe(200_000);
+  });
+
+  it('returns the honest default for an unknown id, never an invented cap', () => {
+    expect(resolveNativeContextWindow('some-runpod-model', 'openai', undefined)).toBe(200_000);
+    expect(resolveNativeContextWindow('some-runpod-model', undefined, undefined)).toBe(200_000);
+  });
+
+  it('keeps trusting a known Anthropic id under the anthropic provider', () => {
+    // The trap guard only fires for openai/custom — direct Anthropic is fine.
+    expect(resolveNativeContextWindow('claude-opus-4-6', 'anthropic', undefined)).toBe(1_000_000);
   });
 });
 
