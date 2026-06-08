@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.11.0 — 2026-06-08
+
+Compliance-and-trust release: EU AI Act Art. 50 transparency disclosure, hardened BYOK custom-endpoint handling, and a content-free security-event aggregate for abuse monitoring.
+
+### Features
+- **EU AI Act Art. 50 disclosure** — a persistent composer notice that responses are AI-generated and may contain errors (DE + EN). (#695)
+- **BYOK custom-endpoint disclosure** — server-persists the "own endpoint" acknowledgement and surfaces curated provider guidance; the disclosure gate survives reload. (#693)
+- **Content-free security-event aggregate** — a new admin endpoint exposing event-type/tool/decision counts with no message content, for abuse monitoring. (#692)
+
+### Fixes
+- **BYOK endpoint allowlist** — drop the overbroad `*.amazonaws.com` entry and clean up the retired Bedrock sub-processor path. (#691)
+
+### Docs & Internal
+- Correct the managed Mistral sub-processor model list. (#694)
+- Add a chat-run lifecycle resilience smoke guard. (#678)
+
 ## 1.10.0 — 2026-06-06
 
 Resilience-and-cost release: chat runs survive reloads and disconnects, long threads stop silently losing messages, the prompt cache works again (large cost drop on long conversations), and a batch of mobile/artifact UX fixes.
