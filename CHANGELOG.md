@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.11.1 — 2026-06-08
+
+Patch: production sanctions name-screening (now populated, with non-Latin coverage), native context window for BYOK/self-host models, and trial-email polish.
+
+### Features
+- **Native context window** — resolve the real context window for custom / BYOK / self-host models instead of a fixed fallback. (#696)
+
+### Fixes
+- **BYOK model id** — render the model-id field for the generic OpenAI-compatible endpoint so the config can be saved (it was rejected with HTTP 400). (#697)
+
+### Control Plane (managed hosting)
+- **Sanctions name list** — bake the OpenSanctions list into the image so production screening is populated on the read-only container. (#266)
+- **Sanctions non-Latin coverage** — index Cyrillic / CJK / Arabic names; closes a ~34% list blind spot. (#267)
+- **Trial email** — warmer trial-ending copy that names the exact charge amount. (#252)
+
 ## 1.11.0 — 2026-06-08
 
 Compliance-and-trust release: EU AI Act Art. 50 transparency disclosure, hardened BYOK custom-endpoint handling, and a content-free security-event aggregate for abuse monitoring.
