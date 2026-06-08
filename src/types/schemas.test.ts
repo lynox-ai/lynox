@@ -31,6 +31,21 @@ describe('LynoxUserConfigSchema — default_tier back-compat (2026-05-29 rename)
   });
 });
 
+describe('LynoxUserConfigSchema — openai_context_window (self-host native window)', () => {
+  it('round-trips a positive integer window (self-host openai-compat)', () => {
+    const result = LynoxUserConfigSchema.safeParse({ openai_context_window: 262_144 });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.openai_context_window).toBe(262_144);
+  });
+
+  it('rejects zero / negative / non-integer / over-cap', () => {
+    expect(LynoxUserConfigSchema.safeParse({ openai_context_window: 0 }).success).toBe(false);
+    expect(LynoxUserConfigSchema.safeParse({ openai_context_window: -1 }).success).toBe(false);
+    expect(LynoxUserConfigSchema.safeParse({ openai_context_window: 1.5 }).success).toBe(false);
+    expect(LynoxUserConfigSchema.safeParse({ openai_context_window: 2_000_000 }).success).toBe(false);
+  });
+});
+
 describe('LynoxUserConfigSchema — http(s) scheme allowlist', () => {
   it('accepts https api_base_url', () => {
     const result = LynoxUserConfigSchema.safeParse({ api_base_url: 'https://api.example.com/v1' });

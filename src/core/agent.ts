@@ -112,6 +112,8 @@ export class Agent implements IAgent {
   private readonly excludeTools: string[] | undefined;
   /** Optional user-preferred max context window — clamps the trim budget below the model's native window. */
   private readonly maxContextWindowTokens: number | undefined;
+  /** Declared native window for a custom/BYOK/self-host model not in the registry (profile.context_window / openai_context_window). Overrides the id-based 200k fallback. Propagated to sub-agents. */
+  private readonly nativeContextWindow: number | undefined;
   /**
    * Set-based lookup hoisted out of the per-iteration `_callAPI` filter and the
    * per-tool-call `_executeOne` check. Without this, both paths re-allocated
@@ -145,12 +147,21 @@ export class Agent implements IAgent {
   getMaxContextWindowTokens(): number | undefined {
     return this.maxContextWindowTokens;
   }
+  /** Declared native window for a custom/BYOK/self-host model — propagated to spawned children so a sub-agent on the same model trims against the real window, not the 200k fallback. */
+  getNativeContextWindow(): number | undefined {
+    return this.nativeContextWindow;
+  }
   /** Effective context window after applying the user's optional cap — never
    *  returns more than the model's native window. Delegates to the shared
    *  SSOT helper in models.ts so http-api.ts /sessions, session.ts
-   *  getContextUsagePercent, and this agent helper can't drift. */
+   *  getContextUsagePercent, and this agent helper can't drift. Passes the
+   *  provider + declared window so custom/BYOK/self-host models resolve their
+   *  real native window instead of the bare-id 200k fallback. */
   private _effectiveContextWindow(): number {
-    return effectiveContextWindow(this.model, this.maxContextWindowTokens);
+    return effectiveContextWindow(this.model, this.maxContextWindowTokens, {
+      provider: this.provider,
+      declaredWindow: this.nativeContextWindow,
+    });
   }
   private briefing: string | undefined;
   readonly autonomy: AutonomyLevel | undefined;
@@ -374,6 +385,7 @@ export class Agent implements IAgent {
     this.excludeTools = config.excludeTools;
     this._excludeSet = new Set(config.excludeTools ?? []);
     this.maxContextWindowTokens = config.maxContextWindowTokens;
+    this.nativeContextWindow = config.nativeContextWindow;
     this.currentRunId = config.currentRunId;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;

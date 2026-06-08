@@ -114,6 +114,8 @@ export interface IAgent {
   getExcludedToolNames(): readonly string[];
   /** User-preferred max context window — propagate to sub-agents so the cap applies tree-wide. */
   getMaxContextWindowTokens(): number | undefined;
+  /** Declared native window for a custom/BYOK/self-host model — propagate to sub-agents so they trim against the real window, not the 200k id-fallback. */
+  getNativeContextWindow(): number | undefined;
   /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Engine surface for HTTP-API SSE toast events. Returns empty array when no warnings. */
   getWarnings(): readonly AgentWarning[];
   /**

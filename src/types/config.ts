@@ -36,6 +36,15 @@ export interface AgentConfig {
    * child agents so a single user preference applies tree-wide.
    */
   maxContextWindowTokens?: number | undefined;
+  /**
+   * Native context window DECLARED for a custom/BYOK/self-host model whose id
+   * is not in the capability registry (a named `ModelProfile.context_window`,
+   * or the self-host `openai_context_window` config field). Wins over the
+   * id-based 200k fallback so trimming + UI usage reflect the real window.
+   * Undefined for managed/Anthropic where the registry already knows the size.
+   * Plumbed to sub-agents like `maxContextWindowTokens`.
+   */
+  nativeContextWindow?: number | undefined;
   apiKey?:             string | undefined;
   apiBaseURL?:         string | undefined;
   provider?:           LLMProvider | undefined;
@@ -327,6 +336,16 @@ export interface LynoxUserConfig {
   experience?: 'business' | 'developer' | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-2512'). Required when provider is 'openai'. */
   openai_model_id?: string | undefined;
+  /**
+   * Native context window (tokens) for a self-host openai-compat model whose
+   * id is not in the capability registry (e.g. a self-hosted Ministral on a
+   * custom host). Without it the engine assumes the 200k fallback and trims
+   * history / shows context usage against the wrong size. Ignored for managed
+   * (registry-known) and Anthropic. Self-host / BYOK only — this field is not
+   * in `MANAGED_USER_WRITABLE_CONFIG` (http-api.ts), so a managed tenant PUT to
+   * it is rejected; managed Mistral is registry-known and never needs it.
+   */
+  openai_context_window?: number | undefined;
   /** Named model profiles for non-Claude providers (Mistral, Gemini, Grok, etc.). */
   model_profiles?: Record<string, ModelProfile> | undefined;
   /** Model profile to use for background tasks (WorkerLoop, Cron). Uses Claude if unset. */

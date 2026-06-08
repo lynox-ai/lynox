@@ -623,15 +623,60 @@ export function getContextWindow(model: string): number {
  *  definitions and bricking every request. */
 export const MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS = 32_000;
 
+/** Resolve a model's NATIVE context window across all tiers (self-host / BYOK /
+ *  managed), with a clear precedence that the bare id-based `getContextWindow`
+ *  cannot express:
+ *
+ *    1. An explicitly DECLARED window always wins — `ModelProfile.context_window`
+ *       (BYOK named profile) or `openai_context_window` (self-host global
+ *       openai-compat switch). The operator knows their model's real window
+ *       better than any id lookup can.
+ *    2. A KNOWN registry id → its registered window (managed Mistral resolves
+ *       via MISTRAL_MODEL_MAP to e.g. `ministral-14b-2512`, provider `openai`,
+ *       262k; direct Anthropic ids likewise).
+ *       BUT: under an openai/custom provider, `getModelId` falls back to an
+ *       Anthropic id when no tier map and no `openai_model_id` are configured
+ *       (see getModelId above). Trusting that id would surface a misleading
+ *       Claude window for a self-host model — so an Anthropic-provider id under
+ *       a custom provider is treated as "unknown" and gets the honest default.
+ *    3. Unknown id → honest 200k default, never an invented cap.
+ *
+ *  Pure + side-effect-free; the single place tier-specific window logic lives. */
+export function resolveNativeContextWindow(
+  model: string,
+  provider?: LLMProvider | undefined,
+  declaredWindow?: number | undefined,
+): number {
+  if (declaredWindow !== undefined && declaredWindow > 0) return declaredWindow;
+  const known = modelCapability(model);
+  if (known) {
+    const isCustomProvider = provider === 'openai' || provider === 'custom';
+    // Anthropic-fallback trap: a Claude id reaching here under a custom
+    // provider means the tier resolver fell back — don't trust its window.
+    if (isCustomProvider && known.provider === 'anthropic') return FALLBACK_CAPABILITY.contextWindow;
+    return known.contextWindow;
+  }
+  return FALLBACK_CAPABILITY.contextWindow;
+}
+
 /** Effective context window after applying the user's optional cap. Mirrors
  *  Agent._effectiveContextWindow so server-side endpoints + session bookkeeping
  *  can compute the same value the agent actually uses internally — staging
  *  2026-05-18 shipped this with three separate copies of the formula that
  *  drifted (UI showed 423% because /sessions returned the native window
  *  while the agent had applied a smaller user cap). Single source of truth.
+ *
+ *  `opts` carries the provider + any declared window so custom/BYOK/self-host
+ *  models resolve their real native window via `resolveNativeContextWindow`
+ *  instead of the bare-id 200k fallback. Omitting `opts` preserves the legacy
+ *  id-only behaviour (all pre-existing 2-arg callers unchanged).
  *  Never returns more than the model's native window. */
-export function effectiveContextWindow(model: string, userCap: number | undefined): number {
-  const native = getContextWindow(model);
+export function effectiveContextWindow(
+  model: string,
+  userCap: number | undefined,
+  opts?: { provider?: LLMProvider | undefined; declaredWindow?: number | undefined } | undefined,
+): number {
+  const native = resolveNativeContextWindow(model, opts?.provider, opts?.declaredWindow);
   if (userCap !== undefined && userCap > 0) {
     return Math.min(native, Math.max(userCap, MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS));
   }

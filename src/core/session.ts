@@ -990,9 +990,15 @@ export class Session {
   getContextUsagePercent(): number {
     if (!this.agent) return 0;
     const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
-    const userCap = this.engine.getUserConfig().max_context_window_tokens;
+    const userConfig = this.engine.getUserConfig();
+    const userCap = userConfig.max_context_window_tokens;
     // agent.model may carry a [1m] suffix; MODEL_MAP[tier] would strip it.
-    const maxCtx = effectiveContextWindow(this.agent.model, userCap);
+    // Pass provider + declared window so a custom/BYOK/self-host model meters
+    // against its real native window, not the 200k id-fallback.
+    const maxCtx = effectiveContextWindow(this.agent.model, userCap, {
+      provider: this._profileOverride?.provider ?? userConfig.provider,
+      declaredWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
+    });
     return Math.round(estimatedTokens / maxCtx * 100);
   }
 
@@ -1328,6 +1334,11 @@ export class Session {
       // below the model's native window (LLM Advanced UI offers 200k/500k/1M
       // at `/app/settings/llm/advanced` post P3-PR-X).
       maxContextWindowTokens: userConfig.max_context_window_tokens,
+      // Declared native window for a custom/BYOK/self-host model whose id the
+      // registry doesn't know: a named profile's `context_window`, else the
+      // self-host `openai_context_window`. Undefined for managed/Anthropic
+      // (registry knows the size). Lets the agent trim against the real window.
+      nativeContextWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
       // Provider-aware key resolution via [[provider-keys]] — pre-1.5.2 this
       // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
       apiKey: this._profileOverride?.api_key ?? resolveProviderApiKey({
