@@ -66,7 +66,6 @@
 		entityCount: number;
 		relationCount: number;
 		communityCount: number;
-		patternCount?: number;
 	}
 
 	let secrets = $state<SecretsStatus | null>(null);
@@ -579,12 +578,6 @@
 							<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
 								<span class="text-text-subtle">{t('status.communities')}</span>
 								<span class="text-text font-medium">{kgStats.communityCount}</span>
-							</div>
-						{/if}
-						{#if kgStats.patternCount != null && kgStats.patternCount > 0}
-							<div class="flex justify-between bg-bg-muted rounded-[var(--radius-sm)] px-3 py-1.5">
-								<span class="text-text-subtle">{t('status.patterns')}</span>
-								<span class="text-text font-medium">{kgStats.patternCount}</span>
 							</div>
 						{/if}
 					</div>

@@ -124,7 +124,7 @@ export interface AccumulatedUsage {
 }
 
 const AUTO_GC_INTERVAL = 50; // Run GC every N runs
-const INTELLIGENCE_INTERVAL = 10; // Run pattern detection + KPIs every N runs
+const INTELLIGENCE_INTERVAL = 10; // Run KPIs every N runs
 
 /**
  * Default the inbox classifier's LLM region from the user's main provider
@@ -898,7 +898,7 @@ export class Engine {
       this.dataStoreBridge = initDataStoreBridge(this.knowledgeLayer, this._dataStore);
     }
 
-    // Inject pattern/KPI context into briefing (now that KnowledgeLayer is available)
+    // Inject KPI context into briefing (now that KnowledgeLayer is available)
     if (this.knowledgeLayer) {
       try {
         const perfParts: string[] = [];
@@ -909,12 +909,6 @@ export class Engine {
             .map(m => `${m.metricName}: ${typeof m.value === 'number' && m.value < 1 ? (m.value * 100).toFixed(0) + '%' : String(Math.round(m.value))}`)
             .slice(0, 5);
           if (kpiLines.length > 0) perfParts.push(`KPIs: ${kpiLines.join(', ')}`);
-        }
-        const patterns = this.knowledgeLayer.getPatterns({ activeOnly: true, limit: 3 });
-        const strong = patterns.filter(p => p.confidence >= 0.6 && p.evidenceCount >= 3);
-        if (strong.length > 0) {
-          const patLines = strong.map(p => `- [${p.patternType}] ${p.description}`);
-          perfParts.push(`Learned patterns:\n${patLines.join('\n')}`);
         }
         if (perfParts.length > 0) {
           const perfBlock = `<agent_performance>\n${perfParts.join('\n')}\n</agent_performance>`;

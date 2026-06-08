@@ -5156,13 +5156,6 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { threadInsights });
     });
 
-    this.addStatic('user', 'GET /api/patterns', async (_req, res) => {
-      const kg = engine.getKnowledgeLayer();
-      if (!kg) { jsonResponse(res, 200, { patterns: [] }); return; }
-      const patterns = kg.getPatterns();
-      jsonResponse(res, 200, { patterns });
-    });
-
     this.addStatic('user', 'GET /api/metrics', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
       if (!kg) { jsonResponse(res, 200, { metrics: [] }); return; }

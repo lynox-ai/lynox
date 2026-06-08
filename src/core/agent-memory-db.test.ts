@@ -306,37 +306,6 @@ describe('AgentMemoryDb', () => {
     });
   });
 
-  // ── Patterns ─────────────────────────────────────────────────
-
-  describe('patterns', () => {
-    it('creates and retrieves pattern', () => {
-      const id = db.createPattern({
-        patternType: 'preference',
-        description: 'User prefers tables over prose',
-        confidence: 0.8,
-      });
-      const patterns = db.getPatterns({ patternType: 'preference' });
-      expect(patterns).toHaveLength(1);
-      expect(patterns[0]!.description).toBe('User prefers tables over prose');
-      expect(patterns[0]!.id).toBe(id);
-    });
-
-    it('increments evidence count', () => {
-      const id = db.createPattern({ patternType: 'sequence', description: 'A then B' });
-      db.incrementPatternEvidence(id);
-      db.incrementPatternEvidence(id);
-      const patterns = db.getPatterns();
-      expect(patterns[0]!.evidence_count).toBe(3);
-      expect(patterns[0]!.confidence).toBeGreaterThan(0.5);
-    });
-
-    it('counts active patterns', () => {
-      db.createPattern({ patternType: 'sequence', description: 'X' });
-      db.createPattern({ patternType: 'preference', description: 'Y' });
-      expect(db.getPatternCount()).toBe(2);
-    });
-  });
-
   // ── Metrics ──────────────────────────────────────────────────
 
   describe('metrics', () => {

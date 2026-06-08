@@ -36,7 +36,6 @@
 	}
 	interface CostDay { day: string; cost_usd: number; run_count: number; }
 	interface TaskRecord { id: string; title: string; status: string; priority?: string; assignee?: string; schedule_cron?: string; }
-	interface Pattern { id: string; patternType: string; description: string; evidenceCount: number; confidence: number; }
 	interface ThreadInsight {
 		sessionId: string;
 		title: string;
@@ -65,25 +64,22 @@
 	let stats = $state<Stats | null>(null);
 	let costDays = $state<CostDay[]>([]);
 	let tasks = $state<TaskRecord[]>([]);
-	let patterns = $state<Pattern[]>([]);
 	let threadInsights = $state<ThreadInsight[]>([]);
 	let loading = $state(true);
 
 	async function loadDashboard() {
 		loading = true;
 		try {
-			const [statsRes, costRes, tasksRes, patternsRes, threadsRes] = await Promise.all([
+			const [statsRes, costRes, tasksRes, threadsRes] = await Promise.all([
 				fetch(`${getApiBase()}/history/stats`),
 				fetch(`${getApiBase()}/history/cost/daily?days=14&tzOffsetMin=${new Date().getTimezoneOffset()}`),
 				fetch(`${getApiBase()}/tasks`),
-				fetch(`${getApiBase()}/patterns`).catch(() => null),
 				fetch(`${getApiBase()}/thread-insights?limit=10`).catch(() => null),
 			]);
 			stats = (await statsRes.json()) as Stats;
 			if (costRes.ok) costDays = (await costRes.json()) as CostDay[];
 			const tasksData = (await tasksRes.json()) as { tasks: TaskRecord[] };
 			tasks = tasksData.tasks;
-			if (patternsRes?.ok) patterns = ((await patternsRes.json()) as { patterns: Pattern[] }).patterns;
 			if (threadsRes?.ok) threadInsights = ((await threadsRes.json()) as { threadInsights: ThreadInsight[] }).threadInsights;
 		} catch { /* non-critical */ }
 		loading = false;
@@ -101,13 +97,6 @@
 	const totalCost14d = $derived(costDays.reduce((s, d) => s + d.cost_usd, 0));
 	const totalRuns14d = $derived(costDays.reduce((s, d) => s + d.run_count, 0));
 	const maxCost = $derived(Math.max(...costDays.map(d => d.cost_usd), 0.01));
-
-	const patternTypeColor: Record<string, string> = {
-		sequence: 'bg-accent/15 text-accent-text',
-		preference: 'bg-success/15 text-success',
-		'anti-pattern': 'bg-danger/15 text-danger',
-		schedule: 'bg-warning/15 text-warning',
-	};
 
 	function shortDay(iso: string): string {
 		const locale = getLocale() === 'de' ? 'de-CH' : 'en-US';
@@ -231,25 +220,6 @@
 											<p>{formatDuration(ti.totalDurationMs)}</p>
 											<p>{formatCost(ti.totalCostUsd)}</p>
 										</div>
-									</div>
-								{/each}
-							</div>
-						</div>
-					{/if}
-
-					<!-- Detected Patterns -->
-					{#if patterns.length > 0}
-						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
-							<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle mb-3">{t('hub.activity.patterns')}</p>
-							<div class="space-y-2">
-								{#each patterns.slice(0, 5) as pattern}
-									<div class="rounded-[var(--radius-sm)] border border-border px-3 py-2">
-										<div class="flex items-center gap-2 mb-1">
-											<span class="text-[10px] rounded-full px-2 py-0.5 font-mono {patternTypeColor[pattern.patternType] ?? 'bg-bg-muted text-text-muted'}">{pattern.patternType}</span>
-											<span class="text-[10px] text-text-subtle">{t('hub.activity.confidence')}: {(pattern.confidence * 100).toFixed(0)}%</span>
-											<span class="text-[10px] text-text-subtle">{t('hub.activity.evidence')}: {pattern.evidenceCount}x</span>
-										</div>
-										<p class="text-xs text-text-muted">{pattern.description}</p>
 									</div>
 								{/each}
 							</div>

@@ -205,10 +205,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.activity.scheduled': { de: 'Geplante Jobs', en: 'Scheduled jobs' },
 	'hub.activity.view_all': { de: 'Alle anzeigen', en: 'View all' },
 	'hub.activity.thread_insights': { de: 'Thread-Performance', en: 'Thread Performance' },
-	'hub.activity.patterns': { de: 'Erkannte Muster', en: 'Detected Patterns' },
-	'hub.activity.no_patterns': { de: 'Noch keine Muster erkannt.', en: 'No patterns detected yet.' },
-	'hub.activity.confidence': { de: 'Konfidenz', en: 'Confidence' },
-	'hub.activity.evidence': { de: 'Belege', en: 'Evidence' },
 	// Activity Root (PRD-IA-V2 P2-PR-A) — canonical /app/activity surface.
 	'nav.activity': { de: 'Aktivität', en: 'Activity' },
 	'activity.tab.overview':  { de: 'Übersicht',  en: 'Overview' },
@@ -429,12 +425,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'insights.avg_duration': { de: 'Avg. Dauer', en: 'Avg. Duration' },
 	'insights.total_cost': { de: 'Gesamtkosten', en: 'Total Cost' },
 	'insights.total_runs': { de: 'Runs', en: 'Runs' },
-	'insights.patterns': { de: 'Erkannte Muster', en: 'Detected Patterns' },
-	'insights.no_patterns': { de: 'Noch keine Muster erkannt. Muster werden nach mehreren Runs automatisch erkannt.', en: 'No patterns detected yet. Patterns are detected automatically after several runs.' },
 	'insights.threads': { de: 'Thread-Insights', en: 'Thread Insights' },
 	'insights.no_threads': { de: 'Keine Thread-Insights vorhanden.', en: 'No thread insights yet.' },
-	'insights.confidence': { de: 'Konfidenz', en: 'Confidence' },
-	'insights.evidence': { de: 'Belege', en: 'Evidence' },
 	'insights.trend': { de: 'Trend (30 Tage)', en: 'Trend (30 days)' },
 	'insights.load_all': { de: 'Alle laden', en: 'Load all' },
 	'insights.error': { de: 'Laden fehlgeschlagen.', en: 'Failed to load insights.' },
@@ -535,7 +527,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.memories': { de: 'Erinnerungen', en: 'Memories' },
 	'status.relations': { de: 'Beziehungen', en: 'Relations' },
 	'status.communities': { de: 'Communities', en: 'Communities' },
-	'status.patterns': { de: 'Patterns', en: 'Patterns' },
 
 	'common.ok': { de: 'OK', en: 'OK' },
 
