@@ -759,6 +759,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	// EU AI Act Art. 50 §1 — persistent transparency disclosure on every assistant message
 	'chat.ai_generated_badge': { de: 'KI', en: 'AI' },
 	'chat.ai_generated_aria': { de: 'Von KI generiert', en: 'AI-generated' },
+	// EU AI Act Art. 50 §1 — composer-level disclosure (interacting with AI) + §8 output caveat
+	'chat.ai_disclaimer': {
+		de: 'Antworten werden von KI generiert und können Fehler enthalten — wichtige Angaben bitte überprüfen.',
+		en: 'Responses are AI-generated and may contain errors — verify important information.',
+	},
 	'chat.thread_menu_aria': { de: 'Thread-Aktionen', en: 'Thread actions' },
 	'chat.expand_all': { de: 'Alle aufklappen', en: 'Expand all' },
 	'chat.edit_answer': { de: 'Antworten verwerfen & neu starten', en: 'Discard answers & restart' },
