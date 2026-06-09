@@ -2631,7 +2631,13 @@ export class LynoxHTTPApi {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
-      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      // An old/deleted thread (or a transient tenant-scope race / mid-deploy
+      // window before routes register) is a benign GET, not a client error: a
+      // 404 lands as browser console noise on every thread-resume. Return 200
+      // with a null thread + threadMissing flag so the client can distinguish
+      // "gone" from "exists" without the noise. PATCH/DELETE below keep their
+      // 404 — mutating a nonexistent thread IS an error.
+      if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       jsonResponse(res, 200, { thread });
     }));
 
@@ -2687,7 +2693,12 @@ export class LynoxHTTPApi {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
-      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      // Mirror GET /threads/:id: a missing/old thread returns 200 with an empty
+      // transcript + threadMissing flag, not a 404. The client keeps its local
+      // snapshot (a stale copy is recoverable, a wipe is not) and renders an
+      // empty state instead of a misleading connection error — and the browser
+      // logs no failed-resource console noise.
+      if (!thread) { jsonResponse(res, 200, { messages: [], activeRun: null, threadMissing: true }); return; }
       const url = new URL(req.url ?? '', 'http://localhost');
       const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);

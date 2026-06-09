@@ -2310,8 +2310,10 @@ export async function resumeThread(threadId: string): Promise<void> {
 		});
 		if (gen !== _resumeGeneration) return;
 		if (threadRes.ok) {
-			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number } };
-			skipExtraction = !!threadData.thread.skip_extraction;
+			// thread is null for an old/missing thread (server now returns 200 +
+			// threadMissing instead of 404) — guard before reading.
+			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number } | null };
+			if (threadData.thread) skipExtraction = !!threadData.thread.skip_extraction;
 		}
 
 		// Load messages for display
@@ -2319,17 +2321,6 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
-		// A 404 used to nuke the local snapshot on the theory that "thread
-		// doesn't exist on the server" is authoritative. That deletes the
-		// user's history on any transient backend hiccup (tenant-scope
-		// race, mid-deploy 404 before routes register, etc.). Keep the
-		// local copy and surface a clear error instead — a stale snapshot
-		// is fully recoverable, a destroyed snapshot is not. Explicit
-		// archive / delete actions still call dropPersistedThread().
-		if (msgRes.status === 404) {
-			chatError = t('chat.error_connection');
-			return;
-		}
 		if (msgRes.ok) {
 			// Server returns RenderedMessage[] — already shaped for the UI
 			// (tool_result carriers merged into preceding tool_use, safety
@@ -2348,7 +2339,14 @@ export async function resumeThread(threadId: string): Promise<void> {
 				// Tier-2: the thread's live run, read atomically with the transcript
 				// so `lastPersistedSeq` is exactly this transcript's durable boundary.
 				activeRun?: { runId: string; status: string; lastPersistedSeq: number } | null;
+				threadMissing?: boolean;
 			};
+			// Old/deleted thread (or a transient tenant-scope race): the server
+			// returns 200 + threadMissing instead of a 404 (which would land as
+			// browser console noise). Keep whatever local snapshot exists — a
+			// stale copy is recoverable, a wipe is not — and skip silently. No
+			// misleading connection error for a thread that's simply gone.
+			if (msgData.threadMissing) return;
 			resumeActiveRun = msgData.activeRun ?? null;
 			const serverMessages: ChatMessage[] = dropEmptyUserMessages(
 				msgData.messages.map((m) => {
@@ -2461,7 +2459,11 @@ export async function reconcileThread(): Promise<void> {
 		const data = (await res.json()) as {
 			messages: ServerRenderedMessage[];
 			activeRun?: { runId: string; status: string; lastPersistedSeq: number } | null;
+			threadMissing?: boolean;
 		};
+		// Missing/old thread returns 200 + threadMissing — never overwrite the
+		// local snapshot with the empty server transcript.
+		if (data.threadMissing) return;
 		const serverMessages: ChatMessage[] = dropEmptyUserMessages(
 			data.messages.map((m) => {
 				const cm: ChatMessage = {
