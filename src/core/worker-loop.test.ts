@@ -586,6 +586,8 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => tm),
       getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
       getRunHistory: vi.fn(() => ({
         // No saved-workflow row, no in-memory entry — getPipeline returns
         // undefined and executePipeline records a benign skip via
@@ -641,6 +643,8 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-not-template', manifest_json: nonTemplatePlanned })),
         insertPipelineRun: vi.fn(),
@@ -692,6 +696,8 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: 'saved-monthly-report', manifest_json: stored.manifest_json })),
         // persistPipelineRun calls these for the FRESH run row (separate id);
@@ -772,6 +778,8 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: 'recurring-wf', manifest_json: templateJson })),
         insertPipelineRun: vi.fn(),
@@ -833,6 +841,8 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: 'partial-wf', manifest_json: templateJson })),
         insertPipelineRun: vi.fn(),
@@ -895,6 +905,8 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
       getRunHistory: vi.fn(() => ({
         // Pipeline lookup goes through getPlannedPipeline (manifest_json blob).
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-interactive', manifest_json: interactivePlanned })),

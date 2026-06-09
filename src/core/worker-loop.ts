@@ -347,7 +347,7 @@ export class WorkerLoop {
     if (!runHistory || !task.pipeline_id) return;
 
     // Load the PlannedPipeline (if any) to enforce the autonomous-only gate.
-    const { getPipeline, runSavedWorkflow } = await import('../tools/builtin/pipeline.js');
+    const { getPipeline } = await import('../tools/builtin/pipeline.js');
     const planned = getPipeline(task.pipeline_id, runHistory);
 
     // Benign race: the workflow was deleted between scheduling and this
@@ -379,8 +379,10 @@ export class WorkerLoop {
     // path the Saved-Workflows-library "Run" button uses, and it never
     // consumes the template row, so the scheduled task can fire on every
     // subsequent tick instead of being marked `executed` on the first one.
-    const config = this.engine.getUserConfig();
-    const result = await runSavedWorkflow(task.pipeline_id, runHistory, config);
+    // Route through the budget + managed-credit lifecycle (cap, credit gate,
+    // cost report) — runSavedWorkflow alone bypasses all three.
+    const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
+    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id);
 
     if (!result.ok) {
       // Surface conversion / validation / not-found / not-template errors as

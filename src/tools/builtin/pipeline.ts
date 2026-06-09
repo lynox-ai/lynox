@@ -521,6 +521,9 @@ export interface RunSavedWorkflowResult {
   runId?: string | undefined;
   status?: string | undefined;
   error?: string | undefined;
+  /** Total USD cost of the run, so a caller can report it to the managed
+   *  credit hook (onAfterRun) — the pipeline path otherwise bypasses billing. */
+  costUsd?: number | undefined;
 }
 
 /**
@@ -573,7 +576,8 @@ export async function runSavedWorkflow(
     validateManifest(manifest);
     const state = await runManifest(manifest, config, { runHistory });
     persistPipelineRun(state, manifest, runHistory, resultLimit);
-    return { ok: true, runId: state.runId, status: state.status };
+    const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
+    return { ok: true, runId: state.runId, status: state.status, costUsd };
   } catch (err: unknown) {
     return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
   }
