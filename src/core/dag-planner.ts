@@ -1,6 +1,6 @@
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
 import { getBetasForProvider, getModelId, normalizeTier } from '../types/index.js';
-import { createLLMClient, getActiveProvider, isCustomProvider } from './llm-client.js';
+import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
 export interface DagPlanResult {
@@ -66,14 +66,22 @@ export async function planDAG(
   },
 ): Promise<DagPlanResult | null> {
   try {
+    // Derive ONE provider and use it for client + model + betas. The pre-fix
+    // code built the client from options.provider but resolved the model and
+    // betas from the GLOBAL getActiveProvider(), so a per-call provider that
+    // differed from the global (managed runtime provider-switch — plan-task.ts
+    // passes the fresh snapshot provider per H-011) sent an Anthropic model id
+    // to a Mistral client. Mirror process-capture.ts.
+    const provider = options?.provider ?? getActiveProvider();
+    const isOpenAICompat = provider === 'custom' || provider === 'openai';
     const client = createLLMClient({
       apiKey: options?.apiKey,
       apiBaseURL: options?.apiBaseURL,
-      provider: options?.provider,
+      provider,
       openaiModelId: options?.openaiModelId,
     });
 
-    const model = options?.model ?? getModelId('fast', getActiveProvider());
+    const model = options?.model ?? getModelId('fast', provider);
     const maxSteps = options?.maxSteps ?? 15;
 
     let systemText = PLANNING_SYSTEM;
@@ -89,7 +97,7 @@ export async function planDAG(
         {
           model,
           max_tokens: 4096,
-          ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
+          ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
           system: systemText,
           tool_choice: { type: 'tool', name: 'propose_dag' },
           tools: [PROPOSE_DAG_TOOL],

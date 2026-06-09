@@ -21,6 +21,7 @@ import type {
 import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
+import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists } from './config.js';
@@ -518,9 +519,21 @@ export async function initMemoryInstance(
     ? (text: string) => secretStore.maskSecrets(text)
     : undefined;
   const { isFeatureEnabled } = await import('./features.js');
+  // Provider-aware key resolution — mirror Engine._recreateClient (engine.ts).
+  // The pre-fix code passed userConfig.api_key unconditionally; that is the
+  // ANTHROPIC vault slot (or empty), so on a Mistral / openai-compat tenant the
+  // Memory auto-extract client (memory.ts maybeUpdate) authenticated against
+  // api.mistral.ai with an Anthropic / empty key → 401 → extraction silently
+  // dead (the catch in maybeUpdate swallows it). Resolving by provider sends
+  // the MISTRAL_API_KEY slot on openai, CUSTOM_API_KEY on custom, etc.
+  const memoryApiKey = resolveProviderApiKey({
+    provider: userConfig.provider,
+    secretStore,
+    userConfig,
+  });
   const memory = new Memory(
     undefined,
-    userConfig.api_key,
+    memoryApiKey,
     userConfig.api_base_url,
     contextId,
     maskFn,

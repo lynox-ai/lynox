@@ -163,8 +163,18 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // Rerank BEFORE enrichment: dropping low-relevance hits first
           // avoids fetching full pages for results we're about to discard.
           // No-op unless LYNOX_SEARCH_RERANK is enabled; falls through on
-          // any failure so original results remain accessible.
-          const reranked = await rerankSearchResults(input.query, results);
+          // any failure so original results remain accessible. Pass the
+          // agent's provider snapshot so reranking runs on the active provider
+          // (Mistral included), not a hard-coded Anthropic env client.
+          // Optional-chain getProviderConfig: full IAgents always have it; the
+          // `?.` only tolerates bare/legacy test agents (snapshot → undefined →
+          // reranker falls back to the global provider).
+          const reranked = await rerankSearchResults(
+            input.query,
+            results,
+            {},
+            agent.getProviderConfig?.(),
+          );
           results = reranked.results;
           results = await enrichResults(results, ctx);
           const formatted = formatSearchResults(results);

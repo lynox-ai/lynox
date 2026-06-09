@@ -12,6 +12,30 @@ import type { BatchIndex } from './batch-index.js';
 import { hashPrompt } from './prompt-hash.js';
 import { SYSTEM_PROMPT } from './prompts.js';
 
+/**
+ * Batching is wired ONLY for the Anthropic-shaped `client.messages.batches`
+ * API today. The OpenAIAdapter (Mistral / openai-compat) and the Vertex client
+ * do not expose that shape, so calling into this module with them would throw a
+ * cryptic `Cannot read properties of undefined (reading 'create')`.
+ *
+ * This is a not-yet-implemented state, NOT a permanent design choice: Mistral
+ * has its own Batch API (api.mistral.ai/v1/batch/jobs) with a different shape.
+ * Making batching provider-agnostic — wiring the Mistral batch path alongside
+ * Anthropic and switching MODEL_MAP→getModelId(tier, provider) — is a tracked
+ * follow-up. `batch.ts` has no live caller yet, so this guard just turns the
+ * cryptic crash into a clear signpost until that work lands.
+ */
+function assertBatchingSupported(client: Anthropic): void {
+  const batches = (client as { messages?: { batches?: unknown } }).messages?.batches;
+  if (batches === undefined || batches === null) {
+    throw new Error(
+      'Message batching is not yet wired for the active provider — only the ' +
+      'Anthropic Batches API shape is implemented. Mistral and other providers ' +
+      'have their own batch APIs that need a provider-specific path.',
+    );
+  }
+}
+
 export function parseBatchItem(item: MessageBatchIndividualResponse): BatchResult {
   const { custom_id, result } = item;
   switch (result.type) {
@@ -48,6 +72,7 @@ export async function submitBatch(
   batchIndex: BatchIndex,
   contextId: string,
 ): Promise<{ batchId: string; parentRunId: string | null }> {
+  assertBatchingSupported(client);
   const model = MODEL_MAP[config.modelTier] ?? MODEL_MAP['deep'];
   const basePrompt = config.systemPrompt ?? SYSTEM_PROMPT;
   const effectivePrompt = config.systemPromptSuffix
@@ -113,6 +138,7 @@ export async function pollBatch(
   client: Anthropic,
   batchId: string,
 ): Promise<BatchResult[]> {
+  assertBatchingSupported(client);
   let delay = 30_000;
   const maxDelay = 300_000;
 

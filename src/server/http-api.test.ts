@@ -2246,7 +2246,7 @@ describe('LynoxHTTPApi', () => {
       expect(body.reason).toBe('disabled-by-env');
     });
 
-    it('GET /api/search/reranker/capability returns supported=false on Mistral / openai-compat', async () => {
+    it('GET /api/search/reranker/capability returns supported=true on Mistral / openai-compat', async () => {
       const { initLLMProvider } = await import('../core/llm-client.js');
       await initLLMProvider('openai');
       try {
@@ -2259,12 +2259,12 @@ describe('LynoxHTTPApi', () => {
           provider: string;
           reason?: string;
         };
-        // The whole point of the endpoint: even with the env on, openai-compat
-        // providers (Mistral et al.) report unsupported so the UI can warn.
-        expect(body.supported).toBe(false);
+        // openai-compat (Mistral) now reranks on its own fast-tier model, so the
+        // endpoint reports supported. Only opaque 'custom' proxies stay off.
+        expect(body.supported).toBe(true);
         expect(body.enabled).toBe(true);
         expect(body.provider).toBe('openai');
-        expect(body.reason).toBe('provider-unsupported');
+        expect(body.reason).toBeUndefined();
       } finally {
         delete process.env['LYNOX_SEARCH_RERANK'];
         await initLLMProvider('anthropic');

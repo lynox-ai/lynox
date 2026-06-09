@@ -219,7 +219,9 @@ describe('search edge cases', () => {
     const tool = createWebSearchTool(provider);
     const result = await tool.handler({ action: 'search', query: 'pytrends github' }, {} as never);
 
-    expect(rerankSpy).toHaveBeenCalledWith('pytrends github', raw);
+    // Now threads opts + the agent's provider snapshot (undefined for this
+    // bare `{}` test agent → reranker falls back to the global active provider).
+    expect(rerankSpy).toHaveBeenCalledWith('pytrends github', raw, {}, undefined);
     expect(result).toContain('Pytrends');
     expect(result).not.toContain('Noise');
     rerankSpy.mockRestore();

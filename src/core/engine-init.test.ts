@@ -1,9 +1,20 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock all heavy dependencies that generateInitBriefing needs
+const { memoryCtorSpy } = vi.hoisted(() => ({ memoryCtorSpy: vi.fn() }));
+
 vi.mock('@anthropic-ai/sdk', () => ({ default: vi.fn() }));
 vi.mock('./run-history.js', () => ({ RunHistory: vi.fn() }));
-vi.mock('./memory.js', () => ({ Memory: vi.fn() }));
+vi.mock('./memory.js', () => ({
+  Memory: class {
+    constructor(...args: unknown[]) { memoryCtorSpy(...args); }
+    setActiveScopes(): void { /* stub */ }
+    setAutoScope(): void { /* stub */ }
+    setExtractionLimit(): void { /* stub */ }
+    async loadAll(): Promise<void> { /* stub */ }
+  },
+}));
+vi.mock('./features.js', () => ({ isFeatureEnabled: () => false }));
 vi.mock('./secret-vault.js', () => ({ SecretVault: vi.fn() }));
 vi.mock('./secret-store.js', () => ({ SecretStore: vi.fn() }));
 vi.mock('./config.js', () => ({
@@ -45,8 +56,9 @@ vi.mock('./project.js', () => ({
   detectProjectRoot: vi.fn(),
 }));
 
-import { generateInitBriefing } from './engine-init.js';
-import type { LynoxContext } from '../types/index.js';
+import { generateInitBriefing, initMemoryInstance } from './engine-init.js';
+import type { LynoxContext, LynoxConfig, LynoxUserConfig } from '../types/index.js';
+import type { SecretStore } from './secret-store.js';
 
 const cliContext: LynoxContext = {
   id: 'test-ctx',
@@ -107,5 +119,58 @@ describe('generateInitBriefing', () => {
       [],
     );
     expect(result.briefing).toBeUndefined();
+  });
+});
+
+describe('initMemoryInstance — provider-resolved key', () => {
+  beforeEach(() => memoryCtorSpy.mockReset());
+
+  // Regression guard: the Memory auto-extract client must authenticate with the
+  // provider's own key slot. Passing userConfig.api_key (the ANTHROPIC slot)
+  // unconditionally — the pre-fix behaviour — sent an Anthropic / empty key to
+  // api.mistral.ai on a Mistral tenant → 401 → silent dead memory extraction.
+  it('passes the MISTRAL slot key (not the Anthropic config key) on the openai provider', async () => {
+    const prev = process.env['MISTRAL_API_KEY'];
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-RIGHT';
+    try {
+      const config = { memory: true } as unknown as LynoxConfig;
+      const userConfig = {
+        provider: 'openai',
+        api_key: 'sk-ant-WRONG-anthropic-slot',
+        api_base_url: 'https://api.mistral.ai/v1',
+        openai_model_id: 'mistral-large-2512',
+      } as unknown as LynoxUserConfig;
+
+      await initMemoryInstance(config, userConfig, [], 'ctx1', null);
+
+      expect(memoryCtorSpy).toHaveBeenCalledOnce();
+      const args = memoryCtorSpy.mock.calls[0]!;
+      expect(args[1]).toBe('sk-mistral-RIGHT');         // arg 2 = apiKey
+      expect(args[1]).not.toBe('sk-ant-WRONG-anthropic-slot');
+      expect(args[6]).toBe('openai');                    // arg 7 = provider
+    } finally {
+      if (prev === undefined) delete process.env['MISTRAL_API_KEY'];
+      else process.env['MISTRAL_API_KEY'] = prev;
+    }
+  });
+
+  it('honours the legacy Anthropic config.api_key fallback on the anthropic provider', async () => {
+    const prevA = process.env['ANTHROPIC_API_KEY'];
+    delete process.env['ANTHROPIC_API_KEY'];
+    try {
+      const config = { memory: true } as unknown as LynoxConfig;
+      const userConfig = {
+        provider: 'anthropic',
+        api_key: 'sk-ant-legacy-config',
+      } as unknown as LynoxUserConfig;
+      const secretStore = { resolve: () => null } as unknown as SecretStore;
+
+      await initMemoryInstance(config, userConfig, [], undefined, secretStore);
+
+      const args = memoryCtorSpy.mock.calls.at(-1)!;
+      expect(args[1]).toBe('sk-ant-legacy-config');
+    } finally {
+      if (prevA !== undefined) process.env['ANTHROPIC_API_KEY'] = prevA;
+    }
   });
 });
