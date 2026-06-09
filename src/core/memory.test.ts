@@ -1047,4 +1047,79 @@ describe('Memory', () => {
       });
     });
   });
+
+  describe('maybeUpdate — provider-robust extraction parsing', () => {
+    // Smaller openai-compat models (e.g. ministral-8b on the Mistral 'fast'
+    // tier) return the extraction object nested one level deeper or as arrays
+    // instead of the documented namespace→string shape. The strict pre-fix
+    // parser dropped those, so Mistral-tenant memory persisted nothing even
+    // after the provider-key fix. coerceExtractionValue flattens them.
+    const LONG_ANSWER = 'A'.repeat(120); // exceeds the 50-char maybeUpdate floor
+
+    beforeEach(() => {
+      mockCreate.mockReset();
+    });
+
+    it('flattens a nested-object value (the ministral-8b shape) into a string', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"knowledge": {"project": "Codename Polarstern, Budget CHF 7400"}}' }],
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(await mem.load('knowledge')).toBe('Codename Polarstern, Budget CHF 7400');
+    });
+
+    it('flattens an array value into a joined string', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"learnings": ["avoid mocking the DB", "prefer a real DB in integration tests"]}' }],
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(await mem.load('learnings')).toBe('avoid mocking the DB; prefer a real DB in integration tests');
+    });
+
+    it('persists multiple nested namespaces in one extraction (real ministral output)', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockResolvedValue({
+        content: [{
+          type: 'text',
+          text: '{"knowledge": {"project": "Polarstern in Helsinki"}, "status": {"open": "milestone planning pending"}}',
+        }],
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(await mem.load('knowledge')).toBe('Polarstern in Helsinki');
+      // 'status' is timeline-stamped on append, so assert the coerced content survives.
+      expect(await mem.load('status')).toContain('milestone planning pending');
+    });
+
+    it('still accepts the documented flat-string shape (Anthropic regression)', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"knowledge": "Project requires PostgreSQL 16+ for JSONB path queries."}' }],
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(await mem.load('knowledge')).toBe('Project requires PostgreSQL 16+ for JSONB path queries.');
+    });
+
+    it('drops empty-object and non-string values without persisting noise', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"knowledge": {}, "status": 42, "methods": null}' }],
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(await mem.load('knowledge')).toBeNull();
+      expect(await mem.load('status')).toBeNull();
+      expect(await mem.load('methods')).toBeNull();
+    });
+  });
 });

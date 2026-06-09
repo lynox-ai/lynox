@@ -75,6 +75,39 @@ function parseExtractionJson(raw: string): unknown {
   throw new Error('No JSON object found');
 }
 
+/**
+ * Coerce an extraction value into a flat string. The EXTRACTION_PROMPT asks for
+ * `namespace → string`, and Anthropic models comply. But smaller openai-compat
+ * models (e.g. ministral-8b on the 'fast' tier) sometimes nest one level deeper
+ * — `"knowledge": { "project": "…" }` — or return an array of strings. The
+ * strict pre-fix parser required `typeof value === 'string'`, so those entries
+ * were silently dropped and Mistral-tenant memory extraction persisted nothing
+ * even once the provider key was correct. Flatten nested objects / arrays into
+ * a single string so extraction is provider-robust. Returns null when no string
+ * content can be recovered (caller drops the entry). Depth-bounded against
+ * pathological nesting; extraction outputs are <=1024 tokens so this is ample.
+ */
+function coerceExtractionValue(value: unknown, depth = 0): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (depth >= 4) return null;
+  if (Array.isArray(value)) {
+    const parts = value
+      .map(v => coerceExtractionValue(v, depth + 1))
+      .filter((s): s is string => s !== null);
+    return parts.length > 0 ? parts.join('; ') : null;
+  }
+  if (value !== null && typeof value === 'object') {
+    const parts = Object.values(value as Record<string, unknown>)
+      .map(v => coerceExtractionValue(v, depth + 1))
+      .filter((s): s is string => s !== null);
+    return parts.length > 0 ? parts.join('; ') : null;
+  }
+  return null;
+}
+
 export class Memory implements IMemory {
   private client: Anthropic;
   private readonly cache = new Map<string, string>();
@@ -468,9 +501,9 @@ export class Memory implements IMemory {
       if (typeof parsed !== 'object' || parsed === null) return;
 
       const entries = Object.entries(parsed as Record<string, unknown>)
-        .filter((entry): entry is [string, string] =>
-          ALL_NAMESPACES.includes(entry[0] as MemoryNamespace) && typeof entry[1] === 'string',
-        )
+        .filter(([ns]) => ALL_NAMESPACES.includes(ns as MemoryNamespace))
+        .map(([ns, value]): [string, string | null] => [ns, coerceExtractionValue(value)])
+        .filter((entry): entry is [string, string] => entry[1] !== null)
         .filter(([ns, text]) => {
           const injection = detectInjectionAttempt(text);
           if (injection.patterns.length >= 2) {

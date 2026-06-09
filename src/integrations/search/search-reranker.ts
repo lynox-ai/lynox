@@ -12,13 +12,16 @@
  * (~$0.001, ~500-1500ms). Falls back to pass-through on any failure —
  * never blocks or errors the original search.
  *
- * Skips on: empty/1-item result sets, custom/openai providers (Haiku
- * not available), LLM call failure, malformed response, timeout.
+ * Provider-agnostic: runs on the active provider's 'fast' tier model
+ * (Haiku on Anthropic, ministral-8b on Mistral). Skips on: empty/1-item
+ * result sets, 'custom' proxies (unknown model catalogue / tool-choice
+ * support), LLM call failure, malformed response, timeout.
  */
 import type { SearchResult } from './search-provider.js';
-import { createLLMClient, getActiveProvider, isCustomProvider } from '../../core/llm-client.js';
+import { createLLMClient, getActiveProvider } from '../../core/llm-client.js';
 import { getModelId, getBetasForProvider } from '../../types/index.js';
 import type { LLMProvider } from '../../types/index.js';
+import type { ProviderConfigSnapshot } from '../../types/agent.js';
 
 export interface RerankOptions {
   /** Score threshold 0-10 for keeping a result. Default: 4. */
@@ -74,13 +77,13 @@ function isEnabled(opts: RerankOptions): boolean {
 }
 
 /**
- * Why isCustomProvider() can't be reached from the UI: the toggle/env-var
- * decision happens server-side at search time. Without this surface, users
- * who flip LYNOX_SEARCH_RERANK=true on Mistral / a custom proxy get a
- * silent no-op (skipReason: 'provider-unsupported' in the outcome, but
- * outcomes aren't surfaced in the UI). The capability snapshot is read at
- * request time so it always reflects the live provider — no DB row, no
- * settings flag, no migration needed.
+ * Why this capability surface exists: the toggle/env-var decision happens
+ * server-side at search time. Without this, users who flip
+ * LYNOX_SEARCH_RERANK=true on a 'custom' proxy get a silent no-op
+ * (skipReason: 'provider-unsupported' in the outcome, but outcomes aren't
+ * surfaced in the UI). The capability snapshot is read at request time so it
+ * always reflects the live provider — no DB row, no settings flag, no
+ * migration needed.
  */
 export interface RerankerCapability {
   supported: boolean;
@@ -96,9 +99,9 @@ export function getRerankerCapability(): RerankerCapability {
   const enabled = envVal === 'true' || envVal === '1';
 
   // Provider-capability mirror of the runtime guard in rerankSearchResults().
-  // Keep these in lockstep — if a future Mistral-native reranker lands, both
-  // gates flip together.
-  if (isCustomProvider()) {
+  // Keep these in lockstep. 'openai' (Mistral) is supported — it reranks on its
+  // own 'fast' tier model. Only opaque 'custom' proxies stay unsupported.
+  if (provider === 'custom') {
     return { supported: false, enabled, provider, reason: 'provider-unsupported' };
   }
   if (!enabled) {
@@ -111,6 +114,7 @@ export async function rerankSearchResults(
   query: string,
   results: SearchResult[],
   opts: RerankOptions = {},
+  providerConfig?: ProviderConfigSnapshot,
 ): Promise<RerankOutcome> {
   const start = Date.now();
   const base = (extra: Partial<RerankOutcome>): RerankOutcome => ({
@@ -121,9 +125,15 @@ export async function rerankSearchResults(
     ...extra,
   });
 
+  // Effective provider: prefer the per-call snapshot (managed multi-tenant /
+  // sub-agent inheritance) and fall back to the process-global active provider.
+  const provider = providerConfig?.provider ?? getActiveProvider();
+
   if (!isEnabled(opts)) return base({ skipReason: 'disabled' });
   if (results.length < 2) return base({ skipReason: 'too-few-results' });
-  if (isCustomProvider()) return base({ skipReason: 'provider-unsupported' });
+  // 'openai' (Mistral) reranks on its own 'fast' tier model. Only 'custom'
+  // proxies — unknown model catalogue and tool-choice support — still skip.
+  if (provider === 'custom') return base({ skipReason: 'provider-unsupported' });
 
   const threshold = opts.threshold ?? DEFAULT_THRESHOLD;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -133,17 +143,32 @@ export async function rerankSearchResults(
     .join('\n');
 
   try {
-    const client = createLLMClient();
-    const provider = getActiveProvider();
-    const callPromise = client.beta.messages.create({
+    // Provider-aware client: on 'openai' (Mistral) createLLMClient has NO
+    // global fallback for key/baseURL/model, so we MUST pass the resolved
+    // snapshot from the calling agent — otherwise the adapter authenticates
+    // with an empty key and 401s. Without a snapshot (callers that don't
+    // thread one) we fall back to the env-based Anthropic client.
+    const client = providerConfig
+      ? createLLMClient({
+          provider: providerConfig.provider,
+          apiKey: providerConfig.apiKey,
+          apiBaseURL: providerConfig.apiBaseURL,
+          openaiModelId: providerConfig.openaiModelId,
+          openaiAuth: providerConfig.openaiAuth,
+        })
+      : createLLMClient();
+    // The OpenAIAdapter implements only `beta.messages.stream` (not `.create`);
+    // stream().finalMessage() works for both the Anthropic SDK and the adapter,
+    // so use it uniformly. betas are an Anthropic-only concept — omit on openai.
+    const callPromise = client.beta.messages.stream({
       model: getModelId('fast', provider),
       max_tokens: 512,
-      ...(isCustomProvider() ? {} : { betas: getBetasForProvider(provider) }),
+      ...(provider === 'openai' ? {} : { betas: getBetasForProvider(provider) }),
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: `Query: "${query}"\n\nResults:\n${resultList}` }],
       tools: [SCORE_TOOL],
       tool_choice: { type: 'tool', name: 'score_results' },
-    });
+    }).finalMessage();
 
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('rerank-timeout')), timeoutMs),

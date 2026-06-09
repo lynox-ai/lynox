@@ -1,23 +1,36 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { rerankSearchResults, getRerankerCapability } from './search-reranker.js';
 import { initLLMProvider } from '../../core/llm-client.js';
+import { setOpenAIModelResolver, MISTRAL_MODEL_MAP } from '../../types/models.js';
 import type { SearchResult } from './search-provider.js';
 
-// Match the pattern used by process-capture.test.ts: a hoisted mock for
-// the Anthropic SDK constructor, with per-test configuration of the
-// messages.create return value.
+// `mockCreate` resolves the reranker's stream().finalMessage() call (it now
+// uses streaming uniformly so the OpenAIAdapter, which has no `.create`, works
+// too). createLLMClient is mocked to return a provider-agnostic fake client
+// routing to mockCreate, so we can exercise both the Anthropic and the Mistral
+// (openai) paths without a real network client. getActiveProvider/getModelId
+// stay real (the real module-global provider switch drives tier selection).
 const mockCreate = vi.fn();
+const createLLMClientSpy = vi.fn();
 
-vi.mock('@anthropic-ai/sdk', () => ({
-  default: class MockAnthropic {
-    beta = {
-      messages: {
-        create: (...args: unknown[]) => mockCreate(...args),
-      },
-    };
-    constructor(..._args: unknown[]) { /* accept any */ }
+const fakeClient = {
+  beta: {
+    messages: {
+      stream: (...args: unknown[]) => ({ finalMessage: () => mockCreate(...args) }),
+    },
   },
-}));
+};
+
+vi.mock('../../core/llm-client.js', async () => {
+  const actual = await vi.importActual<typeof import('../../core/llm-client.js')>('../../core/llm-client.js');
+  return {
+    ...actual,
+    createLLMClient: (opts?: unknown) => {
+      createLLMClientSpy(opts);
+      return fakeClient;
+    },
+  };
+});
 
 function makeResults(): SearchResult[] {
   return [
@@ -43,6 +56,7 @@ function makeScoreResponse(scores: number[]): unknown {
 describe('rerankSearchResults', () => {
   beforeEach(() => {
     mockCreate.mockReset();
+    createLLMClientSpy.mockReset();
     delete process.env['LYNOX_SEARCH_RERANK'];
   });
 
@@ -167,12 +181,63 @@ describe('rerankSearchResults', () => {
     expect((call['system'] as string)).toMatch(/relevance scorer/i);
     expect(Array.isArray(call['tools'])).toBe(true);
   });
+
+  it('runs on the openai (Mistral) provider with a snapshot — fast-tier model, no betas', async () => {
+    // Engine bootstrap registers this map in prod; do it here so the fast tier
+    // resolves to the real Mistral model rather than the Anthropic-id fallback.
+    setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+    try {
+      mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 10, 2]));
+      const snapshot = {
+        provider: 'openai' as const,
+        apiKey: 'sk-mistral-RIGHT',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        openaiModelId: 'mistral-large-2512',
+        openaiAuth: undefined,
+      };
+
+      const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true }, snapshot);
+
+      // Did NOT skip on openai (the pre-fix behaviour was a hard skip).
+      expect(out.skipReason).toBeUndefined();
+      expect(out.results).toHaveLength(2);
+      // The client was built provider-aware from the snapshot, not the env.
+      expect(createLLMClientSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'openai',
+          apiKey: 'sk-mistral-RIGHT',
+          apiBaseURL: 'https://api.mistral.ai/v1',
+          openaiModelId: 'mistral-large-2512',
+        }),
+      );
+      const call = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
+      expect(call['model']).toMatch(/ministral/i); // Mistral fast tier, not Haiku
+      expect(call['betas']).toBeUndefined();        // betas are Anthropic-only
+    } finally {
+      setOpenAIModelResolver({ map: null }); // reset so other suites see legacy behaviour
+    }
+  });
+
+  it('still skips a custom provider snapshot (unknown model / tool-choice support)', async () => {
+    const snapshot = {
+      provider: 'custom' as const,
+      apiKey: 'k',
+      apiBaseURL: 'https://proxy.example',
+      openaiModelId: undefined,
+      openaiAuth: undefined,
+    };
+
+    const out = await rerankSearchResults('x', makeResults(), { enabled: true }, snapshot);
+
+    expect(out.skipReason).toBe('provider-unsupported');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
 });
 
 // The capability surface is what `/api/search/reranker/capability` returns
 // and is the SSoT for the SearchSettings UI card. Keep these tests aligned
-// with the runtime guard in `rerankSearchResults` — if a future Mistral
-// native reranker lands, both flip together.
+// with the runtime guard in `rerankSearchResults`: anthropic/vertex/openai are
+// supported; only opaque 'custom' proxies are not.
 describe('getRerankerCapability', () => {
   // Snapshot + restore so tests don't leak state into each other or into
   // the rerankSearchResults suite below.
@@ -210,17 +275,15 @@ describe('getRerankerCapability', () => {
     expect(cap.reason).toBeUndefined();
   });
 
-  it('reports unsupported on openai provider (Mistral / OpenAI-compat) even with env on', async () => {
+  it('reports supported + enabled on the openai provider (Mistral) when env on', async () => {
     await initLLMProvider('openai');
     process.env['LYNOX_SEARCH_RERANK'] = 'true';
     const cap = getRerankerCapability();
-    // The UI key — `supported=false` is the signal that flips the card to
-    // "Reranker is currently Anthropic-only". `enabled` still reflects the
-    // user's env intent so the UI can say "you tried to enable it, but…".
-    expect(cap.supported).toBe(false);
+    // openai now reranks on its own fast-tier model — supported, like anthropic.
+    expect(cap.supported).toBe(true);
     expect(cap.enabled).toBe(true);
     expect(cap.provider).toBe('openai');
-    expect(cap.reason).toBe('provider-unsupported');
+    expect(cap.reason).toBeUndefined();
   });
 
   it('reports unsupported on custom provider', async () => {
