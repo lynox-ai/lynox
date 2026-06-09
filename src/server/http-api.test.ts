@@ -1589,6 +1589,28 @@ describe('LynoxHTTPApi', () => {
       expect(body.names).toContain('ANTHROPIC_API_KEY');
     });
 
+    it('POST /api/secrets/validate-key blocks a cloud-metadata api_base_url (SSRF guard)', async () => {
+      const res = await jsonFetch('/api/secrets/validate-key', {
+        method: 'POST',
+        body: JSON.stringify({ provider: 'custom', key: 'sk-test', api_base_url: 'http://169.254.169.254/v1' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { state: string; error?: string };
+      // assertPublicUrl rejects the private/metadata host before any fetch fires.
+      expect(body.state).toBe('invalid');
+      expect(body.error).toMatch(/public address/i);
+    });
+
+    it('POST /api/secrets/validate-key blocks an RFC1918 api_base_url (SSRF guard)', async () => {
+      const res = await jsonFetch('/api/secrets/validate-key', {
+        method: 'POST',
+        body: JSON.stringify({ provider: 'openai', key: 'sk-test', api_base_url: 'http://10.1.2.3:8080/v1' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { state: string };
+      expect(body.state).toBe('invalid');
+    });
+
     it('PUT stores a secret', async () => {
       const res = await jsonFetch('/api/secrets/NEW_KEY', {
         method: 'PUT',

@@ -146,10 +146,15 @@ export async function validateOpenAICompatKey(
   key: string,
   baseUrl: string,
   providerLabel = 'OpenAI-compatible endpoint',
+  // Injectable fetch so a server-side caller with a USER-supplied baseUrl can
+  // pass an SSRF-safe transport (network-guard's fetchWithPublicRedirects:
+  // pins the resolved IP + re-validates each redirect hop). Defaults to global
+  // fetch for the CLI installer + the fixed-URL Mistral validator.
+  fetchImpl: (url: string, init: RequestInit) => Promise<Response> = fetch,
 ): Promise<KeyValidation> {
   try {
     const url = baseUrl.replace(/\/+$/, '') + '/models';
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${key}`,

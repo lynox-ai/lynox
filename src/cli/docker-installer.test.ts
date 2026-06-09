@@ -24,6 +24,7 @@ import {
   readVaultKeyFromRecoveryFile,
   validateAnthropicKey,
   validateMistralKey,
+  validateOpenAICompatKey,
 } from './docker-installer.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -453,5 +454,21 @@ describe('docker-installer', () => {
         /envVars\['ORIGIN'\]\s*=\s*`http:\/\/localhost:\$\{String\(hostPort\)\}`/,
       );
     });
+  });
+});
+
+describe('validateOpenAICompatKey — injectable fetch for SSRF-safe server callers', () => {
+  it('uses the injected fetchImpl (not global fetch) so a server caller can pin the transport', async () => {
+    const injected = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const globalSpy = vi.spyOn(globalThis, 'fetch');
+    const r = await validateOpenAICompatKey('k', 'https://api.example.com/v1', undefined, injected as unknown as typeof fetch);
+    expect(r).toEqual({ state: 'valid' });
+    expect(injected).toHaveBeenCalledWith(
+      'https://api.example.com/v1/models',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    // The whole point: the server-side probe must NOT fall back to bare fetch.
+    expect(globalSpy).not.toHaveBeenCalled();
+    globalSpy.mockRestore();
   });
 });
