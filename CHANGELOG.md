@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 1.12.0 — 2026-06-09
+
+Provenance lifecycle lands as a first-class data property, alongside a wave of correctness, billing-integrity, and security fixes across the engine and the managed control plane.
+
+### Added
+
+- **Provenance lifecycle** — every recalled fact now carries an un-spoofable structural `<fact kind="…">` marker for its origin (user-asserted / tool-verified / agent-inferred / external-unverified), captured at the source and threaded through recall, sub-agent grounding, and compaction. Engine `agent-memory.db` migrates v3→v4→v5 per tenant on boot. (#700)
+
+### Changed
+
+- Removed the dead behavioural pattern-engine — its output never reached the agent (confidence below the consumer threshold); KPI metrics are unchanged. (#699)
+
+### Fixed
+
+- **Managed billing — saved & scheduled workflows now count against the budget.** Saved-workflow and scheduled-pipeline runs bypassed the daily/monthly cap, the managed credit gate, and cost reporting, so on managed tiers they could run uncapped and unbilled. They now flow through the same budget + credit lifecycle as an interactive turn: the cost decrements the tenant's balance and an exhausted-budget tenant is blocked. (#706)
+- **Auto-memory + search reranker now work on Mistral / OpenAI-compatible tenants** — secondary LLM call sites (memory extraction, reranker, dag-planner) were keyed to the wrong provider slot and silently failed with a 401 on non-Anthropic tenants. (#703)
+- Old or deleted threads return `200` with an empty transcript instead of a `404` that surfaced as a browser console error. (#705)
+- BYOK custom-endpoint key validation rejects a private / internal / cloud-metadata base URL before probing it (SSRF defense-in-depth). (#707)
+- Managed control plane: the admin env-preview no longer returns the CP-pool LLM keys / migration token in plaintext (masked); Hono bumped for a cookie-handling advisory. (#274)
+- Managed control plane: the per-tenant host SSH key is decrypted before use, so deploys to encrypted hosts no longer fail. (#273)
+- Managed control plane: a same-tag (`staging`→`staging`) rollout reaches an instance pinned to that moving tag instead of silently skipping it. (#272)
+
 
 ## 1.11.1 — 2026-06-08
 
