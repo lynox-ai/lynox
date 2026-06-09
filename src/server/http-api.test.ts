@@ -2326,6 +2326,48 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('threads — graceful missing thread (issue #702)', () => {
+    // Temporarily swap the engine's getThreadStore (null by default) for a
+    // stub, restoring it after each case (mirrors withRegistry above).
+    async function withThreadStore(store: unknown, test: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+      const orig = engineRef.getThreadStore;
+      engineRef.getThreadStore = (): unknown => store;
+      try { await test(); } finally { engineRef.getThreadStore = orig; }
+    }
+
+    it('GET /api/threads/:id returns 200 + threadMissing for an unknown thread (no 404 console noise)', async () => {
+      await withThreadStore({ getThread: () => null, getMessages: () => [] }, async () => {
+        const res = await jsonFetch('/api/threads/does-not-exist');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { thread: unknown; threadMissing?: boolean };
+        expect(body.thread).toBeNull();
+        expect(body.threadMissing).toBe(true);
+      });
+    });
+
+    it('GET /api/threads/:id/messages returns 200 + empty list + threadMissing for an unknown thread', async () => {
+      await withThreadStore({ getThread: () => null, getMessages: () => [] }, async () => {
+        const res = await jsonFetch('/api/threads/does-not-exist/messages');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { messages: unknown[]; activeRun: unknown; threadMissing?: boolean };
+        expect(body.messages).toEqual([]);
+        expect(body.activeRun).toBeNull();
+        expect(body.threadMissing).toBe(true);
+      });
+    });
+
+    it('GET /api/threads/:id/messages on an existing-but-empty thread omits threadMissing (distinguishes gone from empty)', async () => {
+      await withThreadStore({ getThread: () => ({ id: 't1' }), getMessages: () => [] }, async () => {
+        const res = await jsonFetch('/api/threads/t1/messages');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { messages: unknown[]; threadMissing?: boolean };
+        expect(body.threadMissing).toBeUndefined();
+        expect(body.messages).toEqual([]);
+      });
+    });
+  });
+
   describe('tasks', () => {
     it('GET lists tasks', async () => {
       const res = await jsonFetch('/api/tasks');
