@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { rerankSearchResults, getRerankerCapability } from './search-reranker.js';
 import { initLLMProvider } from '../../core/llm-client.js';
-import { setOpenAIModelResolver, MISTRAL_MODEL_MAP } from '../../types/models.js';
+import { setOpenAIModelResolver, getActiveOpenAIModelMap, MISTRAL_MODEL_MAP } from '../../types/models.js';
 import type { SearchResult } from './search-provider.js';
 
 // `mockCreate` resolves the reranker's stream().finalMessage() call (it now
@@ -185,6 +185,7 @@ describe('rerankSearchResults', () => {
   it('runs on the openai (Mistral) provider with a snapshot — fast-tier model, no betas', async () => {
     // Engine bootstrap registers this map in prod; do it here so the fast tier
     // resolves to the real Mistral model rather than the Anthropic-id fallback.
+    const priorMap = getActiveOpenAIModelMap();
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
     try {
       mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 10, 2]));
@@ -211,10 +212,10 @@ describe('rerankSearchResults', () => {
         }),
       );
       const call = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
-      expect(call['model']).toMatch(/ministral/i); // Mistral fast tier, not Haiku
-      expect(call['betas']).toBeUndefined();        // betas are Anthropic-only
+      expect(call['model']).toMatch(/ministral-8b/); // the FAST tier specifically, not large/Haiku
+      expect(call['betas']).toBeUndefined();         // betas are Anthropic-only
     } finally {
-      setOpenAIModelResolver({ map: null }); // reset so other suites see legacy behaviour
+      setOpenAIModelResolver({ map: priorMap }); // restore prior, don't clobber other suites
     }
   });
 

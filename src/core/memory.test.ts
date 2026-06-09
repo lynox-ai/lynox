@@ -1121,5 +1121,16 @@ describe('Memory', () => {
       expect(await mem.load('status')).toBeNull();
       expect(await mem.load('methods')).toBeNull();
     });
+
+    it('drops values nested beyond the depth cap (no runaway recursion)', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"knowledge": {"a": {"b": {"c": {"d": {"e": "buried too deep"}}}}}}' }],
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(await mem.load('knowledge')).toBeNull();
+    });
   });
 });

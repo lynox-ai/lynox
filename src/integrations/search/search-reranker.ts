@@ -128,12 +128,18 @@ export async function rerankSearchResults(
   // Effective provider: prefer the per-call snapshot (managed multi-tenant /
   // sub-agent inheritance) and fall back to the process-global active provider.
   const provider = providerConfig?.provider ?? getActiveProvider();
+  const isOpenAICompat = provider === 'custom' || provider === 'openai';
 
   if (!isEnabled(opts)) return base({ skipReason: 'disabled' });
   if (results.length < 2) return base({ skipReason: 'too-few-results' });
   // 'openai' (Mistral) reranks on its own 'fast' tier model. Only 'custom'
   // proxies — unknown model catalogue and tool-choice support — still skip.
   if (provider === 'custom') return base({ skipReason: 'provider-unsupported' });
+  // openai has no global key/baseURL fallback in createLLMClient, so without a
+  // provider snapshot we can't authenticate — skip rather than fire a doomed
+  // empty-client call. Prod callers (web-search-tool) always thread the agent
+  // snapshot, so this only guards bare/partial callers.
+  if (provider === 'openai' && !providerConfig) return base({ skipReason: 'provider-unsupported' });
 
   const threshold = opts.threshold ?? DEFAULT_THRESHOLD;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -163,7 +169,7 @@ export async function rerankSearchResults(
     const callPromise = client.beta.messages.stream({
       model: getModelId('fast', provider),
       max_tokens: 512,
-      ...(provider === 'openai' ? {} : { betas: getBetasForProvider(provider) }),
+      ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: `Query: "${query}"\n\nResults:\n${resultList}` }],
       tools: [SCORE_TOOL],
