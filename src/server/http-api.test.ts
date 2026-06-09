@@ -122,6 +122,10 @@ vi.mock('../core/engine.js', () => ({
       complete: mockTaskComplete,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    // The saved-workflow run path now flows through the budget/credit
+    // lifecycle (runGuardedSavedWorkflow), which reads these off the engine.
+    this.getContext = vi.fn().mockReturnValue(null);
+    this.getHooks = vi.fn().mockReturnValue([]);
     this.getSecurityAudit = vi.fn().mockReturnValue({
       // Content-free aggregate rows only — no input_preview/detail by construction.
       getContentFreeAggregates: vi.fn().mockReturnValue([

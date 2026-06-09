@@ -3551,9 +3551,10 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
-      const { runSavedWorkflow } = await import('../tools/builtin/pipeline.js');
-      const config = engine.getUserConfig();
-      const result = await runSavedWorkflow(params['id']!, history, config);
+      // Route through the budget + managed-credit lifecycle (cap, credit gate,
+      // cost report) — runSavedWorkflow alone bypasses all three.
+      const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
+      const result = await runGuardedSavedWorkflow(engine, params['id']!);
       if (!result.ok) {
         const code = result.error?.includes('not found') ? 404 : 400;
         errorResponse(res, code, result.error ?? 'Workflow run failed');
