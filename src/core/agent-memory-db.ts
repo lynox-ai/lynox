@@ -13,6 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
+import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 
 // ── Row Types (internal, not exported) ──────────────────────────
 
@@ -34,6 +35,9 @@ export interface MemoryRow {
   last_retrieved_at: string | null;
   created_at: string;
   updated_at: string;
+  // v5 provenance lifecycle — present on every row (NOT NULL DEFAULT backfill).
+  source_type: string;
+  source_tool_name: string | null;
 }
 
 export interface EntityRow {
@@ -225,6 +229,13 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (4);
    DROP INDEX IF EXISTS idx_patterns_type;
    DROP TABLE IF EXISTS patterns;`,
+
+  // v5: Provenance lifecycle (PRD v3) — capture the source tier of each datum.
+  // NOT NULL DEFAULT backfills every pre-existing row to the conservative
+  // 'agent_inferred' tier (we cannot retroactively know if it was user/tool).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+   ALTER TABLE memories ADD COLUMN source_type TEXT NOT NULL DEFAULT 'agent_inferred';
+   ALTER TABLE memories ADD COLUMN source_tool_name TEXT;`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -454,6 +465,8 @@ export class AgentMemoryDb {
     scopeId: string;
     sourceRunId?: string | undefined;
     sourceThreadId?: string | undefined;
+    sourceType?: ProvenanceKind | undefined;
+    sourceToolName?: string | undefined;
     provider?: string | undefined;
     embedding: number[];
   }): string {
@@ -463,12 +476,13 @@ export class AgentMemoryDb {
 
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_run_id,
-        source_thread_id, provider, embedding, confidence, is_active, retrieval_count,
-        confirmation_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
+        source_thread_id, source_type, source_tool_name, provider, embedding, confidence,
+        is_active, retrieval_count, confirmation_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
     `).run(
       id, props.text, props.namespace, props.scopeType, props.scopeId,
       props.sourceRunId ?? null, props.sourceThreadId ?? null,
+      props.sourceType ?? DEFAULT_PROVENANCE_KIND, props.sourceToolName ?? null,
       props.provider ?? 'onnx', embBlob, now, now,
     );
 

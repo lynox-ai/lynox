@@ -1,4 +1,5 @@
 import { channels } from './observability.js';
+import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 
 interface InjectionResult {
   detected: boolean;
@@ -41,6 +42,17 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 
   // Email/messaging exfiltration — attacker instructs agent to forward data via email or messaging
   { pattern: /\b(forward|send|reply|email|mail)\b.*\b(this|the|all|my|these)\b.*\b(to|at)\b.*@/i, label: 'email exfiltration instruction' },
+
+  // Provenance-marker forgery (PRD v3 / INV-1) — untrusted content trying to
+  // impersonate an engine-emitted trust marker (credibility laundering). The
+  // recall surface neutralizes the `<fact>` form via escapeXml, but the bracket
+  // form is NOT escaped and other scanned surfaces (tool results, compaction
+  // input) must catch both. `kind` tokens are coined snake_case → ~zero FP risk.
+  { pattern: /<\s*\/?\s*fact(?:\s|>|\/)/i, label: 'provenance marker forgery' },
+  { pattern: /&lt;\s*\/?\s*fact(?:\s|&gt;|\/)/i, label: 'provenance marker forgery (entity)' },
+  { pattern: /(?:&#0*60;|&#x0*3c;)\s*\/?\s*fact\b/i, label: 'provenance marker forgery (numeric entity)' },
+  { pattern: /\[\s*(?:tool_verified|user_asserted|agent_inferred|external_unverified)\b/i, label: 'provenance marker forgery (bracket)' },
+  { pattern: /\bkind\s*=\s*["']?(?:tool_verified|user_asserted|agent_inferred|external_unverified)\b/i, label: 'provenance marker forgery (attribute)' },
 ];
 
 /**
@@ -71,6 +83,49 @@ export function escapeXml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+/**
+ * The structural element name that carries engine-asserted provenance
+ * (PRD v3 / INV-1). Untrusted content CANNOT synthesize a real one because
+ * `renderProvenanceFact` runs the body through `escapeXml`, turning any embedded
+ * `<fact …>` into inert `&lt;fact …&gt;`. Only engine-emitted `<fact>` elements
+ * carry trust — never a marker appearing inside fact text.
+ */
+export const PROVENANCE_FACT_TAG = 'fact';
+
+/**
+ * Render a single fact as the structural `<fact kind=…>` element. The body is
+ * escaped (un-spoofable marker); attributes come ONLY from engine-trusted
+ * metadata (the captured `kind`, the registry tool *name*, the stored
+ * confidence) — never parsed from content.
+ */
+export function renderProvenanceFact(opts: {
+  text: string;
+  kind: ProvenanceKind;
+  tool?: string | null | undefined;
+  confidence?: number | null | undefined;
+  /** Extra engine-trusted attributes (e.g. ns, date, relevance). Both keys and
+   *  values are escaped — but these must come from engine metadata, never content. */
+  attrs?: Record<string, string | number | null | undefined> | undefined;
+}): string {
+  // Defensive: a security-boundary helper must never throw on malformed input.
+  // An un-tiered fact falls back to the conservative default tier.
+  const kind: ProvenanceKind = opts.kind ?? DEFAULT_PROVENANCE_KIND;
+  const parts: string[] = [`kind="${escapeXml(kind)}"`];
+  if (opts.tool) {
+    parts.push(`tool="${escapeXml(opts.tool)}"`);
+  }
+  if (typeof opts.confidence === 'number' && Number.isFinite(opts.confidence)) {
+    parts.push(`confidence="${opts.confidence.toFixed(2)}"`);
+  }
+  if (opts.attrs) {
+    for (const [k, v] of Object.entries(opts.attrs)) {
+      if (v === null || v === undefined) continue;
+      parts.push(`${escapeXml(k)}="${escapeXml(String(v))}"`);
+    }
+  }
+  return `<fact ${parts.join(' ')}>${escapeXml(opts.text)}</fact>`;
 }
 
 /**

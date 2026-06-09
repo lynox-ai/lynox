@@ -61,7 +61,22 @@ describe('memoryStoreTool', () => {
     expect(channels.memoryStore.publish).toHaveBeenCalledWith({
       namespace: 'knowledge',
       content: 'channel test',
+      sourceType: 'agent_inferred',
     });
+  });
+
+  it('captures the agent-declared sourceType in the published event', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const append = vi.fn().mockResolvedValue(undefined);
+    const agent = makeAgent(makeMockMemory({ append }));
+
+    await memoryStoreTool.handler(
+      { namespace: 'knowledge', content: 'the user told me their budget', sourceType: 'user_asserted' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'the user told me their budget', sourceType: 'user_asserted' }),
+    );
   });
 
   it('stores content via agent.memory.append and returns confirmation', async () => {
@@ -655,6 +670,7 @@ describe('memoryPromoteTool', () => {
       content: 'User pattern B',
       scopeType: 'context',
       scopeId: 'proj1',
+      sourceType: 'agent_inferred',
     });
   });
 

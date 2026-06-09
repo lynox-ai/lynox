@@ -16,8 +16,10 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
+  ProvenanceKind,
   DataStoreColumnDef,
 } from '../types/index.js';
+import { DEFAULT_PROVENANCE_KIND } from '../types/index.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -649,7 +651,12 @@ export function setupMemoryStoreSubscription(
   const activeEmbeddings = new Set<Promise<void>>();
 
   channels.memoryStore.subscribe((msg: unknown) => {
-    const data = msg as { namespace: string; content: string; scopeType?: string | undefined; scopeId?: string | undefined; sourceThreadId?: string | undefined };
+    const data = msg as {
+      namespace: string; content: string;
+      scopeType?: string | undefined; scopeId?: string | undefined;
+      sourceThreadId?: string | undefined;
+      sourceType?: ProvenanceKind | undefined; sourceToolName?: string | undefined;
+    };
 
     const run = async (): Promise<void> => {
       if (activeEmbeddings.size >= MAX_EMBEDDING_CONCURRENCY) {
@@ -665,7 +672,14 @@ export function setupMemoryStoreSubscription(
             data.content,
             data.namespace as MemoryNamespace,
             scope,
-            { sourceRunId: getCurrentRunId() ?? undefined, sourceThreadId: data.sourceThreadId },
+            {
+              sourceRunId: getCurrentRunId() ?? undefined,
+              sourceThreadId: data.sourceThreadId,
+              // Conservative default: events without a declared tier (e.g. the
+              // maybeUpdate auto-extraction path) land as agent_inferred.
+              sourceType: data.sourceType ?? DEFAULT_PROVENANCE_KIND,
+              sourceToolName: data.sourceToolName,
+            },
           );
         } catch (err: unknown) {
           process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);

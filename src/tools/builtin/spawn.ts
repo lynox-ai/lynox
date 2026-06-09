@@ -11,7 +11,7 @@ import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix } from '../../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -213,7 +213,12 @@ async function executeThinker(
   const modelTier = (gatedOverride ?? resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier;
   // Profile overrides model ID + provider; otherwise use Claude tier resolution
   const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider());
-  const systemPrompt = spec.system_prompt;
+  // A2: every sub-agent carries the grounding block. Prepend it to the
+  // caller-supplied prompt, OR use it standalone when none was given — otherwise
+  // the child falls through to agent.ts's bare default, which has NO grounding.
+  const systemPrompt = spec.system_prompt
+    ? `${GROUNDING_PROMPT_BLOCK}\n\n${spec.system_prompt}`
+    : GROUNDING_PROMPT_BLOCK;
   // OpenAI providers don't support thinking or effort
   const thinking = profile ? { type: 'disabled' as const } : spec.thinking;
   const effort = profile ? undefined : (spec.effort ?? resolved?.effort);
@@ -465,7 +470,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               name: { type: 'string', minLength: 1, maxLength: MAX_SPAWN_NAME_LENGTH },
               task: { type: 'string', minLength: 1, maxLength: MAX_SPAWN_TASK_LENGTH },
               role: { type: 'string', enum: ['researcher', 'creator', 'operator', 'collector'], description: 'Role ID. Configures model, tools, and capabilities. Must be one of the four built-ins; omit the field entirely for a custom role.' },
-              context: { type: 'string', description: 'Additional context prepended to the task.' },
+              context: { type: 'string', description: 'Additional context prepended to the task. Sub-agents share NO context — pass the REAL source or verbatim excerpts (file paths, quoted figures, actual fact text) the sub-task hinges on, not your paraphrase; a child given only a summary grounds in a guess.' },
               isolated_memory: { type: 'boolean', description: 'If true, agent has no access to parent memory.' },
               system_prompt: { type: 'string' },
               model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier — fast (cheap/quick), balanced (default), deep (reasoning-heavy). Provider-agnostic; resolves to a concrete model per the active provider.' },
