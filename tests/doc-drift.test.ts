@@ -48,3 +48,29 @@ describe('doc<->code drift: Mistral tier map (src/types/models.ts)', () => {
     });
   });
 });
+
+describe('doc<->code drift: LLM provider framing (src/types/models.ts LLMProvider)', () => {
+  // SoT: `LLMProvider = 'anthropic' | 'vertex' | 'custom' | 'openai'` (models.ts).
+  // Mistral runs via the 'openai' (OpenAI-compatible) path and is a FIRST-CLASS
+  // native provider alongside Anthropic — NOT a fallback. These cases lock the
+  // prose to that truth so the recurring "Mistral fallback" / "Bedrock" drift
+  // (2026-06-09) can't silently reappear. SoT lives in code; prose must track it.
+  const claude = read('CLAUDE.md');
+
+  it('the in-product wizard lists Anthropic AND Mistral as first-class options', () => {
+    expect(claude).toMatch(/Anthropic\s*\/\s*Mistral/i);
+  });
+
+  it('does NOT frame Mistral as a fallback (it is first-class native)', () => {
+    // Narrow window so unrelated "fallback" mentions (DuckDuckGo, SvelteKit
+    // handler) don't false-positive — only "Mistral … fallback" trips it.
+    expect(claude).not.toMatch(/Mistral[^\n.]{0,30}fallback/i);
+  });
+
+  it('Bedrock, if mentioned, is only flagged as removed (never a live provider)', () => {
+    const idx = claude.search(/\bBedrock\b/i);
+    if (idx < 0) return; // absent is fine
+    const window = claude.slice(Math.max(0, idx - 80), idx + 80);
+    expect(window).toMatch(/remov|no longer|gone|retir|not the managed/i);
+  });
+});
