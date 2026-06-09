@@ -2963,7 +2963,22 @@ export class LynoxHTTPApi {
           jsonResponse(res, 200, result);
         } else if (provider === 'openai' || provider === 'custom') {
           if (!apiBaseUrl) { errorResponse(res, 400, 'Missing api_base_url for openai/custom provider'); return; }
-          const result = await validateOpenAICompatKey(key, apiBaseUrl);
+          // The base URL is user-supplied. Validate it resolves to a public host
+          // before we fetch it server-side, so this key-validation probe can't be
+          // turned into an SSRF against the engine's internal network / cloud
+          // metadata. (The /api/llm/test probe does the same via the guard.)
+          const { assertPublicUrl, fetchWithPublicRedirects } = await import('../core/network-guard.js');
+          try {
+            await assertPublicUrl(apiBaseUrl);
+          } catch {
+            jsonResponse(res, 200, { state: 'invalid', error: 'Endpoint URL must be a public address' });
+            return;
+          }
+          // Pin the probe fetch too: assertPublicUrl only checks the initial host,
+          // so the actual request must go through the guarded transport that
+          // re-validates each redirect hop + pins the resolved IP (no 302→private,
+          // no DNS-rebind between the check and the socket).
+          const result = await validateOpenAICompatKey(key, apiBaseUrl, undefined, fetchWithPublicRedirects);
           jsonResponse(res, 200, result);
         } else {
           errorResponse(res, 400, `Unsupported provider: ${provider}`);
