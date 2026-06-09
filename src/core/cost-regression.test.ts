@@ -141,8 +141,14 @@ function measureStaticPrefixTokens(): number {
  * (~31 tokens) steering HTML/slide-deck artifacts to be mobile-ready (fluid
  * widths) + light unless asked, fixing the "presentations dark + not mobile-
  * ready" report at its root. Cheap now that the prefix is cache-read priced.
+ * 2026-06-09: bump to 20720 — PRD v3 provenance lifecycle. The factored
+ * GROUNDING_PROMPT_BLOCK now rides the cached prefix (it replaces the old inline
+ * grounding block, so the SYSTEM_PROMPT delta is small) and `memory_store` /
+ * `memory_update` gain a lean `sourceType` enum param so the agent can declare
+ * provenance. Combined static prefix measures 20628; descriptions kept terse.
+ * Static + cache-read priced, so the per-turn cost impact is minimal.
  */
-const STATIC_PREFIX_BUDGET = 20140;
+const STATIC_PREFIX_BUDGET = 20720;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

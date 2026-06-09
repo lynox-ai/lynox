@@ -92,6 +92,40 @@ export interface RelationRecord {
   createdAt: string;
 }
 
+// === Provenance (SSOT — PRD v3 "provenance lifecycle") ===
+
+/**
+ * Source tier of a stored datum — the trust property that must travel WITH the
+ * data through storage, recall, and compaction (never re-derivable: a guessed
+ * value is otherwise byte-identical to a verified one).
+ * - `user_asserted`       — the user stated it (authoritative for intent).
+ * - `tool_verified`       — produced by a tool result this session (fresh, citable).
+ * - `agent_inferred`      — the model derived/extracted it without a tool call.
+ * - `external_unverified` — from untrusted external content (e.g. a fetched page).
+ */
+export type ProvenanceKind =
+  | 'user_asserted'
+  | 'tool_verified'
+  | 'agent_inferred'
+  | 'external_unverified';
+
+export const ALL_PROVENANCE_KINDS: readonly ProvenanceKind[] = [
+  'user_asserted',
+  'tool_verified',
+  'agent_inferred',
+  'external_unverified',
+];
+
+/** Conservative default when the capture site can't determine the tier. */
+export const DEFAULT_PROVENANCE_KIND: ProvenanceKind = 'agent_inferred';
+
+export interface Provenance {
+  kind: ProvenanceKind;
+  sourceToolName?: string | undefined;
+  sourceRunId?: string | undefined;
+  lastVerifiedAt?: string | undefined;
+}
+
 export interface MemoryRecord {
   id: string;
   text: string;
@@ -99,6 +133,8 @@ export interface MemoryRecord {
   scopeType: MemoryScopeType;
   scopeId: string;
   sourceRunId: string | null;
+  sourceType: ProvenanceKind;
+  sourceToolName: string | null;
   isActive: boolean;
   supersededBy: string | null;
   createdAt: string;
@@ -135,6 +171,14 @@ export interface KnowledgeRetrievalResult {
      *  used by `KnowledgeLayer.listRecentActive` (no-query memory_recall) —
      *  these rows are date-ordered, not similarity-ranked. */
     source: 'vector' | 'graph' | 'fts' | 'recency';
+    /** Provenance tier captured at write time — surfaced as a structural
+     *  `<fact kind=…>` marker at recall (PRD v3). Volatile per-fact metadata:
+     *  rides the uncached ephemeral context block, never the cached prefix. */
+    sourceType: ProvenanceKind;
+    sourceToolName: string | null;
+    /** Stored confidence of the datum (0–1), distinct from the relevance
+     *  `score`/`finalScore`. Surfaced in the recall marker. */
+    confidence: number;
     createdAt: string;
   }>;
   entities: EntityRecord[];
@@ -179,6 +223,11 @@ export interface IKnowledgeLayer {
     scope: MemoryScopeRef,
     options?: {
       sourceRunId?: string | undefined;
+      // Interface had drifted: the impl already accepts (and persists)
+      // sourceThreadId — declare it so callers are typed against reality.
+      sourceThreadId?: string | undefined;
+      sourceType?: ProvenanceKind | undefined;
+      sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
     },

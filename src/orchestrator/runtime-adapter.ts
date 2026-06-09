@@ -10,7 +10,7 @@ import { getRole, getRoleNames } from '../core/roles.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
-import { withCurrentTimePrefix } from '../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -250,7 +250,11 @@ export async function spawnViaAgent(
   const agent = new Agent({
     name: step.agent,
     model,
-    systemPrompt: agentDef.systemPrompt,
+    // A2: ground the named-agent pipeline path too. Prepend the block to the
+    // agent definition's prompt (or use it standalone when none is defined).
+    systemPrompt: agentDef.systemPrompt
+      ? `${GROUNDING_PROMPT_BLOCK}\n\n${agentDef.systemPrompt}`
+      : GROUNDING_PROMPT_BLOCK,
     tools,
     thinking,
     // Default 'high' matches agent.ts:271 main-agent default (non-Haiku,
@@ -337,7 +341,9 @@ export async function spawnInline(
   const configTier = config.default_tier;
   const modelTier = (normalizeTier(step.model) ?? step.model ?? resolved?.model ?? configTier ?? 'balanced') as ModelTier;
   const model = resolveModel(modelTier, 'balanced', config.max_tier);
-  const systemPrompt = 'You are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.';
+  // A2: pipeline steps carry the grounding block too (they previously ran on a
+  // bare task prompt with no provenance discipline).
+  const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
   // Use minimal tool set for inline steps unless role specifies custom tools
   const roleProfile = resolved
     ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }

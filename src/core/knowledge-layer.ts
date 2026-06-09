@@ -12,6 +12,7 @@ import type {
   KnowledgeGcResult,
   MetricWindow,
   MetricRecord,
+  ProvenanceKind,
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
@@ -112,6 +113,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     options?: {
       sourceRunId?: string | undefined;
       sourceThreadId?: string | undefined;
+      sourceType?: ProvenanceKind | undefined;
+      sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
     },
@@ -156,6 +159,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
         sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+        sourceType: options?.sourceType, sourceToolName: options?.sourceToolName,
         provider: this.embeddingProvider.name, embedding,
       });
       for (const c of contradictions) {
@@ -356,6 +360,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       score: r.confidence,
       finalScore: 0,
       source: 'recency' as const,
+      sourceType: r.source_type as ProvenanceKind,
+      sourceToolName: r.source_tool_name,
+      confidence: r.confidence,
       createdAt: r.created_at,
     }));
   }

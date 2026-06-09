@@ -5,6 +5,7 @@ import type {
   MemoryScopeType,
   EntityRecord,
   KnowledgeRetrievalResult,
+  ProvenanceKind,
 } from '../types/index.js';
 import { getBetasForProvider, NAMESPACE_HALF_LIFE, getModelId } from '../types/index.js';
 import { getActiveProvider, isCustomProvider } from './llm-client.js';
@@ -16,7 +17,8 @@ import { extractEntitiesRegex } from './entity-extractor.js';
 import type { EntityResolver } from './entity-resolver.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import type { RunHistory } from './run-history.js';
-import { escapeXml } from './data-boundary.js';
+import { escapeXml, renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
+import { channels } from './observability.js';
 
 /** Default retrieval options. */
 const DEFAULT_TOP_K = 10;
@@ -50,6 +52,8 @@ interface ScoredCandidate {
   confidence: number;
   confirmationCount: number;
   sourceRunId: string | null;
+  sourceType: ProvenanceKind;
+  sourceToolName: string | null;
   vectorScore: number;
   ftsScore: number;
   graphBoost: number;
@@ -170,6 +174,8 @@ export class RetrievalEngine {
         confidence: row.confidence,
         confirmationCount: row.confirmation_count,
         sourceRunId: row.source_run_id,
+        sourceType: row.source_type as ProvenanceKind,
+        sourceToolName: row.source_tool_name,
         vectorScore: row._similarity * VECTOR_WEIGHT,
         ftsScore: 0,
         graphBoost: 0,
@@ -192,6 +198,8 @@ export class RetrievalEngine {
           createdAt: row.created_at, embedding: emb,
           confidence: row.confidence, confirmationCount: row.confirmation_count,
           sourceRunId: row.source_run_id,
+          sourceType: row.source_type as ProvenanceKind,
+          sourceToolName: row.source_tool_name,
           vectorScore: 0, ftsScore: 0, graphBoost: GRAPH_BOOST, runBoost: 0,
           finalScore: 0, source: 'graph',
         });
@@ -249,6 +257,9 @@ export class RetrievalEngine {
         score: c.vectorScore / VECTOR_WEIGHT,
         finalScore: c.finalScore,
         source: c.source,
+        sourceType: c.sourceType,
+        sourceToolName: c.sourceToolName,
+        confidence: c.confidence,
         createdAt: c.createdAt,
       })),
       entities,
@@ -262,7 +273,30 @@ export class RetrievalEngine {
     const limit = maxChars ?? DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS;
     const memories = [...result.memories];
 
-    let formatted = this._buildContextString(memories, result.contextGraph);
+    // INV-1: the recall surface previously ran NO injection scan. Flag facts
+    // whose stored body resembles an injection / marker-forgery attempt. The
+    // body is still structurally escaped inside <fact>, so this is observability
+    // + an agent hint — never a silent drop of the user's own memory. Scan once
+    // here (not in the trim loop) to avoid duplicate security events.
+    const flagged = new Set<string>();
+    const labels = new Set<string>();
+    for (const m of memories) {
+      const det = detectInjectionAttempt(m.text);
+      if (det.detected) {
+        flagged.add(m.id);
+        for (const l of det.patterns) labels.add(l);
+      }
+    }
+    if (flagged.size > 0 && channels.securityInjection.hasSubscribers) {
+      channels.securityInjection.publish({
+        event_type: 'injection_detected',
+        detail: `Suspected injection in ${flagged.size} recalled memor${flagged.size === 1 ? 'y' : 'ies'}: ${[...labels].join(', ')}`,
+        decision: 'flagged',
+        source: 'memory_recall',
+      });
+    }
+
+    let formatted = this._buildContextString(memories, result.contextGraph, flagged);
     while (formatted.length > limit && memories.length > 1) {
       let lowestIdx = 0;
       let lowestScore = Infinity;
@@ -273,7 +307,7 @@ export class RetrievalEngine {
         }
       }
       memories.splice(lowestIdx, 1);
-      formatted = this._buildContextString(memories, result.contextGraph);
+      formatted = this._buildContextString(memories, result.contextGraph, flagged);
     }
 
     return formatted;
@@ -282,6 +316,7 @@ export class RetrievalEngine {
   private _buildContextString(
     memories: KnowledgeRetrievalResult['memories'],
     contextGraph: string | undefined,
+    flagged?: ReadonlySet<string> | undefined,
   ): string {
     const sections: string[] = [];
     const scopeOrder: MemoryScopeType[] = ['user', 'context', 'global'];
@@ -296,10 +331,22 @@ export class RetrievalEngine {
     for (const scopeType of scopeOrder) {
       const bucket = grouped.get(scopeType);
       if (!bucket || bucket.length === 0) continue;
-      const entries = bucket.map(m => {
-        const date = m.createdAt.slice(0, 10);
-        return `[${escapeXml(m.namespace)}] (${(m.finalScore * 100).toFixed(0)}%) — ${date}\n${escapeXml(m.text)}`;
-      }).join('\n\n');
+      // Structural provenance marker (PRD v3 / INV-1): the trust tier rides a
+      // `<fact kind=…>` element whose body is escaped, so content embedding a
+      // fake `<fact>`/`[tool_verified]` cannot launder itself into an engine
+      // marker. The relevance %, namespace and date are engine-trusted attrs.
+      const entries = bucket.map(m => renderProvenanceFact({
+        text: m.text,
+        kind: m.sourceType,
+        tool: m.sourceToolName,
+        confidence: m.confidence,
+        attrs: {
+          ns: m.namespace,
+          relevance: `${(m.finalScore * 100).toFixed(0)}%`,
+          date: m.createdAt.slice(0, 10),
+          ...(flagged?.has(m.id) ? { flagged: 'suspected_injection' } : {}),
+        },
+      })).join('\n');
       sections.push(`<scope type="${escapeXml(scopeType)}">\n${entries}\n</scope>`);
     }
 

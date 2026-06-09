@@ -553,6 +553,9 @@ export class Memory implements IMemory {
               scopeType: classification.scope.type,
               scopeId: classification.scope.id,
               sourceThreadId,
+              // Auto-extraction from the agent's own final answer — no tool call,
+              // so the "agent declares" path can't apply. Hardcode agent_inferred.
+              sourceType: 'agent_inferred',
             });
           }),
         );
@@ -560,7 +563,8 @@ export class Memory implements IMemory {
         await Promise.all(
           entries.map(async ([ns, text]) => {
             await this.append(ns as MemoryNamespace, text);
-            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId });
+            // Auto-extraction (no tool call) → conservative agent_inferred tier.
+            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceType: 'agent_inferred' });
           }),
         );
       }

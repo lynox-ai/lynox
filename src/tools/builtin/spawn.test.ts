@@ -435,7 +435,9 @@ describe('spawn_agent tool', () => {
     );
 
     const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentCall['systemPrompt']).toBe('Custom prompt.');
+    // A2: the caller's prompt is preserved, with the grounding block prepended.
+    expect(agentCall['systemPrompt']).toContain('Custom prompt.');
+    expect(agentCall['systemPrompt']).toContain('Grounding & provenance');
     expect(agentCall['effort']).toBe('max');
     expect(agentCall['model']).toBe('claude-opus-4-6');
   });

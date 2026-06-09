@@ -650,6 +650,7 @@ describe('Memory', () => {
         content: 'Working on auth module.',
         scopeType: 'context',
         scopeId: 'proj1',
+        sourceType: 'agent_inferred',
       });
     });
 
@@ -666,6 +667,7 @@ describe('Memory', () => {
       expect(mockPublish).toHaveBeenCalledWith({
         namespace: 'knowledge',
         content: 'Node.js 22 is latest LTS.',
+        sourceType: 'agent_inferred',
       });
       // Ensure no scope metadata was included
       expect(mockPublish).not.toHaveBeenCalledWith(
