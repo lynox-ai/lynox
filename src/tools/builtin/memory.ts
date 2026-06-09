@@ -28,6 +28,7 @@ interface MemoryStoreInput {
   content: string;
   scope?: string | undefined;
   sourceType?: ProvenanceKind | undefined;
+  sourceToolName?: string | undefined;
 }
 
 interface MemoryRecallInput {
@@ -256,6 +257,10 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
           enum: [...ALL_PROVENANCE_KINDS],
           description: 'Provenance — declare honestly: user_asserted (user stated it), tool_verified (from a tool result this session), agent_inferred (you derived it), external_unverified (untrusted external content). Omit → agent_inferred.',
         },
+        sourceToolName: {
+          type: 'string',
+          description: 'When sourceType is tool_verified, the tool that produced it (e.g. "web_search", "http_request"). Optional.',
+        },
       },
       required: ['namespace', 'content'],
     },
@@ -274,15 +279,16 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     }
 
     const sourceType: ProvenanceKind = input.sourceType ?? 'agent_inferred';
+    const sourceToolName = input.sourceToolName;
 
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceType });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceType, sourceToolName });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceType });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceType, sourceToolName });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };

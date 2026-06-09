@@ -442,6 +442,25 @@ describe('spawn_agent tool', () => {
     expect(agentCall['model']).toBe('claude-opus-4-6');
   });
 
+  it('A2: uses the grounding block standalone when no system_prompt is given', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const { GROUNDING_PROMPT_BLOCK } = await import('../../core/prompts.js');
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'medium', autonomy: 'supervised', description: 'Collector role',
+    } as RoleConfig);
+
+    const agent = makeAgent();
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'c1', task: 'Quick lookup', role: 'collector' }] },
+      agent,
+    );
+
+    const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // The child would otherwise fall through to agent.ts's bare default (NO
+    // grounding); instead it gets the block as its whole system prompt.
+    expect(agentCall['systemPrompt']).toBe(GROUNDING_PROMPT_BLOCK);
+  });
+
   it('throws for unknown role', async () => {
     mockGetRole.mockReturnValue(undefined);
     const agent = makeAgent();

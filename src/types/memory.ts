@@ -119,13 +119,6 @@ export const ALL_PROVENANCE_KINDS: readonly ProvenanceKind[] = [
 /** Conservative default when the capture site can't determine the tier. */
 export const DEFAULT_PROVENANCE_KIND: ProvenanceKind = 'agent_inferred';
 
-export interface Provenance {
-  kind: ProvenanceKind;
-  sourceToolName?: string | undefined;
-  sourceRunId?: string | undefined;
-  lastVerifiedAt?: string | undefined;
-}
-
 export interface MemoryRecord {
   id: string;
   text: string;

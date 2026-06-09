@@ -19,6 +19,7 @@ import type {
   ProvenanceKind,
   DataStoreColumnDef,
 } from '../types/index.js';
+import { DEFAULT_PROVENANCE_KIND } from '../types/index.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -676,7 +677,7 @@ export function setupMemoryStoreSubscription(
               sourceThreadId: data.sourceThreadId,
               // Conservative default: events without a declared tier (e.g. the
               // maybeUpdate auto-extraction path) land as agent_inferred.
-              sourceType: data.sourceType ?? 'agent_inferred',
+              sourceType: data.sourceType ?? DEFAULT_PROVENANCE_KIND,
               sourceToolName: data.sourceToolName,
             },
           );

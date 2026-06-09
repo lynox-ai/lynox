@@ -13,7 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
-import type { ProvenanceKind } from '../types/memory.js';
+import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 
 // ── Row Types (internal, not exported) ──────────────────────────
 
@@ -482,7 +482,7 @@ export class AgentMemoryDb {
     `).run(
       id, props.text, props.namespace, props.scopeType, props.scopeId,
       props.sourceRunId ?? null, props.sourceThreadId ?? null,
-      props.sourceType ?? 'agent_inferred', props.sourceToolName ?? null,
+      props.sourceType ?? DEFAULT_PROVENANCE_KIND, props.sourceToolName ?? null,
       props.provider ?? 'onnx', embBlob, now, now,
     );
 

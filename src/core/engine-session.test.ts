@@ -959,6 +959,8 @@ describe('Engine + Session (Orchestrator)', () => {
       const prompt = String(runSpy.mock.calls.at(-1)?.[0] ?? '');
       expect(prompt).toContain('<fact kind=');
       expect(prompt).not.toContain('NOT engine markers');
+      // AC6: tagging must NOT cause the summarizer to drop/disown open tasks.
+      expect(prompt).toContain('do not drop or disown');
     });
   });
 

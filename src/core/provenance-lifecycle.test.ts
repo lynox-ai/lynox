@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import { renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
 import { GROUNDING_PROMPT_BLOCK, SYSTEM_PROMPT } from './prompts.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
@@ -98,6 +99,40 @@ describe('AgentMemoryDb v5 — sourceType capture (AC4)', () => {
     const row = db.getMemory(id);
     expect(row?.source_type).toBe('agent_inferred');
     expect(row?.source_tool_name).toBeNull();
+  });
+
+  it('migration v5 backfills a pre-existing (legacy) row to agent_inferred', () => {
+    // Seed a raw db with a v1-shape memories table (NO source_type) + one row,
+    // then let AgentMemoryDb open it and run the v5 ALTER — the legacy row must
+    // backfill to agent_inferred via the NOT NULL DEFAULT (AC4).
+    const legacyPath = join(tempDir, 'legacy.db');
+    const raw = new Database(legacyPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (4);
+      CREATE TABLE memories (
+        id TEXT PRIMARY KEY, text TEXT NOT NULL, namespace TEXT NOT NULL,
+        scope_type TEXT NOT NULL, scope_id TEXT NOT NULL, source_run_id TEXT,
+        source_episode_id TEXT, provider TEXT, embedding BLOB,
+        confidence REAL NOT NULL DEFAULT 0.75, is_active INTEGER NOT NULL DEFAULT 1,
+        superseded_by TEXT, retrieval_count INTEGER NOT NULL DEFAULT 0,
+        confirmation_count INTEGER NOT NULL DEFAULT 0, last_retrieved_at TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_thread_id TEXT
+      );
+      INSERT INTO memories (id, text, namespace, scope_type, scope_id, created_at, updated_at)
+      VALUES ('legacy-1', 'fact from before v5', 'knowledge', 'context', 'c1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    `);
+    raw.close();
+
+    const migrated = new AgentMemoryDb(legacyPath);
+    migrated.setEmbeddingDimensions(3);
+    try {
+      const row = migrated.getMemory('legacy-1');
+      expect(row?.source_type).toBe('agent_inferred');
+      expect(row?.source_tool_name).toBeNull();
+    } finally {
+      migrated.close();
+    }
   });
 });
 

@@ -90,8 +90,9 @@ describe('spawnInline with role', () => {
     expect(agentCalls).toHaveLength(1);
     const agentConfig = agentCalls[0]![0] as unknown as Record<string, unknown>;
 
-    // Default system prompt
+    // Default system prompt — A2: pipeline steps carry the grounding block too.
     expect(agentConfig['systemPrompt']).toContain('focused task agent');
+    expect(agentConfig['systemPrompt']).toContain('Grounding & provenance');
     // spawn_agent and recursion tools excluded
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'spawn_agent')).toBeUndefined();

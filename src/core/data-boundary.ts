@@ -1,5 +1,5 @@
 import { channels } from './observability.js';
-import type { ProvenanceKind } from '../types/memory.js';
+import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 
 interface InjectionResult {
   detected: boolean;
@@ -50,6 +50,7 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   // input) must catch both. `kind` tokens are coined snake_case → ~zero FP risk.
   { pattern: /<\s*\/?\s*fact(?:\s|>|\/)/i, label: 'provenance marker forgery' },
   { pattern: /&lt;\s*\/?\s*fact(?:\s|&gt;|\/)/i, label: 'provenance marker forgery (entity)' },
+  { pattern: /(?:&#0*60;|&#x0*3c;)\s*\/?\s*fact\b/i, label: 'provenance marker forgery (numeric entity)' },
   { pattern: /\[\s*(?:tool_verified|user_asserted|agent_inferred|external_unverified)\b/i, label: 'provenance marker forgery (bracket)' },
   { pattern: /\bkind\s*=\s*["']?(?:tool_verified|user_asserted|agent_inferred|external_unverified)\b/i, label: 'provenance marker forgery (attribute)' },
 ];
@@ -110,7 +111,7 @@ export function renderProvenanceFact(opts: {
 }): string {
   // Defensive: a security-boundary helper must never throw on malformed input.
   // An un-tiered fact falls back to the conservative default tier.
-  const kind: ProvenanceKind = opts.kind ?? 'agent_inferred';
+  const kind: ProvenanceKind = opts.kind ?? DEFAULT_PROVENANCE_KIND;
   const parts: string[] = [`kind="${escapeXml(kind)}"`];
   if (opts.tool) {
     parts.push(`tool="${escapeXml(opts.tool)}"`);
