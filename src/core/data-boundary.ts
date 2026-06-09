@@ -102,7 +102,9 @@ export const PROVENANCE_FACT_TAG = 'fact';
  */
 export function renderProvenanceFact(opts: {
   text: string;
-  kind: ProvenanceKind;
+  /** Source tier. Optional: an un-tiered fact falls back to the conservative
+   *  DEFAULT_PROVENANCE_KIND (this is the documented defensive contract). */
+  kind?: ProvenanceKind | undefined;
   tool?: string | null | undefined;
   confidence?: number | null | undefined;
   /** Extra engine-trusted attributes (e.g. ns, date, relevance). Both keys and
@@ -125,7 +127,7 @@ export function renderProvenanceFact(opts: {
       parts.push(`${escapeXml(k)}="${escapeXml(String(v))}"`);
     }
   }
-  return `<fact ${parts.join(' ')}>${escapeXml(opts.text)}</fact>`;
+  return `<${PROVENANCE_FACT_TAG} ${parts.join(' ')}>${escapeXml(opts.text)}</${PROVENANCE_FACT_TAG}>`;
 }
 
 /**

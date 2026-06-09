@@ -245,6 +245,31 @@ describe('KnowledgeLayer', () => {
     expect(ctx).not.toContain('<fact kind="tool_verified">wired');
   });
 
+  it('round-trips a stored sourceType through retrieve → <fact> marker (DB→candidate→marker)', async () => {
+    // Self-contained layer (1 memory, threshold 0) so the assertion is
+    // deterministic — independent of the shared layer's accumulated memories
+    // and retrieve ranking. Exercises the real `row.source_type as
+    // ProvenanceKind` → ScoredCandidate.sourceType plumbing, not a hand-fed kind.
+    const rtDir = await mkdtemp(join(tmpdir(), 'lynox-kl-rt-'));
+    const rt = new KnowledgeLayer(join(rtDir, 'rt.db'), new LocalProvider());
+    await rt.init();
+    try {
+      await rt.store(
+        'The Helsinki datacenter contract was signed by the user on a sales call.',
+        'knowledge', scope, { sourceType: 'user_asserted' },
+      );
+      const result = await rt.retrieve('Helsinki datacenter contract signed', [scope], {
+        topK: 10, threshold: 0, useHyDE: false, useGraphExpansion: false,
+      });
+      const hit = result.memories.find(m => m.text.includes('Helsinki datacenter'));
+      expect(hit?.sourceType).toBe('user_asserted'); // came from the DB row, not hand-fed
+      expect(rt.formatRetrievalContext(result)).toContain('<fact kind="user_asserted"');
+    } finally {
+      await rt.close();
+      await rm(rtDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
   it('drops lowest-scored memories when formatContext exceeds maxChars', () => {
     const memories = Array.from({ length: 5 }, (_, i) => ({
       id: `mem-${i}`, text: 'x'.repeat(500),
