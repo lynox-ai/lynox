@@ -275,6 +275,27 @@ const MISTRAL_FEATURES_SMALL: ModelFeatures = {
 
 const ONE_M_BETA: AnthropicBeta[] = ['context-1m-2025-08-07'];
 
+/**
+ * The cache TTL the agent attaches to every Anthropic/Vertex cache breakpoint
+ * (see `Agent._buildSystemPrompt` / `_applyOutboundCaching`, which send
+ * `cache_control: { type: 'ephemeral', ttl: AGENT_CACHE_TTL }`). Anthropic bills
+ * cache WRITES by TTL — 5-minute = 1.25× input, 1-hour = 2× input — while cache
+ * READS are 0.1× input regardless of TTL. The `cacheWrite` prices in
+ * MODEL_CAPABILITIES MUST equal `input × CACHE_TTL_WRITE_MULTIPLIER[AGENT_CACHE_TTL]`
+ * or managed billing silently drifts from what Anthropic charges. It DID drift:
+ * cacheWrite was priced at the 5m rate (1.25×) while the agent sent 1h (2×), so
+ * every cached prefix write under-billed. The pricing-vs-TTL contract test in
+ * models.test.ts pins this invariant. Custom/OpenAI proxies (Mistral) get no
+ * `cache_control` (`isCustomProxy`), so their `cacheWrite` is not governed here.
+ */
+export const AGENT_CACHE_TTL = '1h' as const;
+
+/** Anthropic cache-WRITE price as a multiple of base input price, keyed by TTL. */
+export const CACHE_TTL_WRITE_MULTIPLIER: Record<string, number> = { '5m': 1.25, '1h': 2 };
+
+/** Anthropic cache-READ price as a multiple of base input price (TTL-independent). */
+export const CACHE_READ_MULTIPLIER = 0.1;
+
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // === Anthropic Claude (direct + custom proxy) ===
   'claude-opus-4-7': {
@@ -286,7 +307,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 20,
     betaHeaders: [],
     features: CLAUDE_FEATURES,
-    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.7',
   },
   'claude-opus-4-6': {
@@ -298,7 +319,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 20,
     betaHeaders: [],
     features: CLAUDE_FEATURES,
-    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.6',
   },
   'claude-sonnet-4-6': {
@@ -310,7 +331,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: CLAUDE_FEATURES,
-    pricing: { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
+    pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
     uiLabel: 'Claude Sonnet 4.6',
   },
   'claude-haiku-4-5-20251001': {
@@ -322,7 +343,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: CLAUDE_FEATURES,
-    pricing: { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
+    pricing: { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.10 },
     uiLabel: 'Claude Haiku 4.5',
   },
   // Vertex AI variant — same model, different id surface (no date suffix).
@@ -335,7 +356,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: CLAUDE_FEATURES,
-    pricing: { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
+    pricing: { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.10 },
     uiLabel: 'Claude Haiku 4.5',
   },
   // 1M-context beta variants — Anthropic's identifier for the 1M-context
@@ -355,7 +376,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 20,
     betaHeaders: ONE_M_BETA,
     features: CLAUDE_FEATURES,
-    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.7 (1M)',
   },
   'claude-opus-4-6[1m]': {
@@ -367,7 +388,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 20,
     betaHeaders: ONE_M_BETA,
     features: CLAUDE_FEATURES,
-    pricing: { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 },
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.6 (1M)',
   },
   'claude-sonnet-4-6[1m]': {
@@ -379,7 +400,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: ONE_M_BETA,
     features: CLAUDE_FEATURES,
-    pricing: { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
+    pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
     uiLabel: 'Claude Sonnet 4.6 (1M)',
   },
   // === Mistral tier-set (eu-sovereign managed via openai-compat) ===

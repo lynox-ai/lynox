@@ -7,9 +7,11 @@ import type { ModelPricing } from '../types/models.js';
 export type { ModelPricing };
 
 /** Fallback when neither override nor registry has an entry — Opus base
- *  rate as the conservative default (matches pre-registry behaviour). */
+ *  rate as the conservative default. cacheWrite mirrors the registry's 1h-TTL
+ *  rate (2× input): an unknown model billed through the Anthropic path gets the
+ *  same 1h cache_control, so the fallback must not under-price its writes. */
 const FALLBACK_PRICING: ModelPricing = {
-  input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50,
+  input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50,
 };
 
 let overridePricing: Record<string, ModelPricing> | null = null;

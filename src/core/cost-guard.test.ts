@@ -153,31 +153,31 @@ describe('CostGuard', () => {
       const cg = new CostGuard({}, 'claude-opus-4-6');
       cg.recordTurn(usage(1_000_000, 1_000_000, 1_000_000, 1_000_000));
       const snap = cg.snapshot();
-      // input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 → total: 36.75
-      expect(snap.estimatedCostUSD).toBeCloseTo(36.75, 2);
+      // input: 5, output: 25, cacheWrite: 10 (1h TTL = 2×), cacheRead: 0.50 → total: 40.50
+      expect(snap.estimatedCostUSD).toBeCloseTo(40.50, 2);
     });
 
     it('calculates sonnet pricing correctly', () => {
       const cg = new CostGuard({}, 'claude-sonnet-4-6');
       cg.recordTurn(usage(1_000_000, 1_000_000, 1_000_000, 1_000_000));
       const snap = cg.snapshot();
-      // input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 → total: 22.05
-      expect(snap.estimatedCostUSD).toBeCloseTo(22.05, 2);
+      // input: 3, output: 15, cacheWrite: 6 (1h TTL = 2×), cacheRead: 0.3 → total: 24.30
+      expect(snap.estimatedCostUSD).toBeCloseTo(24.30, 2);
     });
 
     it('calculates haiku pricing correctly', () => {
       const cg = new CostGuard({}, 'claude-haiku-4-5-20251001');
       cg.recordTurn(usage(1_000_000, 1_000_000, 1_000_000, 1_000_000));
       const snap = cg.snapshot();
-      // input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 → total: 7.35
-      expect(snap.estimatedCostUSD).toBeCloseTo(7.35, 2);
+      // input: 1, output: 5, cacheWrite: 2 (1h TTL = 2×), cacheRead: 0.10 → total: 8.10
+      expect(snap.estimatedCostUSD).toBeCloseTo(8.10, 2);
     });
 
     it('cache write tokens use cacheWrite rate, not input rate', () => {
       const cg = new CostGuard({}, 'claude-opus-4-6');
-      // Only cache write tokens, no input/output
+      // Only cache write tokens, no input/output — opus 1h cacheWrite = 2× input = $10/M
       cg.recordTurn(usage(0, 0, 1_000_000, 0));
-      expect(cg.snapshot().estimatedCostUSD).toBeCloseTo(6.25, 2);
+      expect(cg.snapshot().estimatedCostUSD).toBeCloseTo(10, 2);
     });
 
     it('cache read tokens use cacheRead rate', () => {

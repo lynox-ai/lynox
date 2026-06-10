@@ -133,9 +133,9 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
 
       // input:  500k * $1.00/M  = $0.50
       // output: 100k * $5.00/M  = $0.50
-      // cacheW:  50k * $1.25/M  = $0.0625
+      // cacheW:  50k * $2.00/M  = $0.10   (haiku 1h TTL = 2× input)
       // cacheR: 200k * $0.10/M  = $0.02
-      const expected = 0.50 + 0.50 + 0.0625 + 0.02;
+      const expected = 0.50 + 0.50 + 0.10 + 0.02;
       expect(cost).toBeCloseTo(expected, 4);
     });
 
@@ -149,9 +149,9 @@ describe('Full Flow: Config + RunHistory + Cost Tracking', () => {
 
       // input:  1M   * $3.00/M  = $3.00
       // output: 500k * $15.0/M  = $7.50
-      // cacheW: 100k * $3.75/M  = $0.375
+      // cacheW: 100k * $6.00/M  = $0.60   (sonnet 1h TTL = 2× input)
       // cacheR: 300k * $0.30/M  = $0.09
-      const expected = 3.0 + 7.5 + 0.375 + 0.09;
+      const expected = 3.0 + 7.5 + 0.60 + 0.09;
       expect(cost).toBeCloseTo(expected, 4);
     });
 
