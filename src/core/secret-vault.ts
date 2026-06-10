@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, createHash, hkdfSync } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, chmodSync, copyFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SecretScope } from '../types/index.js';
 import { getLynoxDir } from './config.js';
@@ -356,33 +356,75 @@ export class SecretVault {
     const oldVault = new SecretVault({ path: dbPath, masterKey: oldKey });
     const entries = oldVault.getAll();
     const metadata = oldVault.list();
+    // Fold the WAL into the main db file before snapshotting: the vault runs in
+    // WAL mode, so recent writes live in a `-wal` sidecar that a single-file
+    // copy would miss, producing an incomplete (unreadable) backup.
+    oldVault.db.pragma('wal_checkpoint(TRUNCATE)');
     oldVault.close();
 
     if (entries.size === 0 && metadata.length > 0) {
       throw new Error('Cannot decrypt existing secrets — wrong current key?');
     }
 
-    // Delete old salt so a new one is generated for the new key
-    const db = new Database(dbPath);
-    db.prepare("DELETE FROM vault_meta WHERE key = 'pbkdf2_salt'").run();
-    db.prepare('DELETE FROM vault_secrets').run();
-    db.close();
+    // Re-keying is destructive and NON-atomic: it deletes the salt + every
+    // encrypted secret, then re-encrypts from the in-memory `entries`. A crash
+    // (or a single failing re-encrypt) between the delete and the rewrite would
+    // lose every secret permanently. Snapshot the (now checkpointed) DB file
+    // first, restore it on any error before rethrowing, and remove the snapshot
+    // only after a clean re-key. A hard kill still leaves the .bak on disk for
+    // manual recovery.
+    const backupPath = `${dbPath}.rotate-bak`;
+    copyFileSync(dbPath, backupPath);
+    // Re-assert the 0600 invariant the rest of the vault is careful about, rather
+    // than relying on copyFileSync mode preservation (the snapshot is encrypted
+    // under the old key either way, but the file mode should still be private).
+    try { chmodSync(backupPath, FILE_MODE_PRIVATE); } catch { /* best-effort */ }
+    // Track the open handles so the failure path can close them BEFORE restoring
+    // the file — copying over a db that a WAL connection still holds open
+    // corrupts it.
+    let db: Database.Database | undefined;
+    let newVault: SecretVault | undefined;
+    try {
+      // Delete old salt so a new one is generated for the new key
+      db = new Database(dbPath);
+      db.prepare("DELETE FROM vault_meta WHERE key = 'pbkdf2_salt'").run();
+      db.prepare('DELETE FROM vault_secrets').run();
+      db.close();
+      db = undefined;
 
-    // Open with new key (creates new salt), re-encrypt all
-    const newVault = new SecretVault({ path: dbPath, masterKey: newKey });
-    for (const [name, entry] of entries) {
-      const meta = metadata.find(m => m.name === name);
-      newVault.set(name, entry.value, entry.scope, entry.ttlMs);
-      // Preserve original timestamps
-      if (meta) {
-        newVault.db.prepare(
-          'UPDATE vault_secrets SET created_at = ?, updated_at = ? WHERE name = ?',
-        ).run(meta.createdAt, meta.updatedAt, name);
+      // Open with new key (creates new salt), re-encrypt all
+      newVault = new SecretVault({ path: dbPath, masterKey: newKey });
+      for (const [name, entry] of entries) {
+        const meta = metadata.find(m => m.name === name);
+        newVault.set(name, entry.value, entry.scope, entry.ttlMs);
+        // Preserve original timestamps
+        if (meta) {
+          newVault.db.prepare(
+            'UPDATE vault_secrets SET created_at = ?, updated_at = ? WHERE name = ?',
+          ).run(meta.createdAt, meta.updatedAt, name);
+        }
       }
+      const count = newVault.size;
+      newVault.close();
+      newVault = undefined;
+      rmSync(backupPath, { force: true });
+      return count;
+    } catch (err) {
+      // Close any handle still open on dbPath (a re-encrypt that threw mid-loop
+      // leaves newVault open), THEN restore the pre-rotation DB so no secret is
+      // lost. Drop any partial WAL/SHM the failed re-key left behind, otherwise
+      // the reopened vault would replay stale frames over the restored bytes.
+      try { db?.close(); } catch { /* already closed */ }
+      try { newVault?.close(); } catch { /* already closed */ }
+      try {
+        copyFileSync(backupPath, dbPath);
+        for (const suffix of ['-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+        rmSync(backupPath, { force: true });
+      } catch {
+        // Leave the .bak in place for manual recovery if even the restore fails.
+      }
+      throw err;
     }
-    const count = newVault.size;
-    newVault.close();
-    return count;
   }
 
   /**

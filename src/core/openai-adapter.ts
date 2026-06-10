@@ -392,6 +392,11 @@ async function* translateStream(
           totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
         }
 
+        // Guard the array, not just the element: Mistral emits usage-only final
+        // chunks with no `choices` array at all (the usage block above already
+        // captured the token counts), and `chunk.choices[0]` on those throws a
+        // TypeError that aborts the whole stream mid-response.
+        if (!Array.isArray(chunk.choices)) continue;
         const choice = chunk.choices[0];
         if (!choice) continue;
 

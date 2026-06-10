@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import { AgentMemoryDb } from './agent-memory-db.js';
 
 describe('AgentMemoryDb', () => {
@@ -35,6 +36,32 @@ describe('AgentMemoryDb', () => {
       db2.setEmbeddingDimensions(3);
       expect(db2.getEntityCount()).toBe(1);
       db2.close();
+    });
+
+    it('rolls back the schema_version stamp when a migration fails mid-way', () => {
+      // Simulate the crash-window: drop the latest version stamp but KEEP the
+      // schema it created, so re-running that migration hits a duplicate-object
+      // DDL error partway through — exactly what a real crash between the stamp
+      // and the DDL leaves behind.
+      const path = join(tempDir, 'rollback.db');
+      const fresh = new AgentMemoryDb(path);
+      fresh.setEmbeddingDimensions(3);
+      fresh.close();
+
+      const raw = new Database(path);
+      const latest = (raw.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v;
+      raw.prepare('DELETE FROM schema_version WHERE version = ?').run(latest);
+      raw.close();
+
+      // Re-opening re-runs the latest migration; its DDL now throws. The version
+      // stamp must NOT survive (transaction rollback) — otherwise the DB looks
+      // migrated but isn't, and is bricked forever.
+      expect(() => new AgentMemoryDb(path)).toThrow();
+
+      const check = new Database(path);
+      const after = (check.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v;
+      check.close();
+      expect(after).toBe(latest - 1); // rolled back to the pre-migration version
     });
 
     it('idempotent init', () => {
