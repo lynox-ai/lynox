@@ -90,8 +90,16 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
 
   const rows = _costProvider.getCostByDay(31);
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const currentMonth = today.slice(0, 7); // YYYY-MM
   const todayCost = rows.find(r => r.day === today)?.cost_usd ?? 0;
-  const monthCost = rows.reduce((sum, r) => sum + r.cost_usd, 0);
+  // Calendar-month cap, not a rolling 31-day window: only sum rows in the
+  // current month so the cap actually RESETS on the 1st. Summing all 31 rows let
+  // last month's spend bleed into "this month" and the cap never reset, wrongly
+  // blocking (or, mid-month, allowing) a tenant near month boundaries. 31 days is
+  // always enough to cover any calendar month, so no row is missed.
+  const monthCost = rows
+    .filter(r => r.day.slice(0, 7) === currentMonth)
+    .reduce((sum, r) => sum + r.cost_usd, 0);
 
   if (_dailyCapUSD < Infinity && todayCost >= _dailyCapUSD) {
     return {

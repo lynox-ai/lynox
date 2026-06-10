@@ -111,17 +111,38 @@ describe('persistent budget', () => {
   });
 
   it('blocks when monthly cap exceeded', () => {
+    const monthStart = today.slice(0, 7) + '-01'; // a different day in the SAME month
     configurePersistentBudget({
       costProvider: mockProvider([
         { day: today, cost_usd: 5.00, run_count: 5 },
-        { day: '2026-03-01', cost_usd: 20.00, run_count: 50 },
+        { day: monthStart, cost_usd: 20.00, run_count: 50 },
       ]),
       monthlyCapUSD: 20.00,
     });
     const result = checkPersistentBudget();
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain('Monthly spending cap');
-    expect(result.monthCostUSD).toBe(25.00);
+    expect(result.monthCostUSD).toBeCloseTo(25.00, 2);
+  });
+
+  it('monthly cap counts only the current calendar month — a prior-month row is excluded', () => {
+    // Last day of the previous month — getCostByDay(31) can still return it near
+    // a month boundary, but a calendar-month cap must NOT count it.
+    const d = new Date();
+    const prevMonthLastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 0))
+      .toISOString().slice(0, 10);
+    configurePersistentBudget({
+      costProvider: mockProvider([
+        { day: today, cost_usd: 5.00, run_count: 5 },
+        { day: prevMonthLastDay, cost_usd: 100.00, run_count: 200 },
+      ]),
+      monthlyCapUSD: 20.00,
+    });
+    const result = checkPersistentBudget();
+    // Only this month's $5 counts → under the $20 cap (the old rolling 31-day
+    // window summed $105 and wrongly blocked, never resetting on the 1st).
+    expect(result.allowed).toBe(true);
+    expect(result.monthCostUSD).toBeCloseTo(5.00, 2);
   });
 
   it('daily cap checked before monthly cap', () => {
