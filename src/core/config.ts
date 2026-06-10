@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import type { LynoxUserConfig } from '../types/index.js';
+import type { LynoxUserConfig, ModelProfile } from '../types/index.js';
 import { MISTRAL_API_BASE, normalizeTier } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -157,6 +157,41 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['LYNOX_ACCOUNT_TIER']) {
     const t = process.env['LYNOX_ACCOUNT_TIER'];
     if (t === 'standard' || t === 'pro') merged.account_tier = t;
+  }
+  // Worker-task profile (managed control plane sets this to a Mistral 'fallback'
+  // profile so background WorkerLoop tasks run on the cheaper EU model instead
+  // of the main Anthropic LLM). The CP delivers it as an env var; without this
+  // bridge it never reached `worker_profile` and every managed background task
+  // silently ran on the main provider.
+  if (process.env['LYNOX_WORKER_PROFILE']) {
+    merged.worker_profile = process.env['LYNOX_WORKER_PROFILE'];
+  }
+  // Named model profiles, delivered as JSON by the managed control plane
+  // (LYNOX_MODEL_PROFILES_JSON). The engine deserializes them into
+  // `model_profiles` so `worker_profile` and spawn(profile) can resolve a
+  // profile to a concrete provider/key/model. Env entries merge over (win
+  // against) any file-config profiles. Malformed JSON is ignored rather than
+  // crashing boot — a bad profile blob must not take the whole instance down.
+  if (process.env['LYNOX_MODEL_PROFILES_JSON']) {
+    try {
+      const parsed: unknown = JSON.parse(process.env['LYNOX_MODEL_PROFILES_JSON']);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        merged.model_profiles = {
+          ...merged.model_profiles,
+          ...(parsed as Record<string, ModelProfile>),
+        };
+      }
+    } catch {
+      // ignore malformed LYNOX_MODEL_PROFILES_JSON — boot without rather than crash
+    }
+  }
+  // Guard a dangling worker_profile: if LYNOX_WORKER_PROFILE names a profile that
+  // LYNOX_MODEL_PROFILES_JSON didn't actually provide (e.g. the profiles blob was
+  // malformed and dropped above, or the two env vars drifted), clear it instead
+  // of letting EVERY background task throw "Unknown model profile". Running the
+  // worker on the main provider is a graceful degrade; failing every task is not.
+  if (merged.worker_profile && !merged.model_profiles?.[merged.worker_profile]) {
+    merged.worker_profile = undefined;
   }
   // GCP config for Vertex AI
   if (process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']) {
