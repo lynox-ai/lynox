@@ -31,6 +31,9 @@ describe('Config', () => {
     delete process.env['GOOGLE_CLIENT_SECRET'];
     delete process.env['TAVILY_API_KEY'];
     delete process.env['SEARXNG_URL'];
+    delete process.env['LYNOX_WORKER_PROFILE'];
+    delete process.env['LYNOX_MODEL_PROFILES_JSON'];
+    delete process.env['LYNOX_ACCOUNT_TIER'];
     // Clean up any config files from previous tests
     rmSync(join(fakeHome, '.lynox'), { recursive: true, force: true });
     rmSync(join(fakeProject, '.lynox'), { recursive: true, force: true });
@@ -197,6 +200,50 @@ describe('Config', () => {
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.client_id).toBe('client1');
+  });
+
+  // ── Managed profile bridge (CP delivers worker/model profiles via env) ──────
+
+  it('LYNOX_WORKER_PROFILE env sets worker_profile when its profile exists', async () => {
+    process.env['LYNOX_WORKER_PROFILE'] = 'fallback';
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+      fallback: { provider: 'openai', api_key: 'sk-x', model_id: 'mistral-large-2512' },
+    });
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().worker_profile).toBe('fallback');
+  });
+
+  it('clears a dangling worker_profile whose model profile is missing (avoids per-task throw)', async () => {
+    // worker_profile names a profile the profiles blob never provided (e.g. a
+    // malformed/dropped JSON or drifted env) — must NOT survive, else every
+    // background task throws "Unknown model profile".
+    process.env['LYNOX_WORKER_PROFILE'] = 'fallback';
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = '{ not valid json';
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(cfg.worker_profile).toBeUndefined();
+    expect(cfg.model_profiles).toBeUndefined();
+  });
+
+  it('LYNOX_MODEL_PROFILES_JSON env deserializes into model_profiles', async () => {
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+      fallback: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-x', model_id: 'mistral-large-2512' },
+    });
+    const { loadConfig } = await import('./config.js');
+    const profiles = loadConfig().model_profiles;
+    expect(profiles?.['fallback']).toMatchObject({ provider: 'openai', model_id: 'mistral-large-2512' });
+  });
+
+  it('malformed LYNOX_MODEL_PROFILES_JSON is ignored (boots without crashing)', async () => {
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = '{ not valid json';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().model_profiles).toBeUndefined();
+  });
+
+  it('an array (not an object) for LYNOX_MODEL_PROFILES_JSON is ignored', async () => {
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify(['not', 'a', 'map']);
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().model_profiles).toBeUndefined();
   });
 
   it('project config can override organization_id (safe key)', async () => {
