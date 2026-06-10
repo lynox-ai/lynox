@@ -21,7 +21,7 @@ import type {
   PromptTabsFn,
   PromptSecretFn,
 } from '../types/index.js';
-import { getBetasForProvider, CHARS_PER_TOKEN, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow } from '../types/index.js';
+import { getBetasForProvider, CHARS_PER_TOKEN, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -1046,7 +1046,7 @@ export class Agent implements IAgent {
     const blocks: Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> = [];
     // Block-level cache_control: supported on Anthropic + Vertex (both 1h TTL), not on custom/openai proxies
     const cc = this.isCustomProxy ? undefined
-      : { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral;
+      : { type: 'ephemeral', ttl: AGENT_CACHE_TTL } as unknown as BetaCacheControlEphemeral;
 
     const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
 
@@ -1128,7 +1128,7 @@ export class Agent implements IAgent {
     ephemeralBlocks: BetaContentBlockParam[],
   ): BetaMessageParam[] {
     const cc = this.isCustomProxy ? undefined
-      : { type: 'ephemeral', ttl: '1h' } as unknown as BetaCacheControlEphemeral;
+      : { type: 'ephemeral', ttl: AGENT_CACHE_TTL } as unknown as BetaCacheControlEphemeral;
     // Nothing to apply (custom proxy with no grounding) — send history as-is.
     if (!cc && ephemeralBlocks.length === 0) return messages;
     if (messages.length === 0) return messages;

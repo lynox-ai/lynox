@@ -25,7 +25,7 @@ describe('Pricing', () => {
     // future registry change that drops claude-opus-4-6 from the registry
     // (which would silently re-route the previous "claude-opus-4-6 fallback"
     // path through the same numbers via a different code path).
-    expect(unknown).toEqual({ input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.50 });
+    expect(unknown).toEqual({ input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 });
   });
 
   describe('override-file precedence', () => {
@@ -81,7 +81,7 @@ describe('Pricing', () => {
       cache_creation_input_tokens: 1_000_000,
       cache_read_input_tokens: 1_000_000,
     });
-    expect(cost).toBeCloseTo(6.75); // $6.25 cacheWrite + $0.50 cacheRead
+    expect(cost).toBeCloseTo(10.50); // $10 cacheWrite (1h TTL = 2×) + $0.50 cacheRead
   });
 
   it('calculates haiku cost', () => {

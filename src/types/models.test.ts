@@ -12,7 +12,48 @@ import {
   normalizeTier,
   MISTRAL_MODEL_MAP,
   MISTRAL_API_BASE,
+  MODEL_CAPABILITIES,
+  AGENT_CACHE_TTL,
+  CACHE_TTL_WRITE_MULTIPLIER,
+  CACHE_READ_MULTIPLIER,
 } from './models.js';
+
+describe('pricing-vs-TTL contract (cache-write must match the TTL the agent sends)', () => {
+  // The agent attaches `cache_control: { ttl: AGENT_CACHE_TTL }` to every
+  // Anthropic/Vertex breakpoint. Anthropic bills cache WRITES by TTL, so the
+  // registry `cacheWrite` MUST equal input × the multiplier for that TTL — else
+  // managed billing drifts from the real Anthropic charge (it once under-billed
+  // because cacheWrite sat at the 5m rate while the agent sent 1h). This test is
+  // the structural pin: change the agent TTL or a price out of sync → CI fails.
+  const cachedAnthropic = Object.entries(MODEL_CAPABILITIES).filter(
+    ([, m]) => (m.provider === 'anthropic' || m.provider === 'vertex') && m.features.promptCaching,
+  );
+
+  it('knows the write multiplier for the TTL the agent actually sends', () => {
+    expect(CACHE_TTL_WRITE_MULTIPLIER[AGENT_CACHE_TTL]).toBeDefined();
+  });
+
+  it('covers the cached Anthropic/Vertex roster (filter is not vacuously empty)', () => {
+    // Guards against a refactor that renames provider/feature and silently makes
+    // the contract match zero models (which would pass every assertion below).
+    expect(cachedAnthropic.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it.each(cachedAnthropic)(
+    'cacheWrite for %s equals input × the AGENT_CACHE_TTL write multiplier',
+    (_id, m) => {
+      const expected = m.pricing.input * CACHE_TTL_WRITE_MULTIPLIER[AGENT_CACHE_TTL]!;
+      expect(m.pricing.cacheWrite).toBeCloseTo(expected, 6);
+    },
+  );
+
+  it.each(cachedAnthropic)(
+    'cacheRead for %s equals input × the (TTL-independent) read multiplier',
+    (_id, m) => {
+      expect(m.pricing.cacheRead).toBeCloseTo(m.pricing.input * CACHE_READ_MULTIPLIER, 6);
+    },
+  );
+});
 
 describe('normalizeTier', () => {
   it('passes the canonical provider-agnostic names through unchanged', () => {
