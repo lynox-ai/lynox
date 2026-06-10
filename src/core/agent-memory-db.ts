@@ -289,7 +289,14 @@ export class AgentMemoryDb {
   private _migrate(): void {
     const currentVersion = this._getVersion();
     for (let i = currentVersion; i < MIGRATIONS.length; i++) {
-      this.db.exec(MIGRATIONS[i]!);
+      // Run each migration atomically. db.exec auto-commits each statement, and
+      // every migration stamps schema_version BEFORE its DDL — so a crash (or a
+      // failing statement) between the stamp and the DDL would leave the version
+      // bumped but the schema un-applied. The migration is then skipped forever
+      // and every query hits the missing table/column: the DB is bricked. The
+      // wrapping transaction makes the stamp + DDL all-or-nothing, so a failure
+      // rolls the stamp back and the migration retries cleanly on next boot.
+      this.db.transaction(() => { this.db.exec(MIGRATIONS[i]!); })();
     }
   }
 

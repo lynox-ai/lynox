@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -77,6 +77,55 @@ describe('SecretVault', () => {
       const vault2 = createVault();
       expect(vault2.get('PERSIST')).toBe('my-secret-value-123');
       vault2.close();
+    });
+  });
+
+  // === Key rotation ===
+
+  describe('rotateVault', () => {
+    const NEW_KEY = 'rotated-master-key-987654321-abcdef';
+
+    it('re-keys all secrets and removes its backup on success', () => {
+      const path = join(tmpDir, 'vault.db');
+      const v1 = createVault();
+      v1.set('API_KEY', 'super-secret-value-1');
+      v1.set('DB_PASS', 'super-secret-value-2');
+      v1.close();
+
+      const count = SecretVault.rotateVault(path, TEST_KEY, NEW_KEY);
+      expect(count).toBe(2);
+
+      const vNew = new SecretVault({ path, masterKey: NEW_KEY });
+      expect(vNew.get('API_KEY')).toBe('super-secret-value-1');
+      expect(vNew.get('DB_PASS')).toBe('super-secret-value-2');
+      vNew.close();
+
+      // Backup is gone after a clean re-key.
+      expect(existsSync(`${path}.rotate-bak`)).toBe(false);
+    });
+
+    it('restores the original vault (no secret lost) when re-keying fails mid-way', () => {
+      const path = join(tmpDir, 'vault.db');
+      const v1 = createVault();
+      v1.set('API_KEY', 'super-secret-value-1');
+      v1.close();
+
+      // Force the re-encrypt to throw AFTER the destructive delete (the exact
+      // crash-window). Without the backup+restore this would lose the secret.
+      const spy = vi.spyOn(SecretVault.prototype, 'set').mockImplementationOnce(() => {
+        throw new Error('boom during re-encrypt');
+      });
+      try {
+        expect(() => SecretVault.rotateVault(path, TEST_KEY, NEW_KEY)).toThrow('boom');
+      } finally {
+        spy.mockRestore();
+      }
+
+      // The original secret survived under the OLD key, and no backup leaked.
+      const vOld = new SecretVault({ path, masterKey: TEST_KEY });
+      expect(vOld.get('API_KEY')).toBe('super-secret-value-1');
+      vOld.close();
+      expect(existsSync(`${path}.rotate-bak`)).toBe(false);
     });
   });
 

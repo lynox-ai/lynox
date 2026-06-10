@@ -861,7 +861,10 @@ export class RunHistory {
   private _migrate(): void {
     const currentVersion = this._getVersion();
     for (let i = currentVersion; i < MIGRATIONS.length; i++) {
-      this.db.exec(MIGRATIONS[i]!);
+      // Atomic per-migration (see AgentMemoryDb._migrate): without the wrapping
+      // transaction a crash between the schema_version stamp and the DDL bumps
+      // the version but skips the schema forever, bricking the DB.
+      this.db.transaction(() => { this.db.exec(MIGRATIONS[i]!); })();
     }
   }
 

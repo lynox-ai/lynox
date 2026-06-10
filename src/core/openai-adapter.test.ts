@@ -89,6 +89,40 @@ describe('OpenAIAdapter', () => {
         server.close();
       }
     });
+
+    it('does not crash on a usage-only final chunk with no choices array (Mistral)', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'm-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+        }));
+        // Mistral emits a trailing usage-only chunk with NO `choices` key at all.
+        // Indexing chunk.choices[0] on this used to throw and abort the stream.
+        res.write(sseChunk({ id: 'm-1', usage: { prompt_tokens: 7, completion_tokens: 2 } }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        // Stream completes cleanly and the text survived the usage-only chunk.
+        expect(events.map(e => e.type)).toContain('message_stop');
+        const textDeltas = events
+          .filter(e => e.type === 'content_block_delta')
+          .map(e => (e as { delta: { text?: string } }).delta.text)
+          .filter(Boolean);
+        expect(textDeltas).toEqual(['Hi']);
+      } finally {
+        server.close();
+      }
+    });
   });
 
   describe('tool call streaming', () => {
