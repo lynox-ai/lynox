@@ -1461,8 +1461,13 @@
 	const currentSessionId = $derived(getSessionId());
 	const sessionArtifacts = $derived(getSessionArtifacts(currentSessionId));
 	let artifactShelfExpanded = $state(false);
+	// Load the artifact list on session change AND whenever a run ends — so an
+	// artifact the agent just created or edited (its `version` bumps server-side
+	// via artifact_save or edit_file) appears without needing a session switch.
+	// One effect (not two) so a fresh mount loads once, not twice. Pairs with
+	// ArtifactsView re-fetching an open preview when its version changes.
 	$effect(() => {
-		if (currentSessionId) void loadArtifacts();
+		if (currentSessionId && !isStreaming) void loadArtifacts();
 	});
 
 	// Focus the textarea when the empty-state lands; clearing leftover text

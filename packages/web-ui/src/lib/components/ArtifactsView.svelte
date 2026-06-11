@@ -57,6 +57,25 @@
 		}
 	});
 
+	// Keep an open preview fresh: when the artifact is edited elsewhere (the
+	// agent's artifact_save / edit_file bumps its `version` in the refreshed
+	// list), re-fetch its content so the preview never shows a stale render. (F5)
+	$effect(() => {
+		const open = selected;
+		if (!open) return;
+		const latest = artifacts.find(a => a.id === open.id);
+		if (latest && (latest.version ?? 1) > (open.version ?? 1)) {
+			void getArtifact(open.id).then(full => {
+				// Only swap in if not older than what's shown — guards the
+				// close-then-reopen-same-id race where a stale in-flight fetch
+				// could otherwise clobber a freshly-reopened newer copy.
+				if (full && selected?.id === full.id && (full.version ?? 1) >= (selected.version ?? 1)) {
+					selected = full;
+				}
+			});
+		}
+	});
+
 	// Focus dialog when it opens
 	$effect(() => {
 		if (confirmDelete) {
