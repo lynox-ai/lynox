@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.13.0 — 2026-06-12
+
+Managed-Pro accounts now run on Opus and managed background work routes to Mistral — the headline of an env-ABI fix wave — alongside a forensic-driven batch of cost, context, and UX hardening across the engine and control plane.
+
+### Added
+
+- **Free-text answers on tabbed questions** — a tabbed `ask_user` prompt now also accepts a typed free-form answer per question, so you never break the flow when no option fits. (#714)
+
+### Changed
+
+- **Managed-Pro runs Opus; managed background tasks run Mistral** — the control plane now emits the account tier and worker/model profiles under the names the engine actually reads, so a Managed-Pro instance gets Opus for deep work and routes background/bulk tasks to the cheaper Mistral profile instead of silently staying on Sonnet/Anthropic. (#280, #710)
+- **Binary document uploads are rejected, not garbled** — a `.docx` / `.pdf` / `.doc` upload now returns a clear 415 instead of inlining unreadable bytes as text. (#716)
+- **Monthly spend cap is a calendar month** — the monthly cost cap resets on the 1st of the month rather than on a rolling 31-day window. (#712)
+- **Large HTTP JSON responses are auto-capped** — the `http` tool shapes and caps oversized JSON API responses (up to a 2 MB read ceiling) and strips noise headers, instead of blowing the context window or truncating mid-JSON. (#713)
+
+### Fixed
+
+- **Three engine crash / data-integrity bugs**, plus the per-tenant `agent-memory.db` migration applier is now transactional — a crash between version-stamp and DDL can no longer brick the database. (#711)
+- **Cache-write pricing aligned to the 1-hour cache TTL** the agent actually sends, correcting managed cost reporting. (#709)
+- **Artifact preview and list refresh** after an artifact is edited (no more stale preview). (#715)
+- **Stronger "thinking" animation** on the agent presence icon, plus a universal artifact-activity label. (#718)
+- **Grounding discipline** — the agent states a metric or a tailored recommendation only from data it actually fetched, never an estimate or a generic playbook presented as case-specific data. (#717)
+- **No empty-submit filler turns** after a text-less tool call (Anthropic path). (#719)
+
+### Control plane
+
+- **Credit accounting invariants hardened** — credit-pack purchases are now transactional with a unique payment-intent index (no double-credit on a retried webhook); migration `0033_credit_pack_unique_pi`. (#279)
+- **Provisioning saga hardened** against orphaned VMs, dangling DNS records, and cap races. (#282)
+- **Secret hygiene** — the admin env-preview redacts the pooled LLM key (including inside the model-profiles JSON), emits the account tier, and drops a phantom env var. (#280)
+
 ## 1.12.0 — 2026-06-09
 
 Provenance lifecycle lands as a first-class data property, alongside a wave of correctness, billing-integrity, and security fixes across the engine and the managed control plane.
