@@ -147,8 +147,15 @@ function measureStaticPrefixTokens(): number {
  * `memory_update` gain a lean `sourceType` enum param so the agent can declare
  * provenance. Combined static prefix measures 20628; descriptions kept terse.
  * Static + cache-read priced, so the per-turn cost impact is minimal.
+ *
+ * 2026-06-11: bump to 20850 (measured 20814) — one grounding rule added to
+ * SYSTEM_PROMPT after a prod-thread forensic: state a metric / tailored
+ * recommendation only from data actually fetched (no estimate-as-real-data, no
+ * generic playbook as case-specific advice). (The sibling "tool result is not a
+ * new user turn" fix was done STRUCTURALLY in render-projection/agent instead
+ * of the prefix, so it costs no static tokens.) Static + cache-read priced.
  */
-const STATIC_PREFIX_BUDGET = 20720;
+const STATIC_PREFIX_BUDGET = 20850;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
