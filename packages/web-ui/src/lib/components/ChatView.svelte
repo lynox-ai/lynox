@@ -2522,9 +2522,11 @@
 										>{option}</button>
 									{/each}
 								</div>
-								<div class="flex gap-2 mt-1.5">
-									<button onclick={() => { if (batchAnswers[i]) answerPrompt(batchAnswers[i]!); }}
-										disabled={!(batchSelections[i] ?? []).length}
+								<!-- Free-form fallback: a tabbed question WITH options also accepts a custom typed answer, so an answer outside the offered options never forces a flow break. Typing clears any option selection; Send submits whichever is set (batchAnswers[i]). -->
+									<input type="text" bind:value={batchAnswers[i]} oninput={() => { if ((batchSelections[i] ?? []).length) { batchSelections[i] = []; batchSelections = [...batchSelections]; } }} placeholder={t('chat.batch_custom_answer')} class="mt-1.5 w-full rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5 text-[16px] md:text-xs outline-none focus:border-border-hover" />
+									<div class="flex gap-2 mt-1.5">
+									<button onclick={() => { const a = batchAnswers[i]?.trim(); if (a) answerPrompt(a); }}
+										disabled={!batchAnswers[i]?.trim()}
 										class="rounded-[var(--radius-sm)] bg-accent px-3 py-1 text-xs text-accent-fg hover:opacity-90 disabled:opacity-30"
 									>{t('chat.send')}</button>
 									<button onclick={() => answerPrompt('__dismissed__')}
