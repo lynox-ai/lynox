@@ -36,7 +36,7 @@ import type { ToolCallTracker } from './output-guard.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
-import { THINKING_ONLY_PLACEHOLDER } from './render-projection.js';
+import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -767,7 +767,17 @@ export class Agent implements IAgent {
 
       if (response.stop_reason === 'tool_use') {
         const results = await this._dispatchTools(response.content);
-        this.messages.push({ role: 'user', content: results });
+        // Append a continuation hint so the model reads this tool-result turn as
+        // its OWN action output, not a new (empty) user message (which made it
+        // emit "looks like an empty submit" filler turns). The render projection
+        // detects + suppresses this hint, so it never shows as a chat bubble.
+        // Only when there ARE tool results — a degenerate `tool_use` stop with
+        // zero dispatched blocks (some openai-compat providers) must not produce
+        // a hint-only carrier (it would have no tool_result to ride on).
+        const carrier = results.length > 0
+          ? [...results, { type: 'text' as const, text: TOOL_RESULT_CONTINUATION_HINT }]
+          : results;
+        this.messages.push({ role: 'user', content: carrier });
         // Same checkpoint after tool_results — see above.
         await this._checkpoint();
         continue;

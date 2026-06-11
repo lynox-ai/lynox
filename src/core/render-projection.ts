@@ -12,6 +12,19 @@ import type { ThreadMessageRecord } from './thread-store.js';
 export const THINKING_ONLY_PLACEHOLDER = '[…]';
 
 /**
+ * Trailing text block the agent appends to a tool-result carrier turn so the
+ * model unmistakably reads it as the output of ITS OWN tool calls — not a new
+ * (empty) user message. Without it, models sometimes reply "looks like an empty
+ * submit / let me know when you want to continue" (a wasted, billed turn — prod
+ * thread 2026-06-11). Lives at the decision point (the tool-result turn) rather
+ * than the always-on system prefix, so it costs ~nothing per non-tool turn.
+ * Shared so the agent's append and this projection's carrier-detection +
+ * suppression can never drift apart — the hint must never render as a bubble.
+ */
+export const TOOL_RESULT_CONTINUATION_HINT =
+  '[The block(s) above are results of your own tool calls — continue the task or briefly confirm. This is not a new user message.]';
+
+/**
  * UI-ready projection of stored thread messages.
  *
  * The storage layer keeps raw Anthropic `BetaMessageParam` shape (role + content
@@ -220,8 +233,13 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     const role = r.role === 'assistant' ? 'assistant' : 'user';
 
     if (role === 'user') {
-      if (Array.isArray(content) && content.length > 0 && content.every((b) => b.type === 'tool_result')) {
-        // Tool-result carrier: merge into previously-emitted tool calls.
+      if (Array.isArray(content) && content.length > 0
+        && content.every((b) => b.type === 'tool_result'
+          || (b.type === 'text' && b.text === TOOL_RESULT_CONTINUATION_HINT))) {
+        // Tool-result carrier (incl. a degenerate hint-only turn): merge any
+        // tool_results into previously-emitted tool calls; the hint never
+        // renders. Arbitrary user text alongside a tool_result is NOT a carrier
+        // (the `every` fails) and renders normally.
         // Never renders as its own bubble.
         for (const block of content) {
           const id = block.tool_use_id ?? '';

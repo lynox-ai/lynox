@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -319,5 +319,52 @@ describe('thinking-only placeholder suppression', () => {
     ]);
     expect(out).toHaveLength(1);
     expect(out[0]!.role).toBe('assistant');
+  });
+});
+
+describe('tool-result carrier with continuation hint', () => {
+  it('suppresses the hint (no user bubble) and still merges the tool result', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'do the thing'),
+      rec(2, 'assistant', [{ type: 'tool_use', id: 'tu_1', name: 'artifact_save', input: {} }]),
+      rec(3, 'user', [
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact X' },
+        { type: 'text', text: TOOL_RESULT_CONTINUATION_HINT },
+      ]),
+    ]);
+    // The carrier turn (tool_result + hint) must NOT render as a user bubble,
+    // and the hint text must never leak into any rendered message.
+    const userBubbles = out.filter((m) => m.role === 'user').map((m) => m.content);
+    expect(userBubbles).toEqual(['do the thing']);
+    expect(out.some((m) => m.content.includes('your own tool calls'))).toBe(false);
+    // The tool result still merged into the assistant turn's tool call.
+    const asst = out.find((m) => m.role === 'assistant');
+    expect(asst?.toolCalls?.[0]?.result).toContain('Saved artifact X');
+  });
+
+  it('still renders a real user message that merely contains tool_result + other text', () => {
+    // A carrier is suppressed ONLY when every non-tool_result block is exactly
+    // the hint; arbitrary user text alongside a tool_result is NOT suppressed.
+    const out = projectMessages([
+      rec(1, 'assistant', [{ type: 'tool_use', id: 'tu_2', name: 'bash', input: {} }]),
+      rec(2, 'user', [
+        { type: 'tool_result', tool_use_id: 'tu_2', content: 'ok' },
+        { type: 'text', text: 'actually, also do this' },
+      ]),
+    ]);
+    expect(out.some((m) => m.role === 'user' && m.content.includes('actually, also do this'))).toBe(true);
+  });
+
+  it('suppresses a degenerate hint-only carrier (zero tool_results)', () => {
+    // Defensive: if a carrier ever degrades to hint-only (e.g. a `tool_use` stop
+    // with zero dispatched blocks, or an orphan-stripped tool_result), the hint
+    // must still never render as a user bubble.
+    const out = projectMessages([
+      rec(1, 'user', 'go'),
+      rec(2, 'assistant', 'done'),
+      rec(3, 'user', [{ type: 'text', text: TOOL_RESULT_CONTINUATION_HINT }]),
+    ]);
+    expect(out.some((m) => m.content.includes('your own tool calls'))).toBe(false);
+    expect(out.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['go']);
   });
 });
