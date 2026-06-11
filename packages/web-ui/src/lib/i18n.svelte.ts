@@ -620,7 +620,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.activity.tool.memory_store': { de: 'Speichert Wissen...', en: 'Saving knowledge...' },
 	'chat.activity.tool.http_request': { de: 'Recherchiert im Web...', en: 'Researching online...' },
 	'chat.activity.tool.web_search': { de: 'Sucht im Web...', en: 'Searching the web...' },
-	'chat.activity.tool.artifact_save': { de: 'Erstellt Dashboard...', en: 'Creating dashboard...' },
+	'chat.activity.tool.artifact_save': { de: 'Erstellt Artefakt...', en: 'Creating artifact...' },
 	'chat.activity.tool.ask_user': { de: 'Wartet auf Antwort...', en: 'Waiting for answer...' },
 	'chat.activity.tool.bash': { de: 'Führt Befehl aus...', en: 'Running command...' },
 	'chat.activity.tool.task_list': { de: 'Prüft Aufgaben...', en: 'Checking tasks...' },

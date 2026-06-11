@@ -31,6 +31,14 @@
 		transform-origin: 50% 95%;
 		animation: lynox-breathe 2s ease-in-out infinite;
 	}
+	/* thinking — a fuller, springier, slightly faster breath than the calm
+	   idle base + a touch more aura, so an ACTIVELY-reasoning agent reads as
+	   clearly more alive than one merely idling (the idle base felt too faint
+	   while thinking). */
+	.agent-presence.thinking {
+		filter: drop-shadow(0 0 3.5px color-mix(in srgb, var(--color-accent) 55%, transparent));
+		animation: lynox-think 1.5s ease-in-out infinite;
+	}
 	/* tool — tilt to a side, overshoot, settle, hold; then the other side. */
 	.agent-presence.tool {
 		animation: lynox-scan 2.1s ease-in-out infinite;
@@ -49,6 +57,10 @@
 	@keyframes lynox-breathe {
 		0%, 100% { transform: scaleX(1.03) scaleY(0.97); }
 		50% { transform: scaleX(0.98) scaleY(1.05) translateY(-1.5px); }
+	}
+	@keyframes lynox-think {
+		0%, 100% { transform: scaleX(1.06) scaleY(0.94); }
+		50% { transform: scaleX(0.93) scaleY(1.09) translateY(-2.5px); }
 	}
 	@keyframes lynox-scan {
 		0%, 100% { transform: rotate(-10deg); }
