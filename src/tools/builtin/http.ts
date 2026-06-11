@@ -1,5 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
+import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
@@ -90,6 +91,27 @@ function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
 const DEFAULT_RESPONSE_BYTES = 100_000;
+
+// Safety-net response shaping: when an API profile defines NO `response_shape`
+// and the parsed JSON is large, apply a generic structural cap so an unshaped
+// heavy API (DataForSEO, Stripe list endpoints, ...) can't silently inject tens
+// of KB into the context — which then re-bills via the prompt cache on every
+// subsequent turn. Falls back to the raw body on any error; never worse than
+// the unshaped response. Below the threshold the raw body is returned untouched.
+const DEFAULT_SHAPE_THRESHOLD_CHARS = 30_000;
+const DEFAULT_LARGE_RESPONSE_SHAPE: ResponseShape = {
+  kind: 'reduce',
+  max_array_items: 25,
+  max_string_chars: 1_000,
+  max_chars: 24_000,
+};
+// JSON bodies get a higher read ceiling than the raw-text limit: the shaping
+// pass (explicit profile shape OR the safety-net cap) reduces them back down to
+// a few KB, so byte-truncating a large JSON to invalid mid-cut text BEFORE it
+// can be parsed + shaped would defeat the cap on exactly the heavy API pulls
+// (e.g. DataForSEO bulk keyword data, routinely >100KB) that motivate it. Only
+// applied when the user hasn't pinned an explicit `http_response_limit`.
+const JSON_SHAPE_READ_CEILING = 2_000_000;
 
 function shouldRewriteToGet(status: number, method: string): boolean {
   if (status === 303) return method !== 'GET' && method !== 'HEAD';
@@ -277,43 +299,56 @@ function detectGetExfiltration(url: string): string | null {
  */
 async function maybeShapeJson(json: unknown, url: string, toolContext: ToolContext | undefined): Promise<string> {
   const defaultBody = JSON.stringify(json, null, 2);
-  if (!toolContext?.apiStore) return defaultBody;
 
-  let hostname: string;
-  try {
-    hostname = new URL(url).hostname;
-  } catch {
-    return defaultBody;
-  }
-
-  const profile = toolContext.apiStore.getByHostname(hostname);
-  const shape = profile?.response_shape;
-  if (!profile || !shape) return defaultBody;
-
-  const result = applyShape(json, shape);
-
-  if (result.error) {
-    if (channels.shapeError.hasSubscribers) {
-      channels.shapeError.publish({
-        profileId: profile.id,
-        hostname,
-        error: result.error,
-      });
+  // 1. Explicit per-API shape — a profile's `response_shape` wins when present.
+  const apiStore = toolContext?.apiStore;
+  if (apiStore) {
+    let hostname = '';
+    try {
+      hostname = new URL(url).hostname;
+    } catch {
+      hostname = '';
     }
-    return defaultBody;
+    const profile = hostname ? apiStore.getByHostname(hostname) : undefined;
+    const shape = profile?.response_shape;
+    if (profile && shape) {
+      const result = applyShape(json, shape);
+      if (!result.error) {
+        if (channels.shapeApplied.hasSubscribers) {
+          channels.shapeApplied.publish({
+            profileId: profile.id,
+            hostname,
+            beforeChars: result.beforeChars,
+            afterChars: result.afterChars,
+            kind: shape.kind ?? 'reduce',
+          });
+        }
+        return result.shaped;
+      }
+      if (channels.shapeError.hasSubscribers) {
+        channels.shapeError.publish({ profileId: profile.id, hostname, error: result.error });
+      }
+      // fall through to the safety-net cap below
+    }
   }
 
+  // 2. Safety-net: no explicit shape (or it errored). Return raw unless the body
+  //    is large enough to bloat the context, then apply the generic structural cap.
+  if (defaultBody.length <= DEFAULT_SHAPE_THRESHOLD_CHARS) return defaultBody;
+  const capped = applyShape(json, DEFAULT_LARGE_RESPONSE_SHAPE);
+  if (capped.error) return defaultBody;
   if (channels.shapeApplied.hasSubscribers) {
     channels.shapeApplied.publish({
-      profileId: profile.id,
-      hostname,
-      beforeChars: result.beforeChars,
-      afterChars: result.afterChars,
-      kind: shape.kind ?? 'reduce',
+      profileId: '(default-cap)',
+      hostname: '',
+      beforeChars: capped.beforeChars,
+      afterChars: capped.afterChars,
+      kind: 'reduce',
     });
   }
-
-  return result.shaped;
+  return capped.shaped +
+    `\n[note: large API response auto-capped (${capped.beforeChars}→${capped.afterChars} chars) to protect the context window — ` +
+    `define a response_shape on this API profile for precise field selection, or use spawn_agent role='collector' to work the full dataset in an isolated context.]`;
 }
 
 interface HttpRequestInput {
@@ -552,10 +587,26 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         'proxy-authorization', 'x-auth-token', 'x-api-key', 'x-csrf-token',
         'x-xsrf-token', 'cookie',
       ]);
+      // Transport / CORS / browser-security headers are noise to the agent and
+      // just burn context tokens on every call. Drop them (incl. the whole
+      // `access-control-*` family) and keep only payload-relevant headers
+      // (content-type, content-length, location, retry-after, link, ratelimit…).
+      const NOISE_HEADERS = new Set([
+        'connection', 'keep-alive', 'transfer-encoding', 'cache-control', 'pragma',
+        'expires', 'age', 'vary', 'date', 'server', 'x-powered-by', 'via', 'alt-svc',
+        'strict-transport-security', 'content-security-policy', 'referrer-policy',
+        'x-content-type-options', 'x-frame-options', 'x-xss-protection',
+        'permissions-policy', 'cross-origin-opener-policy', 'cross-origin-resource-policy',
+        'cross-origin-embedder-policy', 'cf-ray', 'cf-cache-status', 'x-cache',
+        'report-to', 'nel', 'timing-allow-origin',
+      ]);
       const respHeaders: string[] = [];
       response.headers.forEach((value, key) => {
-        if (REDACTED_HEADERS.has(key.toLowerCase())) {
+        const lk = key.toLowerCase();
+        if (REDACTED_HEADERS.has(lk)) {
           respHeaders.push(`${key}: [redacted]`);
+        } else if (lk.startsWith('access-control-') || NOISE_HEADERS.has(lk)) {
+          // dropped — transport/CORS/security noise, irrelevant to the agent
         } else {
           respHeaders.push(`${key}: ${value}`);
         }
@@ -563,16 +614,24 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
       let body = '';
       const contentType = response.headers.get('content-type') ?? '';
-      const responseLimit = agent.toolContext?.userConfig?.http_response_limit ?? DEFAULT_RESPONSE_BYTES;
+      const isJson = contentType.includes('json');
+      const explicitLimit = agent.toolContext?.userConfig?.http_response_limit;
+      const responseLimit = explicitLimit ?? DEFAULT_RESPONSE_BYTES;
+      // Read JSON up to the higher shape-ceiling (unless the user pinned a limit)
+      // so the shaping pass can run on large payloads instead of byte-truncating
+      // them to invalid mid-cut text first. See JSON_SHAPE_READ_CEILING.
+      const readLimit = isJson && explicitLimit === undefined
+        ? JSON_SHAPE_READ_CEILING
+        : responseLimit;
       // Race the body read against the same wall-clock — Node fetch's response
       // body stream doesn't honour signal aborts after headers arrive, so a
       // chunked-transfer stall here would otherwise hang the run.
       const { text, truncated } = await Promise.race([
-        readBodyLimited(response, responseLimit),
+        readBodyLimited(response, readLimit),
         wallTimeout,
       ]);
 
-      if (contentType.includes('json') && !truncated) {
+      if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
           // Apply per-API response shaping if the profile defines one.
@@ -586,7 +645,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
 
       if (truncated) {
-        const limitKB = Math.round(responseLimit / 1024);
+        const limitKB = Math.round(readLimit / 1024);
         // Active delegation hint: a half-cut response in the main context is
         // expensive (eats the cap, may still miss the field the agent needs).
         // A collector sub-agent can fetch + summarize in an isolated context
