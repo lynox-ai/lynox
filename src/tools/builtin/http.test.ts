@@ -352,6 +352,74 @@ describe('httpRequestTool', () => {
       expect(result.length).toBeLessThan(150_000);
     });
 
+    it('safety-net caps a large UNSHAPED JSON response (no profile shape)', async () => {
+      mockDnsPublic();
+      // ~38KB compact (< 100KB http cap, so it is parsed not truncated), but
+      // pretty-printed > 30KB → the generic safety-net cap fires.
+      const big = { results: Array.from({ length: 400 }, (_, i) => ({ keyword: `keyword-${i}-` + 'x'.repeat(60), volume: 1000 + i })) };
+      const mockResp = createMockResponse({ json: big });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const result = await handler({ url: 'http://api.example.com/search' }, makeAgent());
+      expect(result).toContain('auto-capped');
+      expect(result).toMatch(/response_shape|spawn_agent/);
+      expect(result).toContain('keyword-0-');           // first items kept
+      expect(result).not.toContain('keyword-399-');      // array capped to 25 items
+      expect(result.length).toBeLessThan(20_000);        // far below the ~90KB raw
+    });
+
+    it('shapes a >100KB JSON instead of byte-truncating it (parses past the raw limit)', async () => {
+      mockDnsPublic();
+      // ~140KB compact — exceeds the 100KB raw read cap. On main this gets
+      // byte-truncated to invalid JSON before shaping; the JSON read ceiling now
+      // lets it parse + shape down to a few KB.
+      const huge = { results: Array.from({ length: 1500 }, (_, i) => ({ keyword: `keyword-${i}-` + 'x'.repeat(60), volume: 1000 + i })) };
+      expect(JSON.stringify(huge).length).toBeGreaterThan(100_000); // would truncate on main
+      const mockResp = createMockResponse({ json: huge });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const result = await handler({ url: 'http://api.example.com/bulk' }, makeAgent());
+      expect(result).toContain('auto-capped');        // shaped, not...
+      expect(result).not.toContain('[truncated');     // ...byte-truncated
+      expect(result).toContain('keyword-0-');
+      expect(result).not.toContain('keyword-1499-');  // array capped to 25
+      expect(result.length).toBeLessThan(30_000);
+    });
+
+    it('leaves a SMALL JSON response untouched (below the safety-net threshold)', async () => {
+      mockDnsPublic();
+      const mockResp = createMockResponse({ json: { name: 'small', items: [1, 2, 3] } });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const result = await handler({ url: 'http://api.example.com/small' }, makeAgent());
+      expect(result).toContain('"name": "small"');
+      expect(result).toContain('"items"');
+      expect(result).not.toContain('auto-capped');
+    });
+
+    it('drops CORS / transport noise headers but keeps payload headers', async () => {
+      mockDnsPublic();
+      const mockResp = createMockResponse({
+        json: { ok: true },
+        headers: {
+          'access-control-allow-origin': '*',
+          'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
+          'cache-control': 'no-cache, must-revalidate',
+          'server': 'nginx',
+          'x-ratelimit-remaining': '99',
+        },
+      });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+
+      const result = await handler({ url: 'http://api.example.com/data' }, makeAgent());
+      expect(result).not.toContain('access-control-allow-origin');
+      expect(result).not.toContain('access-control-allow-methods');
+      expect(result).not.toContain('cache-control');
+      expect(result).not.toContain('server: nginx');
+      expect(result).toContain('x-ratelimit-remaining: 99'); // payload header kept
+      expect(result).toContain('content-type');              // payload header kept
+    });
+
     it('PUT method sends body', async () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'updated' });
