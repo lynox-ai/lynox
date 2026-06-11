@@ -315,6 +315,37 @@ function errorResponse(res: ServerResponse, status: number, message: string): vo
   jsonResponse(res, status, { error: message });
 }
 
+/**
+ * True if an uploaded non-image file is a binary document rather than text.
+ * Decoding a binary (Word/PDF/Excel) as UTF-8 and shoving it into the model
+ * context injects garbage and burns tokens; the upload path should reject it
+ * with a clear message instead. Per-format text extraction (mammoth for .docx,
+ * a PDF parser, …) is a separate feature.
+ */
+export function looksBinaryUpload(buf: Buffer): boolean {
+  if (buf.length >= 4) {
+    const [b0, b1, b2, b3] = buf;
+    // "PK" + a real ZIP record signature (local-file 03 04, central-dir 01 02,
+    // EOCD 05 06, spanned 07 08) — requiring b2/b3 avoids rejecting plain text
+    // that merely starts with the letters "PK" (e.g. "PKW", a firm named "PK").
+    if (b0 === 0x50 && b1 === 0x4b &&
+        ((b2 === 0x03 && b3 === 0x04) || (b2 === 0x01 && b3 === 0x02) ||
+         (b2 === 0x05 && b3 === 0x06) || (b2 === 0x07 && b3 === 0x08))) return true; // zip / OOXML (.docx/.xlsx/.pptx)
+    if (b0 === 0x25 && b1 === 0x50 && b2 === 0x44 && b3 === 0x46) return true; // "%PDF"
+    if (b0 === 0xd0 && b1 === 0xcf && b2 === 0x11 && b3 === 0xe0) return true; // OLE compound (legacy .doc/.xls/.ppt)
+  }
+  // Generic heuristic: a NUL byte, or a high ratio of control bytes in the head,
+  // means it isn't text. Sample the first 4KB to stay O(1) on large uploads.
+  const sample = buf.subarray(0, 4096);
+  if (sample.length === 0) return false;
+  let suspicious = 0;
+  for (const b of sample) {
+    if (b === 0) return true;
+    if (b < 0x09 || (b > 0x0d && b < 0x20)) suspicious++;
+  }
+  return suspicious / sample.length > 0.1;
+}
+
 /** Type-guard that sends 503 if the service is null/undefined. Caller must `return` after a false result. */
 function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
   if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
@@ -1877,7 +1908,12 @@ export class LynoxHTTPApi {
             // Non-image files: decode and include as text. Cap the decoded
             // size so a 10 MB base64 can't push ~7.5 MB of arbitrary text
             // straight into the model context.
-            const decoded = Buffer.from(file.data, 'base64').toString('utf-8');
+            const buf = Buffer.from(file.data, 'base64');
+            if (looksBinaryUpload(buf)) {
+              errorResponse(res, 415, `"${safeName}" looks like a binary document (Word/PDF/Excel/…). Inline text extraction isn't supported yet — paste the text, or upload a .txt/.md/.csv (or export to text first).`);
+              return;
+            }
+            const decoded = buf.toString('utf-8');
             const text = decoded.length > MAX_TEXT_FILE_DECODED_CHARS
               ? `${decoded.slice(0, MAX_TEXT_FILE_DECODED_CHARS)}\n[…truncated, ${String(decoded.length - MAX_TEXT_FILE_DECODED_CHARS)} chars omitted]`
               : decoded;

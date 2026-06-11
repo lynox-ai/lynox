@@ -3701,3 +3701,31 @@ describe('LynoxHTTPApi', () => {
     });
   });
 });
+
+describe('looksBinaryUpload', () => {
+  it('flags binary documents, passes text (incl. UTF-8/German)', async () => {
+    const { looksBinaryUpload } = await import('./http-api.js');
+    // Binary container signatures
+    expect(looksBinaryUpload(Buffer.from([0x50, 0x4b, 0x03, 0x04]))).toBe(true);    // PK — zip / .docx
+    expect(looksBinaryUpload(Buffer.from('%PDF-1.7\n%âãÏÓ'))).toBe(true);            // PDF
+    expect(looksBinaryUpload(Buffer.from([0xd0, 0xcf, 0x11, 0xe0]))).toBe(true);     // OLE — legacy .doc
+    // A NUL byte ⇒ binary
+    expect(looksBinaryUpload(Buffer.from([0x41, 0x00, 0x42, 0x43]))).toBe(true);
+    // Plain text passes — including multi-byte UTF-8 (German accents/umlauts)
+    expect(looksBinaryUpload(Buffer.from('# Heading\n\nHello, world. Grüße & é ü à.'))).toBe(false);
+    expect(looksBinaryUpload(Buffer.from('a,b,c\n1,2,3\n'))).toBe(false);
+    expect(looksBinaryUpload(Buffer.from(''))).toBe(false);
+  });
+
+  it('uses the >10% control-byte ratio for signature-less, NUL-free binary', async () => {
+    const { looksBinaryUpload } = await import('./http-api.js');
+    // All control bytes (NUL-free) ⇒ binary via the ratio branch
+    expect(looksBinaryUpload(Buffer.from(Array(200).fill(0x01)))).toBe(true);
+    // ~4% control bytes (4 of 99) ⇒ still text (pins the threshold below 10%)
+    expect(looksBinaryUpload(Buffer.concat([Buffer.from('x'.repeat(95)), Buffer.from([0x01, 0x02, 0x03, 0x04])]))).toBe(false);
+    // Text that merely starts with "PK" is NOT misclassified (2-byte sig tightened)
+    expect(looksBinaryUpload(Buffer.from('PKW-Liste 2026: Audi, BMW, VW — Bestand'))).toBe(false);
+    // A 2-byte "PK" buffer is too short for the signature → generic path → text
+    expect(looksBinaryUpload(Buffer.from('PK'))).toBe(false);
+  });
+});
