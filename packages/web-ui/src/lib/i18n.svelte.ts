@@ -612,6 +612,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Chat
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },
 	'chat.send': { de: 'Senden', en: 'Send' },
+	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
 	'chat.activity.thinking': { de: 'Denkt nach...', en: 'Thinking...' },
 	'chat.activity.writing': { de: 'Schreibt...', en: 'Writing...' },
