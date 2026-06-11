@@ -426,3 +426,11 @@ describe('DATASTORE_PROMPT_SUFFIX OKR/KPI proactive trigger', () => {
     expect(DATASTORE_PROMPT_SUFFIX).toMatch(/current_value/);
   });
 });
+
+describe('SYSTEM_PROMPT grounding rule', () => {
+  it('pins the metric + advice grounding rule (no estimate/playbook as real data)', () => {
+    expect(SYSTEM_PROMPT).toContain("Ground figures AND tailored advice in THIS case's data");
+    expect(SYSTEM_PROMPT).toContain('generic playbook dressed as case-specific analysis');
+    expect(SYSTEM_PROMPT).toMatch(/an estimate or generic playbook presented as verified data/);
+  });
+});
