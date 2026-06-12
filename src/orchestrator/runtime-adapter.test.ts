@@ -15,10 +15,16 @@ vi.mock('../core/agent.js', () => ({
 // Mock getRole
 const mockGetRole = vi.fn().mockReturnValue(undefined);
 const mockGetRoleNames = vi.fn().mockReturnValue(['researcher', 'creator', 'operator', 'collector']);
-vi.mock('../core/roles.js', () => ({
-  getRole: (...args: unknown[]) => mockGetRole(...args),
-  getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
-}));
+// Partial mock: keep the real applyTierGate (the account gate resolveRunModel
+// composes) and only stub role lookup.
+vi.mock('../core/roles.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../core/roles.js')>();
+  return {
+    ...actual,
+    getRole: (...args: unknown[]) => mockGetRole(...args),
+    getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
+  };
+});
 
 import { Agent } from '../core/agent.js';
 import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';

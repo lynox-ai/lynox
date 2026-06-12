@@ -47,9 +47,11 @@ describe('applyTierGate', () => {
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('deep-tier override requires account_tier=pro'));
   });
 
-  it('downgrades deep to balanced when account_tier is unset (defaults to non-pro)', () => {
-    expect(applyTierGate('deep', undefined)).toBe('balanced');
-    expect(stderrSpy).toHaveBeenCalled();
+  it('passes deep through when account_tier is unset (self-host / BYOK is not gated)', () => {
+    // Self-host pays its own LLM bill — the deep gate is a managed billing
+    // entitlement and must not apply when account_tier is unset.
+    expect(applyTierGate('deep', undefined)).toBe('deep');
+    expect(stderrSpy).not.toHaveBeenCalled();
   });
 
   it('passes balanced and fast through untouched for any tier', () => {

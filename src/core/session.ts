@@ -19,7 +19,8 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { effectiveContextWindow, getModelId, clampTier } from '../types/index.js';
+import { effectiveContextWindow, getModelId } from '../types/index.js';
+import { resolveRunModel } from './tier-resolver.js';
 import { getActiveProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
@@ -475,7 +476,16 @@ export class Session {
       toolCtx.pendingStepHint = null;
       const maxTier = toolCtx.userConfig.max_tier;
       if (pendingHint.model) {
-        this._model = clampTier(pendingHint.model, maxTier);
+        // Gate (deep is Pro-only) AND clamp to the ceiling — this path applied
+        // only the clamp before, so a non-Pro step hint requesting deep slipped
+        // the account gate. Only the resolved tier is used here.
+        this._model = resolveRunModel({
+          requested: pendingHint.model,
+          defaultTier: pendingHint.model,
+          accountTier: toolCtx.userConfig.account_tier,
+          maxTier,
+          provider: toolCtx.userConfig.provider ?? 'anthropic',
+        }).tier;
         this._recreateAgent();
       }
       if (pendingHint.effort) {
