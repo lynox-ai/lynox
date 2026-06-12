@@ -64,6 +64,25 @@ export interface ModelProfile {
   pricing?: { input: number; output: number } | undefined;
 }
 
+/**
+ * Runtime guard for a {@link ModelProfile}. Checks only the REQUIRED fields the
+ * downstream LLM client dereferences (`provider`, `api_base_url`, `api_key`,
+ * `model_id`) — optional fields are left to their defaults. Used at every
+ * untrusted boundary that ingests a profile (the `LYNOX_MODEL_PROFILES_JSON`
+ * env blob, spawn `profile` inputs) so a malformed entry is dropped rather than
+ * reaching the openai-adapter as `Bearer undefined` and crashing the run.
+ */
+export function isModelProfile(value: unknown): value is ModelProfile {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    v['provider'] === 'openai' &&
+    typeof v['api_base_url'] === 'string' &&
+    typeof v['api_key'] === 'string' &&
+    typeof v['model_id'] === 'string'
+  );
+}
+
 export const MODEL_MAP: Record<ModelTier, string> = {
   'deep':     'claude-opus-4-6',
   'balanced': 'claude-sonnet-4-6',

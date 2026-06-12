@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile } from '../types/index.js';
+import { isModelProfile } from '../types/index.js';
 import { MISTRAL_API_BASE, normalizeTier } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -176,9 +177,16 @@ export function loadConfig(): LynoxUserConfig {
     try {
       const parsed: unknown = JSON.parse(process.env['LYNOX_MODEL_PROFILES_JSON']);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // Validate each entry against the engine ModelProfile shape instead of a
+        // blind cast: a malformed profile (e.g. missing api_key) must be dropped
+        // here, not passed on to spawn/openai-adapter as `Bearer undefined`.
+        const valid: Record<string, ModelProfile> = {};
+        for (const [name, profile] of Object.entries(parsed as Record<string, unknown>)) {
+          if (isModelProfile(profile)) valid[name] = profile;
+        }
         merged.model_profiles = {
           ...merged.model_profiles,
-          ...(parsed as Record<string, ModelProfile>),
+          ...valid,
         };
       }
     } catch {
