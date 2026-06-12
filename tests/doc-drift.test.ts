@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { BUILTIN_ROLES } from '../src/core/roles.js';
 import { MISTRAL_MODEL_MAP } from '../src/types/models.js';
+import { normalizeBillingTier } from '../src/server/billing-tier.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p: string): string => readFileSync(resolve(repoRoot, p), 'utf8');
@@ -73,4 +74,56 @@ describe('doc<->code drift: LLM provider framing (src/types/models.ts LLMProvide
     const window = claude.slice(Math.max(0, idx - 80), idx + 80);
     expect(window).toMatch(/remov|no longer|gone|retir|not the managed/i);
   });
+});
+
+describe('cross-repo drift: billing-tier canonical spec (core/pro pin the same frozen literal)', () => {
+  // FROZEN canonical spec — the SAME literals are pinned emitter-side in pro
+  // (packages/managed/src/domain/env-abi-contract.test.ts). Core cannot import
+  // pro (separate repo; CI checks out one at a time), so each repo asserts its
+  // OWN billing-tier.ts against this shared literal: this catches CORE drifting
+  // from the spec, and pro's mirror catches pro drifting — together they keep
+  // the two modules in lockstep without a cross-repo fs read (the equality
+  // guard that was previously missing).
+  const CANONICAL_TIERS = ['hosted', 'managed', 'managed_pro'] as const;
+  const CANONICAL_ALIASES: Record<string, string> = { starter: 'hosted', eu: 'managed' };
+
+  for (const t of CANONICAL_TIERS) {
+    it(`\`${t}\` normalizes to itself`, () => {
+      expect(normalizeBillingTier(t)).toBe(t);
+    });
+  }
+  it('legacy aliases map exactly as the frozen spec', () => {
+    for (const [legacy, canonical] of Object.entries(CANONICAL_ALIASES)) {
+      expect(normalizeBillingTier(legacy)).toBe(canonical);
+    }
+  });
+  it('rejects unknown tiers and self-host (no tier)', () => {
+    expect(normalizeBillingTier('enterprise')).toBeUndefined();
+    expect(normalizeBillingTier(undefined)).toBeUndefined();
+    expect(normalizeBillingTier('')).toBeUndefined();
+  });
+});
+
+describe('env-ABI consume-side: loadConfig reads the engine-consumed var names (src/core/config.ts)', () => {
+  // The CP emits these EXACT names (pinned emitter-side in pro
+  // env-abi-contract.test.ts). If a consume-side rename drops one here, the ABI
+  // silently breaks — the ACCOUNT_TIER-unset / worker-profile-dead bug class.
+  // Match the actual `process.env['NAME']` read (not a bare substring) so a
+  // renamed read fails CI even if a comment still mentions the old name; a
+  // future rename window must add the new read-alias to keep this green.
+  const config = read('src/core/config.ts');
+  const ENGINE_CONSUMED = [
+    'LYNOX_ACCOUNT_TIER',
+    'LYNOX_MAX_TIER',
+    'LYNOX_DEFAULT_TIER',
+    'LYNOX_WORKER_PROFILE',
+    'LYNOX_MODEL_PROFILES_JSON',
+    'LYNOX_LLM_MODE',
+    'LYNOX_LLM_PROVIDER',
+  ];
+  for (const name of ENGINE_CONSUMED) {
+    it(`reads ${name} via process.env`, () => {
+      expect(config).toMatch(new RegExp(`process\\.env\\['${name}'\\]`));
+    });
+  }
 });

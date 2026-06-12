@@ -207,7 +207,10 @@ describe('Config', () => {
   it('LYNOX_WORKER_PROFILE env sets worker_profile when its profile exists', async () => {
     process.env['LYNOX_WORKER_PROFILE'] = 'fallback';
     process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
-      fallback: { provider: 'openai', api_key: 'sk-x', model_id: 'mistral-large-2512' },
+      // A well-formed profile carries api_base_url (a required ModelProfile field
+      // the CP always emits); the isModelProfile guard now drops under-specified
+      // entries rather than letting them reach the openai-adapter.
+      fallback: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-x', model_id: 'mistral-large-2512' },
     });
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().worker_profile).toBe('fallback');
@@ -232,6 +235,20 @@ describe('Config', () => {
     const { loadConfig } = await import('./config.js');
     const profiles = loadConfig().model_profiles;
     expect(profiles?.['fallback']).toMatchObject({ provider: 'openai', model_id: 'mistral-large-2512' });
+  });
+
+  it('drops a malformed profile entry (missing api_key) but keeps valid siblings', async () => {
+    // The blind `as` cast used to pass an entry with no api_key straight to the
+    // openai-adapter, which crashes the run with `Authorization: Bearer undefined`.
+    // The isModelProfile guard now filters per-entry: the valid sibling survives.
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+      good: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-x', model_id: 'mistral-large-2512' },
+      bad: { provider: 'openai', model_id: 'mistral-large-2512' }, // no api_key
+    });
+    const { loadConfig } = await import('./config.js');
+    const profiles = loadConfig().model_profiles;
+    expect(profiles?.['good']).toBeDefined();
+    expect(profiles?.['bad']).toBeUndefined();
   });
 
   it('malformed LYNOX_MODEL_PROFILES_JSON is ignored (boots without crashing)', async () => {

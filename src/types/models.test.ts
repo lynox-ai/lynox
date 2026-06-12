@@ -10,6 +10,7 @@ import {
   effectiveContextWindow,
   resolveNativeContextWindow,
   normalizeTier,
+  isModelProfile,
   MISTRAL_MODEL_MAP,
   MISTRAL_API_BASE,
   MODEL_CAPABILITIES,
@@ -74,6 +75,39 @@ describe('normalizeTier', () => {
     expect(normalizeTier(undefined)).toBeUndefined();
     expect(normalizeTier('gpt-5')).toBeUndefined();
     expect(normalizeTier('')).toBeUndefined();
+  });
+});
+
+describe('isModelProfile', () => {
+  const valid = {
+    provider: 'openai',
+    api_base_url: 'https://api.mistral.ai/v1',
+    api_key: 'sk-x',
+    model_id: 'mistral-large-2512',
+  };
+
+  it('accepts a well-formed profile (required fields present)', () => {
+    expect(isModelProfile(valid)).toBe(true);
+    // optional fields don't affect validity
+    expect(isModelProfile({ ...valid, context_window: 262_000 })).toBe(true);
+  });
+
+  it('rejects entries missing or mistyping a required field', () => {
+    const { api_key: _k, ...noKey } = valid;
+    const { model_id: _m, ...noModel } = valid;
+    const { api_base_url: _u, ...noUrl } = valid;
+    expect(isModelProfile(noKey)).toBe(false);
+    expect(isModelProfile(noModel)).toBe(false);
+    expect(isModelProfile(noUrl)).toBe(false);
+    expect(isModelProfile({ ...valid, api_base_url: 123 })).toBe(false);
+    expect(isModelProfile({ ...valid, provider: 'anthropic' })).toBe(false);
+  });
+
+  it('rejects non-objects', () => {
+    expect(isModelProfile(null)).toBe(false);
+    expect(isModelProfile(undefined)).toBe(false);
+    expect(isModelProfile('x')).toBe(false);
+    expect(isModelProfile(['a'])).toBe(false);
   });
 });
 
