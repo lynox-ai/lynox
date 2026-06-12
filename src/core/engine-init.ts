@@ -364,9 +364,9 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       // doesn't lose them; the secret-store keeps the alias to avoid orphans.
 
       // Mistral API key — BYOK users may store it via Web UI (vault) without
-      // exporting an env var. Voice (speak/transcribe) and the llm_mode
-      // eu-sovereign override (core/config.ts) read from process.env, so sync
-      // vault → env here on init. Env still wins if the user set both.
+      // exporting an env var. Voice (speak/transcribe) and the Mistral key
+      // promotion (core/config.ts: provider=openai + Mistral endpoint) read from
+      // process.env, so sync vault → env here on init. Env still wins if both set.
       if (!process.env['MISTRAL_API_KEY']) {
         const mistralKey = vault.get('MISTRAL_API_KEY');
         if (mistralKey) {

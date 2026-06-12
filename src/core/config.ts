@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile } from '../types/index.js';
 import { isModelProfile } from '../types/index.js';
-import { MISTRAL_API_BASE, normalizeTier } from '../types/index.js';
+import { isMistralHost, normalizeTier } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
@@ -123,19 +123,10 @@ export function loadConfig(): LynoxUserConfig {
       merged.provider = p;
     }
   }
-  // LLM mode (managed-instance toggle: standard | eu-sovereign).
-  // The env var is set by managed hosting on first boot. The local config.json
-  // wins after the user toggles in the Web UI: env loads first here, then the
-  // user value comes from readConfigFile(...) above and remains in `merged`
-  // because we never overwrite it back to the env value once it's set.
-  // (Local config llm_mode takes precedence because env applies before
-  //  the explicit override below only if the local value is still undefined.)
-  if (process.env['LYNOX_LLM_MODE'] && merged.llm_mode === undefined) {
-    const m = process.env['LYNOX_LLM_MODE'];
-    if (m === 'standard' || m === 'eu-sovereign') {
-      merged.llm_mode = m;
-    }
-  }
+  // (LYNOX_LLM_MODE env read retired 2026-06-13 with the eu-sovereign axis.
+  //  Mistral is now selected via provider+endpoint — see the key promotion
+  //  below. `llm_mode` stays a tolerated, ignored config.json key for one
+  //  release window so existing files still parse under the .strict() schema.)
   // OpenAI model ID (for provider: 'openai')
   if (process.env['OPENAI_MODEL_ID']) {
     merged.openai_model_id = process.env['OPENAI_MODEL_ID'];
@@ -221,23 +212,27 @@ export function loadConfig(): LynoxUserConfig {
     merged.searxng_url = process.env['SEARXNG_URL'];
   }
 
-  // EU Sovereign mode override (managed-instance toggle).
-  // When the user has flipped Settings → LLM Mode to 'eu-sovereign' (saved in
-  // local config.json) AND the host has MISTRAL_API_KEY in the environment
-  // (delivered by the managed control plane on first boot), swap the active
-  // LLM out from Anthropic Claude over to Mistral Large 3 via the OpenAI
-  // adapter. The user can flip back to 'standard' at any time without losing
-  // their Anthropic credentials, since both keys remain in the environment.
-  if (merged.llm_mode === 'eu-sovereign' && process.env['MISTRAL_API_KEY']) {
-    merged.provider = 'openai';
+  // Managed Mistral key promotion (replaces the retired eu-sovereign toggle).
+  // When the active provider is the OpenAI-compatible Mistral endpoint — set
+  // either by the managed control plane or by the user picking the Mistral
+  // preset in Settings (which stages provider='openai' + the Mistral
+  // api_base_url) — flow the host's MISTRAL_API_KEY into the active api_key.
+  // The managed key lives only in the environment (never sent to the browser),
+  // so the in-app provider switch has no key to stage from the client; this
+  // bridges it. Keyed on provider+endpoint, not a separate mode, so there is no
+  // orthogonal toggle to keep in sync.
+  //
+  // Unconditional on a Mistral endpoint: a managed/self-host box already has
+  // ANTHROPIC_API_KEY in merged.api_key by this point, so guarding on an empty
+  // api_key would never fire — the override must win, exactly as the prior
+  // eu-sovereign branch did (it overwrote api_key unconditionally).
+  if (merged.provider === 'openai' && isMistralHost(merged.api_base_url) && process.env['MISTRAL_API_KEY']) {
     merged.api_key = process.env['MISTRAL_API_KEY'];
-    merged.api_base_url = MISTRAL_API_BASE;
-    // Pin a versioned snapshot rather than the auto-rolling `*-latest` alias
-    // so behaviour stays reproducible across Mistral model refreshes. Tier
-    // routing (haiku/sonnet/opus) is wired separately via MISTRAL_MODEL_MAP
-    // — see Engine._configureOpenAIResolver for the bootstrap path. This
-    // field remains the single-model fallback when no tier is requested.
-    merged.openai_model_id = 'mistral-large-2512';
+    // Single-model fallback when the UI/CP staged no explicit model. Tier
+    // routing (fast/balanced/deep) is wired separately via MISTRAL_MODEL_MAP —
+    // see setOpenAIModelResolver. A pinned versioned snapshot (not `*-latest`)
+    // keeps behaviour reproducible across Mistral model refreshes.
+    if (!merged.openai_model_id) merged.openai_model_id = 'mistral-large-2512';
   }
 
   _cachedConfig = merged;

@@ -131,27 +131,33 @@ const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<M
 };
 
 /**
+ * True when `apiBaseURL`'s host is the Mistral API — `api.mistral.ai` or any
+ * `*.mistral.ai` subdomain. Hostname-strict (parses the URL) so a crafted base
+ * URL like `https://api.mistral.ai.evil.com` or `https://x/?proxy=mistral.ai`
+ * cannot spoof Mistral identity; invalid or empty URLs return `false`. Single
+ * source of truth for "is this the Mistral endpoint" — consumed by the openai
+ * tier→model map below and by the managed key-promotion in `config.ts`.
+ */
+export function isMistralHost(apiBaseURL: string | undefined): boolean {
+  if (!apiBaseURL) return false;
+  try {
+    const host = new URL(apiBaseURL).hostname.toLowerCase();
+    return host === 'api.mistral.ai' || host.endsWith('.mistral.ai');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Derive a tier→model map for the openai-compat provider, based on the
- * configured `api_base_url`. Returns `null` for unknown providers so callers
- * can fall back to the single configured `openai_model_id`.
- *
- * Matches by URL hostname (not substring) so a misconfigured base URL like
- * `https://attacker.example.com/?proxy=mistral.ai` doesn't accidentally
- * activate the Mistral tier-map. Invalid URLs return `null`.
+ * configured `api_base_url`. Returns `null` for non-Mistral / unknown / invalid
+ * base URLs so callers can fall back to the single configured `openai_model_id`.
  *
  * Pure function — no side effects. Engine init wires the result via
  * `setOpenAIModelResolver()`.
  */
 export function getOpenAIModelMap(apiBaseURL: string | undefined): Record<ModelTier, string> | null {
-  if (!apiBaseURL) return null;
-  let host: string;
-  try {
-    host = new URL(apiBaseURL).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
-  if (host === 'api.mistral.ai' || host.endsWith('.mistral.ai')) return MISTRAL_MODEL_MAP;
-  return null;
+  return isMistralHost(apiBaseURL) ? MISTRAL_MODEL_MAP : null;
 }
 
 /**
