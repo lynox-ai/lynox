@@ -68,21 +68,26 @@ export type AccountTier = 'standard' | 'pro';
 /**
  * Gate an explicit model override by the caller's account tier.
  *
- * Today's only rule: the `deep` tier is a Managed-Pro-only capability. If a
- * non-Pro caller asks for `model: 'deep'`, we silently downgrade to the
- * `balanced` tier and emit a warning on stderr — the Starter/Managed tiers
- * shouldn't burn deep-tier budget on a per-spawn opt-in.
+ * The `deep` tier is a Managed-Pro billing entitlement (managed_pro pays for the
+ * Opus class). A **managed-standard** caller (`account_tier === 'standard'`) who
+ * explicitly asks for `model: 'deep'` is silently downgraded to `balanced` and a
+ * warning is written to stderr — the lower managed tier shouldn't burn deep-tier
+ * budget on a per-spawn opt-in.
  *
- * Keep this function the single place that knows the rule; spawn tool
- * + any other callers delegate. `requestedModel === undefined` means
- * "no override, use the role's default" — returns undefined so the
- * caller falls back to RoleConfig.model.
+ * Self-host / BYOK callers (`account_tier` **unset**) pay their own LLM bill, so
+ * they are NOT gated — an unset tier passes the override through unchanged.
+ * managed_pro passes too. Only an explicit OVERRIDE is gated;
+ * `requestedModel === undefined` means "no override" → returns undefined so the
+ * caller falls through to the role's default untouched.
+ *
+ * Keep this the single place that knows the rule; the model resolver
+ * (`tier-resolver.ts`) and any other callers delegate.
  */
 export function applyTierGate(
   requestedModel: ModelTier | undefined,
   accountTier: AccountTier | undefined,
 ): ModelTier | undefined {
-  if (requestedModel === 'deep' && accountTier !== 'pro') {
+  if (requestedModel === 'deep' && accountTier === 'standard') {
     process.stderr.write(
       `[role-gate] deep-tier override requires account_tier=pro — downgrading to balanced\n`,
     );

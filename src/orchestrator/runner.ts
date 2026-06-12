@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { MODEL_MAP, normalizeTier } from '../types/index.js';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry } from '../types/index.js';
+import { getActiveProvider } from '../core/llm-client.js';
+import { resolveRunModel } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
 import type { SessionCounters } from '../types/agent.js';
@@ -313,7 +314,7 @@ async function executeStep(
       const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext) : step.task;
       const resolvedStep = resolvedTask !== step.task ? { ...step, task: resolvedTask } : step;
       // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, 'balanced');
+      const stepModel = resolveModelForCost(step, 'balanced', config);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null);
@@ -322,7 +323,7 @@ async function executeStep(
     } else {
       const agentDef = await loadAgentDef(step.agent, agentsDir);
       // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, agentDef.defaultTier);
+      const stepModel = resolveModelForCost(step, agentDef.defaultTier, config);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone);
@@ -418,10 +419,15 @@ function makeSkipped(stepId: string, reason: string): AgentOutput {
   };
 }
 
-function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier): string {
-  if (!step.model) return MODEL_MAP[defaultTier];
-  // normalizeTier accepts both current + legacy-brand tier names (pre-rename
-  // manifests); a genuine pinned model id passes through unchanged.
-  const tier = normalizeTier(step.model);
-  return tier ? MODEL_MAP[tier] : step.model;
+function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config: LynoxUserConfig): string {
+  // Price the step against the SAME model the runtime-adapter ran it on — gate +
+  // clamp + the ACTIVE provider — not an Anthropic-only tier map. A Mistral tenant
+  // was previously billed at Claude prices (and a clamped deep step at deep prices).
+  return resolveRunModel({
+    requested: step.model,
+    defaultTier,
+    accountTier: config.account_tier,
+    maxTier: config.max_tier,
+    provider: getActiveProvider(),
+  }).modelId;
 }

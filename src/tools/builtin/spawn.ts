@@ -1,12 +1,13 @@
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
-import { MODEL_MAP, getDefaultMaxTokens, getModelId, normalizeTier } from '../../types/index.js';
+import { getDefaultMaxTokens } from '../../types/index.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
-import { getRole, getRoleNames, applyTierGate } from '../../core/roles.js';
+import { getRole, getRoleNames } from '../../core/roles.js';
+import { resolveRunModel } from '../../core/tier-resolver.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
@@ -202,17 +203,20 @@ async function executeThinker(
     throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
   }
 
-  // Account-tier gate: explicit `spec.model` overrides are checked before
-  // falling through to role defaults. Today only the `deep` tier is gated —
-  // non-Pro tenants requesting `deep` get a silent downgrade to `balanced` so
-  // role defaults + budget caps stay predictable.
-  // Normalize agent-supplied tier at this input boundary — a spawn spec may
-  // carry a legacy Anthropic-brand name (`sonnet`/`opus`/`haiku`) which would
-  // otherwise reach getModelId/MODEL_MAP unresolved.
-  const gatedOverride = applyTierGate(normalizeTier(spec.model), userConfig.account_tier);
-  const modelTier = (gatedOverride ?? resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier;
-  // Profile overrides model ID + provider; otherwise use Claude tier resolution
-  const model = profile ? profile.model_id : getModelId(modelTier, getActiveProvider());
+  // Single chokepoint: GATE (deep is Pro-only) THEN CLAMP to the cost ceiling
+  // THEN map to the provider's model id. Routing through resolveRunModel adds
+  // the max_tier clamp this path previously skipped — a Pro tenant under a lower
+  // ceiling no longer reaches the deep model past its cap.
+  const resolvedRun = resolveRunModel({
+    requested: spec.model,
+    defaultTier: (resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier,
+    accountTier: userConfig.account_tier,
+    maxTier: userConfig.max_tier,
+    provider: getActiveProvider(),
+  });
+  const modelTier = resolvedRun.tier;
+  // Profile overrides model ID + provider; otherwise use the resolved tier id.
+  const model = profile ? profile.model_id : resolvedRun.modelId;
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
   // the child falls through to agent.ts's bare default, which has NO grounding.
@@ -512,13 +516,21 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // session ceiling and blocks cheap batches.
     const cfg = loadConfig();
     const cfgTier = cfg.default_tier;
+    const provider = getActiveProvider();
     const totalEstimate = input.agents.reduce((sum, spec) => {
-      const gated = applyTierGate(normalizeTier(spec.model), cfg.account_tier);
       const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
-      const modelTier = (gated ?? roleDefault ?? cfgTier ?? 'balanced') as ModelTier;
-      const resolvedModel = MODEL_MAP[modelTier] ?? MODEL_MAP['balanced'];
+      // Estimate against the SAME model the run will actually use (gate + clamp +
+      // provider), not an Anthropic-only tier map — otherwise a Mistral-tenant or
+      // ceiling-clamped spawn is mis-estimated and over/under-reserves the budget.
+      const { modelId } = resolveRunModel({
+        requested: spec.model,
+        defaultTier: (roleDefault ?? cfgTier ?? 'balanced') as ModelTier,
+        accountTier: cfg.account_tier,
+        maxTier: cfg.max_tier,
+        provider,
+      });
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
-      return sum + estimateSpawnCost(resolvedModel, iters);
+      return sum + estimateSpawnCost(modelId, iters);
     }, 0);
 
     // Enforce session cost ceiling (shared with pipeline steps) against

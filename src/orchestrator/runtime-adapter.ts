@@ -7,6 +7,7 @@ import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
 import { getRole, getRoleNames } from '../core/roles.js';
+import { resolveRunModel } from '../core/tier-resolver.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
@@ -205,7 +206,16 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
-  const model = resolveModel(step.model, agentDef.defaultTier, config.max_tier);
+  // Single chokepoint: gate (deep is Pro-only) + clamp to max_tier + map to the
+  // provider's id. Adds the account gate the named-agent pipeline path skipped.
+  const runModel = resolveRunModel({
+    requested: step.model,
+    defaultTier: agentDef.defaultTier,
+    accountTier: config.account_tier,
+    maxTier: config.max_tier,
+    provider: getActiveProvider(),
+  });
+  const model = runModel.modelId;
 
   let tools = convertAgentTools(agentDef.tools ?? []);
 
@@ -265,7 +275,7 @@ export async function spawnViaAgent(
     maxIterations: 10,
     excludeTools: disabledTools,
     maxContextWindowTokens: config.max_context_window_tokens,
-    costGuard: { maxBudgetUSD: model.includes('opus') ? 10 : 2, maxIterations: 10 },
+    costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: 10 },
     apiKey: config.api_key,
     apiBaseURL: config.api_base_url,
     provider: config.provider,
@@ -334,13 +344,19 @@ export async function spawnInline(
     throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
-  // 4-tier resolution: step > role > user config > defaults, clamped by max_tier.
-  // normalizeTier canonicalizes a legacy-brand tier name on step.model (pre-rename
-  // manifests) so the cost-guard tier bucket below is correct; a genuine model id
-  // (normalizeTier → undefined) falls through to step.model as before.
+  // Single chokepoint: step > role > user config > default, then GATE (deep is
+  // Pro-only) + CLAMP to max_tier + map to the provider's id. Adds the account
+  // gate this inline path previously skipped; the cost-guard bucket below uses
+  // the same resolved tier so the budget can't disagree with the chosen model.
   const configTier = config.default_tier;
-  const modelTier = (normalizeTier(step.model) ?? step.model ?? resolved?.model ?? configTier ?? 'balanced') as ModelTier;
-  const model = resolveModel(modelTier, 'balanced', config.max_tier);
+  const runModel = resolveRunModel({
+    requested: step.model,
+    defaultTier: (resolved?.model ?? configTier ?? 'balanced') as ModelTier,
+    accountTier: config.account_tier,
+    maxTier: config.max_tier,
+    provider: getActiveProvider(),
+  });
+  const model = runModel.modelId;
   // A2: pipeline steps carry the grounding block too (they previously ran on a
   // bare task prompt with no provenance discipline).
   const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
@@ -401,7 +417,7 @@ export async function spawnInline(
     autonomy,
     toolContext: parentToolContext,
     maxIterations: maxIter,
-    costGuard: { maxBudgetUSD: modelTier === 'deep' ? 10 : 2, maxIterations: maxIter },
+    costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
