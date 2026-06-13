@@ -250,7 +250,8 @@ Options:
 
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required for anthropic provider)
-  ANTHROPIC_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.mistral.ai/v1)
+  LYNOX_API_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.mistral.ai/v1)
+                                (legacy ANTHROPIC_BASE_URL still accepted)
   MISTRAL_API_KEY               Mistral API key (provider: openai with Mistral endpoint)
   OPENAI_API_KEY                Bearer for generic OpenAI-compatible endpoints (experimental)
   OPENAI_MODEL_ID               Model ID for provider: openai (e.g. mistral-large-2512)

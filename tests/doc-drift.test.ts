@@ -114,18 +114,62 @@ describe('env-ABI consume-side: loadConfig reads the engine-consumed var names (
   const config = read('src/core/config.ts');
   const ENGINE_CONSUMED = [
     'LYNOX_ACCOUNT_TIER',
-    'LYNOX_MAX_TIER',
-    'LYNOX_DEFAULT_TIER',
     'LYNOX_WORKER_PROFILE',
     'LYNOX_MODEL_PROFILES_JSON',
     // LYNOX_LLM_MODE retired 2026-06-13 with the eu-sovereign axis — the engine
     // no longer reads it (Mistral is selected via provider+endpoint). Kept out
     // of this consume-pin on purpose; do not re-add.
     'LYNOX_LLM_PROVIDER',
+    // LYNOX_MAX_TIER / LYNOX_DEFAULT_TIER / ANTHROPIC_BASE_URL now read through
+    // the canonical-first alias registry in src/core/env.ts (the rename window).
+    // Their consume-side pin moved to the ENV_ALIASES block below — do not
+    // re-add them here as bare process.env literals.
   ];
   for (const name of ENGINE_CONSUMED) {
     it(`reads ${name} via process.env`, () => {
       expect(config).toMatch(new RegExp(`process\\.env\\['${name}'\\]`));
+    });
+  }
+});
+
+describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/core/env.ts)', () => {
+  // Renamed CP→engine / self-host vars route through the ENV_ALIASES registry
+  // (canonical-first, legacy accepted forever). A consume-side drop of EITHER
+  // the canonical or a legacy name silently breaks the ABI for tenants still on
+  // the other name — pin both so the drop fails CI. Add a row when a rename
+  // lands; never remove a legacy name (the read-alias is permanent).
+  const env = read('src/core/env.ts');
+  const ALIAS_PAIRS: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['LYNOX_MAX_MODEL_TIER', ['LYNOX_MAX_TIER']],
+    ['LYNOX_DEFAULT_MODEL_TIER', ['LYNOX_DEFAULT_TIER']],
+    ['LYNOX_API_BASE_URL', ['ANTHROPIC_BASE_URL']],
+    ['LYNOX_DATA_DIR', ['LYNOX_DIR']],
+  ];
+  for (const [canonical, legacies] of ALIAS_PAIRS) {
+    it(`declares the canonical name ${canonical}`, () => {
+      expect(env).toMatch(new RegExp(`\\b${canonical}\\b`));
+    });
+    for (const legacy of legacies) {
+      it(`keeps ${legacy} as a read-alias of ${canonical}`, () => {
+        expect(env).toMatch(new RegExp(`'${legacy}'`));
+      });
+    }
+  }
+
+  // Pin the consume-side CALL, not just the registry declaration: each renamed
+  // var must actually be READ through the alias helper at its consuming site,
+  // so a silent revert to a bare `process.env['LEGACY']` literal fails CI (the
+  // registry pin above alone would not catch that).
+  const ALIAS_CONSUMERS: ReadonlyArray<readonly [string, string, string]> = [
+    ['LYNOX_API_BASE_URL', 'readEnvAlias', 'src/core/config.ts'],
+    ['LYNOX_MAX_MODEL_TIER', 'envTier', 'src/core/config.ts'],
+    ['LYNOX_DEFAULT_MODEL_TIER', 'envTier', 'src/core/config.ts'],
+    ['LYNOX_DATA_DIR', 'readEnvAlias', 'src/core/config.ts'],
+    ['LYNOX_DATA_DIR', 'readEnvAlias', 'src/core/openai-adapter.ts'],
+  ];
+  for (const [canonical, accessor, file] of ALIAS_CONSUMERS) {
+    it(`${file} reads ${canonical} via ${accessor}()`, () => {
+      expect(read(file)).toMatch(new RegExp(`${accessor}\\('${canonical}'\\)`));
     });
   }
 });

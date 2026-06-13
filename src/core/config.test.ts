@@ -36,6 +36,14 @@ describe('Config', () => {
     delete process.env['LYNOX_ACCOUNT_TIER'];
     delete process.env['MISTRAL_API_KEY'];
     delete process.env['LYNOX_LLM_PROVIDER'];
+    // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
+    delete process.env['LYNOX_API_BASE_URL'];
+    delete process.env['LYNOX_MAX_TIER'];
+    delete process.env['LYNOX_MAX_MODEL_TIER'];
+    delete process.env['LYNOX_DEFAULT_TIER'];
+    delete process.env['LYNOX_DEFAULT_MODEL_TIER'];
+    delete process.env['LYNOX_DATA_DIR'];
+    delete process.env['LYNOX_DIR'];
     // Clean up any config files from previous tests
     rmSync(join(fakeHome, '.lynox'), { recursive: true, force: true });
     rmSync(join(fakeProject, '.lynox'), { recursive: true, force: true });
@@ -137,6 +145,52 @@ describe('Config', () => {
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.api_base_url).toBe('http://localhost:3042');
+  });
+
+  it('LYNOX_API_BASE_URL (canonical) sets api_base_url', async () => {
+    process.env['LYNOX_API_BASE_URL'] = 'https://api.mistral.ai/v1';
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.api_base_url).toBe('https://api.mistral.ai/v1');
+  });
+
+  it('LYNOX_API_BASE_URL wins over the legacy ANTHROPIC_BASE_URL when both are set', async () => {
+    process.env['LYNOX_API_BASE_URL'] = 'https://canonical.example/v1';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://legacy.example/v1';
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.api_base_url).toBe('https://canonical.example/v1');
+  });
+
+  it('LYNOX_MAX_MODEL_TIER (canonical) and the legacy LYNOX_MAX_TIER both set max_tier', async () => {
+    process.env['LYNOX_MAX_MODEL_TIER'] = 'deep';
+    const canonical = (await import('./config.js')).loadConfig();
+    expect(canonical.max_tier).toBe('deep');
+
+    vi.resetModules();
+    delete process.env['LYNOX_MAX_MODEL_TIER'];
+    process.env['LYNOX_MAX_TIER'] = 'opus'; // legacy brand value, still accepted
+    const legacy = (await import('./config.js')).loadConfig();
+    expect(legacy.max_tier).toBe('deep');
+  });
+
+  it('LYNOX_MAX_MODEL_TIER wins over the legacy LYNOX_MAX_TIER when both are set', async () => {
+    process.env['LYNOX_MAX_MODEL_TIER'] = 'fast';
+    process.env['LYNOX_MAX_TIER'] = 'deep';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().max_tier).toBe('fast');
+  });
+
+  it('LYNOX_DEFAULT_MODEL_TIER (canonical) and the legacy LYNOX_DEFAULT_TIER both set default_tier', async () => {
+    process.env['LYNOX_DEFAULT_MODEL_TIER'] = 'balanced';
+    const canonical = (await import('./config.js')).loadConfig();
+    expect(canonical.default_tier).toBe('balanced');
+
+    vi.resetModules();
+    delete process.env['LYNOX_DEFAULT_MODEL_TIER'];
+    process.env['LYNOX_DEFAULT_TIER'] = 'sonnet'; // legacy brand value
+    const legacy = (await import('./config.js')).loadConfig();
+    expect(legacy.default_tier).toBe('balanced');
   });
 
   it('project config cannot override api_key', async () => {

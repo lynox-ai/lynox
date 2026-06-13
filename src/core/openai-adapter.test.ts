@@ -1092,6 +1092,22 @@ describe('OpenAIAdapter', () => {
       expect(a).toBe(b);
     });
 
+    it('prefers the canonical LYNOX_DATA_DIR over the legacy LYNOX_DIR for the salt dir', () => {
+      // beforeEach already set LYNOX_DIR=tmpLynoxDir (legacy). The canonical
+      // var must win, so the salt lands in the data dir, not the legacy dir.
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lynox-data-'));
+      process.env['LYNOX_DATA_DIR'] = dataDir;
+      try {
+        const salt = getCacheKeySalt();
+        expect(salt).toMatch(/^[0-9a-f]{16}$/);
+        expect(fs.existsSync(path.join(dataDir, '.cache-salt'))).toBe(true);
+        expect(fs.existsSync(path.join(tmpLynoxDir, '.cache-salt'))).toBe(false);
+      } finally {
+        delete process.env['LYNOX_DATA_DIR'];
+        try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    });
+
     // POSIX-only: ENOTDIR semantics under "file as directory" differ on
     // Windows. Engine README pins Node 22+ on macOS+Linux so this is fine.
     it('falls back to in-memory salt when filesystem write fails', () => {
