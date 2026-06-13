@@ -20,6 +20,7 @@ import { ensureHttpSecret } from '../core/engine-init.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
+import { readEnvAlias } from '../core/env.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
@@ -126,20 +127,22 @@ const TZ_MAX_LENGTH = 64;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * Three deployment modes the engine has to keep distinct:
+ * Three deployment modes the engine has to keep distinct. The billing tier
+ * arrives via `LYNOX_BILLING_TIER` (canonical; legacy `LYNOX_MANAGED_MODE`
+ * still read via the env alias):
  *
- *  1. **Self-host** — no `LYNOX_HTTP_ADMIN_SECRET`, no `LYNOX_MANAGED_MODE`.
+ *  1. **Self-host** — no `LYNOX_HTTP_ADMIN_SECRET`, no billing-tier env.
  *     Cookie auth is promoted to admin scope at L~1049, so all gates below
  *     are no-ops for cookie users. The user *is* the admin.
  *
  *  2. **Managed BYOK / starter** — `LYNOX_HTTP_ADMIN_SECRET` IS set,
- *     `LYNOX_MANAGED_MODE=starter`. Customer brings their own key via the
- *     SetupBanner. Provider + api_base_url + cost-caps stay configurable
- *     (it's their key, their bill). Only the secret-store write needs the
- *     BYOK whitelist (otherwise a managed cookie user — who has user scope —
- *     can't save their key).
+ *     billing tier `starter` (canonical `hosted`). Customer brings their own
+ *     key via the SetupBanner. Provider + api_base_url + cost-caps stay
+ *     configurable (it's their key, their bill). Only the secret-store write
+ *     needs the BYOK whitelist (otherwise a managed cookie user — who has user
+ *     scope — can't save their key).
  *
- *  3. **Managed pool** — `LYNOX_MANAGED_MODE=managed|managed_pro|eu`.
+ *  3. **Managed pool** — billing tier `managed|managed_pro|eu`.
  *     CP delivers the LLM. Provider, cost caps, MCP servers, OAuth ids,
  *     search/backup config, etc. are all CP-managed. Only UI preferences
  *     are user-writable.
@@ -382,11 +385,12 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
  *
  * Exported so the session.promptSecret wire can short-circuit the UI prompt
  * for the rare admin-only cases AND unit tests can lock the predicate
- * without spinning up an SSE run. Reads `process.env['LYNOX_MANAGED_MODE']`
- * at call time so test setups can stub the env per case.
+ * without spinning up an SSE run. Reads the billing-tier env (canonical
+ * `LYNOX_BILLING_TIER`, legacy `LYNOX_MANAGED_MODE`) at call time so test
+ * setups can stub the env per case.
  */
 export function predictManagedBlocked(name: string): boolean {
-  return requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && isAdminOnlySecret(name);
+  return requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name);
 }
 
 /** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
@@ -921,7 +925,7 @@ export class LynoxHTTPApi {
     }
 
     const config = readUserConfig();
-    const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+    const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
     const isManagedTier = cpSuppliesLLMKey(tier);
 
     interface CpSummary {
@@ -1446,7 +1450,7 @@ export class LynoxHTTPApi {
     // indicator the StatusBar renders as amber "Setup needed".
     const store = this.engine?.getSecretStore();
     const userConfig = this.engine?.getUserConfig() ?? {};
-    const managedMode = process.env['LYNOX_MANAGED_MODE'];
+    const managedMode = readEnvAlias('LYNOX_BILLING_TIER');
     // Only bypass the not-configured check for tiers where the CP supplies
     // the LLM key (managed / managed_pro / eu-sovereign). The Hosted-BYOK
     // starter tier requires the CUSTOMER to bring their own key, so the
@@ -1460,7 +1464,7 @@ export class LynoxHTTPApi {
         if (provider === 'vertex') {
           configured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
         } else if (provider === 'custom') {
-          const customBase = userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL'];
+          const customBase = userConfig.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
           const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
           configured = !!customBase && !!customKey;
         } else if (provider === 'openai') {
@@ -1581,7 +1585,7 @@ export class LynoxHTTPApi {
     if (!lastRun) {
       // No runs yet — if the engine has an API key, assume operational (fresh instance)
       // Use dynamic check — import at module level would cause circular dependency
-      const hasKey = !!(process.env['ANTHROPIC_API_KEY'] ?? process.env['AWS_ACCESS_KEY_ID'] ?? process.env['LYNOX_MANAGED_MODE']);
+      const hasKey = !!(process.env['ANTHROPIC_API_KEY'] ?? process.env['AWS_ACCESS_KEY_ID'] ?? readEnvAlias('LYNOX_BILLING_TIER'));
       return hasKey
         ? { indicator: 'none', description: 'Ready', provider: providerLabel }
         : { indicator: 'unknown', description: 'No API key configured', provider: providerLabel };
@@ -1815,7 +1819,7 @@ export class LynoxHTTPApi {
       if (preflightProvider === 'vertex') {
         preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
       } else if (preflightProvider === 'custom') {
-        const base = preflightCfg.api_base_url ?? process.env['ANTHROPIC_BASE_URL'];
+        const base = preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
         const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
         preflightKeyOk = !!base && !!key;
       } else if (preflightProvider === 'openai') {
@@ -2093,7 +2097,7 @@ export class LynoxHTTPApi {
               detail: JSON.stringify({
                 slot: name,
                 tool: 'ask_secret',
-                tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+                tier: readEnvAlias('LYNOX_BILLING_TIER') ?? 'self-host',
               }),
             });
           } catch {
@@ -2854,7 +2858,7 @@ export class LynoxHTTPApi {
         llmConfigured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
       } else if (provider === 'custom') {
         // Custom needs api_base_url configured + a key in the CUSTOM_API_KEY slot
-        const customBase = userConfig.api_base_url ?? process.env['ANTHROPIC_BASE_URL'];
+        const customBase = userConfig.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
         const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
         llmConfigured = !!customBase && !!customKey;
       } else if (provider === 'openai') {
@@ -2875,7 +2879,7 @@ export class LynoxHTTPApi {
         // LYNOX_MANAGED_MODE env on pre-rename tenants that haven't been
         // re-synced; normalizing here means every Web UI consumer sees the
         // canonical id regardless of provisioning vintage. null on self-host.
-        managed: normalizeBillingTier(process.env['LYNOX_MANAGED_MODE']) ?? null,
+        managed: normalizeBillingTier(readEnvAlias('LYNOX_BILLING_TIER')) ?? null,
         // PRD-HN-LAUNCH-HARDENING tier-1 item 5: surface a public-demo flag so
         // the Web UI can render a "shared instance, no real data" banner on
         // engine.lynox.cloud for HackerNews launch week. Off by default — only  public-repo-guard:allow public demo host
@@ -2914,7 +2918,7 @@ export class LynoxHTTPApi {
       // for any name EXCEPT infrastructure / channel-managed patterns (see
       // INFRA_ADMIN_ONLY_PATTERNS doc). Self-host has no admin secret, so
       // cookie users are already promoted to admin and this gate never applies.
-      if (requiresAdminSplitGate(process.env['LYNOX_MANAGED_MODE']) && isAdminOnlySecret(name)) {
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Set this via the relevant integration UI or contact support@lynox.ai.`);
         return;
       }
@@ -2942,7 +2946,7 @@ export class LynoxHTTPApi {
           source: 'http_api',
           detail: JSON.stringify({
             slot: name,
-            tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+            tier: readEnvAlias('LYNOX_BILLING_TIER') ?? 'self-host',
           }),
         });
       } catch {
@@ -3075,7 +3079,7 @@ export class LynoxHTTPApi {
         }
       }
       // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro = CP-supplied LLM)
-      const tier = process.env['LYNOX_MANAGED_MODE'] ?? null;
+      const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {
         // Emit the CANONICAL tier (starter→hosted, eu→managed) so every Web UI
@@ -3271,7 +3275,7 @@ export class LynoxHTTPApi {
       // value (config file + managed defaults) and only block real changes.
       // Schema is `.strict()` (PRD-IA-V2 P1-PR-A2) — unknown fields already
       // 400 before we get here, so this loop only sees real schema fields.
-      if (requiresConfigLockGate(process.env['LYNOX_MANAGED_MODE'])) {
+      if (requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
         const fileConfig = loadConfig() as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;
         // P3-FOLLOWUP-HOTFIX: value-range validation for the curated provider
@@ -3424,7 +3428,7 @@ export class LynoxHTTPApi {
             decision: 'applied',
             source: 'http_api',
             detail: JSON.stringify({
-              tier: process.env['LYNOX_MANAGED_MODE'] ?? 'self-host',
+              tier: readEnvAlias('LYNOX_BILLING_TIER') ?? 'self-host',
               fields_changed: fields,
             }),
           });
@@ -5628,7 +5632,7 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // Managed mode: never expose vault key to users
-        if (process.env['LYNOX_MANAGED_MODE']) {
+        if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
           return;
         }
@@ -5639,7 +5643,7 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('admin', 'POST /api/vault/rotate', async (_req, res, _params, body) => {
-      if (process.env['LYNOX_MANAGED_MODE']) {
+      if (readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 403, 'Managed instance: vault rotation is system-controlled');
         return;
       }
@@ -5676,7 +5680,7 @@ export class LynoxHTTPApi {
       }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
-        if (process.env['LYNOX_MANAGED_MODE']) {
+        if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: access token is system-controlled');
           return;
         }
@@ -5968,7 +5972,7 @@ export class LynoxHTTPApi {
 
     this.addStatic('admin', 'GET /api/migration/handshake', async (req, res) => {
       // Only available on managed instances receiving a migration
-      if (!process.env['LYNOX_MANAGED_MODE']) {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
       }
@@ -6016,7 +6020,7 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('admin', 'POST /api/migration/handshake', async (_req, res, _params, body) => {
-      if (!process.env['LYNOX_MANAGED_MODE']) {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
       }
@@ -6043,7 +6047,7 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('admin', 'POST /api/migration/manifest', async (_req, res, _params, body) => {
-      if (!process.env['LYNOX_MANAGED_MODE']) {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
       }
@@ -6064,7 +6068,7 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('admin', 'POST /api/migration/chunk', async (_req, res, _params, body) => {
-      if (!process.env['LYNOX_MANAGED_MODE']) {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
       }
@@ -6090,7 +6094,7 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('admin', 'POST /api/migration/restore', async (_req, res) => {
-      if (!process.env['LYNOX_MANAGED_MODE']) {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 404, 'Migration import only available on managed instances');
         return;
       }

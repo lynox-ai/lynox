@@ -140,6 +140,7 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
   // lands; never remove a legacy name (the read-alias is permanent).
   const env = read('src/core/env.ts');
   const ALIAS_PAIRS: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['LYNOX_BILLING_TIER', ['LYNOX_MANAGED_MODE']],
     ['LYNOX_MAX_MODEL_TIER', ['LYNOX_MAX_TIER']],
     ['LYNOX_DEFAULT_MODEL_TIER', ['LYNOX_DEFAULT_TIER']],
     ['LYNOX_API_BASE_URL', ['ANTHROPIC_BASE_URL']],
@@ -161,6 +162,9 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
   // so a silent revert to a bare `process.env['LEGACY']` literal fails CI (the
   // registry pin above alone would not catch that).
   const ALIAS_CONSUMERS: ReadonlyArray<readonly [string, string, string]> = [
+    ['LYNOX_BILLING_TIER', 'readEnvAlias', 'src/server/http-api.ts'],
+    ['LYNOX_BILLING_TIER', 'readEnvAlias', 'src/core/engine.ts'],
+    ['LYNOX_API_BASE_URL', 'readEnvAlias', 'src/server/http-api.ts'],
     ['LYNOX_API_BASE_URL', 'readEnvAlias', 'src/core/config.ts'],
     ['LYNOX_MAX_MODEL_TIER', 'envTier', 'src/core/config.ts'],
     ['LYNOX_DEFAULT_MODEL_TIER', 'envTier', 'src/core/config.ts'],

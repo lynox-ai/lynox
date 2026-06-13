@@ -17,6 +17,7 @@ import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getLynoxDir } from './config.js';
+import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
@@ -1386,10 +1387,11 @@ export class Engine {
       void this.pluginManager.fireSessionStart();
     }
 
-    // Register managed hosting usage hook (env-gated — only on EU instances)
-    // Fatal: if LYNOX_MANAGED_MODE is set but hook fails, engine must not start
-    // (otherwise the managed customer uses Mistral for free without usage tracking)
-    if (process.env['LYNOX_MANAGED_MODE']) {
+    // Register managed hosting usage hook (env-gated — only on managed instances)
+    // Fatal: if the billing-tier env is set but the hook fails, engine must not
+    // start (otherwise the managed customer uses Mistral for free without usage
+    // tracking). Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE.
+    if (readEnvAlias('LYNOX_BILLING_TIER')) {
       const { createManagedHook } = await import('./managed-hook.js');
       this.registerHooks(createManagedHook());
     }
