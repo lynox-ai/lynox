@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile } from '../types/index.js';
 import { isModelProfile } from '../types/index.js';
-import { isMistralHost, normalizeTier } from '../types/index.js';
+import { isMistralHost } from '../types/index.js';
+import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
@@ -23,7 +24,8 @@ export function setDataDir(dir: string): void {
 }
 
 function getUserConfigDir(): string {
-  return _dataDirOverride ?? process.env['LYNOX_DATA_DIR'] ?? join(homedir(), LYNOX_DIR);
+  // `LYNOX_DATA_DIR` (canonical) with the legacy `LYNOX_DIR` accepted forever.
+  return _dataDirOverride ?? readEnvAlias('LYNOX_DATA_DIR') ?? join(homedir(), LYNOX_DIR);
 }
 
 function getProjectConfigDir(): string {
@@ -91,8 +93,12 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['ANTHROPIC_API_KEY']) {
     merged.api_key = process.env['ANTHROPIC_API_KEY'];
   }
-  if (process.env['ANTHROPIC_BASE_URL']) {
-    merged.api_base_url = process.env['ANTHROPIC_BASE_URL'];
+  // Generic LLM endpoint: `LYNOX_API_BASE_URL` (canonical) with the legacy
+  // `ANTHROPIC_BASE_URL` accepted forever (real Anthropic-proxy users + every
+  // pre-rename managed/self-host env). Feeds the Mistral key promotion below.
+  const apiBaseUrl = readEnvAlias('LYNOX_API_BASE_URL');
+  if (apiBaseUrl) {
+    merged.api_base_url = apiBaseUrl;
   }
   if (process.env['LYNOX_WORKSPACE']) {
     merged.workspace_dir = process.env['LYNOX_WORKSPACE'];
@@ -131,18 +137,15 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['OPENAI_MODEL_ID']) {
     merged.openai_model_id = process.env['OPENAI_MODEL_ID'];
   }
-  // Model tier override (used by managed EU to lock model). normalizeTier
-  // accepts both the current provider-agnostic names and the legacy
-  // Anthropic-brand names so existing managed env vars keep working.
-  if (process.env['LYNOX_DEFAULT_TIER']) {
-    const tier = normalizeTier(process.env['LYNOX_DEFAULT_TIER']);
-    if (tier) merged.default_tier = tier;
-  }
-  // Max tier cap (managed hosting cost control — StepHints and pipelines are clamped)
-  if (process.env['LYNOX_MAX_TIER']) {
-    const tier = normalizeTier(process.env['LYNOX_MAX_TIER']);
-    if (tier) merged.max_tier = tier;
-  }
+  // Default model tier: `LYNOX_DEFAULT_MODEL_TIER` (canonical) with the legacy
+  // `LYNOX_DEFAULT_TIER` accepted forever. envTier normalizes both the canonical
+  // band names and the legacy Anthropic-brand names so old env vars keep working.
+  const defaultTier = envTier('LYNOX_DEFAULT_MODEL_TIER');
+  if (defaultTier) merged.default_tier = defaultTier;
+  // Max model tier cap (managed hosting cost control — StepHints and pipelines
+  // are clamped): `LYNOX_MAX_MODEL_TIER` (canonical) / legacy `LYNOX_MAX_TIER`.
+  const maxTier = envTier('LYNOX_MAX_MODEL_TIER');
+  if (maxTier) merged.max_tier = maxTier;
   // Account plan tier (separate from LLM model tier) — 'pro' unlocks
   // capabilities like the researcher-role Opus override. Defaults to
   // 'standard' when unset.
