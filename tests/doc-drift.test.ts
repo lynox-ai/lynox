@@ -118,7 +118,9 @@ describe('env-ABI consume-side: loadConfig reads the engine-consumed var names (
     'LYNOX_DEFAULT_TIER',
     'LYNOX_WORKER_PROFILE',
     'LYNOX_MODEL_PROFILES_JSON',
-    'LYNOX_LLM_MODE',
+    // LYNOX_LLM_MODE retired 2026-06-13 with the eu-sovereign axis — the engine
+    // no longer reads it (Mistral is selected via provider+endpoint). Kept out
+    // of this consume-pin on purpose; do not re-add.
     'LYNOX_LLM_PROVIDER',
   ];
   for (const name of ENGINE_CONSUMED) {

@@ -34,6 +34,8 @@ describe('Config', () => {
     delete process.env['LYNOX_WORKER_PROFILE'];
     delete process.env['LYNOX_MODEL_PROFILES_JSON'];
     delete process.env['LYNOX_ACCOUNT_TIER'];
+    delete process.env['MISTRAL_API_KEY'];
+    delete process.env['LYNOX_LLM_PROVIDER'];
     // Clean up any config files from previous tests
     rmSync(join(fakeHome, '.lynox'), { recursive: true, force: true });
     rmSync(join(fakeProject, '.lynox'), { recursive: true, force: true });
@@ -261,6 +263,73 @@ describe('Config', () => {
     process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify(['not', 'a', 'map']);
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().model_profiles).toBeUndefined();
+  });
+
+  // ── Managed Mistral key promotion (replaces the retired eu-sovereign axis) ──
+  // The CP/UI stages provider='openai' + the Mistral api_base_url; the managed
+  // MISTRAL_API_KEY lives only in the environment, so loadConfig flows it into
+  // api_key. Keyed on provider+endpoint, not the old llm_mode toggle.
+
+  const writeUserConfig = (cfg: Record<string, unknown>): void => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg));
+  };
+
+  it('promotes MISTRAL_API_KEY even when ANTHROPIC_API_KEY already set api_key', async () => {
+    // Blocker-1 regression: ANTHROPIC_API_KEY lands in merged.api_key first (every
+    // managed/self-host box has it). The promotion MUST still win, else the in-app
+    // Mistral switch calls api.mistral.ai with the Anthropic key → 401.
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(cfg.provider).toBe('openai');
+    expect(cfg.api_key).toBe('sk-mistral-yyy');
+    expect(cfg.openai_model_id).toBe('mistral-large-2512'); // default when none staged
+  });
+
+  it('keeps an explicitly staged openai_model_id instead of forcing the default', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-medium-2505' });
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().openai_model_id).toBe('mistral-medium-2505');
+  });
+
+  it('does NOT promote for a non-Mistral openai endpoint (leaves user key intact)', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.openai.com/v1', api_key: 'sk-user-own' });
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-user-own');
+  });
+
+  it('does NOT promote for a spoofed Mistral host (api.mistral.ai.evil.com)', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.mistral.ai.evil.com/v1' });
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  it('leaves an anthropic-provider config untouched even with MISTRAL_API_KEY present', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(cfg.provider).toBeUndefined(); // defaults to anthropic
+    expect(cfg.api_key).toBe('sk-ant-xxx');
+  });
+
+  it('llm_mode=eu-sovereign alone no longer activates Mistral (axis retired, key tolerated)', async () => {
+    // Blocker-2: the .strict() schema still tolerates the deprecated key so the
+    // file parses (not nulled), but the engine no longer acts on it.
+    writeUserConfig({ llm_mode: 'eu-sovereign' });
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(cfg.provider).toBeUndefined();
+    expect(cfg.api_key).toBeUndefined();
+    expect(cfg.llm_mode).toBe('eu-sovereign'); // parsed, but inert
   });
 
   it('project config can override organization_id (safe key)', async () => {
