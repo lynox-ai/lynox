@@ -1488,6 +1488,23 @@ describe('LynoxHTTPApi', () => {
       expect(predictManagedBlocked('CUSTOM_API_KEY')).toBe(false);
     });
 
+    it('the canonical LYNOX_BILLING_TIER env drives the managed gate (legacy alias)', () => {
+      // Only the canonical name set — the gate must fire exactly as it does for
+      // the legacy LYNOX_MANAGED_MODE (read via the env alias).
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      expect(predictManagedBlocked('LYNOX_VAULT_KEY')).toBe(true);   // admin-only → blocked under managed
+      expect(predictManagedBlocked('SHOPIFY_TOKEN')).toBe(false);     // integration secret → flows to UI
+      // A secret NAMED LYNOX_BILLING_TIER is itself admin-only (the /^LYNOX_/
+      // pattern), so a customer cannot PUT it to self-upgrade their tier.
+      expect(predictManagedBlocked('LYNOX_BILLING_TIER')).toBe(true);
+    });
+
+    it('self-host (no billing-tier env at all) leaves the gate open', () => {
+      vi.stubEnv('LYNOX_BILLING_TIER', undefined);
+      vi.stubEnv('LYNOX_MANAGED_MODE', undefined);
+      expect(predictManagedBlocked('LYNOX_VAULT_KEY')).toBe(false);
+    });
+
     it('returns TRUE on managed mode for engine-internal LYNOX_* names', () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
       // Engine-internal — customers must not be able to forge sessions,

@@ -23,6 +23,7 @@ import { normalizeTier } from '../types/index.js';
  * is renamed; never remove a legacy name (the read-alias is permanent).
  */
 export const ENV_ALIASES = {
+  LYNOX_BILLING_TIER: ['LYNOX_MANAGED_MODE'],
   LYNOX_MAX_MODEL_TIER: ['LYNOX_MAX_TIER'],
   LYNOX_DEFAULT_MODEL_TIER: ['LYNOX_DEFAULT_TIER'],
   LYNOX_API_BASE_URL: ['ANTHROPIC_BASE_URL'],
