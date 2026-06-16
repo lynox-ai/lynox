@@ -26,6 +26,26 @@ import type { ModelTier, LLMProvider } from './models.js';
 export type ProviderKey = LLMProvider | (string & {});
 
 /**
+ * How a provider's prompt cache works — the load-bearing fact for the cache
+ * wiring (PR-3): `explicit-breakpoint` providers (Anthropic/Vertex) need
+ * `cache_control` breakpoints in the request; `automatic-prefix` providers
+ * (Mistral and other OpenAI-compatible endpoints, see `isMistralHost` /
+ * models.ts:432) cache transparently and take a `prompt_cache_key` instead;
+ * `none` makes no caching assumption (an unknown custom proxy).
+ *
+ * `readMult`/`writeMult` are intentionally OPTIONAL and omitted today: the
+ * per-model cache economics already live in `MODEL_CAPABILITIES.pricing`
+ * (`cacheRead`/`cacheWrite`) and are read by `calculateCost` (pricing.ts).
+ * Hardcoding provider-level multipliers here would duplicate that and drift;
+ * a later consumer derives aggregates from pricing if it needs them.
+ */
+export interface CacheProfile {
+  mechanism: 'explicit-breakpoint' | 'automatic-prefix' | 'context-cache' | 'none';
+  readMult?: number;
+  writeMult?: number;
+}
+
+/**
  * A provider as a uniformly-resolved, first-class citizen of the registry.
  *
  * `resolveModelId` is byte-parity with the pre-registry `getModelId` branch for
@@ -52,4 +72,6 @@ export interface ProviderDescriptor {
    * the pre-registry `getModelId` per-provider branch.
    */
   resolveModelId: (tier: ModelTier) => string;
+  /** How this provider's prompt cache behaves (consumed by the PR-3 wiring). */
+  cache: CacheProfile;
 }
