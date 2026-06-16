@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.14.0 — 2026-06-16
+
+An environment-ABI and provider refactor: Mistral becomes a first-class provider (EU-sovereign mode retired), engine env vars move to canonical names with permanent legacy aliases, and Managed-Pro's model ceiling is lifted to Opus for deep work. No engine database migration; one destructive control-plane migration (0034).
+
+### Changed
+
+- **EU-sovereign mode retired — Mistral is a first-class provider.** The engine no longer reads an `llm_mode` toggle; it promotes the Mistral API key into the active provider when the selected provider is a Mistral endpoint (provider + endpoint, not a mode flag). Anthropic and Mistral are freely switchable in LLM settings. (core #722, pro #288)
+- **Engine environment variables renamed to canonical names; legacy names accepted forever.** A running instance's existing `.env` keeps working (dual-read): `ANTHROPIC_BASE_URL`→`LYNOX_API_BASE_URL`, `LYNOX_MAX_TIER`→`LYNOX_MAX_MODEL_TIER`, `LYNOX_DEFAULT_TIER`→`LYNOX_DEFAULT_MODEL_TIER`, `LYNOX_MANAGED_MODE`→`LYNOX_BILLING_TIER`, `LYNOX_DIR`→`LYNOX_DATA_DIR`. (core #725, #726)
+- **Managed-Pro can reach Opus for deep work.** The control plane lifts the Managed-Pro model ceiling to Opus; deep tasks (spawns, deep step-hints, pipeline steps) resolve to Opus while everyday chat stays on the cost-sane balanced tier. (pro #284)
+
+### Fixed
+
+- **Model-tier resolution flows through one gate→clamp→provider chokepoint.** Closes two gaps: a Pro tenant under a lower cost ceiling could reach the deep/Opus model past its cap, and a demo instance under a Managed-Pro customer inherited `account_tier=pro`. Resolution is now consistent across the session, spawn, and pipeline paths. (core #721, #720)
+
+### Control plane
+
+- **Managed-hosting schema cleanup** removes a now-unused provider-mode column the engine no longer reads (migration `0034`). (pro #288)
+- **CP-to-engine env-ABI contract manifest + tests** pin the names the control plane emits to the names the engine reads, so a tier/env var can't silently drift between the two repos; tier policy is emitted from one table with canonical wire values. (pro #285, #286)
+
+### Docs & Internal
+
+- Dependency/audit bumps: esbuild, qs, vite 7.3.5, brace-expansion (ReDoS), nodemailer/js-yaml/otel-core. (core #723, pro #287, #291, #293, #294)
+- Docs site → Astro 6 + Starlight 0.40; landing site → Astro 6. (core #728, pro #292)
+
 ## 1.13.0 — 2026-06-12
 
 Managed-Pro accounts now run on Opus and managed background work routes to Mistral — the headline of an env-ABI fix wave — alongside a forensic-driven batch of cost, context, and UX hardening across the engine and control plane.
