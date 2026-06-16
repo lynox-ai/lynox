@@ -19,9 +19,9 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { effectiveContextWindow } from '../types/index.js';
+import { effectiveContextWindow, getBetasForProvider } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
-import { getActiveProvider } from './llm-client.js';
+import { getActiveProvider, isCustomProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
@@ -759,6 +759,13 @@ export class Session {
           if (startMessageCount === 0) {
             const title = generateThreadTitle(taskText);
             threadStore.updateThread(this.sessionId, { title });
+            // Upgrade to an LLM-written title on the `fast` tier (a cheap inline
+            // background consumer, like memory extraction). Async + best-effort:
+            // never blocks the run, skipped in private mode, and never clobbers a
+            // manual rename (the method re-checks the title before writing).
+            if (taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
+              void this._generateLLMTitle(taskText, title);
+            }
           }
           // Stamp this run's token/cost totals onto its final assistant
           // message so the per-message footer survives a thread resume.
@@ -1204,6 +1211,43 @@ export class Session {
 
   // ── Agent creation (internal) ──
 
+  /**
+   * Best-effort upgrade of the auto-generated thread title to an LLM-written one
+   * on the `fast` tier — a cheap inline-background consumer like memory
+   * extraction. Fire-and-forget: never throws, never blocks the run, and only
+   * writes if the title is still the placeholder we set, so a manual rename or a
+   * later run that raced in is never clobbered. Private mode is gated by the
+   * caller. `fast` resolves against the active provider, so under hybrid it
+   * follows the configured fast-tier model.
+   */
+  private async _generateLLMTitle(firstMessage: string, placeholder: string): Promise<void> {
+    try {
+      const provider = getActiveProvider();
+      const prompt =
+        'Write a concise 3-6 word title in Title Case for a conversation that begins ' +
+        'with the message below. No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
+      const stream = this.engine.client.beta.messages.stream({
+        model: resolveTierModel('fast', provider).modelId,
+        max_tokens: 64,
+        ...(isCustomProvider() ? {} : { betas: getBetasForProvider(provider) }),
+        messages: [{ role: 'user', content: prompt + firstMessage.slice(0, 2000) }],
+      });
+      const response = await stream.finalMessage();
+      const textBlock = response.content.find(b => b.type === 'text');
+      if (!textBlock || textBlock.type !== 'text') return;
+      const title = sanitizeLLMTitle(textBlock.text);
+      if (title.length === 0) return;
+      // Only overwrite if nothing (a manual rename, a later run) changed it meanwhile.
+      const store = this.engine.getThreadStore();
+      if (store?.getThread(this.sessionId)?.title === placeholder) {
+        store.updateThread(this.sessionId, { title });
+      }
+    } catch {
+      // Best-effort: keep the placeholder title on any failure (browse-only mode,
+      // provider/rate-limit error, …).
+    }
+  }
+
   /** Recreate agent with overrides (preserves conversation history) */
   _recreateAgent(overrides?: {
     maxIterations?: number | undefined;
@@ -1510,6 +1554,18 @@ function generateThreadTitle(taskText: string): string {
   }
 
   return title || 'New Chat';
+}
+
+/**
+ * Clean a raw LLM title response into a usable thread title: take the first
+ * line, strip wrapping quotes/whitespace and trailing punctuation, and cap the
+ * length. Returns '' when nothing usable remains (caller keeps the placeholder).
+ * Pure — exported for unit testing the `_generateLLMTitle` sanitization.
+ */
+export function sanitizeLLMTitle(raw: string): string {
+  let title = (raw.split('\n')[0] ?? '').replace(/^["'\s]+|["'\s.]+$/g, '');
+  if (title.length > 80) title = title.slice(0, 77) + '...';
+  return title;
 }
 
 /**

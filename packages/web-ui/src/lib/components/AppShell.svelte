@@ -64,6 +64,29 @@
 	function cancelRename() {
 		renamingThreadId = null;
 	}
+	// ── Header session-title rename ───────────────────────────────────────
+	// Manual rename of the ACTIVE conversation from the header. Auto-naming
+	// only fires on the first message (session.ts generateThreadTitle), so a
+	// manually set title is never clobbered — no "manual" flag needed. Kept in
+	// its own state from the sidebar inline-rename above, otherwise editing the
+	// active thread here would also open an input in the thread list.
+	let headerRenaming = $state(false);
+	let headerRenameValue = $state('');
+	function startHeaderRename() {
+		const ct = getThreads().find((thr) => thr.id === getSessionId());
+		headerRenameValue = ct?.title ?? '';
+		headerRenaming = true;
+	}
+	async function commitHeaderRename() {
+		if (!headerRenaming) return;
+		const id = getSessionId();
+		const trimmed = headerRenameValue.trim();
+		headerRenaming = false;
+		if (id && trimmed) await renameThread(id, trimmed);
+	}
+	function cancelHeaderRename() {
+		headerRenaming = false;
+	}
 	async function confirmDelete(threadId: string) {
 		if (confirm(t('threads.confirm_delete'))) {
 			await deleteThread(threadId, getSessionId());
@@ -733,12 +756,42 @@
 					<img src="/logo-brand-light.svg" alt="lynox" class="h-5 w-auto logo-brand-light" />
 				</div>
 
-				<!-- Center: Cmd+K hint -->
-				<button onclick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))} aria-label={t('cmd.placeholder')} class="hidden md:flex items-center gap-2 text-xs text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] border border-border px-3 py-1.5">
-					<Icon name="search" size="sm" />
-					<span>{t('cmd.placeholder')}</span>
-					<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
-				</button>
+				<!-- Center: active session title (editable) on chat, else Cmd+K hint -->
+				{#snippet cmdkHint()}
+					<button onclick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))} aria-label={t('cmd.placeholder')} class="hidden md:flex items-center gap-2 text-xs text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] border border-border px-3 py-1.5">
+						<Icon name="search" size="sm" />
+						<span>{t('cmd.placeholder')}</span>
+						<kbd class="text-[10px] font-mono bg-bg-muted px-1 py-0.5 rounded">⌘K</kbd>
+					</button>
+				{/snippet}
+				{#if isActive('/app', true) && getSessionId()}
+					{@const ct = getThreads().find((thr) => thr.id === getSessionId())}
+					{#if ct && headerRenaming}
+						<input
+							type="text"
+							bind:value={headerRenameValue}
+							onblur={() => { void commitHeaderRename(); }}
+							onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { void commitHeaderRename(); } if (e.key === 'Escape') cancelHeaderRename(); }}
+							class="hidden md:block w-72 max-w-[40vw] px-2 py-1 text-sm bg-bg border border-accent/40 rounded-[var(--radius-md)] outline-none text-text"
+							aria-label={t('threads.rename')}
+							use:focusOnMount
+						/>
+					{:else if ct}
+						<button
+							onclick={startHeaderRename}
+							class="group hidden md:flex items-center gap-1.5 max-w-[40vw] text-sm text-text-subtle hover:text-text transition-colors rounded-[var(--radius-md)] px-2 py-1 hover:bg-bg-muted"
+							title={t('threads.rename')}
+							aria-label={t('threads.rename')}
+						>
+							<span class="truncate">{ct.title || formatThreadDate(ct.created_at)}</span>
+							<Icon name="pencil" size="xs" class="opacity-0 group-hover:opacity-70" />
+						</button>
+					{:else}
+						{@render cmdkHint()}
+					{/if}
+				{:else}
+					{@render cmdkHint()}
+				{/if}
 
 				<!-- Right: private toggle + locale dropdown + sign out -->
 				<div class="flex items-center gap-1">
