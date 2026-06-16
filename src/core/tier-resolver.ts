@@ -17,8 +17,9 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, normalizeTier, clampTier, getModelId } from '../types/index.js';
+import { type ModelTier, type LLMProvider, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
+import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 export interface RunModelRequest {
   /**
@@ -71,4 +72,41 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   const gatedOverride = normalized !== undefined ? applyTierGate(normalized, req.accountTier) : undefined;
   const tier = clampTier(gatedOverride ?? req.defaultTier, req.maxTier);
   return { tier, modelId: getModelId(tier, req.provider) };
+}
+
+/**
+ * The provider snapshot for an ALREADY-RESOLVED tier — the single seam that
+ * every direct LLM-call site resolves its provider + model id + beta headers
+ * through. It exists so hybrid routing (PR-3) can make resolution per-tier by
+ * swapping the provider HERE, instead of editing each call site.
+ *
+ * Unlike {@link resolveRunModel}, this does NOT gate/clamp: callers pass a tier
+ * that is already resolved (a session's `this._model`, a literal `'fast'`), so
+ * re-running the gate/clamp would double-apply it. Standard mode passes the
+ * single active provider, so the result is byte-identical to the previous inline
+ * `getModelId(tier, provider)` + `isCustomProvider() ? {} : { betas }`.
+ */
+export interface TierProviderSnapshot {
+  readonly provider: LLMProvider;
+  readonly modelId: string;
+  /**
+   * Anthropic beta headers to send, or `undefined` for OpenAI-compatible
+   * providers (custom/openai/mistral) that reject them. Call sites spread
+   * `...(snap.betas ? { betas: snap.betas } : {})`, reproducing the old
+   * `isCustomProvider() ? {} : { betas }` omission exactly.
+   */
+  readonly betas: AnthropicBeta[] | undefined;
+}
+
+export function resolveTierModel(tier: ModelTier, provider: LLMProvider): TierProviderSnapshot {
+  // No-betas set = custom Anthropic proxies + the OpenAI-compatible wire (openai,
+  // mistral). Derived from the RESOLVED provider (not the global isCustomProvider())
+  // so a hybrid per-tier provider gets the right betas; byte-parity with
+  // isCustomProvider() (custom||openai) for the standard single-provider case.
+  const noBetas = provider === 'custom' || getProviderDescriptor(provider)?.wireClient === 'openai';
+  return {
+    provider,
+    modelId: getModelId(tier, provider),
+    betas: noBetas ? undefined : getBetasForProvider(provider),
+  };
 }
