@@ -1,4 +1,5 @@
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
+import type { ProviderDescriptor, ProviderKey } from './provider-registry.js';
 
 // === 4.1 Model Tiers & Providers ===
 
@@ -125,11 +126,6 @@ export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   'fast':     'ministral-8b-2512',
 };
 
-const ALL_MODEL_MAPS: Record<Exclude<LLMProvider, 'custom' | 'openai'>, Record<ModelTier, string>> = {
-  anthropic: MODEL_MAP,
-  vertex: VERTEX_MODEL_MAP,
-};
-
 /**
  * True when `apiBaseURL`'s host is the Mistral API — `api.mistral.ai` or any
  * `*.mistral.ai` subdomain. Hostname-strict (parses the URL) so a crafted base
@@ -187,21 +183,77 @@ export function getActiveOpenAIModelMap(): Record<ModelTier, string> | null {
   return _openaiModelMap;
 }
 
+// === Provider Registry (resolution) ===
+// PR-1a: route tier→model resolution through a per-provider descriptor registry
+// instead of the hardcoded `if (provider === …)` branches. Byte-parity — each
+// descriptor's `resolveModelId` reproduces the exact pre-registry branch. Keyed
+// by an OPEN `ProviderKey` so a new provider (incl. the now first-class
+// `'mistral'` identity) registers without editing `LLMProvider` or the resolver.
+// Co-located here because the openai descriptor reads the module-private resolver
+// state (`_openaiModelMap`/`_openaiFallbackModelId`) at call time. The wire-client
+// dispatch (createLLMClient) + Capability/CacheProfile re-projection follow in PR-1b.
+const PROVIDER_REGISTRY = new Map<ProviderKey, ProviderDescriptor>();
+
+/** Register (or replace) a provider descriptor. */
+export function registerProvider(descriptor: ProviderDescriptor): void {
+  PROVIDER_REGISTRY.set(descriptor.id, descriptor);
+}
+
+/** Inspect a registered descriptor (identity + metadata), or `undefined`. */
+export function getProviderDescriptor(key: ProviderKey): ProviderDescriptor | undefined {
+  return PROVIDER_REGISTRY.get(key);
+}
+
 /**
- * Resolve a tier name to a provider-specific model ID.
+ * Resolve a tier to a model ID via the provider registry — the single
+ * resolution path, no `if (provider === …)` branching. An unregistered key
+ * degrades to the Anthropic map: no real caller passes an unknown key (the
+ * typed {@link getModelId} only admits `LLMProvider`, all registered), so this
+ * only guards a future/stub key gracefully instead of throwing.
+ */
+export function resolveModelIdViaRegistry(tier: ModelTier, provider: ProviderKey): string {
+  return PROVIDER_REGISTRY.get(provider)?.resolveModelId(tier) ?? MODEL_MAP[tier];
+}
+
+// Built-in descriptors — each `resolveModelId` is the verbatim pre-registry branch.
+registerProvider({
+  id: 'anthropic', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
+  resolveModelId: (tier) => MODEL_MAP[tier],
+});
+registerProvider({
+  id: 'vertex', wireClient: 'vertex', defaultTierModels: VERTEX_MODEL_MAP,
+  resolveModelId: (tier) => VERTEX_MODEL_MAP[tier],
+});
+registerProvider({
+  // 'custom' (LiteLLM etc.) uses standard Anthropic model IDs — the proxy maps them.
+  id: 'custom', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
+  resolveModelId: (tier) => MODEL_MAP[tier],
+});
+registerProvider({
+  // OpenAI-compatible providers: prefer the active openai tier→map (bootstrapped
+  // per config — e.g. MISTRAL_MODEL_MAP for managed), then the single configured
+  // `openai_model_id` fallback, then Anthropic IDs (legacy/unbootstrapped). The
+  // closure reads the resolver state at CALL time, so config bootstrap/reload
+  // still applies. Verbatim 3-stage fallback.
+  id: 'openai', wireClient: 'openai', defaultTierModels: MODEL_MAP,
+  resolveModelId: (tier) => _openaiModelMap?.[tier] ?? _openaiFallbackModelId ?? MODEL_MAP[tier],
+});
+registerProvider({
+  // Mistral as a FIRST-CLASS identity (`id:'mistral'`), wire path = openai.
+  // Additive: no current caller resolves by the `'mistral'` key — Mistral flows
+  // through the `'openai'` provider + the dynamic map — so this changes no
+  // existing resolution. It gives Mistral a real registry identity for later PRs.
+  id: 'mistral', wireClient: 'openai', defaultTierModels: MISTRAL_MODEL_MAP,
+  resolveModelId: (tier) => MISTRAL_MODEL_MAP[tier],
+});
+
+/**
+ * Resolve a tier name to a provider-specific model ID — dispatched through the
+ * provider registry (descriptors above). Behaviour is byte-identical to the
+ * pre-registry per-provider branches.
  */
 export function getModelId(tier: ModelTier, provider: LLMProvider = 'anthropic'): string {
-  // 'custom' provider (LiteLLM etc.) uses standard Anthropic model IDs — proxy maps them
-  if (provider === 'custom') return MODEL_MAP[tier];
-  if (provider === 'openai') {
-    // Prefer the active openai tier→model map (registered by engine bootstrap
-    // for known providers — e.g. MISTRAL_MODEL_MAP for managed-EU). Fall back
-    // to the configured single `openai_model_id` when no map is registered.
-    // Final fallback to Anthropic IDs preserves legacy test behaviour where
-    // the resolver isn't bootstrapped.
-    return _openaiModelMap?.[tier] ?? _openaiFallbackModelId ?? MODEL_MAP[tier];
-  }
-  return ALL_MODEL_MAPS[provider][tier];
+  return resolveModelIdViaRegistry(tier, provider);
 }
 
 /**

@@ -1,5 +1,6 @@
 // Barrel re-exports — all existing import paths preserved
 export * from './models.js';
+export * from './provider-registry.js';
 export * from './worker.js';
 export * from './tools.js';
 export * from './agent.js';
