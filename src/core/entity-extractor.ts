@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
-import { getBetasForProvider, getModelId } from '../types/index.js';
-import { getActiveProvider, isCustomProvider } from './llm-client.js';
+import { getActiveProvider } from './llm-client.js';
+import { resolveTierModel } from './tier-resolver.js';
 
 export interface ExtractedEntity {
   name: string;
@@ -249,10 +249,11 @@ export async function extractEntitiesLLM(
 ): Promise<ExtractionResult> {
   _llmExtractionCount++;
   try {
+    const fast = resolveTierModel('fast', getActiveProvider());
     const stream = client.beta.messages.stream({
-      model: getModelId('fast', getActiveProvider()),
+      model: fast.modelId,
       max_tokens: 512,
-      ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
+      ...(fast.betas ? { betas: fast.betas } : {}),
       messages: [{ role: 'user', content: ENTITY_EXTRACTION_PROMPT + text.slice(0, 2000) }],
     });
     const response = await stream.finalMessage();

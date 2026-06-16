@@ -19,8 +19,8 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { effectiveContextWindow, getModelId } from '../types/index.js';
-import { resolveRunModel } from './tier-resolver.js';
+import { effectiveContextWindow } from '../types/index.js';
+import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { getActiveProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
@@ -518,7 +518,7 @@ export class Session {
     // Stash the eager-persist checkpoint hook for this run (cleared in finally).
     this._onPersistCheckpoint = runOptions?.onPersistCheckpoint ?? null;
 
-    const model = getModelId(this._model, getActiveProvider());
+    const model = resolveTierModel(this._model, getActiveProvider()).modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._userWaitMs = 0;
@@ -1159,7 +1159,7 @@ export class Session {
     this._model = tier;
     this._createAgent();
     this.loadMessages(messages);
-    return getModelId(tier, getActiveProvider());
+    return resolveTierModel(tier, getActiveProvider()).modelId;
   }
 
   getModelTier(): ModelTier {
@@ -1243,7 +1243,7 @@ export class Session {
     toolContext.tools = registry.getEntries();
     toolContext.streamHandler = this.onStream ?? null;
 
-    const model = getModelId(this._model, getActiveProvider());
+    const model = resolveTierModel(this._model, getActiveProvider()).modelId;
     const entries = registry.getEntries();
     const tools = pluginManager
       ? entries.map(entry => ({
