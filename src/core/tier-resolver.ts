@@ -17,7 +17,7 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor } from '../types/index.js';
+import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
@@ -87,7 +87,7 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
  * `getModelId(tier, provider)` + `isCustomProvider() ? {} : { betas }`.
  */
 export interface TierProviderSnapshot {
-  readonly provider: LLMProvider;
+  readonly provider: ProviderKey;
   readonly modelId: string;
   /**
    * Anthropic beta headers to send, or `undefined` for OpenAI-compatible
@@ -96,17 +96,57 @@ export interface TierProviderSnapshot {
    * `isCustomProvider() ? {} : { betas }` omission exactly.
    */
   readonly betas: AnthropicBeta[] | undefined;
+  /** Per-slot API key for a hybrid tier (undefined in standard mode / base). */
+  readonly apiKey?: string | undefined;
+  /** Per-slot API base URL for a hybrid tier (undefined in standard mode / base). */
+  readonly apiBaseURL?: string | undefined;
 }
 
-export function resolveTierModel(tier: ModelTier, provider: LLMProvider): TierProviderSnapshot {
-  // No-betas set = custom Anthropic proxies + the OpenAI-compatible wire (openai,
-  // mistral). Derived from the RESOLVED provider (not the global isCustomProvider())
-  // so a hybrid per-tier provider gets the right betas; byte-parity with
-  // isCustomProvider() (custom||openai) for the standard single-provider case.
-  const noBetas = provider === 'custom' || getProviderDescriptor(provider)?.wireClient === 'openai';
+// Process-global hybrid Tier-Set state, set at config-load + reload (engine
+// `_configureOpenAIResolver`), mirroring the openai tier-map resolver pattern.
+let _tierSet: TierSet | null = null;
+let _routingMode: 'standard' | 'hybrid' = 'standard';
+
+/**
+ * Configure the active hybrid Tier-Set from user config. Called at bootstrap +
+ * on every reloadUserConfig so a UI toggle takes effect without a restart. Pass
+ * `routingMode: 'standard'` (or `tierSet: null`) to disable hybrid resolution.
+ */
+export function setTierSetResolver(opts: {
+  routingMode?: 'standard' | 'hybrid' | undefined;
+  tierSet?: TierSet | null | undefined;
+}): void {
+  if (opts.routingMode !== undefined) _routingMode = opts.routingMode;
+  if (opts.tierSet !== undefined) _tierSet = opts.tierSet;
+}
+
+/** Inspect the active routing mode (tests + debug). */
+export function getActiveRoutingMode(): 'standard' | 'hybrid' {
+  return _routingMode;
+}
+
+export function resolveTierModel(tier: ModelTier, baseProvider: LLMProvider): TierProviderSnapshot {
+  // Hybrid: a configured tier_set slot overrides the base provider/model/creds
+  // for this tier. Standard (default): the slot is ignored, so the snapshot is
+  // byte-identical to the previous inline resolution against the base provider.
+  const slot = _routingMode === 'hybrid' ? _tierSet?.[tier] : undefined;
+  const provider: ProviderKey = slot?.provider ?? baseProvider;
+  // Anthropic beta headers apply ONLY to the Claude-wire providers (anthropic,
+  // vertex), never to custom (an Anthropic-compatible proxy that strips them,
+  // agent.ts) nor the OpenAI-compatible wire (openai/mistral). Derived from the
+  // RESOLVED provider via a POSITIVE check, so an unknown/typo'd hybrid slot
+  // provider safely gets NO betas rather than the wrong ones. Byte-parity with
+  // isCustomProvider() (custom||openai → no betas) for the 4 standard providers.
+  const wire = getProviderDescriptor(provider)?.wireClient;
+  const usesBetas = provider !== 'custom' && (wire === 'anthropic' || wire === 'vertex');
   return {
     provider,
-    modelId: getModelId(tier, provider),
-    betas: noBetas ? undefined : getBetasForProvider(provider),
+    // A hybrid slot names its own model; otherwise resolve the tier for the base
+    // provider exactly as before.
+    modelId: slot?.model_id ?? getModelId(tier, baseProvider),
+    // Cast is safe: usesBetas is true only for anthropic/vertex ⊂ LLMProvider.
+    betas: usesBetas ? getBetasForProvider(provider as LLMProvider) : undefined,
+    apiKey: slot?.api_key,
+    apiBaseURL: slot?.api_base_url,
   };
 }
