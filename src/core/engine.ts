@@ -13,6 +13,7 @@ import type {
   ContextSource,
 } from '../types/index.js';
 import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver } from '../types/index.js';
+import { setTierSetResolver } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -739,6 +740,12 @@ export class Engine {
       ? this.userConfig.openai_model_id ?? null
       : null;
     setOpenAIModelResolver({ map, fallbackModelId: fallback });
+    // Sync the hybrid Tier-Set resolver too, so a routing_mode/tier_set change
+    // takes effect at bootstrap + reload without a restart (same hook).
+    setTierSetResolver({
+      routingMode: this.userConfig.routing_mode,
+      tierSet: this.userConfig.tier_set,
+    });
   }
 
   /** RunHistory, ThreadStore, PromptStore, SecurityAudit, persistent budget + HTTP rate limits. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
