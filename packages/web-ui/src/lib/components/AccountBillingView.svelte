@@ -23,17 +23,25 @@
 	`pro/docs/internal/PRD-STRIPE-PORTAL-SSO.md` is the spec for that sprint.
 
 	Tier-awareness audit (`managed` value from /api/config, canonical post-v1.8.0):
-	| Surface             | null (self-host)      | 'hosted'/'managed'/'managed_pro' |
-	|---------------------|-----------------------|----------------------------------------|
-	| Subscription tier   | ✗ self_host_note      | ✓ tier label                           |
-	| Stripe portal CTA   | ✗ hidden              | ✓ if LYNOX_STRIPE_PORTAL_LOGIN_URL set |
-	| Support fallback    | ✗ hidden              | ✓ always rendered                      |
+	| Surface                  | null (self-host) | hosted (BYOK) | managed / managed_pro |
+	|--------------------------|------------------|---------------|-----------------------|
+	| Subscription tier label  | ✗ self_host_note | ✓             | ✓                     |
+	| Stripe portal CTA        | ✗                | ✓ if env set  | ✓ if env set          |
+	| Budget + credit-pack CTA | ✗                | ✗             | ✓ (cpSuppliesLLMKey)  |
+	| Upgrade-to-Managed CTA   | ✗                | ✓ (hosted)    | ✗                     |
+	| Support fallback         | ✗                | ✓ always      | ✓ always              |
+
+	The budget/credit-pack CTA deep-links to the customer account dashboard
+	(lynox.ai/managed/account) — the only surface with the AI-budget bar +
+	credit-pack top-ups. The upgrade CTA is gated `managed === 'hosted'` (NOT
+	`isHostedInstance`, which was true for every CP tier and leaked the box to
+	paying Managed customers).
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { normalizeBillingTier, isHostedInstance, type BillingTier } from '../utils/billing-tier.js';
+	import { normalizeBillingTier, cpSuppliesLLMKey, type BillingTier } from '../utils/billing-tier.js';
 
 	let managed = $state<BillingTier | null>(null);
 	let stripePortalUrl = $state<string | null>(null);
@@ -76,6 +84,15 @@
 	});
 
 	const supportEmail = 'support@lynox.ai';
+
+	// Customer account dashboard on the public marketing site (lynox.ai) — NOT
+	// the control-plane API host (which 404s on /managed/account). This is the
+	// ONLY surface that exposes the AI-budget bar + credit-pack top-ups
+	// (CHF 10/25/50). The Stripe
+	// Customer Portal handles the subscription only — credit packs are a separate
+	// one-time payment_intent, so they never appear there. Email-code login, so
+	// deep-linking cross-origin from a tenant subdomain works (no shared cookie).
+	const accountDashboardUrl = 'https://lynox.ai/managed/account';
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -124,11 +141,37 @@
 				<p class="text-xs text-text-muted">{t('account.billing.portal_hint')}</p>
 			{/if}
 
-			{#if isHostedInstance(managed)}
-				<!-- Hosted-BYOK customers get a soft upgrade-CTA — without it
-				     the page has no self-serve path from CHF 39 BYOK to
-				     CHF 79/149 Managed plans, and the visitor sees a billing
-				     page with only a tier-label + mailto. Mailto stopgap until
+			{#if cpSuppliesLLMKey(managed)}
+				<!-- managed / managed_pro only — the tiers that carry an included
+				     AI budget. The Stripe portal above manages the SUBSCRIPTION;
+				     it has no AI-budget view and no credit-pack top-up (packs are
+				     a separate one-time payment_intent). Without this CTA a
+				     budget-capped customer has no in-product path to recover —
+				     they'd have to discover the account dashboard on their own.
+				     Deep-link to lynox.ai/managed/account where the budget bar +
+				     CHF 10/25/50 packs live. (Previously this section did not exist
+				     and the upgrade box below leaked to managed/managed_pro via
+				     isHostedInstance; the gate below is now hosted-only.) -->
+				<div class="rounded border border-border bg-bg-subtle p-4 text-sm space-y-2">
+					<p class="font-medium text-text">{t('account.billing.budget_heading')}</p>
+					<p class="text-text-muted">{t('account.billing.budget_body')}</p>
+					<a href={accountDashboardUrl} target="_blank" rel="noopener"
+						class="inline-flex items-center gap-2 px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 transition-opacity">
+						{t('account.billing.budget_cta')}
+						<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+						</svg>
+					</a>
+					<p class="text-xs text-text-muted">{t('account.billing.budget_hint')}</p>
+				</div>
+			{/if}
+
+			{#if managed === 'hosted'}
+				<!-- Hosted-BYOK ONLY — soft upgrade-CTA from CHF 39 BYOK to the
+				     CHF 79/149 Managed plans. Gated on `managed === 'hosted'`, NOT
+				     `isHostedInstance(managed)` (which is true for EVERY CP tier
+				     incl. managed/managed_pro and used to wrongly show this box to
+				     paying Managed customers). Mailto stopgap until
 				     [[project_pr3_stripe_portal_sso_deferred]] lands a proper
 				     in-portal plan-switch flow. -->
 				<div class="rounded border border-border bg-bg-subtle p-4 text-sm space-y-2">
