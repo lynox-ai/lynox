@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js';
 import { ALL_NAMESPACES } from '../types/index.js';
-import { createLLMClient, getActiveProvider } from './llm-client.js';
+import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { channels } from './observability.js';
 import { classifyScope } from './scope-classifier.js';
@@ -485,7 +485,8 @@ export class Memory implements IMemory {
         : finalAnswer;
 
       const fast = resolveTierModel('fast', getActiveProvider());
-      const stream = this.client.beta.messages.stream({
+      const fastClient = clientForTierSnapshot(fast, this.client, getActiveProvider());
+      const stream = fastClient.beta.messages.stream({
         model: fast.modelId,
         max_tokens: 1024,
         ...(fast.betas ? { betas: fast.betas } : {}),

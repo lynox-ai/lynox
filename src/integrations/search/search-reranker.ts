@@ -18,7 +18,7 @@
  * support), LLM call failure, malformed response, timeout.
  */
 import type { SearchResult } from './search-provider.js';
-import { createLLMClient, getActiveProvider } from '../../core/llm-client.js';
+import { createLLMClient, getActiveProvider, clientForTierSnapshot } from '../../core/llm-client.js';
 import { resolveTierModel } from '../../core/tier-resolver.js';
 import type { LLMProvider } from '../../types/index.js';
 import type { ProviderConfigSnapshot } from '../../types/agent.js';
@@ -166,7 +166,8 @@ export async function rerankSearchResults(
     // stream().finalMessage() works for both the Anthropic SDK and the adapter,
     // so use it uniformly. betas are an Anthropic-only concept — omit on openai.
     const fast = resolveTierModel('fast', provider);
-    const callPromise = client.beta.messages.stream({
+    const fastClient = clientForTierSnapshot(fast, client, provider);
+    const callPromise = fastClient.beta.messages.stream({
       model: fast.modelId,
       max_tokens: 512,
       ...(fast.betas ? { betas: fast.betas } : {}),

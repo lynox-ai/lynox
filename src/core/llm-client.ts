@@ -11,7 +11,7 @@
  * before calling `createLLMClient()` (sync).
  */
 import Anthropic from '@anthropic-ai/sdk';
-import type { LLMProvider } from '../types/index.js';
+import type { LLMProvider, ProviderKey } from '../types/index.js';
 import { getProviderDescriptor } from '../types/index.js';
 import { OpenAIAdapter, type ApiKeyProvider } from './openai-adapter.js';
 import { createVertexOAuthProvider } from './vertex-oauth.js';
@@ -121,4 +121,32 @@ export function getActiveProvider(): LLMProvider {
 /** Whether the active provider is a custom (non-Anthropic) proxy or OpenAI-compatible. */
 export function isCustomProvider(): boolean {
   return _activeProvider === 'custom' || _activeProvider === 'openai';
+}
+
+/**
+ * The client to use for a resolved tier snapshot — the end-to-end half of hybrid
+ * routing. In standard mode (and for a hybrid slot that neither changes the
+ * provider nor supplies its own creds) the AMBIENT client is reused: byte-parity,
+ * and it keeps the ambient client's configured key (a credless same-provider slot
+ * must NOT silently fall back to a default env key). A hybrid slot that changes
+ * the provider OR carries its own endpoint/key gets a dedicated client built for
+ * it (mapping the registry provider to its wire client).
+ */
+export function clientForTierSnapshot(
+  snap: { provider: ProviderKey; modelId: string; apiKey?: string | undefined; apiBaseURL?: string | undefined },
+  ambient: Anthropic,
+  ambientProvider: LLMProvider,
+): Anthropic {
+  const changesProvider = snap.provider !== ambientProvider;
+  if (snap.apiBaseURL === undefined && snap.apiKey === undefined && !changesProvider) {
+    return ambient;
+  }
+  const wire = getProviderDescriptor(snap.provider)?.wireClient ?? 'anthropic';
+  const provider: LLMProvider = wire === 'openai' ? 'openai' : wire === 'vertex' ? 'vertex' : 'anthropic';
+  return createLLMClient({
+    provider,
+    apiKey: snap.apiKey,
+    apiBaseURL: snap.apiBaseURL,
+    openaiModelId: snap.modelId,
+  });
 }
