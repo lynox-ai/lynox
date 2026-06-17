@@ -1409,7 +1409,7 @@ Incremental patches released without changelog entries. See `git log v1.0.0..v1.
 
 ## 1.0.0 — Initial Release
 
-One system that learns your business — replaces your CRM, workflows, outreach, and monitoring. Self-hosted, open, yours.
+One system that learns your business — connects any API, orchestrates your workflows, researches the web, monitors for changes. Self-hosted, open, yours.
 
 ### Core
 

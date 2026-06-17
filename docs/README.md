@@ -1,6 +1,6 @@
 # lynox Documentation
 
-One system that learns your business — replaces your CRM, workflows, outreach, and monitoring.
+One system that learns your business — connects any API, orchestrates your workflows, researches the web, and monitors for changes.
 
 **Live site:** [docs.lynox.ai](https://docs.lynox.ai)
 
