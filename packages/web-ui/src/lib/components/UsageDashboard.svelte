@@ -11,8 +11,11 @@
 	    cost + unit count for voice rows)
 	  - Daily trend sparkline (pure inline SVG, no chart lib)
 
-	No in-app credit-pack purchase surface — that stays in the external Stripe
-	Customer Portal (see PRD non-goals). 80 / 95 % threshold toasts are Phase 4.
+	No in-app credit-pack purchase surface — budget top-ups (credit packs) live on
+	the customer account dashboard at lynox.ai/managed/account, NOT the Stripe
+	Customer Portal (the portal only manages the subscription; packs are a separate
+	one-time payment_intent). AccountBillingView deep-links there for managed tiers.
+	80 / 95 % threshold toasts are Phase 4.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
