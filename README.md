@@ -8,7 +8,7 @@
 
 **Run your business. Not your tools.**
 
-One source-available (ELv2) agent that learns your business — handles CRM, workflows, research, and monitoring. Persistent knowledge graph, workflow capture, background worker. Bring your own LLM — **Anthropic Claude** and **Mistral** are natively supported and tested on every release. Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, LiteLLM) and Google Vertex AI are wired but not regularly tested. Self-hosted, no vendor lock-in.
+One source-available (ELv2) agent that learns your business — connects any API, runs your workflows, researches the web, and monitors for changes. Persistent knowledge graph, workflow capture, sub-agents, background worker. Bring your own LLM — **Anthropic Claude** and **Mistral** are natively supported and tested on every release. Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, LiteLLM) and Google Vertex AI are wired but not regularly tested. Self-hosted, no vendor lock-in.
 
 > [!IMPORTANT]
 > **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
