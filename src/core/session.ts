@@ -557,6 +557,7 @@ export class Session {
           taskText,
           modelTier: this._model,
           modelId: model,
+          provider: getActiveProvider(),
           promptHash,
           contextId: context?.id ?? '',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
