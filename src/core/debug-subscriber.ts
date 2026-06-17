@@ -10,6 +10,7 @@ const CHANNEL_GROUPS: Record<string, string> = {
   'lynox:mode:change':             'mode',
   'lynox:trigger:fire':            'trigger',
   'lynox:cost:warning':            'cost',
+  'lynox:llm:call':                'llm',
   'lynox:goal:update':             'goal',
   'lynox:preapproval:match':       'preapproval',
   'lynox:preapproval:exhausted':   'preapproval',
