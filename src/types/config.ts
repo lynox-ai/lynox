@@ -249,15 +249,16 @@ export interface LynoxUserConfig {
   /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */
   gcp_region?: string | undefined;
   default_tier?: ModelTier | undefined;
-  /** Maximum allowed model tier. StepHints and pipeline steps requesting a higher tier are clamped. Managed hosting sets 'sonnet'. */
+  /** Maximum allowed model tier — the cost ceiling. Requests for a higher tier (StepHints, pipeline steps, run-options) are clamped via `clampTier`. Post-D8 this is the sole tier cap (the budget caps spend); managed + managed_pro set `'deep'`. */
   max_tier?: ModelTier | undefined;
   /**
-   * Account-level plan tier, independent of LLM model tier. Controls
-   * capability gating rather than model selection: e.g. the `researcher`
-   * role accepts an explicit `model: 'opus'` override only when
-   * `account_tier === 'pro'`; other tiers silently downgrade to Sonnet.
-   * Defaults to `'standard'` (Starter/Managed). Set to `'pro'` on
-   * Managed-Pro instances via env `LYNOX_ACCOUNT_TIER=pro` or config.
+   * Account-level plan tier, independent of LLM model tier. Post-D8
+   * (2026-06) it NO LONGER gates model/tier selection — `applyTierGate`
+   * (roles.ts) is a pass-through, so the `max_tier` clamp + the budget are
+   * the only caps; every account can reach any allowed-provider model.
+   * Retained as a vestigial capability label (the param is still threaded
+   * for caller stability / forward-compat). Defaults to `'standard'`; set to
+   * `'pro'` on Managed-Pro via env `LYNOX_ACCOUNT_TIER=pro` or config.
    */
   account_tier?: 'standard' | 'pro' | undefined;
   /**
