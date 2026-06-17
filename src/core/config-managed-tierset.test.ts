@@ -47,4 +47,24 @@ describe('applyManagedTierSetConstraints (PR-3d managed ship-blocker)', () => {
     const out = applyManagedTierSetConstraints({ fast: { provider: 'mistral', model_id: 'ministral-8b-2512' } });
     expect(out.fast).toBeUndefined();
   });
+
+  // PR-4: the settings UI persists a Mistral slot in the LLMProvider form
+  // (provider 'openai' + the Mistral host), matching standard-mode config —
+  // NOT the registry-canonical 'mistral'. The transform must recognise it so
+  // managed Hybrid works, while STILL dropping a non-Mistral 'openai' host.
+  it('accepts the UI Mistral form (provider openai + Mistral host), forcing CP key + canonical base', () => {
+    const out = applyManagedTierSetConstraints({
+      fast: { provider: 'openai', model_id: 'ministral-8b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+    });
+    expect(out.fast).toEqual({
+      provider: 'openai', model_id: 'ministral-8b-2512', api_key: 'cp-mistral-key', api_base_url: MISTRAL_API_BASE,
+    });
+  });
+
+  it('drops a provider-openai slot whose host SPOOFS Mistral (suffix attack)', () => {
+    const out = applyManagedTierSetConstraints({
+      fast: { provider: 'openai', model_id: 'm', api_base_url: 'https://api.mistral.ai.evil.com' },
+    });
+    expect(out.fast).toBeUndefined();
+  });
 });

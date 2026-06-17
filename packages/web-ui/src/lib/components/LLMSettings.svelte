@@ -627,17 +627,17 @@
 				(activeProvider === 'custom' || activeProvider === 'openai') &&
 				typeof url === 'string' && url.trim().length > 0 &&
 				!isAllowlistedEndpoint(url);
-			// PR-4: persist routing_mode + tier_set. Self-host / BYOK only in
-			// Increment 1 — the managed writable-config allowlist doesn't include
-			// these yet (Increment 3 adds the server-side managed tier_set
-			// transform), so sending them on managed would 403. Standard mode
-			// sends only the mode; the engine ignores any stale tier_set unless
-			// routing_mode === 'hybrid'.
-			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet } = {};
-			if (!cpSuppliesLLMKey()) {
-				routingUpdate.routing_mode = routingMode;
-				if (routingMode === 'hybrid') routingUpdate.tier_set = currentTierSet();
-			}
+			// PR-4: persist routing_mode + tier_set for BOTH self-host and managed.
+			// Managed is allow-listed for these fields (MANAGED_USER_WRITABLE_CONFIG)
+			// and sanitised server-side at config-load (applyManagedTierSetConstraints
+			// drops off-allowlist providers, strips tenant keys/base_urls, sources CP
+			// keys). The UI never sends a key in the slot — keys go to the vault. In
+			// standard mode only the mode is sent; the engine ignores any stale
+			// tier_set unless routing_mode === 'hybrid'.
+			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet } = {
+				routing_mode: routingMode,
+			};
+			if (routingMode === 'hybrid') routingUpdate.tier_set = currentTierSet();
 			const body = needsConfirm
 				? { ...update, ...routingUpdate, confirm_custom_endpoint: true }
 				: { ...update, ...routingUpdate };
@@ -692,10 +692,13 @@
 		providers.find((p) => catalogEntryKey(p) === activeCatalogKey)
 		?? providers.find((p) => p.provider === activeProvider),
 	);
-	// Self-host hybrid: the per-tier editor replaces the single-provider flow
-	// (tiles + one key + residency/test). Managed hybrid is a follow-up, so the
-	// toggle is hidden there and this stays false → standard single-provider UI.
-	const hybridSelfHost = $derived(routingMode === 'hybrid' && !cpSuppliesLLMKey());
+	// Hybrid mode is active (managed OR self-host): the per-tier editor replaces
+	// the single-provider flow (tiles + one key + residency/test). The per-tier
+	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral), which
+	// is exactly the managed curated set — so managed hybrid reuses the same UI;
+	// only the per-provider key fields are self-host-only (managed: CP supplies,
+	// server-side `applyManagedTierSetConstraints` sources the keys at load).
+	const hybridActive = $derived(routingMode === 'hybrid');
 	const providerLocked = $derived(!!locks.provider);
 	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
 	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
@@ -796,12 +799,12 @@
 
 	<!-- Model routing (PR-4) — the PRIMARY axis: decide Standard vs Hybrid
 	     FIRST, the model controls below adapt to it. Standard = one provider,
-	     lynox auto-routes per turn (zero knobs). Hybrid = assign a model per
-	     tier (the per-tier picker appears in the provider config below). Self-
-	     host / BYOK only in Increment 1 — managed's per-tier path (allowlist +
-	     server-side validation) is a follow-up, so managed keeps the single
-	     auto-routed Standard mode. NO capability gating (D8 2026-06-17). -->
-	{#if loaded && !cpSuppliesLLMKey()}
+	     lynox auto-routes per turn (zero knobs). Hybrid = each tier picks its own
+	     provider + model. Available on managed too: the provider choices are the
+	     curated allowlist (Anthropic + Mistral) and the CP supplies the keys
+	     (server-side `applyManagedTierSetConstraints` sanitises + sources them).
+	     NO capability gating (D8 2026-06-17). -->
+	{#if loaded}
 		<section aria-labelledby="llm-routing-heading" class="space-y-2">
 			<h2 id="llm-routing-heading" class="text-lg font-medium">{t('llm.routing.heading')}</h2>
 			<div role="group" aria-label={t('llm.routing.heading')}
@@ -828,7 +831,7 @@
 	     longer offered in-product per project_eu_providers_strategy — filter
 	     it out of the tile list. Hidden in self-host Hybrid: there each tier
 	     picks its OWN provider, so a single top-level picker doesn't apply. -->
-	{#if !hybridSelfHost}
+	{#if !hybridActive}
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
@@ -863,12 +866,12 @@
 	{#if activeProviderEntry}
 		<!-- Per-provider config form -->
 		<section aria-labelledby="llm-config-heading" class="border-t border-border pt-6 space-y-4">
-			<h2 id="llm-config-heading" class="text-lg font-medium">{hybridSelfHost ? t('llm.routing.per_tier_heading') : activeProviderEntry.display_name}</h2>
-			{#if !hybridSelfHost && activeProviderEntry.notes}
+			<h2 id="llm-config-heading" class="text-lg font-medium">{hybridActive ? t('llm.routing.per_tier_heading') : activeProviderEntry.display_name}</h2>
+			{#if !hybridActive && activeProviderEntry.notes}
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey() && !hybridSelfHost}
+			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey() && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
@@ -877,16 +880,17 @@
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
-			{:else if cpSuppliesLLMKey()}
+			{:else if cpSuppliesLLMKey() && !hybridActive}
 				<!-- v1.5.2: on managed tiers, the CP supplies the LLM key — the
 				     input would be misleading-disabled. Replace with a short
-				     note so the user knows why the field is missing. -->
+				     note so the user knows why the field is missing. (Hidden in
+				     managed Hybrid — the per-tier editor covers it.) -->
 				<p class="text-xs text-text-muted rounded border border-border/50 bg-bg-subtle px-3 py-2">
 					{t('llm.api_key_managed_note')}
 				</p>
 			{/if}
 
-			{#if activeProviderEntry.requires_base_url && !hybridSelfHost}
+			{#if activeProviderEntry.requires_base_url && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
@@ -935,7 +939,7 @@
 				{/if}
 			{/if}
 
-			{#if activeProviderEntry.requires_region && !hybridSelfHost}
+			{#if activeProviderEntry.requires_region && !hybridActive}
 				<div class="grid gap-3 sm:grid-cols-2">
 					<label class="block">
 						<span class="block text-sm font-medium mb-1">{t('llm.gcp_project')}</span>
@@ -952,7 +956,7 @@
 				</div>
 			{/if}
 
-			{#if hybridSelfHost}
+			{#if hybridActive}
 				<!-- Hybrid (PR-4): each tier picks its OWN provider + model. The
 				     Standard/Hybrid decision lives at the TOP of the page (it drives
 				     this section). Provider choices = the catalogued, key-via-vault
@@ -990,26 +994,34 @@
 					<p class="text-xs text-text-muted">{t('llm.routing.budget_hint')}</p>
 				</div>
 
-				<!-- Per-provider API keys — one field per DISTINCT provider used across
-				     the tiers. Keys persist to the vault under their canonical slot
-				     (ANTHROPIC_API_KEY / MISTRAL_API_KEY), NEVER into the tier_set in
-				     config.json; the engine injects each slot's key at config-load. -->
-				{#if usedHybridProviders.length > 0}
-					<div class="space-y-2 border-t border-border/50 pt-4">
-						<span class="block text-sm font-medium">{t('llm.hybrid_keys_heading')}</span>
-						{#each usedHybridProviders as p (catalogEntryKey(p))}
-							{#if slotFor(p.provider)}
-								<label class="block">
-									<span class="block text-xs text-text-muted mb-1">{p.display_name}</span>
-									<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
-										placeholder={t('llm.api_key_placeholder')}
-										bind:value={keys[slotFor(p.provider)]}
-										class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
-								</label>
-							{/if}
-						{/each}
-						<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
-					</div>
+				<!-- Per-provider API keys (self-host / BYOK) — one field per DISTINCT
+				     provider used across the tiers. Keys persist to the vault under
+				     their canonical slot (ANTHROPIC_API_KEY / MISTRAL_API_KEY), NEVER
+				     into the tier_set in config.json; the engine injects each slot's
+				     key at config-load. On managed the CP supplies the keys, so a
+				     short note replaces the fields. -->
+				{#if !cpSuppliesLLMKey()}
+					{#if usedHybridProviders.length > 0}
+						<div class="space-y-2 border-t border-border/50 pt-4">
+							<span class="block text-sm font-medium">{t('llm.hybrid_keys_heading')}</span>
+							{#each usedHybridProviders as p (catalogEntryKey(p))}
+								{#if slotFor(p.provider)}
+									<label class="block">
+										<span class="block text-xs text-text-muted mb-1">{p.display_name}</span>
+										<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
+											placeholder={t('llm.api_key_placeholder')}
+											bind:value={keys[slotFor(p.provider)]}
+											class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
+									</label>
+								{/if}
+							{/each}
+							<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
+						</div>
+					{/if}
+				{:else}
+					<p class="text-xs text-text-muted rounded border border-border/50 bg-bg-subtle px-3 py-2">
+						{t('llm.api_key_managed_note')}
+					</p>
 				{/if}
 			{:else if activeProviderEntry.models.length > 0}
 				<!-- Standard mode shows NO tier control: lynox auto-routes per turn
@@ -1040,7 +1052,7 @@
 
 			<!-- Inline residency note — single-provider only; in Hybrid each tier's
 			     residency is implied by its provider choice. -->
-			{#if !hybridSelfHost}
+			{#if !hybridActive}
 				<p class="text-xs text-text-muted">
 					<span class="font-medium">{t('llm.residency')}:</span> {activeProviderEntry.default_residency}
 				</p>
@@ -1049,7 +1061,7 @@
 			<!-- Connection-test row — hidden on managed (CP-supplied key, can't
 			     be re-tested by the customer; the engine probe still runs on
 			     server start) and in Hybrid (no single provider to probe). -->
-			{#if !cpSuppliesLLMKey() && !hybridSelfHost}
+			{#if !cpSuppliesLLMKey() && !hybridActive}
 			<div class="flex items-center gap-3">
 				<button type="button" onclick={testConnection} disabled={testing || providerLocked || !loaded}
 					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">

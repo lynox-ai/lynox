@@ -31,10 +31,17 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
     const slot = tierSet[tier];
     if (!slot) continue;
+    // Mistral is the registry-canonical 'mistral' OR the LLMProvider form the
+    // settings UI persists ('openai' + a Mistral host — same as standard mode).
+    // A non-Mistral host on 'openai' (a tenant trying to sneak a free-text
+    // endpoint) fails isMistralHost → the slot drops. The accepted base_url is
+    // ALWAYS forced to the canonical MISTRAL_API_BASE (no host spoof).
+    const isMistral = slot.provider === 'mistral'
+      || (slot.provider === 'openai' && isMistralHost(slot.api_base_url));
     if (slot.provider === 'anthropic' && anthropicKey) {
       out[tier] = { provider: 'anthropic', model_id: slot.model_id, api_key: anthropicKey };
-    } else if (slot.provider === 'mistral' && mistralKey) {
-      out[tier] = { provider: 'mistral', model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
+    } else if (isMistral && mistralKey) {
+      out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
     }
     // else: off-allowlist provider or missing CP key → drop (falls back to base).
   }
