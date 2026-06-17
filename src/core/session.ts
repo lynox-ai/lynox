@@ -10,6 +10,7 @@ import type {
   StreamHandler,
   StreamEvent,
   ModelTier,
+  LLMProvider,
   EffortLevel,
   ThinkingMode,
   TabQuestion,
@@ -19,9 +20,9 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { effectiveContextWindow, getBetasForProvider } from '../types/index.js';
+import { effectiveContextWindow, getProviderDescriptor } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
-import { getActiveProvider, isCustomProvider } from './llm-client.js';
+import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
@@ -519,7 +520,11 @@ export class Session {
     // Stash the eager-persist checkpoint hook for this run (cleared in finally).
     this._onPersistCheckpoint = runOptions?.onPersistCheckpoint ?? null;
 
-    const model = resolveTierModel(this._model, getActiveProvider()).modelId;
+    // Provider-agnostic routing: capture the full per-tier snapshot so the run
+    // record attributes the provider the tier ACTUALLY resolved to (e.g. a
+    // hybrid `balanced→Mistral` slot → provider 'mistral'), not the base.
+    const runSnap = resolveTierModel(this._model, getActiveProvider());
+    const model = runSnap.modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._userWaitMs = 0;
@@ -558,7 +563,7 @@ export class Session {
           taskText,
           modelTier: this._model,
           modelId: model,
-          provider: getActiveProvider(),
+          provider: runSnap.provider,
           promptHash,
           contextId: context?.id ?? '',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
@@ -1223,13 +1228,21 @@ export class Session {
   private async _generateLLMTitle(firstMessage: string, placeholder: string): Promise<void> {
     try {
       const provider = getActiveProvider();
+      // `fast` may map to a different provider under a hybrid tier_set — build
+      // the per-tier client (same as the memory/entity/retrieval fast-utils) so
+      // a fast→Mistral slot reaches Mistral instead of sending a Mistral model
+      // id to the ambient Anthropic client (a 404 that this best-effort path
+      // would silently swallow). Same-provider/standard → the ambient client
+      // (byte-identical). Betas come from the snapshot (none for the openai wire).
+      const fastSnap = resolveTierModel('fast', provider);
+      const titleClient = clientForTierSnapshot(fastSnap, this.engine.client, provider);
       const prompt =
         'Write a concise 3-6 word title in Title Case for a conversation that begins ' +
         'with the message below. No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
-      const stream = this.engine.client.beta.messages.stream({
-        model: resolveTierModel('fast', provider).modelId,
+      const stream = titleClient.beta.messages.stream({
+        model: fastSnap.modelId,
         max_tokens: 64,
-        ...(isCustomProvider() ? {} : { betas: getBetasForProvider(provider) }),
+        ...(fastSnap.betas ? { betas: fastSnap.betas } : {}),
         messages: [{ role: 'user', content: prompt + firstMessage.slice(0, 2000) }],
       });
       const response = await stream.finalMessage();
@@ -1289,7 +1302,22 @@ export class Session {
     toolContext.tools = registry.getEntries();
     toolContext.streamHandler = this.onStream ?? null;
 
-    const model = resolveTierModel(this._model, getActiveProvider()).modelId;
+    // Provider-agnostic routing: resolve the FULL per-tier snapshot, not just
+    // the model id. Under a hybrid tier_set a tier can map to a DIFFERENT
+    // provider than the base — then the Agent's client + identity must follow
+    // the slot (see hybridSlotClientConfig). A `_profileOverride` (explicit
+    // sub-agent profile) always wins, so the slot is ignored there. Standard /
+    // same-provider → crossProviderSlot=false → the base values below are
+    // byte-identical to the previous single-provider behavior.
+    const baseProvider = getActiveProvider();
+    const tierSnap = resolveTierModel(this._model, baseProvider);
+    const model = tierSnap.modelId;
+    const slotCfg = this._profileOverride
+      ? { crossProviderSlot: false as const }
+      : hybridSlotClientConfig(tierSnap, baseProvider);
+    const effectiveProvider: LLMProvider | undefined = slotCfg.crossProviderSlot
+      ? slotCfg.provider
+      : (this._profileOverride?.provider ?? userConfig.provider);
     const entries = registry.getEntries();
     const tools = pluginManager
       ? entries.map(entry => ({
@@ -1369,7 +1397,7 @@ export class Session {
     // Anchor the model identity so a third-party adapter (Mistral, custom)
     // doesn't hallucinate "I am Claude Haiku" from training-data bias.
     const identityContext = modelIdentityContext(
-      this._profileOverride?.provider ?? userConfig.provider,
+      effectiveProvider,
       model,
     );
     const systemPrompt = (this.agentOverrides.systemPromptSuffix
@@ -1433,16 +1461,23 @@ export class Session {
       nativeContextWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
       // Provider-aware key resolution via [[provider-keys]] — pre-1.5.2 this
       // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
-      apiKey: this._profileOverride?.api_key ?? resolveProviderApiKey({
-        provider: this._profileOverride?.provider ?? userConfig.provider,
-        secretStore: engine.getSecretStore(),
-        userConfig,
-      }),
-      apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
-      provider: this._profileOverride?.provider ?? userConfig.provider,
+      // Cross-provider hybrid slot → use the slot's enriched creds (the vault/CP
+      // key + Mistral host injected by enrichTierSetCreds / applyManagedTierSet-
+      // Constraints). Otherwise the base resolution, unchanged (byte-parity).
+      apiKey: slotCfg.crossProviderSlot
+        ? slotCfg.apiKey
+        : (this._profileOverride?.api_key ?? resolveProviderApiKey({
+            provider: this._profileOverride?.provider ?? userConfig.provider,
+            secretStore: engine.getSecretStore(),
+            userConfig,
+          })),
+      apiBaseURL: slotCfg.crossProviderSlot ? slotCfg.apiBaseURL : (this._profileOverride?.api_base_url ?? userConfig.api_base_url),
+      provider: effectiveProvider,
       gcpProjectId: userConfig.gcp_project_id,
       gcpRegion: userConfig.gcp_region,
-      openaiModelId: this._profileOverride?.model_id ?? userConfig.openai_model_id,
+      // For the openai wire the adapter falls back to this id when the per-call
+      // model looks Anthropic; a cross-provider slot pins it to the slot model.
+      openaiModelId: slotCfg.crossProviderSlot ? slotCfg.openaiModelId : (this._profileOverride?.model_id ?? userConfig.openai_model_id),
       briefing: this._briefingConsumed ? undefined : this.briefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,
@@ -1566,6 +1601,38 @@ export function sanitizeLLMTitle(raw: string): string {
   let title = (raw.split('\n')[0] ?? '').replace(/^["'\s]+|["'\s.]+$/g, '');
   if (title.length > 80) title = title.slice(0, 77) + '...';
   return title;
+}
+
+/**
+ * Wire-level Agent client config for a resolved per-tier snapshot under hybrid
+ * routing. A CROSS-provider slot — one whose provider differs from the base, or
+ * that carries enriched `api_key`/`api_base_url` (injected by enrichTierSetCreds
+ * / applyManagedTierSetConstraints) — drives the Agent's wire + creds from the
+ * slot, mapping the registry ProviderKey to the wire-level LLMProvider the Agent
+ * client + beta/cache logic understand (mirrors `clientForTierSnapshot`:
+ * mistral→openai). So a hybrid Mistral slot becomes the SAME Agent shape as a
+ * standard managed-Mistral session (provider 'openai' + Mistral host), reusing
+ * that well-tested path end-to-end. A same-provider/standard snapshot returns
+ * `{crossProviderSlot:false}` and the caller keeps its base values (byte-parity).
+ *
+ * Pure + table-testable — this is the seam the hybrid hot-path regression is
+ * pinned to: before this, `session.ts` dispatched a cross-provider tier through
+ * the AMBIENT client with only the model id swapped, so a chat-tier→Mistral slot
+ * sent a Mistral model id to the Anthropic endpoint → 404.
+ */
+export function hybridSlotClientConfig(
+  snap: ReturnType<typeof resolveTierModel>,
+  baseProvider: LLMProvider | undefined,
+):
+  | { crossProviderSlot: true; provider: LLMProvider; apiKey: string | undefined; apiBaseURL: string | undefined; openaiModelId: string }
+  | { crossProviderSlot: false } {
+  const isCross = snap.provider !== baseProvider
+    || snap.apiKey !== undefined
+    || snap.apiBaseURL !== undefined;
+  if (!isCross) return { crossProviderSlot: false };
+  const wire = getProviderDescriptor(snap.provider)?.wireClient ?? 'anthropic';
+  const provider: LLMProvider = wire === 'openai' ? 'openai' : wire === 'vertex' ? 'vertex' : 'anthropic';
+  return { crossProviderSlot: true, provider, apiKey: snap.apiKey, apiBaseURL: snap.apiBaseURL, openaiModelId: snap.modelId };
 }
 
 /**
