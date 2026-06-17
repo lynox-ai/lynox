@@ -941,6 +941,8 @@ export class LynoxHTTPApi {
       managed: boolean;
       tier?: string;
       budget_cents?: number;
+      topup_cents?: number;
+      available_cents?: number;
       used_cents?: number;
       balance_cents?: number;
       period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
@@ -988,6 +990,16 @@ export class LynoxHTTPApi {
         : 0;
     }
 
+    // Available = included budget + genuine top-ups (credit packs). The
+    // dashboard sizes its progress bar / remaining against this so a purchased
+    // pack shows as real headroom instead of being clamped to the included
+    // budget. Falls back to `budgetCents` for self-host/BYOK (no CP top-ups)
+    // and for an older CP that doesn't yet send `available_cents`.
+    const topupCents = cpSummary?.managed ? (cpSummary.topup_cents ?? 0) : 0;
+    const availableCents = cpSummary?.managed
+      ? (cpSummary.available_cents ?? budgetCents)
+      : budgetCents;
+
     // SSoT: rebuild `used_cents` from `daily` entries (already done in
     // `getUsageSummary`, but the dashboard reads `used_cents` directly so
     // we re-derive here defensively in case a future caller mocks
@@ -1004,7 +1016,7 @@ export class LynoxHTTPApi {
     const usedCents = cpSummary?.managed
       ? Math.max(localUsedCents, cpSummary.used_cents ?? 0)
       : localUsedCents;
-    const projection = this._projectExhaust(summary.daily, usedCents, budgetCents, endIso);
+    const projection = this._projectExhaust(summary.daily, usedCents, availableCents, endIso);
     const hardLimits = isManagedTier
       ? { tier: 'managed', contact_for_quotas: true }
       : getHardLimits();
@@ -1014,7 +1026,9 @@ export class LynoxHTTPApi {
       ...summary,
       used_cents: usedCents,
       budget_cents: budgetCents,
-      limit_cents: budgetCents > 0 ? budgetCents : null,
+      topup_cents: topupCents,
+      available_cents: availableCents,
+      limit_cents: availableCents > 0 ? availableCents : null,
       projection,
       hard_limits: hardLimits,
     });

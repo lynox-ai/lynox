@@ -48,6 +48,8 @@
 		period: { label: string; start_iso: string; end_iso: string; source: string };
 		used_cents: number;
 		budget_cents: number;
+		topup_cents?: number;
+		available_cents?: number;
 		by_model: ByModel[];
 		by_kind: ByKind[];
 		daily: Daily[];
@@ -75,9 +77,17 @@
 	$effect(() => { load(period); });
 
 	// ── Derived presentation ────────────────────────────────────────────────
+	// available = included budget + top-ups (credit packs). Older engines omit
+	// available_cents → fall back to budget_cents so the bar/remaining stay
+	// correct there. This is the dashboard sibling of the #304 account-card fix:
+	// sizing against the included budget alone hid a purchased pack as headroom.
+	const availableCents = $derived(
+		summary ? (summary.available_cents ?? summary.budget_cents) : 0,
+	);
+	const topupCents = $derived(summary?.topup_cents ?? 0);
 	const pct = $derived(
-		summary && summary.budget_cents > 0
-			? Math.min(100, Math.round((summary.used_cents / summary.budget_cents) * 100))
+		summary && availableCents > 0
+			? Math.min(100, Math.round((summary.used_cents / availableCents) * 100))
 			: 0,
 	);
 	// Amber at 80 %, red at 95 % — signals budget pressure without toasts
@@ -86,7 +96,7 @@
 		pct >= 95 ? 'bg-danger' : pct >= 80 ? 'bg-warning' : 'bg-accent',
 	);
 	const remainingCents = $derived(
-		summary ? Math.max(0, summary.budget_cents - summary.used_cents) : 0,
+		summary ? Math.max(0, availableCents - summary.used_cents) : 0,
 	);
 
 	// Map a by_model row to a concise secondary label. LLM rows have real
@@ -200,12 +210,18 @@
 
 			<p class="text-2xl font-light tracking-tight mt-1">
 				{formatCostCents(summary.used_cents)}
-				{#if summary.budget_cents > 0}
-					<span class="text-sm text-text-muted">/ {formatCostCents(summary.budget_cents)}</span>
+				{#if availableCents > 0}
+					<span class="text-sm text-text-muted">/ {formatCostCents(availableCents)}</span>
 				{/if}
 			</p>
 
-			{#if summary.budget_cents > 0}
+			{#if topupCents > 0}
+				<p class="text-xs text-text-muted mt-1">
+					{formatCostCents(summary.budget_cents)} {t('usage.included_label')} + {formatCostCents(topupCents)} {t('usage.credit_pack_label')}
+				</p>
+			{/if}
+
+			{#if availableCents > 0}
 				<div class="h-2 w-full rounded-full bg-border mt-3 overflow-hidden" aria-label={t('usage.budget_bar_label')}>
 					<div class="h-full {barColor} transition-all" style="width:{pct}%"></div>
 				</div>

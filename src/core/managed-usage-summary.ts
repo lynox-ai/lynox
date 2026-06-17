@@ -18,6 +18,12 @@ export interface ControlPlaneUsageSummary {
   managed: boolean;
   tier?: string;
   budget_cents?: number;
+  /** Genuine top-ups (credit packs) granted this period. Added headroom on top
+   *  of the included budget. Present since the topup-aware /summary fix. */
+  topup_cents?: number;
+  /** included budget + top-ups. The denominator the dashboard should size
+   *  against; falls back to budget_cents when an older CP omits it. */
+  available_cents?: number;
   used_cents?: number;
   balance_cents?: number;
   period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;

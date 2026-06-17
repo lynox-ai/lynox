@@ -1015,6 +1015,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'usage.remaining_prefix': { de: 'Verbleibend:', en: 'Remaining:' },
 	'usage.percent_used_suffix': { de: ' % verbraucht', en: '% used' },
 	'usage.managed_budget_pending': { de: 'Enthaltenes Guthaben wird in einem späteren Release angezeigt.', en: 'Included-credit view lands in a later release.' },
+	'usage.included_label': { de: 'enthalten', en: 'included' },
+	'usage.credit_pack_label': { de: 'Credit-Pack', en: 'credit pack' },
 	'usage.selfhost_no_limit_hint': { de: 'Kein Monatslimit gesetzt — trag unten eins ein, damit die Fortschrittsanzeige erscheint.', en: 'No monthly limit set — add one below to see a progress bar.' },
 	'usage.daily_trend': { de: 'Täglicher Verlauf', en: 'Daily trend' },
 	'usage.breakdown_title': { de: 'Aufschlüsselung nach Modell', en: 'Per-model breakdown' },
