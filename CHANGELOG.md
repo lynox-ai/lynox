@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.15.0 — 2026-06-17
+
+Provider-agnostic model routing: each tier (fast/balanced/deep) can run on its own provider and model — in a Standard mode (one provider for all tiers) or an opt-in Hybrid mode (per-tier, freely cross-provider, e.g. a Mistral `fast` tier alongside an Anthropic `deep` tier). Built on a new provider registry; no engine or control-plane database migration.
+
+### Added
+
+- **Provider-agnostic routing with a Standard/Hybrid mode.** Tier resolution and LLM-client dispatch now flow through a provider registry, so each tier resolves to its own provider + model. Standard mode keeps one provider for every tier (byte-identical to before); Hybrid mode assigns each tier its own provider+model, freely mixing providers. (#730, #743, #739)
+- **Per-tier Tier-Set editor in LLM settings** with a Standard ↔ Hybrid toggle and a model picker per tier. No capability gating — every allowed-provider model is selectable on every tier; the included budget controls spend, not a tier band (D8). Managed tenants stay on the curated Anthropic + Mistral allowlist with control-plane-supplied keys. (#739)
+- **Manual session rename in the chat header**, plus automatic fast-tier thread titles. (#729)
+
+### Fixed
+
+- **Hybrid routing applies on the main chat path.** A chat tier assigned to a cross-provider slot (e.g. Mistral) now reaches that provider instead of dispatching to the base provider — previously only the fast-tier background utilities switched providers. (#745)
+- **Billing settings** gate the upgrade CTA correctly and add a budget top-up path. (#740)
+
+### Changed
+
+- **Managed model ceiling lifted to deep.** Under no-capability-gating (D8) the included budget caps spend rather than a tier band, so managed (and managed-pro) tenants can reach the deep tier. (pro #301)
+- **Canonical tier environment names + fail-closed env-preview redaction** on the control plane, pinned to the engine via the env-ABI contract. (pro #296, #297)
+- **Honest, mechanism-first product copy** across the README, docs, and website — leads with what the agent does, not a feature checklist. (#744, pro #302)
+
+### Docs & Internal
+
+- Credit-pack currency → CHF with VAT-ID collection. (pro #300)
+- Cleared OSV advisories blocking CI (vite, protobufjs, and transitive bumps); removed a vestigial config-generator preview page; corrected stale post-D8 config comments. (#741, #746, pro #298)
+
 ## 1.14.0 — 2026-06-16
 
 An environment-ABI and provider refactor: Mistral becomes a first-class provider (EU-sovereign mode retired), engine env vars move to canonical names with permanent legacy aliases, and Managed-Pro's model ceiling is lifted to Opus for deep work. No engine database migration; one destructive control-plane migration (0034).
