@@ -66,32 +66,26 @@ export function getRoleNames(): string[] {
 export type AccountTier = 'standard' | 'pro';
 
 /**
- * Gate an explicit model override by the caller's account tier.
+ * Resolve an explicit model override. Historically this GATED the `deep` tier
+ * behind a Managed-Pro entitlement — a managed-standard caller asking for
+ * `model: 'deep'` was silently downgraded to `balanced`.
  *
- * The `deep` tier is a Managed-Pro billing entitlement (managed_pro pays for the
- * Opus class). A **managed-standard** caller (`account_tier === 'standard'`) who
- * explicitly asks for `model: 'deep'` is silently downgraded to `balanced` and a
- * warning is written to stderr — the lower managed tier shouldn't burn deep-tier
- * budget on a per-spawn opt-in.
+ * That capability gate is RETIRED (D8, 2026-06-17). With the flexible Tier-Set,
+ * gating the tier BAND is incoherent: `deep` no longer means "Opus" (a tenant
+ * can map it to a cheap Mistral-Large), so a band gate would wrongly block a
+ * cheap deep tier while a band-allowed model could be the expensive one. Cost is
+ * controlled where it actually lives — the included BUDGET (overdraft cap →
+ * block/suspend, `usage.ts`) + per-model cost transparency in the settings UI —
+ * not by an arbitrary tier lock. So this is now a PASS-THROUGH: any account may
+ * request any tier.
  *
- * Self-host / BYOK callers (`account_tier` **unset**) pay their own LLM bill, so
- * they are NOT gated — an unset tier passes the override through unchanged.
- * managed_pro passes too. Only an explicit OVERRIDE is gated;
- * `requestedModel === undefined` means "no override" → returns undefined so the
- * caller falls through to the role's default untouched.
- *
- * Keep this the single place that knows the rule; the model resolver
- * (`tier-resolver.ts`) and any other callers delegate.
+ * Kept as the single seam every model-resolution path delegates through (rather
+ * than inlined/deleted) so any future policy stays a one-line change here; the
+ * `_accountTier` param is retained for caller stability + that forward-compat.
  */
 export function applyTierGate(
   requestedModel: ModelTier | undefined,
-  accountTier: AccountTier | undefined,
+  _accountTier: AccountTier | undefined,
 ): ModelTier | undefined {
-  if (requestedModel === 'deep' && accountTier === 'standard') {
-    process.stderr.write(
-      `[role-gate] deep-tier override requires account_tier=pro — downgrading to balanced\n`,
-    );
-    return 'balanced';
-  }
   return requestedModel;
 }

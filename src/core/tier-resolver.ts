@@ -10,7 +10,9 @@
  *
  * `resolveRunModel` composes them in ONE fixed order so they can never diverge:
  *   1. normalize the requested tier (legacy `haiku|sonnet|opus` accepted),
- *   2. GATE by account tier — `deep` is a Pro-only capability (`applyTierGate`),
+ *   2. apply the override gate (`applyTierGate`) — RETIRED to a pass-through
+ *      (D8, 2026-06-17): no tier-band capability gate; the included budget +
+ *      per-model cost transparency control spend. The call stays as the seam.
  *   3. CLAMP to the cost ceiling (`clampTier`),
  *   4. map to the concrete model id for the active provider (`getModelId`).
  *
@@ -64,12 +66,11 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
     return { tier: clampTier(req.defaultTier, req.maxTier), modelId: requested };
   }
 
-  // The account GATE applies to an explicit tier OVERRIDE only — `deep` is a
-  // Pro-only capability the caller asked for. A role/config DEFAULT is trusted
-  // and NOT gated (matches applyTierGate's documented contract: no override →
-  // fall through to the default untouched). The CLAMP (cost ceiling) then applies
-  // to whatever tier results — that is the step the spawn path skipped, which let
-  // a Pro tenant reach the deep model past a lower max_tier.
+  // `applyTierGate` is now a pass-through (D8 — no tier-band capability gate;
+  // budget + cost-transparency control spend), but the call stays as the single
+  // override seam. The CLAMP (cost ceiling, `max_tier`) still applies to whatever
+  // tier results — that is the real cap, and the step the spawn path historically
+  // skipped (which let a run reach a model past a lower max_tier).
   const gatedOverride = normalized !== undefined ? applyTierGate(normalized, req.accountTier) : undefined;
   const tier = clampTier(gatedOverride ?? req.defaultTier, req.maxTier);
   return { tier, modelId: getModelId(tier, req.provider) };

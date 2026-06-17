@@ -15,31 +15,32 @@ describe('resolveRunModel — gate → clamp → provider, the single chokepoint
     maxTier: ModelTier | undefined;
     expectTier: ModelTier;
   }> = [
-    // ── GATE: deep is Pro-only ───────────────────────────────────────────
-    { name: 'standard requesting deep → downgraded to balanced', requested: 'deep', defaultTier: 'balanced', accountTier: 'standard', maxTier: undefined, expectTier: 'balanced' },
-    { name: 'unset account (self-host/BYOK) requesting deep → NOT gated, stays deep', requested: 'deep', defaultTier: 'balanced', accountTier: undefined, maxTier: undefined, expectTier: 'deep' },
-    { name: 'pro requesting deep → deep survives the gate', requested: 'deep', defaultTier: 'balanced', accountTier: 'pro', maxTier: undefined, expectTier: 'deep' },
+    // ── OVERRIDE GATE: retired to a pass-through (D8) — any account, any tier ──
+    { name: 'standard requesting deep → NOT gated (gate retired), stays deep', requested: 'deep', defaultTier: 'balanced', accountTier: 'standard', maxTier: undefined, expectTier: 'deep' },
+    { name: 'unset account (self-host/BYOK) requesting deep → stays deep', requested: 'deep', defaultTier: 'balanced', accountTier: undefined, maxTier: undefined, expectTier: 'deep' },
+    { name: 'pro requesting deep → stays deep', requested: 'deep', defaultTier: 'balanced', accountTier: 'pro', maxTier: undefined, expectTier: 'deep' },
 
     // ── CLAMP: cost ceiling ──────────────────────────────────────────────
     { name: 'pro deep clamped down to balanced by max_tier', requested: 'deep', defaultTier: 'balanced', accountTier: 'pro', maxTier: 'balanced', expectTier: 'balanced' },
     { name: 'pro deep clamped down to fast by max_tier', requested: 'deep', defaultTier: 'balanced', accountTier: 'pro', maxTier: 'fast', expectTier: 'fast' },
     { name: 'balanced unaffected by a deep ceiling', requested: 'balanced', defaultTier: 'fast', accountTier: 'standard', maxTier: 'deep', expectTier: 'balanced' },
 
-    // ── COMBINED: the NEW-1 / F7 repro — both gates must apply ────────────
-    // Pro opens the gate, but the fast ceiling must still clamp. The bug was
-    // the spawn path applying ONLY the gate → delivering deep past the cap.
-    { name: 'pro + max_tier fast + requested deep → clamped to fast (NOT deep)', requested: 'deep', defaultTier: 'balanced', accountTier: 'pro', maxTier: 'fast', expectTier: 'fast' },
-    // A non-pro session step-hint requesting deep must be gated even though the
-    // ceiling alone (deep) would let it through — the session path applied only
-    // the clamp before.
-    { name: 'standard + max_tier deep + hint deep → gated to balanced', requested: 'deep', defaultTier: 'balanced', accountTier: 'standard', maxTier: 'deep', expectTier: 'balanced' },
+    // ── CLAMP is now the ONLY cap (the NEW-1 / F7 repro) ─────────────────
+    // The fast ceiling must clamp a deep request. The bug was the spawn path
+    // skipping the clamp → delivering deep past the cap. With the gate retired
+    // the clamp is the sole cost cap, so covering it matters more, not less.
+    { name: 'max_tier fast + requested deep → clamped to fast (NOT deep)', requested: 'deep', defaultTier: 'balanced', accountTier: 'pro', maxTier: 'fast', expectTier: 'fast' },
+    // A deep request under a deep ceiling stays deep for ANY account — no gate
+    // downgrades it and the ceiling permits it.
+    { name: 'standard + max_tier deep + hint deep → stays deep (no gate; ceiling permits)', requested: 'deep', defaultTier: 'balanced', accountTier: 'standard', maxTier: 'deep', expectTier: 'deep' },
 
     // ── DEFAULT path (no request) ────────────────────────────────────────
-    { name: 'no request → uses defaultTier (gated+clamped)', requested: undefined, defaultTier: 'balanced', accountTier: 'standard', maxTier: undefined, expectTier: 'balanced' },
+    { name: 'no request → uses defaultTier (clamped)', requested: undefined, defaultTier: 'balanced', accountTier: 'standard', maxTier: undefined, expectTier: 'balanced' },
     { name: 'no request, fast default', requested: undefined, defaultTier: 'fast', accountTier: 'pro', maxTier: undefined, expectTier: 'fast' },
-    // A role/config DEFAULT is NOT gated (only explicit overrides are) — a role
-    // configured for deep is trusted; this preserves applyTierGate's contract.
-    { name: 'deep DEFAULT is not gated (no override) → stays deep', requested: undefined, defaultTier: 'deep', accountTier: 'standard', maxTier: undefined, expectTier: 'deep' },
+    // A role/config DEFAULT with no override stays as configured — a role
+    // configured for deep is trusted (and, post-D8, an explicit deep override is
+    // equally trusted; only the clamp can lower either).
+    { name: 'deep DEFAULT (no override) → stays deep', requested: undefined, defaultTier: 'deep', accountTier: 'standard', maxTier: undefined, expectTier: 'deep' },
     // …but the cost CEILING still clamps the default — this is the clamp the spawn
     // path skipped (the NEW-1 mechanism), and it applies regardless of the gate.
     { name: 'deep default + max_tier balanced → clamped to balanced', requested: undefined, defaultTier: 'deep', accountTier: 'standard', maxTier: 'balanced', expectTier: 'balanced' },
