@@ -310,15 +310,17 @@ export class Engine {
     // catches it before the client swap. Throws on `refuse`; caller catches.
     this._enforceEndpointAllowlist();
     const newProvider = this.userConfig.provider;
+    // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
+    // EVERY reload — a routing_mode/tier_set-only change carries no credential
+    // delta but must still take effect. Idempotent; safe to call always; runs
+    // before the client swap below.
+    this._configureOpenAIResolver();
     // Recreate API client if credentials or provider changed
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
       // Provider switch: load new SDK if needed
       if (newProvider && newProvider !== oldProvider) {
         await initLLMProvider(newProvider);
       }
-      // Re-bind the openai tier→model resolver to the new config (or clear
-      // it on a switch back to anthropic). Idempotent; safe to call always.
-      this._configureOpenAIResolver();
       this._recreateClient();
     }
     // Tear down / bring up Bugsink on toggle transition. Without this, the

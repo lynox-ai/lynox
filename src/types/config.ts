@@ -209,6 +209,21 @@ export interface TierSlot {
  */
 export type TierSet = Partial<Record<ModelTier, TierSlot>>;
 
+/**
+ * Runtime guard for a {@link TierSlot} — checks the required fields a downstream
+ * resolver dereferences (`provider`, `model_id`). Used at the untrusted
+ * `LYNOX_TIER_SET_JSON` env boundary so a malformed slot is dropped rather than
+ * reaching client construction as `Bearer undefined`.
+ */
+export function isTierSlot(value: unknown): value is TierSlot {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['provider'] === 'string' && v['provider'].length > 0 &&
+    typeof v['model_id'] === 'string' && v['model_id'].length > 0
+  );
+}
+
 export interface LynoxUserConfig {
   api_key?: string | undefined;
   api_base_url?: string | undefined;
