@@ -3612,13 +3612,17 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { workflows: workflows.slice(0, limit) });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
+      // Optional `{ params: { <name>: <value> } }` body binds re-run values to
+      // the workflow's parameter schema (validated in runSavedWorkflow; a
+      // missing required param surfaces as a 400 below).
+      const suppliedParams = (body as { params?: Record<string, unknown> } | undefined)?.params;
       // Route through the budget + managed-credit lifecycle (cap, credit gate,
       // cost report) — runSavedWorkflow alone bypasses all three.
       const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
-      const result = await runGuardedSavedWorkflow(engine, params['id']!);
+      const result = await runGuardedSavedWorkflow(engine, params['id']!, suppliedParams);
       if (!result.ok) {
         const code = result.error?.includes('not found') ? 404 : 400;
         errorResponse(res, code, result.error ?? 'Workflow run failed');
