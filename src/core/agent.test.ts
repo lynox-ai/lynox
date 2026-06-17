@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent } from '../types/index.js';
 
 // === Mocks ===
@@ -54,6 +54,11 @@ vi.mock('./observability.js', () => ({
 import { Agent } from './agent.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
+import { createToolContext } from './tool-context.js';
+import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function endTurnResponse(text: string) {
   return {
@@ -2192,5 +2197,74 @@ describe('Agent', () => {
       });
       await expect(agent.send('go')).resolves.toBe('done');
     });
+  });
+});
+
+describe('Agent — context_cost_log live hook (wiring)', () => {
+  let dir: string;
+  const prevDataDir = process.env['LYNOX_DATA_DIR'];
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-agent-costlog-'));
+    process.env['LYNOX_DATA_DIR'] = dir;
+  });
+  afterEach(() => {
+    if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The hook append is fire-and-forget — poll briefly for the flushed file. */
+  async function waitForFile(file: string): Promise<boolean> {
+    for (let i = 0; i < 40; i++) {
+      if (existsSync(file)) return true;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return existsSync(file);
+  }
+
+  it('appends a real composition snapshot after a turn when the flag is ON', async () => {
+    mockProcess.mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: {
+        input_tokens: 80_000,
+        cache_read_input_tokens: 1_000,
+        cache_creation_input_tokens: 0,
+        output_tokens: 50,
+      },
+    });
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      toolContext: createToolContext({ context_cost_log: true }),
+    });
+    await agent.send('Hi');
+
+    const file = join(dir, CONTEXT_COST_LOG_FILE);
+    expect(await waitForFile(file)).toBe(true);
+    const lines = readFileSync(file, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]!) as {
+      occupancyTokens: number; cacheReadTokens: number; model: string; messageCount: number;
+    };
+    // occupancy = realInput = input + cache_read + cache_write (80_000 + 1_000).
+    expect(entry.occupancyTokens).toBe(81_000);
+    expect(entry.cacheReadTokens).toBe(1_000);
+    expect(entry.model).toBe('claude-sonnet-4-6');
+    expect(entry.messageCount).toBeGreaterThan(0);
+  });
+
+  it('writes nothing when the flag is OFF (default) — no graceful-disable masking', async () => {
+    mockProcess.mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 80_000, output_tokens: 50 },
+    });
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send('Hi');
+    // Give any (incorrect) async write the same window the ON-case needs.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(existsSync(join(dir, CONTEXT_COST_LOG_FILE))).toBe(false);
   });
 });
