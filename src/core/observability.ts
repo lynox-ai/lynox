@@ -14,6 +14,17 @@ export const channels = {
    *   { agent, model, realInput, cacheRead, cacheWrite, expectedMin, threadId? }
    */
   cacheHealth:  channel('lynox:cache:health'),
+  /**
+   * Emitted once per tier→model RESOLUTION with provider attribution — a
+   * routing-observability signal showing which provider/model a tier resolved
+   * to (e.g. confirm a hybrid `fast` tier routed to Mistral live). Fires per
+   * resolution (run start, agent (re)build, background task, a model/effort
+   * toggle), NOT strictly 1:1 with an LLM API call — so it is a routing signal,
+   * not a billing-accurate per-call counter. For accurate spend attribution use
+   * the persisted `runs.provider` column.
+   *   { tier, provider, model_id }
+   */
+  llmCall:      channel('lynox:llm:call'),
   preApprovalMatch:     channel('lynox:preapproval:match'),
   preApprovalExhausted: channel('lynox:preapproval:exhausted'),
   preApprovalExpired:   channel('lynox:preapproval:expired'),

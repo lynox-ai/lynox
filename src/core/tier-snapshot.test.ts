@@ -1,6 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { resolveTierModel, setTierSetResolver, getActiveRoutingMode } from './tier-resolver.js';
+import { channels } from './observability.js';
 import { getModelId, getBetasForProvider, type ModelTier, type LLMProvider } from '../types/index.js';
+
+interface LlmCallEvent { tier?: string; provider?: string; model_id?: string }
+/** Capture lynox:llm:call events fired while `fn` runs. */
+function captureLlmCalls(fn: () => void): LlmCallEvent[] {
+  const events: LlmCallEvent[] = [];
+  const sub = (msg: unknown): void => { events.push(msg as LlmCallEvent); };
+  channels.llmCall.subscribe(sub);
+  try { fn(); } finally { channels.llmCall.unsubscribe(sub); }
+  return events;
+}
 
 const TIERS: ModelTier[] = ['fast', 'balanced', 'deep'];
 const PROVIDERS: LLMProvider[] = ['anthropic', 'vertex', 'custom', 'openai'];
@@ -113,5 +124,19 @@ describe('resolveTierModel — hybrid Tier-Set (PR-3a)', () => {
     expect(getActiveRoutingMode()).toBe('hybrid');
     setTierSetResolver({ routingMode: 'standard' });
     expect(getActiveRoutingMode()).toBe('standard');
+  });
+
+  it('publishes a lynox:llm:call event with provider attribution (PR-5b)', () => {
+    const events = captureLlmCalls(() => { resolveTierModel('balanced', 'anthropic'); });
+    expect(events.some(e => e.tier === 'balanced' && e.provider === 'anthropic' && typeof e.model_id === 'string')).toBe(true);
+  });
+
+  it('the event attributes a hybrid slot to its provider (the live-walk observable)', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'mistral', model_id: 'ministral-8b-2512' } },
+    });
+    const events = captureLlmCalls(() => { resolveTierModel('fast', 'anthropic'); });
+    expect(events).toContainEqual({ tier: 'fast', provider: 'mistral', model_id: 'ministral-8b-2512' });
   });
 });

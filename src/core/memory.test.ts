@@ -41,6 +41,8 @@ vi.mock('./observability.js', () => ({
     memoryExtraction: { publish: vi.fn(), hasSubscribers: false },
     contentTruncation: { publish: vi.fn(), hasSubscribers: false },
     securityInjection: { publish: vi.fn(), hasSubscribers: true },
+    // memory.ts → resolveTierModel('fast', …) now publishes lynox:llm:call.
+    llmCall: { publish: vi.fn(), hasSubscribers: false },
   },
 }));
 

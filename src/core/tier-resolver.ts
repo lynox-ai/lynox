@@ -19,6 +19,7 @@
 
 import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
+import { channels } from './observability.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 export interface RunModelRequest {
@@ -139,11 +140,19 @@ export function resolveTierModel(tier: ModelTier, baseProvider: LLMProvider): Ti
   // isCustomProvider() (custom||openai → no betas) for the 4 standard providers.
   const wire = getProviderDescriptor(provider)?.wireClient;
   const usesBetas = provider !== 'custom' && (wire === 'anthropic' || wire === 'vertex');
+  // A hybrid slot names its own model; otherwise resolve the tier for the base
+  // provider exactly as before.
+  const modelId = slot?.model_id ?? getModelId(tier, baseProvider);
+  // Live routing attribution (lynox:llm:call) — fires per RESOLUTION (not 1:1
+  // with an API call: this runs at run start, agent (re)build, background task,
+  // and model/effort toggles). It's a routing-observability signal — which
+  // provider a tier resolved to (e.g. a hybrid `fast` slot → Mistral live) — NOT
+  // a billing counter (use runs.provider for spend). A diagnostics_channel
+  // publish is a no-op with no subscriber → free on the hot path.
+  channels.llmCall.publish({ tier, provider, model_id: modelId });
   return {
     provider,
-    // A hybrid slot names its own model; otherwise resolve the tier for the base
-    // provider exactly as before.
-    modelId: slot?.model_id ?? getModelId(tier, baseProvider),
+    modelId,
     // Cast is safe: usesBetas is true only for anthropic/vertex ⊂ LLMProvider.
     betas: usesBetas ? getBetasForProvider(provider as LLMProvider) : undefined,
     apiKey: slot?.api_key,
