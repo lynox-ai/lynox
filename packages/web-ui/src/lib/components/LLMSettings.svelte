@@ -632,12 +632,19 @@
 			// and sanitised server-side at config-load (applyManagedTierSetConstraints
 			// drops off-allowlist providers, strips tenant keys/base_urls, sources CP
 			// keys). The UI never sends a key in the slot — keys go to the vault. In
-			// standard mode only the mode is sent; the engine ignores any stale
-			// tier_set unless routing_mode === 'hybrid'.
+			// standard mode CLEARS any previously-saved tier_set (sends `{}` — the
+			// schema rejects null, and an empty set is the "no per-tier slots"
+			// state) so switching Hybrid→Standard leaves no stale slots in
+			// config.json for a future reader to misinterpret. The engine ignores
+			// tier_set unless routing_mode === 'hybrid' regardless.
 			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet } = {
 				routing_mode: routingMode,
 			};
-			if (routingMode === 'hybrid') routingUpdate.tier_set = currentTierSet();
+			if (routingMode === 'hybrid') {
+				routingUpdate.tier_set = currentTierSet();
+			} else if (config.tier_set && Object.keys(config.tier_set).length > 0) {
+				routingUpdate.tier_set = {};
+			}
 			const body = needsConfirm
 				? { ...update, ...routingUpdate, confirm_custom_endpoint: true }
 				: { ...update, ...routingUpdate };

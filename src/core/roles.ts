@@ -19,11 +19,10 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
   researcher: {
     // Default is the `balanced` tier for all accounts — bench (2026-04) showed
     // the balanced tier + adaptive-thinking matches the `deep` tier on
-    // deep-research tasks at a fraction of the cost. Managed-Pro tenants can
-    // still override via explicit `model: 'deep'` on the spawn call;
-    // `applyTierGate` below downgrades that override to `balanced` for non-Pro
-    // tenants so Starter/Managed accounts can't burn the deep-tier budget by
-    // accident.
+    // deep-research tasks at a fraction of the cost. Any account can still
+    // override via explicit `model: 'deep'` on the spawn call — the capability
+    // gate was retired (D8); the included budget + the `max_tier` clamp control
+    // cost, not a per-account tier lock.
     model: 'balanced',
     effort: 'max',
     autonomy: 'guided',

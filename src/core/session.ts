@@ -476,9 +476,10 @@ export class Session {
       toolCtx.pendingStepHint = null;
       const maxTier = toolCtx.userConfig.max_tier;
       if (pendingHint.model) {
-        // Gate (deep is Pro-only) AND clamp to the ceiling — this path applied
-        // only the clamp before, so a non-Pro step hint requesting deep slipped
-        // the account gate. Only the resolved tier is used here.
+        // Resolve via the single chokepoint — the override gate is now a
+        // pass-through (D8); the max_tier CLAMP is the cost cap that still
+        // applies here (this path historically skipped it). Only the resolved
+        // tier is used.
         this._model = resolveRunModel({
           requested: pendingHint.model,
           defaultTier: pendingHint.model,

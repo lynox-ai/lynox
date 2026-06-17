@@ -203,10 +203,10 @@ async function executeThinker(
     throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
   }
 
-  // Single chokepoint: GATE (deep is Pro-only) THEN CLAMP to the cost ceiling
-  // THEN map to the provider's model id. Routing through resolveRunModel adds
-  // the max_tier clamp this path previously skipped — a Pro tenant under a lower
-  // ceiling no longer reaches the deep model past its cap.
+  // Single chokepoint: the override gate (now a pass-through, D8) THEN CLAMP to
+  // the cost ceiling THEN map to the provider's model id. Routing through
+  // resolveRunModel adds the max_tier clamp this path previously skipped — a run
+  // under a lower ceiling no longer reaches the deep model past its cap.
   const resolvedRun = resolveRunModel({
     requested: spec.model,
     defaultTier: (resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier,

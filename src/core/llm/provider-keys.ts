@@ -96,8 +96,11 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
  *  - a SAME-provider slot is left untouched so `clientForTierSnapshot` keeps
  *    reusing the ambient client + its key (byte-parity, no extra client);
  *  - a CROSS-provider slot gets `resolveKey(slot.provider)` injected — or is
- *    left key-less if nothing resolves (the adapter surfaces a 401 at request
- *    time, the correct place, rather than us inventing a wrong key).
+ *    left key-less if nothing resolves. The UI always pairs a cross-provider
+ *    slot with its provider's `api_base_url`, so a missing key surfaces a clean
+ *    401 at request time (the correct place) rather than us inventing a wrong
+ *    one. (A hand-edited slot naming a provider with no vault-slot mapping AND
+ *    no base_url is unsupported — it would yield a malformed request, not a 401.)
  *
  * Pure + deterministic: the caller passes a `resolveKey` closure (the engine
  * binds it to `resolveProviderApiKey` over its secret store), so this is
