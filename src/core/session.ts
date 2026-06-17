@@ -19,8 +19,8 @@ import type {
   PromptSecretFn,
   PromptMeta,
 } from '../types/index.js';
-import { effectiveContextWindow, getModelId } from '../types/index.js';
-import { resolveRunModel } from './tier-resolver.js';
+import { effectiveContextWindow } from '../types/index.js';
+import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { getActiveProvider } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
@@ -476,9 +476,10 @@ export class Session {
       toolCtx.pendingStepHint = null;
       const maxTier = toolCtx.userConfig.max_tier;
       if (pendingHint.model) {
-        // Gate (deep is Pro-only) AND clamp to the ceiling — this path applied
-        // only the clamp before, so a non-Pro step hint requesting deep slipped
-        // the account gate. Only the resolved tier is used here.
+        // Resolve via the single chokepoint — the override gate is now a
+        // pass-through (D8); the max_tier CLAMP is the cost cap that still
+        // applies here (this path historically skipped it). Only the resolved
+        // tier is used.
         this._model = resolveRunModel({
           requested: pendingHint.model,
           defaultTier: pendingHint.model,
@@ -518,7 +519,7 @@ export class Session {
     // Stash the eager-persist checkpoint hook for this run (cleared in finally).
     this._onPersistCheckpoint = runOptions?.onPersistCheckpoint ?? null;
 
-    const model = getModelId(this._model, getActiveProvider());
+    const model = resolveTierModel(this._model, getActiveProvider()).modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._userWaitMs = 0;
@@ -557,6 +558,7 @@ export class Session {
           taskText,
           modelTier: this._model,
           modelId: model,
+          provider: getActiveProvider(),
           promptHash,
           contextId: context?.id ?? '',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
@@ -1159,7 +1161,7 @@ export class Session {
     this._model = tier;
     this._createAgent();
     this.loadMessages(messages);
-    return getModelId(tier, getActiveProvider());
+    return resolveTierModel(tier, getActiveProvider()).modelId;
   }
 
   getModelTier(): ModelTier {
@@ -1243,7 +1245,7 @@ export class Session {
     toolContext.tools = registry.getEntries();
     toolContext.streamHandler = this.onStream ?? null;
 
-    const model = getModelId(this._model, getActiveProvider());
+    const model = resolveTierModel(this._model, getActiveProvider()).modelId;
     const entries = registry.getEntries();
     const tools = pluginManager
       ? entries.map(entry => ({

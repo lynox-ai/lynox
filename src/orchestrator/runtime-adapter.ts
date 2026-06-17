@@ -206,8 +206,8 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
-  // Single chokepoint: gate (deep is Pro-only) + clamp to max_tier + map to the
-  // provider's id. Adds the account gate the named-agent pipeline path skipped.
+  // Single chokepoint: override gate (now a pass-through, D8) + clamp to
+  // max_tier + map to the provider's id. The clamp is the cost cap that applies.
   const runModel = resolveRunModel({
     requested: step.model,
     defaultTier: agentDef.defaultTier,
@@ -344,10 +344,10 @@ export async function spawnInline(
     throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
-  // Single chokepoint: step > role > user config > default, then GATE (deep is
-  // Pro-only) + CLAMP to max_tier + map to the provider's id. Adds the account
-  // gate this inline path previously skipped; the cost-guard bucket below uses
-  // the same resolved tier so the budget can't disagree with the chosen model.
+  // Single chokepoint: step > role > user config > default, then the override
+  // gate (now a pass-through, D8) + CLAMP to max_tier + map to the provider's
+  // id. The cost-guard bucket below uses the same resolved tier so the budget
+  // can't disagree with the chosen model.
   const configTier = config.default_tier;
   const runModel = resolveRunModel({
     requested: step.model,

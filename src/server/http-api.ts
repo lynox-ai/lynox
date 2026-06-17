@@ -252,6 +252,15 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'api_base_url',
   'openai_model_id',
   'llm_mode',
+  // Provider-agnostic routing (PR-4 follow-up). A managed tenant may switch
+  // routing mode + assign a per-tier Tier-Set. The raw value is accepted here,
+  // but `applyManagedTierSetConstraints` (config.ts, run at config-load on
+  // cp_supplied tenants) is the security gate: it drops any off-allowlist
+  // provider, strips tenant-supplied keys/base_urls, and sources the CP env
+  // keys — so a tenant cannot point a slot at a free-text endpoint or inject a
+  // key. Persisting the raw value is inert; the load-time transform sanitizes.
+  'routing_mode',
+  'tier_set',
 ]);
 
 /**

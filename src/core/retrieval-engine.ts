@@ -7,8 +7,9 @@ import type {
   KnowledgeRetrievalResult,
   ProvenanceKind,
 } from '../types/index.js';
-import { getBetasForProvider, NAMESPACE_HALF_LIFE, getModelId } from '../types/index.js';
-import { getActiveProvider, isCustomProvider } from './llm-client.js';
+import { NAMESPACE_HALF_LIFE } from '../types/index.js';
+import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
+import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
@@ -360,10 +361,12 @@ export class RetrievalEngine {
   private async _generateHyDE(query: string): Promise<string | null> {
     if (!this.anthropicClient) return null;
     try {
-      const stream = this.anthropicClient.beta.messages.stream({
-        model: getModelId('fast', getActiveProvider()),
+      const fast = resolveTierModel('fast', getActiveProvider());
+      const fastClient = clientForTierSnapshot(fast, this.anthropicClient, getActiveProvider());
+      const stream = fastClient.beta.messages.stream({
+        model: fast.modelId,
         max_tokens: 256,
-        ...(isCustomProvider() ? {} : { betas: getBetasForProvider(getActiveProvider()) }),
+        ...(fast.betas ? { betas: fast.betas } : {}),
         messages: [{
           role: 'user',
           content: `Write a brief factual answer (1-2 sentences) to this question as if you already know the answer. Do not explain or add caveats.\n\nQuestion: ${query.slice(0, 500)}`,

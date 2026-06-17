@@ -10,7 +10,9 @@ import {
   PROVIDER_KEY_SLOTS,
   vaultSlotForProvider,
   resolveProviderApiKey,
+  enrichTierSetCreds,
 } from './provider-keys.js';
+import type { TierSet } from '../../types/config.js';
 
 describe('VAULT_SLOT_BY_PROVIDER', () => {
   it('covers every known LLMProvider with a stable slot (or explicit null for vertex)', () => {
@@ -170,5 +172,68 @@ describe('resolveProviderApiKey', () => {
       secretStore: null,
     });
     expect(result).toBe('sk-ant-env-only');
+  });
+});
+
+describe('enrichTierSetCreds (hybrid per-slot vault-key injection)', () => {
+  // resolveKey stub: a fixed provider→key table so the helper stays pure +
+  // table-testable without a real SecretStore.
+  const keyFor: Record<string, string | undefined> = {
+    anthropic: 'sk-ant-xxx',
+    openai: 'sk-mistral-xxx',
+  };
+  const resolveKey = (p: string): string | undefined => keyFor[p];
+
+  it('injects the target provider key into a CROSS-provider slot (no key in config.json)', () => {
+    const tierSet: TierSet = {
+      fast: { provider: 'openai', model_id: 'ministral-8b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', resolveKey);
+    // base=anthropic, slot=openai → cross-provider → key injected in-memory.
+    expect(out.fast).toEqual({
+      provider: 'openai',
+      model_id: 'ministral-8b-2512',
+      api_base_url: 'https://api.mistral.ai/v1',
+      api_key: 'sk-mistral-xxx',
+    });
+    // The INPUT slot is never mutated (config-on-disk stays key-less).
+    expect(tierSet.fast).not.toHaveProperty('api_key');
+  });
+
+  it('leaves a SAME-provider slot untouched so the ambient client (+ its key) is reused', () => {
+    const tierSet: TierSet = {
+      balanced: { provider: 'anthropic', model_id: 'claude-sonnet-4-6' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', resolveKey);
+    expect(out.balanced).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-4-6' });
+    expect(out.balanced).not.toHaveProperty('api_key');
+  });
+
+  it('keeps an explicit api_key as-is (power-user / managed transform)', () => {
+    const tierSet: TierSet = {
+      deep: { provider: 'openai', model_id: 'mistral-large-2512', api_key: 'sk-explicit' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', resolveKey);
+    expect(out.deep?.api_key).toBe('sk-explicit');
+  });
+
+  it('leaves a cross-provider slot key-less when nothing resolves (adapter surfaces 401 at request time)', () => {
+    const tierSet: TierSet = {
+      fast: { provider: 'custom', model_id: 'whatever', api_base_url: 'https://proxy.example' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', resolveKey); // no 'custom' in keyFor
+    expect(out.fast).not.toHaveProperty('api_key');
+    expect(out.fast?.model_id).toBe('whatever');
+  });
+
+  it('handles a full mixed tier_set + skips unset tiers', () => {
+    const tierSet: TierSet = {
+      fast: { provider: 'openai', model_id: 'ministral-3b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+      deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', resolveKey);
+    expect(out.fast?.api_key).toBe('sk-mistral-xxx');   // cross → injected
+    expect(out.deep).not.toHaveProperty('api_key');     // same → untouched
+    expect(out.balanced).toBeUndefined();               // unset → skipped
   });
 });

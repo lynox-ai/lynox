@@ -18,8 +18,8 @@
  * support), LLM call failure, malformed response, timeout.
  */
 import type { SearchResult } from './search-provider.js';
-import { createLLMClient, getActiveProvider } from '../../core/llm-client.js';
-import { getModelId, getBetasForProvider } from '../../types/index.js';
+import { createLLMClient, getActiveProvider, clientForTierSnapshot } from '../../core/llm-client.js';
+import { resolveTierModel } from '../../core/tier-resolver.js';
 import type { LLMProvider } from '../../types/index.js';
 import type { ProviderConfigSnapshot } from '../../types/agent.js';
 
@@ -128,7 +128,6 @@ export async function rerankSearchResults(
   // Effective provider: prefer the per-call snapshot (managed multi-tenant /
   // sub-agent inheritance) and fall back to the process-global active provider.
   const provider = providerConfig?.provider ?? getActiveProvider();
-  const isOpenAICompat = provider === 'custom' || provider === 'openai';
 
   if (!isEnabled(opts)) return base({ skipReason: 'disabled' });
   if (results.length < 2) return base({ skipReason: 'too-few-results' });
@@ -166,10 +165,12 @@ export async function rerankSearchResults(
     // The OpenAIAdapter implements only `beta.messages.stream` (not `.create`);
     // stream().finalMessage() works for both the Anthropic SDK and the adapter,
     // so use it uniformly. betas are an Anthropic-only concept — omit on openai.
-    const callPromise = client.beta.messages.stream({
-      model: getModelId('fast', provider),
+    const fast = resolveTierModel('fast', provider);
+    const fastClient = clientForTierSnapshot(fast, client, provider);
+    const callPromise = fastClient.beta.messages.stream({
+      model: fast.modelId,
       max_tokens: 512,
-      ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
+      ...(fast.betas ? { betas: fast.betas } : {}),
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: `Query: "${query}"\n\nResults:\n${resultList}` }],
       tools: [SCORE_TOOL],

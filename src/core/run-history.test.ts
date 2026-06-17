@@ -44,6 +44,25 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('records the provider a run executed on (v35)', () => {
+    const h = createHistory();
+    const id = h.insertRun({
+      taskText: 'hybrid fast call',
+      modelTier: 'fast',
+      modelId: 'ministral-8b-2512',
+      provider: 'mistral',
+    });
+    expect(h.getRun(id)!.provider).toBe('mistral');
+    h.close();
+  });
+
+  it('defaults provider to empty string when unset (back-compat)', () => {
+    const h = createHistory();
+    const id = h.insertRun({ taskText: 'no provider', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+    expect(h.getRun(id)!.provider).toBe('');
+    h.close();
+  });
+
   it('updates a run', () => {
     const h = createHistory();
     const id = h.insertRun({

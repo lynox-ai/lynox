@@ -35,6 +35,16 @@ const HttpUrlSchema = z.string().url().refine(
   { message: 'URL must use http:// or https:// scheme' },
 );
 
+// One hybrid Tier-Set slot. `provider` is a free string (registry key incl.
+// 'mistral'); semantic validation (known provider, key presence, managed
+// allowlist) is layered on at config-load (PR-3b), not in the structural schema.
+const TierSlotSchema = z.object({
+  provider:     z.string().min(1),
+  model_id:     z.string().min(1),
+  api_key:      z.string().optional(),
+  api_base_url: z.string().optional(),
+}).strict();
+
 export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
   // Empty string permitted (UI "clear" gesture) — collapses to undefined at consume time.
@@ -149,6 +159,16 @@ export const LynoxUserConfigSchema = z.object({
   tts_voice:               z.string().min(1).max(64).optional(),
   // Auto-update notification toggle (SystemSettings → Updates).
   update_check:            z.boolean().optional(),
+  // Provider-agnostic routing (PR-3). routing_mode selects standard (one
+  // provider) vs hybrid (per-tier via tier_set). cp_supplied mirrors the
+  // billing-tier key-custody flag for the managed allowlist gate.
+  routing_mode:            z.enum(['standard', 'hybrid']).optional(),
+  tier_set:                z.object({
+    fast:     TierSlotSchema.optional(),
+    balanced: TierSlotSchema.optional(),
+    deep:     TierSlotSchema.optional(),
+  }).strict().optional(),
+  cp_supplied:             z.boolean().optional(),
 }).strict(); // reject unknown keys — prevents stale-tab ghost-writes from
               // landing GET-response-only fields (capabilities, locks,
               // managed, bugsink_dsn_configured) in ~/.lynox/config.json.

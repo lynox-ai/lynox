@@ -67,6 +67,20 @@
 
 	interface CustomEndpoint { id: string; name: string; base_url: string }
 
+	// Provider-agnostic routing (PR-4). Canonical tier band — the catalog and
+	// the engine both speak 'fast' | 'balanced' | 'deep' (legacy haiku/sonnet/opus
+	// only survive as normaliser input). Display + iteration order is cheap→deep.
+	type ModelTier = 'fast' | 'balanced' | 'deep';
+	const TIER_ORDER: ReadonlyArray<ModelTier> = ['fast', 'balanced', 'deep'];
+
+	// One tier's provider+model assignment in a hybrid Tier-Set. Mirrors
+	// core/src/types/config.ts TierSlot (web-ui can't import core — see the
+	// type-mirror note at the top of this script). PR-4 Increment 1 only sets
+	// {provider, model_id} for the active provider; per-slot creds + cross-
+	// provider mixing land in Increment 2.
+	interface TierSlot { provider: string; model_id: string; api_key?: string; api_base_url?: string }
+	type TierSet = Partial<Record<ModelTier, TierSlot>>;
+
 	interface UserConfig {
 		provider?: LLMProvider;
 		api_base_url?: string;
@@ -75,6 +89,12 @@
 		default_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
+		// 'standard' (default) = one provider for all tiers (lynox routes per task
+		// via the fixed MODEL_MAP). 'hybrid' = each tier resolves via `tier_set`.
+		routing_mode?: 'standard' | 'hybrid';
+		// Per-tier {provider, model_id} — only consulted by the engine when
+		// routing_mode === 'hybrid'. An unset tier falls back to the base provider.
+		tier_set?: TierSet;
 		// Server-persisted disclosure acceptances for non-allowlisted custom
 		// endpoints (host + timestamp). Read from /api/config; replaces the old
 		// per-tab sessionStorage flag so acceptance survives reload / new device.
@@ -140,6 +160,18 @@
 	// Live `/api/secrets/status` snapshot — drives the empty-state predicate
 	// alongside the explicit-provider flag. Both must be false to show the CTA.
 	let apiKeyConfigured = $state<boolean | null>(null);
+
+	// Provider-agnostic routing (PR-4). `routingMode` mirrors config.routing_mode.
+	// In hybrid each tier picks its OWN provider + model, so `tierSlots` holds a
+	// {catalogKey, modelId} pair per tier (catalogKey = the provider tile's UI key,
+	// e.g. 'anthropic' | 'mistral'). Hydrated in load(); the API key for each
+	// provider lives in the vault (entered below), never in the persisted tier_set.
+	let routingMode = $state<'standard' | 'hybrid'>('standard');
+	let tierSlots = $state<Record<ModelTier, { catalogKey: string; modelId: string }>>({
+		fast: { catalogKey: '', modelId: '' },
+		balanced: { catalogKey: '', modelId: '' },
+		deep: { catalogKey: '', modelId: '' },
+	});
 
 	// Vault slot per provider — keeps existing keys when user switches.
 	// Each provider has a DISTINCT slot so flipping anthropic → custom → anthropic
@@ -227,6 +259,14 @@
 			// Mistral tenant (api_base_url not on disk) resolves the Mistral
 			// preset instead of the generic OpenAI-compat tile.
 			activeCatalogKey = resolveCatalogKey(activeProvider, configBody.api_base_url ?? effProvider?.api_base_url);
+			// Starting tier is NOT exposed in standard mode — lynox auto-routes per
+			// turn from the engine's own balanced default, so we leave default_tier
+			// untouched (undefined → engine default; a managed CP value resends as a
+			// no-op). This avoids a two-way-bind footgun and a managed-save 403.
+			// PR-4 routing state: hybrid only when explicitly persisted; seed the
+			// per-tier {provider, model} slots from the saved tier_set (else defaults).
+			routingMode = configBody.routing_mode === 'hybrid' ? 'hybrid' : 'standard';
+			seedTierSlots(configBody.tier_set);
 			if (statusRes.ok) {
 				const status = (await statusRes.json()) as { configured?: { api_key?: boolean } };
 				apiKeyConfigured = status.configured?.api_key === true;
@@ -253,27 +293,125 @@
 	}
 
 	/**
-	 * Return the {main, small} pair for the active provider's tier-set so
-	 * the UI can show both models that will run (main for orchestration,
-	 * small for fast sub-tasks). Pre-1.5.2 the picker only surfaced one
-	 * model — users couldn't see that switching providers also swaps the
-	 * small/fast model used in pipelines and spawn calls.
+	 * A model is "expensive" when its output price is in Opus territory
+	 * ($20+/M out). The catalog's deep Claude (Opus, $75/M) trips this; Sonnet
+	 * ($15), Haiku ($4) and every Mistral model ($≤1.50) do not — so the ⚡ cue
+	 * lands exactly on the budget-heavy choices the user should think twice
+	 * about (D8: no gating, cost-transparency instead).
 	 */
-	function tierSetFor(entry: CatalogProvider | null | undefined, defaultTier?: string | undefined): { main: CatalogModel | null; small: CatalogModel | null } {
-		if (!entry || !entry.models || entry.models.length === 0) {
-			return { main: null, small: null };
-		}
-		// Main reflects the user's selected default_tier; fall back to the
-		// sonnet tier (lynox's standard recommendation) then the first model.
-		// Without this, picking "Magistral" in the tier picker would still show
-		// "Main: Mistral Large" in the summary — confusing inconsistency.
-		const main = (defaultTier ? entry.models.find((m) => m.tier === defaultTier) : undefined)
-			?? entry.models.find((m) => m.tier === 'sonnet')
-			?? entry.models[0]
-			?? null;
-		const small = entry.models.find((m) => m.tier === 'haiku') ?? null;
-		return { main, small };
+	function isExpensive(m: CatalogModel): boolean {
+		return typeof m.pricing?.output === 'number' && m.pricing.output >= 20;
 	}
+
+	/**
+	 * Default model id for a tier within a provider's catalog: the first model
+	 * tagged with that tier, falling back to the first model overall. Used to
+	 * seed the hybrid per-tier dropdowns. (Mistral lists two `fast` models —
+	 * this picks the first; the user freely re-picks in the dropdown.)
+	 */
+	function defaultTierModelId(entry: CatalogProvider, tier: ModelTier): string {
+		return (entry.models.find((m) => m.tier === tier) ?? entry.models[0])?.id ?? '';
+	}
+
+	/** Catalog entry for a UI key ('anthropic' | 'mistral' | …), if present. */
+	function catalogEntryByKey(key: string): CatalogProvider | undefined {
+		return providers.find((p) => catalogEntryKey(p) === key);
+	}
+
+	// Providers selectable per tier in hybrid mode: the catalogued, key-via-vault
+	// ones (Anthropic + Mistral). Free-text endpoints (custom / openai-compat) and
+	// the retired Vertex tile are out of scope for the per-tier picker for now.
+	const hybridProviderOptions = $derived(
+		providers.filter((p) => p.models.length > 0 && p.provider !== 'vertex'),
+	);
+
+	/** Seed each tier's {provider, model} from a saved tier_set, else defaults. */
+	function seedTierSlots(fromSet?: TierSet): void {
+		const opts = hybridProviderOptions;
+		if (opts.length === 0) return;
+		// Default provider for an unset tier: the active tile if it's a valid
+		// hybrid option, else the first option (Anthropic).
+		const fallbackKey = (activeCatalogKey && opts.some((p) => catalogEntryKey(p) === activeCatalogKey))
+			? activeCatalogKey
+			: catalogEntryKey(opts[0]!);
+		const next: Record<ModelTier, { catalogKey: string; modelId: string }> = {
+			fast: { catalogKey: '', modelId: '' },
+			balanced: { catalogKey: '', modelId: '' },
+			deep: { catalogKey: '', modelId: '' },
+		};
+		for (const tier of TIER_ORDER) {
+			const slot = fromSet?.[tier];
+			let key = fallbackKey;
+			let modelId = '';
+			if (slot) {
+				// Map a saved slot back to a tile via provider + base URL; keep it
+				// only if it resolves to a valid hybrid option and its model exists.
+				const resolved = resolveCatalogKey(slot.provider as LLMProvider, slot.api_base_url);
+				const entry = catalogEntryByKey(resolved);
+				if (entry && opts.some((o) => catalogEntryKey(o) === resolved)) {
+					key = resolved;
+					if (entry.models.some((m) => m.id === slot.model_id)) modelId = slot.model_id;
+				}
+			}
+			const entry = catalogEntryByKey(key);
+			if (entry && !modelId) modelId = defaultTierModelId(entry, tier);
+			next[tier] = { catalogKey: key, modelId };
+		}
+		tierSlots = next;
+	}
+
+	/**
+	 * Build the tier_set to persist: per tier {provider, model_id, api_base_url?}.
+	 * NO api_key — each provider's key lives in the vault (entered below); the
+	 * engine injects it per slot at config-load (never written to config.json).
+	 */
+	function currentTierSet(): TierSet {
+		const set: TierSet = {};
+		for (const tier of TIER_ORDER) {
+			const { catalogKey, modelId } = tierSlots[tier];
+			const entry = catalogEntryByKey(catalogKey);
+			if (!entry || !modelId) continue;
+			set[tier] = {
+				provider: entry.provider,
+				model_id: modelId,
+				...(entry.base_url_default ? { api_base_url: entry.base_url_default } : {}),
+			};
+		}
+		return set;
+	}
+
+	function setRoutingMode(mode: 'standard' | 'hybrid'): void {
+		if (routingMode === mode) return;
+		routingMode = mode;
+		if (mode === 'hybrid') seedTierSlots(config.tier_set);
+		if (loaded) void saveConfig();
+	}
+
+	function setTierProvider(tier: ModelTier, catalogKey: string): void {
+		const entry = catalogEntryByKey(catalogKey);
+		const modelId = entry ? defaultTierModelId(entry, tier) : '';
+		tierSlots = { ...tierSlots, [tier]: { catalogKey, modelId } };
+		if (loaded) void saveConfig();
+	}
+
+	function setTierModel(tier: ModelTier, modelId: string): void {
+		tierSlots = { ...tierSlots, [tier]: { ...tierSlots[tier], modelId } };
+		if (loaded) void saveConfig();
+	}
+
+	// Distinct provider tiles used across the slots — drives the per-provider key
+	// fields in hybrid mode (each provider's key persists to its own vault slot).
+	const usedHybridProviders = $derived.by(() => {
+		const seen = new Set<string>();
+		const out: CatalogProvider[] = [];
+		for (const tier of TIER_ORDER) {
+			const key = tierSlots[tier].catalogKey;
+			if (!key || seen.has(key)) continue;
+			const entry = catalogEntryByKey(key);
+			if (entry) { seen.add(key); out.push(entry); }
+		}
+		return out;
+	});
 
 	function selectCatalogEntry(entry: CatalogProvider): void {
 		if (isTileLocked(entry)) {
@@ -282,6 +420,9 @@
 		}
 		activeProvider = entry.provider;
 		activeCatalogKey = catalogEntryKey(entry);
+		// Standard-mode tile: picks the single active provider. Hybrid slots are
+		// independent (each tier picks its own provider) and seeded on the
+		// Standard→Hybrid toggle, so no per-tier reseed is needed here.
 		// Fix A (v1.5.2): auto-default the main-tier model for the new
 		// provider's catalog so the <select bind:value={openai_model_id}>
 		// renders the right option highlighted instead of blank. Pre-fix
@@ -486,9 +627,27 @@
 				(activeProvider === 'custom' || activeProvider === 'openai') &&
 				typeof url === 'string' && url.trim().length > 0 &&
 				!isAllowlistedEndpoint(url);
+			// PR-4: persist routing_mode + tier_set for BOTH self-host and managed.
+			// Managed is allow-listed for these fields (MANAGED_USER_WRITABLE_CONFIG)
+			// and sanitised server-side at config-load (applyManagedTierSetConstraints
+			// drops off-allowlist providers, strips tenant keys/base_urls, sources CP
+			// keys). The UI never sends a key in the slot — keys go to the vault. In
+			// standard mode CLEARS any previously-saved tier_set (sends `{}` — the
+			// schema rejects null, and an empty set is the "no per-tier slots"
+			// state) so switching Hybrid→Standard leaves no stale slots in
+			// config.json for a future reader to misinterpret. The engine ignores
+			// tier_set unless routing_mode === 'hybrid' regardless.
+			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet } = {
+				routing_mode: routingMode,
+			};
+			if (routingMode === 'hybrid') {
+				routingUpdate.tier_set = currentTierSet();
+			} else if (config.tier_set && Object.keys(config.tier_set).length > 0) {
+				routingUpdate.tier_set = {};
+			}
 			const body = needsConfirm
-				? { ...update, confirm_custom_endpoint: true }
-				: update;
+				? { ...update, ...routingUpdate, confirm_custom_endpoint: true }
+				: { ...update, ...routingUpdate };
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -540,6 +699,13 @@
 		providers.find((p) => catalogEntryKey(p) === activeCatalogKey)
 		?? providers.find((p) => p.provider === activeProvider),
 	);
+	// Hybrid mode is active (managed OR self-host): the per-tier editor replaces
+	// the single-provider flow (tiles + one key + residency/test). The per-tier
+	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral), which
+	// is exactly the managed curated set — so managed hybrid reuses the same UI;
+	// only the per-provider key fields are self-host-only (managed: CP supplies,
+	// server-side `applyManagedTierSetConstraints` sources the keys at load).
+	const hybridActive = $derived(routingMode === 'hybrid');
 	const providerLocked = $derived(!!locks.provider);
 	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
 	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
@@ -638,12 +804,41 @@
 		</div>
 	{/if}
 
+	<!-- Model routing (PR-4) — the PRIMARY axis: decide Standard vs Hybrid
+	     FIRST, the model controls below adapt to it. Standard = one provider,
+	     lynox auto-routes per turn (zero knobs). Hybrid = each tier picks its own
+	     provider + model. Available on managed too: the provider choices are the
+	     curated allowlist (Anthropic + Mistral) and the CP supplies the keys
+	     (server-side `applyManagedTierSetConstraints` sanitises + sources them).
+	     NO capability gating (D8 2026-06-17). -->
+	{#if loaded}
+		<section aria-labelledby="llm-routing-heading" class="space-y-2">
+			<h2 id="llm-routing-heading" class="text-lg font-medium">{t('llm.routing.heading')}</h2>
+			<div role="group" aria-label={t('llm.routing.heading')}
+				class="inline-flex rounded-md border border-border overflow-hidden text-sm">
+				<button type="button" aria-pressed={routingMode === 'standard'} disabled={providerLocked}
+					onclick={() => setRoutingMode('standard')}
+					class="px-4 py-1.5 transition-colors disabled:opacity-50 {routingMode === 'standard' ? 'bg-accent text-accent-fg' : 'bg-bg hover:bg-accent/5'}">
+					{t('llm.routing.standard')}
+				</button>
+				<button type="button" aria-pressed={routingMode === 'hybrid'} disabled={providerLocked}
+					onclick={() => setRoutingMode('hybrid')}
+					class="px-4 py-1.5 border-l border-border transition-colors disabled:opacity-50 {routingMode === 'hybrid' ? 'bg-accent text-accent-fg' : 'bg-bg hover:bg-accent/5'}">
+					{t('llm.routing.hybrid')}
+				</button>
+			</div>
+			<p class="text-xs text-text-muted">{routingMode === 'hybrid' ? t('llm.routing.hybrid_desc') : t('llm.routing.standard_desc')}</p>
+		</section>
+	{/if}
+
 	<!-- Provider picker — Anthropic / Mistral / Custom. P3-FOLLOWUP-HOTFIX:
 	     moved to the top of the page so the user sees the selection control
 	     before the sub-route nav. Vertex is wired in the engine for legacy
 	     `provider: 'vertex'` config.json setups (see core CLAUDE.md) but no
 	     longer offered in-product per project_eu_providers_strategy — filter
-	     it out of the tile list. -->
+	     it out of the tile list. Hidden in self-host Hybrid: there each tier
+	     picks its OWN provider, so a single top-level picker doesn't apply. -->
+	{#if !hybridActive}
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
@@ -656,6 +851,7 @@
 			{/each}
 		</div>
 	</section>
+	{/if}
 
 	<!--
 		LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven so the OpenAI-native
@@ -677,12 +873,12 @@
 	{#if activeProviderEntry}
 		<!-- Per-provider config form -->
 		<section aria-labelledby="llm-config-heading" class="border-t border-border pt-6 space-y-4">
-			<h2 id="llm-config-heading" class="text-lg font-medium">{activeProviderEntry.display_name}</h2>
-			{#if activeProviderEntry.notes}
+			<h2 id="llm-config-heading" class="text-lg font-medium">{hybridActive ? t('llm.routing.per_tier_heading') : activeProviderEntry.display_name}</h2>
+			{#if !hybridActive && activeProviderEntry.notes}
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey()}
+			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey() && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
@@ -691,16 +887,17 @@
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
-			{:else if cpSuppliesLLMKey()}
+			{:else if cpSuppliesLLMKey() && !hybridActive}
 				<!-- v1.5.2: on managed tiers, the CP supplies the LLM key — the
 				     input would be misleading-disabled. Replace with a short
-				     note so the user knows why the field is missing. -->
+				     note so the user knows why the field is missing. (Hidden in
+				     managed Hybrid — the per-tier editor covers it.) -->
 				<p class="text-xs text-text-muted rounded border border-border/50 bg-bg-subtle px-3 py-2">
 					{t('llm.api_key_managed_note')}
 				</p>
 			{/if}
 
-			{#if activeProviderEntry.requires_base_url}
+			{#if activeProviderEntry.requires_base_url && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
@@ -749,7 +946,7 @@
 				{/if}
 			{/if}
 
-			{#if activeProviderEntry.requires_region}
+			{#if activeProviderEntry.requires_region && !hybridActive}
 				<div class="grid gap-3 sm:grid-cols-2">
 					<label class="block">
 						<span class="block text-sm font-medium mb-1">{t('llm.gcp_project')}</span>
@@ -766,35 +963,78 @@
 				</div>
 			{/if}
 
-			{#if activeProviderEntry.models.length > 0}
-				<!-- Default-tier picker for every tier-aware provider with a catalog
-				     (Anthropic + Mistral). Binds to `default_tier` which IS
-				     runtime-meaningful — sets the starting orchestration tier
-				     before auto-downgrade. On Mistral, the tier maps via
-				     MISTRAL_MODEL_MAP: deep→Large-2512, balanced→Ministral-14B, fast→Ministral-8B.
-				     v1.5.2 parity (rafael QA 2026-05-18): Mistral previously had
-				     no picker because the old single-model dropdown wrote
-				     openai_model_id (no runtime effect). Now the tier-bound picker
-				     gives Mistral users the same control as Anthropic users have. -->
-				<label class="block">
-					<span class="block text-sm font-medium mb-1">{t('llm.default_tier_heading')}</span>
-					<select disabled={!loaded || providerLocked} bind:value={config.default_tier}
-						class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-						{#each activeProviderEntry.models as m (m.id)}
-							<option value={m.tier ?? m.id}>{m.label}{m.id === 'mistral-large-2512' ? ' (Recommended for chat)' : ''} — ${m.pricing?.input ?? '?'}/M in, ${m.pricing?.output ?? '?'}/M out</option>
-						{/each}
-					</select>
-				</label>
+			{#if hybridActive}
+				<!-- Hybrid (PR-4): each tier picks its OWN provider + model. The
+				     Standard/Hybrid decision lives at the TOP of the page (it drives
+				     this section). Provider choices = the catalogued, key-via-vault
+				     ones (Anthropic + Mistral). NO capability gating (D8 2026-06-17):
+				     every model is selectable (incl. Opus) — the included budget +
+				     per-model cost (⚡ = expensive) control spend. -->
+				<div class="space-y-3">
+					{#each TIER_ORDER as tier (tier)}
+						{@const entry = catalogEntryByKey(tierSlots[tier].catalogKey)}
+						<div class="space-y-1 sm:grid sm:grid-cols-[8rem_1fr] sm:gap-3 sm:space-y-0 sm:items-start">
+							<div class="sm:pt-1">
+								<div class="text-sm font-medium">{t(`llm.tier.${tier}`)}</div>
+								<div class="text-xs text-text-muted">{t(`llm.tier.${tier}_desc`)}</div>
+							</div>
+							<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+								<select disabled={!loaded || providerLocked} value={tierSlots[tier].catalogKey}
+									onchange={(e) => setTierProvider(tier, e.currentTarget.value)}
+									aria-label={t('llm.provider_heading')}
+									class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+									{#each hybridProviderOptions as p (catalogEntryKey(p))}
+										<option value={catalogEntryKey(p)}>{p.display_name}</option>
+									{/each}
+								</select>
+								<select disabled={!loaded || providerLocked || !entry} value={tierSlots[tier].modelId}
+									onchange={(e) => setTierModel(tier, e.currentTarget.value)}
+									aria-label={t('llm.model')}
+									class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+									{#each entry?.models ?? [] as m (m.id)}
+										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{isExpensive(m) ? ' ⚡' : ''}</option>
+									{/each}
+								</select>
+							</div>
+						</div>
+					{/each}
+					<p class="text-xs text-text-muted">{t('llm.routing.budget_hint')}</p>
+				</div>
 
-				<!--
-					Pre-1.5.2 Mistral had a separate single-model dropdown that wrote
-					openai_model_id — but that field is only consulted as a fallback
-					when a tier is missing from MISTRAL_MODEL_MAP. All three Mistral
-					tiers (deep→Large, balanced→Ministral-14B, fast→Ministral-8B) are
-					mapped, so the dropdown value was never actually used. Replaced
-					with the unified default-tier picker above + the tier-set summary
-					block below — single source of truth, lynox routes per turn.
-				-->
+				<!-- Per-provider API keys (self-host / BYOK) — one field per DISTINCT
+				     provider used across the tiers. Keys persist to the vault under
+				     their canonical slot (ANTHROPIC_API_KEY / MISTRAL_API_KEY), NEVER
+				     into the tier_set in config.json; the engine injects each slot's
+				     key at config-load. On managed the CP supplies the keys, so a
+				     short note replaces the fields. -->
+				{#if !cpSuppliesLLMKey()}
+					{#if usedHybridProviders.length > 0}
+						<div class="space-y-2 border-t border-border/50 pt-4">
+							<span class="block text-sm font-medium">{t('llm.hybrid_keys_heading')}</span>
+							{#each usedHybridProviders as p (catalogEntryKey(p))}
+								{#if slotFor(p.provider)}
+									<label class="block">
+										<span class="block text-xs text-text-muted mb-1">{p.display_name}</span>
+										<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
+											placeholder={t('llm.api_key_placeholder')}
+											bind:value={keys[slotFor(p.provider)]}
+											class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
+									</label>
+								{/if}
+							{/each}
+							<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
+						</div>
+					{/if}
+				{:else}
+					<p class="text-xs text-text-muted rounded border border-border/50 bg-bg-subtle px-3 py-2">
+						{t('llm.api_key_managed_note')}
+					</p>
+				{/if}
+			{:else if activeProviderEntry.models.length > 0}
+				<!-- Standard mode shows NO tier control: lynox auto-routes per turn
+				     from a balanced baseline (the engine's own default), so a
+				     starting-tier knob would be noise — the auto-routing promise is
+				     the point. Explicit per-tier control is the Hybrid path above. -->
 			{:else if activeProvider === 'custom' || activeCatalogKey === 'openai-compat'}
 				<!--
 					Free-text endpoints with no enumerated model catalog need an
@@ -817,43 +1057,18 @@
 				</label>
 			{/if}
 
-			{#if activeProviderEntry.models.length > 0}
-				{@const tierSet = tierSetFor(activeProviderEntry, config.default_tier)}
-				{#if tierSet.main && tierSet.small}
-					<!--
-						Fix D (v1.5.2): make the provider's tier-set visible. lynox dispatches
-						orchestration on the "main" tier (Sonnet → Claude Sonnet 4.6 / Mistral
-						Large) and sub-tasks on the "small" tier (Haiku → Claude Haiku 4.5 /
-						Mistral Small). Pre-fix the UI only surfaced one dropdown, so users
-						didn't know what model their pipeline / spawn calls were actually
-						hitting after a provider switch.
-					-->
-					<div class="rounded border border-border bg-bg-subtle px-3 py-2 text-xs space-y-1.5">
-						<div class="font-medium text-text-muted">{t('llm.tier_set_heading')}</div>
-						<div class="flex flex-wrap gap-x-4 gap-y-1">
-							<span>
-								<span class="text-text-muted">{t('llm.tier_main')}:</span>
-								<span class="font-mono">{tierSet.main.label}</span>
-							</span>
-							<span>
-								<span class="text-text-muted">{t('llm.tier_small')}:</span>
-								<span class="font-mono">{tierSet.small.label}</span>
-							</span>
-						</div>
-						<div class="text-text-muted">{t('llm.tier_set_routing_hint')}</div>
-					</div>
-				{/if}
+			<!-- Inline residency note — single-provider only; in Hybrid each tier's
+			     residency is implied by its provider choice. -->
+			{#if !hybridActive}
+				<p class="text-xs text-text-muted">
+					<span class="font-medium">{t('llm.residency')}:</span> {activeProviderEntry.default_residency}
+				</p>
 			{/if}
-
-			<!-- Inline residency note -->
-			<p class="text-xs text-text-muted">
-				<span class="font-medium">{t('llm.residency')}:</span> {activeProviderEntry.default_residency}
-			</p>
 
 			<!-- Connection-test row — hidden on managed (CP-supplied key, can't
 			     be re-tested by the customer; the engine probe still runs on
-			     server start). -->
-			{#if !cpSuppliesLLMKey()}
+			     server start) and in Hybrid (no single provider to probe). -->
+			{#if !cpSuppliesLLMKey() && !hybridActive}
 			<div class="flex items-center gap-3">
 				<button type="button" onclick={testConnection} disabled={testing || providerLocked || !loaded}
 					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">

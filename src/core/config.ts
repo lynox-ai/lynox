@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import type { LynoxUserConfig, ModelProfile } from '../types/index.js';
-import { isModelProfile } from '../types/index.js';
+import type { LynoxUserConfig, ModelProfile, TierSet } from '../types/index.js';
+import { isModelProfile, isTierSlot, MISTRAL_API_BASE } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
+import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -11,6 +12,41 @@ import { getErrorMessage } from './utils.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
+
+/**
+ * Managed tier_set hardening — the PRD tenant-writable ship-blocker. For each
+ * slot: keep ONLY an allowlisted provider (anthropic / mistral), STRIP the
+ * user-supplied key/base_url, and source the CP env credentials for that
+ * provider (base_url forced to the canonical MISTRAL_API_BASE — no host spoof).
+ * An off-allowlist provider, or one whose CP key is absent, drops the slot (it
+ * falls back to the base provider). This makes a managed tenant unable to point
+ * a slot at an off-allowlist endpoint, inject a key/base_url, or name a provider
+ * outside the curated set. Self-host (not cp_supplied) never runs this — its
+ * slots legitimately carry their own keys.
+ */
+export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
+  const out: TierSet = {};
+  const anthropicKey = process.env['ANTHROPIC_API_KEY'];
+  const mistralKey = process.env['MISTRAL_API_KEY'];
+  for (const tier of ['fast', 'balanced', 'deep'] as const) {
+    const slot = tierSet[tier];
+    if (!slot) continue;
+    // Mistral is the registry-canonical 'mistral' OR the LLMProvider form the
+    // settings UI persists ('openai' + a Mistral host — same as standard mode).
+    // A non-Mistral host on 'openai' (a tenant trying to sneak a free-text
+    // endpoint) fails isMistralHost → the slot drops. The accepted base_url is
+    // ALWAYS forced to the canonical MISTRAL_API_BASE (no host spoof).
+    const isMistral = slot.provider === 'mistral'
+      || (slot.provider === 'openai' && isMistralHost(slot.api_base_url));
+    if (slot.provider === 'anthropic' && anthropicKey) {
+      out[tier] = { provider: 'anthropic', model_id: slot.model_id, api_key: anthropicKey };
+    } else if (isMistral && mistralKey) {
+      out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
+    }
+    // else: off-allowlist provider or missing CP key → drop (falls back to base).
+  }
+  return out;
+}
 
 /** Override for getLynoxDir(). Set via --data-dir or LYNOX_DATA_DIR. */
 let _dataDirOverride: string | null = null;
@@ -194,6 +230,43 @@ export function loadConfig(): LynoxUserConfig {
   // worker on the main provider is a graceful degrade; failing every task is not.
   if (merged.worker_profile && !merged.model_profiles?.[merged.worker_profile]) {
     merged.worker_profile = undefined;
+  }
+  // Provider-agnostic routing (PR-3d): cp_supplied mirrors the billing-tier
+  // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
+  // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
+  if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
+  // Hybrid Tier-Set delivered as JSON by the CP / op-provisioning
+  // (LYNOX_TIER_SET_JSON) → deserialized into `tier_set` (+ routing_mode hybrid).
+  // Each slot is validated; a malformed slot is dropped (never reaches client
+  // construction as `Bearer undefined`); a fully malformed blob is ignored rather
+  // than crashing boot.
+  if (process.env['LYNOX_TIER_SET_JSON']) {
+    try {
+      const parsed: unknown = JSON.parse(process.env['LYNOX_TIER_SET_JSON']);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const validSet: TierSet = {};
+        for (const tier of ['fast', 'balanced', 'deep'] as const) {
+          const slot = (parsed as Record<string, unknown>)[tier];
+          if (isTierSlot(slot)) validSet[tier] = slot;
+        }
+        if (Object.keys(validSet).length > 0) {
+          merged.tier_set = { ...merged.tier_set, ...validSet };
+          merged.routing_mode = 'hybrid';
+        }
+      }
+    } catch {
+      // ignore malformed LYNOX_TIER_SET_JSON — boot in standard mode rather than crash
+    }
+  }
+  // Managed instances: the tier_set is a TENANT-WRITABLE surface, so harden it at
+  // config-load (the PRD ship-blocker) — allowlist + CP key-custody. If every
+  // slot is dropped, fall back to standard mode.
+  if (merged.cp_supplied && merged.tier_set) {
+    merged.tier_set = applyManagedTierSetConstraints(merged.tier_set);
+    if (Object.keys(merged.tier_set).length === 0) {
+      merged.tier_set = undefined;
+      merged.routing_mode = 'standard';
+    }
   }
   // GCP config for Vertex AI
   if (process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']) {

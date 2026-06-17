@@ -25,6 +25,8 @@ export interface RunRecord {
   response_text: string;
   model_tier: string;
   model_id: string;
+  /** Provider this run executed on ('' on pre-v35 rows). */
+  provider: string;
   prompt_hash: string;
   tokens_in: number;
   tokens_out: number;
@@ -765,6 +767,13 @@ const MIGRATIONS: string[] = [
      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_active_runs_thread ON active_runs(thread_id);`,
+
+  // v35: provider on runs — spend rolls up to (model_tier, provider, model_id)
+  // for provider-agnostic routing observability (a run records WHICH provider it
+  // executed on, not just the tier/model). Additive, default '' for old rows.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (35);
+   ALTER TABLE runs ADD COLUMN provider TEXT NOT NULL DEFAULT '';
+   CREATE INDEX IF NOT EXISTS idx_runs_provider ON runs(provider);`,
 ];
 
 export class RunHistory {
@@ -882,6 +891,8 @@ export class RunHistory {
     taskText: string;
     modelTier: string;
     modelId: string;
+    /** Provider this run executed on (provider-agnostic routing observability). */
+    provider?: string | undefined;
     promptHash?: string | undefined;
     runType?: 'single' | 'batch_parent' | 'batch_item' | undefined;
     batchParentId?: string | undefined;
@@ -895,8 +906,8 @@ export class RunHistory {
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
+      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units, provider)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
     `).run(
       id,
       params.sessionId ?? '',
@@ -914,6 +925,7 @@ export class RunHistory {
       params.roleId ?? '',
       params.kind ?? null,
       params.units ?? 0,
+      params.provider ?? '',
     );
     return id;
   }

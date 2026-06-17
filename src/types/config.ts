@@ -3,6 +3,7 @@
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
+import type { ProviderKey } from './provider-registry.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
 import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
@@ -189,6 +190,40 @@ export interface LynoxConfig {
 
 // === User Config ===
 
+/** One tier's provider+model assignment in a hybrid Tier-Set. */
+export interface TierSlot {
+  /** Provider key — a registry id (incl. the first-class 'mistral'). */
+  provider: ProviderKey;
+  /** Concrete model id to send for this tier. */
+  model_id: string;
+  /** Per-slot API key. Self-host/BYOK only; managed ignores it (CP supplies keys). */
+  api_key?: string | undefined;
+  /** Per-slot API base URL (e.g. an OpenAI-compatible endpoint). */
+  api_base_url?: string | undefined;
+}
+
+/**
+ * Per-tier provider+model assignment for hybrid routing. Partial — a tier with
+ * no slot falls back to the base `provider`. Only consulted when
+ * `routing_mode === 'hybrid'`.
+ */
+export type TierSet = Partial<Record<ModelTier, TierSlot>>;
+
+/**
+ * Runtime guard for a {@link TierSlot} — checks the required fields a downstream
+ * resolver dereferences (`provider`, `model_id`). Used at the untrusted
+ * `LYNOX_TIER_SET_JSON` env boundary so a malformed slot is dropped rather than
+ * reaching client construction as `Bearer undefined`.
+ */
+export function isTierSlot(value: unknown): value is TierSlot {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['provider'] === 'string' && v['provider'].length > 0 &&
+    typeof v['model_id'] === 'string' && v['model_id'].length > 0
+  );
+}
+
 export interface LynoxUserConfig {
   api_key?: string | undefined;
   api_base_url?: string | undefined;
@@ -225,6 +260,24 @@ export interface LynoxUserConfig {
    * Managed-Pro instances via env `LYNOX_ACCOUNT_TIER=pro` or config.
    */
   account_tier?: 'standard' | 'pro' | undefined;
+  /**
+   * Model routing mode. 'standard' (default) = one `provider` for all tiers.
+   * 'hybrid' = each tier may use a different provider+model via `tier_set`.
+   * A distinct axis from the legacy `llm_mode` (a retiring residency axis).
+   */
+  routing_mode?: 'standard' | 'hybrid' | undefined;
+  /**
+   * Hybrid Tier-Set: per-tier {provider, model_id, api_key?, api_base_url?}.
+   * Only consulted when `routing_mode === 'hybrid'`; an unset tier falls back to
+   * the base `provider`.
+   */
+  tier_set?: TierSet | undefined;
+  /**
+   * Whether the control plane supplies the LLM key (config mirror of
+   * `cpSuppliesLLMKey` / billing-tier). Set from `LYNOX_BILLING_TIER`; the
+   * managed tier_set allowlist (PR-3b) is gated on this.
+   */
+  cp_supplied?: boolean | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
   max_session_cost_usd?: number | undefined;
