@@ -422,6 +422,43 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(result).toContain('has already been executed');
   });
 
+  // --- B2: parameter binding ---
+  function storeParamTemplate(id: string, parameters: unknown[]): void {
+    storePipeline(id, {
+      id, name: 'audit', goal: 'g',
+      steps: [makeStep('s1', 'audit {{params.client}}')],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: parameters as never,
+    });
+  }
+
+  it('binds supplied params into the manifest context', async () => {
+    const agent = makePipelineAgent();
+    storeParamTemplate('param-wf-1', [{ name: 'client', description: '', type: 'string', source: 'user_input' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: 'param-wf-1', context: { params: { client: 'Acme' } } }, agent);
+    const manifestArg = mockRunManifest.mock.calls[0]![0] as { context: Record<string, unknown> };
+    expect((manifestArg.context['params'] as Record<string, unknown>)['client']).toBe('Acme');
+  });
+
+  it('rejects a run when a required param is missing (no run dispatched)', async () => {
+    const agent = makePipelineAgent();
+    storeParamTemplate('param-wf-2', [{ name: 'client', description: '', type: 'string', source: 'user_input' }]);
+    const result = await runWorkflowTool.handler({ workflow_id: 'param-wf-2' }, agent);
+    expect(result).toContain('Missing required parameter');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('uses a param default when no value is supplied', async () => {
+    const agent = makePipelineAgent();
+    storeParamTemplate('param-wf-3', [{ name: 'region', description: '', type: 'string', defaultValue: 'EU', source: 'context' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: 'param-wf-3', context: {} }, agent);
+    const manifestArg = mockRunManifest.mock.calls[0]![0] as { context: Record<string, unknown> };
+    expect((manifestArg.context['params'] as Record<string, unknown>)['region']).toBe('EU');
+  });
+
   it('successfully executes stored pipeline', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();

@@ -6,6 +6,7 @@ import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orch
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
@@ -546,6 +547,7 @@ export async function runSavedWorkflow(
   workflowId: string,
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
+  params?: Record<string, unknown>,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -573,9 +575,14 @@ export async function runSavedWorkflow(
     return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
   }
 
+  const bound = bindWorkflowParameters(planned.parameters ?? [], params);
+  if (!bound.ok) {
+    return { ok: false, error: bound.error };
+  }
+
   const resultLimit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   try {
-    const manifest = buildManifest(planned.name, steps, 'stop');
+    const manifest = buildManifest(planned.name, steps, 'stop', { params: bound.params });
     validateManifest(manifest);
     const state = await runManifest(manifest, config, { runHistory });
     persistPipelineRun(state, manifest, runHistory, resultLimit);
@@ -652,11 +659,18 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
   }
 
+  const suppliedParams = input.context?.['params'] as Record<string, unknown> | undefined;
+  const bound = bindWorkflowParameters(planned.parameters ?? [], suppliedParams);
+  if (!bound.ok) {
+    return `Error: ${bound.error}`;
+  }
+
   try {
     const manifest = buildManifest(
       planned.name,
       steps,
       input.on_failure ?? 'stop',
+      { ...(input.context ?? {}), params: bound.params },
     );
 
     validateManifest(manifest);

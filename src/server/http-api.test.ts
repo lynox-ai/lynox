@@ -2513,7 +2513,18 @@ describe('LynoxHTTPApi', () => {
       expect(body.ran).toBe(true);
       expect(body.runId).toBe('run-xyz');
       expect(body.status).toBe('completed');
-      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything());
+      // 4th arg = re-run params (undefined when the request carries no body).
+      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined);
+    });
+
+    it('POST /api/workflows/:id/run threads a { params } body to the run', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-p', status: 'completed' });
+      const res = await jsonFetch('/api/workflows/wf-1/run', {
+        method: 'POST',
+        body: JSON.stringify({ params: { client: 'Acme' } }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), { client: 'Acme' });
     });
 
     it('POST /api/workflows/:id/run returns 404 when the workflow is missing', async () => {
