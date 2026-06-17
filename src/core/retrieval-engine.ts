@@ -8,7 +8,7 @@ import type {
   ProvenanceKind,
 } from '../types/index.js';
 import { NAMESPACE_HALF_LIFE } from '../types/index.js';
-import { getActiveProvider } from './llm-client.js';
+import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
@@ -362,7 +362,8 @@ export class RetrievalEngine {
     if (!this.anthropicClient) return null;
     try {
       const fast = resolveTierModel('fast', getActiveProvider());
-      const stream = this.anthropicClient.beta.messages.stream({
+      const fastClient = clientForTierSnapshot(fast, this.anthropicClient, getActiveProvider());
+      const stream = fastClient.beta.messages.stream({
         model: fast.modelId,
         max_tokens: 256,
         ...(fast.betas ? { betas: fast.betas } : {}),

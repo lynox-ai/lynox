@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
-import { getActiveProvider } from './llm-client.js';
+import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 
 export interface ExtractedEntity {
@@ -250,7 +250,8 @@ export async function extractEntitiesLLM(
   _llmExtractionCount++;
   try {
     const fast = resolveTierModel('fast', getActiveProvider());
-    const stream = client.beta.messages.stream({
+    const fastClient = clientForTierSnapshot(fast, client, getActiveProvider());
+    const stream = fastClient.beta.messages.stream({
       model: fast.modelId,
       max_tokens: 512,
       ...(fast.betas ? { betas: fast.betas } : {}),

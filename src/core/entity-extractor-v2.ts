@@ -6,7 +6,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 import type { EntityType, MemoryNamespace } from '../types/index.js';
-import { getActiveProvider, isCustomProvider } from './llm-client.js';
+import { getActiveProvider, isCustomProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget } from './kg-stopwords.js';
 
@@ -275,7 +275,8 @@ export async function extractEntitiesV2(
 
   try {
     const fast = resolveTierModel('fast', provider);
-    const stream = client.beta.messages.stream({
+    const fastClient = clientForTierSnapshot(fast, client, provider);
+    const stream = fastClient.beta.messages.stream({
       model: fast.modelId,
       max_tokens: 1024,
       temperature: 0,
