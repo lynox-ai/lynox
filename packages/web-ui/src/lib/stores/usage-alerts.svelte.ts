@@ -20,6 +20,9 @@ interface UsageSummary {
   period: { start_iso: string };
   used_cents: number;
   budget_cents: number;
+  /** included + top-ups (credit packs). Absent on older engines → falls back
+   *  to budget_cents. Sized against here so the toast agrees with the bar. */
+  available_cents?: number;
 }
 
 const STORAGE_KEY = 'lynox_usage_threshold_fired';
@@ -70,8 +73,13 @@ export async function checkUsageThreshold(): Promise<void> {
       const res = await fetch(`${getApiBase()}/usage/summary?period=current`);
       if (!res.ok) return;
       const summary = (await res.json()) as UsageSummary;
-      if (summary.budget_cents <= 0) return; // no limit set → nothing to alert on
-      const pct = (summary.used_cents / summary.budget_cents) * 100;
+      // Size against available = included + top-ups (credit packs), the same
+      // denominator the dashboard bar uses. Otherwise a purchased pack would
+      // desync the toast (still firing at 95% of included) from the bar (well
+      // under 95% of available). Falls back to budget_cents on older engines.
+      const availableCents = summary.available_cents ?? summary.budget_cents;
+      if (availableCents <= 0) return; // no limit set → nothing to alert on
+      const pct = (summary.used_cents / availableCents) * 100;
       const period = summary.period.start_iso;
       const fired = loadFired();
       const alreadyFired = fired.get(period) ?? 0;
