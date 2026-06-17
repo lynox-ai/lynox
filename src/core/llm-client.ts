@@ -12,6 +12,7 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider } from '../types/index.js';
+import { getProviderDescriptor } from '../types/index.js';
 import { OpenAIAdapter, type ApiKeyProvider } from './openai-adapter.js';
 import { createVertexOAuthProvider } from './vertex-oauth.js';
 
@@ -64,8 +65,15 @@ export interface LLMClientOptions {
  */
 export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   const provider = opts.provider ?? _activeProvider;
+  // Dispatch on the registry descriptor's wire client instead of branching per
+  // provider — so a new provider that reuses an existing wire protocol (e.g.
+  // another OpenAI-compatible endpoint) needs no edit here. Byte-parity with the
+  // previous per-provider branches: anthropic+custom → 'anthropic', vertex →
+  // 'vertex', openai → 'openai'. An unregistered key falls back to the Anthropic
+  // client, matching the old `else` branch.
+  const wireClient = getProviderDescriptor(provider)?.wireClient ?? 'anthropic';
 
-  if (provider === 'openai') {
+  if (wireClient === 'openai') {
     // Boot-time tolerance: we DELIBERATELY do NOT throw here on missing
     // apiBaseURL / openaiModelId / apiKey. BYOK tenants legitimately reach
     // this codepath at boot with an empty vault — the customer is meant to
@@ -85,7 +93,7 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
     }) as unknown as Anthropic;
   }
 
-  if (provider === 'vertex') {
+  if (wireClient === 'vertex') {
     if (!_vertexCtor) {
       throw new Error('Vertex provider not initialized. Call initLLMProvider("vertex") first.');
     }

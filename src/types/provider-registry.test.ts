@@ -4,6 +4,7 @@ import {
   setOpenAIModelResolver,
   registerProvider,
   getProviderDescriptor,
+  getCacheProfile,
   resolveModelIdViaRegistry,
   MODEL_MAP,
   VERTEX_MODEL_MAP,
@@ -80,6 +81,27 @@ describe('provider registry — byte-parity resolution (PR-1a)', () => {
     });
   });
 
+  describe('CacheProfile per provider (PR-1b)', () => {
+    // Mirrors the runtime isCustomProxy split (agent.ts): only Anthropic + Vertex
+    // honour cache_control; custom + openai-compat strip it (automatic-prefix).
+    it('only Anthropic + Vertex use explicit-breakpoint', () => {
+      for (const p of ['anthropic', 'vertex'] as const) {
+        expect(getCacheProfile(p).mechanism).toBe('explicit-breakpoint');
+      }
+    });
+    it('custom + OpenAI-compatible providers use automatic-prefix', () => {
+      for (const p of ['custom', 'openai', 'mistral'] as const) {
+        expect(getCacheProfile(p).mechanism).toBe('automatic-prefix');
+      }
+    });
+    it('an unregistered key makes no caching assumption (none)', () => {
+      expect(getCacheProfile('unknown-x').mechanism).toBe('none');
+    });
+    it('the descriptor carries its cache profile', () => {
+      expect(getProviderDescriptor('mistral')?.cache.mechanism).toBe('automatic-prefix');
+    });
+  });
+
   describe('open registry — a stub registers + resolves without editing the enum', () => {
     it('a stub descriptor resolves via the registry', () => {
       registerProvider({
@@ -87,6 +109,7 @@ describe('provider registry — byte-parity resolution (PR-1a)', () => {
         wireClient: 'anthropic',
         defaultTierModels: MODEL_MAP,
         resolveModelId: () => 'stub-model-x',
+        cache: { mechanism: 'none' },
       });
       expect(getProviderDescriptor('stub-provider')?.id).toBe('stub-provider');
       expect(resolveModelIdViaRegistry('deep', 'stub-provider')).toBe('stub-model-x');

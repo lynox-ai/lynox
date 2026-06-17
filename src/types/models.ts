@@ -1,5 +1,5 @@
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
-import type { ProviderDescriptor, ProviderKey } from './provider-registry.js';
+import type { ProviderDescriptor, ProviderKey, CacheProfile } from './provider-registry.js';
 
 // === 4.1 Model Tiers & Providers ===
 
@@ -205,6 +205,15 @@ export function getProviderDescriptor(key: ProviderKey): ProviderDescriptor | un
 }
 
 /**
+ * The cache mechanism for a provider — used by the cache wiring to choose
+ * `cache_control` breakpoints (Anthropic) vs `prompt_cache_key` (OpenAI-compat).
+ * Defaults to `'none'` for an unregistered key (make no caching assumption).
+ */
+export function getCacheProfile(provider: ProviderKey): CacheProfile {
+  return PROVIDER_REGISTRY.get(provider)?.cache ?? { mechanism: 'none' };
+}
+
+/**
  * Resolve a tier to a model ID via the provider registry — the single
  * resolution path, no `if (provider === …)` branching. An unregistered key
  * degrades to the Anthropic map: no real caller passes an unknown key (the
@@ -216,18 +225,31 @@ export function resolveModelIdViaRegistry(tier: ModelTier, provider: ProviderKey
 }
 
 // Built-in descriptors — each `resolveModelId` is the verbatim pre-registry branch.
+// Cache mechanism — mirrors the runtime `isCustomProxy` split (agent.ts:352,
+// 1128-1140): only Anthropic + Vertex honour block-level `cache_control`
+// breakpoints (explicit-breakpoint). custom AND openai-compat proxies (incl.
+// Mistral) STRIP cache_control and rely on the provider's own automatic prefix
+// caching (automatic-prefix → a `prompt_cache_key`, PR-3 wiring). Note this is a
+// distinct axis from `wireClient`: custom uses the Anthropic SDK client yet
+// caches automatic-prefix.
 registerProvider({
   id: 'anthropic', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
   resolveModelId: (tier) => MODEL_MAP[tier],
+  cache: { mechanism: 'explicit-breakpoint' },
 });
 registerProvider({
   id: 'vertex', wireClient: 'vertex', defaultTierModels: VERTEX_MODEL_MAP,
   resolveModelId: (tier) => VERTEX_MODEL_MAP[tier],
+  cache: { mechanism: 'explicit-breakpoint' },
 });
 registerProvider({
-  // 'custom' (LiteLLM etc.) uses standard Anthropic model IDs — the proxy maps them.
+  // 'custom' (LiteLLM etc.) uses the Anthropic SDK client + model IDs (the proxy
+  // maps them) — hence wireClient:'anthropic'. But the engine treats it as a
+  // custom proxy and STRIPS cache_control (agent.ts:1140), so cache-wise it is
+  // automatic-prefix like openai, NOT explicit-breakpoint.
   id: 'custom', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
   resolveModelId: (tier) => MODEL_MAP[tier],
+  cache: { mechanism: 'automatic-prefix' },
 });
 registerProvider({
   // OpenAI-compatible providers: prefer the active openai tier→map (bootstrapped
@@ -237,6 +259,7 @@ registerProvider({
   // still applies. Verbatim 3-stage fallback.
   id: 'openai', wireClient: 'openai', defaultTierModels: MODEL_MAP,
   resolveModelId: (tier) => _openaiModelMap?.[tier] ?? _openaiFallbackModelId ?? MODEL_MAP[tier],
+  cache: { mechanism: 'automatic-prefix' },
 });
 registerProvider({
   // Mistral as a FIRST-CLASS identity (`id:'mistral'`), wire path = openai.
@@ -245,6 +268,7 @@ registerProvider({
   // existing resolution. It gives Mistral a real registry identity for later PRs.
   id: 'mistral', wireClient: 'openai', defaultTierModels: MISTRAL_MODEL_MAP,
   resolveModelId: (tier) => MISTRAL_MODEL_MAP[tier],
+  cache: { mechanism: 'automatic-prefix' },
 });
 
 /**
