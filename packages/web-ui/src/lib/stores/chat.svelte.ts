@@ -996,6 +996,17 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// Refresh thread list so sidebar reflects updated ordering
 	void loadThreads();
 
+	// The first-turn auto-title is written server-side asynchronously (a fast-tier
+	// LLM call landing ~1-3s after the run ends), so the loadThreads above — and the
+	// early one on first output — race ahead of it and pick up only the naive
+	// placeholder title. Re-poll a couple of times on a new thread's first turn so
+	// the upgraded title surfaces live in the sidebar + header without a manual
+	// refresh. Safe: the server's no-clobber guard means a manual rename still wins.
+	if (userMsgIdx === 0) {
+		setTimeout(() => { void loadThreads(); }, 2500);
+		setTimeout(() => { void loadThreads(); }, 6000);
+	}
+
 	// Process queue: send next queued message
 	if (messageQueue.length > 0) {
 		const next = messageQueue.shift()!;
