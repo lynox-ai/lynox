@@ -148,6 +148,10 @@ export const LynoxUserConfigSchema = z.object({
   experience:              z.enum(['business', 'developer']).optional(),
   max_tool_result_chars:   z.number().min(1_000).max(500_000).optional(),
   tool_result_blob_threshold_chars: z.number().min(256).max(500_000).optional(),
+  // Context-cost Slice 0: opt-in per-turn composition logging to
+  // ~/.lynox/context-cost.jsonl (ground-truth context breakdown for the
+  // cost-cut investigation). Off by default; zero overhead when unset.
+  context_cost_log:        z.boolean().optional(),
   knowledge_graph_enabled: z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),

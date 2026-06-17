@@ -362,6 +362,14 @@ export interface LynoxUserConfig {
    * lost when `compact()` resets the message history. Default: 4096.
    */
   tool_result_blob_threshold_chars?: number | undefined;
+  /**
+   * Context-cost Slice 0: when true, the agent appends one per-turn context
+   * composition snapshot to `~/.lynox/context-cost.jsonl` (best-effort). Gives
+   * ground-truth context breakdown for the cost-cut investigation without a
+   * thread export (which is rendered display text, not the billed context).
+   * Default: false — zero overhead when unset.
+   */
+  context_cost_log?: boolean | undefined;
   /** Enable Knowledge Graph for entity-aware memory. Default: true */
   knowledge_graph_enabled?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
