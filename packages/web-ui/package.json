@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "@simplewebauthn/browser": "^13.3.0",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.9",
     "html2canvas": "^1.4.1",
     "marked": "^18.0.2",
     "mermaid": "^11.6.0",
@@ -45,7 +45,7 @@
     "svelte-check": "^4.2.1",
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
-    "vite": "^8.0.10"
+    "vite": "^8.0.16"
   },
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",
