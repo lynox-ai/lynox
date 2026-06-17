@@ -52,6 +52,7 @@ import type {
   BetaTextBlockParam,
   BetaThinkingConfigParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-key.js';
 
 export class Agent implements IAgent {
   readonly name: string;
@@ -1016,6 +1017,16 @@ export class Agent implements IAgent {
           system: systemBlocks,
           messages: outboundMessages,
           ...( this.isCustomProxy ? {} : { betas: getBetasForProvider(this.provider) }),
+          // Mistral/openai-compat prefix caching: a stable per-thread cache key
+          // for the OpenAIAdapter to salt + forward (openai-adapter.ts). Gate on
+          // the openai WIRE, not isCustomProxy: only the 'openai' provider's
+          // client IS the OpenAIAdapter — 'custom' is Anthropic-wire (a real
+          // Anthropic SDK client) which would forward this unknown key verbatim
+          // to a non-OpenAI endpoint. Cast to object — a runtime-only pass-through
+          // key the SDK's params type omits.
+          ...( shouldSendPromptCacheKey(this.provider)
+            ? ({ prompt_cache_key: buildPromptCacheKey(this.currentThreadId, this.name) } as object)
+            : {} ),
           tools: toolsDef,
         }, { signal });
 
