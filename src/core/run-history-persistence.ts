@@ -467,7 +467,7 @@ export function getPipelineStepResults(db: Database.Database, pipelineRunId: str
 
 // === Planned pipeline persistence ===
 
-export function insertPlannedPipeline(db: Database.Database, planned: { id: string; name: string; goal: string; steps: unknown[]; reasoning: string; estimatedCost: number; createdAt: string }): void {
+export function insertPlannedPipeline(db: Database.Database, planned: { id: string; name: string; goal: string; steps: unknown[]; reasoning: string; estimatedCost: number; createdAt: string; parameters?: unknown[] }): void {
   db.prepare(`
     INSERT OR REPLACE INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count)
     VALUES (?, ?, 'planned', ?, ?)

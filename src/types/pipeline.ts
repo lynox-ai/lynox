@@ -74,6 +74,14 @@ export interface PlannedPipeline {
    * Defaulted on read for legacy entries (see `tools/builtin/pipeline.ts#getPipeline`).
    */
   mode: PipelineMode;
+  /**
+   * Re-run parameters, lifted from the source `ProcessRecord` at promote time.
+   * First-class on the template (not just audit-only on `ProcessRecord`) so the
+   * run path can validate supplied values against this schema and substitute
+   * `{{params.<name>}}` deterministically. Optional + backfilled to `[]` on read
+   * so legacy rows deserialize (`backfillPlannedPipelineDefaults`).
+   */
+  parameters?: ProcessParameter[];
 }
 
 // === Process Capture ===

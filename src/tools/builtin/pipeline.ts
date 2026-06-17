@@ -32,6 +32,7 @@ const WARNED_LEGACY_MAX = 1024;
 function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipeline {
   planned.executionMode ??= 'orchestrated';
   planned.template ??= false;
+  planned.parameters ??= [];
   if (planned.mode === undefined) {
     planned.mode = inferPipelineMode(planned.steps);
     if (planned.mode === 'interactive' && !warnedLegacyIds.has(planned.id)) {
@@ -122,7 +123,9 @@ function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'st
     manifest_version: '1.1',
     name,
     triggered_by: 'pipeline-tool',
-    context: context ?? {},
+    // Always expose a `params` namespace so `{{params.<name>}}` resolves to a
+    // stable slot (empty when unparameterised; the caller's params override it).
+    context: { params: {}, ...(context ?? {}) },
     agents: steps.map(s => ({
       id: s.id,
       agent: s.id,
