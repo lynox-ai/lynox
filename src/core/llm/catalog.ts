@@ -196,6 +196,15 @@ export const LLM_CATALOG: LLMCatalog = [
     notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
   },
   {
+    provider: 'custom',
+    display_name: 'Anthropic-compatible endpoint (experimental)',
+    models: [],
+    requires_base_url: true,
+    requires_region: false,
+    default_residency: 'e.g. LiteLLM in Anthropic mode, or an Anthropic-API-compatible gateway',
+    notes: 'Experimental — wired but not regularly tested. Anthropic wire (POST /v1/messages) against a custom base URL. Model ID is free-text — the endpoint routes.',
+  },
+  {
     provider: 'openai',
     preset_id: 'openai-compat',
     display_name: 'OpenAI-compatible endpoint (experimental)',
@@ -213,15 +222,6 @@ export const LLM_CATALOG: LLMCatalog = [
     requires_region: true,
     default_residency: 'GCP region (configurable)',
     notes: 'Experimental — wired but not regularly tested. Same Claude family routed through Vertex. Requires GCP project + region.',
-  },
-  {
-    provider: 'custom',
-    display_name: 'Anthropic-compatible endpoint (experimental)',
-    models: [],
-    requires_base_url: true,
-    requires_region: false,
-    default_residency: 'e.g. LiteLLM in Anthropic mode, self-hosted Claude proxy',
-    notes: 'Experimental — wired but not regularly tested. Anthropic wire (POST /v1/messages) against a custom base URL. Model ID is free-text — the endpoint routes.',
   },
 ];
 

@@ -277,6 +277,23 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.tier_set_routing_hint': { de: 'lynox wählt automatisch — kurze, einfache Antworten laufen aufs schnelle Modell, komplexe Aufgaben aufs Hauptmodell.', en: 'lynox routes per turn — simple replies go to the small model, complex tasks to the main one.' },
 	'llm.api_key_managed_note': { de: 'API-Schlüssel werden von deinem Managed-Hosting-Plan bereitgestellt — nichts einzugeben oder zu rotieren auf dieser Seite.', en: 'API keys are provided by your managed-hosting plan — nothing to enter or rotate on this page.' },
 	'llm.default_tier_heading': { de: 'Standard-Tier',                                                           en: 'Default tier' },
+	// Provider-agnostic routing (PR-4): Standard (one provider, lynox routes per
+	// task) vs Hybrid (a model assigned per tier). No capability gating — every
+	// model is selectable; the included budget + per-model cost control spend.
+	'llm.routing.heading':    { de: 'Modell-Routing',                                                            en: 'Model routing' },
+	'llm.routing.standard':   { de: 'Standard',                                                                  en: 'Standard' },
+	'llm.routing.hybrid':     { de: 'Hybrid',                                                                    en: 'Hybrid' },
+	'llm.routing.standard_desc': { de: 'Ein Anbieter bedient alle Stufen. lynox wählt das passende Modell pro Aufgabe.', en: 'One provider serves every tier. lynox picks the right model per task.' },
+	'llm.routing.hybrid_desc':   { de: 'Weise jeder Stufe ein eigenes Modell zu.',                               en: 'Assign a specific model to each tier.' },
+	'llm.routing.budget_hint':   { de: 'Teurere Modelle verbrauchen dein Guthaben schneller — die Kosten pro Modell stehen rechts (⚡ = teuer).', en: 'Pricier models use up your balance faster — per-model cost is shown on the right (⚡ = expensive).' },
+	'llm.routing.per_tier_heading': { de: 'Modell pro Stufe',                                                       en: 'Model per tier' },
+	'llm.hybrid_keys_heading': { de: 'API-Schlüssel pro Anbieter',                                                 en: 'API keys per provider' },
+	'llm.tier.fast':          { de: 'Schnell',                                                                   en: 'Fast' },
+	'llm.tier.balanced':      { de: 'Ausgewogen',                                                                en: 'Balanced' },
+	'llm.tier.deep':          { de: 'Tief',                                                                      en: 'Deep' },
+	'llm.tier.fast_desc':     { de: 'Hohes Volumen, Orchestrierung & Klassifizierung',                           en: 'High-volume orchestration & classification' },
+	'llm.tier.balanced_desc': { de: 'Standard-Arbeitspferd für die meisten Aufgaben',                            en: 'The workhorse for most tasks' },
+	'llm.tier.deep_desc':     { de: 'Komplexes Denken & schwierige Aufgaben',                                    en: 'Complex reasoning & hard tasks' },
 	'llm.test_connection':    { de: 'Verbindung testen',                                                         en: 'Test connection' },
 	'llm.testing':            { de: 'Teste …',                                                                   en: 'Testing …' },
 	'llm.test_ok':            { de: 'Verbindung steht',                                                          en: 'Connected' },

@@ -1,6 +1,7 @@
 // Canonical provider → vault-slot map. Mirrors LLMSettings.svelte's VAULT_SLOTS.
 
 import type { LLMProvider } from '../../types/models.js';
+import type { TierSet } from '../../types/config.js';
 
 export const VAULT_SLOT_BY_PROVIDER: Readonly<Record<LLMProvider, string | null>> = Object.freeze({
   anthropic: 'ANTHROPIC_API_KEY',
@@ -81,4 +82,44 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
   if (provider === 'anthropic' && userConfig?.api_key) return userConfig.api_key;
 
   return undefined;
+}
+
+/**
+ * Resolve per-slot credentials for a hybrid Tier-Set, in-memory only — the pure
+ * core of the engine's config-load enrichment. The UI persists a slot as
+ * `{provider, model_id, api_base_url?}` with NO api_key (keys belong in the
+ * vault, never in config.json); this injects each cross-provider slot's key so
+ * `clientForTierSnapshot` can authenticate it.
+ *
+ * Rules, per tier slot:
+ *  - an explicit `api_key` (set by a power-user / managed transform) is kept;
+ *  - a SAME-provider slot is left untouched so `clientForTierSnapshot` keeps
+ *    reusing the ambient client + its key (byte-parity, no extra client);
+ *  - a CROSS-provider slot gets `resolveKey(slot.provider)` injected — or is
+ *    left key-less if nothing resolves (the adapter surfaces a 401 at request
+ *    time, the correct place, rather than us inventing a wrong key).
+ *
+ * Pure + deterministic: the caller passes a `resolveKey` closure (the engine
+ * binds it to `resolveProviderApiKey` over its secret store), so this is
+ * table-testable without a SecretStore.
+ */
+export function enrichTierSetCreds(
+  tierSet: TierSet,
+  baseProvider: LLMProvider,
+  resolveKey: (provider: LLMProvider) => string | undefined,
+): TierSet {
+  const out: TierSet = {};
+  for (const tier of ['fast', 'balanced', 'deep'] as const) {
+    const slot = tierSet[tier];
+    if (!slot) continue;
+    if (slot.api_key || slot.provider === baseProvider) {
+      out[tier] = slot;
+      continue;
+    }
+    // Hybrid slots store a catalogued LLMProvider ('anthropic' | 'openai' for
+    // the Mistral preset); the vault-slot map keys off exactly that.
+    const key = resolveKey(slot.provider as LLMProvider);
+    out[tier] = key ? { ...slot, api_key: key } : slot;
+  }
+  return out;
 }

@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider } from './llm-client.js';
-import { resolveProviderApiKey } from './llm/provider-keys.js';
+import { resolveProviderApiKey, enrichTierSetCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
@@ -743,11 +743,36 @@ export class Engine {
       : null;
     setOpenAIModelResolver({ map, fallbackModelId: fallback });
     // Sync the hybrid Tier-Set resolver too, so a routing_mode/tier_set change
-    // takes effect at bootstrap + reload without a restart (same hook).
+    // takes effect at bootstrap + reload without a restart (same hook). For
+    // hybrid we enrich each slot with its provider's vault key at this seam so
+    // a cross-provider slot authenticates WITHOUT the key ever being persisted
+    // to config.json (keys stay in the vault).
+    const tierSet = this.userConfig.routing_mode === 'hybrid' && this.userConfig.tier_set
+      ? this._enrichTierSetCreds(this.userConfig.tier_set)
+      : this.userConfig.tier_set;
     setTierSetResolver({
       routingMode: this.userConfig.routing_mode,
-      tierSet: this.userConfig.tier_set,
+      tierSet,
     });
+  }
+
+  /**
+   * Resolve per-slot credentials for a hybrid Tier-Set from the vault (env >
+   * vault), in-memory only. A SAME-provider slot is left untouched so
+   * `clientForTierSnapshot` keeps reusing the ambient client + its key
+   * (byte-parity). A CROSS-provider slot with no explicit key gets the target
+   * provider's vault key injected (e.g. a `fast→Mistral` slot picks up
+   * `MISTRAL_API_KEY`), so the UI never has to store API keys in config.json —
+   * it persists only `{provider, model_id, api_base_url}` and the key lives in
+   * the vault under its canonical per-provider slot.
+   */
+  private _enrichTierSetCreds(
+    tierSet: import('../types/index.js').TierSet,
+  ): import('../types/index.js').TierSet {
+    const base = this.userConfig.provider ?? 'anthropic';
+    return enrichTierSetCreds(tierSet, base, (provider) =>
+      resolveProviderApiKey({ provider, secretStore: this.secretStore, userConfig: this.userConfig }),
+    );
   }
 
   /** RunHistory, ThreadStore, PromptStore, SecurityAudit, persistent budget + HTTP rate limits. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
