@@ -2214,13 +2214,31 @@ describe('Agent — context_cost_log live hook (wiring)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The hook append is fire-and-forget — poll briefly for the flushed file. */
-  async function waitForFile(file: string): Promise<boolean> {
-    for (let i = 0; i < 40; i++) {
-      if (existsSync(file)) return true;
-      await new Promise((r) => setTimeout(r, 5));
+  interface LoggedEntry {
+    occupancyTokens: number; cacheReadTokens: number; model: string; messageCount: number;
+  }
+  /**
+   * The hook append is fire-and-forget, so existence and content-flush race. Poll
+   * until the first COMPLETE (parseable) JSON line is present — existsSync alone
+   * is not enough (the file can exist mid-write, and `JSON.parse('')` would throw
+   * on slow CI I/O; that race is what failed CI run 27727394051).
+   */
+  async function readLoggedEntryWhenReady(file: string): Promise<LoggedEntry | null> {
+    for (let i = 0; i < 200; i++) {
+      if (existsSync(file)) {
+        const raw = readFileSync(file, 'utf8').trim();
+        const first = raw.split('\n')[0];
+        if (first) {
+          try {
+            return JSON.parse(first) as LoggedEntry;
+          } catch {
+            // partial write — keep polling
+          }
+        }
+      }
+      await new Promise((r) => setTimeout(r, 10));
     }
-    return existsSync(file);
+    return null;
   }
 
   it('appends a real composition snapshot after a turn when the flag is ON', async () => {
@@ -2241,18 +2259,13 @@ describe('Agent — context_cost_log live hook (wiring)', () => {
     });
     await agent.send('Hi');
 
-    const file = join(dir, CONTEXT_COST_LOG_FILE);
-    expect(await waitForFile(file)).toBe(true);
-    const lines = readFileSync(file, 'utf8').trim().split('\n');
-    expect(lines).toHaveLength(1);
-    const entry = JSON.parse(lines[0]!) as {
-      occupancyTokens: number; cacheReadTokens: number; model: string; messageCount: number;
-    };
+    const entry = await readLoggedEntryWhenReady(join(dir, CONTEXT_COST_LOG_FILE));
+    expect(entry).not.toBeNull();
     // occupancy = realInput = input + cache_read + cache_write (80_000 + 1_000).
-    expect(entry.occupancyTokens).toBe(81_000);
-    expect(entry.cacheReadTokens).toBe(1_000);
-    expect(entry.model).toBe('claude-sonnet-4-6');
-    expect(entry.messageCount).toBeGreaterThan(0);
+    expect(entry!.occupancyTokens).toBe(81_000);
+    expect(entry!.cacheReadTokens).toBe(1_000);
+    expect(entry!.model).toBe('claude-sonnet-4-6');
+    expect(entry!.messageCount).toBeGreaterThan(0);
   });
 
   it('writes nothing when the flag is OFF (default) — no graceful-disable masking', async () => {
