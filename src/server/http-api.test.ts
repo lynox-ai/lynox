@@ -2952,6 +2952,7 @@ describe('LynoxHTTPApi', () => {
         ['max_context_window_tokens', 200_000],
         ['custom_endpoints', [{ id: 'mistral-eu', name: 'Mistral EU', base_url: 'https://api.mistral.ai/v1' }]],
         ['disabled_tools', ['web_search']],
+        ['context_cost_log', true],
       ])(
         'PUT /api/config accepts user-pref %s in managed mode',
         async (field, value) => {
