@@ -39,10 +39,10 @@ function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
   return record.steps.map(step => {
     const paramHints = record.parameters
       .filter(p => {
-        const templateStr = JSON.stringify(step.inputTemplate);
-        return templateStr.includes(p.name);
+        const placeholder = `{{params.${p.name}}}`;
+        return step.description.includes(placeholder) || JSON.stringify(step.inputTemplate).includes(placeholder);
       })
-      .map(p => `{{${p.name}}}`)
+      .map(p => `{{params.${p.name}}}`)
       .join(', ');
 
     const task = paramHints

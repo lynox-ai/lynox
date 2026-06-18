@@ -112,6 +112,13 @@ export interface ProcessRecord {
   steps: ProcessStep[];
   parameters: ProcessParameter[];
   createdAt: string;
+  /**
+   * Set by the capture-time guard when a parameter value leaked into a step
+   * description in a way it could not safely auto-substitute (multiple or
+   * too-short occurrences) → the template must be human-reviewed before
+   * unattended re-use.
+   */
+  needsReview?: boolean;
   promotedToPipelineId?: string | undefined;
 }
 
