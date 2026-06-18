@@ -1262,6 +1262,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.steps_many': { de: '{count} Schritte', en: '{count} steps' },
 	'workflow_library.run': { de: 'Ausführen', en: 'Run' },
 	'workflow_library.running': { de: 'Läuft...', en: 'Running...' },
+	'workflow_library.params_hint': { de: 'Werte für diesen Lauf eingeben:', en: 'Enter values for this run:' },
+	'workflow_library.step_failed': { de: 'Schritt fehlgeschlagen:', en: 'Step failed:' },
 	'workflow_library.rename': { de: 'Umbenennen', en: 'Rename' },
 	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },
 	'workflow_library.save': { de: 'Speichern', en: 'Save' },

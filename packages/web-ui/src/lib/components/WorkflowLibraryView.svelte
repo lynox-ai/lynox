@@ -5,12 +5,19 @@
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
+	interface WorkflowParam {
+		name: string;
+		description: string;
+		type: string;
+	}
+
 	interface SavedWorkflow {
 		id: string;
 		name: string;
 		description: string;
 		step_count: number;
 		steps: { id: string; task: string }[];
+		parameters: WorkflowParam[];
 		created_at: string;
 	}
 
@@ -24,6 +31,26 @@
 	let editingId = $state<string | null>(null);
 	let editName = $state('');
 	let expandedCards = $state<Set<string>>(new Set());
+
+	// Parameter-form state: which workflow's re-run form is open + the values.
+	let paramFormId = $state<string | null>(null);
+	let paramValues = $state<Record<string, string>>({});
+
+	function requestRun(wf: SavedWorkflow): void {
+		if (runningId) return;
+		if (wf.parameters.length > 0) {
+			// Open the form so the user supplies + reviews values before the run.
+			paramValues = Object.fromEntries(wf.parameters.map((p) => [p.name, '']));
+			paramFormId = wf.id;
+		} else {
+			void runWorkflow(wf.id);
+		}
+	}
+
+	function cancelParamForm(): void {
+		paramFormId = null;
+		paramValues = {};
+	}
 
 	function toggleCard(id: string): void {
 		const next = new Set(expandedCards);
@@ -45,23 +72,32 @@
 		loading = false;
 	}
 
-	async function runWorkflow(id: string): Promise<void> {
+	async function runWorkflow(id: string, params?: Record<string, string>): Promise<void> {
 		if (runningId) return;
 		runningId = id;
 		error = '';
 		notice = t('workflow_library.run_started');
 		try {
-			const res = await fetch(`${getApiBase()}/workflows/${id}/run`, { method: 'POST' });
+			const res = await fetch(`${getApiBase()}/workflows/${id}/run`, {
+				method: 'POST',
+				...(params ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ params }) } : {}),
+			});
 			if (!res.ok) {
 				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
 				error = msg?.error ?? t('workflow_library.run_failed');
 				notice = '';
 				return;
 			}
-			const data = (await res.json()) as { status?: string };
-			notice = data.status === 'completed'
-				? t('workflow_library.run_done')
-				: t('workflow_library.run_failed');
+			const data = (await res.json()) as { status?: string; failedStep?: { id: string; error: string } };
+			if (data.status === 'completed') {
+				notice = t('workflow_library.run_done');
+				paramFormId = null; // close the form on a successful run
+			} else {
+				notice = '';
+				error = data.failedStep
+					? `${t('workflow_library.step_failed')} ${data.failedStep.id}: ${data.failedStep.error}`
+					: t('workflow_library.run_failed');
+			}
 		} catch {
 			error = t('workflow_library.run_failed');
 			notice = '';
@@ -181,7 +217,7 @@
 								<button onclick={cancelRename} class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>
 							{:else}
 								<button
-									onclick={() => void runWorkflow(wf.id)}
+									onclick={() => requestRun(wf)}
 									disabled={runningId !== null}
 									class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
 								>
@@ -198,6 +234,26 @@
 								</button>
 							{/if}
 						</div>
+						{#if paramFormId === wf.id}
+							<div class="mt-2 space-y-2 rounded-[var(--radius-sm)] border border-border bg-bg-muted/50 p-2">
+								<p class="text-[10px] text-text-muted">{t('workflow_library.params_hint')}</p>
+								{#each wf.parameters as p (p.name)}
+									<label class="block text-[10px] text-text-muted">
+										{p.description || p.name}
+										<input
+											type={p.type === 'number' ? 'number' : p.type === 'date' ? 'date' : 'text'}
+											bind:value={paramValues[p.name]}
+											placeholder={p.name}
+											class="mt-0.5 w-full rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-xs text-text"
+										/>
+									</label>
+								{/each}
+								<div class="flex gap-1">
+									<button onclick={() => void runWorkflow(wf.id, paramValues)} disabled={runningId !== null} class="rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 disabled:opacity-50">{t('workflow_library.run')}</button>
+									<button onclick={cancelParamForm} class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg">{t('workflow_library.cancel')}</button>
+								</div>
+							</div>
+						{/if}
 					</div>
 				</div>
 			{/each}
