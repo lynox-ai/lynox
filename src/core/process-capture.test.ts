@@ -3,9 +3,11 @@ import {
   captureProcess,
   collapseConsecutiveDuplicates,
   buildCanonicalSteps,
+  applyCaptureGuard,
 } from './process-capture.js';
 import type { StepAnnotation } from './process-capture.js';
 import type { ToolCallRecord } from './run-history.js';
+import type { ProcessStep } from '../types/index.js';
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/models.js';
 
 // Mock Anthropic SDK (class pattern — see dag-planner.test.ts)
@@ -548,5 +550,99 @@ describe('captureProcess — provider plumbing', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
     const body = mockCreate.mock.calls[0]![0] as { model: string };
     expect(body.model.startsWith('claude-haiku')).toBe(true);
+  });
+});
+
+describe('applyCaptureGuard (capture-time guard)', () => {
+  const mkStep = (order: number, description: string): ProcessStep => ({
+    order, tool: 'bash', description, inputTemplate: {}, dependsOn: [],
+  });
+  const cap = (name: string, exampleValue?: string) => ({
+    param: { name, description: '', type: 'string' as const, source: 'user_input' as const },
+    exampleValue,
+  });
+
+  it('no-op when the value is absent (model templatised it)', () => {
+    const r = applyCaptureGuard([mkStep(0, 'audit {{params.client}}')], [cap('client', 'Acme Corp')]);
+    expect(r.needsReview).toBe(false);
+    expect(r.steps[0]!.description).toBe('audit {{params.client}}');
+  });
+
+  it('deterministically substitutes a single-occurrence leak', () => {
+    const r = applyCaptureGuard([mkStep(0, 'audit Acme Corp ad spend')], [cap('client', 'Acme Corp')]);
+    expect(r.needsReview).toBe(false);
+    expect(r.steps[0]!.description).toBe('audit {{params.client}} ad spend');
+  });
+
+  it('substitutes all occurrences of a multi-occurrence leak and flags review', () => {
+    const r = applyCaptureGuard([mkStep(0, 'Acme Corp vs Acme Corp')], [cap('client', 'Acme Corp')]);
+    expect(r.needsReview).toBe(true); // multiple matches → human verifies
+    expect(r.steps[0]!.description).toBe('{{params.client}} vs {{params.client}}');
+  });
+
+  it('does not self-corrupt: a later value cannot match an inserted placeholder', () => {
+    const r = applyCaptureGuard(
+      [mkStep(0, 'Globex hires staff')],
+      [cap('company', 'Globex'), cap('x', 'params')],
+    );
+    // "params" is absent from the ORIGINAL description → no spurious match into
+    // the inserted {{params.company}} token.
+    expect(r.steps[0]!.description).toBe('{{params.company}} hires staff');
+  });
+
+  it('flags needsReview on a too-short value instead of substituting', () => {
+    const r = applyCaptureGuard([mkStep(0, 'region EU report')], [cap('region', 'EU')]);
+    expect(r.needsReview).toBe(true);
+    expect(r.steps[0]!.description).toBe('region EU report');
+  });
+
+  it('flags needsReview on a sub-token match instead of substituting inside a word', () => {
+    const r = applyCaptureGuard([mkStep(0, 'audit Corporation report')], [cap('client', 'Corp')]);
+    expect(r.needsReview).toBe(true);
+    expect(r.steps[0]!.description).toBe('audit Corporation report');
+  });
+
+  it('skips a param with no example value', () => {
+    const r = applyCaptureGuard([mkStep(0, 'audit Acme Corp')], [cap('client')]);
+    expect(r.needsReview).toBe(false);
+    expect(r.steps[0]!.description).toBe('audit Acme Corp');
+  });
+});
+
+describe('captureProcess — guard integration (no value at rest)', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('substitutes a single-occurrence leak and never persists the example value', async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{
+        type: 'tool_use', name: 'extract_process',
+        input: {
+          steps: [{ index: 0, description: 'audit Acme Corp ad spend', inputTemplate: {}, dependsOn: [] }],
+          parameters: [{ name: 'client', description: 'the client', type: 'string', exampleValue: 'Acme Corp', source: 'user_input' }],
+        },
+      }],
+    });
+    const record = await captureProcess('run1', 'Audit', [call('bash', '{"command":"x"}', 0)], { apiKey: 'k' });
+    expect(record.steps[0]!.description).toBe('audit {{params.client}} ad spend');
+    expect(record.needsReview).toBeFalsy();
+    // The example value is transient — it must not survive on the persisted record.
+    expect(JSON.stringify(record)).not.toContain('Acme Corp');
+    expect(JSON.stringify(record)).not.toContain('exampleValue');
+    expect(record.parameters[0]).toEqual({ name: 'client', description: 'the client', type: 'string', source: 'user_input' });
+  });
+
+  it('removes a multi-occurrence leak from the record and flags review', async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{
+        type: 'tool_use', name: 'extract_process',
+        input: {
+          steps: [{ index: 0, description: 'Acme Corp report for Acme Corp', inputTemplate: {}, dependsOn: [] }],
+          parameters: [{ name: 'client', description: '', type: 'string', exampleValue: 'Acme Corp', source: 'user_input' }],
+        },
+      }],
+    });
+    const record = await captureProcess('run1', 'Audit', [call('bash', '{"command":"x"}', 0)], { apiKey: 'k' });
+    expect(record.needsReview).toBe(true);
+    expect(JSON.stringify(record)).not.toContain('Acme Corp'); // value removed, not left at rest
   });
 });

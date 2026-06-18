@@ -161,19 +161,19 @@ Your ONLY job is to ANNOTATE each numbered entry. You must return exactly one an
 
 For each numbered call, provide:
 1. "index": the index of the call you are annotating (copied verbatim from the input)
-2. "description": a plain-language description of what this step does (for a business user, not a developer)
-3. "inputTemplate": a JSON object capturing the call's input values, with values likely to change between runs left as placeholders
+2. "description": a plain-language description of what this step does (for a business user, not a developer). For any value that is one of the workflow parameters below, write a {{params.<name>}} placeholder INSTEAD of the literal value (e.g. "audit {{params.client}}'s spend", NOT "audit Acme Corp's spend").
+3. "inputTemplate": a JSON object capturing the call's input values, with parameter values written as {{params.<name>}} placeholders
 4. "dependsOn": the indexes of earlier calls whose output this call depends on (an array, possibly empty)
 
-Also identify the workflow's parameters — input values likely to CHANGE between runs. Classify each as:
+Also identify the workflow's parameters — input values likely to CHANGE between runs. For each, give an "exampleValue": the concrete value EXACTLY as it appeared in THIS run (used only to verify the placeholders, never stored). Classify each as:
 - "user_input": value the user provides each time (e.g., client name, specific query)
 - "relative_date": time-based value that should be relative (e.g., "last month" not "March 2026")
 - "context": value from the environment or previous step output
 
 Return a JSON object with this exact structure:
 {
-  "steps": [{ "index": 0, "description": "plain language", "inputTemplate": {}, "dependsOn": [] }],
-  "parameters": [{ "name": "param_name", "description": "what this is", "type": "string|number|date", "defaultValue": null, "source": "user_input|relative_date|context" }]
+  "steps": [{ "index": 0, "description": "audit {{params.client}}", "inputTemplate": {}, "dependsOn": [] }],
+  "parameters": [{ "name": "param_name", "description": "what this is", "type": "string|number|date", "defaultValue": null, "exampleValue": "the value from this run", "source": "user_input|relative_date|context" }]
 }`;
 
 const EXTRACT_TOOL = {
@@ -205,6 +205,7 @@ const EXTRACT_TOOL = {
             description: { type: 'string' as const },
             type: { type: 'string' as const, enum: ['string', 'number', 'date'] },
             defaultValue: {},
+            exampleValue: { type: 'string' as const },
             source: { type: 'string' as const, enum: ['user_input', 'relative_date', 'context'] },
           },
           required: ['name', 'description', 'type', 'source'],
@@ -265,7 +266,14 @@ const PARAM_SOURCES = new Set<string>(['user_input', 'relative_date', 'context']
  * type/source is rejected so a malformed parameter cannot reach
  * `ProcessRecord.parameters` and the downstream param-hint logic.
  */
-function asProcessParameter(value: unknown): ProcessParameter | null {
+/** A captured parameter plus its transient example value — used by the
+ *  capture-time guard, NEVER persisted on the ProcessRecord. */
+interface CapturedParam {
+  param: ProcessParameter;
+  exampleValue?: string;
+}
+
+function asCapturedParam(value: unknown): CapturedParam | null {
   if (typeof value !== 'object' || value === null) return null;
   const obj = value as Record<string, unknown>;
   if (typeof obj.name !== 'string' || obj.name.length === 0) return null;
@@ -278,7 +286,89 @@ function asProcessParameter(value: unknown): ProcessParameter | null {
     source: obj.source as 'user_input' | 'relative_date' | 'context',
   };
   if (obj.defaultValue !== undefined) param.defaultValue = obj.defaultValue;
-  return param;
+  const exampleValue = typeof obj.exampleValue === 'string' && obj.exampleValue.length > 0
+    ? obj.exampleValue
+    : undefined;
+  return exampleValue !== undefined ? { param, exampleValue } : { param };
+}
+
+/** Min length of an example value we will auto-substitute on a single-occurrence
+ *  leak — shorter values (e.g. "EU", "06") risk matching unrelated text, so they
+ *  flag `needsReview` instead. */
+const MIN_AUTOSUB_LEN = 4;
+
+/**
+ * Capture-time guard (deterministic): catch any parameter value that LEAKED
+ * into a step description because the model failed to templatise it. Runs at
+ * capture, where the example values are transiently available — the values are
+ * NEVER persisted.
+ *
+ * - value absent from the description → model templatised it (happy path) or the
+ *   step doesn't use it → no-op.
+ * - exactly one occurrence AND length >= MIN_AUTOSUB_LEN → deterministically
+ *   replace it with the `{{params.<name>}}` placeholder.
+ * - multiple occurrences, or a value too short to match safely → flag the record
+ *   `needsReview` (no risky auto-substitution).
+ */
+/** Indices of every word-delimited occurrence of `value` in `text` (a match not
+ *  flanked by word characters — so "Corp" inside "Corporation" is excluded). */
+function wordDelimitedOccurrences(text: string, value: string): number[] {
+  const idxs: number[] = [];
+  for (let from = 0; ; ) {
+    const i = text.indexOf(value, from);
+    if (i === -1) break;
+    const before = i > 0 ? text[i - 1]! : '';
+    const after = text[i + value.length] ?? '';
+    if (!/\w/.test(before) && !/\w/.test(after)) idxs.push(i);
+    from = i + value.length;
+  }
+  return idxs;
+}
+
+export function applyCaptureGuard(
+  steps: ProcessStep[],
+  captured: CapturedParam[],
+): { steps: ProcessStep[]; needsReview: boolean } {
+  let needsReview = false;
+  const guarded = steps.map(step => {
+    const original = step.description;
+    // Collect substitution spans against the ORIGINAL description (never the
+    // mutating copy) so an inserted `{{params.…}}` token can't self-match a
+    // later parameter value.
+    const spans: Array<{ start: number; end: number; name: string }> = [];
+    for (const { param, exampleValue } of captured) {
+      if (exampleValue === undefined) continue;
+      const total = original.split(exampleValue).length - 1;
+      if (total === 0) continue;
+      const hits = exampleValue.length >= MIN_AUTOSUB_LEN
+        ? wordDelimitedOccurrences(original, exampleValue)
+        : [];
+      // Anything we can't cleanly remove (too short, sub-token, a leftover
+      // occurrence) means a literal value may persist → flag for human review.
+      // Multiple matches are replaced too, but still flagged so a human verifies.
+      if (hits.length !== total || exampleValue.length < MIN_AUTOSUB_LEN || hits.length > 1) {
+        needsReview = true;
+      }
+      for (const start of hits) spans.push({ start, end: start + exampleValue.length, name: param.name });
+    }
+    if (spans.length === 0) return step;
+    // Drop overlapping spans (one value's match sits inside another's) → review.
+    spans.sort((a, b) => a.start - b.start);
+    const safe: typeof spans = [];
+    for (const span of spans) {
+      const prev = safe[safe.length - 1];
+      if (prev && span.start < prev.end) { needsReview = true; continue; }
+      safe.push(span);
+    }
+    if (safe.length === 0) return step;
+    // Apply right-to-left so earlier indices stay valid.
+    let description = original;
+    for (const span of [...safe].reverse()) {
+      description = description.slice(0, span.start) + `{{params.${span.name}}}` + description.slice(span.end);
+    }
+    return { ...step, description };
+  });
+  return { steps: guarded, needsReview };
 }
 
 /**
@@ -398,9 +488,10 @@ export async function captureProcess(
     tool_choice: { type: 'tool', name: 'extract_process' },
   });
 
-  // Extract annotations + parameters from the tool use response.
+  // Extract annotations + parameters (with transient example values) from the
+  // tool use response.
   const annotations: StepAnnotation[] = [];
-  const parameters: ProcessParameter[] = [];
+  const captured: CapturedParam[] = [];
 
   for (const block of response.content) {
     if (block.type === 'tool_use' && block.name === 'extract_process') {
@@ -413,23 +504,27 @@ export async function captureProcess(
       }
       if (Array.isArray(input.parameters)) {
         for (const raw of input.parameters) {
-          const param = asProcessParameter(raw);
-          if (param) parameters.push(param);
+          const cp = asCapturedParam(raw);
+          if (cp) captured.push(cp);
         }
       }
     }
   }
 
-  // Build the final step list deterministically — one step per canonical call.
-  const steps = buildCanonicalSteps(canonicalCalls, annotations);
+  // Build the deterministic step list, then run the capture-time guard against
+  // the transient example values (the values are never persisted).
+  const rawSteps = buildCanonicalSteps(canonicalCalls, annotations);
+  const { steps, needsReview } = applyCaptureGuard(rawSteps, captured);
 
-  return {
+  const record: ProcessRecord = {
     id: randomUUID(),
     name,
     description: options.description ?? '',
     sourceRunId: runId,
     steps,
-    parameters,
+    parameters: captured.map(c => c.param), // persist the schema only — no example values
     createdAt: new Date().toISOString(),
   };
+  if (needsReview) record.needsReview = true;
+  return record;
 }
