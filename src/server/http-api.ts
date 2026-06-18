@@ -3583,11 +3583,11 @@ export class LynoxHTTPApi {
       // LIMIT would let non-template planned rows (un-run plans) starve the
       // result. Scan a generous fixed window, then slice to `limit`.
       const rows = history.getPlannedPipelines(500);
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; created_at: string }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string }> = [];
       for (const row of rows) {
-        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
+        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown };
         try {
-          parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
+          parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown };
         } catch { continue; } // skip corrupt rows
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
@@ -3600,12 +3600,23 @@ export class LynoxHTTPApi {
                 ? [{ id: (s as { id: string }).id, task: (s as { task: string }).task }]
                 : [])
           : [];
+        const parameters = Array.isArray(parsed.parameters)
+          ? parsed.parameters.flatMap((p) =>
+              p && typeof p === 'object' && typeof (p as { name?: unknown }).name === 'string'
+                ? [{
+                    name: (p as { name: string }).name,
+                    description: typeof (p as { description?: unknown }).description === 'string' ? (p as { description: string }).description : '',
+                    type: typeof (p as { type?: unknown }).type === 'string' ? (p as { type: string }).type : 'string',
+                  }]
+                : [])
+          : [];
         workflows.push({
           id: row.id,
           name: typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : row.manifest_name,
           description: typeof parsed.goal === 'string' ? parsed.goal : '',
           step_count: Array.isArray(parsed.steps) ? parsed.steps.length : row.step_count,
           steps,
+          parameters,
           created_at: row.started_at,
         });
       }
@@ -3628,7 +3639,7 @@ export class LynoxHTTPApi {
         errorResponse(res, code, result.error ?? 'Workflow run failed');
         return;
       }
-      jsonResponse(res, 200, { ran: true, runId: result.runId, status: result.status });
+      jsonResponse(res, 200, { ran: true, runId: result.runId, status: result.status, failedStep: result.failedStep });
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/workflows/:id', async (_req, res, params, body) => {

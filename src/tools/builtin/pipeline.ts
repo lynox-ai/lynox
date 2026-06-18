@@ -528,6 +528,9 @@ export interface RunSavedWorkflowResult {
   /** Total USD cost of the run, so a caller can report it to the managed
    *  credit hook (onAfterRun) — the pipeline path otherwise bypasses billing. */
   costUsd?: number | undefined;
+  /** The first failed step (id + error), surfaced when the run did not complete
+   *  so the UI can show which step failed instead of a generic "run failed". */
+  failedStep?: { id: string; error: string } | undefined;
 }
 
 /**
@@ -587,7 +590,16 @@ export async function runSavedWorkflow(
     const state = await runManifest(manifest, config, { runHistory });
     persistPipelineRun(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
-    return { ok: true, runId: state.runId, status: state.status, costUsd };
+    const failed = state.status !== 'completed'
+      ? [...state.outputs.values()].find(o => o.error)
+      : undefined;
+    return {
+      ok: true,
+      runId: state.runId,
+      status: state.status,
+      costUsd,
+      ...(failed?.error ? { failedStep: { id: failed.stepId, error: failed.error } } : {}),
+    };
   } catch (err: unknown) {
     return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
   }

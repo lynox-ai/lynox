@@ -2472,6 +2472,28 @@ describe('LynoxHTTPApi', () => {
       ]);
     });
 
+    it('GET /api/workflows/library surfaces the parameter schema (name/description/type only)', async () => {
+      mockHistoryGetPlannedPipelines.mockReturnValue([
+        { id: 'wf-p', manifest_name: 'Audit', manifest_json: JSON.stringify({
+          template: true, name: 'Audit', goal: 'g', steps: [{ id: 's1', task: 'audit {{params.client}}' }],
+          parameters: [{ name: 'client', description: 'the client', type: 'string', defaultValue: 'Acme', source: 'user_input' }],
+        }), step_count: 1, started_at: '2026-06-18T00:00:00Z' },
+      ]);
+      const res = await jsonFetch('/api/workflows/library');
+      const body = await res.json() as { workflows: Array<{ parameters: Array<{ name: string; description: string; type: string }> }> };
+      // defaultValue/source are stripped — the UI only needs the form schema.
+      expect(body.workflows[0]!.parameters).toEqual([{ name: 'client', description: 'the client', type: 'string' }]);
+    });
+
+    it('GET /api/workflows/library defaults parameters to [] when absent', async () => {
+      mockHistoryGetPlannedPipelines.mockReturnValue([
+        { id: 'wf-np', manifest_name: 'NoParams', manifest_json: JSON.stringify({ template: true, name: 'NoParams', goal: 'g', steps: [{ id: 's1', task: 'x' }] }), step_count: 1, started_at: '2026-06-18T00:00:00Z' },
+      ]);
+      const res = await jsonFetch('/api/workflows/library');
+      const body = await res.json() as { workflows: Array<{ parameters: unknown[] }> };
+      expect(body.workflows[0]!.parameters).toEqual([]);
+    });
+
     it('GET /api/workflows/library drops malformed steps, keeps raw step_count', async () => {
       mockHistoryGetPlannedPipelines.mockReturnValue([
         { id: 'wf-m', manifest_name: 'Mixed', manifest_json: JSON.stringify({
@@ -2537,6 +2559,15 @@ describe('LynoxHTTPApi', () => {
       mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow execution failed: boom' });
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
       expect(res.status).toBe(400);
+    });
+
+    it('POST /api/workflows/:id/run surfaces the failed step on a step-level failure', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-f', status: 'failed', failedStep: { id: 'step-2', error: 'timeout' } });
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { status: string; failedStep?: { id: string; error: string } };
+      expect(body.status).toBe('failed');
+      expect(body.failedStep).toEqual({ id: 'step-2', error: 'timeout' });
     });
 
     it('PATCH /api/workflows/:id renames a saved workflow and evicts the cache', async () => {
