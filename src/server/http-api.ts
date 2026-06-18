@@ -243,6 +243,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'max_context_window_tokens',  // LLM Advanced radios (200k / 500k / 1M) — caps the agent trim budget, no cost / capability impact on CP.
   'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
   'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
+  'context_cost_log',           // Diagnostic: opt-in content-free per-turn composition log to the instance's own data dir. Shapes only the user's own session, writes no content, never widens blast radius.
   // P3-FOLLOWUP-HOTFIX: provider switching between curated managed providers
   // (Anthropic + Mistral; future: openai-native). The value-range guard at
   // `enforceManagedProviderConstraints()` below caps the allowed set —
