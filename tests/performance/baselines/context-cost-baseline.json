@@ -1,0 +1,340 @@
+{
+  "generated": "SYNTHETIC — modeled per-turn sizes + duplication; cross-check the duplication share against the live context-cost.jsonl on a real thread.",
+  "params": {
+    "turns": 40,
+    "overheadTokens": 9000,
+    "charsPerToken": 3.5,
+    "cacheReadUsdPerMtok": 0.3,
+    "largeDocChars": 80000,
+    "smallResultChars": 2000,
+    "refetchEvery": 3,
+    "l1ThresholdTokens": 120000,
+    "l1SummaryTokens": 2500
+  },
+  "baseline": {
+    "totalCacheReadTokens": 10178711,
+    "totalCacheReadCostUsd": 3.05,
+    "avgContextTokensPerTurn": 254468,
+    "finalOccupancyTokens": 498838,
+    "finalComposition": {
+      "totalBytes": 1714433,
+      "categories": {
+        "userText": 16080,
+        "assistantText": 49000,
+        "toolUse": 3482,
+        "toolResult": 1642351,
+        "image": 0,
+        "structural": 3520
+      },
+      "toolResultByTool": {
+        "http_request": {
+          "bytes": 41175,
+          "count": 20
+        },
+        "web_fetch": {
+          "bytes": 1601176,
+          "count": 20
+        }
+      },
+      "duplicateResidentBytes": 480353,
+      "duplicateSharePctOfTotal": 28
+    }
+  },
+  "projections": {
+    "l1CostAwareCompaction": {
+      "thresholdTokens": 120000,
+      "compactions": 4,
+      "totalCacheReadCostUsd": 0.75,
+      "savedUsd": 2.3,
+      "savedPct": 75.4
+    },
+    "l3ToolResultDedup": {
+      "duplicateResidentTokensOverThread": 2744870,
+      "totalCacheReadCostUsd": 2.23,
+      "savedUsd": 0.82,
+      "savedPct": 27
+    }
+  },
+  "perTurn": [
+    {
+      "turn": 1,
+      "messageCount": 3,
+      "occupancyTokens": 10103,
+      "cacheReadCostUsd": 0.003,
+      "duplicateResidentBytes": 0
+    },
+    {
+      "turn": 2,
+      "messageCount": 6,
+      "occupancyTokens": 33491,
+      "cacheReadCostUsd": 0.01,
+      "duplicateResidentBytes": 0
+    },
+    {
+      "turn": 3,
+      "messageCount": 9,
+      "occupancyTokens": 34593,
+      "cacheReadCostUsd": 0.0104,
+      "duplicateResidentBytes": 0
+    },
+    {
+      "turn": 4,
+      "messageCount": 12,
+      "occupancyTokens": 57981,
+      "cacheReadCostUsd": 0.0174,
+      "duplicateResidentBytes": 0
+    },
+    {
+      "turn": 5,
+      "messageCount": 15,
+      "occupancyTokens": 59084,
+      "cacheReadCostUsd": 0.0177,
+      "duplicateResidentBytes": 0
+    },
+    {
+      "turn": 6,
+      "messageCount": 18,
+      "occupancyTokens": 82472,
+      "cacheReadCostUsd": 0.0247,
+      "duplicateResidentBytes": 80058
+    },
+    {
+      "turn": 7,
+      "messageCount": 21,
+      "occupancyTokens": 83575,
+      "cacheReadCostUsd": 0.0251,
+      "duplicateResidentBytes": 80058
+    },
+    {
+      "turn": 8,
+      "messageCount": 24,
+      "occupancyTokens": 106962,
+      "cacheReadCostUsd": 0.0321,
+      "duplicateResidentBytes": 80058
+    },
+    {
+      "turn": 9,
+      "messageCount": 27,
+      "occupancyTokens": 108065,
+      "cacheReadCostUsd": 0.0324,
+      "duplicateResidentBytes": 80058
+    },
+    {
+      "turn": 10,
+      "messageCount": 30,
+      "occupancyTokens": 131454,
+      "cacheReadCostUsd": 0.0394,
+      "duplicateResidentBytes": 80058
+    },
+    {
+      "turn": 11,
+      "messageCount": 33,
+      "occupancyTokens": 132557,
+      "cacheReadCostUsd": 0.0398,
+      "duplicateResidentBytes": 80058
+    },
+    {
+      "turn": 12,
+      "messageCount": 36,
+      "occupancyTokens": 155946,
+      "cacheReadCostUsd": 0.0468,
+      "duplicateResidentBytes": 160117
+    },
+    {
+      "turn": 13,
+      "messageCount": 39,
+      "occupancyTokens": 157050,
+      "cacheReadCostUsd": 0.0471,
+      "duplicateResidentBytes": 160117
+    },
+    {
+      "turn": 14,
+      "messageCount": 42,
+      "occupancyTokens": 180438,
+      "cacheReadCostUsd": 0.0541,
+      "duplicateResidentBytes": 160117
+    },
+    {
+      "turn": 15,
+      "messageCount": 45,
+      "occupancyTokens": 181542,
+      "cacheReadCostUsd": 0.0545,
+      "duplicateResidentBytes": 160117
+    },
+    {
+      "turn": 16,
+      "messageCount": 48,
+      "occupancyTokens": 204931,
+      "cacheReadCostUsd": 0.0615,
+      "duplicateResidentBytes": 160117
+    },
+    {
+      "turn": 17,
+      "messageCount": 51,
+      "occupancyTokens": 206034,
+      "cacheReadCostUsd": 0.0618,
+      "duplicateResidentBytes": 160117
+    },
+    {
+      "turn": 18,
+      "messageCount": 54,
+      "occupancyTokens": 229423,
+      "cacheReadCostUsd": 0.0688,
+      "duplicateResidentBytes": 240176
+    },
+    {
+      "turn": 19,
+      "messageCount": 57,
+      "occupancyTokens": 230527,
+      "cacheReadCostUsd": 0.0692,
+      "duplicateResidentBytes": 240176
+    },
+    {
+      "turn": 20,
+      "messageCount": 60,
+      "occupancyTokens": 253915,
+      "cacheReadCostUsd": 0.0762,
+      "duplicateResidentBytes": 240176
+    },
+    {
+      "turn": 21,
+      "messageCount": 63,
+      "occupancyTokens": 255019,
+      "cacheReadCostUsd": 0.0765,
+      "duplicateResidentBytes": 240176
+    },
+    {
+      "turn": 22,
+      "messageCount": 66,
+      "occupancyTokens": 278407,
+      "cacheReadCostUsd": 0.0835,
+      "duplicateResidentBytes": 240176
+    },
+    {
+      "turn": 23,
+      "messageCount": 69,
+      "occupancyTokens": 279511,
+      "cacheReadCostUsd": 0.0839,
+      "duplicateResidentBytes": 240176
+    },
+    {
+      "turn": 24,
+      "messageCount": 72,
+      "occupancyTokens": 302900,
+      "cacheReadCostUsd": 0.0909,
+      "duplicateResidentBytes": 320235
+    },
+    {
+      "turn": 25,
+      "messageCount": 75,
+      "occupancyTokens": 304003,
+      "cacheReadCostUsd": 0.0912,
+      "duplicateResidentBytes": 320235
+    },
+    {
+      "turn": 26,
+      "messageCount": 78,
+      "occupancyTokens": 327392,
+      "cacheReadCostUsd": 0.0982,
+      "duplicateResidentBytes": 320235
+    },
+    {
+      "turn": 27,
+      "messageCount": 81,
+      "occupancyTokens": 328496,
+      "cacheReadCostUsd": 0.0985,
+      "duplicateResidentBytes": 320235
+    },
+    {
+      "turn": 28,
+      "messageCount": 84,
+      "occupancyTokens": 351884,
+      "cacheReadCostUsd": 0.1056,
+      "duplicateResidentBytes": 320235
+    },
+    {
+      "turn": 29,
+      "messageCount": 87,
+      "occupancyTokens": 352988,
+      "cacheReadCostUsd": 0.1059,
+      "duplicateResidentBytes": 320235
+    },
+    {
+      "turn": 30,
+      "messageCount": 90,
+      "occupancyTokens": 376377,
+      "cacheReadCostUsd": 0.1129,
+      "duplicateResidentBytes": 400294
+    },
+    {
+      "turn": 31,
+      "messageCount": 93,
+      "occupancyTokens": 377480,
+      "cacheReadCostUsd": 0.1132,
+      "duplicateResidentBytes": 400294
+    },
+    {
+      "turn": 32,
+      "messageCount": 96,
+      "occupancyTokens": 400869,
+      "cacheReadCostUsd": 0.1203,
+      "duplicateResidentBytes": 400294
+    },
+    {
+      "turn": 33,
+      "messageCount": 99,
+      "occupancyTokens": 401973,
+      "cacheReadCostUsd": 0.1206,
+      "duplicateResidentBytes": 400294
+    },
+    {
+      "turn": 34,
+      "messageCount": 102,
+      "occupancyTokens": 425361,
+      "cacheReadCostUsd": 0.1276,
+      "duplicateResidentBytes": 400294
+    },
+    {
+      "turn": 35,
+      "messageCount": 105,
+      "occupancyTokens": 426465,
+      "cacheReadCostUsd": 0.1279,
+      "duplicateResidentBytes": 400294
+    },
+    {
+      "turn": 36,
+      "messageCount": 108,
+      "occupancyTokens": 449853,
+      "cacheReadCostUsd": 0.135,
+      "duplicateResidentBytes": 480353
+    },
+    {
+      "turn": 37,
+      "messageCount": 111,
+      "occupancyTokens": 450957,
+      "cacheReadCostUsd": 0.1353,
+      "duplicateResidentBytes": 480353
+    },
+    {
+      "turn": 38,
+      "messageCount": 114,
+      "occupancyTokens": 474346,
+      "cacheReadCostUsd": 0.1423,
+      "duplicateResidentBytes": 480353
+    },
+    {
+      "turn": 39,
+      "messageCount": 117,
+      "occupancyTokens": 475449,
+      "cacheReadCostUsd": 0.1426,
+      "duplicateResidentBytes": 480353
+    },
+    {
+      "turn": 40,
+      "messageCount": 120,
+      "occupancyTokens": 498838,
+      "cacheReadCostUsd": 0.1497,
+      "duplicateResidentBytes": 480353
+    }
+  ]
+}

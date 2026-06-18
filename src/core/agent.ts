@@ -53,6 +53,8 @@ import type {
   BetaThinkingConfigParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-key.js';
+import { computeComposition } from './context-composition-probe.js';
+import { appendContextCostLog } from './context-cost-log.js';
 
 export class Agent implements IAgent {
   readonly name: string;
@@ -707,6 +709,19 @@ export class Agent implements IAgent {
               maxTokens: maxCtx,
               usagePercent: Math.round((realInput / maxCtx) * 100),
               agent: this.name,
+            });
+          }
+          // Context-cost Slice 0: opt-in ground-truth composition capture. Off
+          // by default (one boolean check). Best-effort + fire-and-forget — the
+          // writer swallows every error so cost telemetry can never break a run.
+          if (this.toolContext.userConfig?.context_cost_log === true) {
+            const composition = computeComposition(this.messages, { lastRealInputTokens: realInput });
+            void appendContextCostLog({
+              ts: Date.now(),
+              thread: this.currentThreadId,
+              model: this.model,
+              cacheReadTokens: cacheRead,
+              ...composition,
             });
           }
         }
