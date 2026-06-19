@@ -1059,7 +1059,10 @@ export class RunHistory {
    */
   getRunsBySession(sessionId: string): RunRecord[] {
     const rows = this.db.prepare(
-      'SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, id ASC'
+      // rowid (SQLite implicit, insertion-monotonic) breaks created_at ties in
+      // INSERTION order — `id` is a random uuid, so an `id` tiebreak reorders
+      // same-millisecond runs non-deterministically (flaked on fast CI).
+      'SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, rowid ASC'
     ).all(sessionId) as RunRecord[];
     return rows.map(r => this._decRun(r));
   }
