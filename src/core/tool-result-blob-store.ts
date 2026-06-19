@@ -19,15 +19,22 @@ export const DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS = 4_096;
  * Max number of retained blobs across compaction windows. Beyond this the
  * least-recently-used blobs are evicted. Replaces the old clear-on-every-
  * compaction as one half of the memory bound.
+ *
+ * Raised 64 → 128 for L1 cost-aware compaction (PRD engine-context-cost): L1
+ * makes compaction fire more often (at the ~150K cost budget, not ~800K of a
+ * large window), which mints more blob windows against this cap → older tool
+ * results would be pruned before `recall_tool_result` could fetch them. Doubling
+ * the cap keeps the recall safety net intact under more-frequent compaction.
  */
-export const DEFAULT_BLOB_STORE_MAX_ENTRIES = 64;
+export const DEFAULT_BLOB_STORE_MAX_ENTRIES = 128;
 
 /**
- * Max total retained payload bytes across compaction windows. 8 MB mirrors the
- * engine's MAX_BUFFER_BYTES ceiling and is the dominant half of the memory
- * bound (a few huge dumps hit the byte cap long before the entry count).
+ * Max total retained payload bytes across compaction windows. 16 MB (the dominant
+ * half of the memory bound — a few huge dumps hit the byte cap before the entry
+ * count). Raised 8 → 16 MB alongside the entry cap for L1 (see above): more
+ * frequent compaction retains more tool-result payload that must stay recallable.
  */
-export const DEFAULT_BLOB_STORE_MAX_BYTES = 8 * 1_024 * 1_024;
+export const DEFAULT_BLOB_STORE_MAX_BYTES = 16 * 1_024 * 1_024;
 
 /** One retained tool result, keyed by a short stable id in the blob store. */
 export interface ToolResultBlob {

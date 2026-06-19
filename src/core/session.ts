@@ -79,6 +79,18 @@ const AUTO_COMPACT_PERCENT = 90;
  *  compaction signal at all. */
 const COMPACT_PREPARE_PERCENT = 80;
 
+/** L1 cost-aware compaction (PRD engine-context-cost). The compaction trigger is
+ *  gated on `% of the context window` — on a large (e.g. 1M) native window that
+ *  is ~800K, so a thread carries 300–500K of cache-read-billed context before any
+ *  trim. Ground-truth (rafael's prod + a staging heavy-thread walk): on heavy
+ *  threads the cache-read floor is the dominant *scaling* cost and the carried
+ *  history (tool outputs) dominates it — so we ALSO gate compaction on an
+ *  ABSOLUTE carried-token budget, independent of window size. This is the OFFER
+ *  (PREPARE) point; auto-compaction fires at `budget × AUTO/PREPARE`. Bounds the
+ *  cache-read floor on the threads that actually cost money (medium threads sit
+ *  far below it, so they are untouched). CP-tunable via `compaction_token_budget`. */
+const DEFAULT_COMPACTION_TOKEN_BUDGET = 150_000;
+
 /** Per-run overrides — applied via agent setters, never mutate session state. */
 export interface RunOptions {
   effort?: EffortLevel | undefined;
@@ -1045,6 +1057,26 @@ export class Session {
     return Math.round(estimatedTokens / maxCtx * 100);
   }
 
+  /**
+   * Compaction-trigger occupancy %, gated on the cost-aware ceiling = the SMALLER
+   * of the real display window and the absolute carried-token budget (L1). This
+   * is what `_autoCompactIfNeeded` fires on — deliberately DISTINCT from
+   * `getContextUsagePercent` (the honest UI meter against the real window) so the
+   * meter never misreports the model's true window even as compaction fires
+   * earlier for cost protection. The budget is the PREPARE (offer) point, so the
+   * effective ceiling is `budget / (PREPARE/100)` → 80% of it = budget (offer),
+   * 90% = budget × 1.125 (auto). `compaction_token_budget` overrides the default.
+   */
+  private _compactionUsagePercent(): number {
+    if (!this.agent) return 0;
+    const occupancy = this.agent.getEstimatedOccupancyTokens();
+    const window = this._displayContextWindow(this.agent.model);
+    const budget = this.engine.getUserConfig().compaction_token_budget ?? DEFAULT_COMPACTION_TOKEN_BUDGET;
+    const ceiling = Math.min(window, Math.round(budget / (COMPACT_PREPARE_PERCENT / 100)));
+    if (ceiling <= 0) return 0;
+    return Math.round((occupancy / ceiling) * 100);
+  }
+
   /** Effective context window for display/metering across all tiers — the user
    *  cap applied on top of the real native window (provider + declared window
    *  resolved via the SSOT so a custom/BYOK/self-host model meters against its
@@ -1069,7 +1101,12 @@ export class Session {
    */
   private async _autoCompactIfNeeded(): Promise<void> {
     if (this._isCompacting || !this.agent) return;
-    const usagePercent = this.getContextUsagePercent();
+    // Cost-aware trigger (L1): fire against the SMALLER of the real window and
+    // the absolute carried-token budget — NOT getContextUsagePercent (which
+    // stays the honest UI meter against the real window). On a 1M-window thread
+    // this fires at ~150K carried tokens instead of ~800K, bounding the
+    // cache-read floor that dominates heavy-thread cost.
+    const usagePercent = this._compactionUsagePercent();
 
     // Below the prepare point: nothing to do; arm the one-shot offer for the
     // next time the context fills up again.

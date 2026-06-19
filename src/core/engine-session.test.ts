@@ -965,13 +965,13 @@ describe('Engine + Session (Orchestrator)', () => {
   });
 
   describe('compaction pressure: prepare-offer vs safety-net', () => {
-    type AutoCompact = { _autoCompactIfNeeded(): Promise<void> };
+    type AutoCompact = { _autoCompactIfNeeded(): Promise<void>; _compactionUsagePercent(): number };
 
     it('offers compaction ONCE in the prepare zone [80,90) and does NOT auto-compact', async () => {
       const { session } = await createEngineAndSession();
       const events: Array<{ type: string; usagePercent?: number }> = [];
       session.onStream = (e) => { events.push(e as { type: string }); return Promise.resolve(); };
-      vi.spyOn(session, 'getContextUsagePercent').mockReturnValue(83);
+      vi.spyOn(session as unknown as AutoCompact, '_compactionUsagePercent').mockReturnValue(83);
       const compactSpy = vi.spyOn(session, 'compact');
 
       await (session as unknown as AutoCompact)._autoCompactIfNeeded();
@@ -987,7 +987,7 @@ describe('Engine + Session (Orchestrator)', () => {
       const { session } = await createEngineAndSession();
       const events: Array<{ type: string }> = [];
       session.onStream = (e) => { events.push(e as { type: string }); return Promise.resolve(); };
-      const usage = vi.spyOn(session, 'getContextUsagePercent');
+      const usage = vi.spyOn(session as unknown as AutoCompact, '_compactionUsagePercent');
 
       usage.mockReturnValue(82);
       await (session as unknown as AutoCompact)._autoCompactIfNeeded(); // offer #1
@@ -1001,7 +1001,7 @@ describe('Engine + Session (Orchestrator)', () => {
 
     it('auto-compacts as a last-resort safety net at >=90% (with confirmScope)', async () => {
       const { session } = await createEngineAndSession();
-      vi.spyOn(session, 'getContextUsagePercent').mockReturnValue(92);
+      vi.spyOn(session as unknown as AutoCompact, '_compactionUsagePercent').mockReturnValue(92);
       const compactSpy = vi.spyOn(session, 'compact').mockResolvedValue({ success: true, summary: 'S' });
 
       await (session as unknown as AutoCompact)._autoCompactIfNeeded();
@@ -1013,13 +1013,50 @@ describe('Engine + Session (Orchestrator)', () => {
       const { session } = await createEngineAndSession();
       const events: Array<{ type: string }> = [];
       session.onStream = (e) => { events.push(e as { type: string }); return Promise.resolve(); };
-      vi.spyOn(session, 'getContextUsagePercent').mockReturnValue(50);
+      vi.spyOn(session as unknown as AutoCompact, '_compactionUsagePercent').mockReturnValue(50);
       const compactSpy = vi.spyOn(session, 'compact');
 
       await (session as unknown as AutoCompact)._autoCompactIfNeeded();
 
       expect(events.filter(e => e.type === 'compaction_offer')).toHaveLength(0);
       expect(compactSpy).not.toHaveBeenCalled();
+    });
+
+    it('L1: cost-aware trigger fires on the absolute token budget, not the full window — meter stays honest', async () => {
+      const { session } = await createEngineAndSession({ compaction_token_budget: 150_000 });
+      const agentMock = (session as unknown as {
+        agent: { model: string; getEstimatedOccupancyTokens: () => number };
+      }).agent;
+      agentMock.model = 'claude-sonnet-4-6[1m]'; // 1M native window
+      const cup = () => (session as unknown as AutoCompact)._compactionUsagePercent();
+
+      // 150K carried tokens on a 1M window: the honest UI meter shows ~15%, but
+      // the cost-aware trigger is at the 150K budget (ceiling = 150K/0.8 = 187.5K) → 80% (offer).
+      agentMock.getEstimatedOccupancyTokens = () => 150_000;
+      expect(session.getContextUsagePercent()).toBe(15); // honest meter: 150K / 1M
+      expect(cup()).toBe(80);                             // cost trigger at the budget
+
+      // 170K → 170/187.5 ≈ 91% → auto-compact zone (>= 90), well before the
+      // window-% trigger would fire (~800K on this 1M model).
+      agentMock.getEstimatedOccupancyTokens = () => 170_000;
+      expect(cup()).toBe(91);
+    });
+
+    it('L1: budget is CP-tunable via compaction_token_budget', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // The session reads the budget from engine.getUserConfig() — inject an
+      // override (the real config.json→loadConfig path is covered by the schema test).
+      vi.spyOn(engine, 'getUserConfig').mockReturnValue({
+        ...engine.getUserConfig(),
+        compaction_token_budget: 300_000,
+      });
+      const agentMock = (session as unknown as {
+        agent: { model: string; getEstimatedOccupancyTokens: () => number };
+      }).agent;
+      agentMock.model = 'claude-sonnet-4-6[1m]';
+      agentMock.getEstimatedOccupancyTokens = () => 150_000;
+      // budget 300K → ceiling 375K → 150K/375K = 40% — below the offer; no trim.
+      expect((session as unknown as AutoCompact)._compactionUsagePercent()).toBe(40);
     });
   });
 });
