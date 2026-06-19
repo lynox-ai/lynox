@@ -49,6 +49,10 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor — mirrors the pre-PR1 char-estimate so
     // Session.getContextUsagePercent behaves identically under the mock.
     this.getEstimatedOccupancyTokens = () => JSON.stringify(mockGetMessages() ?? []).length / 3.5;
+    // @ts-expect-error mock constructor — debug-export Tier 2 per-run composition.
+    // The mock makes no real API call, so there is no occupancy to frame → undefined
+    // (matches the real Agent's contract when _lastRealInputTokens is unset).
+    this.snapshotComposition = vi.fn().mockReturnValue(undefined);
     // @ts-expect-error mock constructor
     this.loadMessages = mockLoadMessages;
     // @ts-expect-error mock constructor
@@ -293,6 +297,10 @@ vi.mock('./run-history.js', () => ({
     this.insertPromptSnapshot = mockInsertPromptSnapshot;
     // @ts-expect-error mock constructor
     this.updateRun = vi.fn();
+    // @ts-expect-error mock constructor — debug-export Tier 2 compaction events.
+    this.insertCompactionEvent = vi.fn();
+    // @ts-expect-error mock constructor
+    this.getCompactionEventsBySession = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor
@@ -395,6 +403,33 @@ describe('Engine + Session (Orchestrator)', () => {
         // `userMessagePrePersisted` flags whether the durable pre-run user write
         // succeeded so the identity-based eager-persist won't duplicate the row.
         expect.objectContaining({ suppressTools: false }),
+      );
+    });
+
+    it('Tier 2: a failed run records raw error detail (error_text) for failure-class triage', async () => {
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 429, type: 'rate_limit_error' }));
+      await expect(session.run('go')).rejects.toThrow('boom');
+      const rh = engine.getRunHistory()!;
+      // The catch path stamps the failed run with the structured error detail.
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', errorText: expect.stringContaining('rate_limit_error') }),
+      );
+    });
+
+    it('Tier 2: a manual compaction records a compaction event (trigger=manual)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockResolvedValueOnce('summary text');   // the internal summary run
+      const result = await session.compact('keep the goal');
+      expect(result.success).toBe(true);
+      const rh = engine.getRunHistory()!;
+      expect(rh.insertCompactionEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trigger: 'manual',
+          sessionId: expect.any(String),
+          summaryChars: 'summary text'.length,
+        }),
       );
     });
 
@@ -1006,7 +1041,7 @@ describe('Engine + Session (Orchestrator)', () => {
 
       await (session as unknown as AutoCompact)._autoCompactIfNeeded();
 
-      expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true });
+      expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true, trigger: 'auto' });
     });
 
     it('does nothing below the prepare threshold', async () => {

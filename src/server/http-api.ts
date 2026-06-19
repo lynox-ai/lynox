@@ -2802,8 +2802,10 @@ export class LynoxHTTPApi {
     // RAW tool I/O, and the system-prompt snapshot at run time. Secret-scrubbed:
     // raw tool I/O + prompt snapshots can carry credentials that the display
     // projection masks but the raw store retained. User-scoped (the caller's own
-    // thread). Tier 1 of prd/engine-context-cost debug-export work — read-only
-    // over already-persisted data, no schema change.
+    // thread). prd/engine-context-cost debug-export. Tier 1 = read-only bundle;
+    // Tier 2 adds persisted cost data (per-run composition + cache-hit, raw
+    // error detail, compaction events, thread cost rollup) captured by migrations
+    // v36–v38 — they ride the bundle here via the run/compaction read paths.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/debug-export', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
@@ -2815,28 +2817,82 @@ export class LynoxHTTPApi {
 
       const history = engine.getRunHistory();
       const runs = history
-        ? history.getRunsBySession(id).map((run) => ({
-            ...run,
-            tool_calls: history.getRunToolCalls(run.id).map((tc) => ({
-              tool_name: tc.tool_name,
-              input: tc.input_json,
-              output: tc.output_json,
-              duration_ms: tc.duration_ms,
-              sequence_order: tc.sequence_order,
-            })),
-            prompt_snapshot: run.prompt_hash ? (history.getPromptSnapshot(run.prompt_hash)?.prompt_text ?? null) : null,
-          }))
+        ? history.getRunsBySession(id).map((run) => {
+            // Tier 2: parse the per-run composition (stored as a JSON string) into
+            // an object for readability, and drop the raw string to avoid a
+            // double-escaped duplicate in the bundle.
+            const { composition_json, ...rest } = run;
+            let composition: unknown = null;
+            if (composition_json) {
+              try { composition = JSON.parse(composition_json); } catch { composition = null; }
+            }
+            // Tier 2: per-run cache-hit rate over the full prompt input (base +
+            // cache_read + cache_write). null when the run billed no input.
+            const promptInput = rest.tokens_in + rest.tokens_cache_read + rest.tokens_cache_write;
+            const cache_hit_rate = promptInput > 0
+              ? Math.round((rest.tokens_cache_read / promptInput) * 1000) / 1000
+              : null;
+            return {
+              ...rest,
+              composition,
+              cache_hit_rate,
+              tool_calls: history.getRunToolCalls(run.id).map((tc) => ({
+                tool_name: tc.tool_name,
+                input: tc.input_json,
+                output: tc.output_json,
+                duration_ms: tc.duration_ms,
+                sequence_order: tc.sequence_order,
+              })),
+              prompt_snapshot: run.prompt_hash ? (history.getPromptSnapshot(run.prompt_hash)?.prompt_text ?? null) : null,
+            };
+          })
         : [];
+
+      // Tier 2: persisted compaction events (when/why the carried context was
+      // reset, and how much it dropped) — the cache-read floor's hidden mover.
+      const compactionEvents = history ? history.getCompactionEventsBySession(id) : [];
+
+      // Tier 2: thread-level cost rollup so a debugger sees "where the money went"
+      // at a glance without re-summing the runs. Computed export-side from the
+      // persisted rows — no schema change.
+      const debugSummary = (() => {
+        if (runs.length === 0) return null;
+        let totalIn = 0, totalOut = 0, totalCacheRead = 0, totalCacheWrite = 0, totalCost = 0;
+        let peak: { run_id: string; total_bytes: number; message_count: number } | null = null;
+        for (const r of runs) {
+          totalIn += r.tokens_in; totalOut += r.tokens_out;
+          totalCacheRead += r.tokens_cache_read; totalCacheWrite += r.tokens_cache_write;
+          totalCost += r.cost_usd;
+          const comp = r.composition as { totalBytes?: number; messageCount?: number } | null;
+          if (comp && typeof comp.totalBytes === 'number' && (!peak || comp.totalBytes > peak.total_bytes)) {
+            peak = { run_id: r.id, total_bytes: comp.totalBytes, message_count: comp.messageCount ?? 0 };
+          }
+        }
+        const promptInput = totalIn + totalCacheRead + totalCacheWrite;
+        return {
+          run_count: runs.length,
+          total_cost_usd: totalCost,
+          total_tokens_in: totalIn,
+          total_tokens_out: totalOut,
+          total_cache_read: totalCacheRead,
+          total_cache_write: totalCacheWrite,
+          overall_cache_hit_rate: promptInput > 0 ? Math.round((totalCacheRead / promptInput) * 1000) / 1000 : null,
+          compaction_count: compactionEvents.length,
+          peak_composition: peak,
+        };
+      })();
 
       const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
       const bundle = {
         exported_at: new Date().toISOString(),
         exported_by: 'lynox debug-export',
-        schema: 'thread-debug-export/v1',
+        schema: 'thread-debug-export/v2',
         engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
         thread,
+        debug_summary: debugSummary,
         messages,
         runs,
+        compaction_events: compactionEvents,
       };
       // Secret-scrub the WHOLE bundle in one pass — messages AND runs AND tool
       // I/O AND prompt snapshots — so a credential pasted in chat or passed as a
@@ -2846,7 +2902,8 @@ export class LynoxHTTPApi {
       // prefix-less opaque tokens are NOT masked (the generic high-entropy
       // pattern is skipped to avoid over-masking legit debug data). This is
       // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
-      // A stricter export-only scrub is a Tier-2 hardening.
+      // A stricter export-only scrub (masking prefix-less opaque tokens) remains
+      // a follow-up hardening — not in this Tier-2 scope.
       const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
       jsonResponse(res, 200, scrubbed);
     }));
