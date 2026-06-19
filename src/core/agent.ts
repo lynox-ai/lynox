@@ -53,7 +53,7 @@ import type {
   BetaThinkingConfigParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-key.js';
-import { computeComposition } from './context-composition-probe.js';
+import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 
 export class Agent implements IAgent {
@@ -223,6 +223,10 @@ export class Agent implements IAgent {
   /** Exact prompt-token count of the most recent API call (input + cache_read
    *  + cache_creation). undefined before the first call of the session. */
   private _lastRealInputTokens: number | undefined;
+  /** Cache-read tokens of the most recent API call (the real billed cache floor),
+   *  retained so the per-run composition snapshot can record it. undefined before
+   *  the first call. */
+  private _lastCacheReadTokens: number | undefined;
   /** messages.length when _lastRealInputTokens was captured (before the
    *  assistant reply was appended) — anchors the incremental delta estimate. */
   private _lastRealAtMsgCount = 0;
@@ -439,6 +443,7 @@ export class Agent implements IAgent {
     this.messages = [];
     this._persistedMark = 0;
     this._lastRealInputTokens = undefined;
+    this._lastCacheReadTokens = undefined;
     this._lastRealAtMsgCount = 0;
   }
 
@@ -476,6 +481,7 @@ export class Agent implements IAgent {
     this._persistedMark = this.messages.length;
     // Rehydrated history invalidates the last real-usage anchor.
     this._lastRealInputTokens = undefined;
+    this._lastCacheReadTokens = undefined;
     this._lastRealAtMsgCount = 0;
   }
 
@@ -560,6 +566,20 @@ export class Agent implements IAgent {
    */
   getEstimatedOccupancyTokens(): number {
     return this._estimateOccupancyTokens(0);
+  }
+
+  /**
+   * One context-cost composition snapshot of the agent's CURRENT `messages[]`,
+   * plus the last call's cache-read tokens. Session persists this onto the run
+   * at run-end (debug-export Tier 2) so the carried-context cost basis rides the
+   * thread. Computed ONCE per run (not per API call) — a cheap byte-accounting
+   * pass, always-on (independent of the verbose `context_cost_log` JSONL sink).
+   * Returns undefined when the run made no real API call (no occupancy to frame).
+   */
+  snapshotComposition(): (CompositionSnapshot & { cacheReadTokens: number | undefined }) | undefined {
+    if (this._lastRealInputTokens === undefined) return undefined;
+    const composition = computeComposition(this.messages, { lastRealInputTokens: this._lastRealInputTokens });
+    return { ...composition, cacheReadTokens: this._lastCacheReadTokens };
   }
 
   async send(
@@ -696,6 +716,7 @@ export class Agent implements IAgent {
 
         if (realInput > 0) {
           this._lastRealInputTokens = realInput;
+          this._lastCacheReadTokens = cacheRead;
           // messages is now [...prompt messages, assistant reply]. The API
           // priced the prompt (all but that just-pushed reply), so the reply
           // onward is the delta for the next estimate. Derived from the

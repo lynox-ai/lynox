@@ -175,6 +175,49 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('Tier 2: round-trips composition_json (plaintext) + error_text (encrypted)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-'));
+    tmpDirs.push(dir);
+    // An encryption key so error_text exercises the encrypt-at-rest path.
+    const h = new RunHistory(join(dir, 'enc.db'), 'a-test-vault-key');
+    const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+    const composition = JSON.stringify({ messageCount: 5, totalBytes: 12345, cacheReadTokens: 9000 });
+    h.updateRun(r1, { status: 'completed', compositionJson: composition });
+    const r2 = h.insertRun({ sessionId: 'thread-1', taskText: 'boom', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r2, { status: 'failed', errorText: '{"status":429,"type":"rate_limit_error"}' });
+
+    const [run1, run2] = h.getRunsBySession('thread-1');
+    expect(run1!.composition_json).toBe(composition);   // plaintext, verbatim
+    expect(run1!.error_text).toBeNull();
+    expect(run2!.error_text).toContain('rate_limit_error'); // decrypted back
+
+    // error_text is stored encrypted at rest (raw row is NOT plaintext).
+    const raw = new BetterSqlite3(join(dir, 'enc.db'))
+      .prepare('SELECT error_text FROM runs WHERE id = ?').get(r2) as { error_text: string };
+    expect(raw.error_text.startsWith('enc:')).toBe(true);
+    // composition_json is NOT encrypted (counts, no PII) — stored verbatim.
+    const rawComp = new BetterSqlite3(join(dir, 'enc.db'))
+      .prepare('SELECT composition_json FROM runs WHERE id = ?').get(r1) as { composition_json: string };
+    expect(rawComp.composition_json).toBe(composition);
+    h.close();
+  });
+
+  it('Tier 2: records + retrieves compaction events per session, chronological + isolated', () => {
+    const h = createHistory();
+    h.insertCompactionEvent({ sessionId: 'thread-1', runId: 'run-a', trigger: 'auto', occupancyBefore: 160000, occupancyAfter: 8000, messagesBefore: 40, messagesAfter: 3, summaryChars: 1200 });
+    h.insertCompactionEvent({ sessionId: 'thread-1', trigger: 'manual', occupancyBefore: 150000, occupancyAfter: 9000, messagesBefore: 38, messagesAfter: 4, summaryChars: 900 });
+    h.insertCompactionEvent({ sessionId: 'thread-2', trigger: 'auto', occupancyBefore: 100, occupancyAfter: 50, messagesBefore: 2, messagesAfter: 1, summaryChars: 10 });
+
+    const events = h.getCompactionEventsBySession('thread-1');
+    expect(events.map(e => e.trigger)).toEqual(['auto', 'manual']);   // chronological
+    expect(events[0]!.run_id).toBe('run-a');
+    expect(events[1]!.run_id).toBeNull();                              // optional runId
+    expect(events[0]!.occupancy_before).toBe(160000);
+    expect(h.getCompactionEventsBySession('thread-2')).toHaveLength(1); // isolated
+    expect(h.getCompactionEventsBySession('nope')).toEqual([]);
+    h.close();
+  });
+
   it('getThreadTotals sums cost + tokens across ALL runs in a session (the per-thread SSOT)', () => {
     const h = createHistory();
     const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });

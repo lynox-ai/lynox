@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
+import { extractErrorDetail } from './error-detail.js';
 import { LynoxError } from './errors.js';
 import type {
   LynoxUserConfig,
@@ -709,6 +710,9 @@ export class Session {
 
       if (runHistory && this.currentRunId) {
         try {
+          // Debug-export Tier 2: stamp the carried-context composition (computed
+          // once here, not per API call) so the cost basis rides the run.
+          const compositionSnap = this.agent?.snapshotComposition();
           runHistory.updateRun(this.currentRunId, {
             responseText: result,
             tokensIn,
@@ -721,6 +725,7 @@ export class Session {
             userWaitMs: this._userWaitMs,
             stopReason: 'end_turn',
             status: 'completed',
+            ...(compositionSnap ? { compositionJson: JSON.stringify(compositionSnap) } : {}),
           });
         } catch {
           // Fire-and-forget
@@ -867,6 +872,15 @@ export class Session {
             cache_creation_input_tokens: cacheWrite,
             cache_read_input_tokens: cacheRead,
           });
+          // Debug-export Tier 2: raw structured error detail (status/type/body/
+          // cause) for failure-class triage. Masked for the user's KNOWN stored
+          // secrets (a provider 401 body can echo the provisioned key) before it
+          // is encrypted at rest. NO composition here: a failed turn rolls its
+          // messages back before re-throwing, so a snapshot would pair the
+          // rolled-back array with a prior call's occupancy — composition is
+          // captured on the success path only.
+          const secretStore = this.engine.getSecretStore();
+          const errorDetail = extractErrorDetail(err);
           runHistory.updateRun(this.currentRunId, {
             responseText: getErrorMessage(err),
             tokensIn,
@@ -877,6 +891,7 @@ export class Session {
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: 'failed',
+            errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
           });
         } catch {
           // Fire-and-forget
@@ -959,7 +974,7 @@ export class Session {
    * reset messages, and inject the summary as synthetic context.
    * Used by CLI /compact command and auto-compaction.
    */
-  async compact(focus?: string, opts?: { confirmScope?: boolean }): Promise<{ success: boolean; summary: string }> {
+  async compact(focus?: string, opts?: { confirmScope?: boolean; trigger?: 'auto' | 'manual' }): Promise<{ success: boolean; summary: string }> {
     // Phase 2 Context Hygiene: do NOT clear the blob store here. Blobs retained
     // at earlier compactions are CARRIED FORWARD so a `recall_tool_result` still
     // works two+ compactions later (the old clear-on-every-compaction hard-
@@ -970,6 +985,14 @@ export class Session {
     // summary run below only *appends* (the summary prompt + reply), so the
     // snapshot still captures every result that is about to be reset away.
     const preCompactionMessages = this.saveMessages();
+    // Debug-export Tier 2: capture the triggering occupancy AND the active run id
+    // BEFORE the summary run below mutates the agent's last-usage anchor and (via
+    // its own run() finally) nulls currentRunId. For auto-compaction this is the
+    // triggering user run (the void _autoCompactIfNeeded() call runs synchronously
+    // inside that run's try, so its id is still set here); a manual /compact has
+    // no active run, so it is null.
+    const occBefore = this.agent ? Math.round(this.agent.getEstimatedOccupancyTokens()) : 0;
+    const compactionRunId = this.currentRunId;
 
     // S2 / INV-1: the compaction summary becomes an AUTHORITATIVE record (see
     // compaction-messages.ts), so a forged provenance marker planted in earlier
@@ -1037,6 +1060,26 @@ export class Session {
       // automatic one. Best-effort — never block. (The live UI marker is streamed
       // by _autoCompactIfNeeded for auto, and pushed by compactNow() for manual.)
       persistCompactionMarker(this.engine.getThreadStore(), this.sessionId);
+      // Debug-export Tier 2: record the compaction event (counts + trigger only,
+      // no PII). Best-effort — never block or fail the compaction. run_id is the
+      // run active when compaction fired (the triggering user run for auto; null
+      // for a manual /compact with no run in progress) — captured at the top
+      // before the summary run nulled currentRunId.
+      const runHistory = this.engine.getRunHistory();
+      if (runHistory) {
+        try {
+          runHistory.insertCompactionEvent({
+            sessionId: this.sessionId,
+            ...(compactionRunId ? { runId: compactionRunId } : {}),
+            trigger: opts?.trigger ?? 'manual',
+            occupancyBefore: occBefore,
+            occupancyAfter: this.agent ? Math.round(this.agent.getEstimatedOccupancyTokens()) : 0,
+            messagesBefore: preCompactionMessages.length,
+            messagesAfter: this.agent ? this.agent.getMessages().length : 0,
+            summaryChars: summary.length,
+          });
+        } catch { /* fire-and-forget */ }
+      }
       return { success: true, summary };
     }
     return { success: false, summary: '' };
@@ -1134,7 +1177,7 @@ export class Session {
       // confirmScope: this compaction fires mid-task (unprompted), so steer the
       // agent to restate the task and confirm scope on its next turn instead of
       // silently rebuilding from the lossy summary.
-      const result = await this.compact(undefined, { confirmScope: true });
+      const result = await this.compact(undefined, { confirmScope: true, trigger: 'auto' });
       if (result.success) {
         this._compactionOffered = false;
         // compact() already persisted the visible marker; here we also stream

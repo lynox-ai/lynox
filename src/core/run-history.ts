@@ -52,6 +52,44 @@ export interface RunRecord {
   //   'voice_stt'  → seconds of input audio (0 until providers surface duration)
   //   'voice_tts'  → characters of synthesized text
   units: number;
+  /**
+   * Per-run context-cost composition snapshot (JSON). The `CompositionSnapshot`
+   * from context-composition-probe.ts plus `cacheReadTokens`, captured ONCE at
+   * run-end from the agent's final `messages[]` — the carried-context cost basis
+   * for debugging where a heavy thread's billed size goes. NULL on pre-v36 rows
+   * and runs that made no real API call. Pure byte-counts + tool NAMES + dup
+   * bytes — no raw content/PII — so stored plaintext (SQL-analytics-friendly).
+   */
+  composition_json: string | null;
+  /**
+   * Structured raw error detail for a failed run (status/type/provider-body/
+   * cause), distinct from `response_text` (the human-readable message). Lets a
+   * debugger tell a 429 from a 400 from an overloaded_error. Encrypted at rest
+   * like response_text; the debug-export whole-bundle scrub masks key shapes.
+   * NULL on success + pre-v37 rows.
+   */
+  error_text: string | null;
+  created_at: string;
+}
+
+/** One persisted context-compaction event (debug-export Tier 2). */
+export interface CompactionEventRecord {
+  id: string;
+  session_id: string;
+  /** The run during which compaction fired, if known. */
+  run_id: string | null;
+  /** 'auto' (≥90% safety net) | 'manual' (/compact, user-triggered). */
+  trigger: string;
+  /** Estimated occupancy tokens that TRIGGERED compaction (pre-summary). */
+  occupancy_before: number;
+  /** Estimated occupancy tokens after reset + summary injection. */
+  occupancy_after: number;
+  /** messages[] length before the reset. */
+  messages_before: number;
+  /** messages[] length after the summary injection. */
+  messages_after: number;
+  /** Characters in the generated summary (0 if the summary run failed). */
+  summary_chars: number;
   created_at: string;
 }
 
@@ -774,6 +812,43 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (35);
    ALTER TABLE runs ADD COLUMN provider TEXT NOT NULL DEFAULT '';
    CREATE INDEX IF NOT EXISTS idx_runs_provider ON runs(provider);`,
+
+  // v36: Per-run context-cost composition (debug-export Tier 2). Persists the
+  // composition snapshot that was previously ONLY available flag-gated in the
+  // ~/.lynox/context-cost.jsonl, so it rides every thread's debug-export for
+  // free and survives with the thread — no JSONL read, no tenant access. Pure
+  // byte-counts + tool names (no PII) → plaintext. Nullable: pre-v36 rows + runs
+  // with no real API call read NULL (export omits composition).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (36);
+   ALTER TABLE runs ADD COLUMN composition_json TEXT;`,
+
+  // v37: Raw structured error detail on a failed run (debug-export Tier 2).
+  // Distinct from response_text (the human message): status/type/provider-body/
+  // cause, so a debugger can tell apart provider failure classes (429 vs 400 vs
+  // overloaded). Encrypted at rest (the column may echo request fragments).
+  // Nullable: NULL on success + pre-v37 rows.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (37);
+   ALTER TABLE runs ADD COLUMN error_text TEXT;`,
+
+  // v38: Persisted compaction events (debug-export Tier 2). Compaction silently
+  // reshapes the carried context (and thus the cache-read cost floor); without a
+  // record, a debugger inspecting a thread can't see WHEN/why the context was
+  // reset or how much it dropped. One row per compaction (auto + manual). No
+  // PII: counts + a trigger label only.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (38);
+   CREATE TABLE IF NOT EXISTS compaction_events (
+     id TEXT PRIMARY KEY,
+     session_id TEXT NOT NULL,
+     run_id TEXT,
+     trigger TEXT NOT NULL DEFAULT 'manual',
+     occupancy_before INTEGER NOT NULL DEFAULT 0,
+     occupancy_after INTEGER NOT NULL DEFAULT 0,
+     messages_before INTEGER NOT NULL DEFAULT 0,
+     messages_after INTEGER NOT NULL DEFAULT 0,
+     summary_chars INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX IF NOT EXISTS idx_compaction_events_session ON compaction_events(session_id);`,
 ];
 
 export class RunHistory {
@@ -942,6 +1017,10 @@ export class RunHistory {
     userWaitMs?: number | undefined;
     stopReason?: string | undefined;
     status?: 'running' | 'completed' | 'failed' | undefined;
+    /** Context-cost composition snapshot JSON (stored plaintext — counts only). */
+    compositionJson?: string | undefined;
+    /** Structured raw error detail (encrypted at rest like response_text). */
+    errorText?: string | undefined;
   }): void {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -957,6 +1036,10 @@ export class RunHistory {
     if (params.userWaitMs !== undefined) { sets.push('user_wait_ms = ?'); values.push(params.userWaitMs); }
     if (params.stopReason !== undefined) { sets.push('stop_reason = ?'); values.push(params.stopReason); }
     if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
+    // Plaintext: composition is pure byte-counts + tool names, no PII.
+    if (params.compositionJson !== undefined) { sets.push('composition_json = ?'); values.push(params.compositionJson); }
+    // Encrypted: an error body may echo request/user content.
+    if (params.errorText !== undefined) { sets.push('error_text = ?'); values.push(this._enc(params.errorText)); }
 
     if (sets.length === 0) return;
     values.push(id);
@@ -997,6 +1080,9 @@ export class RunHistory {
   private _decRun(r: RunRecord): RunRecord {
     r.task_text = this._dec(r.task_text);
     r.response_text = this._dec(r.response_text);
+    // error_text is encrypted at rest (may echo request fragments); composition_json
+    // is plaintext counts and needs no decrypt.
+    if (r.error_text) r.error_text = this._dec(r.error_text);
     return r;
   }
 
@@ -1065,6 +1151,42 @@ export class RunHistory {
       'SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, rowid ASC'
     ).all(sessionId) as RunRecord[];
     return rows.map(r => this._decRun(r));
+  }
+
+  /** Record one context-compaction event (debug-export Tier 2). */
+  insertCompactionEvent(params: {
+    sessionId: string;
+    runId?: string | undefined;
+    trigger: 'auto' | 'manual';
+    occupancyBefore: number;
+    occupancyAfter: number;
+    messagesBefore: number;
+    messagesAfter: number;
+    summaryChars: number;
+  }): string {
+    const id = generateId();
+    this.db.prepare(`
+      INSERT INTO compaction_events (id, session_id, run_id, trigger, occupancy_before, occupancy_after, messages_before, messages_after, summary_chars)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      params.sessionId,
+      params.runId ?? null,
+      params.trigger,
+      params.occupancyBefore,
+      params.occupancyAfter,
+      params.messagesBefore,
+      params.messagesAfter,
+      params.summaryChars,
+    );
+    return id;
+  }
+
+  /** All compaction events for one session (thread), chronological. */
+  getCompactionEventsBySession(sessionId: string): CompactionEventRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM compaction_events WHERE session_id = ? ORDER BY created_at ASC, rowid ASC'
+    ).all(sessionId) as CompactionEventRecord[];
   }
 
   getRunToolCalls(runId: string): ToolCallRecord[] {

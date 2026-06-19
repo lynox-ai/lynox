@@ -2429,9 +2429,10 @@ describe('LynoxHTTPApi', () => {
     it('bundles per-run telemetry + raw tool I/O + prompt snapshots, secret-scrubbed', async () => {
       const KEY = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX'; // matches a SECRET_PATTERN
       const runHistory = {
-        getRunsBySession: () => [{ id: 'run-1', session_id: 't1', task_text: 'do X', response_text: `leaked ${KEY}`, prompt_hash: 'ph1', provider: 'anthropic', status: 'completed', cost_usd: 0.02, tokens_in: 100 }],
+        getRunsBySession: () => [{ id: 'run-1', session_id: 't1', task_text: 'do X', response_text: `leaked ${KEY}`, prompt_hash: 'ph1', provider: 'anthropic', status: 'completed', cost_usd: 0.02, tokens_in: 100, tokens_out: 0, tokens_cache_read: 0, tokens_cache_write: 0, composition_json: null, error_text: null }],
         getRunToolCalls: () => [{ tool_name: 'http_request', input_json: `{"k":"${KEY}"}`, output_json: 'ok', duration_ms: 5, sequence_order: 0 }],
         getPromptSnapshot: () => ({ prompt_text: `system ${KEY}` }),
+        getCompactionEventsBySession: () => [],
       };
       await swapEngine({
         // KEY also in the thread title → proves the whole-bundle scrub covers
@@ -2445,7 +2446,7 @@ describe('LynoxHTTPApi', () => {
           schema: string; thread: { id: string };
           runs: Array<{ provider: string; tool_calls: Array<{ tool_name: string }>; prompt_snapshot: string }>;
         };
-        expect(body.schema).toBe('thread-debug-export/v1');
+        expect(body.schema).toBe('thread-debug-export/v2');
         expect(body.thread.id).toBe('t1');
         expect(body.runs).toHaveLength(1);
         // The per-run telemetry the thin export never carried:
@@ -2454,6 +2455,49 @@ describe('LynoxHTTPApi', () => {
         expect(body.runs[0]!.prompt_snapshot).toContain('system');
         // Secret scrub: the leaked key must NOT survive anywhere in the bundle.
         expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+
+    it('Tier 2: parses composition, derives cache-hit, surfaces compaction events + cost rollup', async () => {
+      const composition = { messageCount: 12, totalBytes: 480_000, categories: { toolResult: 400_000 } };
+      const runHistory = {
+        getRunsBySession: () => [{
+          id: 'run-1', session_id: 't1', task_text: 'turn', response_text: 'ok', prompt_hash: '',
+          provider: 'anthropic', status: 'completed', cost_usd: 0.5,
+          // 9000 cache_read out of 10000 total prompt input → 0.9 hit rate.
+          tokens_in: 1000, tokens_out: 200, tokens_cache_read: 9000, tokens_cache_write: 0,
+          composition_json: JSON.stringify(composition), error_text: null,
+        }],
+        getRunToolCalls: () => [],
+        getPromptSnapshot: () => null,
+        getCompactionEventsBySession: () => [
+          { id: 'c1', session_id: 't1', run_id: 'run-1', trigger: 'auto', occupancy_before: 160000, occupancy_after: 8000, messages_before: 12, messages_after: 3, summary_chars: 900, created_at: '2026-06-19T00:00:00Z' },
+        ],
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => runHistory,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          runs: Array<{ composition: { totalBytes: number } | null; cache_hit_rate: number | null; composition_json?: unknown }>;
+          compaction_events: Array<{ trigger: string; occupancy_before: number }>;
+          debug_summary: { run_count: number; overall_cache_hit_rate: number; compaction_count: number; peak_composition: { total_bytes: number } | null };
+        };
+        // composition parsed into an object; the raw string is dropped.
+        expect(body.runs[0]!.composition?.totalBytes).toBe(480_000);
+        expect(body.runs[0]!.composition_json).toBeUndefined();
+        // cache-hit rate derived from the token columns.
+        expect(body.runs[0]!.cache_hit_rate).toBeCloseTo(0.9, 5);
+        // compaction events surfaced.
+        expect(body.compaction_events).toHaveLength(1);
+        expect(body.compaction_events[0]!.trigger).toBe('auto');
+        // thread-level cost rollup.
+        expect(body.debug_summary.run_count).toBe(1);
+        expect(body.debug_summary.overall_cache_hit_rate).toBeCloseTo(0.9, 5);
+        expect(body.debug_summary.compaction_count).toBe(1);
+        expect(body.debug_summary.peak_composition?.total_bytes).toBe(480_000);
       });
     });
   });
