@@ -1051,6 +1051,19 @@ export class RunHistory {
     return row ? this._decRun(row) : undefined;
   }
 
+  /**
+   * Every run belonging to one session (thread), chronological — for the
+   * comprehensive thread debug-export. Includes ALL statuses (completed/failed/
+   * running) on purpose: a debugger needs to see the failed + in-flight turns,
+   * not just the successful ones.
+   */
+  getRunsBySession(sessionId: string): RunRecord[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, id ASC'
+    ).all(sessionId) as RunRecord[];
+    return rows.map(r => this._decRun(r));
+  }
+
   getRunToolCalls(runId: string): ToolCallRecord[] {
     const rows = this.db.prepare(
       'SELECT * FROM run_tool_calls WHERE run_id = ? ORDER BY sequence_order'

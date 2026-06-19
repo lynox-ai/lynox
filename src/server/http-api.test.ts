@@ -2411,6 +2411,53 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('thread debug-export (comprehensive)', () => {
+    function swapEngine(overrides: Record<string, () => unknown>, test: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origs: Record<string, unknown> = {};
+      for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+      return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+    }
+
+    it('GET /api/threads/:id/debug-export 404s an unknown thread', async () => {
+      await swapEngine({ getThreadStore: () => ({ getThread: () => null, getMessages: () => [] }) }, async () => {
+        const res = await jsonFetch('/api/threads/nope/debug-export');
+        expect(res.status).toBe(404);
+      });
+    });
+
+    it('bundles per-run telemetry + raw tool I/O + prompt snapshots, secret-scrubbed', async () => {
+      const KEY = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX'; // matches a SECRET_PATTERN
+      const runHistory = {
+        getRunsBySession: () => [{ id: 'run-1', session_id: 't1', task_text: 'do X', response_text: `leaked ${KEY}`, prompt_hash: 'ph1', provider: 'anthropic', status: 'completed', cost_usd: 0.02, tokens_in: 100 }],
+        getRunToolCalls: () => [{ tool_name: 'http_request', input_json: `{"k":"${KEY}"}`, output_json: 'ok', duration_ms: 5, sequence_order: 0 }],
+        getPromptSnapshot: () => ({ prompt_text: `system ${KEY}` }),
+      };
+      await swapEngine({
+        // KEY also in the thread title → proves the whole-bundle scrub covers
+        // fields BEYOND runs (thread + messages), not just the runs array.
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `T ${KEY}` }), getMessages: () => [] }),
+        getRunHistory: () => runHistory,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          schema: string; thread: { id: string };
+          runs: Array<{ provider: string; tool_calls: Array<{ tool_name: string }>; prompt_snapshot: string }>;
+        };
+        expect(body.schema).toBe('thread-debug-export/v1');
+        expect(body.thread.id).toBe('t1');
+        expect(body.runs).toHaveLength(1);
+        // The per-run telemetry the thin export never carried:
+        expect(body.runs[0]!.provider).toBe('anthropic');
+        expect(body.runs[0]!.tool_calls[0]!.tool_name).toBe('http_request');
+        expect(body.runs[0]!.prompt_snapshot).toContain('system');
+        // Secret scrub: the leaked key must NOT survive anywhere in the bundle.
+        expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+  });
+
   describe('tasks', () => {
     it('GET lists tasks', async () => {
       const res = await jsonFetch('/api/tasks');
