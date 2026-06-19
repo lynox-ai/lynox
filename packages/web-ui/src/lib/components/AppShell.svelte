@@ -204,11 +204,20 @@
 	async function exportThreadJson(threadId: string, title: string | null) {
 		try {
 			const base = getApiBase();
-			const [threadRes, msgRes, healthRes] = await Promise.all([
+			// Server-side comprehensive debug-export: thread + rendered messages +
+			// per-run telemetry (provider, tokens/cost/cache, status, raw tool I/O,
+			// prompt snapshots), secret-scrubbed. One round-trip.
+			const res = await fetch(`${base}/threads/${encodeURIComponent(threadId)}/debug-export`);
+			if (res.ok) {
+				const bundle: unknown = await res.json();
+				downloadBlob(JSON.stringify(bundle, null, 2), 'application/json', exportFilename(title, 'json'));
+				return;
+			}
+			// Fallback for an older engine without /debug-export (e.g. mid-rollout):
+			// the thin thread + messages bundle still exports.
+			const [threadRes, msgRes] = await Promise.all([
 				fetch(`${base}/threads/${encodeURIComponent(threadId)}`),
 				fetch(`${base}/threads/${encodeURIComponent(threadId)}/messages?limit=10000`),
-				// Health is best-effort — failure shouldn't block the export.
-				fetch(`${base}/health`).catch(() => null),
 			]);
 			if (!threadRes.ok || !msgRes.ok) {
 				alert(t('threads.error_export'));
@@ -216,23 +225,9 @@
 			}
 			const threadData = (await threadRes.json()) as { thread?: unknown };
 			const msgData = (await msgRes.json()) as { messages?: unknown };
-			let engineMeta: Record<string, unknown> | undefined;
-			if (healthRes && healthRes.ok) {
-				try {
-					const health = (await healthRes.json()) as Record<string, unknown>;
-					engineMeta = {
-						version: health['version'],
-						build_sha: health['build_sha'],
-						uptime_s: health['uptime_s'],
-					};
-				} catch {
-					// Ignore malformed health response; debug data is best-effort.
-				}
-			}
 			const bundle = {
 				exported_at: new Date().toISOString(),
-				exported_by: 'lynox web-ui',
-				engine: engineMeta,
+				exported_by: 'lynox web-ui (fallback)',
 				thread: threadData.thread,
 				messages: msgData.messages,
 			};

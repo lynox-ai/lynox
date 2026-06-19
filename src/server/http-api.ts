@@ -28,6 +28,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
+import { maskSecretPatterns } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -2792,6 +2793,62 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { messages, activeRun });
+    }));
+
+    // Comprehensive thread DEBUG-EXPORT. The thin client export (AppShell
+    // exportThreadJson) carries only the thread record + rendered messages;
+    // this adds the per-run telemetry that IS persisted but was never exported
+    // — provider, per-run tokens/cost/cache, status/stop_reason/durations, the
+    // RAW tool I/O, and the system-prompt snapshot at run time. Secret-scrubbed:
+    // raw tool I/O + prompt snapshots can carry credentials that the display
+    // projection masks but the raw store retained. User-scoped (the caller's own
+    // thread). Tier 1 of prd/engine-context-cost debug-export work — read-only
+    // over already-persisted data, no schema change.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/debug-export', async (_req, res, params) => {
+      const threadStore = engine.getThreadStore();
+      if (!requireService(res, threadStore, 'Thread store')) return;
+      const id = params['id']!;
+      const thread = threadStore.getThread(id);
+      if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+
+      const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }));
+
+      const history = engine.getRunHistory();
+      const runs = history
+        ? history.getRunsBySession(id).map((run) => ({
+            ...run,
+            tool_calls: history.getRunToolCalls(run.id).map((tc) => ({
+              tool_name: tc.tool_name,
+              input: tc.input_json,
+              output: tc.output_json,
+              duration_ms: tc.duration_ms,
+              sequence_order: tc.sequence_order,
+            })),
+            prompt_snapshot: run.prompt_hash ? (history.getPromptSnapshot(run.prompt_hash)?.prompt_text ?? null) : null,
+          }))
+        : [];
+
+      const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
+      const bundle = {
+        exported_at: new Date().toISOString(),
+        exported_by: 'lynox debug-export',
+        schema: 'thread-debug-export/v1',
+        engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
+        thread,
+        messages,
+        runs,
+      };
+      // Secret-scrub the WHOLE bundle in one pass — messages AND runs AND tool
+      // I/O AND prompt snapshots — so a credential pasted in chat or passed as a
+      // tool argument can't surface unmasked. (Per-field masking of only `runs`
+      // left the `messages` array — the largest free-text surface — exposed.)
+      // NOTE: maskSecretPatterns matches KNOWN key shapes (sk-…, AKIA…, xox…);
+      // prefix-less opaque tokens are NOT masked (the generic high-entropy
+      // pattern is skipped to avoid over-masking legit debug data). This is
+      // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
+      // A stricter export-only scrub is a Tier-2 hardening.
+      const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
+      jsonResponse(res, 200, scrubbed);
     }));
 
     // ── Memory ──

@@ -158,6 +158,23 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getRunsBySession returns every run for a thread (ALL statuses), chronological + isolated', () => {
+    const h = createHistory();
+    const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r1, { tokensIn: 100, costUsd: 0.01, status: 'completed' });
+    const r2 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 2', modelTier: 'balanced', modelId: 'm' });
+    h.updateRun(r2, { status: 'failed' }); // a FAILED turn must appear — debug needs it
+    h.insertRun({ sessionId: 'thread-2', taskText: 'other', modelTier: 'balanced', modelId: 'm' });
+
+    const runs = h.getRunsBySession('thread-1');
+    expect(runs.map(r => r.task_text)).toEqual(['turn 1', 'turn 2']);     // chronological
+    expect(runs.map(r => r.status)).toEqual(['completed', 'failed']);     // NOT filtered by status
+    // Isolated from other threads; unknown session is empty.
+    expect(h.getRunsBySession('thread-2').map(r => r.task_text)).toEqual(['other']);
+    expect(h.getRunsBySession('nope')).toEqual([]);
+    h.close();
+  });
+
   it('getThreadTotals sums cost + tokens across ALL runs in a session (the per-thread SSOT)', () => {
     const h = createHistory();
     const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });

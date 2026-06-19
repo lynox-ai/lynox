@@ -1051,6 +1051,22 @@ export class RunHistory {
     return row ? this._decRun(row) : undefined;
   }
 
+  /**
+   * Every run belonging to one session (thread), chronological — for the
+   * comprehensive thread debug-export. Includes ALL statuses (completed/failed/
+   * running) on purpose: a debugger needs to see the failed + in-flight turns,
+   * not just the successful ones.
+   */
+  getRunsBySession(sessionId: string): RunRecord[] {
+    const rows = this.db.prepare(
+      // rowid (SQLite implicit, insertion-monotonic) breaks created_at ties in
+      // INSERTION order — `id` is a random uuid, so an `id` tiebreak reorders
+      // same-millisecond runs non-deterministically (flaked on fast CI).
+      'SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, rowid ASC'
+    ).all(sessionId) as RunRecord[];
+    return rows.map(r => this._decRun(r));
+  }
+
   getRunToolCalls(runId: string): ToolCallRecord[] {
     const rows = this.db.prepare(
       'SELECT * FROM run_tool_calls WHERE run_id = ? ORDER BY sequence_order'
