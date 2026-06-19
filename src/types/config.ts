@@ -329,6 +329,15 @@ export interface LynoxUserConfig {
    * provider/model's native context window (see types/models.ts).
    */
   max_context_window_tokens?: number | undefined;
+  /**
+   * L1 cost-aware compaction (PRD engine-context-cost). Absolute carried-token
+   * budget at which compaction is OFFERED (auto-compaction at budget × 1.125);
+   * the trigger fires on `min(this, % of the context window)`, so on a large
+   * (e.g. 1M) window a thread compacts at this budget instead of ~800K —
+   * bounding the cache-read floor that dominates heavy-thread cost. CP-tuned
+   * (not in the managed-user allowlist). Default: 150_000 (`DEFAULT_COMPACTION_TOKEN_BUDGET`).
+   */
+  compaction_token_budget?: number | undefined;
   /** Max HTTP requests per hour (across sessions). */
   max_http_requests_per_hour?: number | undefined;
   /** Max HTTP requests per day (across sessions). */

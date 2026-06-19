@@ -126,6 +126,9 @@ export const LynoxUserConfigSchema = z.object({
   // unreachable from the UI anyway. Raise this only when a model that
   // takes >1M context lands AND the UI radio gains a matching option.
   max_context_window_tokens: z.number().int().positive().max(1_000_000).optional(),
+  // L1 cost-aware compaction budget (absolute carried-token offer point). Bounded
+  // [32K, 1M]: below 32K would thrash compaction; 1M = the max window.
+  compaction_token_budget: z.number().int().min(32_000).max(1_000_000).optional(),
   max_http_requests_per_hour: z.number().optional(),
   max_http_requests_per_day:  z.number().optional(),
   max_mail_sends_per_hour:    z.number().optional(),
