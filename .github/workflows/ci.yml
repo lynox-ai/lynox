@@ -151,7 +151,7 @@ jobs:
         run: bash scripts/smoke-local.sh --verbose
       - name: Upload playwright trace artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke-playwright-traces
           path: test-results/
