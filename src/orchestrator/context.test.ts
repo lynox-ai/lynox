@@ -132,4 +132,33 @@ describe('resolveTaskTemplate', () => {
     expect(result).toBe('Process: Normal analysis output');
     expect(result).not.toContain('<untrusted_data');
   });
+
+  // --- Fundament-2: {{params.<name>}} namespace ---
+  it('resolves {{params.<name>}} from the params namespace', () => {
+    const ctx = { params: { client: 'Acme Corp' } };
+    expect(resolveTaskTemplate('Audit {{params.client}}', ctx)).toContain('Acme Corp');
+  });
+
+  it('resolves params and step results in one string without collision', () => {
+    const ctx = { params: { client: 'Acme' }, 'step-0': { result: 'data' } };
+    const result = resolveTaskTemplate('{{params.client}} :: {{step-0.result}}', ctx);
+    expect(result).toContain('Acme');
+    expect(result).toContain('data');
+  });
+
+  // --- Fundament-5: param values are ALWAYS wrapped (untrusted), step results are not ---
+  it('ALWAYS wraps a param value, even when it looks clean', () => {
+    const ctx = { params: { client: 'Acme Corp' } };
+    const result = resolveTaskTemplate('Audit {{params.client}}', ctx);
+    expect(result).toContain('<untrusted_data');
+    expect(result).toContain('workflow_param:params.client');
+    expect(result).toContain('</untrusted_data>');
+    expect(result).toContain('Acme Corp');
+  });
+
+  it('wraps a clean param but NOT a clean step result (contrast)', () => {
+    const ctx = { params: { x: 'clean value' }, 'step-0': { result: 'clean value' } };
+    expect(resolveTaskTemplate('{{step-0.result}}', ctx)).toBe('clean value');
+    expect(resolveTaskTemplate('{{params.x}}', ctx)).toContain('<untrusted_data');
+  });
 });

@@ -257,7 +257,8 @@ describe('run_workflow — inline steps', () => {
     );
 
     const manifestArg = mockRunManifest.mock.calls[0]![0] as Record<string, unknown>;
-    expect(manifestArg['context']).toEqual(context);
+    // buildManifest always exposes a `params` namespace; caller context merges over it.
+    expect(manifestArg['context']).toEqual({ params: {}, ...context });
   });
 
   it('truncates result at 50KB and includes config hint', async () => {
@@ -705,6 +706,25 @@ describe('getPipeline — legacy mode backfill', () => {
     expect(planned?.mode).toBe('autonomous');
     expect(planned?.executionMode).toBe('orchestrated');
     expect(planned?.template).toBe(false);
+    expect(planned?.parameters).toEqual([]); // F-1: legacy row backfills parameters
+  });
+
+  it('preserves stored parameters through the getPipeline roundtrip (F-1)', () => {
+    const pipelineId = 'param-pipeline-1';
+    const parameters = [
+      { name: 'client', description: 'the client', type: 'string', source: 'user_input' },
+    ];
+    const planned = {
+      id: pipelineId, name: 'with-params', goal: 'g',
+      steps: [{ id: 'a', task: 'audit {{params.client}}' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters,
+    };
+    const fakeRunHistory = {
+      getPlannedPipeline: () => ({ id: pipelineId, manifest_json: JSON.stringify(planned) }),
+    };
+    expect(getPipeline(pipelineId, fakeRunHistory as never)?.parameters).toEqual(parameters);
   });
 
   it('legacy row with ask_user step is auto-labelled interactive (with warn)', () => {

@@ -45,13 +45,19 @@ export function buildStepContext(
  * Missing paths are left as-is (e.g. `{{unknown.path}}` stays unchanged).
  */
 export function resolveTaskTemplate(task: string, context: Record<string, unknown>): string {
-  return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, path: string) => {
-    const value = getByPath(context, path.trim());
+  return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+    const path = rawPath.trim();
+    const value = getByPath(context, path);
     if (value === undefined) return `{{${path}}}`;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
-    // Wrap with untrusted boundary only if injection patterns are detected
+    // Workflow parameter values are user/external-supplied (untrusted) → ALWAYS
+    // wrap them in the data boundary, not just when an injection pattern matches.
+    // Pipeline step results keep the detect-based heuristic.
+    if (path === 'params' || path.startsWith('params.')) {
+      return wrapUntrustedData(str, `workflow_param:${path}`);
+    }
     return detectInjectionAttempt(str).detected
-      ? wrapUntrustedData(str, `pipeline_step:${path.trim()}`)
+      ? wrapUntrustedData(str, `pipeline_step:${path}`)
       : str;
   });
 }

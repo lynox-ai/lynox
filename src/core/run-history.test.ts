@@ -847,6 +847,19 @@ describe('RunHistory', () => {
       } as Parameters<typeof h.insertPlannedPipeline>[0]);
     }
 
+    it('lifts parameters onto the template and round-trips them via manifest_json (F-1)', () => {
+      const h = createHistory();
+      const parameters = [
+        { name: 'client', description: 'the client', type: 'string', source: 'user_input' },
+        { name: 'month', description: 'reporting month', type: 'date', source: 'relative_date' },
+      ];
+      insertPlanned(h, 'plan-params', 'with-params', { template: true, parameters });
+      const row = h.getPlannedPipeline('plan-params');
+      expect(row).toBeDefined();
+      const parsed = JSON.parse(row!.manifest_json) as { parameters?: unknown };
+      expect(parsed.parameters).toEqual(parameters);
+    });
+
     it('getPlannedPipelines returns only status=planned rows, newest first', () => {
       const h = createHistory();
       insertPlanned(h, 'plan-a', 'first');

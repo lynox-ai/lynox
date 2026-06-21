@@ -1831,7 +1831,7 @@ export class RunHistory {
     return persistence.getPipelineStepResults(this.db, pipelineRunId);
   }
 
-  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: unknown[]; reasoning: string; estimatedCost: number; createdAt: string }): void {
+  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: unknown[]; reasoning: string; estimatedCost: number; createdAt: string; parameters?: unknown[] }): void {
     persistence.insertPlannedPipeline(this.db, planned);
   }
 
