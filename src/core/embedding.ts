@@ -110,9 +110,32 @@ export class OnnxProvider implements EmbeddingProvider {
     return this.loading;
   }
 
+  /**
+   * `multilingual-e5-small` is a 512-token transformer and does NOT truncate
+   * over-long input on its own — feeding it a much longer string makes the
+   * O(seq_len²) self-attention allocate hundreds of MB and run ~15s per call.
+   * Per-turn memory recall embeds the task, so an otherwise-ordinary large task
+   * drives GC-thrash that blocks the event loop and hangs the HTTP server on a
+   * memory-constrained container (e.g. a 1.5 GB managed tenant). The pipeline's
+   * `truncation` / `max_length` call options are silently ignored in
+   * @huggingface/transformers v4, so the load-bearing guard is this CHAR cap:
+   * slicing the input bounds the token count regardless of the model's own
+   * limit (and of which model is selected). 2000 chars is ~500 tokens for latin
+   * text — the model's design point, no quality loss — and ≤2000 tokens for the
+   * densest scripts (~50 MB transient, comfortably bounded). An embedding only
+   * needs the gist, so capping costs nothing semantically.
+   */
+  private static readonly MAX_EMBED_CHARS = 2000;
+
   async embed(text: string): Promise<number[]> {
-    const pipe = await this._getPipeline() as (text: string, opts: { pooling: string; normalize: boolean }) => Promise<{ data: Float32Array }>;
-    const output = await pipe(text, { pooling: 'mean', normalize: true });
+    const pipe = await this._getPipeline() as (
+      text: string,
+      opts: { pooling: string; normalize: boolean },
+    ) => Promise<{ data: Float32Array }>;
+    const input = text.length > OnnxProvider.MAX_EMBED_CHARS
+      ? text.slice(0, OnnxProvider.MAX_EMBED_CHARS)
+      : text;
+    const output = await pipe(input, { pooling: 'mean', normalize: true });
     return Array.from(output.data as Float32Array);
   }
 }

@@ -69,6 +69,37 @@ describe('Embedding', () => {
 
       vi.doUnmock('@huggingface/transformers');
     });
+
+    it('caps long input to bound the O(seq_len²) attention blowup', async () => {
+      const mockPipeline = vi.fn().mockResolvedValue({
+        data: new Float32Array(384).fill(0.05),
+      });
+      const mockPipelineFn = vi.fn().mockResolvedValue(mockPipeline);
+
+      vi.doMock('@huggingface/transformers', () => ({
+        pipeline: mockPipelineFn,
+        env: { backends: { onnx: {} } },
+      }));
+
+      const { OnnxProvider: FreshOnnx } = await import('./embedding.js');
+      const provider = new FreshOnnx();
+
+      // multilingual-e5-small is a 512-token model that does NOT self-truncate;
+      // a long task fed whole makes the transformer allocate hundreds of MB and
+      // run ~15s, which hangs a memory-constrained container. The pipeline's
+      // truncation/max_length opts are ignored in transformers v4, so embed()
+      // must char-slice the input — that is the load-bearing cap on the token
+      // count (and thus on the O(seq_len²) attention).
+      const huge = 'word '.repeat(20_000); // ~100k chars
+      await provider.embed(huge);
+
+      const call = mockPipeline.mock.calls[0];
+      expect(call).toBeDefined();
+      const [calledText] = call as [string, Record<string, unknown>];
+      expect(calledText.length).toBeLessThanOrEqual(2000);
+
+      vi.doUnmock('@huggingface/transformers');
+    });
   });
 
   describe('cosineSimilarity', () => {
