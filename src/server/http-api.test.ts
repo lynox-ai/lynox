@@ -96,6 +96,7 @@ vi.mock('../core/engine.js', () => ({
       update: mockMemoryUpdate,
       delete: mockMemoryDelete,
     });
+    this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
       set: mockSecretSet,
@@ -2604,7 +2605,28 @@ describe('LynoxHTTPApi', () => {
       expect(body.ran).toBe(true);
       expect(body.runId).toBe('run-xyz');
       expect(body.status).toBe('completed');
-      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything());
+      // No body → no re-target params (4th arg undefined); 5th = engine runtime.
+      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined, expect.anything());
+    });
+
+    it('POST /api/workflows/:id/run forwards re-target params from the body', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-p', status: 'completed' });
+      const res = await jsonFetch('/api/workflows/wf-1/run', {
+        method: 'POST',
+        body: JSON.stringify({ params: { client: 'Acme B', month: '2026-05' } }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockRunSavedWorkflow).toHaveBeenCalledWith(
+        'wf-1', expect.anything(), expect.anything(), { client: 'Acme B', month: '2026-05' }, expect.anything(),
+      );
+    });
+
+    it('POST /api/workflows/:id/run rejects a non-object "params" with 400', async () => {
+      const res = await jsonFetch('/api/workflows/wf-1/run', {
+        method: 'POST',
+        body: JSON.stringify({ params: 'not-an-object' }),
+      });
+      expect(res.status).toBe(400);
     });
 
     it('POST /api/workflows/:id/run returns 404 when the workflow is missing', async () => {

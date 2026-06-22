@@ -319,6 +319,31 @@ export async function spawnViaAgent(
 }
 
 /**
+ * Build the literal-replay instruction for a captured step. Given the captured
+ * tool name + (param-substituted) input object, produces a task that pins the
+ * step agent to executing exactly that call — the determinism seam that
+ * replaces re-interpreting `description` prose. The prose is appended as
+ * read-only context so the agent knows what the call is for. Pure + exported
+ * for unit testing.
+ */
+export function buildReplayInstruction(
+  tool: string,
+  inputTemplate: Record<string, unknown>,
+  description: string | undefined,
+): string {
+  const lines = [
+    'Execute exactly this tool call and return its result. Do not add, omit, rename, or reinterpret any argument, and do not call any other tool first or instead.',
+    `Tool: ${tool}`,
+    `Input (JSON): ${JSON.stringify(inputTemplate)}`,
+  ];
+  const trimmed = description?.trim();
+  if (trimmed) {
+    lines.push(`(Context — what this step accomplishes: ${trimmed})`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * Spawn an inline agent from a task description (no disk agent def needed).
  * Inherits parent tools minus recursion-prone ones.
  */
@@ -445,8 +470,21 @@ export async function spawnInline(
     agent.abort();
   }, timeoutMs);
 
+  // Captured steps replay the literal call — but ONLY when the captured tool is
+  // actually in this step's (deliberately minimal) inline tool set. A captured
+  // tool the inline sandbox doesn't grant (e.g. a non-core or destructive tool)
+  // falls back to the param-substituted prose task rather than instructing the
+  // agent to call a tool it doesn't have. No sandbox widening — the inline
+  // allowlist stays the security boundary. `step.task` / `step.input_template`
+  // are already param-substituted by the runner before spawn.
+  const task = (step.tool !== undefined
+      && step.input_template !== undefined
+      && tools.some(t => t.definition.name === step.tool))
+    ? buildReplayInstruction(step.tool, step.input_template, step.task)
+    : step.task;
+
   try {
-    const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task: step.task, context: stepContext }), userTimezone));
+    const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task, context: stepContext }), userTimezone));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
@@ -515,6 +553,8 @@ export async function spawnPipeline(
       thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
+      tool: s.tool,
+      input_template: s.input_template,
     })),
     gate_points: [],
     on_failure: 'stop',

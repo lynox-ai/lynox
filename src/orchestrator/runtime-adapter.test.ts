@@ -27,7 +27,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';
+import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from '../types/orchestration.js';
 
@@ -524,5 +524,104 @@ describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
     for (const name of ['bash', 'read_file', 'write_file', 'http', 'ask_user', 'data_store_query', 'data_store_insert']) {
       expect(INLINE_CORE_TOOLS.has(name)).toBe(true);
     }
+  });
+});
+
+describe('buildReplayInstruction', () => {
+  it('pins the agent to the exact tool + JSON input', () => {
+    const out = buildReplayInstruction('data_store_query', { table: 'revenue', client: 'Acme' }, 'Pull revenue');
+    expect(out).toContain('Execute exactly this tool call');
+    expect(out).toContain('Tool: data_store_query');
+    expect(out).toContain('Input (JSON): {"table":"revenue","client":"Acme"}');
+    expect(out).toContain('Context — what this step accomplishes: Pull revenue');
+  });
+
+  it('omits the context line when there is no description', () => {
+    const out = buildReplayInstruction('bash', { cmd: 'ls' }, undefined);
+    expect(out).toContain('Tool: bash');
+    expect(out).not.toContain('Context —');
+  });
+
+  it('omits the context line for a blank description', () => {
+    const out = buildReplayInstruction('bash', { cmd: 'ls' }, '   ');
+    expect(out).not.toContain('Context —');
+  });
+});
+
+describe('spawnInline literal replay (captured steps)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  const replayParentTools: ToolEntry[] = [
+    ...mockParentTools,
+    {
+      definition: { name: 'mail_send', description: 'Send mail', input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'sent',
+    },
+  ];
+
+  it('sends the literal-replay instruction when the captured tool is in the inline set', async () => {
+    // read_file is both in INLINE_CORE_TOOLS and in mockParentTools.
+    const step: ManifestStep = {
+      id: 'q-step', agent: 'q-step', runtime: 'inline',
+      task: 'Read the report', tool: 'read_file', input_template: { path: 'reports/x.md' },
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const sent = mockSend.mock.calls[0]![0] as string;
+    expect(sent).toContain('Execute exactly this tool call');
+    expect(sent).toContain('read_file');
+    expect(sent).toContain('Input (JSON):');
+    // The instruction is a string inside the outer {task,context} JSON, so the
+    // inner template quotes are escaped — assert on the (unescaped) field names.
+    expect(sent).toContain('path');
+  });
+
+  it('does NOT widen the sandbox — a captured non-core tool is not admitted', async () => {
+    const step: ManifestStep = {
+      id: 'send-step', agent: 'send-step', runtime: 'inline',
+      task: 'Send the report', tool: 'mail_send', input_template: { to: 'a@b.c' },
+    };
+    await spawnInline(step, {}, mockConfig, replayParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    const tools = agentConfig['tools'] as ToolEntry[];
+    // mail_send is not in INLINE_CORE_TOOLS and must stay out of the inline set.
+    expect(tools.find(t => t.definition.name === 'mail_send')).toBeUndefined();
+  });
+
+  it('falls back to the prose task when the captured tool is unavailable (no broken replay)', async () => {
+    const step: ManifestStep = {
+      id: 'send-step', agent: 'send-step', runtime: 'inline',
+      task: 'Send the report to the client', tool: 'mail_send', input_template: { to: 'a@b.c' },
+    };
+    await spawnInline(step, {}, mockConfig, replayParentTools);
+    const sent = mockSend.mock.calls[0]![0] as string;
+    // mail_send isn't granted → no replay instruction pinning a tool it lacks.
+    expect(sent).not.toContain('Execute exactly this tool call');
+    expect(sent).toContain('Send the report to the client');
+  });
+
+  it('a hand-authored step (no tool) sends its prose task verbatim', async () => {
+    const step: ManifestStep = {
+      id: 'prose-step', agent: 'prose-step', runtime: 'inline', task: 'Summarize the findings',
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const sent = mockSend.mock.calls[0]![0] as string;
+    expect(sent).toContain('Summarize the findings');
+    expect(sent).not.toContain('Execute exactly this tool call');
+  });
+
+  it('never replays a recursion-prone captured tool (spawn_agent stays excluded + prose fallback)', async () => {
+    const step: ManifestStep = {
+      id: 'rec-step', agent: 'rec-step', runtime: 'inline',
+      task: 'spawn a helper', tool: 'spawn_agent', input_template: { task: 'x' },
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    const tools = agentConfig['tools'] as ToolEntry[];
+    expect(tools.find(t => t.definition.name === 'spawn_agent')).toBeUndefined();
+    const sent = mockSend.mock.calls[0]![0] as string;
+    expect(sent).not.toContain('Execute exactly this tool call');
   });
 });

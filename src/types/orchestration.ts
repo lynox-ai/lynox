@@ -23,6 +23,14 @@ export interface ManifestStep {
   input_from?: string[] | undefined;
   conditions?: ManifestCondition[] | undefined;
   timeout_ms?: number | undefined;
+  /**
+   * Deterministic-replay pair carried from `InlinePipelineStep`. When present
+   * (captured workflows), the inline runtime substitutes bound params into
+   * `input_template` and instructs the step agent to execute exactly this tool
+   * call rather than re-interpreting `task` prose. See `InlinePipelineStep`.
+   */
+  tool?: string | undefined;
+  input_template?: Record<string, unknown> | undefined;
   output_schema?: Record<string, unknown> | undefined;
   tool_gates?: string[] | undefined;
   pre_approve?: Array<{

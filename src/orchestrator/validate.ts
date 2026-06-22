@@ -28,6 +28,10 @@ const ManifestStepSchema = z.object({
   runtime: z.enum(['agent', 'mock', 'inline', 'pipeline']),
   task: z.string().optional(),
   model: z.string().optional(),
+  // Deterministic-replay pair — schema'd so validation preserves (not strips)
+  // the literal captured call carried on a promoted step.
+  tool: z.string().optional(),
+  input_template: z.record(z.string(), z.unknown()).optional(),
   input_from: z.array(z.string()).optional(),
   conditions: z.array(ManifestConditionSchema).optional(),
   timeout_ms: z.number().positive().optional(),

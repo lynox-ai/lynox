@@ -3712,11 +3712,11 @@ export class LynoxHTTPApi {
       // LIMIT would let non-template planned rows (un-run plans) starve the
       // result. Scan a generous fixed window, then slice to `limit`.
       const rows = history.getPlannedPipelines(500);
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; created_at: string }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string }> = [];
       for (const row of rows) {
-        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
+        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown };
         try {
-          parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown };
+          parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown };
         } catch { continue; } // skip corrupt rows
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
@@ -3729,25 +3729,60 @@ export class LynoxHTTPApi {
                 ? [{ id: (s as { id: string }).id, task: (s as { task: string }).task }]
                 : [])
           : [];
+        // Surface the re-target schema (name + type + description) so the run
+        // UI can collect values before invoking POST /run with `{ params }`.
+        const parameters = Array.isArray(parsed.parameters)
+          ? parsed.parameters.flatMap((p) =>
+              p && typeof p === 'object'
+                && typeof (p as { name?: unknown }).name === 'string'
+                ? [{
+                    name: (p as { name: string }).name,
+                    description: typeof (p as { description?: unknown }).description === 'string'
+                      ? (p as { description: string }).description : '',
+                    type: typeof (p as { type?: unknown }).type === 'string'
+                      ? (p as { type: string }).type : 'string',
+                  }]
+                : [])
+          : [];
         workflows.push({
           id: row.id,
           name: typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : row.manifest_name,
           description: typeof parsed.goal === 'string' ? parsed.goal : '',
           step_count: Array.isArray(parsed.steps) ? parsed.steps.length : row.step_count,
           steps,
+          parameters,
           created_at: row.started_at,
         });
       }
       jsonResponse(res, 200, { workflows: workflows.slice(0, limit) });
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
+      // Optional re-target values: { "params": { "<name>": <value>, ... } }.
+      // Validated + coerced against the workflow's parameter schema inside
+      // runSavedWorkflow (a missing required param → 400 from there). An absent
+      // body keeps the legacy no-arg behaviour (all params bind to defaults).
+      let runParams: Record<string, unknown> | undefined;
+      if (body !== undefined && body !== null) {
+        if (typeof body !== 'object' || Array.isArray(body)) {
+          errorResponse(res, 400, 'Invalid request body — expected an object.');
+          return;
+        }
+        const rawParams = (body as Record<string, unknown>)['params'];
+        if (rawParams !== undefined) {
+          if (typeof rawParams !== 'object' || rawParams === null || Array.isArray(rawParams)) {
+            errorResponse(res, 400, 'Invalid "params" — expected an object of name to value.');
+            return;
+          }
+          runParams = rawParams as Record<string, unknown>;
+        }
+      }
       // Route through the budget + managed-credit lifecycle (cap, credit gate,
       // cost report) — runSavedWorkflow alone bypasses all three.
       const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
-      const result = await runGuardedSavedWorkflow(engine, params['id']!);
+      const result = await runGuardedSavedWorkflow(engine, params['id']!, runParams);
       if (!result.ok) {
         const code = result.error?.includes('not found') ? 404 : 400;
         errorResponse(res, code, result.error ?? 'Workflow run failed');
