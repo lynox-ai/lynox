@@ -14,6 +14,17 @@ export interface InlinePipelineStep {
   role?: string | undefined;
   input_from?: string[] | undefined;
   timeout_ms?: number | undefined;
+  /**
+   * Deterministic-replay pair (captured workflows only). When a step was
+   * promoted from a captured tool call, `tool` is the literal tool name and
+   * `input_template` the literal input object (with `{{params.<name>}}`
+   * placeholders for re-targetable values). At run time the runner substitutes
+   * the bound params into `input_template` and instructs the step agent to
+   * execute exactly that call — replacing prose re-interpretation with a literal
+   * replay. Absent on hand-authored/plan_task steps, which run as prose tasks.
+   */
+  tool?: string | undefined;
+  input_template?: Record<string, unknown> | undefined;
 }
 
 export interface PipelineStepResult {
@@ -74,6 +85,16 @@ export interface PlannedPipeline {
    * Defaulted on read for legacy entries (see `tools/builtin/pipeline.ts#getPipeline`).
    */
   mode: PipelineMode;
+  /**
+   * Re-target schema for the saved workflow — the parameters a caller supplies
+   * at run time (`{{params.<name>}}` placeholders resolve against these). Lifted
+   * here from the capture's `ProcessRecord.parameters` so a saved template
+   * carries its own re-target contract (binding, validation, the run UI form all
+   * read it). Round-trips for free — `insertPlannedPipeline` JSON-stringifies the
+   * whole pipeline — and is backfilled to `[]` on read for legacy rows
+   * (`tools/builtin/pipeline.ts#backfillPlannedPipelineDefaults`).
+   */
+  parameters: ProcessParameter[];
 }
 
 // === Process Capture ===

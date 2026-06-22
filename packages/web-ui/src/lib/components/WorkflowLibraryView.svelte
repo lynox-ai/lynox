@@ -5,12 +5,20 @@
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
+	interface WorkflowParam {
+		name: string;
+		description: string;
+		type: string;
+	}
 	interface SavedWorkflow {
 		id: string;
 		name: string;
 		description: string;
 		step_count: number;
 		steps: { id: string; task: string }[];
+		// Re-target schema — present (possibly empty) since the deterministic-replay
+		// slice. Optional in the type so a pre-upgrade engine response still parses.
+		parameters?: WorkflowParam[];
 		created_at: string;
 	}
 
@@ -24,6 +32,10 @@
 	let editingId = $state<string | null>(null);
 	let editName = $state('');
 	let expandedCards = $state<Set<string>>(new Set());
+
+	// Run-time parameter modal (only opened for workflows that declare params).
+	let paramModalWf = $state<SavedWorkflow | null>(null);
+	let paramValues = $state<Record<string, string>>({});
 
 	function toggleCard(id: string): void {
 		const next = new Set(expandedCards);
@@ -45,13 +57,49 @@
 		loading = false;
 	}
 
-	async function runWorkflow(id: string): Promise<void> {
+	// Run button: a workflow with parameters opens the value modal first; one
+	// without runs immediately (the legacy no-arg behaviour).
+	function onRunClick(wf: SavedWorkflow): void {
+		if (runningId) return;
+		if (wf.parameters && wf.parameters.length > 0) {
+			paramValues = Object.fromEntries(wf.parameters.map((p) => [p.name, '']));
+			paramModalWf = wf;
+			return;
+		}
+		void runWorkflow(wf.id);
+	}
+
+	function submitParamModal(): void {
+		const wf = paramModalWf;
+		if (!wf || !wf.parameters) return;
+		// Require every declared param — the engine would 400 on a missing one;
+		// catch it client-side for a cleaner message.
+		if (wf.parameters.some((p) => !paramValues[p.name]?.trim())) {
+			error = t('workflow_library.params_required');
+			return;
+		}
+		const params = { ...paramValues };
+		paramModalWf = null;
+		void runWorkflow(wf.id, params);
+	}
+
+	function cancelParamModal(): void {
+		paramModalWf = null;
+		error = '';
+	}
+
+	async function runWorkflow(id: string, params?: Record<string, string>): Promise<void> {
 		if (runningId) return;
 		runningId = id;
 		error = '';
 		notice = t('workflow_library.run_started');
 		try {
-			const res = await fetch(`${getApiBase()}/workflows/${id}/run`, { method: 'POST' });
+			const res = await fetch(`${getApiBase()}/workflows/${id}/run`, {
+				method: 'POST',
+				...(params
+					? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ params }) }
+					: {})
+			});
 			if (!res.ok) {
 				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
 				error = msg?.error ?? t('workflow_library.run_failed');
@@ -181,7 +229,7 @@
 								<button onclick={cancelRename} class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>
 							{:else}
 								<button
-									onclick={() => void runWorkflow(wf.id)}
+									onclick={() => onRunClick(wf)}
 									disabled={runningId !== null}
 									class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
 								>
@@ -209,3 +257,47 @@
 		</div>
 	{/if}
 </div>
+
+{#if paramModalWf}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+		role="dialog"
+		aria-modal="true"
+		aria-label={t('workflow_library.params_title')}
+	>
+		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
+			<h2 class="text-sm font-medium mb-1">{paramModalWf.name}</h2>
+			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.params_hint')}</p>
+			<div class="space-y-3">
+				{#each paramModalWf.parameters ?? [] as param (param.name)}
+					<label class="block">
+						<span class="block text-xs font-medium mb-1">{param.name}</span>
+						{#if param.description}
+							<span class="block text-[10px] text-text-subtle mb-1">{param.description}</span>
+						{/if}
+						<input
+							bind:value={paramValues[param.name]}
+							type={param.type === 'date' ? 'date' : 'text'}
+							inputmode={param.type === 'number' ? 'decimal' : undefined}
+							onkeydown={(e) => { if (e.key === 'Enter') submitParamModal(); if (e.key === 'Escape') cancelParamModal(); }}
+							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
+						/>
+					</label>
+				{/each}
+			</div>
+			<div class="flex items-center justify-end gap-2 mt-5">
+				<button
+					onclick={cancelParamModal}
+					class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"
+				>{t('workflow_library.cancel')}</button>
+				<button
+					onclick={submitParamModal}
+					class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/20 transition-colors"
+				>
+					<Icon name="bolt" size="xs" />
+					{t('workflow_library.run')}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}

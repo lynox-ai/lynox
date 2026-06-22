@@ -6,6 +6,7 @@ import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orch
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
@@ -32,6 +33,9 @@ const WARNED_LEGACY_MAX = 1024;
 function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipeline {
   planned.executionMode ??= 'orchestrated';
   planned.template ??= false;
+  // Legacy rows (saved before the re-target schema landed) have no `parameters`;
+  // default to an empty schema so binding/validation treats them as no-param.
+  planned.parameters ??= [];
   if (planned.mode === undefined) {
     planned.mode = inferPipelineMode(planned.steps);
     if (planned.mode === 'interactive' && !warnedLegacyIds.has(planned.id)) {
@@ -134,6 +138,10 @@ function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'st
       thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
+      // Deterministic-replay pair — preserved so the inline runtime can replay
+      // the literal captured call instead of re-interpreting `task`.
+      tool: s.tool,
+      input_template: s.input_template,
     })),
     gate_points: [],
     on_failure: onFailure,
@@ -442,6 +450,14 @@ export interface PipelineDeps {
    * the same "not configured" path the parent saw.
    */
   memory?: IMemory | null | undefined;
+  /**
+   * Caller-supplied re-target values for a parametrised saved workflow, bound +
+   * validated against `PlannedPipeline.parameters` before the run (the
+   * `{{params.<name>}}` namespace). Absent for the agent `run_workflow` tool and
+   * the `plan_task` O7 auto-trigger (those bind to schema defaults); the HTTP
+   * `/run` route + the saved-workflow library supply real values.
+   */
+  params?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -474,6 +490,11 @@ export async function dispatchOrchestratedPipeline(
     return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
+  const bound = bindWorkflowParameters(planned.parameters ?? [], deps.params, { requireAll: deps.params !== undefined });
+  if (!bound.ok) {
+    return `Error: ${bound.error}`;
+  }
+
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
@@ -485,7 +506,7 @@ export async function dispatchOrchestratedPipeline(
   }
 
   try {
-    const manifest = buildManifest(planned.name, steps, 'stop');
+    const manifest = buildManifest(planned.name, steps, 'stop', { params: bound.params });
     validateManifest(manifest);
     if (!isTemplate) planned.executed = true;
 
@@ -543,6 +564,7 @@ export async function runSavedWorkflow(
   workflowId: string,
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
+  params?: Record<string, unknown> | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -562,6 +584,16 @@ export async function runSavedWorkflow(
     };
   }
 
+  // Bind the supplied re-target values against the workflow's parameter schema.
+  // Strict only when the caller actually supplied values (HTTP `/run` body / the
+  // run UI): a missing required param then fails fast. An autonomous run with no
+  // values (cron, `run_workflow`) binds leniently — unbound params stay as
+  // unresolved placeholders, preserving the pre-replay behaviour (no regression).
+  const bound = bindWorkflowParameters(planned.parameters ?? [], params, { requireAll: params !== undefined });
+  if (!bound.ok) {
+    return { ok: false, error: bound.error };
+  }
+
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
@@ -572,7 +604,7 @@ export async function runSavedWorkflow(
 
   const resultLimit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   try {
-    const manifest = buildManifest(planned.name, steps, 'stop');
+    const manifest = buildManifest(planned.name, steps, 'stop', { params: bound.params });
     validateManifest(manifest);
     const state = await runManifest(manifest, config, { runHistory });
     persistPipelineRun(state, manifest, runHistory, resultLimit);
@@ -633,6 +665,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
+  const bound = bindWorkflowParameters(planned.parameters ?? [], deps.params, { requireAll: deps.params !== undefined });
+  if (!bound.ok) {
+    return `Error: ${bound.error}`;
+  }
+
   // Deep copy steps for modification
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
@@ -654,6 +691,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       planned.name,
       steps,
       input.on_failure ?? 'stop',
+      { params: bound.params },
     );
 
     validateManifest(manifest);

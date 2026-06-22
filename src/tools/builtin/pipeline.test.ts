@@ -34,7 +34,7 @@ import {
   _resetPipelineStore,
   _summarizeStepOutput,
 } from './pipeline.js';
-import type { IAgent } from '../../types/index.js';
+import type { IAgent, ProcessParameter } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import type { RunHistory } from '../../core/run-history.js';
 
@@ -767,7 +767,7 @@ describe('runSavedWorkflow', () => {
     insertPipelineStepResult: vi.fn(),
   };
 
-  function seedSavedWorkflow(opts?: { template?: boolean; mode?: 'autonomous' | 'interactive'; steps?: InlinePipelineStep[] }): string {
+  function seedSavedWorkflow(opts?: { template?: boolean; mode?: 'autonomous' | 'interactive'; steps?: InlinePipelineStep[]; params?: ProcessParameter[] }): string {
     const id = 'saved-wf-id';
     storePipeline(id, {
       id,
@@ -781,6 +781,7 @@ describe('runSavedWorkflow', () => {
       executionMode: 'orchestrated',
       template: opts?.template ?? true,
       mode: opts?.mode ?? 'autonomous',
+      parameters: opts?.params ?? [],
     });
     return id;
   }
@@ -844,6 +845,55 @@ describe('runSavedWorkflow', () => {
     const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/Workflow execution failed/);
+  });
+
+  it('binds supplied re-target params into the run manifest context', async () => {
+    const id = seedSavedWorkflow({
+      params: [{ name: 'client', description: 'client name', type: 'string', source: 'user_input' }],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'rt-1' }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme B' });
+    expect(result.ok).toBe(true);
+    // The bound params must reach the manifest the runner executes (the
+    // {{params.*}} namespace) — the re-target seam.
+    const manifestArg = mockRunManifest.mock.calls[0]![0] as { context?: { params?: Record<string, unknown> } };
+    expect(manifestArg.context?.params).toEqual({ client: 'Acme B' });
+  });
+
+  it('rejects a missing required param when re-targeting (params supplied) — acceptance #4', async () => {
+    const id = seedSavedWorkflow({
+      params: [{ name: 'client', description: 'client name', type: 'string', source: 'user_input' }],
+    });
+    // A caller actively re-targeting (a params object given) but omitting a
+    // required value gets a clean error — not a silent run.
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, {});
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('client');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('a no-param saved workflow still runs unchanged (cron-path regression)', async () => {
+    const id = seedSavedWorkflow(); // parameters: []
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'np-1' }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(true);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('a required-param workflow still RUNS on the cron path (no params supplied) — no regression', async () => {
+    // The autonomous path (cron / run_workflow) supplies no values. A required
+    // param must NOT hard-fail the run — it binds leniently (placeholder stays
+    // unresolved), preserving the pre-replay behaviour. (Refuter HIGH fix.)
+    const id = seedSavedWorkflow({
+      params: [{ name: 'month', description: 'report month', type: 'date', source: 'relative_date' }],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'cron-1' }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig); // no params
+    expect(result.ok).toBe(true);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    // The unbound param is absent from the manifest's params namespace.
+    const manifestArg = mockRunManifest.mock.calls[0]![0] as { context?: { params?: Record<string, unknown> } };
+    expect(manifestArg.context?.params).toEqual({});
   });
 
   it('forgetPipeline evicts a cached entry by id', () => {

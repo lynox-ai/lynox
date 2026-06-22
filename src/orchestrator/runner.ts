@@ -9,7 +9,7 @@ import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
-import { buildStepContext, resolveTaskTemplate } from './context.js';
+import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
@@ -310,9 +310,18 @@ async function executeStep(
       if (!options.parentTools) {
         throw new Error(`Step "${step.id}" uses inline runtime but no parentTools provided`);
       }
-      // Resolve task templates before execution
+      // Resolve task + captured-call templates before execution. The prose task
+      // resolves `{{params.*}}` with the untrusted-data boundary; the captured
+      // `input_template` resolves the same params into the literal call the step
+      // agent replays (no boundary — those are tool arguments, not prose).
       const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext) : step.task;
-      const resolvedStep = resolvedTask !== step.task ? { ...step, task: resolvedTask } : step;
+      const resolvedInputTemplate = step.input_template
+        ? resolveInputTemplate(step.input_template, stepContext)
+        : step.input_template;
+      const resolvedStep =
+        (resolvedTask !== step.task || resolvedInputTemplate !== step.input_template)
+          ? { ...step, task: resolvedTask, input_template: resolvedInputTemplate }
+          : step;
       // Check session budget before spawning step agent
       const stepModel = resolveModelForCost(step, 'balanced', config);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });

@@ -26,6 +26,7 @@ import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/
 export async function runGuardedSavedWorkflow(
   engine: Engine,
   workflowId: string,
+  params?: Record<string, unknown> | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
   const budgetCheck = checkPersistentBudget();
@@ -57,7 +58,7 @@ export async function runGuardedSavedWorkflow(
   }
 
   // 3. Run the workflow.
-  const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config);
+  const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params);
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.
   //    Hook errors are non-fatal (mirror Session.run). Skip zero-cost runs.

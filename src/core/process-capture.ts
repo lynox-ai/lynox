@@ -162,7 +162,7 @@ Your ONLY job is to ANNOTATE each numbered entry. You must return exactly one an
 For each numbered call, provide:
 1. "index": the index of the call you are annotating (copied verbatim from the input)
 2. "description": a plain-language description of what this step does (for a business user, not a developer)
-3. "inputTemplate": a JSON object capturing the call's input values, with values likely to change between runs left as placeholders
+3. "inputTemplate": a JSON object capturing the call's input values verbatim, EXCEPT that each value likely to change between runs is replaced by a "{{name}}" placeholder whose name EXACTLY matches the corresponding entry in the "parameters" list below (e.g. if a parameter is named "client_name", write "{{client_name}}" in the template wherever that client's name appeared). Keep every other value literal. This template is replayed verbatim, so the placeholder names must line up with the parameters.
 4. "dependsOn": the indexes of earlier calls whose output this call depends on (an array, possibly empty)
 
 Also identify the workflow's parameters — input values likely to CHANGE between runs. Classify each as:

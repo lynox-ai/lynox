@@ -1272,6 +1272,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.run_done': { de: 'Workflow abgeschlossen.', en: 'Workflow completed.' },
 	'workflow_library.run_failed': { de: 'Workflow-Ausführung fehlgeschlagen.', en: 'Workflow run failed.' },
 	'workflow_library.delete_confirm': { de: 'Diesen gespeicherten Workflow löschen?', en: 'Delete this saved workflow?' },
+	'workflow_library.params_title': { de: 'Werte für diesen Lauf', en: 'Values for this run' },
+	'workflow_library.params_hint': { de: 'Diese Werte ersetzen die Platzhalter im Workflow.', en: 'These values replace the placeholders in the workflow.' },
+	'workflow_library.params_required': { de: 'Bitte alle Felder ausfüllen.', en: 'Please fill in all fields.' },
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },

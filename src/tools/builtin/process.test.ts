@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { saveWorkflowTool } from './process.js';
+import { saveWorkflowTool, processToSteps } from './process.js';
 import { _resetPipelineStore, getPipeline, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
@@ -373,5 +373,98 @@ describe('save_workflow — session-call forwarding', () => {
       SESSION_TOOL_CALLS,
       expect.anything(),
     );
+  });
+});
+
+describe('processToSteps (deterministic-replay carry-through)', () => {
+  function makeRecord(over: Partial<ProcessRecord> = {}): ProcessRecord {
+    return {
+      id: 'rec-1',
+      name: 'Monthly Report',
+      description: 'A monthly client report',
+      sourceRunId: 'run-1',
+      steps: [],
+      parameters: [],
+      createdAt: '2026-06-22T00:00:00.000Z',
+      ...over,
+    };
+  }
+
+  it('carries the literal tool + input_template onto each runnable step', () => {
+    const steps = processToSteps(makeRecord({
+      steps: [
+        { order: 0, tool: 'data_store_query', description: 'Pull revenue', inputTemplate: { table: 'revenue', client: '{{client}}' }, dependsOn: [] },
+      ],
+      parameters: [{ name: 'client', description: 'client', type: 'string', source: 'user_input' }],
+    }));
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.id).toBe('step-0');
+    expect(steps[0]!.tool).toBe('data_store_query');
+    // The captured bare {{client}} placeholder is re-homed into the params namespace.
+    expect(steps[0]!.input_template).toEqual({ table: 'revenue', client: '{{params.client}}' });
+  });
+
+  it('re-homes bare {{param}} placeholders into the {{params.*}} namespace (deep)', () => {
+    const steps = processToSteps(makeRecord({
+      steps: [
+        { order: 0, tool: 'http', description: 'Fetch', inputTemplate: { url: 'https://api/{{client}}/m/{{month}}', tags: ['{{client}}', 'fixed'] }, dependsOn: [] },
+      ],
+      parameters: [
+        { name: 'client', description: 'c', type: 'string', source: 'user_input' },
+        { name: 'month', description: 'm', type: 'date', source: 'relative_date' },
+      ],
+    }));
+    expect(steps[0]!.input_template).toEqual({
+      url: 'https://api/{{params.client}}/m/{{params.month}}',
+      tags: ['{{params.client}}', 'fixed'],
+    });
+  });
+
+  it('does not match a param name inside a longer placeholder ({{report_month}} vs month)', () => {
+    const steps = processToSteps(makeRecord({
+      steps: [{ order: 0, tool: 'http', description: 'X', inputTemplate: { u: '{{report_month}}' }, dependsOn: [] }],
+      parameters: [
+        { name: 'month', description: 'm', type: 'string', source: 'user_input' },
+        { name: 'report_month', description: 'rm', type: 'string', source: 'user_input' },
+      ],
+    }));
+    // `month` must NOT rewrite the inner of `{{report_month}}`; only the exact
+    // `{{report_month}}` token is namespaced.
+    expect(steps[0]!.input_template).toEqual({ u: '{{params.report_month}}' });
+  });
+
+  it('surfaces referenced params as {{params.<name>}} hints in the prose task', () => {
+    const steps = processToSteps(makeRecord({
+      steps: [
+        { order: 0, tool: 'http', description: 'Fetch client data', inputTemplate: { url: 'https://api/{{client}}' }, dependsOn: [] },
+      ],
+      parameters: [
+        { name: 'client', description: 'client', type: 'string', source: 'user_input' },
+        { name: 'unused', description: 'not referenced', type: 'string', source: 'user_input' },
+      ],
+    }));
+    // Only the param actually referenced by the template is hinted, in the
+    // {{params.*}} namespace (so prose + input_template resolve the same way).
+    expect(steps[0]!.task).toContain('{{params.client}}');
+    expect(steps[0]!.task).not.toContain('{{params.unused}}');
+  });
+
+  it('emits no parameter hint when the step references none', () => {
+    const steps = processToSteps(makeRecord({
+      steps: [{ order: 0, tool: 'bash', description: 'List files', inputTemplate: { cmd: 'ls' }, dependsOn: [] }],
+      parameters: [{ name: 'client', description: 'client', type: 'string', source: 'user_input' }],
+    }));
+    expect(steps[0]!.task).toBe('List files');
+  });
+
+  it('maps dependsOn order values to step-<order> input_from, dropping stale ones', () => {
+    const steps = processToSteps(makeRecord({
+      steps: [
+        { order: 0, tool: 'http', description: 'A', inputTemplate: {}, dependsOn: [] },
+        { order: 1, tool: 'bash', description: 'B', inputTemplate: {}, dependsOn: [0, 99] },
+      ],
+    }));
+    expect(steps[1]!.input_from).toEqual(['step-0']); // 99 has no step → dropped
+    expect(steps[0]!.input_from).toBeUndefined();
   });
 });

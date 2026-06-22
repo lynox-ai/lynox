@@ -176,6 +176,9 @@ function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: Run
     executionMode: 'orchestrated',
     template: false,
     mode: inferPipelineMode(pipelineSteps),
+    // plan_task plans carry no capture parameters; the field exists so a saved
+    // template can be re-targeted (populated only on the capture/promote path).
+    parameters: [],
   };
 
   // Save-time gate. plan_task is the canonical save path for pipelines today;

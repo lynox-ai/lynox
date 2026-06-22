@@ -29,25 +29,80 @@ interface SaveWorkflowInput {
   workflow_id?: string | undefined;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Convert a captured ProcessRecord into runnable pipeline steps. Parameter
- * names referenced by a step's inputTemplate are surfaced as `{{name}}`
- * placeholders in the step task so the workflow stays re-parameterizable.
+ * Normalise captured parameter placeholders into the `{{params.<name>}}`
+ * namespace. Capture (Haiku) reliably emits BARE `{{<param_name>}}` placeholders
+ * matching the identified parameters (verified online — see
+ * tests/online/workflow-replay-eval); this deterministic rewrite re-homes them
+ * under `params.*` so they resolve against the bound run-context namespace
+ * (`resolveTaskTemplate` / `resolveInputTemplate`), independent of whatever
+ * namespace the model happened to choose. Walks string leaves of any value.
+ *
+ * The `{{`…`}}` anchoring makes the replace exact: a param `month` never
+ * matches inside `{{report_month}}`, and an already-namespaced
+ * `{{params.month}}` is left untouched (no double-prefixing).
  */
-function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
+function namespaceParamPlaceholders(value: unknown, paramNames: string[]): unknown {
+  if (paramNames.length === 0) return value;
+  if (typeof value === 'string') {
+    let s = value;
+    for (const name of paramNames) {
+      const re = new RegExp(`\\{\\{\\s*${escapeRegExp(name)}\\s*\\}\\}`, 'g');
+      s = s.replace(re, `{{params.${name}}}`);
+    }
+    return s;
+  }
+  if (Array.isArray(value)) {
+    return value.map(v => namespaceParamPlaceholders(v, paramNames));
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = namespaceParamPlaceholders(v, paramNames);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Convert a captured ProcessRecord into runnable pipeline steps. Each step
+ * carries its literal captured tool name + input object (`tool` /
+ * `input_template`) so the runner can replay the exact call instead of having
+ * an agent re-interpret prose — the deterministic-replay seam. The captured
+ * `{{<param>}}` placeholders are normalised into the `{{params.<name>}}`
+ * namespace (both in the prose task and the `input_template`) so the same
+ * namespace resolves in both at run time against the bound params
+ * (`resolveTaskTemplate` / `resolveInputTemplate`), keeping the workflow
+ * re-targetable.
+ *
+ * Exported for unit testing — a pure ProcessRecord → InlinePipelineStep[] transform.
+ */
+export function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
   const validOrders = new Set(record.steps.map(s => s.order));
+  const paramNames = record.parameters.map(p => p.name);
   return record.steps.map(step => {
+    // Re-home the captured bare placeholders into the params namespace.
+    const inputTemplate = namespaceParamPlaceholders(step.inputTemplate, paramNames) as Record<string, unknown>;
+
     const paramHints = record.parameters
       .filter(p => {
-        const templateStr = JSON.stringify(step.inputTemplate);
-        return templateStr.includes(p.name);
+        const templateStr = JSON.stringify(inputTemplate);
+        return templateStr.includes(`{{params.${p.name}}}`);
       })
-      .map(p => `{{${p.name}}}`)
+      .map(p => `{{params.${p.name}}}`)
       .join(', ');
 
+    // Normalise any placeholder the model left in the prose description too,
+    // then append the explicit hint list for the prose-fallback path.
+    const description = namespaceParamPlaceholders(step.description, paramNames) as string;
     const task = paramHints
-      ? `${step.description}\n\nParameters: ${paramHints}`
-      : step.description;
+      ? `${description}\n\nParameters: ${paramHints}`
+      : description;
 
     // `dependsOn` holds step `order` values — the same space the `step-<order>`
     // IDs below use. Keep only deps that resolve to a real step so a stale
@@ -59,6 +114,8 @@ function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
     return {
       id: `step-${step.order}`,
       task,
+      tool: step.tool,
+      input_template: inputTemplate,
       input_from: input_from?.length ? input_from : undefined,
     };
   });
@@ -98,6 +155,9 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     template: true,
     executed: false,
     createdAt: new Date().toISOString(),
+    // A plan_task pipeline carries no capture parameters; preserve any the
+    // source already had (legacy rows backfill to []).
+    parameters: existing.parameters ?? [],
   };
 
   // Save-time gate — same as plan_task.
@@ -213,6 +273,9 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // Captured sessions don't carry ask_user/ask_secret today; infer the
       // interaction mode by step inspection so the contract stays honest.
       mode: inferPipelineMode(pipelineSteps),
+      // The re-target schema travels with the template (binding/validation/UI
+      // form all read it) — lifted from the capture's identified parameters.
+      parameters: record.parameters,
     };
 
     // Save-time gate — same as plan_task.
