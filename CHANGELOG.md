@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.16.0 — 2026-06-22
+
+Engine context-cost tooling and a comprehensive thread debug-export, a memory-recall stability fix, and the managed credit-pack and usage-display fixes. No control-plane database migration; engine adds additive per-tenant history-DB migrations (run on boot).
+
+### Added
+
+- Comprehensive thread debug-export — `GET /api/threads/:id/debug-export` bundles the thread, messages, and per-run cost / tokens / cache / context-composition plus compaction events (secrets scrubbed); an "Export thread JSON" control in the web UI. (#757, #758)
+- Cost-aware compaction: long threads auto-summarize against an absolute token budget (`compaction_token_budget`, default 150K) to bound large-context cache-read cost; recall LRU cap raised 64→128. (#754)
+- Context-cost composition probe with opt-in per-turn logging (`context_cost_log`, also settable by managed users) and a baseline harness. (#750, #753)
+- Managed: grant `$0`-coupon (100%-off) credit packs and surface purchased packs in the budget display. (pro #304, #305)
+
+### Fixed
+
+- Embedding: cap the embed input length so a large task can no longer push the transformer's O(seq_len²) attention into a memory blowup that hangs the engine on memory-constrained instances. (#759)
+- Bump nodemailer 8.0.11 → 9.0.1 (GHSA-p6gq-j5cr-w38f). (#755)
+- Usage dashboard budget now sized against included + top-up credits. (#747)
+- Managed: resolve the control-plane base URL by environment across the checkout/account pages. (pro #306)
+
 ## 1.15.0 — 2026-06-17
 
 Provider-agnostic model routing: each tier (fast/balanced/deep) can run on its own provider and model — in a Standard mode (one provider for all tiers) or an opt-in Hybrid mode (per-tier, freely cross-provider, e.g. a Mistral `fast` tier alongside an Anthropic `deep` tier). Built on a new provider registry; no engine or control-plane database migration.
