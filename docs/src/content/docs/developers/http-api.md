@@ -77,6 +77,9 @@ GET    /api/threads/:id           # Get thread details
 PATCH  /api/threads/:id           # Update (rename, archive)
 DELETE /api/threads/:id           # Delete thread
 GET    /api/threads/:id/messages  # Get messages (supports pagination)
+GET    /api/threads/:id/debug-export  # Full debug bundle (thread + messages + per-run
+                                      # cost/tokens/cache/composition + compaction events;
+                                      # secrets scrubbed)
 ```
 
 ### Memory

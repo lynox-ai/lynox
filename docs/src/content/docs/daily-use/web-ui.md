@@ -31,9 +31,9 @@ During workflows, a **progress bar** appears above the input showing each step a
 
 ### Threads
 
-Every conversation is saved as a thread. The sidebar lists your threads — click to resume any past conversation with full context.
+Every conversation is saved as a thread. The sidebar lists your threads — click to resume any past conversation. Very long threads are automatically summarized once they grow past a token budget (configurable via `compaction_token_budget`), so the agent keeps a compact working memory of the conversation instead of re-sending the entire history on every turn.
 
-You can **rename**, **archive**, or **delete** threads from the sidebar.
+You can **rename**, **archive**, **delete**, or **export** a thread (including a debug bundle) from the sidebar.
 
 ### Artifacts
 

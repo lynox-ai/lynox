@@ -53,6 +53,8 @@ Only **anthropic** and **openai with the Mistral endpoint** are exercised on eve
 | `default_tier` | `fast`, `balanced`, `deep` | `balanced` |
 | `thinking_mode` | `adaptive`, `disabled` | `adaptive` |
 | `effort_level` | `low`, `medium`, `high`, `max` | `high` |
+| `compaction_token_budget` | Token budget that triggers automatic thread summarization (min 32000) | `150000` |
+| `context_cost_log` | Opt-in: write a content-free per-turn context-composition log to the data dir (diagnostics) | `false` |
 
 The tiers are provider-agnostic capability bands (`fast` = cheapest/quickest, `balanced` = default workhorse, `deep` = reasoning-heavy); each resolves to a concrete model for your active provider. The legacy Anthropic-brand names (`haiku`/`sonnet`/`opus`) are still accepted and normalized automatically, so existing configs keep working.
 
