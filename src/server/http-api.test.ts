@@ -96,6 +96,7 @@ vi.mock('../core/engine.js', () => ({
       update: mockMemoryUpdate,
       delete: mockMemoryDelete,
     });
+    this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
       set: mockSecretSet,
@@ -2604,8 +2605,8 @@ describe('LynoxHTTPApi', () => {
       expect(body.ran).toBe(true);
       expect(body.runId).toBe('run-xyz');
       expect(body.status).toBe('completed');
-      // No body → no re-target params (4th arg undefined).
-      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined);
+      // No body → no re-target params (4th arg undefined); 5th = engine runtime.
+      expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined, expect.anything());
     });
 
     it('POST /api/workflows/:id/run forwards re-target params from the body', async () => {
@@ -2616,7 +2617,7 @@ describe('LynoxHTTPApi', () => {
       });
       expect(res.status).toBe(200);
       expect(mockRunSavedWorkflow).toHaveBeenCalledWith(
-        'wf-1', expect.anything(), expect.anything(), { client: 'Acme B', month: '2026-05' },
+        'wf-1', expect.anything(), expect.anything(), { client: 'Acme B', month: '2026-05' }, expect.anything(),
       );
     });
 

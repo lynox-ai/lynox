@@ -57,8 +57,15 @@ export async function runGuardedSavedWorkflow(
     }
   }
 
-  // 3. Run the workflow.
-  const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params);
+  // 3. Run the workflow. Pass the engine's tool set + tool-context + memory so
+  //    inline steps can actually execute headless — the runner needs
+  //    `parentTools` or it throws before running a step.
+  const toolContext = engine.getToolContext();
+  const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params, {
+    tools: toolContext.tools,
+    toolContext,
+    memory: engine.getMemory(),
+  });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.
   //    Hook errors are non-fatal (mirror Session.run). Skip zero-cost runs.

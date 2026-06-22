@@ -565,6 +565,7 @@ export async function runSavedWorkflow(
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
   params?: Record<string, unknown> | undefined,
+  runtime?: { tools?: ToolEntry[] | undefined; toolContext?: ToolContext | undefined; memory?: IMemory | null | undefined } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -606,7 +607,17 @@ export async function runSavedWorkflow(
   try {
     const manifest = buildManifest(planned.name, steps, 'stop', { params: bound.params });
     validateManifest(manifest);
-    const state = await runManifest(manifest, config, { runHistory });
+    // Inline steps need the engine's tool set to execute — without `parentTools`
+    // the runner throws "no parentTools provided" before any step runs (the gap
+    // that left every headless saved-workflow run failing). The library "Run",
+    // cron, and the HTTP re-target all reach here via runGuardedSavedWorkflow,
+    // which sources these off the engine.
+    const state = await runManifest(manifest, config, {
+      runHistory,
+      parentTools: runtime?.tools,
+      parentToolContext: runtime?.toolContext,
+      parentMemory: runtime?.memory ?? null,
+    });
     persistPipelineRun(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     return { ok: true, runId: state.runId, status: state.status, costUsd };

@@ -18,6 +18,8 @@ function makeEngine(hooks: LynoxHooks[]): Engine {
     getContext: () => null,
     getUserConfig: () => ({ default_tier: 'balanced' }),
     getRunHistory: () => ({} as unknown),
+    getToolContext: () => ({ tools: [] }),
+    getMemory: () => null,
   } as unknown as Engine;
 }
 

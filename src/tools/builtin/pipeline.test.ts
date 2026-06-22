@@ -880,6 +880,16 @@ describe('runSavedWorkflow', () => {
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards the engine tool set to runManifest so inline steps can execute headless', async () => {
+    // The pre-replay gap: runSavedWorkflow ran inline steps with no parentTools,
+    // so the runner threw "no parentTools provided" before any step ran.
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'pt-1' }));
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as { parentTools?: ToolEntry[] };
+    expect(opts.parentTools).toBe(mockTools);
+  });
+
   it('a required-param workflow still RUNS on the cron path (no params supplied) — no regression', async () => {
     // The autonomous path (cron / run_workflow) supplies no values. A required
     // param must NOT hard-fail the run — it binds leniently (placeholder stays
