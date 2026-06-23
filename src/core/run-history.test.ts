@@ -898,6 +898,37 @@ describe('RunHistory', () => {
       h.close();
     });
 
+    // Slice B: the save chokepoint runs the fail-closed contract validator.
+    const govStep = {
+      id: 's1', task: 'replay', tool: 'http_request',
+      input_template: { url: 'https://api.acme.test/v1/{{params.customer}}' },
+    };
+    const contract = (paramConstraints: Record<string, unknown>) => ({
+      version: 1, grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['api.acme.test'], pathPatterns: ['/v1/*'], paramConstraints,
+    });
+
+    it('rejects a contract-governed workflow that leaves a re-targetable param unconstrained', () => {
+      const h = createHistory();
+      expect(() => insertPlanned(h, 'plan-bad', 'bad', {
+        steps: [govStep], capabilityContract: contract({}),
+      })).toThrow(/customer/);
+      h.close();
+    });
+
+    it('accepts a contract-governed workflow when every referenced param is constrained', () => {
+      const h = createHistory();
+      expect(() => insertPlanned(h, 'plan-ok', 'ok', {
+        steps: [govStep], capabilityContract: contract({ customer: { regex: '^[a-z0-9-]+$' } }),
+      })).not.toThrow();
+      // And the contract actually round-trips into the stored blob — so it reaches
+      // isDangerous at run time (guards a fail-open-on-persist regression).
+      const [row] = h.getPlannedPipelines(10);
+      const parsed = JSON.parse(row!.manifest_json) as { capabilityContract?: { version?: number } };
+      expect(parsed.capabilityContract?.version).toBe(1);
+      h.close();
+    });
+
     it('getPlannedPipelines manifest_json carries the template flag', () => {
       const h = createHistory();
       insertPlanned(h, 'plan-tpl', 'tpl', { template: true });

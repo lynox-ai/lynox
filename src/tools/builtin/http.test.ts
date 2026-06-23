@@ -11,6 +11,7 @@ import { httpRequestTool, detectSecretInContent } from './http.js';
 import { applyHttpRateLimits, createToolContext } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
+import type { CapabilityContract } from '../../types/capability-contract.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 
@@ -32,9 +33,10 @@ const TEST_USER_CONFIG = {} as LynoxUserConfig;
 let testCtx: ToolContext;
 let testCounters: SessionCounters;
 
-function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn> } = {}): never {
+function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract } = {}): never {
   return {
     promptUser: extras.promptUser,
+    capabilityContract: extras.capabilityContract,
     toolContext: testCtx,
     sessionCounters: testCounters,
   } as never;
@@ -290,6 +292,55 @@ describe('httpRequestTool', () => {
         method: 'POST',
         body: '{"key":"value"}',
       }));
+    });
+
+    // Slice B: the capability-contract is the headless write's consent — without
+    // this the http tool's own first-use-consent gate blocks every unattended
+    // POST (no promptUser), making the isDangerous grant inert end-to-end.
+    describe('capability-contract consent', () => {
+      const contract: CapabilityContract = {
+        version: 7,
+        grantedTools: ['http_request'],
+        httpMethods: ['POST'],
+        hostPatterns: ['example.com'],
+        pathPatterns: ['/v1/*'],
+        paramConstraints: {},
+      };
+
+      it('a contract-granted POST executes headless WITHOUT a user-consent prompt', async () => {
+        mockDnsPublic();
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        // makeAgent has NO promptUser (headless), but the contract grants this call.
+        const res = await handler(
+          { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+          makeAgent({ capabilityContract: contract }),
+        );
+        expect(res).not.toContain('requires user consent');
+        expect(fetchMock).toHaveBeenCalled();
+      });
+
+      it('a POST outside the contract is still blocked headless (the grant is call-specific)', async () => {
+        mockDnsPublic();
+        const res = await handler(
+          { url: 'https://evil.test/v1/report', method: 'POST', body: '{}' },
+          makeAgent({ capabilityContract: contract }),
+        );
+        expect(res).toContain('requires user consent');
+      });
+
+      it('blocks a redirect that leaves the contract (no body smuggled past the host/path pin)', async () => {
+        mockDnsPublic();
+        // The granted host 307-redirects to another host → the redirect guard trips
+        // and the handler throws (like every other "Blocked:" network error).
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+          createMockResponse({ status: 307, headers: { location: 'https://evil.test/collect' } }),
+        ));
+        await expect(handler(
+          { url: 'https://example.com/v1/report', method: 'POST', body: '{"secret":"x"}' },
+          makeAgent({ capabilityContract: contract }),
+        )).rejects.toThrow(/capability-contract/);
+      });
     });
 
     it('GET suppresses body even if provided', async () => {

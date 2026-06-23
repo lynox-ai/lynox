@@ -1,4 +1,4 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits } from '../../types/index.js';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -509,6 +509,28 @@ export interface RunSavedWorkflowResult {
 }
 
 /**
+ * Conservative default DoS bounds for an unattended (headless/autonomous) run
+ * (PRD §4.2 S3). Wall-clock is the primary guard — it terminates a
+ * non-terminating run without capping legitimate (research) spend. The step
+ * backstop sits above MAX_STEPS (= 20). Per-run spend is intentionally NOT
+ * defaulted: research workflows are legitimately expensive, so spend is bounded
+ * by the tenant-level `checkPersistentBudget`, with `maxSpendUsd` an opt-in
+ * tighter per-run cap a workflow can declare.
+ */
+const DEFAULT_HEADLESS_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
+const DEFAULT_HEADLESS_MAX_ITERATIONS = 50;          // backstop above MAX_STEPS
+
+/** Merge a workflow's stored limits with the headless defaults (unset → default;
+ *  `maxSpendUsd` stays opt-in). */
+function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
+  return {
+    maxWallClockMs: stored?.maxWallClockMs ?? DEFAULT_HEADLESS_WALL_CLOCK_MS,
+    maxIterations: stored?.maxIterations ?? DEFAULT_HEADLESS_MAX_ITERATIONS,
+    maxSpendUsd: stored?.maxSpendUsd,
+  };
+}
+
+/**
  * Run a *saved workflow* (a `PlannedPipeline` with `template:true`) headless,
  * for the Saved-Workflows library UI's "Run" action (PRD §6.8 / D13).
  *
@@ -551,7 +573,13 @@ export async function runSavedWorkflow(
   // run UI): a missing required param then fails fast. An autonomous run with no
   // values (cron, `run_workflow`) binds leniently — unbound params stay as
   // unresolved placeholders, preserving the pre-replay behaviour (no regression).
-  const bound = bindWorkflowParameters(planned.parameters ?? [], params, { requireAll: params !== undefined });
+  // Slice B: a contract-governed workflow constrains its re-targetable params at
+  // bind (enum/regex/min-max) so a supplied value can't redirect an outbound
+  // call before it resolves raw into the literal step call (S1).
+  const bound = bindWorkflowParameters(planned.parameters ?? [], params, {
+    requireAll: params !== undefined,
+    constraints: planned.capabilityContract?.paramConstraints,
+  });
   if (!bound.ok) {
     return { ok: false, error: bound.error };
   }
@@ -590,6 +618,12 @@ export async function runSavedWorkflow(
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
       parentMemory: runtime?.memory ?? null,
+      // Slice B: the stored capability-contract authorises this headless run's
+      // declared outbound writes (enforced per-tool-call at isDangerous); the
+      // DoS bounds (wall-clock/iterations/spend, with headless defaults) stop a
+      // runaway from inside the run. Absent contract = the safe deny default.
+      capabilityContract: planned.capabilityContract,
+      limits: resolveHeadlessLimits(planned.limits),
     }));
     persistPipelineRun(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
@@ -668,6 +702,14 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow "${planned.id}" has already been executed.`;
   }
 
+  // Deliberately NOT contract-governed (Slice B1): the in-session `run_workflow`
+  // tool runs with a live approver, so `isDangerous` still prompts for outbound
+  // writes — the capability-contract grant + param constraints are the headless
+  // unattended substitute for that prompt and are threaded only on the headless
+  // `runSavedWorkflow` path. Keeping them off here means zero in-session
+  // behaviour change. (If `run_workflow` is ever made callable from an
+  // unattended/worker session, thread `planned.capabilityContract` +
+  // `paramConstraints` + `limits` here too.)
   const bound = bindWorkflowParameters(planned.parameters ?? [], deps.params, { requireAll: deps.params !== undefined });
   if (!bound.ok) {
     return `Error: ${bound.error}`;

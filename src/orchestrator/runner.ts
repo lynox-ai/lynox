@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract } from '../types/index.js';
+import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { resolveRunModel } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
@@ -82,6 +82,13 @@ export interface RunManifestOptions {
    * autonomous-deny default (PRD §4.2 S7). Slice B fills the shape + enforces.
    */
   capabilityContract?: CapabilityContract | undefined;
+  /**
+   * Per-workflow DoS bounds enforced *inside* this run, between steps (PRD §4.2
+   * S3). Set only by the headless saved-workflow path (`runSavedWorkflow`), with
+   * conservative defaults applied there; sub-pipelines + in-session runs omit it
+   * (undefined = no run-level bound, only the existing per-step/session guards).
+   */
+  limits?: WorkflowLimits | undefined;
 }
 
 /**
@@ -103,6 +110,7 @@ export interface RunCtxInput {
   runHistory?: RunHistory | undefined;
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
+  limits?: WorkflowLimits | undefined;
 }
 
 /**
@@ -131,7 +139,44 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     runHistory: input.runHistory,
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
+    limits: input.limits,
   };
+}
+
+/**
+ * Per-workflow DoS guard (PRD §4.2 S3). Returns an abort reason, or null when
+ * within bounds / unbounded. Primary guard is wall-clock — it terminates a
+ * non-terminating run without capping legitimate (research) spend. `iterations`
+ * = steps executed so far (a backstop above MAX_STEPS); `maxSpendUsd` is the
+ * opt-in tighter per-run cap on top of the tenant-level `checkPersistentBudget`.
+ *
+ * **Granularity (no silent cap):** the guard is evaluated at STEP/PHASE
+ * boundaries (before each sequential step, before each parallel phase), so it
+ * bounds the common shape — a linear captured workflow runs one step per phase,
+ * so the wall-clock/spend/step bound is re-checked before every step. It does
+ * NOT interrupt work already in flight: a single long-running step, or a single
+ * *wide* parallel phase (independent steps with no `input_from`, all launched
+ * together), is bounded instead by that step's own `timeout_ms`, the agent's
+ * per-spawn iteration cap, and the per-step `checkSessionBudget` — not by this
+ * guard. Exported for direct unit testing of each bound.
+ */
+export function workflowBoundExceeded(
+  limits: WorkflowLimits | undefined,
+  startMs: number,
+  iterations: number,
+  stepCounters: SessionCounters,
+): string | null {
+  if (!limits) return null;
+  if (limits.maxIterations !== undefined && iterations >= limits.maxIterations) {
+    return `Workflow exceeded its step limit (${limits.maxIterations}) — aborting to prevent a runaway.`;
+  }
+  if (limits.maxWallClockMs !== undefined && Date.now() - startMs > limits.maxWallClockMs) {
+    return `Workflow exceeded its wall-clock limit (${Math.round(limits.maxWallClockMs / 1000)}s) — aborting to prevent a runaway.`;
+  }
+  if (limits.maxSpendUsd !== undefined && stepCounters.costUSD > limits.maxSpendUsd) {
+    return `Workflow exceeded its spend limit ($${limits.maxSpendUsd.toFixed(2)}) — aborting to prevent a runaway.`;
+  }
+  return null;
 }
 
 const MAX_PIPELINE_DEPTH = 3;
@@ -259,8 +304,18 @@ async function runSequential(
   options: RunManifestOptions,
   stepCounters: SessionCounters,
 ): Promise<void> {
+  const startMs = Date.parse(state.startedAt);
+  let iterations = 0;
   for (const step of manifest.agents) {
+    const exceeded = workflowBoundExceeded(options.limits, startMs, iterations, stepCounters);
+    if (exceeded) {
+      state.status = 'failed';
+      state.error = exceeded;
+      state.completedAt = new Date().toISOString();
+      return;
+    }
     const result = await executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
+    iterations++;
     if (result === 'halt') return;
   }
 }
@@ -278,7 +333,17 @@ async function runParallel(
   const { phases } = computePhases(manifest.agents);
   const stepsById = new Map(manifest.agents.map(s => [s.id, s]));
 
+  const startMs = Date.parse(state.startedAt);
+  let iterations = 0;
   for (const phase of phases) {
+    const exceeded = workflowBoundExceeded(options.limits, startMs, iterations, stepCounters);
+    if (exceeded) {
+      state.status = 'failed';
+      state.error = exceeded;
+      state.completedAt = new Date().toISOString();
+      return;
+    }
+    iterations += phase.stepIds.length;
     options.hooks?.onPhaseStart?.(phase.phaseIndex, phase.stepIds);
 
     const promises = phase.stepIds.map(async (stepId) => {

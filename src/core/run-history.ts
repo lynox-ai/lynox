@@ -6,7 +6,8 @@ import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import type { TaskRecord } from '../types/index.js';
+import type { TaskRecord, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 
@@ -1865,7 +1866,14 @@ export class RunHistory {
     return persistence.getPipelineStepResults(this.db, pipelineRunId);
   }
 
-  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: unknown[]; reasoning: string; estimatedCost: number; createdAt: string }): void {
+  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; capabilityContract?: CapabilityContract | undefined }): void {
+    // Fail-closed contract validation at the save chokepoint (Slice B / D2):
+    // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
+    // through here, so a contract-governed workflow with an unconstrained
+    // re-targetable param is rejected before it can be persisted + scheduled.
+    // No contract → no-op, so existing playbooks are unaffected.
+    const contractError = validateContractAgainstSteps(planned);
+    if (contractError) throw new Error(contractError);
     persistence.insertPlannedPipeline(this.db, planned);
   }
 
