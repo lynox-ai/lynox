@@ -544,10 +544,11 @@ export function insertTask(db: Database.Database, params: {
   maxRetries?: number | undefined;
   notificationChannel?: string | undefined;
   pipelineId?: string | undefined;
+  pipelineParams?: string | undefined;
 }): void {
   db.prepare(`
-    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id, pipeline_params)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.title, params.description ?? '',
     params.status ?? 'open', params.priority ?? 'medium',
@@ -557,8 +558,25 @@ export function insertTask(db: Database.Database, params: {
     params.scheduleCron ?? null, params.nextRunAt ?? null,
     params.taskType ?? 'manual', params.watchConfig ?? null,
     params.maxRetries ?? 0, params.notificationChannel ?? null,
-    params.pipelineId ?? null,
+    params.pipelineId ?? null, params.pipelineParams ?? null,
   );
+}
+
+/** Slice B2: stamp `confirmedAt` onto a saved workflow's manifest blob (the
+ *  human's first-run-confirm at promote-to-cron). Mirrors renamePlannedPipeline. */
+export function setWorkflowConfirmedAt(db: Database.Database, id: string, confirmedAt: string): boolean {
+  const res = db.prepare(
+    "UPDATE pipeline_runs SET manifest_json = json_set(manifest_json, '$.confirmedAt', ?) WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
+  ).run(confirmedAt, id, `${id}%`);
+  return res.changes > 0;
+}
+
+/** Slice B2: flip a scheduled task's cron kill-switch. */
+export function setTaskEnabled(db: Database.Database, id: string, enabled: boolean): boolean {
+  const res = db.prepare(
+    "UPDATE tasks SET enabled = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(enabled ? 1 : 0, id);
+  return res.changes > 0;
 }
 
 export function updateTask(db: Database.Database, id: string, params: {
@@ -698,10 +716,17 @@ export function getOverdueTasks(db: Database.Database, scopes?: Array<{ type: st
  */
 export function getDueTasks(db: Database.Database): TaskRecord[] {
   const now = new Date().toISOString();
+  // Slice B2 — kill-switch: a disabled task (enabled=0) is simply NOT due, so it
+  // is never processed and never has its status / next_run_at mutated. This
+  // pauses it reversibly (re-enabling makes it due again with its schedule
+  // intact) — unlike skipping it AFTER selection, which would route a one-shot
+  // task through recordTaskRun and permanently complete it. The column is
+  // NOT NULL DEFAULT 1, so legacy/absent rows count as enabled.
   return db.prepare(
     `SELECT * FROM tasks
      WHERE next_run_at IS NOT NULL
        AND next_run_at <= ?
+       AND enabled != 0
        AND status != 'completed'
        AND (status != 'failed' OR schedule_cron IS NOT NULL)
      ORDER BY next_run_at ASC`

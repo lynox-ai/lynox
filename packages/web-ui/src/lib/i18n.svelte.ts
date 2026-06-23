@@ -1275,6 +1275,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.params_title': { de: 'Werte für diesen Lauf', en: 'Values for this run' },
 	'workflow_library.params_hint': { de: 'Diese Werte ersetzen die Platzhalter im Workflow.', en: 'These values replace the placeholders in the workflow.' },
 	'workflow_library.params_required': { de: 'Bitte alle Felder ausfüllen.', en: 'Please fill in all fields.' },
+	'workflow_library.schedule': { de: 'Planen', en: 'Schedule' },
+	'workflow_library.schedule_title': { de: 'Workflow planen', en: 'Schedule workflow' },
+	'workflow_library.schedule_hint': { de: 'Dieser Workflow läuft danach automatisch nach dem Zeitplan unten – unbeaufsichtigt. Bestätige die Aktionen, die er ausführen darf.', en: 'This workflow will then run automatically on the schedule below — unattended. Confirm the actions it is allowed to take.' },
+	'workflow_library.schedule_cron_label': { de: 'Cron-Zeitplan', en: 'Cron schedule' },
+	'workflow_library.schedule_cron_hint': { de: 'Standard-Cron, z.B. „0 9 * * *“ = täglich um 9 Uhr.', en: 'Standard cron, e.g. "0 9 * * *" = every day at 9am.' },
+	'workflow_library.schedule_cron_required': { de: 'Bitte einen Cron-Zeitplan angeben.', en: 'Please enter a cron schedule.' },
+	'workflow_library.schedule_contract_title': { de: 'Dieser Workflow darf folgende ausgehende Aktionen durchführen:', en: 'This workflow may perform these outbound actions:' },
+	'workflow_library.schedule_confirm': { de: 'Bestätigen & planen', en: 'Confirm & schedule' },
+	'workflow_library.scheduled': { de: 'Workflow geplant.', en: 'Workflow scheduled.' },
+	'workflow_library.schedule_failed': { de: 'Planen fehlgeschlagen.', en: 'Scheduling failed.' },
 
 	// Integrations
 	'integrations.title': { de: 'Integrationen', en: 'Integrations' },

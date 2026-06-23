@@ -35,6 +35,8 @@ export interface TaskCreateParams {
   maxRetries?: number | undefined;
   notificationChannel?: string | undefined;
   pipelineId?: string | undefined;
+  /** Slice B2: JSON-stringified bound param values for a scheduled workflow run. */
+  pipelineParams?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -140,6 +142,7 @@ export class TaskManager {
       maxRetries: params.maxRetries,
       notificationChannel: params.notificationChannel,
       pipelineId: params.pipelineId,
+      pipelineParams: params.pipelineParams,
     });
 
     return this.history.getTask(id)!;
@@ -433,6 +436,13 @@ export class TaskManager {
       pipelineId: params.pipelineId,
       maxRetries: params.maxRetries,
     });
+  }
+
+  /** Slice B2: cron kill-switch — disable/enable a scheduled task without
+   *  deleting it (so its schedule + stored params survive). Returns false if no
+   *  task matched. */
+  setEnabled(id: string, enabled: boolean): boolean {
+    return this.history.setTaskEnabled(id, enabled);
   }
 
   /** Create a watch/monitor task. Sets task_type='watch', assignee='lynox', computes next_run_at from interval. */

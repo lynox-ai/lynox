@@ -54,6 +54,9 @@ const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
 const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'completed' });
+const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
+const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
+const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
 const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
 const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state', state: 'test-state' });
 const mockGoogleExchangeRedirectCode = vi.fn().mockResolvedValue(undefined);
@@ -115,12 +118,16 @@ vi.mock('../core/engine.js', () => ({
       getPlannedPipelines: mockHistoryGetPlannedPipelines,
       renamePlannedPipeline: mockHistoryRenamePlannedPipeline,
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
+      setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
+      getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
     });
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,
       create: mockTaskCreate,
       update: mockTaskUpdate,
       complete: mockTaskComplete,
+      createPipelineTask: mockTaskCreatePipeline,
+      setEnabled: mockTaskSetEnabled,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     // The saved-workflow run path now flows through the budget/credit
@@ -196,9 +203,11 @@ vi.mock('../integrations/push/web-push-channel.js', () => ({
 // to these HTTP-route tests and pulls in the orchestrator otherwise.
 const mockRunSavedWorkflow = vi.fn();
 const mockForgetPipeline = vi.fn();
+const mockGetPipeline = vi.fn();
 vi.mock('../tools/builtin/pipeline.js', () => ({
   runSavedWorkflow: mockRunSavedWorkflow,
   forgetPipeline: mockForgetPipeline,
+  getPipeline: mockGetPipeline,
 }));
 
 // === Import after mocks ===
@@ -785,6 +794,80 @@ describe('LynoxHTTPApi', () => {
     it('returns 404 for unknown session delete', async () => {
       mockSessionGet.mockReturnValue(undefined);
       const res = await jsonFetch('/api/sessions/nonexistent', { method: 'DELETE' });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('POST /api/tasks — schedule a saved workflow (Slice B2)', () => {
+    beforeEach(() => {
+      mockTaskCreatePipeline.mockClear();
+      mockSetWorkflowConfirmedAt.mockClear();
+      mockForgetPipeline.mockClear();
+      mockGetPipeline.mockReset();
+    });
+
+    // The handler dynamic-imports getPipeline (mocked) + the REAL
+    // bindWorkflowParameters (so param validation is genuinely exercised).
+    function storeWf(over: Record<string, unknown> = {}): void {
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-sched', name: 'Report', goal: 'g',
+        steps: [{ id: 's', task: 'do' }], reasoning: 'r', estimatedCost: 0,
+        createdAt: '2026-01-01T00:00:00.000Z', executed: false,
+        executionMode: 'orchestrated', template: true, mode: 'autonomous',
+        parameters: [{ name: 'month', description: '', type: 'string', source: 'user_input' }],
+        ...over,
+      });
+    }
+
+    it('binds params, stamps the confirm, and creates the cron task', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', {
+        method: 'POST',
+        body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' } }),
+      });
+      expect(res.status).toBe(201);
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      // Evicts the in-memory pipeline cache so the WorkerLoop reads the
+      // now-confirmed blob at fire time (else the confirmedAt gate breaks it).
+      expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
+      expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({
+        pipelineId: 'wf-sched',
+        scheduleCron: '0 9 1 * *',
+        pipelineParams: JSON.stringify({ month: '2026-06' }),
+      }));
+    });
+
+    it('rejects an invalid cron WITHOUT stamping the confirm (no spurious consent)', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: 'not a cron', params: { month: '2026-06' } }) });
+      expect(res.status).toBe(400);
+      expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+      expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+    });
+
+    it('rejects a schedule with no cron expression (400)', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', params: { month: '2026-06' } }) });
+      expect(res.status).toBe(400);
+      expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+    });
+
+    it('rejects an interactive workflow (400)', async () => {
+      storeWf({ mode: 'interactive' });
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: { month: '2026-06' } }) });
+      expect(res.status).toBe(400);
+      expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing required param without stamping the confirm (400)', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: {} }) });
+      expect(res.status).toBe(400);
+      expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+    });
+
+    it('404s an unknown workflow', async () => {
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'nope', scheduleCron: '0 9 * * *' }) });
       expect(res.status).toBe(404);
     });
   });

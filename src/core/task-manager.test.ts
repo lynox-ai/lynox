@@ -619,4 +619,58 @@ describe('TaskManager', () => {
       expect(after!.last_run_status).toBe('success');
     });
   });
+
+  describe('Slice B2: scheduled-workflow params + kill-switch', () => {
+    afterEach(() => setPipelineModeLookup(undefined));
+
+    it('createPipelineTask round-trips the stored param values', () => {
+      const task = tm.createPipelineTask({
+        title: 'Monthly report',
+        pipelineId: 'wf-1',
+        scheduleCron: '0 9 1 * *',
+        pipelineParams: JSON.stringify({ month: '2026-06' }),
+      });
+      const stored = tm.getTask(task.id);
+      expect(stored!.pipeline_params).toBe(JSON.stringify({ month: '2026-06' }));
+      expect(stored!.pipeline_id).toBe('wf-1');
+      // A fresh scheduled task is enabled by default (the column defaults to 1).
+      expect(stored!.enabled).toBe(1);
+    });
+
+    it('setEnabled toggles the cron kill-switch without losing the schedule/params', () => {
+      const task = tm.createPipelineTask({
+        title: 'Toggle me', pipelineId: 'wf-2', scheduleCron: '0 9 * * *',
+        pipelineParams: JSON.stringify({ a: 1 }),
+      });
+      expect(tm.setEnabled(task.id, false)).toBe(true);
+      let stored = tm.getTask(task.id);
+      expect(stored!.enabled).toBe(0);
+      // schedule + params survive the disable.
+      expect(stored!.schedule_cron).toBe('0 9 * * *');
+      expect(stored!.pipeline_params).toBe(JSON.stringify({ a: 1 }));
+      expect(tm.setEnabled(task.id, true)).toBe(true);
+      stored = tm.getTask(task.id);
+      expect(stored!.enabled).toBe(1);
+    });
+
+    it('setEnabled returns false for an unknown task', () => {
+      expect(tm.setEnabled('does-not-exist', false)).toBe(false);
+    });
+
+    it('a disabled task is excluded from getDueTasks and re-enabling restores it (reversible, no side effects)', () => {
+      // A due one-shot scheduled task (past next_run_at, status open).
+      const t = tm.create({ title: 'Due', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z' });
+      expect(tm.getDueTasks().some((x) => x.id === t.id)).toBe(true);
+
+      tm.setEnabled(t.id, false);
+      expect(tm.getDueTasks().some((x) => x.id === t.id)).toBe(false);
+      // Crucially, the disable did NOT complete the one-shot — its status is
+      // untouched, so re-enabling resurrects it (the bug the getDueTasks-level
+      // filter avoids vs. skipping after selection).
+      expect(tm.getTask(t.id)!.status).toBe('open');
+
+      tm.setEnabled(t.id, true);
+      expect(tm.getDueTasks().some((x) => x.id === t.id)).toBe(true);
+    });
+  });
 });

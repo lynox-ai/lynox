@@ -938,6 +938,20 @@ describe('RunHistory', () => {
       h.close();
     });
 
+    it('Slice B2: setWorkflowConfirmedAt stamps the first-run-confirm onto the blob', () => {
+      const h = createHistory();
+      insertPlanned(h, 'plan-confirm', 'wf', { template: true });
+      // Not yet confirmed.
+      let parsed = JSON.parse(h.getPlannedPipelines(10)[0]!.manifest_json) as { confirmedAt?: string };
+      expect(parsed.confirmedAt).toBeUndefined();
+      // Stamp it; only a planned row should match.
+      expect(h.setWorkflowConfirmedAt('plan-confirm', '2026-06-24T08:00:00.000Z')).toBe(true);
+      parsed = JSON.parse(h.getPlannedPipelines(10)[0]!.manifest_json) as { confirmedAt?: string };
+      expect(parsed.confirmedAt).toBe('2026-06-24T08:00:00.000Z');
+      expect(h.setWorkflowConfirmedAt('does-not-exist', '2026-06-24T08:00:00.000Z')).toBe(false);
+      h.close();
+    });
+
     it('renamePlannedPipeline updates manifest_name AND manifest_json name', () => {
       const h = createHistory();
       insertPlanned(h, 'plan-rn', 'old name');
@@ -1854,11 +1868,11 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('preserves indexes — all seven idx_tasks_* recreated post-migration', () => {
+    it('preserves indexes — the v31 idx_tasks_* set + the v39 pipeline-enabled index', () => {
       const h = createHistory();
       // Direct sqlite_master assertion — a botched migration that dropped
       // an index would still let getDueTasks return the row on tiny data
-      // (full-scan), so we pin the seven indexes the v31 recreate emits.
+      // (full-scan), so we pin the seven v31 indexes plus the v39 kill-switch one.
       const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
       const idxNames = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name LIKE 'idx_tasks_%'`,
@@ -1868,6 +1882,7 @@ describe('RunHistory', () => {
         'idx_tasks_due_date',
         'idx_tasks_next_run',
         'idx_tasks_parent',
+        'idx_tasks_pipeline_enabled',
         'idx_tasks_scope',
         'idx_tasks_status',
         'idx_tasks_type',

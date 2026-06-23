@@ -10,6 +10,14 @@
 		description: string;
 		type: string;
 	}
+	// The resolved capability-contract (Slice B2) — the outbound writes a scheduled
+	// run is allowed to perform. Shown read-only in the consent surface.
+	interface WorkflowContract {
+		grantedTools?: string[];
+		httpMethods?: string[];
+		hostPatterns?: string[];
+		pathPatterns?: string[];
+	}
 	interface SavedWorkflow {
 		id: string;
 		name: string;
@@ -20,6 +28,11 @@
 		// slice. Optional in the type so a pre-upgrade engine response still parses.
 		parameters?: WorkflowParam[];
 		created_at: string;
+		// Slice B2: only `autonomous` workflows are cron-eligible; `capabilityContract`
+		// (if any) is rendered in the consent surface. All optional for back-compat.
+		mode?: string;
+		confirmedAt?: string;
+		capabilityContract?: WorkflowContract;
 	}
 
 	let workflows = $state<SavedWorkflow[]>([]);
@@ -86,6 +99,76 @@
 	function cancelParamModal(): void {
 		paramModalWf = null;
 		error = '';
+	}
+
+	// Schedule (promote-to-cron) consent flow — the one bespoke consent gate
+	// (PRD §4.6): shows the resolved capability-contract, collects the cron
+	// schedule + the param values the unattended run will use, and the single
+	// POST /api/tasks stamps the first-run-confirm + creates the cron task.
+	let scheduleModalWf = $state<SavedWorkflow | null>(null);
+	let scheduleCron = $state('0 9 * * *');
+	let scheduling = $state(false);
+
+	function onScheduleClick(wf: SavedWorkflow): void {
+		paramValues = Object.fromEntries((wf.parameters ?? []).map((p) => [p.name, '']));
+		scheduleCron = '0 9 * * *';
+		error = '';
+		scheduleModalWf = wf;
+	}
+
+	function cancelScheduleModal(): void {
+		scheduleModalWf = null;
+		error = '';
+	}
+
+	// True only when the contract has at least one displayable outbound action —
+	// avoids rendering a scary-but-empty "may perform these actions" panel.
+	function contractHasRows(c: WorkflowContract): boolean {
+		return (
+			(c.httpMethods?.length ?? 0) > 0 ||
+			(c.hostPatterns?.length ?? 0) > 0 ||
+			(c.grantedTools ?? []).some((tool) => tool !== 'http_request')
+		);
+	}
+
+	function onScheduleKey(e: KeyboardEvent): void {
+		if (e.key === 'Enter') void submitSchedule();
+		if (e.key === 'Escape') cancelScheduleModal();
+	}
+
+	async function submitSchedule(): Promise<void> {
+		const wf = scheduleModalWf;
+		if (!wf || scheduling) return;
+		if (!scheduleCron.trim()) { error = t('workflow_library.schedule_cron_required'); return; }
+		if ((wf.parameters ?? []).some((p) => !paramValues[p.name]?.trim())) {
+			error = t('workflow_library.params_required');
+			return;
+		}
+		scheduling = true;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/tasks`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					pipelineId: wf.id,
+					scheduleCron: scheduleCron.trim(),
+					...(wf.parameters && wf.parameters.length > 0 ? { params: { ...paramValues } } : {}),
+				}),
+			});
+			if (!res.ok) {
+				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
+				error = msg?.error ?? t('workflow_library.schedule_failed');
+				return;
+			}
+			scheduleModalWf = null;
+			notice = t('workflow_library.scheduled');
+			await loadWorkflows();
+		} catch {
+			error = t('workflow_library.schedule_failed');
+		} finally {
+			scheduling = false;
+		}
 	}
 
 	async function runWorkflow(id: string, params?: Record<string, string>): Promise<void> {
@@ -258,6 +341,15 @@
 									<Icon name="bolt" size="xs" />
 									{runningId === wf.id ? t('workflow_library.running') : t('workflow_library.run')}
 								</button>
+								{#if wf.mode === 'autonomous'}
+									<button
+										onclick={() => onScheduleClick(wf)}
+										class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity"
+									>
+										<Icon name="clock" size="xs" />
+										{t('workflow_library.schedule')}
+									</button>
+								{/if}
 								<button onclick={() => startRename(wf)} class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-opacity">
 									<Icon name="pencil" size="xs" />
 									{t('workflow_library.rename')}
@@ -318,6 +410,82 @@
 				>
 					<Icon name="bolt" size="xs" />
 					{t('workflow_library.run')}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if scheduleModalWf}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+		role="dialog"
+		aria-modal="true"
+		aria-label={t('workflow_library.schedule_title')}
+	>
+		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
+			<h2 class="text-sm font-medium mb-1">{t('workflow_library.schedule_title')}: {scheduleModalWf.name}</h2>
+			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.schedule_hint')}</p>
+
+			{#if scheduleModalWf.capabilityContract && contractHasRows(scheduleModalWf.capabilityContract)}
+				{@const c = scheduleModalWf.capabilityContract}
+				<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-3 mb-4 text-xs">
+					<p class="font-medium mb-1 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.schedule_contract_title')}</p>
+					<ul class="space-y-0.5 text-text-subtle">
+						{#if c.httpMethods?.length || c.hostPatterns?.length}
+							<li>{(c.httpMethods ?? []).join(', ')} → {(c.hostPatterns ?? []).join(', ')}{(c.pathPatterns ?? []).map((p) => ` ${p}`).join('')}</li>
+						{/if}
+						{#each (c.grantedTools ?? []).filter((tool) => tool !== 'http_request') as tool (tool)}
+							<li>{tool}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+
+			<label class="block mb-3">
+				<span class="block text-xs font-medium mb-1">{t('workflow_library.schedule_cron_label')}</span>
+				<span class="block text-[10px] text-text-subtle mb-1">{t('workflow_library.schedule_cron_hint')}</span>
+				<input
+					bind:value={scheduleCron}
+					placeholder="0 9 * * *"
+					onkeydown={onScheduleKey}
+					class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 font-mono text-[16px] md:text-sm focus:border-accent focus:outline-none"
+				/>
+			</label>
+
+			{#if (scheduleModalWf.parameters ?? []).length > 0}
+				<div class="space-y-3 mb-1">
+					<p class="text-[10px] uppercase tracking-widest text-text-subtle">{t('workflow_library.params_title')}</p>
+					{#each scheduleModalWf.parameters ?? [] as param (param.name)}
+						<label class="block">
+							<span class="block text-xs font-medium mb-1">{param.name}</span>
+							{#if param.description}
+								<span class="block text-[10px] text-text-subtle mb-1">{param.description}</span>
+							{/if}
+							<input
+								bind:value={paramValues[param.name]}
+								type={param.type === 'date' ? 'date' : 'text'}
+								inputmode={param.type === 'number' ? 'decimal' : undefined}
+								onkeydown={onScheduleKey}
+								class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
+							/>
+						</label>
+					{/each}
+				</div>
+			{/if}
+
+			<div class="flex items-center justify-end gap-2 mt-5">
+				<button
+					onclick={cancelScheduleModal}
+					class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"
+				>{t('workflow_library.cancel')}</button>
+				<button
+					onclick={submitSchedule}
+					disabled={scheduling}
+					class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/20 transition-colors disabled:opacity-50"
+				>
+					<Icon name="clock" size="xs" />
+					{t('workflow_library.schedule_confirm')}
 				</button>
 			</div>
 		</div>
