@@ -154,8 +154,14 @@ function measureStaticPrefixTokens(): number {
  * generic playbook as case-specific advice). (The sibling "tool result is not a
  * new user turn" fix was done STRUCTURALLY in render-projection/agent instead
  * of the prefix, so it costs no static tokens.) Static + cache-read priced.
+ *
+ * 2026-06-23: bump to 20860 (measured 20854) — Workflow Run-Engine A1 adds a
+ * `params` input field to the `run_workflow` tool so the agent can re-target a
+ * stored workflow's {{params.<name>}} placeholders (§4.5 drift fix). A genuine
+ * new capability, not accidental growth; description was trimmed to its minimal
+ * form first (structural lever) — the residual +4 is irreducible.
  */
-const STATIC_PREFIX_BUDGET = 20850;
+const STATIC_PREFIX_BUDGET = 20860;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

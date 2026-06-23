@@ -11,4 +11,5 @@ export * from './pipeline.js';
 export * from './security.js';
 export * from './modes.js';
 export * from './inbox.js';
+export * from './capability-contract.js';
 export type { ToolContext, ToolCallCountProvider } from '../core/tool-context.js';

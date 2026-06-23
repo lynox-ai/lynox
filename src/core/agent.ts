@@ -13,6 +13,7 @@ import type {
   EffortLevel,
   AutonomyLevel,
   PreApprovalSet,
+  CapabilityContract,
   PreApproveAuditLike,
   SecretStoreLike,
   ChangesetManagerLike,
@@ -170,6 +171,13 @@ export class Agent implements IAgent {
   readonly autonomy: AutonomyLevel | undefined;
   private readonly preApproval: PreApprovalSet | undefined;
   private readonly audit: PreApproveAuditLike | undefined;
+  /**
+   * Capability contract authorising this agent's headless outbound writes.
+   * RESERVED SEAM (Slice A1): carried here beside `autonomy`/`preApproval` so
+   * the `isDangerous` enforcement point can read it, but A1 attaches no logic —
+   * `undefined` = the safe autonomous-deny default (PRD §4.2). Slice B enforces.
+   */
+  readonly capabilityContract: CapabilityContract | undefined;
   readonly secretStore: SecretStoreLike | undefined;
   readonly userId: string | undefined;
   readonly activeScopes: import('../types/index.js').MemoryScopeRef[] | undefined;
@@ -398,6 +406,7 @@ export class Agent implements IAgent {
     this.briefing = config.briefing;
     this.autonomy = config.autonomy;
     this.preApproval = config.preApproval;
+    this.capabilityContract = config.capabilityContract;
     this.audit = config.audit;
     this.knowledgeContext = config.knowledgeContext;
     this.secretStore = config.secretStore;

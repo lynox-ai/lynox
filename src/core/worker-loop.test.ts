@@ -9,10 +9,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const mockRunManifest = vi.fn();
 const mockRetryManifest = vi.fn();
 const mockValidateManifest = vi.fn((m: unknown) => m);
-vi.mock('../orchestrator/runner.js', () => ({
-  runManifest: (...args: unknown[]) => mockRunManifest(...args),
-  retryManifest: (...args: unknown[]) => mockRetryManifest(...args),
-}));
+vi.mock('../orchestrator/runner.js', async (importActual) => {
+  const actual = await importActual<typeof import('../orchestrator/runner.js')>();
+  return {
+    runManifest: (...args: unknown[]) => mockRunManifest(...args),
+    retryManifest: (...args: unknown[]) => mockRetryManifest(...args),
+    buildRunCtx: actual.buildRunCtx,
+  };
+});
 vi.mock('../orchestrator/validate.js', async (importOriginal) => {
   // Keep MAX_STEPS + the rest of the module intact; only intercept
   // validateManifest so we don't have to assemble a fully-valid Manifest
