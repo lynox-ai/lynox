@@ -23,6 +23,34 @@ import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/
  * `LYNOX_MANAGED_INSTANCE_ID` (the container == the tenant), so no tenant id has
  * to be threaded through the RunContext here.
  */
+/**
+ * S6 tenant-isolation invariant: one container serves exactly one tenant. The
+ * headless runner sources `toolContext`/`dataStore`/`memory` off the single
+ * engine and keys billing off `LYNOX_MANAGED_INSTANCE_ID` (the container ==
+ * the tenant), so a process that ever served a SECOND, distinct tenant would
+ * silently execute one tenant's workflow with another's resources/credit. We
+ * record the first tenant identity this process serves and fail closed if a
+ * different one reaches the runner — a tripwire that a future per-container
+ * multiplexing can't slip past silently. Stateful by design (process-scoped).
+ */
+let _processTenantId: string | null = null;
+export function assertSingleTenantContext(tenantId: string): void {
+  if (_processTenantId === null) {
+    _processTenantId = tenantId;
+    return;
+  }
+  if (_processTenantId !== tenantId) {
+    throw new Error(
+      `Tenant-isolation invariant violated (S6): this process is bound to tenant "${_processTenantId}" ` +
+      `but a saved-workflow run was requested for tenant "${tenantId}". One container serves exactly one tenant.`,
+    );
+  }
+}
+/** Test-only: clear the recorded process tenant between cases. */
+export function _resetTenantInvariantForTests(): void {
+  _processTenantId = null;
+}
+
 export async function runGuardedSavedWorkflow(
   engine: Engine,
   workflowId: string,
@@ -36,6 +64,23 @@ export async function runGuardedSavedWorkflow(
 
   const config = engine.getUserConfig();
   const context = engine.getContext();
+
+  // S6: refuse to start if a second, distinct tenant context reaches this
+  // process (fail closed rather than run the wrong tenant's workflow). Key on
+  // the ENGINE CONTEXT id — that is the per-engine tenant identity (it carries
+  // toolContext/dataStore/memory) and is exactly what a future per-container
+  // multiplexing would vary. We deliberately do NOT key on
+  // LYNOX_MANAGED_INSTANCE_ID first: it is process-global and immutable, so it
+  // would read the SAME value for two multiplexed tenants and the tripwire could
+  // never fire in the very mode it guards. `context.id` is always non-empty
+  // post-start (resolveContext), so a normal single-tenant process records one
+  // stable id and never trips; the env var / 'default' are unreachable backstops.
+  const tenantId = context?.id ?? process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? 'default';
+  try {
+    assertSingleTenantContext(tenantId);
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
   const runContext: RunContext = {
     runId: randomUUID(),
     contextId: context?.id ?? '',

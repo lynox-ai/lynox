@@ -10,7 +10,7 @@ const { mockCheckPersistentBudget, mockRunSavedWorkflow } = vi.hoisted(() => ({
 vi.mock('./session-budget.js', () => ({ checkPersistentBudget: mockCheckPersistentBudget }));
 vi.mock('../tools/builtin/pipeline.js', () => ({ runSavedWorkflow: mockRunSavedWorkflow }));
 
-const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
+const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests } = await import('./saved-workflow-runner.js');
 
 function makeEngine(hooks: LynoxHooks[]): Engine {
   return {
@@ -28,6 +28,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     vi.clearAllMocks();
     mockCheckPersistentBudget.mockReturnValue({ allowed: true });
     mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-9', status: 'completed', costUsd: 0.42 });
+    _resetTenantInvariantForTests();
   });
 
   it('blocks when the persistent daily/monthly cap is exceeded — no run, no hooks', async () => {
@@ -112,5 +113,60 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     const runIdArg = onAfterRun.mock.calls[0]?.[0] as string;
     expect(typeof runIdArg).toBe('string');
     expect(runIdArg.length).toBeGreaterThan(0);
+  });
+
+  it('A2: surfaces stepErrors from the underlying run through to the caller', async () => {
+    mockRunSavedWorkflow.mockResolvedValue({
+      ok: true, runId: 'run-e', status: 'failed', costUsd: 0.03, error: 'step "b" failed',
+      stepErrors: [{ stepId: 'b', error: 'boom', costUsd: 0.03 }],
+    });
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun: vi.fn() }]), 'wf-1');
+    expect(result.status).toBe('failed');
+    expect(result.stepErrors).toEqual([{ stepId: 'b', error: 'boom', costUsd: 0.03 }]);
+    expect(result.error).toBe('step "b" failed');
+  });
+});
+
+describe('S6 tenant-isolation invariant', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCheckPersistentBudget.mockReturnValue({ allowed: true });
+    mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'r', status: 'completed', costUsd: 0 });
+    _resetTenantInvariantForTests();
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+  });
+
+  function engineForTenant(id: string): Engine {
+    return {
+      getHooks: () => [],
+      getContext: () => ({ id }),
+      getUserConfig: () => ({ default_tier: 'balanced' }),
+      getRunHistory: () => ({} as unknown),
+      getToolContext: () => ({ tools: [] }),
+      getMemory: () => null,
+    } as unknown as Engine;
+  }
+
+  it('assertSingleTenantContext records the first tenant and throws on a different one', () => {
+    expect(() => assertSingleTenantContext('a')).not.toThrow();
+    expect(() => assertSingleTenantContext('a')).not.toThrow();
+    expect(() => assertSingleTenantContext('b')).toThrow(/Tenant-isolation invariant/);
+  });
+
+  it('runs for the first tenant, then REFUSES a second distinct tenant — the second workflow never executes', async () => {
+    const first = await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf');
+    expect(first.ok).toBe(true);
+
+    const second = await runGuardedSavedWorkflow(engineForTenant('tenant-b'), 'wf');
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain('Tenant-isolation invariant violated');
+    // The wrong tenant's workflow MUST NOT have run.
+    expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows repeated runs for the SAME tenant', async () => {
+    expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf')).ok).toBe(true);
+    expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf')).ok).toBe(true);
+    expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(2);
   });
 });

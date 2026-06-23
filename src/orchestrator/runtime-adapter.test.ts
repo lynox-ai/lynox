@@ -27,7 +27,8 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';
+import { spawnInline, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from '../types/orchestration.js';
 
@@ -657,5 +658,66 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
     const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     expect(innerConfig['autonomy']).toBeUndefined();
+  });
+});
+
+describe('createStepStreamHandler — A2 step tool-call capture', () => {
+  function toolCall(name: string, input: unknown, subAgent?: string): StreamEvent {
+    return { type: 'tool_call', name, input, agent: 'step', ...(subAgent ? { subAgent } : {}) } as StreamEvent;
+  }
+  function toolResult(name: string, result: string, opts?: { isError?: boolean; subAgent?: string }): StreamEvent {
+    return { type: 'tool_result', name, result, agent: 'step', ...(opts?.isError ? { isError: true } : {}), ...(opts?.subAgent ? { subAgent: opts.subAgent } : {}) } as StreamEvent;
+  }
+  function turnEnd(inT: number, outT: number): StreamEvent {
+    return { type: 'turn_end', stop_reason: 'end_turn', agent: 'step', usage: { input_tokens: inT, output_tokens: outT } } as unknown as StreamEvent;
+  }
+
+  it('tallies turn_end token usage via onTokens', () => {
+    let tin = 0, tout = 0;
+    const h = createStepStreamHandler({ onTokens: (i, o) => { tin += i; tout += o; } });
+    h(turnEnd(100, 40));
+    h(turnEnd(10, 5));
+    expect(tin).toBe(110);
+    expect(tout).toBe(45);
+  });
+
+  it('records a tool call by FIFO-pairing tool_call → tool_result (name, input, output, isError)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h(toolCall('bash', { command: 'ls' }));
+    h(toolResult('bash', 'file1\nfile2'));
+    h(toolCall('http', { url: 'https://x' }));
+    h(toolResult('http', 'boom', { isError: true }));
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ toolName: 'bash', outputJson: 'file1\nfile2', isError: false });
+    expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'ls' });
+    expect(calls[1]).toMatchObject({ toolName: 'http', isError: true });
+    expect(JSON.parse(calls[1]!.inputJson)).toEqual({ url: 'https://x' });
+  });
+
+  it('pairs same-named concurrent calls FIFO (input order preserved)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h(toolCall('bash', { command: 'first' }));
+    h(toolCall('bash', { command: 'second' }));
+    h(toolResult('bash', 'out-first'));
+    h(toolResult('bash', 'out-second'));
+    expect(calls.map(c => c.outputJson)).toEqual(['out-first', 'out-second']);
+    expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'first' });
+  });
+
+  it('does NOT record forwarded sub-agent events (only the step agent\'s own calls)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h(toolCall('bash', { command: 'x' }, 'child')); // forwarded from a child → skip
+    h(toolResult('bash', 'out', { subAgent: 'child' }));
+    expect(calls).toHaveLength(0);
+  });
+
+  it('with no recorder, only tokens are tallied (tool events are a no-op, never throw)', () => {
+    let tin = 0;
+    const h = createStepStreamHandler({ onTokens: (i) => { tin += i; } });
+    expect(() => { h(toolCall('bash', {})); h(toolResult('bash', 'ok')); h(turnEnd(5, 5)); }).not.toThrow();
+    expect(tin).toBe(5);
   });
 });

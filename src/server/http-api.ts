@@ -3788,7 +3788,17 @@ export class LynoxHTTPApi {
         errorResponse(res, code, result.error ?? 'Workflow run failed');
         return;
       }
-      jsonResponse(res, 200, { ran: true, runId: result.runId, status: result.status });
+      // A2: surface the run's cost + per-step failures (not just status), so the
+      // library UI can show WHICH step failed and the spend where the run was
+      // triggered. costUsd/stepErrors default safely for legacy callers.
+      jsonResponse(res, 200, {
+        ran: true,
+        runId: result.runId,
+        status: result.status,
+        error: result.error,
+        costUsd: result.costUsd ?? 0,
+        stepErrors: result.stepErrors ?? [],
+      });
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/workflows/:id', async (_req, res, params, body) => {

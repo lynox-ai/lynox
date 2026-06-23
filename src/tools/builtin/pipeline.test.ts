@@ -856,6 +856,30 @@ describe('runSavedWorkflow', () => {
     expect(result.error).toMatch(/Workflow execution failed/);
   });
 
+  it('A2: surfaces per-step errors + the terminal error from the run state', async () => {
+    const id = seedSavedWorkflow();
+    const outputs = new Map<string, AgentOutput>([
+      ['ok-step', { stepId: 'ok-step', result: 'fine', startedAt: '', completedAt: '', durationMs: 5, tokensIn: 1, tokensOut: 1, costUsd: 0.002, skipped: false }],
+      ['bad-step', { stepId: 'bad-step', result: '', startedAt: '', completedAt: '', durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, skipped: false, error: 'http 500 from upstream' }],
+    ]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'run-err', status: 'failed', error: 'step "bad-step" failed', outputs }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(true); // the run executed; the failure is in status/stepErrors
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('step "bad-step" failed');
+    expect(result.stepErrors).toEqual([{ stepId: 'bad-step', error: 'http 500 from upstream', costUsd: 0 }]);
+    // a clean run reports no step errors
+    expect(result.costUsd).toBeCloseTo(0.002, 6);
+  });
+
+  it('A2: a fully-successful run reports an empty stepErrors list', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'run-ok' }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.ok).toBe(true);
+    expect(result.stepErrors).toEqual([]);
+  });
+
   it('binds supplied re-target params into the run manifest context', async () => {
     const id = seedSavedWorkflow({
       params: [{ name: 'client', description: 'client name', type: 'string', source: 'user_input' }],

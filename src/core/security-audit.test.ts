@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SecurityAudit } from './security-audit.js';
+import { channels } from './observability.js';
 
 describe('SecurityAudit', () => {
   let tmpDir: string;
@@ -109,6 +110,36 @@ describe('SecurityAudit', () => {
     audit = createAudit();
     const events = audit.getRecentEvents(1);
     expect(events).toEqual([]);
+  });
+
+  // === A2 (S5): run-id + contract-version stamping ===
+  it('persists run_id + contract_version on a recorded decision', () => {
+    audit = createAudit();
+    audit.record({
+      event_type: 'tool_blocked', tool_name: 'bash', decision: 'blocked',
+      autonomy_level: 'autonomous', run_id: 'run-xyz', contract_version: '3',
+    });
+    const ev = audit.getRecentEvents(1)[0]!;
+    expect(ev['run_id']).toBe('run-xyz');
+    expect(ev['contract_version']).toBe('3');
+  });
+
+  it('contract_version is null when no contract governed the decision (A1/A2 default)', () => {
+    audit = createAudit();
+    audit.record({ event_type: 'tool_blocked', tool_name: 'bash', decision: 'blocked', run_id: 'run-1' });
+    const ev = audit.getRecentEvents(1)[0]!;
+    expect(ev['run_id']).toBe('run-1');
+    expect(ev['contract_version']).toBeNull();
+  });
+
+  it('maps a guardBlock channel event to a recorded block WITH the run id + contract version', () => {
+    audit = createAudit(); // subscribes to channels.guardBlock in its ctor
+    channels.guardBlock.publish({ toolName: 'bash', warning: '[BLOCKED] rm -rf /', autonomy: 'autonomous', runId: 'step-7', contractVersion: 2 });
+    const ev = audit.getRecentEvents(1).find(e => e['run_id'] === 'step-7');
+    expect(ev).toBeDefined();
+    expect(ev!['event_type']).toBe('tool_blocked');
+    expect(ev!['decision']).toBe('blocked');
+    expect(ev!['contract_version']).toBe('2');
   });
 
   describe('getContentFreeAggregates', () => {

@@ -31,6 +31,78 @@ export const INLINE_CORE_TOOLS = new Set([
 ]);
 
 /**
+ * A2 observability: a step's tool calls are recorded under its own
+ * `pipeline_step` run id. The runner builds this callback (closing over the
+ * step run id + RunHistory + a sequence counter) and threads it into the
+ * direct-Agent spawners; `null`/absent = recording disabled (no RunHistory,
+ * e.g. ad-hoc tests). Recording is best-effort and never breaks the run.
+ */
+export type StepToolRecorder = (call: {
+  toolName: string;
+  inputJson: string;
+  outputJson: string;
+  durationMs: number;
+  isError: boolean;
+}) => void;
+
+/** Bounded, crash-safe JSON for tool-call previews (no PII guarantees here —
+ * the inputs are tool arguments already redacted upstream where needed). */
+function boundedJson(value: unknown, max = 4000): string {
+  if (value === undefined) return '{}';
+  try {
+    const s = typeof value === 'string' ? value : JSON.stringify(value) ?? 'null';
+    return s.length > max ? s.slice(0, max) : s;
+  } catch {
+    return '"[unserializable]"';
+  }
+}
+
+/**
+ * Build the per-Agent `onStream` handler shared by `spawnInline` /
+ * `spawnViaAgent`. It (a) tallies `turn_end` token usage via `onTokens` and
+ * (b) — when a recorder is present — captures the step agent's OWN tool calls
+ * (`!subAgent`, so forwarded child events aren't double-recorded). Per-Agent
+ * closure ⇒ race-safe for parallel STEPS (the global `channels.toolEnd` carries
+ * no run id and would mis-attribute concurrent steps).
+ *
+ * `StreamEvent` carries no `tool_use_id` or duration, so a `tool_result` is
+ * paired to its `tool_call` FIFO by name and self-timed. Limitation: when one
+ * turn issues ≥2 calls of the SAME tool concurrently and their results complete
+ * out of call-order, the recorded input↔output pairing for those same-named
+ * calls may be swapped (the set of inputs/outputs is still correct, and
+ * tokens/cost/status are unaffected — they come from `turn_end`). This is an
+ * observability-only imperfection; an exact fix needs a `tool_use_id` on the
+ * stream events, out of scope for this slice.
+ */
+export function createStepStreamHandler(opts: {
+  onTokens: (inputDelta: number, outputDelta: number) => void;
+  recordToolCall?: StepToolRecorder | undefined;
+}): (event: StreamEvent) => void {
+  const pending: Array<{ name: string; input: unknown; start: number }> = [];
+  return (event: StreamEvent): void => {
+    if (event.type === 'turn_end') {
+      opts.onTokens(event.usage.input_tokens, event.usage.output_tokens);
+      return;
+    }
+    const record = opts.recordToolCall;
+    if (!record) return;
+    if (event.type === 'tool_call' && !event.subAgent) {
+      pending.push({ name: event.name, input: event.input, start: Date.now() });
+    } else if (event.type === 'tool_result' && !event.subAgent) {
+      const idx = pending.findIndex(p => p.name === event.name);
+      const matched = idx >= 0 ? pending.splice(idx, 1)[0] : undefined;
+      record({
+        toolName: event.name,
+        inputJson: boundedJson(matched?.input),
+        outputJson: boundedJson(event.result),
+        durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
+        isError: event.isError === true,
+      });
+    }
+  };
+}
+
+/**
  * Per-pipeline-run sub-agent prompt callbacks + budget tracking.
  * Stitched together by `runManifest` and forwarded into spawners.
  */
@@ -202,6 +274,8 @@ export async function spawnViaAgent(
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
   capabilityContract?: CapabilityContract | undefined,
+  stepRunId?: string | undefined,
+  recordToolCall?: StepToolRecorder | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -286,16 +360,18 @@ export async function spawnViaAgent(
     preApproval,
     autonomy,
     capabilityContract,
+    // A2: the step's own run id (reuses the Agent's `currentRunId` attribution
+    // tag), so an isDangerous guard decision during this step is stamped onto
+    // the append-only audit with the run it occurred in.
+    currentRunId: stepRunId,
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
-    onStream: (event: StreamEvent) => {
-      if (event.type === 'turn_end') {
-        tokensIn += event.usage.input_tokens;
-        tokensOut += event.usage.output_tokens;
-      }
-    },
+    onStream: createStepStreamHandler({
+      onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
+      recordToolCall,
+    }),
   });
 
   activePipelineAgents.add(agent);
@@ -361,6 +437,8 @@ export async function spawnInline(
   userTimezone?: string | undefined,
   parentMemory?: IMemory | null | undefined,
   capabilityContract?: CapabilityContract | undefined,
+  stepRunId?: string | undefined,
+  recordToolCall?: StepToolRecorder | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -444,6 +522,8 @@ export async function spawnInline(
     preApproval,
     autonomy,
     capabilityContract,
+    // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
+    currentRunId: stepRunId,
     toolContext: parentToolContext,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
@@ -458,12 +538,10 @@ export async function spawnInline(
     // null when parent had no memory — that's strictly equivalent to the
     // previous behaviour and keeps headless callers + ad-hoc tests untouched.
     memory: parentMemory ?? undefined,
-    onStream: (event: StreamEvent) => {
-      if (event.type === 'turn_end') {
-        tokensIn += event.usage.input_tokens;
-        tokensOut += event.usage.output_tokens;
-      }
-    },
+    onStream: createStepStreamHandler({
+      onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
+      recordToolCall,
+    }),
   });
 
   activePipelineAgents.add(agent);
@@ -530,6 +608,7 @@ export async function spawnPipeline(
   parentMemory?: IMemory | null | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   capabilityContract?: CapabilityContract | undefined,
+  runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -582,6 +661,10 @@ export async function spawnPipeline(
     // through nesting. The capability-contract seam rides along for Slice B.
     autonomy,
     capabilityContract,
+    // A2: thread RunHistory so the nested sub-pipeline's steps record their own
+    // `pipeline_step` rows (under the sub-pipeline's run id) — observability at
+    // every nesting depth, not just the top level.
+    runHistory: runHistory ?? undefined,
   });
 
   // Aggregate results
