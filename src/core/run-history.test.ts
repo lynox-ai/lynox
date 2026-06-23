@@ -94,6 +94,37 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('A2: updateRun stamps the resolved model_id + tool_call_count at a pipeline_step finalize', () => {
+    const h = createHistory();
+    // Mirror the runner's pipeline_step lifecycle: only the tier is known at
+    // insert (concrete model id empty), then the resolved model + recorded
+    // tool-call count are stamped at step end via updateRun.
+    const id = h.insertRun({
+      taskText: 'step task',
+      modelTier: 'balanced',
+      modelId: '',
+      runType: 'pipeline_step',
+    });
+    expect(h.getRun(id)!.model_id).toBe('');
+    expect(h.getRun(id)!.tool_call_count).toBe(0);
+
+    h.updateRun(id, {
+      status: 'completed',
+      costUsd: 0.003,
+      tokensIn: 6,
+      tokensOut: 205,
+      durationMs: 80,
+      toolCallCount: 3,
+      modelId: 'claude-sonnet-4-6',
+    });
+
+    const run = h.getRun(id)!;
+    expect(run.model_id).toBe('claude-sonnet-4-6');
+    expect(run.tool_call_count).toBe(3);
+    expect(run.status).toBe('completed');
+    h.close();
+  });
+
   it('inserts and retrieves tool calls', () => {
     const h = createHistory();
     const runId = h.insertRun({
@@ -1856,6 +1887,115 @@ describe('RunHistory', () => {
       });
       const due = h.getDueTasks();
       expect(due.some(t => t.id === 'tcronfail')).toBe(true);
+      h.close();
+    });
+  });
+
+  // === A2 observability: pipeline_step run rows ===
+  describe('pipeline_step observability overlay', () => {
+    function insertCompleted(h: RunHistory, params: Parameters<RunHistory['insertRun']>[0], cost: number, createdAt?: string): string {
+      const id = h.insertRun(params);
+      h.updateRun(id, { tokensIn: 100, tokensOut: 50, costUsd: cost, durationMs: 10, status: 'completed' });
+      if (createdAt) {
+        (h as unknown as { db: import('better-sqlite3').Database }).db
+          .prepare('UPDATE runs SET created_at = ? WHERE id = ?').run(createdAt, id);
+      }
+      return id;
+    }
+
+    it('a pipeline_step run NEVER moves spend/stats/usage aggregates (the billing invariant)', () => {
+      const h = createHistory();
+      const parent = insertCompleted(h, { sessionId: 's', taskText: 'real turn', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' }, 0.10, '2026-04-10T12:00:00.000Z');
+
+      const usageOpts = { startIso: '2026-04-01T00:00:00.000Z', endIso: '2026-05-01T00:00:00.000Z', source: 'calendar-month' as const, label: 'Apr' };
+      const before = {
+        stats: JSON.stringify(h.getStats()),
+        costByDay: JSON.stringify(h.getCostByDay(3650)),
+        costByModel: JSON.stringify(h.getCostByModel()),
+        usage: JSON.stringify(h.getUsageSummary(usageOpts)),
+      };
+
+      // A real, completed, costly pipeline_step row — exactly what the runner writes.
+      insertCompleted(h, {
+        sessionId: parent, taskText: 'step-1', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
+        runType: 'pipeline_step', spawnParentId: parent, spawnDepth: 1,
+      }, 0.05, '2026-04-10T12:00:05.000Z');
+
+      const after = {
+        stats: JSON.stringify(h.getStats()),
+        costByDay: JSON.stringify(h.getCostByDay(3650)),
+        costByModel: JSON.stringify(h.getCostByModel()),
+        usage: JSON.stringify(h.getUsageSummary(usageOpts)),
+      };
+
+      expect(after.stats).toBe(before.stats);
+      expect(after.costByDay).toBe(before.costByDay);
+      expect(after.costByModel).toBe(before.costByModel);
+      expect(after.usage).toBe(before.usage); // the GET /api/usage/summary billing surface
+      h.close();
+    });
+
+    it('getSessionToolCalls excludes a pipeline_step row even when its session_id collides with a chat session', () => {
+      const h = createHistory();
+      const chat = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall({ runId: chat, toolName: 'bash', inputJson: '{"command":"ls"}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+      // Worst case: a pipeline_step row sharing the chat session_id. The run_type
+      // filter (not session_id) is what keeps its REPLAYED calls out of capture.
+      const step = h.insertRun({ sessionId: 'thread-1', taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'p', spawnDepth: 1 });
+      h.insertToolCall({ runId: step, toolName: 'http', inputJson: '{"url":"x"}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+
+      expect(h.getSessionToolCalls('thread-1').map(c => c.tool_name)).toEqual(['bash']);
+      h.close();
+    });
+
+    it('a step\'s tool calls ARE queryable under its own pipeline_step run id (run-detail view)', () => {
+      const h = createHistory();
+      const step = h.insertRun({ taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'p', spawnDepth: 1 });
+      h.insertToolCall({ runId: step, toolName: 'bash', inputJson: '{"command":"echo hi"}', outputJson: 'hi', durationMs: 5, sequenceOrder: 0 });
+      h.insertToolCall({ runId: step, toolName: 'write_file', inputJson: '{"path":"/tmp/x"}', outputJson: '', durationMs: 3, sequenceOrder: 1 });
+
+      const calls = h.getRunToolCalls(step);
+      expect(calls.map(c => c.tool_name)).toEqual(['bash', 'write_file']);
+      h.close();
+    });
+
+    it('does NOT surface as a phantom thread in getThreadAggregates (its non-empty run-id session would otherwise leak)', () => {
+      const h = createHistory();
+      const chat = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+      h.updateRun(chat, { costUsd: 0.01, status: 'completed' });
+      const step = h.insertRun({ sessionId: 'pipeline-run-99', taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'pipeline-run-99', spawnDepth: 1 });
+      h.updateRun(step, { costUsd: 0.05, status: 'completed' });
+
+      const threads = h.getThreadAggregates();
+      expect(threads.map(t => t.sessionId)).toEqual(['thread-1']); // not 'pipeline-run-99'
+      h.close();
+    });
+
+    it('getToolCallCountSince excludes pipeline_step calls — A2 must not change tool rate-limiting', () => {
+      const h = createHistory();
+      const chat = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall({ runId: chat, toolName: 'http', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+      const step = h.insertRun({ taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'p', spawnDepth: 1 });
+      h.insertToolCall({ runId: step, toolName: 'http', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+
+      expect(h.getToolCallCountSince('http', 24)).toBe(1); // only the chat turn's call counts
+      h.close();
+    });
+
+    it('getRecentRuns hides pipeline_step from the general list, but an explicit session filter drills into them', () => {
+      const h = createHistory();
+      const chat = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+      h.updateRun(chat, { status: 'completed' });
+      const step = h.insertRun({ sessionId: 'pipeline-run-1', taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'pipeline-run-1', spawnDepth: 1 });
+      h.updateRun(step, { status: 'completed' });
+
+      const general = h.getRecentRuns(20);
+      expect(general.map(r => r.id)).toContain(chat);
+      expect(general.map(r => r.id)).not.toContain(step);
+
+      // Run-detail drill-down by the pipeline run id still returns the step rows.
+      const drill = h.getRecentRuns(20, 0, { sessionId: 'pipeline-run-1' });
+      expect(drill.map(r => r.id)).toEqual([step]);
       h.close();
     });
   });

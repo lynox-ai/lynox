@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { channel } from 'node:diagnostics_channel';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { runManifest, retryManifest } from './runner.js';
+import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig } from '../types/index.js';
 
@@ -855,5 +859,57 @@ describe('runManifest — buildConditionContext', () => {
 
     expect(state.outputs.get('a')?.skipped).toBe(true);
     expect(state.outputs.get('a')?.skipReason).toBe('conditions not met');
+  });
+});
+
+describe('runManifest — A2 step-recording (pipeline_step rows + billing isolation)', () => {
+  function tmpHistory(): { h: RunHistory; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-a2-'));
+    return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('records a `pipeline_step` run per step (status running→completed, chained via spawn_parent_id)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const stepRows = db.prepare(
+        `SELECT task_text, status, run_type, model_id, tool_call_count FROM runs WHERE spawn_parent_id = ? AND run_type = 'pipeline_step' ORDER BY created_at`,
+      ).all(state.runId) as Array<{ task_text: string; status: string; run_type: string; model_id: string; tool_call_count: number }>;
+
+      expect(stepRows).toHaveLength(2);
+      expect(stepRows.every(r => r.status === 'completed')).toBe(true);
+      // No step left dangling in 'running'.
+      expect(stepRows.some(r => r.status === 'running')).toBe(false);
+      // Mock steps resolve no model and record no tool calls, so the finalize
+      // leaves model_id='' + tool_call_count=0. The populated path (a real
+      // inline/agent step stamping the resolved model + recorded call count) is
+      // staging-verified — it can't run here without a live LLM.
+      expect(stepRows.every(r => r.model_id === '')).toBe(true);
+      expect(stepRows.every(r => r.tool_call_count === 0)).toBe(true);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('those pipeline_step rows do NOT pollute getStats / getUsageSummary (billing isolation, end-to-end)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      // Only pipeline_step rows exist → every spend/stats aggregate must read zero.
+      const stats = h.getStats();
+      expect(stats.total_cost_usd).toBe(0);
+      expect(stats.user_turn_runs).toBe(0);
+      expect(stats.cost_by_model).toEqual([]);
+      const usage = h.getUsageSummary({ startIso: '2000-01-01T00:00:00.000Z', endIso: '2100-01-01T00:00:00.000Z', source: 'rolling', label: 'all' });
+      expect(usage.used_cents).toBe(0);
+      expect(usage.by_model).toEqual([]);
+    } finally {
+      h.close();
+      cleanup();
+    }
   });
 });

@@ -11,7 +11,7 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
@@ -327,6 +327,15 @@ async function executeStep(
   }
 
   const stepStart = new Date().toISOString();
+  // A2: the step's `pipeline_step` run id (declared before the try so the catch
+  // can finalize it as failed). Undefined when RunHistory isn't wired.
+  let stepRunId: string | undefined;
+  // Hoisted before the try so BOTH finalizers (success + catch) can stamp them:
+  // `toolSeq` = the count of tool calls recorded for this step (becomes
+  // `tool_call_count`); `stepModelId` = the resolved concrete model the step ran
+  // on (becomes `model_id`, '' for mock/pipeline steps that resolve no model).
+  let toolSeq = 0;
+  let stepModelId = '';
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
@@ -341,6 +350,42 @@ async function executeStep(
     }
 
     options.hooks?.onStepStart?.(step.id, step.agent);
+
+    // A2 observability: record this step as a `pipeline_step` run — the
+    // live-progress row (status running→completed/failed, polled by the UI via
+    // `spawn_parent_id = pipelineRunId`) AND the run id this step's tool calls
+    // attach to (`run_tool_calls.run_id`). Best-effort: a history failure never
+    // breaks the run. `session_id = state.runId` (the pipeline run id, NOT a
+    // chat session) isolates these from `getSessionToolCalls`; the row is
+    // excluded from every spend/stats/usage aggregate (see run-history.ts).
+    // cost/tokens/status are finalized at step end (success + catch).
+    if (options.runHistory) {
+      try {
+        stepRunId = options.runHistory.insertRun({
+          sessionId: state.runId,
+          taskText: step.task ?? step.id,
+          modelTier: step.model ?? '',
+          modelId: '',
+          runType: 'pipeline_step',
+          spawnParentId: state.runId,
+          spawnDepth: (options.depth ?? 0) + 1,
+        });
+      } catch { stepRunId = undefined; }
+    }
+    const recordToolCall: StepToolRecorder | undefined = (stepRunId && options.runHistory)
+      ? (call) => {
+          try {
+            options.runHistory!.insertToolCall({
+              runId: stepRunId!,
+              toolName: call.toolName,
+              inputJson: call.inputJson,
+              outputJson: call.outputJson,
+              durationMs: call.durationMs,
+              sequenceOrder: toolSeq++,
+            });
+          } catch { /* best-effort: observability must never break the run */ }
+        }
+      : undefined;
 
     let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
     let costUsd = 0;
@@ -362,7 +407,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -382,18 +427,20 @@ async function executeStep(
           : step;
       // Check session budget before spawning step agent
       const stepModel = resolveModelForCost(step, 'balanced', config);
+      stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
       const agentDef = await loadAgentDef(step.agent, agentsDir);
       // Check session budget before spawning step agent
       const stepModel = resolveModelForCost(step, agentDef.defaultTier, config);
+      stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }
@@ -431,11 +478,34 @@ async function executeStep(
     };
     state.outputs.set(step.id, output);
     options.hooks?.onStepComplete?.(output);
+    // A2: finalize the step's progress row — status completed + real per-step
+    // cost/tokens/duration (queryable in the run-detail view; still excluded
+    // from spend aggregates).
+    if (stepRunId && options.runHistory) {
+      try {
+        options.runHistory.updateRun(stepRunId, {
+          status: 'completed',
+          costUsd,
+          tokensIn: r.tokensIn,
+          tokensOut: r.tokensOut,
+          durationMs: r.durationMs,
+          toolCallCount: toolSeq,
+          modelId: stepModelId,
+        });
+      } catch { /* best-effort */ }
+    }
     return 'ok';
 
   } catch (err: unknown) {
     const error = err instanceof Error ? err : new Error(String(err));
     options.hooks?.onError?.(step.id, error);
+    // A2: finalize the step's progress row as failed (errorText is encrypted at
+    // rest like response_text). The error also surfaces via state.error/outputs.
+    if (stepRunId && options.runHistory) {
+      try {
+        options.runHistory.updateRun(stepRunId, { status: 'failed', errorText: error.message, toolCallCount: toolSeq, modelId: stepModelId });
+      } catch { /* best-effort */ }
+    }
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';

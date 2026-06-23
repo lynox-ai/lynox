@@ -13,6 +13,9 @@ export interface SecurityEvent {
   run_id?: string | undefined;
   source?: string | undefined;
   detail?: string | undefined;
+  /** A2 (S5): the capability-contract version that governed this decision.
+   * Null in A1/A2 (the seam carries no contract); Slice B populates it. */
+  contract_version?: string | undefined;
 }
 
 /** Mask common secret patterns in preview strings. */
@@ -55,20 +58,37 @@ export class SecurityAudit {
       CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at);
     `);
 
+    // A2 (S5): own the `contract_version` column idempotently HERE.
+    // security-audit.ts owns `security_events` on its OWN DB connection
+    // (separate from RunHistory's), so a RunHistory migration `ALTER` plus this
+    // module's idempotent CREATE would race to add the column on a fresh DB
+    // (whichever connection runs second throws "duplicate column"). A
+    // pragma-guarded add is order-independent and keeps the single owner. The
+    // column is null in A1/A2 (the capability-contract seam carries no
+    // contract); Slice B stamps the authorising version.
+    const cols = this.db.prepare(`PRAGMA table_info(security_events)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'contract_version')) {
+      this.db.exec(`ALTER TABLE security_events ADD COLUMN contract_version TEXT`);
+    }
+
     this.insertStmt = this.db.prepare(`
-      INSERT INTO security_events (event_type, tool_name, input_preview, decision, autonomy_level, agent_name, run_id, source, detail)
-      VALUES (@event_type, @tool_name, @input_preview, @decision, @autonomy_level, @agent_name, @run_id, @source, @detail)
+      INSERT INTO security_events (event_type, tool_name, input_preview, decision, autonomy_level, agent_name, run_id, source, detail, contract_version)
+      VALUES (@event_type, @tool_name, @input_preview, @decision, @autonomy_level, @agent_name, @run_id, @source, @detail, @contract_version)
     `);
 
-    // Subscribe to guardBlock channel (existing)
+    // Subscribe to guardBlock channel (existing). A2: map the run id (so a
+    // headless step's block is attributable to its run) + the contract version
+    // that governed the decision — both newly carried on the published event.
     channels.guardBlock.subscribe((msg: unknown) => {
-      const event = msg as { toolName?: string; warning?: string; autonomy?: string };
+      const event = msg as { toolName?: string; warning?: string; autonomy?: string; runId?: string; contractVersion?: number };
       this.record({
         event_type: event.warning?.includes('[BLOCKED') ? 'tool_blocked' : 'danger_flagged',
         tool_name: event.toolName,
         input_preview: event.warning?.slice(0, 500),
         decision: event.warning?.includes('[BLOCKED') ? 'blocked' : 'flagged',
         autonomy_level: event.autonomy,
+        run_id: event.runId,
+        contract_version: event.contractVersion !== undefined ? String(event.contractVersion) : undefined,
       });
     });
 
@@ -96,6 +116,7 @@ export class SecurityAudit {
         run_id: event.run_id ?? null,
         source: event.source ?? null,
         detail: event.detail ?? null,
+        contract_version: event.contract_version ?? null,
       });
     } catch {
       // Silently ignore insert failures — security audit should never crash the runtime

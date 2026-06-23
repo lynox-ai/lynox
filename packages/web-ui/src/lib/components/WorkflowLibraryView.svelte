@@ -106,10 +106,32 @@
 				notice = '';
 				return;
 			}
-			const data = (await res.json()) as { status?: string };
-			notice = data.status === 'completed'
-				? t('workflow_library.run_done')
-				: t('workflow_library.run_failed');
+			// A2: the run endpoint now returns cost + per-step failures, so the
+			// library shows WHICH step failed and the spend right where the run was
+			// triggered — not just a terminal status.
+			const data = (await res.json()) as {
+				status?: string;
+				costUsd?: number;
+				error?: string;
+				stepErrors?: Array<{ stepId: string; error?: string; costUsd: number }>;
+			};
+			const failedSteps = (data.stepErrors ?? []).filter((s) => s.error);
+			const cost =
+				typeof data.costUsd === 'number' && data.costUsd > 0
+					? ` ($${data.costUsd.toFixed(4)})`
+					: '';
+			const stepDetail = failedSteps.map((s) => `${s.stepId}: ${s.error}`).join('; ');
+			if (data.status === 'completed') {
+				// The run finished successfully. Non-fatal step errors (on_failure:
+				// 'continue'/'notify') are appended as a caveat — they did NOT fail
+				// the run, so they belong in the success notice, not a red error box.
+				notice = `${t('workflow_library.run_done')}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`;
+				error = '';
+			} else {
+				const detail = stepDetail || (data.error ?? '');
+				error = detail ? `${t('workflow_library.run_failed')} — ${detail}` : t('workflow_library.run_failed');
+				notice = '';
+			}
 		} catch {
 			error = t('workflow_library.run_failed');
 			notice = '';

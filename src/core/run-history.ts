@@ -38,7 +38,7 @@ export interface RunRecord {
   user_wait_ms: number;
   stop_reason: string;
   status: 'running' | 'completed' | 'failed';
-  run_type: 'single' | 'batch_parent' | 'batch_item';
+  run_type: 'single' | 'batch_parent' | 'batch_item' | 'pipeline_step';
   batch_parent_id: string | null;
   spawn_parent_id: string | null;
   spawn_depth: number;
@@ -969,7 +969,7 @@ export class RunHistory {
     /** Provider this run executed on (provider-agnostic routing observability). */
     provider?: string | undefined;
     promptHash?: string | undefined;
-    runType?: 'single' | 'batch_parent' | 'batch_item' | undefined;
+    runType?: 'single' | 'batch_parent' | 'batch_item' | 'pipeline_step' | undefined;
     batchParentId?: string | undefined;
     spawnParentId?: string | undefined;
     spawnDepth?: number | undefined;
@@ -1017,6 +1017,11 @@ export class RunHistory {
     userWaitMs?: number | undefined;
     stopReason?: string | undefined;
     status?: 'running' | 'completed' | 'failed' | undefined;
+    /** Resolved concrete model id, finalized once the run picked its model
+     * (A2: pipeline_step rows insert with `model_id=''` then stamp the resolved
+     * model here at step end — the tier is known at insert, the concrete id only
+     * after the spawner resolves it). */
+    modelId?: string | undefined;
     /** Context-cost composition snapshot JSON (stored plaintext — counts only). */
     compositionJson?: string | undefined;
     /** Structured raw error detail (encrypted at rest like response_text). */
@@ -1032,6 +1037,7 @@ export class RunHistory {
     if (params.tokensCacheWrite !== undefined) { sets.push('tokens_cache_write = ?'); values.push(params.tokensCacheWrite); }
     if (params.costUsd !== undefined) { sets.push('cost_usd = ?'); values.push(params.costUsd); }
     if (params.toolCallCount !== undefined) { sets.push('tool_call_count = ?'); values.push(params.toolCallCount); }
+    if (params.modelId !== undefined) { sets.push('model_id = ?'); values.push(params.modelId); }
     if (params.durationMs !== undefined) { sets.push('duration_ms = ?'); values.push(params.durationMs); }
     if (params.userWaitMs !== undefined) { sets.push('user_wait_ms = ?'); values.push(params.userWaitMs); }
     if (params.stopReason !== undefined) { sets.push('stop_reason = ?'); values.push(params.stopReason); }
@@ -1098,6 +1104,11 @@ export class RunHistory {
     const params: unknown[] = [];
 
     if (filters?.sessionId) { conditions.push('session_id = ?'); params.push(filters.sessionId); }
+    // A2: hide internal pipeline_step rows from the general run list — they are
+    // an observability overlay (no parent runs row), reachable via the run-detail
+    // drill-down (spawn_parent_id) or an explicit session filter, not the top
+    // list. When the caller filters by a specific session they get the steps.
+    else { conditions.push("run_type != 'pipeline_step'"); }
     if (filters?.status) { conditions.push('status = ?'); params.push(filters.status); }
     if (filters?.model) { conditions.push('model_id = ?'); params.push(filters.model); }
     if (filters?.dateFrom) { conditions.push('created_at >= ?'); params.push(filters.dateFrom); }
@@ -1208,6 +1219,9 @@ export class RunHistory {
       SELECT tc.* FROM run_tool_calls tc
       JOIN runs r ON r.id = tc.run_id
       WHERE r.session_id = ?
+        -- A2 capture-pollution guard: never re-surface a workflow step's
+        -- REPLAYED tool calls to save_workflow / pattern analysis.
+        AND r.run_type != 'pipeline_step'
       ORDER BY r.created_at, r.rowid, tc.sequence_order
     `).all(sessionId) as ToolCallRecord[];
     return rows.map(tc => this._decToolCall(tc));
@@ -1221,6 +1235,7 @@ export class RunHistory {
       FROM runs r
       LEFT JOIN run_tool_calls tc ON tc.run_id = r.id
       WHERE r.status != 'running'
+        AND r.run_type != 'pipeline_step' -- A2 overlay, excluded from analysis
       GROUP BY r.id
       ORDER BY r.created_at DESC
       LIMIT ?
@@ -1254,6 +1269,11 @@ export class RunHistory {
       FROM runs r
       LEFT JOIN threads t ON t.id = r.session_id
       WHERE r.session_id != '' AND r.status != 'running'
+        -- A2: a pipeline_step row carries session_id = the pipeline run id (a
+        -- non-empty UUID with no matching threads row); without this guard each
+        -- workflow run would surface as a phantom untitled "thread" carrying the
+        -- summed step cost. Observability rows never appear in thread insights.
+        AND r.run_type != 'pipeline_step'
       GROUP BY r.session_id
       ORDER BY last_run_at DESC
       LIMIT ?
@@ -1322,6 +1342,10 @@ export class RunHistory {
              COALESCE(SUM(cost_usd), 0) as total_cost_usd,
              COALESCE(AVG(duration_ms), 0) as avg_duration_ms
       FROM runs WHERE status NOT IN ('running', 'failed')
+        -- A2: pipeline_step rows are an observability overlay (live progress +
+        -- tool-call attribution); they carry real per-step cost/tokens for the
+        -- run-detail view but must NEVER move spend/stats/usage aggregates.
+        AND run_type != 'pipeline_step'
     `).get() as { total_runs: number; user_turn_runs: number | null; total_tokens_in: number; total_tokens_out: number; total_cost_usd: number; avg_duration_ms: number };
 
     const costByModel = this.db.prepare(`
@@ -1333,6 +1357,7 @@ export class RunHistory {
              COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
              COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
       FROM runs WHERE status NOT IN ('running', 'failed')
+        AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
 
@@ -1368,6 +1393,7 @@ export class RunHistory {
              SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND spawn_depth = 0 AND run_type != 'batch_item' THEN 1 ELSE 0 END) as user_turns
       FROM runs
       WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
+        AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY date(created_at, ?) ORDER BY day DESC
     `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
   }
@@ -1382,7 +1408,8 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as tokens_out,
              COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
              COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
-      FROM runs GROUP BY model_id ORDER BY cost_usd DESC
+      FROM runs WHERE run_type != 'pipeline_step' -- A2 overlay, excluded from spend
+      GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
   }
 
@@ -1412,6 +1439,7 @@ export class RunHistory {
              COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read
       FROM runs
       WHERE status NOT IN ('running', 'failed')
+        AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
         AND created_at >= ? AND created_at < ?
       GROUP BY model_id
       ORDER BY cost_usd DESC
@@ -1439,6 +1467,7 @@ export class RunHistory {
              COUNT(*) as run_count
       FROM runs
       WHERE status NOT IN ('running', 'failed')
+        AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
         AND created_at >= ? AND created_at < ?
       GROUP BY COALESCE(kind, 'llm')
       ORDER BY cost_usd DESC
@@ -1453,6 +1482,7 @@ export class RunHistory {
       SELECT date(created_at) as day, COALESCE(SUM(cost_usd), 0) as cost_usd
       FROM runs
       WHERE status NOT IN ('running', 'failed')
+        AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
         AND created_at >= ? AND created_at < ?
       GROUP BY date(created_at)
       ORDER BY day ASC
@@ -1511,6 +1541,10 @@ export class RunHistory {
       SELECT COUNT(*) as cnt FROM run_tool_calls tc
       JOIN runs r ON tc.run_id = r.id
       WHERE tc.tool_name = ? AND r.created_at >= datetime('now', ?)
+        -- A2: the step recorder is observability-only — it must not retroactively
+        -- change tool rate-limiting. Excluding pipeline_step preserves the exact
+        -- pre-A2 count (workflow step calls were unrecorded, so uncounted here).
+        AND r.run_type != 'pipeline_step'
     `).get(toolName, `-${hours} hours`) as { cnt: number };
     return row.cnt;
   }

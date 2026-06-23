@@ -500,6 +500,12 @@ export interface RunSavedWorkflowResult {
   /** Total USD cost of the run, so a caller can report it to the managed
    *  credit hook (onAfterRun) — the pipeline path otherwise bypasses billing. */
   costUsd?: number | undefined;
+  /** A2: per-step failure detail (stepId + message + that step's cost), so the
+   *  caller (POST /run → run UI) can show WHICH step failed and why where the
+   *  run was triggered — not just a terminal status. Empty when all steps
+   *  succeeded; present for every step that recorded an error (incl. on_failure
+   *  = 'continue'/'notify' runs that finished 'completed' with errored steps). */
+  stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number }> | undefined;
 }
 
 /**
@@ -587,7 +593,13 @@ export async function runSavedWorkflow(
     }));
     persistPipelineRun(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
-    return { ok: true, runId: state.runId, status: state.status, costUsd };
+    // A2: surface per-step failures + the terminal run error so the trigger UI
+    // shows WHICH step failed (not just status). `ok:true` = the run executed;
+    // a failed step is reflected in `status`/`error`/`stepErrors`, not `ok`.
+    const stepErrors = [...state.outputs.values()]
+      .filter(o => o.error !== undefined && o.error !== '')
+      .map(o => ({ stepId: o.stepId, error: o.error, costUsd: o.costUsd }));
+    return { ok: true, runId: state.runId, status: state.status, costUsd, stepErrors, error: state.error };
   } catch (err: unknown) {
     return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
   }

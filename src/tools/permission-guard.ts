@@ -274,7 +274,7 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry): string | null {
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contractVersion?: number): string | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
@@ -286,9 +286,12 @@ export function isDangerous(toolName: string, input: unknown, autonomy?: Autonom
     }
   }
 
-  // Publish guard block for observability / audit
+  // Publish guard block for observability / audit. A2: stamp the run id this
+  // decision occurred in (so a headless step's block is attributable post-hoc)
+  // and the capability-contract version that governed it (null/undefined in
+  // A1/A2 where the seam carries no contract — Slice B fills it).
   if (channels.guardBlock.hasSubscribers) {
-    channels.guardBlock.publish({ toolName, warning, autonomy });
+    channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion });
   }
 
   return warning;
