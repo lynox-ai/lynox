@@ -8,13 +8,18 @@ vi.mock('../../core/dag-planner.js', () => ({
   estimatePipelineCost: (...args: unknown[]) => mockEstimatePipelineCost(...args),
 }));
 
-// Mock runner
+// Mock runner — but keep the REAL buildRunCtx so the contract test asserts the
+// actual option-shaping (the structural guard against the dropped-field drift).
 const mockRunManifest = vi.fn();
 const mockRetryManifest = vi.fn();
-vi.mock('../../orchestrator/runner.js', () => ({
-  runManifest: (...args: unknown[]) => mockRunManifest(...args),
-  retryManifest: (...args: unknown[]) => mockRetryManifest(...args),
-}));
+vi.mock('../../orchestrator/runner.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../orchestrator/runner.js')>();
+  return {
+    runManifest: (...args: unknown[]) => mockRunManifest(...args),
+    retryManifest: (...args: unknown[]) => mockRetryManifest(...args),
+    buildRunCtx: actual.buildRunCtx,
+  };
+});
 
 // Mock validate — keep MAX_STEPS in sync with the real module (pipeline.ts
 // imports the canonical constant from here).
@@ -29,14 +34,16 @@ import {
   storePipeline,
   getPipeline,
   runSavedWorkflow,
-  dispatchOrchestratedPipeline,
   forgetPipeline,
   _resetPipelineStore,
   _summarizeStepOutput,
 } from './pipeline.js';
-import type { IAgent, ProcessParameter } from '../../types/index.js';
+import type { IAgent, ProcessParameter, AutonomyLevel } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import type { RunHistory } from '../../core/run-history.js';
+// Resolves to the REAL buildRunCtx (the runner mock above passes it through via
+// importActual) so the contract test exercises the actual option-shaping.
+import { buildRunCtx } from '../../orchestrator/runner.js';
 
 const mockConfig: LynoxUserConfig = {
   api_key: 'test-key',
@@ -246,7 +253,7 @@ describe('run_workflow — inline steps', () => {
     expect(manifestArg['on_failure']).toBe('continue');
   });
 
-  it('passes context to manifest', async () => {
+  it('passes context to manifest, exposed both top-level and under params (§4.5)', async () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
 
@@ -257,7 +264,9 @@ describe('run_workflow — inline steps', () => {
     );
 
     const manifestArg = mockRunManifest.mock.calls[0]![0] as Record<string, unknown>;
-    expect(manifestArg['context']).toEqual(context);
+    // Top-level keys preserved ({{repo}} still resolves) + a params namespace
+    // added ({{params.repo}} now resolves) — the inline {params} drift fix.
+    expect(manifestArg['context']).toEqual({ ...context, params: context });
   });
 
   it('truncates result at 50KB and includes config hint', async () => {
@@ -939,8 +948,7 @@ describe('_summarizeStepOutput', () => {
 });
 
 // PRD-HN-LAUNCH-HARDENING T2-W1 — saved-workflow templates must never be
-// consumed by `executePipelineById` (the `run_workflow workflow_id:` path)
-// or by `dispatchOrchestratedPipeline` (the plan_task O7 auto-trigger).
+// consumed by `executePipelineById` (the `run_workflow workflow_id:` path).
 // `runSavedWorkflow` is already guarded; see the dedicated suite above.
 describe('template-integrity guard (T2-W1)', () => {
   const markExecutedSpy = vi.fn();
@@ -1014,70 +1022,6 @@ describe('template-integrity guard (T2-W1)', () => {
 
       // Second run is now refused — proves the guard only relaxes for templates.
       const second = await runWorkflowTool.handler({ workflow_id: id }, agent);
-      expect(second).toMatch(/already been executed/);
-    });
-  });
-
-  describe('dispatchOrchestratedPipeline (plan_task O7 auto-trigger)', () => {
-    it('does NOT mark a template as executed', async () => {
-      const id = seedTemplate('tpl-disp-1');
-      const planned = getPipeline(id)!;
-      mockRunManifest.mockResolvedValueOnce(makeRunState());
-
-      const result = await dispatchOrchestratedPipeline(planned, {
-        config: mockConfig,
-        tools: mockTools,
-        streamHandler: null,
-        runHistory: fakeRunHistory as never,
-      });
-      expect(result).not.toMatch(/Error/);
-      expect(planned.executed).toBe(false);
-      expect(markExecutedSpy).not.toHaveBeenCalled();
-
-      // Re-dispatching the same template must not be blocked.
-      mockRunManifest.mockResolvedValueOnce(makeRunState());
-      const second = await dispatchOrchestratedPipeline(planned, {
-        config: mockConfig,
-        tools: mockTools,
-        streamHandler: null,
-        runHistory: fakeRunHistory as never,
-      });
-      expect(second).not.toMatch(/already been executed/);
-    });
-
-    it('still marks a non-template planned pipeline executed', async () => {
-      const id = 'disp-regular';
-      storePipeline(id, {
-        id,
-        name: 'regular',
-        goal: 'g',
-        steps: [{ id: 's', task: 't' }],
-        reasoning: 'r',
-        estimatedCost: 0,
-        createdAt: new Date().toISOString(),
-        executed: false,
-        executionMode: 'orchestrated',
-        template: false,
-        mode: 'autonomous',
-      });
-      const planned = getPipeline(id)!;
-      mockRunManifest.mockResolvedValueOnce(makeRunState());
-
-      await dispatchOrchestratedPipeline(planned, {
-        config: mockConfig,
-        tools: mockTools,
-        streamHandler: null,
-        runHistory: fakeRunHistory as never,
-      });
-      expect(planned.executed).toBe(true);
-      expect(markExecutedSpy).toHaveBeenCalledTimes(1);
-
-      const second = await dispatchOrchestratedPipeline(planned, {
-        config: mockConfig,
-        tools: mockTools,
-        streamHandler: null,
-        runHistory: fakeRunHistory as never,
-      });
       expect(second).toMatch(/already been executed/);
     });
   });
@@ -1157,5 +1101,194 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
     const cfgArg = mockRunManifest.mock.calls[0]![1] as LynoxUserConfig;
     expect(cfgArg.api_key).toBe('anthropic-key');
     expect(cfgArg.provider).toBe('anthropic');
+  });
+});
+
+// ===========================================================================
+// Slice A1 — run-context unification (buildRunCtx), autonomy posture, the
+// capability-contract seam, and the §4.5 drift fixes.
+// ===========================================================================
+
+/** Every field buildRunCtx must emit — the structural guard against a call
+ *  site silently dropping one (the parentTools / parentToolContext /
+ *  userTimezone drift class C1). */
+const RUN_CTX_KEYS = [
+  'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
+  'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
+] as const;
+
+/** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
+function makeAutonomyAgent(autonomy: AutonomyLevel | undefined): IAgent {
+  const ctx = createToolContext(mockConfig);
+  ctx.tools = mockTools;
+  return { toolContext: ctx, autonomy } as unknown as IAgent;
+}
+
+describe('A1: buildRunCtx — complete run-context shaping', () => {
+  it('emits every option key (no field can be dropped) and requires autonomy', () => {
+    const opts = buildRunCtx({ autonomy: 'autonomous' });
+    for (const key of RUN_CTX_KEYS) {
+      expect(Object.prototype.hasOwnProperty.call(opts, key)).toBe(true);
+    }
+    expect(opts.autonomy).toBe('autonomous');
+    // parentMemory normalises null when omitted; the rest are explicit undefined.
+    expect(opts.parentMemory).toBeNull();
+    expect(opts.parentToolContext).toBeUndefined();
+    expect(opts.userTimezone).toBeUndefined();
+    expect(opts.capabilityContract).toBeUndefined();
+  });
+
+  it('passes through the values it is given', () => {
+    const tc = createToolContext(mockConfig);
+    const opts = buildRunCtx({
+      autonomy: undefined,
+      parentToolContext: tc,
+      userTimezone: 'Europe/Zurich',
+    });
+    expect(opts.autonomy).toBeUndefined();
+    expect(opts.parentToolContext).toBe(tc);
+    expect(opts.userTimezone).toBe('Europe/Zurich');
+  });
+});
+
+describe('A1: every entrypoint routes a complete run-context (contract test)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  it('headless saved-workflow run is autonomous + complete', async () => {
+    const id = 'wf-headless';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['autonomy']).toBe('autonomous'); // C1: the headless posture is now explicit
+    for (const key of RUN_CTX_KEYS) {
+      expect(Object.prototype.hasOwnProperty.call(opts, key)).toBe(true);
+    }
+    // Value (not just key): the headless path forwards the runtime tools, so a
+    // future change that drops the VALUE (not just the key) is caught too.
+    expect(opts['parentTools']).toBe(mockTools);
+  });
+
+  it('in-session inline run inherits the parent agent autonomy + forwards its context', async () => {
+    const agent = makeAutonomyAgent('autonomous');
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['autonomy']).toBe('autonomous');
+    for (const key of RUN_CTX_KEYS) {
+      expect(Object.prototype.hasOwnProperty.call(opts, key)).toBe(true);
+    }
+    // Value assertion: the agent's tool context + tools actually flow through.
+    expect(opts['parentToolContext']).toBe(agent.toolContext);
+    expect(opts['parentTools']).toBe(agent.toolContext.tools);
+  });
+
+  it('in-session stored run inherits undefined autonomy from a normal chat agent', async () => {
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['autonomy']).toBeUndefined(); // normal chat keeps interactive prompting
+    for (const key of RUN_CTX_KEYS) {
+      expect(Object.prototype.hasOwnProperty.call(opts, key)).toBe(true);
+    }
+    expect(opts['parentToolContext']).toBe(agent.toolContext);
+  });
+
+  it('retry path no longer drops parentToolContext + userTimezone (value, not just key)', async () => {
+    const id = seedStoredPipeline();
+    // First run populates executedStates.
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    const agent = makeAutonomyAgent(undefined);
+    // Give the agent a userTimezone so the retry can carry it.
+    (agent as unknown as { userTimezone: string }).userTimezone = 'Europe/Zurich';
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    // The historical bug dropped these two fields entirely. Assert the actual
+    // VALUES flow through, not merely that the keys exist (buildRunCtx always
+    // emits the keys, so a key-only check would not catch a re-introduced drop).
+    expect(retryOpts['parentToolContext']).toBe(agent.toolContext);
+    expect(retryOpts['userTimezone']).toBe('Europe/Zurich');
+  });
+});
+
+describe('A1: §4.5 drift fixes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  it('runSavedWorkflow honours the stored on_failure strategy (not hardcoded stop)', async () => {
+    const id = 'wf-onfail';
+    storePipeline(id, {
+      id, name: 'onfail', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [], on_failure: 'continue',
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const manifest = mockRunManifest.mock.calls[0]![0] as { on_failure: string };
+    expect(manifest.on_failure).toBe('continue');
+  });
+
+  it('inline run exposes context under both top-level and the params namespace', async () => {
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')], context: { foo: 'bar' } },
+      makeAutonomyAgent(undefined),
+    );
+    const manifest = mockRunManifest.mock.calls[0]![0] as { context: Record<string, unknown> };
+    expect(manifest.context['foo']).toBe('bar'); // legacy {{foo}} still resolves
+    expect((manifest.context['params'] as Record<string, unknown>)['foo']).toBe('bar'); // {{params.foo}} now resolves
+  });
+
+  it('run_workflow re-targets a stored workflow via params', async () => {
+    const id = 'wf-retarget';
+    storePipeline(id, {
+      id, name: 'retarget', goal: 'g', steps: [{ id: 's', task: 'report for {{params.client}}' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [{ name: 'client', description: 'client name', type: 'string', source: 'user_input' }],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, params: { client: 'Acme' } }, makeAutonomyAgent(undefined));
+    const manifest = mockRunManifest.mock.calls[0]![0] as { context: { params: Record<string, unknown> } };
+    expect(manifest.context.params['client']).toBe('Acme');
+  });
+
+  it('non-template reentrancy: a retry while the run is in flight is rejected, not 404', async () => {
+    const id = seedStoredPipeline(); // template:false → non-template
+    let resolveRun!: (v: RunState) => void;
+    mockRunManifest.mockImplementationOnce(() => new Promise<RunState>(res => { resolveRun = res; }));
+    const agent = makeAutonomyAgent(undefined);
+
+    const inFlight = runWorkflowTool.handler({ workflow_id: id }, agent); // starts, parks at await
+    await Promise.resolve();
+    const retry = await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+    expect(retry).toMatch(/still running/);
+
+    resolveRun(makeRunState());
+    await inFlight;
   });
 });

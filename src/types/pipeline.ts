@@ -86,6 +86,18 @@ export interface PlannedPipeline {
    */
   mode: PipelineMode;
   /**
+   * Failure strategy honoured by headless runs (`runSavedWorkflow`): `'stop'`
+   * halts at the first failed step, `'continue'` runs the rest, `'notify'`
+   * continues + flags. Round-trips for free (the whole pipeline is
+   * JSON-stringified by `insertPlannedPipeline`) and is backfilled to `'stop'`
+   * on read for legacy rows. The in-session `run_workflow` tool still honours
+   * its per-call `on_failure` input; this is the stored default for unattended
+   * runs that have no caller input. A producer that sets a non-`'stop'` value
+   * (the edit-via-chat tool) lands in Slice C; the consumer is wired here so the
+   * headless path stops hardcoding `'stop'`.
+   */
+  on_failure?: 'stop' | 'continue' | 'notify' | undefined;
+  /**
    * Re-target schema for the saved workflow — the parameters a caller supplies
    * at run time (`{{params.<name>}}` placeholders resolve against these). Lifted
    * here from the capture's `ProcessRecord.parameters` so a saved template

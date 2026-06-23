@@ -27,7 +27,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';
+import { spawnInline, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, type SubAgentPromptHandles } from './runtime-adapter.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from '../types/orchestration.js';
 
@@ -623,5 +623,39 @@ describe('spawnInline literal replay (captured steps)', () => {
     expect(tools.find(t => t.definition.name === 'spawn_agent')).toBeUndefined();
     const sent = mockSend.mock.calls[0]![0] as string;
     expect(sent).not.toContain('Execute exactly this tool call');
+  });
+});
+
+describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('threads the run autonomy into the nested sub-pipeline steps', async () => {
+    const step: ManifestStep = {
+      id: 'nested', agent: 'nested', runtime: 'pipeline',
+      pipeline: [{ id: 'inner', task: 'do inner thing' }],
+    };
+    // Headless autonomous run → the nested inner step must also be 'autonomous',
+    // otherwise a benign DANGEROUS_BASH op is denied non-interactively (the C1
+    // bug leaking through a `runtime:'pipeline'` step).
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0, undefined, undefined, undefined, null, 'autonomous');
+
+    // The inner step is spawned via the real inner runManifest → spawnInline →
+    // new Agent. Assert the constructed inner Agent inherited the posture.
+    expect(vi.mocked(Agent).mock.calls.length).toBeGreaterThanOrEqual(1);
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(innerConfig['autonomy']).toBe('autonomous');
+  });
+
+  it('passes undefined autonomy through unchanged (in-session inheritance)', async () => {
+    const step: ManifestStep = {
+      id: 'nested2', agent: 'nested2', runtime: 'pipeline',
+      pipeline: [{ id: 'inner2', task: 'do inner thing' }],
+    };
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(innerConfig['autonomy']).toBeUndefined();
   });
 });

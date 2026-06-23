@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry } from '../types/index.js';
+import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { resolveRunModel } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
@@ -74,6 +74,64 @@ export interface RunManifestOptions {
    * pipelines whose parent run had no memory configured to begin with.
    */
   parentMemory?: IMemory | null | undefined;
+  /**
+   * Capability contract authorising this run's headless outbound writes.
+   * RESERVED SEAM (Slice A1): threaded `runManifest` → spawners → `new Agent`
+   * → carried beside `autonomy`/`preApproval` at the `isDangerous` enforcement
+   * point, but A1 attaches no enforcement logic — `undefined`/`null` = the safe
+   * autonomous-deny default (PRD §4.2 S7). Slice B fills the shape + enforces.
+   */
+  capabilityContract?: CapabilityContract | undefined;
+}
+
+/**
+ * Inputs to {@link buildRunCtx}. `autonomy` is a **required key** (value may be
+ * `undefined`) so every call site must consciously decide the run's permission
+ * posture — the headless saved-workflow path passes `'autonomous'`, in-session
+ * callers inherit the parent agent's autonomy. This is the structural guard
+ * against the C1 drift class (a `runManifest` call that silently omits autonomy
+ * → a headless step with no approver → silent `DANGEROUS_BASH` denial).
+ */
+export interface RunCtxInput {
+  autonomy: import('../types/index.js').AutonomyLevel | undefined;
+  parentTools?: ToolEntry[] | undefined;
+  parentToolContext?: import('../types/index.js').ToolContext | undefined;
+  parentMemory?: IMemory | null | undefined;
+  userTimezone?: string | undefined;
+  parentPrompt?: SubAgentPromptHandles | undefined;
+  parentSessionCounters?: SessionCounters | undefined;
+  runHistory?: RunHistory | undefined;
+  hooks?: RunHooks | undefined;
+  capabilityContract?: CapabilityContract | undefined;
+}
+
+/**
+ * Build a *complete* {@link RunManifestOptions} for a pipeline run — the single
+ * chokepoint every entrypoint routes through (`executeInlineSteps`,
+ * `executePipelineById`, `runSavedWorkflow`, the retry path). Owning the object
+ * construction here means no call site can drop a field (the `parentTools` /
+ * `parentToolContext` / `userTimezone` drift class): every key is emitted
+ * explicitly, and `autonomy` is required on the input. A contract test asserts
+ * each entrypoint passes its options through this builder.
+ *
+ * Billing-agnostic by design: it shapes options only and fires no credit hook —
+ * the in-Session path already bills via `Session.run` and the headless path via
+ * `runGuardedSavedWorkflow`, so adding a wrapper here would double-bill
+ * (prd-review A3).
+ */
+export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
+  return {
+    autonomy: input.autonomy,
+    parentTools: input.parentTools,
+    parentToolContext: input.parentToolContext,
+    parentMemory: input.parentMemory ?? null,
+    userTimezone: input.userTimezone,
+    parentPrompt: input.parentPrompt,
+    parentSessionCounters: input.parentSessionCounters,
+    runHistory: input.runHistory,
+    hooks: input.hooks,
+    capabilityContract: input.capabilityContract,
+  };
 }
 
 const MAX_PIPELINE_DEPTH = 3;
@@ -304,7 +362,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -326,7 +384,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, 'balanced', config);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -335,7 +393,7 @@ async function executeStep(
       const stepModel = resolveModelForCost(step, agentDef.defaultTier, config);
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

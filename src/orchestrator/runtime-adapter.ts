@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -201,6 +201,7 @@ export async function spawnViaAgent(
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
+  capabilityContract?: CapabilityContract | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -284,6 +285,7 @@ export async function spawnViaAgent(
     openaiModelId: config.openai_model_id,
     preApproval,
     autonomy,
+    capabilityContract,
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
@@ -358,6 +360,7 @@ export async function spawnInline(
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
   parentMemory?: IMemory | null | undefined,
+  capabilityContract?: CapabilityContract | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -440,6 +443,7 @@ export async function spawnInline(
     openaiModelId: config.openai_model_id,
     preApproval,
     autonomy,
+    capabilityContract,
     toolContext: parentToolContext,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
@@ -524,6 +528,8 @@ export async function spawnPipeline(
   userTimezone?: string | undefined,
   parentSessionCounters?: import('../types/agent.js').SessionCounters | undefined,
   parentMemory?: IMemory | null | undefined,
+  autonomy?: import('../types/index.js').AutonomyLevel | undefined,
+  capabilityContract?: CapabilityContract | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -569,6 +575,13 @@ export async function spawnPipeline(
     userTimezone,
     parentSessionCounters,
     parentMemory,
+    // Thread the run's posture into the nested sub-pipeline. Without this a
+    // `runtime:'pipeline'` step inside a headless `autonomous` workflow re-spawns
+    // its inner steps with autonomy=undefined → a benign DANGEROUS_BASH op is
+    // denied non-interactively and the run silently fails — the C1 bug leaking
+    // through nesting. The capability-contract seam rides along for Slice B.
+    autonomy,
+    capabilityContract,
   });
 
   // Aggregate results

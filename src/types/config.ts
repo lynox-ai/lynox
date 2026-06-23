@@ -10,6 +10,7 @@ import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
+import type { CapabilityContract } from './capability-contract.js';
 
 export interface AgentConfig {
   name:             string;
@@ -57,6 +58,13 @@ export interface AgentConfig {
   autonomy?:           AutonomyLevel | undefined;
   preApproval?:        PreApprovalSet | undefined;
   audit?:              PreApproveAuditLike | undefined;
+  /**
+   * Capability contract authorising headless outbound writes. RESERVED SEAM
+   * (Slice A1): stored on the Agent + carried to the `isDangerous` enforcement
+   * point beside `autonomy`/`preApproval`, but A1 attaches no logic —
+   * `undefined` = the safe autonomous-deny default (PRD §4.2). Slice B enforces.
+   */
+  capabilityContract?: CapabilityContract | undefined;
   /** Knowledge context for system prompt. Truthy string = inject as Block 2. Falsy/undefined = no memory block. */
   knowledgeContext?:   string | undefined;
   secretStore?:        SecretStoreLike | undefined;

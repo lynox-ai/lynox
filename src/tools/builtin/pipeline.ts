@@ -1,6 +1,6 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel } from '../../types/index.js';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
-import { runManifest, retryManifest } from '../../orchestrator/runner.js';
+import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
@@ -22,6 +22,17 @@ const pipelineStore = new Map<string, PlannedPipeline>();
 // Store last executed state per pipeline for retry
 const executedStates = new Map<string, { manifest: Manifest; state: RunState }>();
 
+// Non-template reentrancy guard: a non-template (run-once) pipeline currently
+// in-flight. `executePipelineById` marks `planned.executed = true` before the
+// run completes and only writes `executedStates` after — so a retry firing in
+// that window observes `executed = true` with no recoverable state and used to
+// 404 with "no previous execution". Tracking the id here closes that window: a
+// retry while the original run is still in flight gets a clear "still running"
+// error instead. (A second *fresh* run is already blocked separately by the
+// `executed === true` check with "already been executed".) Templates (saved
+// workflows) are reusable by definition and never enter this set.
+const inFlightNonTemplatePipelines = new Set<string>();
+
 /** Track pipeline IDs we've already warned about during legacy-mode migration. */
 const warnedLegacyIds = new Set<string>();
 const WARNED_LEGACY_MAX = 1024;
@@ -36,6 +47,9 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
   // Legacy rows (saved before the re-target schema landed) have no `parameters`;
   // default to an empty schema so binding/validation treats them as no-param.
   planned.parameters ??= [];
+  // Legacy rows have no stored failure strategy; default to 'stop' (the prior
+  // hardcoded headless behaviour) so the headless path can read it uniformly.
+  planned.on_failure ??= 'stop';
   if (planned.mode === undefined) {
     planned.mode = inferPipelineMode(planned.steps);
     if (planned.mode === 'interactive' && !warnedLegacyIds.has(planned.id)) {
@@ -357,7 +371,12 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       input.name ?? 'inline-pipeline',
       steps,
       input.on_failure ?? 'stop',
-      input.context,
+      // Expose inline context under BOTH the top-level namespace (preserves
+      // existing `{{key}}` references — no regression) and the `params`
+      // namespace, so inline steps resolve `{{params.key}}` consistently with
+      // saved-workflow runs (§4.5 drift fix). The explicit `params` key wins
+      // on a name collision.
+      { ...(input.context ?? {}), params: input.context ?? {} },
     );
 
     validateManifest(manifest);
@@ -373,7 +392,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
-    const state = await runManifest(manifest, deps.config, {
+    const state = await runManifest(manifest, deps.config, buildRunCtx({
+      autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       hooks,
@@ -382,7 +402,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
-    });
+    }));
 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
@@ -431,6 +451,15 @@ export interface PipelineDeps {
   parentPrompt?: SubAgentPromptHandles | undefined;
   userTimezone?: string | undefined;
   /**
+   * Permission posture the run's step sub-agents inherit. In-session callers
+   * (the `run_workflow` tool) thread the parent agent's `autonomy` so a normal
+   * chat keeps interactive prompting (parent `undefined`) while a worker-session
+   * run propagates `'autonomous'`. The headless saved-workflow path does not use
+   * this — it passes `'autonomous'` to `buildRunCtx` directly. The C1 fix: every
+   * pipeline run now carries an explicit autonomy instead of silently omitting it.
+   */
+  autonomy?: AutonomyLevel | undefined;
+  /**
    * Parent Session's counters object — threaded into runManifest so step
    * cost shares the same per-Session budget as the calling agent + its
    * spawns. Absent when the pipeline tool is exercised outside a real
@@ -453,86 +482,12 @@ export interface PipelineDeps {
   /**
    * Caller-supplied re-target values for a parametrised saved workflow, bound +
    * validated against `PlannedPipeline.parameters` before the run (the
-   * `{{params.<name>}}` namespace). Absent for the agent `run_workflow` tool and
-   * the `plan_task` O7 auto-trigger (those bind to schema defaults); the HTTP
-   * `/run` route + the saved-workflow library supply real values.
+   * `{{params.<name>}}` namespace). Supplied by the agent `run_workflow` tool
+   * (its `params` input, §4.5 re-target), the HTTP `/run` route, and the
+   * saved-workflow library; absent for a cron fire with no stored params (binds
+   * leniently to schema defaults).
    */
   params?: Record<string, unknown> | undefined;
-}
-
-/**
- * Run a stored pipeline through the orchestrated runner (`runManifest`) — the
- * exact isolation path `executePipelineById` uses (one fresh sub-agent per
- * step, per-step `model` honored via `resolveModelForCost`). Exported so the
- * O7 auto-trigger in `plan_task` can dispatch eligible plans straight to the
- * orchestrated runner instead of running them inline on the main loop.
- *
- * Returns the formatted `PipelineResult` JSON, or an `Error: ...` string.
- */
-export async function dispatchOrchestratedPipeline(
-  planned: PlannedPipeline,
-  deps: PipelineDeps,
-): Promise<string> {
-  // Interactive pipelines need a live prompt-capable session — mirror the
-  // executePipelineById guard so the dispatch fails fast with a clear error
-  // rather than throwing "ask_user is not set" deep inside a step.
-  if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
-    return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
-  }
-
-  // Saved workflows (`template:true`) are reusable by definition — never
-  // mark them executed (T2-W1). Without this guard, dispatching a saved
-  // template through the orchestrated runner consumed the template after
-  // the first run.
-  const isTemplate = planned.template === true;
-
-  if (!isTemplate && planned.executed) {
-    return `Error: Workflow "${planned.id}" has already been executed.`;
-  }
-
-  const bound = bindWorkflowParameters(planned.parameters ?? [], deps.params, { requireAll: deps.params !== undefined });
-  if (!bound.ok) {
-    return `Error: ${bound.error}`;
-  }
-
-  const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
-  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
-
-  if (steps.length === 0) {
-    return 'Error: Workflow has no steps to execute.';
-  }
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
-  }
-
-  try {
-    const manifest = buildManifest(planned.name, steps, 'stop', { params: bound.params });
-    validateManifest(manifest);
-    if (!isTemplate) planned.executed = true;
-
-    const hooks = buildProgressHooks(deps.streamHandler, manifest);
-    const state = await runManifest(manifest, deps.config, {
-      parentTools: deps.tools,
-      parentToolContext: deps.toolContext,
-      hooks,
-      runHistory: deps.runHistory ?? undefined,
-      parentPrompt: deps.parentPrompt,
-      userTimezone: deps.userTimezone,
-      parentSessionCounters: deps.sessionCounters,
-      parentMemory: deps.memory ?? null,
-    });
-
-    executedStates.set(planned.id, { manifest, state });
-    persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
-    if (!isTemplate) {
-      try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
-    }
-
-    return formatResult(state, planned.name, resultLimit);
-  } catch (err: unknown) {
-    if (!isTemplate) planned.executed = false; // Allow retry on validation errors
-    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
-  }
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -551,7 +506,7 @@ export interface RunSavedWorkflowResult {
  * Run a *saved workflow* (a `PlannedPipeline` with `template:true`) headless,
  * for the Saved-Workflows library UI's "Run" action (PRD §6.8 / D13).
  *
- * Unlike `executePipelineById` / `dispatchOrchestratedPipeline`, this never
+ * Unlike `executePipelineById`, this never
  * consumes the template: a saved workflow is reusable by definition, so the
  * stored row is left untouched and a *fresh* `pipeline_runs` row (the
  * orchestrated run's `state.runId`) is written for every invocation. The
@@ -605,19 +560,31 @@ export async function runSavedWorkflow(
 
   const resultLimit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   try {
-    const manifest = buildManifest(planned.name, steps, 'stop', { params: bound.params });
+    // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
+    // (§4.5 drift fix). Backfilled to 'stop' on read, so legacy rows are
+    // unchanged; the edit-via-chat tool (Slice C) is the producer of a
+    // non-'stop' value.
+    const manifest = buildManifest(planned.name, steps, planned.on_failure ?? 'stop', { params: bound.params });
     validateManifest(manifest);
     // Inline steps need the engine's tool set to execute — without `parentTools`
     // the runner throws "no parentTools provided" before any step runs (the gap
     // that left every headless saved-workflow run failing). The library "Run",
     // cron, and the HTTP re-target all reach here via runGuardedSavedWorkflow,
     // which sources these off the engine.
-    const state = await runManifest(manifest, config, {
+    //
+    // C1 fix: headless saved-workflow runs are explicitly `autonomous`. Without
+    // it the step sub-agents inherited an undefined posture → a benign step that
+    // hit any DANGEROUS_BASH pattern was denied non-interactively (no approver)
+    // and the run silently failed. `buildRunCtx` makes the posture explicit +
+    // the option object complete; the capability-contract seam rides along (null
+    // here = the safe autonomous-deny default until Slice B grants writes).
+    const state = await runManifest(manifest, config, buildRunCtx({
+      autonomy: 'autonomous',
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
       parentMemory: runtime?.memory ?? null,
-    });
+    }));
     persistPipelineRun(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     return { ok: true, runId: state.runId, status: state.status, costUsd };
@@ -643,6 +610,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
   // Retry mode
   if (input.retry) {
+    // Reentrancy guard: a non-template's fresh run sets executed=true before it
+    // records `executedStates`, so a retry firing in that window would have hit
+    // the misleading "no previous execution found" below. Reject with a clear
+    // message instead while the original run is still in flight.
+    if (inFlightNonTemplatePipelines.has(planned.id)) {
+      return `Error: Workflow "${planned.id}" is still running — wait for the current run to finish before retrying.`;
+    }
     const prev = executedStates.get(planned.id);
     if (!prev) {
       return `Error: No previous execution found for pipeline "${planned.id}". Execute it first before retrying.`;
@@ -650,14 +624,20 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     try {
       const hooks = buildProgressHooks(deps.streamHandler, prev.manifest);
-      const state = await retryManifest(prev.manifest, prev.state, deps.config, {
+      // buildRunCtx restores the two fields the retry path used to drop
+      // (parentToolContext + userTimezone) — without them a retried step ran
+      // with no tool context / wrong timezone vs its original run (§4.1).
+      const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+        autonomy: deps.autonomy,
         parentTools: deps.tools,
+        parentToolContext: deps.toolContext,
         hooks,
         runHistory: deps.runHistory ?? undefined,
         parentPrompt: deps.parentPrompt,
+        userTimezone: deps.userTimezone,
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
-      });
+      }));
 
       executedStates.set(planned.id, { manifest: prev.manifest, state });
       persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit);
@@ -706,10 +686,17 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     );
 
     validateManifest(manifest);
-    if (!isTemplate) planned.executed = true;
+    if (!isTemplate) {
+      planned.executed = true;
+      // Mark in-flight so a concurrent retry sees "still running" instead of the
+      // misleading "no previous execution" (the executed=true → executedStates
+      // window). Cleared in finally.
+      inFlightNonTemplatePipelines.add(planned.id);
+    }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
-    const state = await runManifest(manifest, deps.config, {
+    const state = await runManifest(manifest, deps.config, buildRunCtx({
+      autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       hooks,
@@ -718,7 +705,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
-    });
+    }));
 
     executedStates.set(planned.id, { manifest, state });
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
@@ -730,6 +717,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+  } finally {
+    if (!isTemplate) inFlightNonTemplatePipelines.delete(planned.id);
   }
 }
 
@@ -743,6 +732,14 @@ interface RunPipelineInput {
   context?: Record<string, unknown> | undefined;
   retry?: boolean | undefined;
   modifications?: StepModification[] | undefined;
+  /**
+   * Re-target values for a parametrised saved workflow (`workflow_id` path).
+   * Bound + validated against `PlannedPipeline.parameters` before the run and
+   * resolved into `{{params.<name>}}` placeholders. The §4.5 fix that lets the
+   * agent re-target a stored workflow from chat (previously the tool had no
+   * params field, so a re-targetable workflow could only run with its defaults).
+   */
+  params?: Record<string, unknown> | undefined;
 }
 
 export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
@@ -785,6 +782,10 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         context: {
           type: 'object',
           description: 'Global context variables available to all steps',
+        },
+        params: {
+          type: 'object',
+          description: 'Re-target values for a stored workflow\'s {{params.<name>}} placeholders (requires workflow_id).',
         },
         retry: {
           type: 'boolean',
@@ -874,6 +875,12 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         userTimezone: agent.userTimezone,
         sessionCounters: agent.sessionCounters,
         memory: agent.memory,
+        // Inherit the calling agent's posture: a normal chat (undefined) keeps
+        // interactive prompting; a worker-session run propagates 'autonomous'
+        // so its steps don't silently fail on a benign DANGEROUS_BASH op (C1).
+        autonomy: agent.autonomy,
+        // Re-target values for a parametrised stored workflow (§4.5).
+        params: input.params,
       });
     }
 
@@ -887,6 +894,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         parentPrompt,
         userTimezone: agent.userTimezone,
         memory: agent.memory,
+        autonomy: agent.autonomy,
       });
   },
 };
@@ -896,4 +904,5 @@ export function _resetPipelineStore(): void {
   pipelineStore.clear();
   executedStates.clear();
   warnedLegacyIds.clear();
+  inFlightNonTemplatePipelines.clear();
 }
