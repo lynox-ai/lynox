@@ -369,6 +369,30 @@ export class WorkerLoop {
       );
     }
 
+    // Slice B2 — first-run-confirm gate (S2, PRD §4.4): a workflow must have been
+    // confirmed by a human before it runs unattended. The B2 scheduling surface
+    // stamps `confirmedAt` as part of the consent action, so any workflow
+    // scheduled through the product has it; enforce here too so a hand-edited /
+    // synced task can't put an un-consented workflow on a cron. (No back-compat
+    // carve-out for un-confirmed legacy schedules — pre-product there are none,
+    // and the uniform gate is the correct foundation.)
+    if (!planned.confirmedAt) {
+      // Not confirmed for unattended execution — e.g. an agent-/sync-created
+      // cron that skipped the consent flow (the product schedule flow always
+      // confirms). Disable the schedule so it stops re-firing every tick and
+      // surface why, instead of throwing (which would Bugsink-report an expected
+      // state and retry it forever). Re-scheduling via the consent flow confirms
+      // it + creates a fresh, enabled task.
+      const tm = this.engine.getTaskManager();
+      tm?.setEnabled?.(task.id, false);
+      tm?.recordTaskRun(
+        task.id,
+        `Not run: workflow "${planned.id}" needs first-run confirmation. Schedule it from the workflow library (the consent step confirms it) — the schedule has been disabled.`,
+        'failed',
+      );
+      return;
+    }
+
     // Orchestrated execution via the exported saved-workflow entry point.
     //
     // `task.pipeline_id` points at the `status='planned'` `pipeline_runs` row
@@ -381,8 +405,26 @@ export class WorkerLoop {
     // subsequent tick instead of being marked `executed` on the first one.
     // Route through the budget + managed-credit lifecycle (cap, credit gate,
     // cost report) — runSavedWorkflow alone bypasses all three.
+    // Slice B2: pass the param VALUES bound at schedule time (the cron run can't
+    // prompt). Parsed defensively — a malformed blob degrades to no params rather
+    // than throwing here. The schedule flow already bound + validated every
+    // required param against the schema (requireAll), so the stored object is
+    // complete; runSavedWorkflow re-binds it (a non-undefined object → requireAll
+    // = true) and only fails if the schema gained a new required param AFTER the
+    // schedule was created (an edit-via-chat concern for Slice C), surfaced as a
+    // normal run failure.
+    let scheduledParams: Record<string, unknown> | undefined;
+    if (task.pipeline_params) {
+      try {
+        const parsed: unknown = JSON.parse(task.pipeline_params);
+        if (parsed !== null && typeof parsed === 'object') {
+          scheduledParams = parsed as Record<string, unknown>;
+        }
+      } catch { scheduledParams = undefined; }
+    }
+
     const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
-    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id);
+    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams);
 
     if (!result.ok) {
       // Surface conversion / validation / not-found / not-template errors as

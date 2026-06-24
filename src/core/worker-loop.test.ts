@@ -81,6 +81,7 @@ function makeTaskManager(tasks: TaskRecord[] = []): TaskManager {
   return {
     getDueTasks: vi.fn<() => TaskRecord[]>().mockReturnValue(tasks),
     recordTaskRun: vi.fn(),
+    setEnabled: vi.fn<(id: string, enabled: boolean) => boolean>().mockReturnValue(true),
   } as unknown as TaskManager;
 }
 
@@ -645,6 +646,7 @@ describe('WorkerLoop', () => {
       executionMode: 'orchestrated',
       template: false,
       mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z',
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
@@ -693,6 +695,7 @@ describe('WorkerLoop', () => {
       executionMode: 'orchestrated',
       template: true,
       mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z',
     });
 
     // RunHistory stub backed by a mutable record so we can snapshot the
@@ -782,6 +785,7 @@ describe('WorkerLoop', () => {
       executionMode: 'orchestrated',
       template: true,
       mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z',
     });
 
     const taskManager = makeTaskManager();
@@ -847,6 +851,7 @@ describe('WorkerLoop', () => {
       executionMode: 'orchestrated',
       template: true,
       mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z',
     });
 
     const taskManager = makeTaskManager();
@@ -890,6 +895,79 @@ describe('WorkerLoop', () => {
     );
     // Template still re-runnable on the next tick even after a failed run.
     expect(JSON.parse(templateJson).executed).toBe(false);
+  });
+
+  // ── Slice B2: confirmedAt gate · kill-switch · stored-param passing ──
+  async function firePipeline(
+    template: Record<string, unknown>,
+    taskOverrides: Partial<TaskRecord>,
+  ): Promise<TaskManager> {
+    const templateJson = JSON.stringify(template);
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
+    const task = makeTask({ pipeline_id: template['id'] as string, task_type: 'pipeline', ...taskOverrides });
+    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> }).executePipeline(task);
+    return taskManager;
+  }
+
+  const CONFIRMED = '2026-06-24T00:00:00.000Z';
+  const baseTemplate = (extra: Record<string, unknown>): Record<string, unknown> => ({
+    id: 'b2-wf', name: 'B2', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'saved',
+    estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false,
+    executionMode: 'orchestrated', template: true, mode: 'autonomous', ...extra,
+  });
+
+  // The kill-switch lives in getDueTasks (a disabled task is never "due"), not in
+  // executeTask — see run-history-persistence.test.ts / task-manager.test.ts. That
+  // avoids routing a skipped one-shot through recordTaskRun (which would complete
+  // it permanently). This block keeps the confirm + param-passing coverage.
+
+  it('refuses to fire an un-confirmed workflow: disables the schedule + records why, never runs it', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    const tm = await firePipeline(baseTemplate({}), { id: 't-unconfirmed' });
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    // Disabled (so it stops re-firing every tick) + a clear status, not a throw.
+    expect(tm.setEnabled).toHaveBeenCalledWith('t-unconfirmed', false);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('t-unconfirmed', expect.stringContaining('first-run confirmation') as string, 'failed');
+  });
+
+  it('runs a workflow once it has been confirmed', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'ok', status: 'completed' }));
+    const tm = await firePipeline(baseTemplate({ confirmedAt: CONFIRMED }), { id: 't-confirmed' });
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('t-confirmed', expect.stringContaining('completed') as string, 'success');
+  });
+
+  it('passes the schedule\'s stored params into the run', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'ok', status: 'completed' }));
+    await firePipeline(
+      baseTemplate({ confirmedAt: CONFIRMED, parameters: [{ name: 'month', description: '', type: 'string', source: 'user_input' }] }),
+      { id: 't-params', pipeline_params: JSON.stringify({ month: '2026-06' }) },
+    );
+    // runSavedWorkflow binds the stored params into the manifest context.
+    const manifest = mockRunManifest.mock.calls[0]![0] as { context?: { params?: Record<string, unknown> } };
+    expect(manifest.context?.params).toEqual({ month: '2026-06' });
   });
 
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.

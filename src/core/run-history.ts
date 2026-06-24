@@ -850,6 +850,14 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_compaction_events_session ON compaction_events(session_id);`,
+
+  // v39 (Slice B2): scheduling a saved workflow on cron carries its bound param
+  // VALUES (the cron run can't prompt) + a per-workflow kill-switch. `enabled`
+  // defaults to 1 so every pre-existing scheduled task stays running.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (39);
+   ALTER TABLE tasks ADD COLUMN pipeline_params TEXT;
+   ALTER TABLE tasks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+   CREATE INDEX IF NOT EXISTS idx_tasks_pipeline_enabled ON tasks(enabled) WHERE task_type = 'pipeline';`,
 ];
 
 export class RunHistory {
@@ -1897,6 +1905,16 @@ export class RunHistory {
     return persistence.renamePlannedPipeline(this.db, id, name);
   }
 
+  /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
+  setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
+    return persistence.setWorkflowConfirmedAt(this.db, id, confirmedAt);
+  }
+
+  /** Slice B2: flip a scheduled task's cron kill-switch. */
+  setTaskEnabled(id: string, enabled: boolean): boolean {
+    return persistence.setTaskEnabled(this.db, id, enabled);
+  }
+
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {
     return persistence.deletePlannedPipeline(this.db, id);
@@ -1925,6 +1943,7 @@ export class RunHistory {
     maxRetries?: number | undefined;
     notificationChannel?: string | undefined;
     pipelineId?: string | undefined;
+    pipelineParams?: string | undefined;
   }): void {
     persistence.insertTask(this.db, params);
   }

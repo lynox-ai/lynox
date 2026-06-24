@@ -218,4 +218,10 @@ export interface TaskRecord {
   retry_count?: number | undefined;
   notification_channel?: string | undefined;
   pipeline_id?: string | undefined;
+  /** Slice B2: bound param VALUES (JSON object) passed to a scheduled workflow
+   *  run — the cron path can't prompt, so the schedule stores them. */
+  pipeline_params?: string | undefined;
+  /** Slice B2: cron kill-switch (SQLite 0/1). 1 = fires on schedule, 0 = the
+   *  worker skips it. Absent = enabled (the column defaults to 1). */
+  enabled?: number | undefined;
 }

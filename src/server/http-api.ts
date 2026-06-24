@@ -3712,11 +3712,15 @@ export class LynoxHTTPApi {
       // LIMIT would let non-template planned rows (un-run plans) starve the
       // result. Scan a generous fixed window, then slice to `limit`.
       const rows = history.getPlannedPipelines(500);
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string }> = [];
+      // Backfill `mode` for legacy rows the same way getPipeline does, so the
+      // library agrees with the schedule handler on cron-eligibility (otherwise a
+      // legacy autonomous workflow with no stored mode hides its Schedule button).
+      const { inferPipelineMode } = await import('../orchestrator/human-in-the-loop.js');
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; confirmedAt?: string; capabilityContract?: unknown }> = [];
       for (const row of rows) {
-        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown };
+        let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
-          parsed = JSON.parse(row.manifest_json) as { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown };
+          parsed = JSON.parse(row.manifest_json) as typeof parsed;
         } catch { continue; } // skip corrupt rows
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
@@ -3752,6 +3756,13 @@ export class LynoxHTTPApi {
           steps,
           parameters,
           created_at: row.started_at,
+          // Slice B2: the consent surface needs these to decide cron-eligibility
+          // (autonomous + confirmed) and to render the resolved capability-contract.
+          mode: typeof parsed.mode === 'string'
+            ? parsed.mode
+            : (Array.isArray(parsed.steps) ? inferPipelineMode(parsed.steps as import('../types/index.js').InlinePipelineStep[]) : 'autonomous'),
+          ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
+          ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
         });
       }
       jsonResponse(res, 200, { workflows: workflows.slice(0, limit) });
@@ -3852,6 +3863,61 @@ export class LynoxHTTPApi {
       const scheduleCron = typeof b['scheduleCron'] === 'string' && b['scheduleCron'].length > 0 ? b['scheduleCron'] : undefined;
       const runAt = typeof b['runAt'] === 'string' && b['runAt'].length > 0 ? b['runAt'] : undefined;
       const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
+      const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
+
+      // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
+      // action. Validates the workflow is autonomous, binds + constrains the
+      // stored param values NOW (the cron run can't prompt, so a contract-
+      // violating re-target is rejected at schedule time, not at fire), stamps
+      // the human's first-run-confirm, then creates the cron task with the bound
+      // params. This is the only product path that writes a confirmed schedule.
+      if (pipelineId) {
+        const history = engine.getRunHistory();
+        if (!requireService(res, history, 'History')) return;
+        if (!scheduleCron) { errorResponse(res, 400, 'A scheduled workflow needs a scheduleCron expression.'); return; }
+        // Validate the cron BEFORE any mutation so a typo can't spuriously stamp
+        // the (security-gate) confirmedAt on the workflow.
+        const { isValidCron } = await import('../core/cron-parser.js');
+        if (!isValidCron(scheduleCron)) { errorResponse(res, 400, `Invalid cron expression: ${scheduleCron}`); return; }
+        const rawParams = b['params'];
+        if (rawParams !== undefined && (typeof rawParams !== 'object' || rawParams === null || Array.isArray(rawParams))) {
+          errorResponse(res, 400, 'Invalid "params" — expected an object of name to value.'); return;
+        }
+        const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
+        const planned = getPipeline(pipelineId, history);
+        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
+        if (planned.mode !== 'autonomous') {
+          errorResponse(res, 400, `Workflow "${planned.id}" is interactive and cannot be scheduled — convert it to autonomous first.`); return;
+        }
+        const { bindWorkflowParameters } = await import('../orchestrator/workflow-params.js');
+        const bound = bindWorkflowParameters(planned.parameters ?? [], rawParams as Record<string, unknown> | undefined, {
+          requireAll: true,
+          constraints: planned.capabilityContract?.paramConstraints,
+        });
+        if (!bound.ok) { errorResponse(res, 400, bound.error); return; }
+        try {
+          // Use the RESOLVED id (`planned.id`), never the caller's (possibly
+          // prefix) `pipelineId`, so the confirm-stamp + the cron task target
+          // exactly this workflow. Stamp the first-run-confirm, then evict the
+          // in-memory pipeline cache (mirrors the rename/delete routes) so the
+          // WorkerLoop re-reads the now-confirmed blob at fire time instead of a
+          // stale pre-confirm copy — otherwise the confirmedAt gate would refuse
+          // to run the workflow this slice just scheduled.
+          history.setWorkflowConfirmedAt(planned.id, new Date().toISOString());
+          forgetPipeline(planned.id);
+          const task = taskManager.createPipelineTask({
+            title: title ?? `Scheduled: ${planned.name}`,
+            pipelineId: planned.id,
+            scheduleCron,
+            pipelineParams: JSON.stringify(bound.params),
+          });
+          jsonResponse(res, 201, task);
+        } catch (e) {
+          errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to schedule workflow');
+        }
+        return;
+      }
+
       if (!title) { errorResponse(res, 400, 'Missing required field: title'); return; }
       if (runAt && Number.isNaN(Date.parse(runAt))) {
         errorResponse(res, 400, 'Invalid runAt: must be ISO 8601 datetime'); return;
@@ -3871,6 +3937,14 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
+      const b = body as Record<string, unknown>;
+      // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
+      if (typeof b['enabled'] === 'boolean') {
+        if (!taskManager.setEnabled(params['id']!, b['enabled'])) { errorResponse(res, 404, 'Task not found'); return; }
+        const updated = engine.getRunHistory()?.getTask(params['id']!);
+        jsonResponse(res, 200, updated ?? { id: params['id'], enabled: b['enabled'] ? 1 : 0 });
+        return;
+      }
       const task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
