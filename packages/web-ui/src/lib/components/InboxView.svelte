@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
-		closeDraftPane,
 		closeItem,
 		dismissReclassifyBanner,
-		getDraftPane,
 		getInboxCounts,
 		getInboxItems,
 		getLastAction,
@@ -13,7 +13,6 @@
 		getSelectedItemId,
 		getSnoozedCount,
 		getSnoozedItems,
-		isComposeOpen,
 		isInboxAvailable,
 		isLoading,
 		isLoadingSnoozed,
@@ -22,8 +21,6 @@
 		loadInboxItems,
 		loadSnoozedItems,
 		onColdStartCompletion,
-		openCompose,
-		openDraftPane,
 		openItem,
 		runColdStartBackfillForAllAccounts,
 		setItemAction,
@@ -42,9 +39,7 @@
 	import { isTouchPrimary } from '../utils/touch-detect.js';
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import ColdStartBanner from './ColdStartBanner.svelte';
-	import DraftReplyPane from './DraftReplyPane.svelte';
 	import InboxBulkBar from './InboxBulkBar.svelte';
-	import InboxComposePane from './InboxComposePane.svelte';
 	import InboxContextSidebar from './InboxContextSidebar.svelte';
 	import InboxKopilotCard from './InboxKopilotCard.svelte';
 	import InboxReadingPane from './InboxReadingPane.svelte';
@@ -194,7 +189,6 @@
 
 	function closeOverlays(): void {
 		if (helpOpen) { helpOpen = false; return; }
-		if (getDraftPane() !== null) { closeDraftPane(); return; }
 		if (triageSnoozeOpen) { triageSnoozeOpen = false; return; }
 		if (openSnoozeFor !== null) { openSnoozeFor = null; return; }
 		// In triage mode, Escape exits triage rather than closing the item —
@@ -202,16 +196,25 @@
 		if (triageMode) { triageMode = false; return; }
 	}
 
-	function openReplyForSelected(): void {
-		const item = visibleItems().find((i) => i.id === selectedItemId);
-		if (!item) return;
-		void openItem(item.id);
-		void openDraftPane(item.id);
+	// Replying / composing is chat-with-context, not a bespoke composer: open a
+	// fresh chat seeded with the mail item (the agent drafts + sends via
+	// mail_reply), or a blank compose chat for a brand-new mail.
+	function replyInChat(item: InboxItem): void {
+		newChat();
+		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
+		void goto('/app');
 	}
 
-	function openReplyFor(item: InboxItem): void {
-		void openItem(item.id);
-		void openDraftPane(item.id);
+	function replyInChatForSelected(): void {
+		const item = visibleItems().find((i) => i.id === selectedItemId);
+		if (item) replyInChat(item);
+	}
+
+	function composeInChat(): void {
+		newChat();
+		void sendMessage(t('inbox.compose_in_chat_prompt'));
+		void goto('/app');
 	}
 
 	function pickItem(item: InboxItem): void {
@@ -260,7 +263,7 @@
 			return;
 		}
 		if (action.kind === 'close') {
-			if (helpOpen || getDraftPane() !== null || triageSnoozeOpen || openSnoozeFor !== null || triageMode) {
+			if (helpOpen || triageSnoozeOpen || openSnoozeFor !== null || triageMode) {
 				event.preventDefault();
 				closeOverlays();
 			}
@@ -271,7 +274,6 @@
 			toggleTriage();
 			return;
 		}
-		if (getDraftPane() !== null) return;
 		if (zone !== 'requires_user') return;
 		event.preventDefault();
 		switch (action.kind) {
@@ -286,7 +288,7 @@
 				else openSnoozeForSelected();
 				break;
 			case 'undo': void undoOrHint(); break;
-			case 'reply': openReplyForSelected(); break;
+			case 'reply': replyInChatForSelected(); break;
 		}
 	}
 
@@ -348,38 +350,7 @@
 		return dateFormat(until);
 	}
 
-	const paneItem = $derived.by((): InboxItem | null => {
-		const pane = getDraftPane();
-		if (!pane) return null;
-		return getInboxItems('requires_user').find((i) => i.id === pane.itemId)
-			?? getInboxItems('draft_ready').find((i) => i.id === pane.itemId)
-			?? getInboxItems('auto_handled').find((i) => i.id === pane.itemId)
-			?? null;
-	});
-
 	const readingOpen = $derived(getSelectedItemId() !== null);
-
-	let composeCollision = $state(false);
-
-	function onComposeClick(): void {
-		if (getDraftPane() !== null) {
-			composeCollision = true;
-		} else {
-			openCompose();
-		}
-	}
-
-	function resolveCollisionSaveAndOpen(): void {
-		closeDraftPane();
-		composeCollision = false;
-		openCompose();
-	}
-
-	function resolveCollisionDiscardAndOpen(): void {
-		closeDraftPane();
-		composeCollision = false;
-		openCompose();
-	}
 
 	function refreshAfterAction(): void {
 		void loadInboxCounts();
@@ -404,7 +375,7 @@
 	<InboxZoneRail
 		{zone}
 		onZoneChange={(z) => (zone = z)}
-		onCompose={onComposeClick}
+		onCompose={composeInChat}
 		onTriageToggle={toggleTriage}
 		triageActive={triageMode}
 		onHelp={() => (helpOpen = true)}
@@ -415,7 +386,6 @@
 		<!-- Triage mode owns the entire right side on desktop, full screen on mobile. -->
 		<div class="flex-1 flex flex-col min-w-0 overflow-hidden">
 			<InboxTriagePane
-				onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 				onActionApplied={refreshAfterAction}
 				onExit={exitTriage}
 				bind:snoozeMenuOpen={triageSnoozeOpen}
@@ -434,7 +404,7 @@
 					<h1 class="text-lg font-light tracking-tight">{t('inbox.title')}</h1>
 					<button
 						type="button"
-						onclick={() => onComposeClick()}
+						onclick={() => composeInChat()}
 						class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 					>{t('inbox.compose_new')}</button>
 				</div>
@@ -678,7 +648,6 @@
 						The former narrow right-side column was removed (2026-06-03)
 						because it clipped at every width. -->
 					<InboxReadingPane
-						onReply={(item) => { void openItem(item.id); void openDraftPane(item.id); }}
 						onActionApplied={refreshAfterAction}
 						showBack
 					>
@@ -698,46 +667,5 @@
 </div>
 
 <KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />
-
-{#if getDraftPane() !== null}
-	<DraftReplyPane item={paneItem} />
-{/if}
-
-{#if isComposeOpen()}
-	<InboxComposePane />
-{/if}
-
-{#if composeCollision}
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-bg/60"
-		role="dialog"
-		aria-modal="true"
-		aria-labelledby="compose-collision-title"
-	>
-		<div class="max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-4 shadow-xl">
-			<h2 id="compose-collision-title" class="mb-2 text-sm font-medium text-text">
-				{t('inbox.compose_collision_title')}
-			</h2>
-			<p class="mb-4 text-[12px] text-text-muted">{t('inbox.compose_collision_body')}</p>
-			<div class="flex flex-wrap items-center justify-end gap-2">
-				<button
-					type="button"
-					class="rounded-[var(--radius-sm)] px-3 py-1.5 text-[11px] text-text-subtle hover:text-text"
-					onclick={() => (composeCollision = false)}
-				>{t('inbox.compose_collision_cancel')}</button>
-				<button
-					type="button"
-					class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text"
-					onclick={() => resolveCollisionDiscardAndOpen()}
-				>{t('inbox.compose_collision_discard')}</button>
-				<button
-					type="button"
-					class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
-					onclick={() => resolveCollisionSaveAndOpen()}
-				>{t('inbox.compose_collision_save_new')}</button>
-			</div>
-		</div>
-	</div>
-{/if}
 
 <InboxUndoToast currentZone={zone === 'snoozed' ? 'requires_user' : zone} />

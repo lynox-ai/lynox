@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { clickOutside } from '../utils/click-outside.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
 		getInboxItems,
@@ -20,7 +22,6 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	interface Props {
-		onReply?: (item: InboxItem) => void;
 		onActionApplied?: () => void;
 		onExit: () => void;
 		// Bindable so the parent can open the snooze menu via the `s` keyboard
@@ -30,11 +31,19 @@
 	}
 
 	let {
-		onReply,
 		onActionApplied,
 		onExit,
 		snoozeMenuOpen = $bindable(false),
 	}: Props = $props();
+
+	// Replying is chat-with-context, not a bespoke composer — open a fresh chat
+	// seeded with this mail item; the agent drafts + sends via mail_reply.
+	function replyInChat(item: InboxItem): void {
+		newChat();
+		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
+		void goto('/app');
+	}
 
 	// One source of truth for the actionable queue — both the auto-open effect
 	// and archive/snooze step-forward read it.
@@ -220,10 +229,10 @@
 		<footer class="border-t border-border bg-bg-subtle/40 px-4 py-2.5 flex flex-wrap items-center gap-1.5">
 			<button
 				type="button"
-				onclick={() => onReply?.(full.item)}
+				onclick={() => replyInChat(full.item)}
 				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[12px] hover:opacity-90"
 			>
-				↩ {t('inbox.action_reply')}
+				💬 {t('inbox.reply_in_chat')}
 			</button>
 			<button
 				type="button"

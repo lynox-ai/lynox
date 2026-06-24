@@ -1731,7 +1731,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.draft_error_create': { de: 'Entwurf konnte nicht angelegt werden', en: 'Failed to create draft' },
 	'inbox.draft_error_save': { de: 'Entwurf konnte nicht gespeichert werden', en: 'Failed to save draft' },
 	'inbox.action_draft_reply': { de: 'Antwort entwerfen', en: 'Draft reply' },
-	'inbox.shortcuts_reply': { de: 'Antwort-Pane für Auswahl öffnen', en: 'Open reply pane for selection' },
+	'inbox.shortcuts_reply': { de: 'Auswahl im Chat beantworten', en: 'Reply to selection in chat' },
 	'inbox.reading_loading': { de: 'Lade…', en: 'Loading…' },
 	'inbox.reading_open': { de: 'E-Mail öffnen', en: 'Open mail' },
 	'inbox.reading_body_missing': {
@@ -1786,6 +1786,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.search_placeholder': { de: 'In dieser Zone suchen…', en: 'Search this zone…' },
 	'inbox.search_clear': { de: 'Suche löschen', en: 'Clear search' },
 	'inbox.compose_new': { de: 'Neue Mail', en: 'New mail' },
+	'inbox.reply_in_chat': { de: 'Im Chat beantworten', en: 'Reply in chat' },
+	'inbox.reply_in_chat_prompt': { de: 'Ich möchte auf diese Mail antworten:', en: "I'd like to reply to this email:" },
+	'inbox.compose_in_chat_prompt': { de: 'Ich möchte eine neue Mail schreiben.', en: "I'd like to compose a new email." },
 	'inbox.compose_title': { de: 'Neue Mail schreiben', en: 'Compose new mail' },
 	'inbox.compose_account': { de: 'Absender-Konto', en: 'From account' },
 	'inbox.compose_to': { de: 'An', en: 'To' },

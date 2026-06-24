@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { clickOutside } from '../utils/click-outside.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
 		getSelectedFull,
@@ -18,8 +20,6 @@
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 
 	interface Props {
-		/** Fires when the user clicks "Draft reply" so the parent can open DraftReplyPane. */
-		onReply?: (item: InboxItem) => void;
 		/** Fires on archive/snooze actions so the parent can refresh the list. */
 		onActionApplied?: () => void;
 		/** Mobile back-button is shown when true (hidden on three-pane desktop). */
@@ -28,7 +28,19 @@
 		children?: import('svelte').Snippet;
 	}
 
-	const { onReply, onActionApplied, showBack = false, children }: Props = $props();
+	const { onActionApplied, showBack = false, children }: Props = $props();
+
+	// "Im Chat beantworten": replying is chat-with-context, not a bespoke
+	// composer. Open a fresh chat seeded with a typed reference to this mail item;
+	// the server resolves it into a context preamble (sender/subject/body + the
+	// uid) so the agent can draft + send via mail_reply. (Mirrors the workflow
+	// "💬 Bearbeiten" entry.)
+	function replyInChat(item: InboxItem): void {
+		newChat();
+		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
+		void goto('/app');
+	}
 
 	const full = $derived(getSelectedFull());
 	const thread = $derived(getSelectedThread());
@@ -172,9 +184,9 @@
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
-						onclick={() => onReply?.(full!.item)}
-						aria-label={t('inbox.action_draft_reply')}
-					>{t('inbox.action_draft_reply')}</button>
+						onclick={() => replyInChat(full!.item)}
+						aria-label={t('inbox.reply_in_chat')}
+					>{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
@@ -234,9 +246,9 @@
 					<button
 						type="button"
 						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
-						onclick={() => onReply?.(full!.item)}
-						aria-label={t('inbox.action_draft_reply')}
-					>{t('inbox.action_draft_reply')}</button>
+						onclick={() => replyInChat(full!.item)}
+						aria-label={t('inbox.reply_in_chat')}
+					>{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
