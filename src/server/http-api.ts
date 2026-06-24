@@ -2719,6 +2719,13 @@ export class LynoxHTTPApi {
         is_favorite: typeof b?.['is_favorite'] === 'boolean' ? b['is_favorite'] : undefined,
         skip_extraction: skipExtraction,
       });
+      // Slice B3: the web UI sends `{ is_unread: false }` when the user opens an
+      // escalated thread. Clear it via markThreadRead (which deliberately does
+      // NOT bump updated_at — reading shouldn't re-sort the list).
+      if (typeof b?.['is_unread'] === 'boolean') {
+        if (b['is_unread']) threadStore.updateThread(params['id']!, { is_unread: true });
+        else threadStore.markThreadRead(params['id']!);
+      }
       // Propagate extraction toggle to in-memory session (if active)
       if (skipExtraction !== undefined) {
         const session = this.sessionStore.get(params['id']!);

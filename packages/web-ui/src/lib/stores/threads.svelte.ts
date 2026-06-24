@@ -13,6 +13,9 @@ export interface Thread {
 	is_archived: number;
 	is_favorite: number;
 	skip_extraction: number;
+	/** Slice B3: 1 = the agent escalated to this thread (a failed run / a watcher
+	 *  finding) and the user hasn't opened it yet. Floats to the top + shows a dot. */
+	is_unread: number;
 	created_at: string;
 	updated_at: string;
 }
@@ -189,8 +192,28 @@ export function startVisibilityRefresh(): () => void {
 	return () => document.removeEventListener('visibilitychange', handler);
 }
 
+/** Slice B3: clear the unread flag when the user opens an escalated thread.
+ *  Optimistic + best-effort (the badge clearing is non-critical). */
+export async function markThreadRead(id: string): Promise<void> {
+	const thread = threads.find((t) => t.id === id);
+	if (!thread || thread.is_unread === 0) return;
+	thread.is_unread = 0;
+	const res = await fetch(`${getApiBase()}/threads/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ is_unread: false }),
+	});
+	if (!res.ok) thread.is_unread = 1; // rollback
+}
+
 export function getThreads() {
 	return threads.toSorted((a, b) => {
+		// Slice B3: agent-escalated (unread) threads float to the very top, then
+		// favorites, then recency — mirrors the backend listThreads order. `?? 0`
+		// guards a partially-constructed Thread (a NaN comparator silently breaks
+		// toSorted's ordering).
+		const au = a.is_unread ?? 0, bu = b.is_unread ?? 0;
+		if (au !== bu) return bu - au;
 		if (a.is_favorite !== b.is_favorite) return b.is_favorite - a.is_favorite;
 		return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
 	});

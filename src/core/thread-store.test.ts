@@ -26,6 +26,7 @@ function freshDb(): Database.Database {
       is_archived INTEGER NOT NULL DEFAULT 0,
       is_favorite INTEGER NOT NULL DEFAULT 0,
       skip_extraction INTEGER NOT NULL DEFAULT 0,
+      is_unread INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -254,5 +255,41 @@ describe('ThreadStore B-full display-only rows', () => {
     const res = store.markDisplayOnlyFrom('t1', 2); // nothing persisted at seq>=2
     expect(res).toEqual({ marked: 0, hadUserMessage: false });
     expect(store.getApiMessageCount('t1')).toBe(2);
+  });
+});
+
+describe('ThreadStore — Slice B3 unread state', () => {
+  let db: Database.Database;
+  let store: ThreadStore;
+  beforeEach(() => {
+    db = freshDb();
+    store = new ThreadStore(db);
+  });
+
+  it('updateThread sets is_unread; markThreadRead clears it', () => {
+    store.createThread('t1', { title: 'Escalation' });
+    expect(store.getThread('t1')!.is_unread).toBe(0);
+    store.updateThread('t1', { is_unread: true });
+    expect(store.getThread('t1')!.is_unread).toBe(1);
+    store.markThreadRead('t1');
+    expect(store.getThread('t1')!.is_unread).toBe(0);
+  });
+
+  it('listThreads floats an unread thread above a (newer) FAVORITE — proving is_unread leads the order', () => {
+    // 'fav' is a favorite; 'unread' is a plain unread thread created AFTER it
+    // (so it is also the more-recent one). Without `is_unread DESC` leading the
+    // ORDER BY, the favorite would win (is_favorite DESC); with it, the unread
+    // non-favorite floats above. So this asserts the unread term specifically.
+    store.createThread('fav', { title: 'fav' });
+    store.appendMessages('fav', [makeMessage('user', 'hi')], 0, { message_count: 1 });
+    store.updateThread('fav', { is_favorite: true });
+
+    store.createThread('unread', { title: 'unread' });
+    store.appendMessages('unread', [makeMessage('user', 'hi')], 0, { message_count: 1 });
+    store.updateThread('unread', { is_unread: true });
+
+    const ids = store.listThreads().map((t) => t.id);
+    expect(ids[0]).toBe('unread'); // unread (non-favorite) beats the favorite
+    expect(ids[1]).toBe('fav');
   });
 });
