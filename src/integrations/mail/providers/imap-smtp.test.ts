@@ -158,6 +158,54 @@ describe('ImapSmtpProvider — connection', () => {
   });
 });
 
+describe('ImapSmtpProvider — LYNOX_MAIL_INSECURE_TLS opt-in', () => {
+  const ENV = 'LYNOX_MAIL_INSECURE_TLS';
+  let prior: string | undefined;
+  beforeEach(() => { prior = process.env[ENV]; });
+  afterEach(() => {
+    if (prior === undefined) delete process.env[ENV];
+    else process.env[ENV] = prior;
+  });
+
+  function imapReject(): boolean {
+    return (lastClientOptions as { tls: { rejectUnauthorized: boolean } }).tls.rejectUnauthorized;
+  }
+
+  it('disables cert validation on BOTH IMAP and SMTP when the env flag is set', async () => {
+    process.env[ENV] = '1';
+    probe.search.mockResolvedValue([]);
+    sendMailMock.mockResolvedValue({ messageId: '<x>', accepted: ['b@example.com'], rejected: [] });
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.list();                                                          // captures IMAP tls
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }); // captures SMTP tls
+
+    expect(imapReject()).toBe(false);
+    expect((lastTransportOptions as { tls: { rejectUnauthorized: boolean } }).tls.rejectUnauthorized).toBe(false);
+  });
+
+  it('accepts the string "true" as well as "1"', async () => {
+    process.env[ENV] = 'true';
+    probe.search.mockResolvedValue([]);
+    await new ImapSmtpProvider(ACCOUNT, credResolver).list();
+    expect(imapReject()).toBe(false);
+  });
+
+  it('an explicit insecureTls:false option WINS over the env (never weakens an explicit demand for validation)', async () => {
+    process.env[ENV] = '1';
+    probe.search.mockResolvedValue([]);
+    await new ImapSmtpProvider(ACCOUNT, credResolver, { insecureTls: false }).list();
+    expect(imapReject()).toBe(true);
+  });
+
+  it('leaves validation ON for an unrecognised env value (strict opt-in — only 1/true)', async () => {
+    process.env[ENV] = 'yes';
+    probe.search.mockResolvedValue([]);
+    await new ImapSmtpProvider(ACCOUNT, credResolver).list();
+    expect(imapReject()).toBe(true);
+  });
+});
+
 describe('ImapSmtpProvider — list', () => {
   it('returns envelopes most-recent-first with snippet, attachments, flags', async () => {
     probe.search.mockResolvedValue([1, 2]);
