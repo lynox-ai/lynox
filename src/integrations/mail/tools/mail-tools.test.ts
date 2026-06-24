@@ -32,6 +32,9 @@ function makeStubContext(accounts: ReadonlyArray<MailAccountConfig>): MailContex
   return {
     getAccountConfig: (id: string) => byId.get(id) ?? null,
     findAccountByAddress: (addr: string) => byAddress.get(addr.toLowerCase()) ?? null,
+    // mail_reply fires this after a successful send (inbox reconcile hook); a
+    // spy so tests can assert the firing. No-ops (these tests wire no MailHooks).
+    notifyOutboundSent: vi.fn(async () => {}),
   } as unknown as MailContext;
 }
 
@@ -392,6 +395,41 @@ describe('mail_reply tool', () => {
     expect(out).toContain('Reply sent');
   });
 
+  it('reports a SENT reply as success when the ctx lacks notifyOutboundSent (no false error → no re-send)', async () => {
+    // A minimal ctx (e.g. the greenmail Phase-0 stub) wires no inbox-reconcile
+    // hook. The reply WAS sent — an absent hook method must NOT surface as a
+    // mail_reply error, which would make the agent believe the send failed and
+    // re-send (duplicate). Regression for the CI-only greenmail failure
+    // "mail_reply error: ctx?.notifyOutboundSent is not a function".
+    const orig = envelope(7, { messageId: '<o7@x>', from: 'alice@example.com', subject: 'Hi' });
+    provider.fetch.mockResolvedValue({ envelope: orig, text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined });
+    provider.send.mockResolvedValue({ messageId: '<r7@x>', accepted: ['alice@example.com'], rejected: [] });
+    // Non-null ctx with the pre-send methods mail_reply needs, but NO reconcile
+    // hook — exactly the greenmail Phase-0 stub's shape.
+    const ctxWithoutHook = {
+      findAccountByAddress: () => null,
+      getAccountConfig: () => null,
+    } as unknown as MailContext;
+    const tool = createMailReplyTool(registry, ctxWithoutHook);
+    const out = await tool.handler({ uid: 7, body: 'answer' }, yesAgent);
+    expect(out).toContain('Reply sent');
+    expect(out).not.toContain('error');
+  });
+
+  it('reports a SENT reply as success even when the reconcile hook THROWS (best-effort, isolated)', async () => {
+    const orig = envelope(8, { messageId: '<o8@x>', from: 'alice@example.com', subject: 'Hi' });
+    provider.fetch.mockResolvedValue({ envelope: orig, text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined });
+    provider.send.mockResolvedValue({ messageId: '<r8@x>', accepted: ['alice@example.com'], rejected: [] });
+    const throwingCtx = {
+      findAccountByAddress: () => null,
+      getAccountConfig: () => null,
+      notifyOutboundSent: vi.fn(async () => { throw new Error('reconcile boom'); }),
+    } as unknown as MailContext;
+    const tool = createMailReplyTool(registry, throwingCtx);
+    const out = await tool.handler({ uid: 8, body: 'answer' }, yesAgent);
+    expect(out).toContain('Reply sent');
+  });
+
   it('does not double-prefix subject when original starts with Re:', async () => {
     const orig = envelope(1, { messageId: '<o@x>', subject: 'Re: Question' });
     provider.fetch.mockResolvedValue({
@@ -739,6 +777,12 @@ describe('mail_reply — smart reply-from', () => {
     expect(personal.send).not.toHaveBeenCalled();
     expect(business.send).toHaveBeenCalled();
     expect(out).toContain('Reply sent from business');
+    // Fires the inbox reconcile hook AFTER a successful send, carrying the
+    // REPLIED-TO message-id (what the reconcile matches the inbox item on).
+    expect(vi.mocked(ctx.notifyOutboundSent)).toHaveBeenCalledWith(
+      'business',
+      expect.objectContaining({ isReply: true, originalMessageId: '<inbound@x>' }),
+    );
   });
 
   it('falls back to the read account when no recipient matches a registered account', async () => {

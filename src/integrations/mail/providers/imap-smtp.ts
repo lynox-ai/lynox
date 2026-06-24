@@ -43,13 +43,29 @@ export type CredentialsResolver = () => Promise<MailCredentials> | MailCredentia
 /**
  * Provider construction options.
  *
- * `insecureTls` disables certificate validation on both IMAP and SMTP. It
- * exists ONLY for integration tests against local mail servers with
- * self-signed certificates (e.g. GreenMail in Docker). Production code paths
- * — including all preset factories — must leave it unset.
+ * `insecureTls` disables certificate validation on both IMAP and SMTP. Set it
+ * directly only in integration tests (against self-signed GreenMail). All
+ * preset factories leave it unset in production — the operator instead opts in
+ * fleet-wide via `LYNOX_MAIL_INSECURE_TLS=1` (see `insecureTlsFromEnv`), the
+ * supported path for a self-hosted internal mail server presenting a
+ * self-signed certificate. An explicit option still wins over the env.
  */
 export interface ImapSmtpProviderOptions {
   insecureTls?: boolean;
+}
+
+/**
+ * Explicit, operator-level opt-in to accept self-signed / untrusted IMAP+SMTP
+ * certificates: `LYNOX_MAIL_INSECURE_TLS=1|true`. Default OFF — certificate
+ * validation stays on unless the operator deliberately disables it. Read
+ * per-construction (not cached at module load) so the flag takes effect on the
+ * next provider build without a process restart. A `insecureTls` construction
+ * option overrides this, so the env only fills the unset production default and
+ * never weakens a caller that explicitly demanded validation.
+ */
+function insecureTlsFromEnv(): boolean {
+  const v = process.env['LYNOX_MAIL_INSECURE_TLS'];
+  return v === '1' || v === 'true';
 }
 
 // ── Tuning constants (PRD: production security requirements) ───────────────
@@ -337,7 +353,7 @@ export class ImapSmtpProvider implements MailProvider {
     this.accountId = account.id;
     this.account = account;
     this.resolveCredentials = resolveCredentials;
-    this.tlsRejectUnauthorized = !options?.insecureTls;
+    this.tlsRejectUnauthorized = !(options?.insecureTls ?? insecureTlsFromEnv());
   }
 
   // ── Connection management ────────────────────────────────────────────────

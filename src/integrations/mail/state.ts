@@ -525,6 +525,22 @@ const MIGRATIONS: string[] = [
      value TEXT NOT NULL,
      updated_at INTEGER NOT NULL
    );`,
+
+  // v16: Retire the autonomous draft store. Replying moved into chat (the
+  // agent drives the generic `mail_reply` tool with the item loaded as
+  // context), so the bespoke pre-draft store + its UI composer are gone.
+  // First NULL the now-orphaned `inbox_items.draft_id` pointers (plain TEXT,
+  // never a FK), then DROP the table. The DROP is FK-safe: no surviving
+  // table references `inbox_drafts` — its only inbound FK is its own
+  // self-ref (`superseded_by`), which drops with the table. The runner has
+  // no transaction wrap (each statement autocommits), so the version bump is
+  // ordered LAST — unlike the additive migrations above where order is
+  // immaterial — so a crash mid-migration leaves version at 15 and the
+  // destructive step re-runs on next boot. Every statement is idempotent
+  // (OR IGNORE / WHERE … IS NOT NULL / IF EXISTS), so re-running is safe.
+  `UPDATE inbox_items SET draft_id = NULL WHERE draft_id IS NOT NULL;
+   DROP TABLE IF EXISTS inbox_drafts;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (16);`,
 ];
 
 export interface MailStateDbOptions {

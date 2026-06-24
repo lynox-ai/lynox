@@ -579,6 +579,8 @@ export class Engine {
           return runtime.hook(accountId, envelope);
         };
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
+        // Mark an inbox item `replied` when the user answers it in chat.
+        this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1310,6 +1312,8 @@ export class Engine {
           // re-runs via `state.hasAnyItemForAccount`, so a re-credential
           // does not pull provider.list() again.
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
+          // Mark an inbox item `replied` when the user answers it in chat.
+          this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
         }
         this._inboxRuntime = runtime;
       } catch (err) {

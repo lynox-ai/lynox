@@ -66,7 +66,7 @@ Beispiele: Rechnung mit Fälligkeitsdatum, Mahnung, Zahlungserinnerung, \
 Aufforderung, Sicherheitswarnung, Frage von Kollegin/Kunde ohne kurze Antwort.
 - draft_ready: Eine sinnvolle KURZE Antwort ist möglich — Terminvorschlag, \
 Bestätigung, kurze Klärungsfrage, Heads-up beantwortet mit "Danke, gemerkt". \
-User editiert+sendet. Beispiele: "Hast du Zeit am Mittwoch?" → ja/nein-Antwort \
+Schnell im Chat zu beantworten. Beispiele: "Hast du Zeit am Mittwoch?" → ja/nein-Antwort \
 reicht; "Confirming our 3pm tomorrow" → kurze Bestätigung; "Welche SDK-Version?" \
 → eine Zeile genügt; "Wir verschieben auf März, OK?" → Bestätigung reicht.
 - auto_handled: Newsletter, Werbung, Versand-/Lieferbestätigung, Receipt einer \

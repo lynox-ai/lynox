@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { clickOutside } from '../utils/click-outside.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
 		getSelectedFull,
@@ -16,10 +18,9 @@
 	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface Props {
-		/** Fires when the user clicks "Draft reply" so the parent can open DraftReplyPane. */
-		onReply?: (item: InboxItem) => void;
 		/** Fires on archive/snooze actions so the parent can refresh the list. */
 		onActionApplied?: () => void;
 		/** Mobile back-button is shown when true (hidden on three-pane desktop). */
@@ -28,7 +29,19 @@
 		children?: import('svelte').Snippet;
 	}
 
-	const { onReply, onActionApplied, showBack = false, children }: Props = $props();
+	const { onActionApplied, showBack = false, children }: Props = $props();
+
+	// "Im Chat beantworten": replying is chat-with-context, not a bespoke
+	// composer. Open a fresh chat seeded with a typed reference to this mail item;
+	// the server resolves it into a context preamble (sender/subject/body + the
+	// uid) so the agent can draft + send via mail_reply. (Mirrors the workflow
+	// "💬 Bearbeiten" entry.)
+	function replyInChat(item: InboxItem): void {
+		newChat();
+		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
+		void goto('/app');
+	}
 
 	const full = $derived(getSelectedFull());
 	const thread = $derived(getSelectedThread());
@@ -42,20 +55,20 @@
 		try {
 			const result = await refreshSelectedItemBody();
 			if (result.ok) {
-				addToast(t('inbox.draft_refresh_ok'), 'success');
+				addToast(t('inbox.body_refresh_ok'), 'success');
 				return;
 			}
 			if (result.reason.kind === 'aborted') return;
 			const keyMap: Record<string, string> = {
-				unavailable: 'inbox.draft_refresh_unavailable',
-				unsupported: 'inbox.draft_refresh_unsupported',
-				not_registered: 'inbox.draft_refresh_not_registered',
-				empty_body: 'inbox.draft_refresh_empty',
-				not_found: 'inbox.draft_refresh_not_found',
-				fetch_failed: 'inbox.draft_refresh_failed',
-				network: 'inbox.draft_refresh_failed',
+				unavailable: 'inbox.body_refresh_unavailable',
+				unsupported: 'inbox.body_refresh_unsupported',
+				not_registered: 'inbox.body_refresh_not_registered',
+				empty_body: 'inbox.body_refresh_empty',
+				not_found: 'inbox.body_refresh_not_found',
+				fetch_failed: 'inbox.body_refresh_failed',
+				network: 'inbox.body_refresh_failed',
 			};
-			addToast(t(keyMap[result.reason.kind] ?? 'inbox.draft_refresh_failed'), 'info');
+			addToast(t(keyMap[result.reason.kind] ?? 'inbox.body_refresh_failed'), 'info');
 		} finally {
 			refreshing = false;
 		}
@@ -171,10 +184,10 @@
 				<div class="hidden sm:flex flex-wrap items-center gap-1.5 mt-3">
 					<button
 						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
-						onclick={() => onReply?.(full!.item)}
-						aria-label={t('inbox.action_draft_reply')}
-					>{t('inbox.action_draft_reply')}</button>
+						class="flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-1.5 text-[11px] text-accent-fg hover:opacity-90 min-h-[36px]"
+						onclick={() => replyInChat(full!.item)}
+						aria-label={t('inbox.reply_in_chat')}
+					><Icon name="chat" size="xs" />{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
@@ -220,10 +233,10 @@
 						type="button"
 						onclick={() => void onRefreshBody()}
 						disabled={refreshing}
-						title={t('inbox.draft_refresh_body_hint')}
-						aria-label={t('inbox.draft_refresh_body')}
+						title={t('inbox.body_refresh_body_hint')}
+						aria-label={t('inbox.body_refresh_body')}
 						class="ml-auto rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
-					>{refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_full_body')}</button>
+					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
 
@@ -233,10 +246,10 @@
 				<div class="mt-3 flex items-center gap-1.5 sm:hidden">
 					<button
 						type="button"
-						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
-						onclick={() => onReply?.(full!.item)}
-						aria-label={t('inbox.action_draft_reply')}
-					>{t('inbox.action_draft_reply')}</button>
+						class="flex-1 flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-2 text-[12px] text-accent-fg hover:opacity-90 min-h-[44px]"
+						onclick={() => replyInChat(full!.item)}
+						aria-label={t('inbox.reply_in_chat')}
+					><Icon name="chat" size="xs" />{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
@@ -282,10 +295,10 @@
 						type="button"
 						onclick={() => void onRefreshBody()}
 						disabled={refreshing}
-						title={t('inbox.draft_refresh_body_hint')}
-						aria-label={t('inbox.draft_refresh_body')}
+						title={t('inbox.body_refresh_body_hint')}
+						aria-label={t('inbox.body_refresh_body')}
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
-					>{refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_full_body')}</button>
+					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
 		</header>

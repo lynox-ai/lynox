@@ -18,6 +18,7 @@
 // integration in Phase 2.
 
 import type { MailEnvelope } from '../mail/provider.js';
+import { resolveThreadKey } from '../mail/thread-key.js';
 import type { InboxChannel } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
@@ -281,18 +282,6 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
   };
 }
 
-/**
- * Stable per-channel key for an envelope. Prefers the provider's threading
- * decision, falls back to the Message-ID, and finally synthesises one from
- * the (folder, uid) pair so dedup never collapses unrelated mails. Exported
- * because the body-refresh adapter must produce the same key shape — drift
- * would silently break the match-by-threadKey lookup on reload.
- */
-export function resolveThreadKey(env: MailEnvelope): string {
-  if (env.threadKey) return env.threadKey;
-  if (env.messageId) return `imap:${env.messageId}`;
-  return `imap:${env.folder}:${String(env.uid)}`;
-}
 
 /**
  * v12 sibling write: store the per-message envelope in

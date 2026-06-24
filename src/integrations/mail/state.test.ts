@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import BetterSqlite3 from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MailStateDb } from './state.js';
 import type { MailEnvelope } from './provider.js';
@@ -304,7 +308,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(15);
+    expect(row.v).toBe(16);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -416,9 +420,9 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
         `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'inbox_%' ORDER BY name`,
       )
       .all() as ReadonlyArray<{ name: string }>;
+    // inbox_drafts was dropped in v16 (replying moved into chat).
     expect(tables.map((t) => t.name)).toEqual([
       'inbox_audit_log',
-      'inbox_drafts',
       'inbox_item_bodies',
       'inbox_items',
       'inbox_rules',
@@ -432,7 +436,7 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     expect(inner(db).pragma('foreign_keys', { simple: true })).toBe(1);
   });
 
-  it('cascades inbox_items + inbox_drafts + inbox_audit_log + inbox_rules when a mail_account is deleted', () => {
+  it('cascades inbox_items + inbox_audit_log + inbox_rules when a mail_account is deleted', () => {
     db.upsertAccount({
       id: 'acct-cascade',
       displayName: 'Cascade test',
@@ -454,12 +458,6 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       .run('item-1', 'acct-cascade', 'email', 'imap:abc', 'requires_user', 'why');
     raw
       .prepare(
-        `INSERT INTO inbox_drafts (id, item_id, body_md, generated_at, generator_version, user_edits_count)
-         VALUES (?, ?, ?, 1700000000001, ?, 0)`,
-      )
-      .run('draft-1', 'item-1', 'Hi', 'gen-v1');
-    raw
-      .prepare(
         `INSERT INTO inbox_audit_log (id, item_id, action, actor, payload_json, created_at)
          VALUES (?, ?, ?, ?, ?, 1700000000002)`,
       )
@@ -476,9 +474,6 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
     const itemCount = raw
       .prepare(`SELECT COUNT(*) as c FROM inbox_items WHERE account_id = 'acct-cascade'`)
       .get() as { c: number };
-    const draftCount = raw
-      .prepare(`SELECT COUNT(*) as c FROM inbox_drafts WHERE item_id = 'item-1'`)
-      .get() as { c: number };
     const auditCount = raw
       .prepare(`SELECT COUNT(*) as c FROM inbox_audit_log WHERE item_id = 'item-1'`)
       .get() as { c: number };
@@ -486,7 +481,6 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       .prepare(`SELECT COUNT(*) as c FROM inbox_rules WHERE account_id = 'acct-cascade'`)
       .get() as { c: number };
     expect(itemCount.c).toBe(0);
-    expect(draftCount.c).toBe(0);
     expect(auditCount.c).toBe(0);
     expect(ruleCount.c).toBe(0);
   });
@@ -506,6 +500,75 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
       .prepare(`SELECT account_id FROM inbox_items WHERE id = 'p1'`)
       .get() as { account_id: string };
     expect(row.account_id).toBe('pseudo:abc');
+  });
+});
+
+describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
+  // Faithful replay: hand-craft a pre-v16 DB pinned at schema_version 15
+  // (the head before this slice), then open MailStateDb on the same file so
+  // the REAL constructor migrator runs MIGRATIONS[15] = v16 forward. Proves
+  // the shipped DROP + draft_id-null applies cleanly to a live DB that still
+  // carries draft rows + attached pointers — the v42-style data-loss gate.
+  let dir: string;
+  let path: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-mail-mig16-'));
+    path = join(dir, 'mail-state.db');
+    const raw = new BetterSqlite3(path);
+    // Pre-v16 surface mirroring the REAL v7 schema the migration touches, so
+    // the DROP genuinely exercises FK-safety under foreign_keys=ON: an
+    // inbox_items table whose `draft_id` is a PLAIN column (never a FK — the
+    // key safety fact: dropping inbox_drafts violates no inbox_items FK) and
+    // the inbox_drafts table carrying its real outgoing CASCADE FK + its
+    // self-referential `superseded_by` FK. foreign_keys is ON during setup
+    // so the FK-constrained inserts behave like production.
+    raw.pragma('foreign_keys = ON');
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (15);
+      CREATE TABLE inbox_items (id TEXT PRIMARY KEY, draft_id TEXT);
+      CREATE TABLE inbox_drafts (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL,
+        superseded_by TEXT,
+        FOREIGN KEY (item_id) REFERENCES inbox_items(id) ON DELETE CASCADE,
+        FOREIGN KEY (superseded_by) REFERENCES inbox_drafts(id) ON DELETE SET NULL
+      );
+      INSERT INTO inbox_items (id, draft_id) VALUES ('itm-1', 'drf-1'), ('itm-2', NULL);
+      INSERT INTO inbox_drafts (id, item_id, superseded_by) VALUES ('drf-1', 'itm-1', NULL);
+    `);
+    raw.close();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('drops inbox_drafts, nulls draft_id pointers, and preserves inbox_items', () => {
+    const migrated = new MailStateDb({ path });
+    try {
+      const raw = (migrated as unknown as { db: BetterSqlite3.Database }).db;
+      // Migration ran to the new head.
+      const version = raw.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
+      expect(version.v).toBe(16);
+      // The table is gone.
+      const drafts = raw
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'inbox_drafts'`)
+        .all();
+      expect(drafts).toEqual([]);
+      // Items survive; the dangling draft_id pointer is nulled, the
+      // already-null one is untouched.
+      const items = raw
+        .prepare('SELECT id, draft_id FROM inbox_items ORDER BY id')
+        .all() as ReadonlyArray<{ id: string; draft_id: string | null }>;
+      expect(items).toEqual([
+        { id: 'itm-1', draft_id: null },
+        { id: 'itm-2', draft_id: null },
+      ]);
+    } finally {
+      migrated.close();
+    }
   });
 });
 

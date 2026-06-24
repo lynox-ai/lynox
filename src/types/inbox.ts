@@ -62,7 +62,11 @@ export interface InboxItem {
   classifierVersion: string;
   userAction: InboxUserAction | undefined;
   userActionAt: Date | undefined;
-  /** FK into `inbox_drafts`. Null until the user clicks "Draft Reply". */
+  /**
+   * Vestigial since v16 retired the autonomous draft store (replying moved
+   * into chat). The column survives but is always null — kept on the type
+   * so existing readers compile; drop it once nothing references it.
+   */
   draftId: string | undefined;
   snoozeUntil: Date | undefined;
   /** Free-form condition snapshot, e.g. `if_no_reply_by:2026-05-15`. */
@@ -103,19 +107,6 @@ export interface InboxAuditEntry {
   /** Snapshot payload as JSON string — bucket, confidence, llm_call_id, prev_state, etc. */
   payloadJson: string;
   createdAt: Date;
-}
-
-export interface InboxDraft {
-  id: string;
-  tenantId: string;
-  itemId: string;
-  bodyMd: string;
-  generatedAt: Date;
-  generatorVersion: string;
-  /** Increments on each user keystroke batch — drives the tone-button "edit-loss" guard. */
-  userEditsCount: number;
-  /** Self-FK forming the regenerate history chain. */
-  supersededBy: string | undefined;
 }
 
 export interface InboxRule {

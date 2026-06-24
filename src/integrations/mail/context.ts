@@ -106,6 +106,13 @@ export interface OutboundContext {
   result: MailSendResult;
   isReply: boolean;
   originalMessageId?: string | undefined;
+  /**
+   * Thread key of the replied-to message (`resolveThreadKey` of the original
+   * envelope). Lets the inbox reconcile fall back to a thread-key match when
+   * the original mail carried no Message-ID — `originalMessageId` is then
+   * absent and a message-id lookup can't fire.
+   */
+  originalThreadKey?: string | undefined;
 }
 
 export interface MailHooks {
@@ -266,6 +273,19 @@ export class MailContext {
 
     this.handler = wrappedHandler;
     this.watcher = new MailWatcher(stateDb, wrappedHandler);
+  }
+
+  /**
+   * Fire the outbound hook after a successful send — the symmetric twin of the
+   * inbound-hook firing in the watcher wrapper above. Currently driven by
+   * `mail_reply` so the inbox can reconcile a just-answered item to `replied`;
+   * `mail_send` can call this too when a consumer needs the outbound event.
+   * Best-effort: a throwing hook never fails the send that already happened.
+   */
+  async notifyOutboundSent(accountId: string, ctx: OutboundContext): Promise<void> {
+    if (this.hooks.onOutboundSent) {
+      try { await this.hooks.onOutboundSent(accountId, ctx); } catch { /* swallow */ }
+    }
   }
 
   /**

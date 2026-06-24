@@ -30,7 +30,6 @@ import {
   InboxCostBudget,
   type InboxCostBudgetOptions,
 } from './cost-budget.js';
-import { GenerateRateLimiter } from './generate-rate-limit.js';
 import { startReminderPoller, type ReminderPoller } from './inbox-reminder-poller.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import {
@@ -39,6 +38,7 @@ import {
   type InboxRunnerPolicy,
 } from './runner.js';
 import { InboxStateDb } from './state.js';
+import { reconcileOutboundReply } from './outbound-reconcile.js';
 import type { SensitiveMode } from './sensitive-content.js';
 import {
   type AccountResolver,
@@ -59,6 +59,9 @@ export interface InboxRuntime {
   hook: OnInboundMailHook;
   /** Wire as `MailHooks.onAccountAdded` — fires a backfill pass on connect. */
   onAccountAdded: NonNullable<import('../mail/context.js').MailHooks['onAccountAdded']>;
+  /** Wire as `MailHooks.onOutboundSent` — marks an item `replied` when the user
+   *  answers it in chat (the reply leaves via the generic mail_reply tool). */
+  onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']>;
   /**
    * Operator-driven cold-start re-run. The HTTP layer resolves the
    * `MailProvider` from its registry and hands it in; runtime closes over
@@ -70,16 +73,10 @@ export interface InboxRuntime {
     provider: import('../mail/provider.js').MailProvider,
     runOpts?: { force?: boolean },
   ) => Promise<void>;
-  /** LLM caller used by the draft generator. Same instance the classifier uses. */
-  llm: LLMCaller;
-  /** Account resolver — turns an accountId into address + display name. */
-  accounts: { resolve: (id: string) => { address: string; displayName: string } | null };
   /** Sensitive-content mode echoed from BootstrapInboxOptions so HTTP-layer
    *  consumers (handleRefreshItemBody) can apply the same masking the
    *  classifier did at classify time. */
   sensitiveMode: SensitiveMode;
-  /** Per-account sliding-window rate-limit for /draft/generate (10/min default). */
-  generateRateLimiter: import('./generate-rate-limit.js').GenerateRateLimiter;
   shutdown(): Promise<void>;
 }
 
@@ -307,6 +304,14 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       await runColdStartForAccount(adapterOpts);
     };
 
+  const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
+    (accountId, outboundCtx) => {
+      // Message-ID match is account-agnostic; the account scopes only the
+      // thread-key fallback (for message-id-less originals).
+      reconcileOutboundReply(state, accountId, outboundCtx);
+      return Promise.resolve();
+    };
+
   const runColdStart: InboxRuntime['runColdStart'] = async (provider, runOpts) => {
     if (disabledAccounts?.has(provider.accountId)) return;
     const adapterOpts: Parameters<typeof runColdStartForAccount>[0] = {
@@ -345,11 +350,9 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     coldStartTracker,
     hook,
     onAccountAdded,
+    onOutboundReconcile,
     runColdStart,
-    llm,
-    accounts,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
-    generateRateLimiter: new GenerateRateLimiter(),
     shutdown: async () => {
       reminderPoller?.stop();
       await queue.drain();

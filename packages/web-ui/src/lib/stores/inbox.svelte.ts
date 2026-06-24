@@ -8,25 +8,14 @@
 // same fetcher with a different bucket filter once their views land.
 
 import {
-	createDraft as apiCreateDraft,
-	generateDraft as apiGenerateDraft,
-	getItemDraft as apiGetItemDraft,
 	refreshItemBody as apiRefreshItemBody,
-	sendInboxReply as apiSendInboxReply,
-	updateDraft as apiUpdateDraft,
-	type DraftTone,
-	type GenerateDraftFailure,
-	type InboxDraft,
 	type RefreshBodyFailure,
-	type SendReplyFailure,
-} from '../api/inbox-drafts.js';
+} from '../api/inbox-body.js';
 
-export type { DraftTone, RefreshBodyFailure, SendReplyFailure };
+export type { RefreshBodyFailure };
 import { getApiBase } from '../config.svelte.js';
 import { t } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
-
-export type { InboxDraft };
 
 export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
 /**
@@ -157,12 +146,10 @@ export interface BulkActionResult {
 	bulkId: string;
 	action: BulkAction;
 	itemCount: number;
-	performedAt: number; // ms epoch — drives the 60s toast countdown
 }
 
 let selectedForBulk = $state(new Set<string>());
 let lastSelectedId = $state<string | null>(null);
-let recentBulks = $state<BulkActionResult[]>([]);
 
 export function getSelectedForBulk(): ReadonlySet<string> {
 	return selectedForBulk;
@@ -174,10 +161,6 @@ export function isSelectedForBulk(id: string): boolean {
 
 export function getSelectionCount(): number {
 	return selectedForBulk.size;
-}
-
-export function getRecentBulks(): ReadonlyArray<BulkActionResult> {
-	return recentBulks;
 }
 
 /**
@@ -242,9 +225,7 @@ export async function applyBulkAction(action: BulkAction): Promise<BulkActionRes
 		bulkId: data.bulkId,
 		action,
 		itemCount: data.applied.length,
-		performedAt: Date.now(),
 	};
-	recentBulks = [result, ...recentBulks].slice(0, 5);
 	clearBulkSelection();
 	void loadInboxCounts();
 	return result;
@@ -259,90 +240,9 @@ export async function undoBulk(bulkId: string, currentZone: InboxBucket): Promis
 		addToast(t('inbox.error_bulk_undo'), 'error');
 		return false;
 	}
-	recentBulks = recentBulks.filter((b) => b.bulkId !== bulkId);
 	void loadInboxCounts();
 	void loadInboxItems(currentZone);
 	return true;
-}
-
-/** Drop the local cache so a refresh kicks fresh from /undo/recent on next read. */
-export function pruneRecentBulks(now = Date.now(), windowMs = 60_000): void {
-	recentBulks = recentBulks.filter((b) => now - b.performedAt < windowMs);
-}
-
-// ── Compose-new (PRD-INBOX-PHASE-3 §"Compose-New") ─────────────────────────
-
-export interface ComposeDraft {
-	to: string;
-	cc: string;
-	bcc: string;
-	subject: string;
-	body: string;
-}
-
-let composeOpen = $state(false);
-let composeDraft = $state<ComposeDraft>({ to: '', cc: '', bcc: '', subject: '', body: '' });
-let composeSending = $state(false);
-
-export function isComposeOpen(): boolean {
-	return composeOpen;
-}
-
-export function getComposeDraft(): ComposeDraft {
-	return composeDraft;
-}
-
-export function isComposeSending(): boolean {
-	return composeSending;
-}
-
-export function openCompose(): void {
-	composeOpen = true;
-	composeDraft = { to: '', cc: '', bcc: '', subject: '', body: '' };
-}
-
-export function updateComposeDraft(patch: Partial<ComposeDraft>): void {
-	composeDraft = { ...composeDraft, ...patch };
-}
-
-export function closeCompose(): void {
-	composeOpen = false;
-	composeDraft = { to: '', cc: '', bcc: '', subject: '', body: '' };
-}
-
-/**
- * Send the compose-new draft. Returns true on success. Account id
- * must come from the caller (the UI's account selector).
- */
-export async function sendCompose(accountId: string): Promise<boolean> {
-	if (composeSending) return false;
-	composeSending = true;
-	try {
-		const res = await fetch(`${getApiBase()}/inbox/compose-send`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				accountId,
-				to: composeDraft.to,
-				cc: composeDraft.cc,
-				bcc: composeDraft.bcc,
-				subject: composeDraft.subject,
-				body: composeDraft.body,
-			}),
-		});
-		if (!res.ok) {
-			addToast(t('inbox.compose_send_failed'), 'error');
-			return false;
-		}
-		addToast(t('inbox.compose_send_ok'), 'success');
-		closeCompose();
-		return true;
-	} catch {
-		addToast(t('inbox.compose_send_failed'), 'error');
-		return false;
-	} finally {
-		composeSending = false;
-	}
 }
 
 // ── Reading-Pane wire shapes ───────────────────────────────────────────────
@@ -918,272 +818,4 @@ export function startColdStartPolling(): () => void {
 		cancelled = true;
 		if (timer !== null) clearTimeout(timer);
 	};
-}
-
-// ── Draft pane ───────────────────────────────────────────────────────────
-//
-// Owns the currently-open Draft-Reply pane. There is at most one open at
-// a time — opening on a new item replaces the previous slot. The pane
-// closes when `closeDraftPane()` is called or when the underlying item
-// changes (e.g. archived from a J/K shortcut while the pane is open).
-//
-// `openDraftPane(itemId)` is idempotent. It always fetches the active
-// draft for the item (returns `null` when none exists yet, which the
-// pane renders as the "no draft, click Draft Reply to create one"
-// affordance). Phase 2 ships without LLM-driven generation, so the
-// create path stubs a starter body until the generator slice lands.
-
-const DRAFT_GENERATOR_VERSION_STUB = 'manual-2026-05';
-
-interface DraftPaneState {
-	itemId: string;
-	draft: InboxDraft | null;
-	/** True while the active-draft fetch is in flight. */
-	loading: boolean;
-	/** True while a PATCH (save) round-trip is in flight. */
-	saving: boolean;
-	/** True while the LLM generation round-trip is in flight. */
-	generating: boolean;
-	/** Last-known persisted body — used so the pane can flag unsaved buffers. */
-	persistedBody: string;
-}
-
-let draftPane = $state<DraftPaneState | null>(null);
-
-export function getDraftPane(): DraftPaneState | null {
-	return draftPane;
-}
-
-export function isDraftPaneOpen(): boolean {
-	return draftPane !== null;
-}
-
-export async function openDraftPane(itemId: string): Promise<void> {
-	draftPane = {
-		itemId,
-		draft: null,
-		loading: true,
-		saving: false,
-		generating: false,
-		persistedBody: '',
-	};
-	const result = await apiGetItemDraft(getApiBase(), itemId);
-	// Race-guard: the user may have closed or re-opened on a different
-	// item before the fetch resolved; only commit the result when the
-	// pane still belongs to this itemId.
-	if (draftPane?.itemId !== itemId) return;
-	if (result === undefined) {
-		addToast(t('inbox.draft_error_load'), 'error');
-		draftPane = { ...draftPane, loading: false };
-		return;
-	}
-	draftPane = {
-		...draftPane,
-		draft: result,
-		loading: false,
-		persistedBody: result?.bodyMd ?? '',
-	};
-}
-
-export function closeDraftPane(): void {
-	draftPane = null;
-}
-
-/**
- * Create a fresh draft for the open pane's item. Used as the manual
- * fallback when the LLM generator is unavailable (no LLM credentials,
- * channel unsupported, cached body missing). The starter body is
- * intentionally minimal so the user has something editable; the
- * generator slice replaces this whenever it succeeds.
- */
-export async function createDraftForOpenPane(starterBody = ''): Promise<void> {
-	const pane = draftPane;
-	if (!pane) return;
-	const initialBody = starterBody.length > 0 ? starterBody : t('inbox.draft_starter_body');
-	const created = await apiCreateDraft(getApiBase(), pane.itemId, {
-		bodyMd: initialBody,
-		generatorVersion: DRAFT_GENERATOR_VERSION_STUB,
-	});
-	if (draftPane?.itemId !== pane.itemId) return;
-	if (!created) {
-		addToast(t('inbox.draft_error_create'), 'error');
-		return;
-	}
-	draftPane = {
-		...pane,
-		draft: created,
-		persistedBody: created.bodyMd,
-	};
-}
-
-/**
- * Ask the backend to LLM-generate a draft for the open pane's item,
- * then commit the generated body via the existing create path. On a
- * recoverable backend failure (`unavailable` / `unsupported` /
- * `no_body`), the caller can fall back to `createDraftForOpenPane`
- * with the manual starter — the discriminated `reason.kind` surfaces
- * which fallback affordance to show.
- *
- * Returns the failure reason on the unhappy path so the UI can show
- * the right copy (e.g. "Generation deaktiviert — Editor öffnen?" for
- * unavailable vs "Mail nicht mehr verfügbar" for not_found).
- */
-export async function generateDraftForOpenPane(): Promise<
-	{ ok: true } | { ok: false; reason: GenerateDraftFailure }
-> {
-	const pane = draftPane;
-	if (!pane) return { ok: false, reason: { kind: 'aborted' } };
-	const itemId = pane.itemId;
-	// `generating` stays true across BOTH the LLM call and the follow-up
-	// create — clearing it between would flash the empty-draft placeholder
-	// for the ~50ms create round-trip.
-	draftPane = { ...pane, generating: true };
-	const result = await apiGenerateDraft(getApiBase(), itemId);
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
-	if (!result.ok) {
-		draftPane = { ...draftPane, generating: false };
-		return { ok: false, reason: result.reason };
-	}
-	// Persist the generated body via the existing create path so the
-	// supersede chain stays under one writer.
-	const created = await apiCreateDraft(getApiBase(), itemId, {
-		bodyMd: result.draft.bodyMd,
-		generatorVersion: result.draft.generatorVersion,
-	});
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
-	if (!created) {
-		draftPane = { ...draftPane, generating: false };
-		addToast(t('inbox.draft_error_create'), 'error');
-		return { ok: false, reason: { kind: 'network' } };
-	}
-	draftPane = {
-		...draftPane,
-		draft: created,
-		generating: false,
-		persistedBody: created.bodyMd,
-	};
-	return { ok: true };
-}
-
-/**
- * Regenerate the open pane's draft with a tone modifier. Sends the
- * caller's `currentBuffer` as the previous draft body (so unsaved live
- * edits feed into the rewrite). On success the new draft is persisted
- * via the existing create path with `supersededDraftId` set to the
- * outgoing draft — the supersede chain stays under one writer and the
- * UI gets a fresh `userEditsCount: 0` row to mirror.
- */
-export async function regenerateDraftWithTone(
-	tone: DraftTone,
-	currentBuffer: string,
-): Promise<{ ok: true } | { ok: false; reason: GenerateDraftFailure }> {
-	const pane = draftPane;
-	if (!pane || !pane.draft) return { ok: false, reason: { kind: 'aborted' } };
-	const itemId = pane.itemId;
-	const supersededId = pane.draft.id;
-	draftPane = { ...pane, generating: true };
-	const result = await apiGenerateDraft(getApiBase(), itemId, {
-		tone,
-		previousBodyMd: currentBuffer,
-	});
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
-	if (!result.ok) {
-		draftPane = { ...draftPane, generating: false };
-		return { ok: false, reason: result.reason };
-	}
-	const created = await apiCreateDraft(getApiBase(), itemId, {
-		bodyMd: result.draft.bodyMd,
-		generatorVersion: result.draft.generatorVersion,
-		supersededDraftId: supersededId,
-	});
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
-	if (!created) {
-		draftPane = { ...draftPane, generating: false };
-		addToast(t('inbox.draft_error_create'), 'error');
-		return { ok: false, reason: { kind: 'network' } };
-	}
-	draftPane = {
-		...draftPane,
-		draft: created,
-		generating: false,
-		persistedBody: created.bodyMd,
-	};
-	return { ok: true };
-}
-
-/**
- * Pull the full mail body from the provider for the open pane's item
- * and overwrite the cached snippet. Subsequent regenerate calls will
- * then see the full body as context. Does NOT alter the open draft —
- * the user explicitly opts in by clicking "Reload from server"; their
- * editor buffer stays untouched.
- */
-export async function refreshOpenPaneBody(): Promise<
-	{ ok: true } | { ok: false; reason: RefreshBodyFailure }
-> {
-	const pane = draftPane;
-	if (!pane) return { ok: false, reason: { kind: 'aborted' } };
-	const itemId = pane.itemId;
-	const result = await apiRefreshItemBody(getApiBase(), itemId);
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
-	if (!result.ok) return result;
-	return { ok: true };
-}
-
-/**
- * Send the open draft as a reply. Passes the live buffer so the server
- * sees the user's latest edits without an extra PATCH first. On success
- * the inbox item transitions to `userAction: 'replied'` — the pane is
- * closed by the component, the list refresh moves the item out of
- * Needs-You.
- */
-export async function sendOpenPaneDraft(
-	currentBuffer: string,
-	scheduledAt?: Date,
-): Promise<
-	{ ok: true; messageId: string }
-	| { ok: true; scheduled: { scheduledId: string; scheduledAt: string } }
-	| { ok: false; reason: SendReplyFailure }
-> {
-	const pane = draftPane;
-	if (!pane || !pane.draft) return { ok: false, reason: { kind: 'aborted' } };
-	const draftId = pane.draft.id;
-	const itemId = pane.itemId;
-	const result = await apiSendInboxReply(getApiBase(), draftId, currentBuffer, scheduledAt);
-	if (draftPane?.itemId !== itemId) return { ok: false, reason: { kind: 'aborted' } };
-	if (!result.ok) return result;
-	// Refresh counts so the badge updates after the item moves zones (only on
-	// immediate send — scheduled sends don't change zone state until the
-	// poller fires the actual delivery).
-	if ('sent' in result) {
-		void loadInboxCounts();
-		return { ok: true, messageId: result.sent.messageId };
-	}
-	return { ok: true, scheduled: result.scheduled };
-}
-
-/**
- * Persist a body edit. Caller is responsible for debouncing keystrokes —
- * the store does not coalesce. Returns false on a non-ok response so the
- * caller can keep the local buffer dirty.
- */
-export async function saveDraftBody(bodyMd: string): Promise<boolean> {
-	const pane = draftPane;
-	if (!pane || !pane.draft) return false;
-	const draftId = pane.draft.id;
-	draftPane = { ...pane, saving: true };
-	const updated = await apiUpdateDraft(getApiBase(), draftId, bodyMd);
-	if (draftPane?.draft?.id !== draftId) return false;
-	if (!updated) {
-		draftPane = { ...draftPane, saving: false };
-		addToast(t('inbox.draft_error_save'), 'error');
-		return false;
-	}
-	draftPane = {
-		...draftPane,
-		draft: updated,
-		saving: false,
-		persistedBody: updated.bodyMd,
-	};
-	return true;
 }

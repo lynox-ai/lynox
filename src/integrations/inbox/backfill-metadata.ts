@@ -22,7 +22,7 @@
 
 import type { MailProvider } from '../mail/provider.js';
 import { envelopeToItemInputFields, type InboxStateDb, type ThreadMessageInput } from './state.js';
-import { resolveThreadKey } from './watcher-hook.js';
+import { resolveThreadKey } from '../mail/thread-key.js';
 import { DEFAULT_BACKFILL_LIMIT } from './cold-start-adapter.js';
 
 export interface BackfillMetadataOptions {

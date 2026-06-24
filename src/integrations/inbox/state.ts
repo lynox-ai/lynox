@@ -21,7 +21,6 @@ import type {
   InboxAuditEntry,
   InboxBucket,
   InboxChannel,
-  InboxDraft,
   InboxItem,
   InboxRule,
   InboxRuleAction,
@@ -116,16 +115,6 @@ export interface InboxAuditInput {
   /** Pre-serialized JSON snapshot of relevant state. */
   payloadJson: string;
   createdAt?: Date | undefined;
-}
-
-export interface InboxDraftInput {
-  tenantId?: string | undefined;
-  itemId: string;
-  bodyMd: string;
-  generatedAt: Date;
-  generatorVersion: string;
-  /** Set when this draft replaces an earlier one (regenerate flow). */
-  supersededDraftId?: string | undefined;
 }
 
 export interface InboxRuleInput {
@@ -250,17 +239,6 @@ interface AuditRow {
   created_at: number;
 }
 
-interface DraftRow {
-  id: string;
-  tenant_id: string;
-  item_id: string;
-  body_md: string;
-  generated_at: number;
-  generator_version: string;
-  user_edits_count: number;
-  superseded_by: string | null;
-}
-
 interface RuleRow {
   id: string;
   tenant_id: string;
@@ -334,19 +312,6 @@ function rowToAudit(row: AuditRow): InboxAuditEntry {
     actor: row.actor as InboxAuditActor,
     payloadJson: row.payload_json,
     createdAt: new Date(row.created_at),
-  };
-}
-
-function rowToDraft(row: DraftRow): InboxDraft {
-  return {
-    id: row.id,
-    tenantId: row.tenant_id,
-    itemId: row.item_id,
-    bodyMd: row.body_md,
-    generatedAt: new Date(row.generated_at),
-    generatorVersion: row.generator_version,
-    userEditsCount: row.user_edits_count,
-    supersededBy: row.superseded_by ?? undefined,
   };
 }
 
@@ -499,6 +464,24 @@ export class InboxStateDb {
   }
 
   /**
+   * Resolve the IMAP uid + folder a `mail_reply` needs from a stored RFC
+   * message-id. The `processed_mail_messages` table is owned by `MailStateDb`
+   * but lives on the SAME connection (see file header), so the inbox reader can
+   * bridge an inbox item (message-id) to the uid the mail tools key on without
+   * a live IMAP round-trip. Null when the message isn't in the dedup table
+   * (pre-classify-window or moved folder) → the caller falls back to mail_search.
+   */
+  getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null {
+    if (!messageId) return null;
+    const row = this.db
+      .prepare<[string, string], { uid: number; folder: string }>(
+        'SELECT uid, folder FROM processed_mail_messages WHERE account_id = ? AND message_id = ? LIMIT 1',
+      )
+      .get(accountId, messageId);
+    return row ? { uid: row.uid, folder: row.folder } : null;
+  }
+
+  /**
    * Look up an existing item for `(accountId, threadKey)`. Used by the
    * classifier worker to decide between insert vs re-classify on a known
    * thread (re-classification updates the existing row in a future commit;
@@ -510,6 +493,25 @@ export class InboxStateDb {
         'SELECT * FROM inbox_items WHERE account_id = ? AND thread_key = ? ORDER BY classified_at DESC LIMIT 1',
       )
       .get(accountId, threadKey);
+    return row ? rowToItem(row) : null;
+  }
+
+  /**
+   * Look up the item whose source message has this RFC Message-ID — the bridge
+   * the outbound-reply reconcile (`onOutboundSent`) uses to find the item a sent
+   * reply answers. Keyed on message-id ALONE (NOT account): a Message-ID is
+   * globally unique, and a reply can legitimately go out from a different
+   * account than the one the mail was received on (mail_reply's smart
+   * reply-from), so account-scoping here would silently MISS the item. Newest
+   * -first if a re-classify ever duplicates a message-id across rows.
+   */
+  findItemByMessageId(messageId: string): InboxItem | null {
+    if (!messageId) return null;
+    const row = this.db
+      .prepare<[string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE message_id = ? ORDER BY classified_at DESC LIMIT 1',
+      )
+      .get(messageId);
     return row ? rowToItem(row) : null;
   }
 
@@ -1102,20 +1104,6 @@ export class InboxStateDb {
       .run(key, value, Date.now());
   }
 
-  /** Link a draft to its item. Pass `null` to detach. Scoped to tenant. */
-  attachDraft(
-    id: string,
-    draftId: string | null,
-    tenantId: string = DEFAULT_TENANT_ID,
-  ): boolean {
-    const result = this.db
-      .prepare<[string | null, string, string], unknown>(
-        `UPDATE inbox_items SET draft_id = ? WHERE id = ? AND tenant_id = ?`,
-      )
-      .run(draftId, id, tenantId) as { changes: number };
-    return result.changes > 0;
-  }
-
   // ── Audit (append-only) ──────────────────────────────────────────────────
 
   /** Append an audit entry. There is intentionally no update or delete API. */
@@ -1146,74 +1134,6 @@ export class InboxStateDb {
       )
       .all(itemId, tenantId);
     return rows.map(rowToAudit);
-  }
-
-  // ── Drafts ───────────────────────────────────────────────────────────────
-
-  /**
-   * Insert a new draft. When `supersededDraftId` is set, the previous draft
-   * is marked superseded in the same transaction — the regenerate flow.
-   */
-  insertDraft(input: InboxDraftInput): string {
-    const id = nextId('drf');
-    const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
-    const txn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO inbox_drafts (id, tenant_id, item_id, body_md, generated_at, generator_version, user_edits_count)
-           VALUES (?, ?, ?, ?, ?, ?, 0)`,
-        )
-        .run(id, tenantId, input.itemId, input.bodyMd, input.generatedAt.getTime(), input.generatorVersion);
-      if (input.supersededDraftId) {
-        this.db
-          .prepare(`UPDATE inbox_drafts SET superseded_by = ? WHERE id = ?`)
-          .run(id, input.supersededDraftId);
-      }
-    });
-    txn();
-    return id;
-  }
-
-  /**
-   * Insert + attach in one txn so `inbox_items.draft_id` cannot lag the
-   * actual draft row after a partial crash. Without the wrap, a SIGKILL
-   * between the two writes would leave the regenerate flow pointing at
-   * the prior (now-superseded) draft id forever.
-   */
-  insertDraftAndAttach(input: InboxDraftInput): string {
-    return this.db.transaction(() => {
-      const id = this.insertDraft(input);
-      this.attachDraft(input.itemId, id);
-      return id;
-    })();
-  }
-
-  getDraftById(id: string, tenantId: string = DEFAULT_TENANT_ID): InboxDraft | null {
-    const row = this.db
-      .prepare<[string, string], DraftRow>('SELECT * FROM inbox_drafts WHERE id = ? AND tenant_id = ?')
-      .get(id, tenantId);
-    return row ? rowToDraft(row) : null;
-  }
-
-  /** The current (non-superseded) draft for an item, or null. Scoped to tenant. */
-  getActiveDraftForItem(itemId: string, tenantId: string = DEFAULT_TENANT_ID): InboxDraft | null {
-    const row = this.db
-      .prepare<[string, string], DraftRow>(
-        `SELECT * FROM inbox_drafts
-         WHERE item_id = ? AND tenant_id = ? AND superseded_by IS NULL
-         ORDER BY generated_at DESC
-         LIMIT 1`,
-      )
-      .get(itemId, tenantId);
-    return row ? rowToDraft(row) : null;
-  }
-
-  /** Track keystroke-batches for the tone-change "edit-loss" guard. Scoped to tenant. */
-  incrementDraftEdits(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
-    const result = this.db
-      .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ? AND tenant_id = ?`)
-      .run(id, tenantId) as { changes: number };
-    return result.changes > 0;
   }
 
   // ── v12 thread messages (per-message Reading-Pane storage) ─────────────
@@ -1334,7 +1254,7 @@ export class InboxStateDb {
     return row ? rowToThreadMessage(row) : null;
   }
 
-  // ── Item bodies (lazy cache for draft generation) ──────────────────────
+  // ── Item bodies (lazy cache for the reading-pane body refresh) ─────────
 
   /**
    * Fetch the cached mail body for an item, or null when nothing has been
@@ -1385,22 +1305,6 @@ export class InboxStateDb {
       bytesWritten: Buffer.byteLength(clamped, 'utf8'),
       clampedAtCacheLayer,
     };
-  }
-
-  /**
-   * Atomic body update + edits counter bump. Single txn so the tone-button
-   * "edit-loss" guard (`userEditsCount > 0`) never sees a body change without
-   * its matching counter increment.
-   */
-  updateDraftBody(id: string, bodyMd: string): boolean {
-    const result = this.db
-      .prepare(
-        `UPDATE inbox_drafts
-         SET body_md = ?, user_edits_count = user_edits_count + 1
-         WHERE id = ?`,
-      )
-      .run(bodyMd, id) as { changes: number };
-    return result.changes > 0;
   }
 
   // ── Rules ────────────────────────────────────────────────────────────────
