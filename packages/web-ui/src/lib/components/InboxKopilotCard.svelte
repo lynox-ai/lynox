@@ -22,17 +22,19 @@
 	const snoozedCount = $derived(getSnoozedCount());
 
 	// Reminders due today (task_type='reminder' + next_run_at in today's
-	// local-day window). Fetched once on mount — the typical reminder
-	// volume is too low to warrant a stream. Failure is silent: a missing
-	// "due today" card is preferable to a noisy error toast on this
-	// passive landing surface.
+	// local-day window). Reminders are AGENT-TRIGGERS (post-v42 split they
+	// live in the `triggers` table), so this reads /api/triggers — /api/tasks
+	// only returns user-TODOs and would never surface a reminder. Fetched once
+	// on mount — the typical reminder volume is too low to warrant a stream.
+	// Failure is silent: a missing "due today" card is preferable to a noisy
+	// error toast on this passive landing surface.
 	interface ReminderRow { id: string; title: string; next_run_at?: string; task_type?: string }
 	let remindersDueToday = $state<ReminderRow[]>([]);
 	onMount(async () => {
 		try {
-			const res = await fetch(`${getApiBase()}/tasks?status=open`);
+			const res = await fetch(`${getApiBase()}/triggers?status=open`);
 			if (!res.ok) return;
-			const data = (await res.json()) as { tasks: ReminderRow[] };
+			const data = (await res.json()) as { triggers: ReminderRow[] };
 			const today = new Date();
 			const isToday = (iso: string | undefined): boolean => {
 				if (!iso) return false;
@@ -42,7 +44,7 @@
 					&& d.getMonth() === today.getMonth()
 					&& d.getDate() === today.getDate();
 			};
-			remindersDueToday = data.tasks.filter((r) => r.task_type === 'reminder' && isToday(r.next_run_at));
+			remindersDueToday = data.triggers.filter((r) => r.task_type === 'reminder' && isToday(r.next_run_at));
 		} catch { /* silent — passive card, optional */ }
 	});
 

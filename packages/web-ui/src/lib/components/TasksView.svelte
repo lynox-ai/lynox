@@ -51,15 +51,22 @@
 		loading = true;
 		error = '';
 		try {
-			const res = await fetch(`${getApiBase()}/tasks`);
-			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { tasks: TaskRecord[] };
-			// Client-side filter — the /api/tasks endpoint doesn't yet
-			// support a task_type query param. Cheap on the typical
-			// <100 task volume; revisit if it grows.
+			// v42 split user-TODOs (`/api/tasks`) and agent-triggers (`/api/triggers`)
+			// into separate tables; this view renders both so nothing vanished when
+			// the storage was split. TODOs show due_date/priority, triggers their
+			// schedule. `filterTaskType` (if a consumer passes it) narrows to a
+			// trigger sub-type — only triggers carry `task_type`.
+			const [tasksRes, triggersRes] = await Promise.all([
+				fetch(`${getApiBase()}/tasks`),
+				fetch(`${getApiBase()}/triggers`),
+			]);
+			if (!tasksRes.ok || !triggersRes.ok) throw new Error();
+			const todoData = (await tasksRes.json()) as { tasks: TaskRecord[] };
+			const triggerData = (await triggersRes.json()) as { triggers: TaskRecord[] };
+			const merged = [...todoData.tasks, ...triggerData.triggers];
 			tasks = filterTaskType !== undefined
-				? data.tasks.filter((task) => (task.task_type ?? '') === filterTaskType)
-				: data.tasks;
+				? merged.filter((task) => (task.task_type ?? '') === filterTaskType)
+				: merged;
 		} catch {
 			error = t('common.load_failed');
 		}

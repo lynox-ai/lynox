@@ -64,22 +64,29 @@
 	let stats = $state<Stats | null>(null);
 	let costDays = $state<CostDay[]>([]);
 	let tasks = $state<TaskRecord[]>([]);
+	// AGENT-TRIGGERS (cron/watch/pipeline/reminder) live in a separate table
+	// post-v42 split and are served by /api/triggers — the scheduled-rows
+	// section reads from here, not from `tasks` (user-TODOs).
+	let triggers = $state<TaskRecord[]>([]);
 	let threadInsights = $state<ThreadInsight[]>([]);
 	let loading = $state(true);
 
 	async function loadDashboard() {
 		loading = true;
 		try {
-			const [statsRes, costRes, tasksRes, threadsRes] = await Promise.all([
+			const [statsRes, costRes, tasksRes, triggersRes, threadsRes] = await Promise.all([
 				fetch(`${getApiBase()}/history/stats`),
 				fetch(`${getApiBase()}/history/cost/daily?days=14&tzOffsetMin=${new Date().getTimezoneOffset()}`),
 				fetch(`${getApiBase()}/tasks`),
+				fetch(`${getApiBase()}/triggers`),
 				fetch(`${getApiBase()}/thread-insights?limit=10`).catch(() => null),
 			]);
 			stats = (await statsRes.json()) as Stats;
 			if (costRes.ok) costDays = (await costRes.json()) as CostDay[];
 			const tasksData = (await tasksRes.json()) as { tasks: TaskRecord[] };
 			tasks = tasksData.tasks;
+			const triggersData = (await triggersRes.json()) as { triggers: TaskRecord[] };
+			triggers = triggersData.triggers;
 			if (threadsRes?.ok) threadInsights = ((await threadsRes.json()) as { threadInsights: ThreadInsight[] }).threadInsights;
 		} catch { /* non-critical */ }
 		loading = false;
@@ -93,7 +100,8 @@
 	// same way `completed` is excluded. Only `open` and `in_progress` count
 	// as live work in the hub.
 	const openTasks = $derived(tasks.filter(t => t.status === 'open' || t.status === 'in_progress'));
-	const scheduledTasks = $derived(tasks.filter(t => t.schedule_cron));
+	// Scheduled rows are AGENT-TRIGGERS (own table) — derive from `triggers`, not `tasks`.
+	const scheduledTasks = $derived(triggers.filter(t => t.schedule_cron));
 	const totalCost14d = $derived(costDays.reduce((s, d) => s + d.cost_usd, 0));
 	const totalRuns14d = $derived(costDays.reduce((s, d) => s + d.run_count, 0));
 	const maxCost = $derived(Math.max(...costDays.map(d => d.cost_usd), 0.01));

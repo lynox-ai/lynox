@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TaskRecord } from '../types/index.js';
+import type { TriggerRecord } from '../types/index.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
@@ -113,7 +113,7 @@ export class WorkerLoop {
       const taskManager = this.engine.getTaskManager();
       if (!taskManager) return;
 
-      const dueTasks = taskManager.getDueTasks();
+      const dueTasks = taskManager.getDueTriggers();
 
       // Missed run detection: warn about tasks that were due >10min ago
       const now = Date.now();
@@ -143,7 +143,7 @@ export class WorkerLoop {
     }
   }
 
-  private async executeTask(task: TaskRecord): Promise<void> {
+  private async executeTask(task: TriggerRecord): Promise<void> {
     const controller = new AbortController();
     this.activeTasks.set(task.id, { controller });
 
@@ -235,7 +235,7 @@ export class WorkerLoop {
   }
 
   /** Execute a backup task — no LLM needed, direct BackupManager call. */
-  private async executeBackup(task: TaskRecord): Promise<void> {
+  private async executeBackup(task: TriggerRecord): Promise<void> {
     const backupManager = this.engine.getBackupManager();
     if (!backupManager) {
       throw new Error('Backup manager not initialized');
@@ -272,7 +272,7 @@ export class WorkerLoop {
    * the payload for the UI to deep-link, but firing logic stays simple:
    * a reminder = "tell the user something at time X".
    */
-  private async executeReminder(task: TaskRecord): Promise<void> {
+  private async executeReminder(task: TriggerRecord): Promise<void> {
     await this.notificationRouter.notify({
       title: 'Erinnerung',
       body: task.title,
@@ -286,7 +286,7 @@ export class WorkerLoop {
   }
 
   /** Execute a standard or scheduled task via headless Session. */
-  private async executeStandard(task: TaskRecord): Promise<void> {
+  private async executeStandard(task: TriggerRecord): Promise<void> {
     const session = this.engine.createSession({
       autonomy: 'autonomous',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
@@ -342,7 +342,7 @@ export class WorkerLoop {
   }
 
   /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
-  private async executePipeline(task: TaskRecord): Promise<void> {
+  private async executePipeline(task: TriggerRecord): Promise<void> {
     const runHistory = this.engine.getRunHistory();
     if (!runHistory || !task.pipeline_id) return;
 
@@ -466,7 +466,7 @@ export class WorkerLoop {
     });
   }
 
-  private recordAndNotify(task: TaskRecord, resultSummary: string, success: boolean): void {
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, success: boolean): void {
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       taskManager.recordTaskRun(task.id, resultSummary, success ? 'success' : 'failed');
@@ -487,7 +487,7 @@ export class WorkerLoop {
    * Only notifies (and runs agent analysis) when content has changed.
    * Uses Node.js crypto.createHash('sha256') for fast comparison.
    */
-  private async executeWatch(task: TaskRecord): Promise<void> {
+  private async executeWatch(task: TriggerRecord): Promise<void> {
     let config: { url?: string; interval_minutes?: number; selector?: string; last_hash?: string };
     try {
       config = task.watch_config ? JSON.parse(task.watch_config) as typeof config : {};

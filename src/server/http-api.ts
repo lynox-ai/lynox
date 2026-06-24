@@ -3880,6 +3880,18 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { tasks });
     });
 
+    // Agent-triggers (cron/watch/pipeline/reminder/backup) — split out of the
+    // `tasks` table in v42. The UI fetches both and renders them together; the
+    // create/patch/delete routes below resolve a row's kind by its id.
+    this.addStatic('user', 'GET /api/triggers', async (req, res) => {
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
+      const triggers = taskManager.listTriggers(status ? { status } : undefined);
+      jsonResponse(res, 200, { triggers });
+    });
+
     this.addStatic('user', 'POST /api/tasks', async (_req, res, _params, body) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
@@ -3969,7 +3981,10 @@ export class LynoxHTTPApi {
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
         if (!taskManager.setEnabled(params['id']!, b['enabled'])) { errorResponse(res, 404, 'Task not found'); return; }
-        const updated = engine.getRunHistory()?.getTask(params['id']!);
+        // setEnabled toggles a TRIGGER (the `triggers` table), so read the
+        // updated row back from there — getTask reads the `tasks` table and
+        // would always miss, dropping the response to the {id, enabled} stub.
+        const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         jsonResponse(res, 200, updated ?? { id: params['id'], enabled: b['enabled'] ? 1 : 0 });
         return;
       }
@@ -3981,7 +3996,9 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const runHistory = engine.getRunHistory();
       if (!requireService(res, runHistory, 'History')) return;
-      const deleted = runHistory.deleteTask(params['id']!);
+      // A row id lives in exactly one table after the v42 split — try the TODO
+      // table first, then triggers, so deleting a scheduled trigger still works.
+      const deleted = runHistory.deleteTask(params['id']!) || runHistory.deleteTrigger(params['id']!);
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
     }));

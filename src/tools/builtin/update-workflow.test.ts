@@ -170,7 +170,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     beforeEach(() => {
       history.insertPlannedPipeline(makePlanned());
       // An ENABLED cron task referencing the workflow → it is "scheduled".
-      history.insertTask({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
+      history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
     });
 
     it('refuses without confirm and does NOT persist', async () => {
@@ -196,7 +196,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     });
 
     it('a disabled (paused) schedule does NOT trip the guard', async () => {
-      history.setTaskEnabled('task-1', false);
+      history.setTriggerEnabled('task-1', false);
       const agent = makeAgent(history);
       const out = await updateWorkflowTool.handler(
         { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'changed' }] },
@@ -212,7 +212,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       hostPatterns: ['hooks.example.com'], pathPatterns: ['/report'], paramConstraints: {},
     };
     history.insertPlannedPipeline(makePlanned({ capabilityContract: contract, confirmedAt: '2026-06-24T10:00:00.000Z' }));
-    history.insertTask({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
+    history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
     const agent = makeAgent(history);
 
     const out = await updateWorkflowTool.handler(

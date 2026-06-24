@@ -41,11 +41,15 @@ interface TaskListInput {
   limit?: number | undefined;
 }
 
-function formatTaskLine(t: { id: string; title: string; priority: string; status: string; assignee: string | null; scope_type: string; scope_id: string; due_date: string | null }): string {
+// Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
+// (TriggerRecord: neither) since v42 split them — priority/due_date are optional
+// so a trigger renders without them.
+function formatTaskLine(t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined }): string {
   const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${t.scope_id})`;
   const due = t.due_date ? ` — due ${t.due_date}` : '';
   const assign = t.assignee ? ` @${t.assignee}` : '';
-  return `[${t.priority.toUpperCase()}] ${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
+  const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
+  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -243,9 +247,11 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       // Surface the new schedule when it changed so the agent can confirm
       // the reschedule landed (mirrors the create path's "scheduled for …"
       // string, which the LLM is already trained to read back).
-      const scheduleNote = task.next_run_at
+      // Only a trigger (TriggerRecord) carries a schedule — narrow via `in`
+      // since the v42 split removed these columns from the TODO (TaskRecord).
+      const scheduleNote = 'next_run_at' in task && task.next_run_at
         ? ` — next run: ${task.next_run_at}`
-        : task.schedule_cron
+        : 'schedule_cron' in task && task.schedule_cron
           ? ` — schedule: ${task.schedule_cron}`
           : '';
       return `Task updated: ${formatTaskLine(task)}${scheduleNote}`;
@@ -306,11 +312,24 @@ export const taskListTool: ToolEntry<TaskListInput> = {
       scope = parsed;
     }
 
-    const tasks = managerRef.list({
+    // v42 split user-TODOs (`tasks`) and agent-triggers (`triggers`) into two
+    // tables. task_list shows the agent's FULL picture — its own scheduled
+    // triggers plus the user-TODOs. An explicit assignee filter narrows:
+    // triggers are all 'lynox', so a non-lynox assignee filter drops them.
+    const todos = managerRef.list({
       status: input.status as TaskStatus | undefined,
       assignee: input.assignee,
       scope,
     });
+    const triggers = input.assignee === undefined || input.assignee === 'lynox'
+      ? managerRef.listTriggers({ status: input.status as TaskStatus | undefined, scope })
+      : [];
+    // Triggers FIRST: the agent's active scheduled work is fewer rows and more
+    // relevant to surface. Appending them after the todos would let an install
+    // with ≥20 TODOs truncate every trigger off the default-20 slice below;
+    // putting them first guarantees they're never starved by the limit. Any
+    // overflowing TODOs are still accounted for by the "... and N more" line.
+    const tasks = [...triggers, ...todos];
 
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';

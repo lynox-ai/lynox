@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { TaskManager, setPipelineModeLookup } from './task-manager.js';
+import type { TriggerRecord } from '../types/index.js';
 
 describe('TaskManager', () => {
   let dir: string;
@@ -255,12 +256,18 @@ describe('TaskManager', () => {
       tm.create({ title: 'My task', assignee: 'user' });
       tm.create({ title: 'Agent task', assignee: 'lynox' });
       tm.create({ title: 'Unassigned' });
+      // Post-v42 split: a USER-TODO (`tasks` table) is anything NOT routed to
+      // the `triggers` table. assignee='user' and the unassigned row are TODOs;
+      // assignee='lynox' is an AGENT-TRIGGER (it auto-fires), so it lands in
+      // `triggers` and `tm.list` (the TODO query) no longer sees it.
       const userTasks = tm.list({ assignee: 'user' });
       expect(userTasks).toHaveLength(1);
       expect(userTasks[0]!.title).toBe('My task');
-      const lynoxTasks = tm.list({ assignee: 'lynox' });
-      expect(lynoxTasks).toHaveLength(1);
-      expect(lynoxTasks[0]!.title).toBe('Agent task');
+      // The lynox row is now a trigger — query the trigger side.
+      expect(tm.list({ assignee: 'lynox' })).toHaveLength(0);
+      const lynoxTriggers = tm.listTriggers();
+      expect(lynoxTriggers).toHaveLength(1);
+      expect(lynoxTriggers[0]!.title).toBe('Agent task');
     });
   });
 
@@ -334,10 +341,14 @@ describe('TaskManager', () => {
     });
 
     it('should show assignee on overdue tasks', () => {
+      // Post-v42 split: only USER-TODOs have a `due_date` (the overdue concept).
+      // A non-lynox assignee keeps the row in the `tasks` table so it can be
+      // overdue AND carry a visible assignee tag. (assignee='lynox' would route
+      // it to `triggers`, which have no due_date and so are never "overdue".)
       const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      tm.create({ title: 'Overdue agent', dueDate: yesterday, assignee: 'lynox' });
+      tm.create({ title: 'Overdue delegated', dueDate: yesterday, assignee: 'maria' });
       const briefing = tm.getBriefingSummary();
-      expect(briefing).toContain('[lynox]');
+      expect(briefing).toContain('[maria]');
     });
   });
 
@@ -443,17 +454,19 @@ describe('TaskManager', () => {
       // Simulate the WorkerLoop path: a task assigned to lynox is created
       // with assignee='lynox' which auto-sets next_run_at = now so the
       // worker picks it up immediately.
-      const task = tm.create({ title: 'Bad shell command', assignee: 'lynox' });
+      const task = tm.create({ title: 'Bad shell command', assignee: 'lynox' }) as TriggerRecord;
       expect(task.next_run_at).toBeTruthy();
       expect(task.status).toBe('open');
 
       tm.recordTaskRun(task.id, 'permission denied', 'failed');
 
-      const after = tm.getTask(task.id);
+      // assignee='lynox' routes the row to the `triggers` table (it auto-fires),
+      // so read it back via getTrigger — getTask only sees user-TODOs now.
+      const after = tm.getTrigger(task.id);
       expect(after).toBeDefined();
       expect(after!.status).toBe('failed');
-      // The crux: next_run_at must be cleared, otherwise getDueTasks
-      // would re-select the task every worker tick.
+      // The crux: next_run_at must be cleared, otherwise getDueTriggers
+      // would re-select the trigger every worker tick.
       expect(after!.next_run_at ?? null).toBeNull();
       // last_run_status preserves the actual outcome for the UI footer.
       expect(after!.last_run_status).toBe('failed');
@@ -463,21 +476,21 @@ describe('TaskManager', () => {
       const task = tm.create({ title: 'Slow command', assignee: 'lynox' });
       tm.recordTaskRun(task.id, 'execution exceeded budget', 'timeout');
 
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('failed');
       expect(after!.next_run_at ?? null).toBeNull();
       expect(after!.last_run_status).toBe('timeout');
     });
 
-    it('a failed one-shot task is no longer selected by getDueTasks', () => {
+    it('a failed one-shot task is no longer selected by getDueTriggers', () => {
       const task = tm.create({ title: 'Bad task', assignee: 'lynox' });
-      // Pre-condition: the task is due.
-      expect(tm.getDueTasks().some(t => t.id === task.id)).toBe(true);
+      // Pre-condition: the trigger is due.
+      expect(tm.getDueTriggers().some(t => t.id === task.id)).toBe(true);
 
       tm.recordTaskRun(task.id, 'boom', 'failed');
 
-      // Post-condition: the task is gone from the worker's queue.
-      expect(tm.getDueTasks().some(t => t.id === task.id)).toBe(false);
+      // Post-condition: the trigger is gone from the worker's queue.
+      expect(tm.getDueTriggers().some(t => t.id === task.id)).toBe(false);
     });
 
     it('a failed one-shot task is no longer counted as assigned to lynox', () => {
@@ -497,7 +510,7 @@ describe('TaskManager', () => {
       });
       tm.recordTaskRun(task.id, 'transient error', 'failed');
 
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('open');           // not failed yet
       expect(after!.retry_count).toBe(1);
       expect(after!.next_run_at).toBeTruthy();      // scheduled for retry
@@ -511,7 +524,7 @@ describe('TaskManager', () => {
       // New semantic (replaces the pre-2026-05-23 "stays open"):
       //   - status='failed' so the UI can show the cron task is unhealthy
       //   - next_run_at is still set (cron schedule, not status, drives
-      //     re-runs — getDueTasks was widened to keep cron rows in the
+      //     re-runs — getDueTriggers was widened to keep cron rows in the
       //     queue even when status='failed')
       //   - A subsequent successful run auto-recovers status to 'open'
       //     (see "auto-recovers" test below)
@@ -522,7 +535,7 @@ describe('TaskManager', () => {
       });
       tm.recordTaskRun(task.id, 'transient error', 'failed');
 
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('failed');         // surface the failure
       // Stricter than toBeTruthy: ensure the rescheduled timestamp is
       // genuinely in the future, so a regression that re-emits a stale
@@ -543,7 +556,7 @@ describe('TaskManager', () => {
         scheduleCron: '0 * * * *',
       });
       tm.recordTaskRun(task.id, 'timed out', 'timeout');
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('failed');
       expect(after!.last_run_status).toBe('timeout');
       setPipelineModeLookup(undefined);
@@ -559,16 +572,16 @@ describe('TaskManager', () => {
         scheduleCron: '0 * * * *',
       });
       tm.recordTaskRun(task.id, 'boom 1', 'failed');
-      expect(tm.getTask(task.id)!.status).toBe('failed');
+      expect(tm.getTrigger(task.id)!.status).toBe('failed');
       tm.recordTaskRun(task.id, 'boom 2', 'failed');
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('failed');
       expect(after!.last_run_status).toBe('failed');
       setPipelineModeLookup(undefined);
     });
 
-    it('a cron task with status=failed is STILL picked up by getDueTasks (recurrence survives)', () => {
-      // Regression guard: if the getDueTasks SELECT ever reverts to
+    it('a cron task with status=failed is STILL picked up by getDueTriggers (recurrence survives)', () => {
+      // Regression guard: if the getDueTriggers SELECT ever reverts to
       // excluding all status='failed' rows, a single transient failure
       // would permanently freeze a weekly cron — the exact bug this
       // sprint fixes.
@@ -578,14 +591,15 @@ describe('TaskManager', () => {
         scheduleCron: '0 * * * *',
       });
       tm.recordTaskRun(task.id, 'boom', 'failed');
-      expect(tm.getTask(task.id)!.status).toBe('failed');
+      expect(tm.getTrigger(task.id)!.status).toBe('failed');
 
       // Backdate next_run_at via the history layer (tm.update would also
       // wipe schedule_cron because of the "schedule fields move as a
-      // pair" rule). The point of this test is the getDueTasks SELECT
-      // shape, not the manager API.
-      history.updateTask(task.id, { nextRunAt: '2020-01-01T00:00:00.000Z' });
-      const due = tm.getDueTasks();
+      // pair" rule). The point of this test is the getDueTriggers SELECT
+      // shape, not the manager API. Schedule fields live on the `triggers`
+      // table now, so backdate via updateTrigger.
+      history.updateTrigger(task.id, { nextRunAt: '2020-01-01T00:00:00.000Z' });
+      const due = tm.getDueTriggers();
       expect(due.some(t => t.id === task.id)).toBe(true);
       setPipelineModeLookup(undefined);
     });
@@ -600,10 +614,10 @@ describe('TaskManager', () => {
         scheduleCron: '0 * * * *',
       });
       tm.recordTaskRun(task.id, 'transient error', 'failed');
-      expect(tm.getTask(task.id)!.status).toBe('failed');
+      expect(tm.getTrigger(task.id)!.status).toBe('failed');
 
       tm.recordTaskRun(task.id, 'all good', 'success');
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('open');           // auto-recovered
       expect(after!.last_run_status).toBe('success');
       expect(after!.next_run_at).toBeTruthy();      // still scheduled
@@ -614,7 +628,7 @@ describe('TaskManager', () => {
       const task = tm.create({ title: 'Good task', assignee: 'lynox' });
       tm.recordTaskRun(task.id, 'ok', 'success');
 
-      const after = tm.getTask(task.id);
+      const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('completed');
       expect(after!.last_run_status).toBe('success');
     });
@@ -630,10 +644,11 @@ describe('TaskManager', () => {
         scheduleCron: '0 9 1 * *',
         pipelineParams: JSON.stringify({ month: '2026-06' }),
       });
-      const stored = tm.getTask(task.id);
+      // createPipelineTask produces an AGENT-TRIGGER — read it back via getTrigger.
+      const stored = tm.getTrigger(task.id);
       expect(stored!.pipeline_params).toBe(JSON.stringify({ month: '2026-06' }));
       expect(stored!.pipeline_id).toBe('wf-1');
-      // A fresh scheduled task is enabled by default (the column defaults to 1).
+      // A fresh scheduled trigger is enabled by default (the column defaults to 1).
       expect(stored!.enabled).toBe(1);
     });
 
@@ -643,13 +658,13 @@ describe('TaskManager', () => {
         pipelineParams: JSON.stringify({ a: 1 }),
       });
       expect(tm.setEnabled(task.id, false)).toBe(true);
-      let stored = tm.getTask(task.id);
+      let stored = tm.getTrigger(task.id);
       expect(stored!.enabled).toBe(0);
       // schedule + params survive the disable.
       expect(stored!.schedule_cron).toBe('0 9 * * *');
       expect(stored!.pipeline_params).toBe(JSON.stringify({ a: 1 }));
       expect(tm.setEnabled(task.id, true)).toBe(true);
-      stored = tm.getTask(task.id);
+      stored = tm.getTrigger(task.id);
       expect(stored!.enabled).toBe(1);
     });
 
@@ -657,20 +672,21 @@ describe('TaskManager', () => {
       expect(tm.setEnabled('does-not-exist', false)).toBe(false);
     });
 
-    it('a disabled task is excluded from getDueTasks and re-enabling restores it (reversible, no side effects)', () => {
-      // A due one-shot scheduled task (past next_run_at, status open).
+    it('a disabled task is excluded from getDueTriggers and re-enabling restores it (reversible, no side effects)', () => {
+      // A due one-shot scheduled AGENT-TRIGGER (past next_run_at, status open).
+      // taskType='scheduled' + nextRunAt routes it to the `triggers` table.
       const t = tm.create({ title: 'Due', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z' });
-      expect(tm.getDueTasks().some((x) => x.id === t.id)).toBe(true);
+      expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(true);
 
       tm.setEnabled(t.id, false);
-      expect(tm.getDueTasks().some((x) => x.id === t.id)).toBe(false);
+      expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(false);
       // Crucially, the disable did NOT complete the one-shot — its status is
-      // untouched, so re-enabling resurrects it (the bug the getDueTasks-level
+      // untouched, so re-enabling resurrects it (the bug the getDueTriggers-level
       // filter avoids vs. skipping after selection).
-      expect(tm.getTask(t.id)!.status).toBe('open');
+      expect(tm.getTrigger(t.id)!.status).toBe('open');
 
       tm.setEnabled(t.id, true);
-      expect(tm.getDueTasks().some((x) => x.id === t.id)).toBe(true);
+      expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(true);
     });
   });
 });

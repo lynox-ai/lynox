@@ -6,7 +6,7 @@ import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import type { TaskRecord, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, InlinePipelineStep, CapabilityContract } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
@@ -872,6 +872,126 @@ const MIGRATIONS: string[] = [
   // Nullable: ad-hoc / inline (non-saved-workflow) runs have no source workflow.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (41);
    ALTER TABLE pipeline_runs ADD COLUMN workflow_id TEXT;`,
+
+  // v42: split the conflated \`tasks\` table into TWO primitives (pre-customer
+  // foundation, so no later live-customer-data migration is needed):
+  //   - \`tasks\`     = USER-TODOs (project-management work lynox tracks FOR the
+  //                     user: title/due_date/priority/status, assignee=user, the
+  //                     "perceive/track" side — NEVER fired by the WorkerLoop).
+  //   - \`triggers\`  = AGENT-TRIGGER rows (cron/watch/pipeline/reminder/backup,
+  //                     assignee=lynox, next_run_at — the "act" side, fired by the
+  //                     WorkerLoop).
+  // A row is a TRIGGER if it carries ANY firing/agent attribute; the predicate is
+  // NULL-safe (COALESCE) so a bare user-TODO (assignee NULL/user, no schedule,
+  // never fired, task_type='manual') stays in \`tasks\`. Runs inside the single
+  // boot transaction (atomic/crash-safe). Scope = TODO⟂trigger ONLY — the trigger
+  // sub-types stay as-is (no grand "Trigger primitive" here, by design).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (42);
+
+   CREATE TABLE IF NOT EXISTS triggers (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','failed')),
+     assignee TEXT,
+     scope_type TEXT NOT NULL DEFAULT 'project',
+     scope_id TEXT NOT NULL DEFAULT '',
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     schedule_cron TEXT,
+     next_run_at TEXT,
+     last_run_at TEXT,
+     last_run_result TEXT,
+     last_run_status TEXT,
+     task_type TEXT NOT NULL DEFAULT 'manual',
+     watch_config TEXT,
+     max_retries INTEGER NOT NULL DEFAULT 0,
+     retry_count INTEGER NOT NULL DEFAULT 0,
+     notification_channel TEXT,
+     pipeline_id TEXT,
+     pipeline_params TEXT,
+     enabled INTEGER NOT NULL DEFAULT 1
+   );
+
+   INSERT INTO triggers (
+     id, title, description, status, assignee, scope_type, scope_id, created_at, updated_at,
+     schedule_cron, next_run_at, last_run_at, last_run_result, last_run_status, task_type,
+     watch_config, max_retries, retry_count, notification_channel, pipeline_id, pipeline_params, enabled
+   )
+   SELECT
+     id, title, description, status, assignee, scope_type, scope_id, created_at, updated_at,
+     schedule_cron, next_run_at, last_run_at, last_run_result, last_run_status, task_type,
+     watch_config, max_retries, retry_count, notification_channel, pipeline_id, pipeline_params, enabled
+   FROM tasks
+   WHERE COALESCE(assignee,'') = 'lynox'
+      OR next_run_at IS NOT NULL
+      OR schedule_cron IS NOT NULL
+      OR pipeline_id IS NOT NULL
+      OR watch_config IS NOT NULL
+      OR last_run_at IS NOT NULL
+      OR COALESCE(task_type,'manual') <> 'manual';
+
+   CREATE INDEX IF NOT EXISTS idx_triggers_next_run ON triggers(next_run_at);
+   CREATE INDEX IF NOT EXISTS idx_triggers_type ON triggers(task_type);
+   CREATE INDEX IF NOT EXISTS idx_triggers_pipeline_enabled ON triggers(enabled) WHERE task_type = 'pipeline';
+   CREATE INDEX IF NOT EXISTS idx_triggers_scope ON triggers(scope_type, scope_id);
+
+   CREATE TABLE tasks_v42 (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','failed')),
+     priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low','medium','high','urgent')),
+     assignee TEXT,
+     scope_type TEXT NOT NULL DEFAULT 'project',
+     scope_id TEXT NOT NULL DEFAULT '',
+     due_date TEXT,
+     tags TEXT,
+     parent_task_id TEXT REFERENCES tasks_v42(id),
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     completed_at TEXT
+   );
+
+   INSERT INTO tasks_v42 (
+     id, title, description, status, priority, assignee, scope_type, scope_id,
+     due_date, tags, parent_task_id, created_at, updated_at, completed_at
+   )
+   SELECT
+     id, title, description, status, priority, assignee, scope_type, scope_id,
+     due_date, tags,
+     -- A subtask whose parent moved to \`triggers\` would dangle the self-FK
+     -- (\`parent_task_id REFERENCES tasks_v42(id)\`) and, with foreign_keys=ON,
+     -- abort the whole boot migration → the catch in _openOrRecreate would
+     -- rename the entire history DB to .corrupt = total tenant data loss. Null
+     -- such a cross-table parent ref; TODO↔TODO subtask links are preserved.
+     CASE WHEN parent_task_id IN (
+            SELECT id FROM tasks WHERE
+                 COALESCE(assignee,'') = 'lynox' OR next_run_at IS NOT NULL
+              OR schedule_cron IS NOT NULL OR pipeline_id IS NOT NULL
+              OR watch_config IS NOT NULL OR last_run_at IS NOT NULL
+              OR COALESCE(task_type,'manual') <> 'manual'
+          ) THEN NULL ELSE parent_task_id END,
+     created_at, updated_at, completed_at
+   FROM tasks
+   WHERE NOT (
+        COALESCE(assignee,'') = 'lynox'
+     OR next_run_at IS NOT NULL
+     OR schedule_cron IS NOT NULL
+     OR pipeline_id IS NOT NULL
+     OR watch_config IS NOT NULL
+     OR last_run_at IS NOT NULL
+     OR COALESCE(task_type,'manual') <> 'manual'
+   );
+
+   DROP TABLE tasks;
+   ALTER TABLE tasks_v42 RENAME TO tasks;
+
+   CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+   CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks(scope_type, scope_id);
+   CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+   CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+   CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);`,
 ];
 
 export class RunHistory {
@@ -1925,9 +2045,9 @@ export class RunHistory {
     return persistence.setWorkflowConfirmedAt(this.db, id, confirmedAt);
   }
 
-  /** Slice B2: flip a scheduled task's cron kill-switch. */
-  setTaskEnabled(id: string, enabled: boolean): boolean {
-    return persistence.setTaskEnabled(this.db, id, enabled);
+  /** Slice B2: flip a scheduled trigger's cron kill-switch. */
+  setTriggerEnabled(id: string, enabled: boolean): boolean {
+    return persistence.setTriggerEnabled(this.db, id, enabled);
   }
 
   /** Delete a planned pipeline. Returns false if no row matched. */
@@ -1951,6 +2071,19 @@ export class RunHistory {
     dueDate?: string | undefined;
     tags?: string | undefined;
     parentTaskId?: string | undefined;
+  }): void {
+    persistence.insertTask(this.db, params);
+  }
+
+  /** Insert an AGENT-TRIGGER row (cron/watch/pipeline/reminder/backup). */
+  insertTrigger(params: {
+    id: string;
+    title: string;
+    description?: string | undefined;
+    status?: string | undefined;
+    assignee?: string | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
     scheduleCron?: string | undefined;
     nextRunAt?: string | undefined;
     taskType?: string | undefined;
@@ -1960,7 +2093,7 @@ export class RunHistory {
     pipelineId?: string | undefined;
     pipelineParams?: string | undefined;
   }): void {
-    persistence.insertTask(this.db, params);
+    persistence.insertTrigger(this.db, params);
   }
 
   /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */
@@ -1978,18 +2111,36 @@ export class RunHistory {
     dueDate?: string | undefined;
     tags?: string | undefined;
     completedAt?: string | undefined;
-    nextRunAt?: string | undefined;
-    scheduleCron?: string | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return persistence.updateTask(this.db, id, params, opts);
+  }
+
+  /** Update an AGENT-TRIGGER row. */
+  updateTrigger(id: string, params: {
+    title?: string | undefined;
+    description?: string | undefined;
+    status?: string | undefined;
+    assignee?: string | undefined;
+    nextRunAt?: string | null | undefined;
+    scheduleCron?: string | null | undefined;
+  }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
+    return persistence.updateTrigger(this.db, id, params, opts);
   }
 
   getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
     return persistence.getTask(this.db, id, opts);
   }
 
+  getTrigger(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TriggerRecord | undefined {
+    return persistence.getTrigger(this.db, id, opts);
+  }
+
   deleteTask(id: string): boolean {
     return persistence.deleteTask(this.db, id);
+  }
+
+  deleteTrigger(id: string): boolean {
+    return persistence.deleteTrigger(this.db, id);
   }
 
   getTasks(opts?: {
@@ -2011,33 +2162,45 @@ export class RunHistory {
     return persistence.getOverdueTasks(this.db, scopes);
   }
 
-  getDueTasks(): TaskRecord[] {
-    return persistence.getDueTasks(this.db);
+  /** List AGENT-TRIGGERs (cron/watch/pipeline/reminder/backup). */
+  getTriggers(opts?: {
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    status?: string | undefined;
+    taskType?: string | undefined;
+    limit?: number | undefined;
+  }): TriggerRecord[] {
+    return persistence.getTriggers(this.db, opts);
   }
 
-  /** Tasks that actively reference a saved workflow (Slice C destructive-edit
+  /** Triggers due for execution (next_run_at <= now, not terminal). Fired by
+   *  the WorkerLoop. */
+  getDueTriggers(): TriggerRecord[] {
+    return persistence.getDueTriggers(this.db);
+  }
+
+  /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
-  getTasksByPipelineId(pipelineId: string): TaskRecord[] {
-    return persistence.getTasksByPipelineId(this.db, pipelineId);
+  getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
+    return persistence.getTriggersByPipelineId(this.db, pipelineId);
   }
 
-  updateTaskRunResult(id: string, update: {
+  updateTriggerRunResult(id: string, update: {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
     // `undefined` leaves next_run_at unchanged; `null` clears it.
-    // Clearing is required after a one-shot task reaches a terminal
-    // state, otherwise getDueTasks would re-select it forever.
+    // Clearing is required after a one-shot trigger reaches a terminal
+    // state, otherwise getDueTriggers would re-select it forever.
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    persistence.updateTaskRunResult(this.db, id, update);
+    persistence.updateTriggerRunResult(this.db, id, update);
   }
 
-  /** Update the watch_config JSON for a watch task. */
-  updateTaskWatchConfig(id: string, watchConfig: string): void {
-    this.db.prepare('UPDATE tasks SET watch_config = ?, updated_at = ? WHERE id = ?')
-      .run(watchConfig, new Date().toISOString(), id);
+  /** Update the watch_config JSON for a watch trigger. */
+  updateTriggerWatchConfig(id: string, watchConfig: string): void {
+    persistence.updateTriggerWatchConfig(this.db, id, watchConfig);
   }
 
   /**

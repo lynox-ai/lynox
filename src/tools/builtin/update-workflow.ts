@@ -82,14 +82,14 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
 
     // Destructive-edit guard (U5): editing a scheduled workflow changes what its
     // next run does — require explicit confirmation the agent relays to the user.
-    const activeTasks = runHistory.getTasksByPipelineId(planned.id);
-    if (activeTasks.length > 0 && input.confirm !== true) {
-      const cronCount = activeTasks.filter(t => t.schedule_cron).length;
+    const activeTriggers = runHistory.getTriggersByPipelineId(planned.id);
+    if (activeTriggers.length > 0 && input.confirm !== true) {
+      const cronCount = activeTriggers.filter(t => t.schedule_cron).length;
       const contractNote = planned.capabilityContract
         ? ' Because this workflow is contract-governed, the edit also resets its first-run-confirm — the schedule pauses until it is re-confirmed.'
         : '';
       return (
-        `⚠️ This workflow is scheduled (${activeTasks.length} active task${activeTasks.length === 1 ? '' : 's'}` +
+        `⚠️ This workflow is scheduled (${activeTriggers.length} active task${activeTriggers.length === 1 ? '' : 's'}` +
         `${cronCount > 0 ? `, ${cronCount} on a cron` : ''}) — editing its steps changes what the next run does. ` +
         `Confirm with the user, then call update_workflow_steps again with "confirm": true.${contractNote}`
       );
