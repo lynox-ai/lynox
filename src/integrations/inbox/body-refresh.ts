@@ -122,10 +122,9 @@ export async function refreshItemBody(
   // Match strategy (most → least precise):
   //   1. v11 Message-ID — RFC 5322 ID is unique per mail. Direct lookup.
   //   2. resolveThreadKey() — synthesised thread key, matches the watcher path.
-  // resolveThreadKey is duplicated from watcher-hook.ts on purpose — both
-  // call sites must agree on the synthesised key shape so dedup never
-  // collapses unrelated mails. An import would tangle the refresh path
-  // into the live-watcher module.
+  // resolveThreadKey is single-sourced in mail/thread-key.ts — every call site
+  // (inbound watcher, backfill, this refresh path, reconcile) MUST agree on the
+  // synthesised key shape so dedup never collapses unrelated mails.
   let match: MailEnvelope | undefined;
   if (opts.item.messageId !== undefined && opts.item.messageId !== '') {
     match = envelopes.find((env) => env.messageId === opts.item.messageId);

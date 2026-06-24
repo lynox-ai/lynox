@@ -1782,6 +1782,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.bulk_snooze_tomorrow_hint': { de: 'Bis morgen snoozen', en: 'Snooze until tomorrow' },
 	'inbox.bulk_clear': { de: 'Auswahl löschen', en: 'Clear selection' },
 	'inbox.bulk_undo_toast': { de: '{count} archiviert', en: '{count} archived' },
+	'inbox.bulk_undo_toast_snoozed': { de: '{count} gesnoozt', en: '{count} snoozed' },
 	'inbox.bulk_undo': { de: 'Rückgängig', en: 'Undo' },
 	'inbox.bulk_escalate': { de: '{count} im Chat', en: '{count} in chat' },
 	'inbox.bulk_escalate_prompt': { de: 'Hilf mir, diese E-Mails zu bearbeiten:', en: 'Help me work through these emails:' },

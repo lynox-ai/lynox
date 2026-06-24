@@ -31,6 +31,7 @@
 		clearBulkSelection,
 		undoBulk,
 		undoLastAction,
+		type BulkAction,
 		type InboxItem,
 		type InboxZone,
 	} from '../stores/inbox.svelte.js';
@@ -200,10 +201,12 @@
 	// Bulk actions surface their 60s undo through the shared toast (one toast
 	// region, not a second stack colliding in the same corner). The toast
 	// auto-dismisses after the undo window; clicking "Rückgängig" reverses it.
-	function showBulkUndo(bulkId: string, count: number): void {
+	// The copy reflects the actual action — a snooze must not read "archived".
+	function showBulkUndo(bulkId: string, action: BulkAction, count: number): void {
 		const undoZone = zone === 'snoozed' ? 'requires_user' : zone;
+		const msgKey = action === 'snoozed' ? 'inbox.bulk_undo_toast_snoozed' : 'inbox.bulk_undo_toast';
 		addToast(
-			t('inbox.bulk_undo_toast').replace('{count}', String(count)),
+			t(msgKey).replace('{count}', String(count)),
 			'info',
 			60_000,
 			{ label: t('inbox.bulk_undo'), handler: () => void undoBulk(bulkId, undoZone) },
@@ -456,7 +459,7 @@
 					<ColdStartBanner />
 					<InboxSearchBar value={searchQuery} onChange={(q) => (searchQuery = q)} />
 					<InboxBulkBar
-						onApplied={(bulkId, _action, count) => showBulkUndo(bulkId, count)}
+						onApplied={(bulkId, action, count) => showBulkUndo(bulkId, action, count)}
 						onEscalate={escalateBulkToChat}
 					/>
 					{#if reclassifyBanner}
