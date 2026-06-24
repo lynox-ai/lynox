@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { isDangerous, normalizeCommand, splitCommandSegments } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
+import { channels } from '../core/observability.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
 // in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
@@ -1908,5 +1910,73 @@ describe('isDangerous', () => {
         expect(tool.destructive?.check?.({ action: safe })).toBeNull();
       }
     });
+  });
+});
+
+// === Slice B: capability-contract grant ===
+describe('isDangerous — capability-contract grant', () => {
+  // A contract granting POST/PUT to api.acme.test under /v1/reports/*.
+  const contract: CapabilityContract = {
+    version: 4,
+    grantedTools: ['http_request'],
+    httpMethods: ['POST', 'PUT'],
+    hostPatterns: ['api.acme.test'],
+    pathPatterns: ['/v1/reports/*'],
+    paramConstraints: {},
+  };
+  const post = (url: string, method = 'POST') => ({ url, method });
+  // isDangerous(tool, input, autonomy, preApproval, audit, entry, runId, contract)
+  const guard = (input: unknown, c?: CapabilityContract) =>
+    isDangerous('http_request', input, 'autonomous', undefined, undefined, undefined, undefined, c);
+
+  it('grants a declared POST to the pinned host+path+method (warn-level lifted)', () => {
+    expect(guard(post('https://api.acme.test/v1/reports/monthly'), contract)).toBeNull();
+  });
+
+  it('denies a POST to a DIFFERENT host even when method+path match (S1 exfil block)', () => {
+    expect(guard(post('https://evil.test/v1/reports/monthly'), contract)).toContain('write operation');
+  });
+
+  it('denies a method the contract did not pin', () => {
+    // PATCH ∉ httpMethods → not granted → the warn-level denial stands.
+    expect(guard(post('https://api.acme.test/v1/reports/monthly', 'PATCH'), contract)).toContain('write operation');
+  });
+
+  it('denies a path outside the pinned pattern', () => {
+    expect(guard(post('https://api.acme.test/v1/admin/users'), contract)).toContain('write operation');
+  });
+
+  it('denies a tool not listed in grantedTools', () => {
+    const noHttp: CapabilityContract = { ...contract, grantedTools: [] };
+    expect(guard(post('https://api.acme.test/v1/reports/monthly'), noHttp)).toContain('write operation');
+  });
+
+  it('without a contract, the warn-level autonomous denial is unchanged', () => {
+    expect(guard(post('https://api.acme.test/v1/reports/monthly'))).toContain('write operation');
+  });
+
+  it('NEVER lifts a [BLOCKED] critical — http DELETE stays blocked even if the contract pins DELETE', () => {
+    const delContract: CapabilityContract = { ...contract, httpMethods: ['DELETE'] };
+    const r = guard(post('https://api.acme.test/v1/reports/monthly', 'DELETE'), delContract);
+    expect(r).toContain('[BLOCKED');
+  });
+
+  it('S4: a contract listing bash can NOT lift a CRITICAL_BASH command — the post-substitution scan still governs', () => {
+    const bashContract: CapabilityContract = { ...contract, grantedTools: ['http_request', 'bash'] };
+    const r = isDangerous('bash', { command: 'rm -rf /' }, 'autonomous', undefined, undefined, undefined, undefined, bashContract);
+    expect(r).toContain('[BLOCKED');
+  });
+
+  it('a denied contract-governed call stamps the contract version onto the audit channel', () => {
+    const events: Array<{ contractVersion?: number | undefined }> = [];
+    const handler = (m: unknown): void => { events.push(m as { contractVersion?: number | undefined }); };
+    channels.guardBlock.subscribe(handler);
+    try {
+      // Wrong host → denied → published with the governing contract's version.
+      guard(post('https://evil.test/v1/reports/monthly'), contract);
+    } finally {
+      channels.guardBlock.unsubscribe(handler);
+    }
+    expect(events.at(-1)?.contractVersion).toBe(4);
   });
 });

@@ -96,4 +96,85 @@ describe('bindWorkflowParameters', () => {
       expect(r.ok).toBe(false);
     });
   });
+
+  // === Slice B: capability-contract param constraints (S1) ===
+  describe('capability-contract constraints', () => {
+    it('accepts a value inside an enum constraint', () => {
+      const r = bindWorkflowParameters([param({ name: 'env' })], { env: 'staging' }, {
+        constraints: { env: { enum: ['staging', 'prod'] } },
+      });
+      expect(r).toEqual({ ok: true, params: { env: 'staging' } });
+    });
+
+    it('rejects a value outside an enum constraint', () => {
+      const r = bindWorkflowParameters([param({ name: 'env' })], { env: 'evil' }, {
+        constraints: { env: { enum: ['staging', 'prod'] } },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain('must be one of');
+    });
+
+    it('rejects a value failing a regex constraint', () => {
+      const r = bindWorkflowParameters([param({ name: 'slug' })], { slug: 'has spaces' }, {
+        constraints: { slug: { regex: '^[a-z0-9-]+$' } },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain('pattern');
+    });
+
+    it('accepts a value matching a regex constraint', () => {
+      const r = bindWorkflowParameters([param({ name: 'slug' })], { slug: 'monthly-report' }, {
+        constraints: { slug: { regex: '^[a-z0-9-]+$' } },
+      });
+      expect(r.ok).toBe(true);
+    });
+
+    it('enforces numeric min/max on a coerced number', () => {
+      const c = { constraints: { m: { min: 1, max: 12 } } };
+      expect(bindWorkflowParameters([param({ name: 'm', type: 'number' })], { m: '13' }, c).ok).toBe(false);
+      expect(bindWorkflowParameters([param({ name: 'm', type: 'number' })], { m: '0' }, c).ok).toBe(false);
+      expect(bindWorkflowParameters([param({ name: 'm', type: 'number' })], { m: '6' }, c)).toEqual({ ok: true, params: { m: 6 } });
+    });
+
+    it('constrains a defaulted value too (a stored default cannot dodge the contract)', () => {
+      const r = bindWorkflowParameters([param({ name: 'env', defaultValue: 'evil' })], {}, {
+        constraints: { env: { enum: ['staging', 'prod'] } },
+      });
+      expect(r.ok).toBe(false);
+    });
+
+    it('is a no-op when a param has no declared constraint (existing behaviour unchanged)', () => {
+      const r = bindWorkflowParameters([param({ name: 'free' })], { free: 'anything goes' }, {
+        constraints: { other: { enum: ['x'] } },
+      });
+      expect(r).toEqual({ ok: true, params: { free: 'anything goes' } });
+    });
+
+    it('an EMPTY enum denies all values (deny-all, never allow-all)', () => {
+      const r = bindWorkflowParameters([param({ name: 'env' })], { env: 'anything' }, {
+        constraints: { env: { enum: [] } },
+      });
+      expect(r.ok).toBe(false);
+    });
+
+    it('anchors the regex to a FULL match — a substring match is rejected', () => {
+      const c = { constraints: { id: { regex: 'reports' } } };
+      // un-anchored substring would match, but a full-match anchor rejects it.
+      expect(bindWorkflowParameters([param({ name: 'id' })], { id: 'reports/../admin' }, c).ok).toBe(false);
+      expect(bindWorkflowParameters([param({ name: 'id' })], { id: 'reports' }, c).ok).toBe(true);
+    });
+
+    it('min/max rejects a non-numeric (string) param value instead of loosely coercing it', () => {
+      // A string param '0x10' must NOT satisfy a numeric bound via Number('0x10')=16.
+      const r = bindWorkflowParameters([param({ name: 's', type: 'string' })], { s: '0x10' }, {
+        constraints: { s: { min: 1, max: 100 } },
+      });
+      expect(r.ok).toBe(false);
+      // The same min/max on a real number param works.
+      const ok = bindWorkflowParameters([param({ name: 'n', type: 'number' })], { n: '16' }, {
+        constraints: { n: { min: 1, max: 100 } },
+      });
+      expect(ok).toEqual({ ok: true, params: { n: 16 } });
+    });
+  });
 });

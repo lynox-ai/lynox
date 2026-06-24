@@ -1,6 +1,7 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
 import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry } from '../types/index.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive } from '../core/workspace.js';
 import { channels } from '../core/observability.js';
 import { extractMatchString, globToRegex } from '../core/pre-approve.js';
@@ -274,27 +275,86 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contractVersion?: number): string | null {
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
-  // Pre-approval can override non-critical dangers.
-  // Critical ops (BLOCKED) are never auto-approved — they contain "[BLOCKED" marker.
-  if (preApproval && !warning.includes('[BLOCKED')) {
-    if (_matchesPreApproval(toolName, input, preApproval, audit)) {
+  // Pre-approval + capability-contract can override NON-critical dangers only.
+  // Critical ops ([BLOCKED]) are never auto-approved — they carry the "[BLOCKED"
+  // marker and fall straight through to the audit publish below.
+  if (!warning.includes('[BLOCKED')) {
+    if (preApproval && _matchesPreApproval(toolName, input, preApproval, audit)) {
+      return null;
+    }
+    // Capability-contract grant (Slice B): a confirmed contract lifts a
+    // warn-level autonomous denial for an explicitly declared (tool, method,
+    // host, path) tuple — and only that tuple. The grant requires host AND path
+    // AND method to all match, so a re-target param that resolved into a
+    // different host/path/method is NOT granted → the warning stands → denied
+    // (the S1 fix the host-only applyHostPolicy misses). Never reached for a
+    // [BLOCKED] critical (guarded above), so a contract can't lift CRITICAL_BASH
+    // / sensitive-path / http DELETE — the post-substitution bash scan in
+    // _detectDanger therefore still governs every bash call regardless of the
+    // contract (PRD §7 S4).
+    if (contract && contractGrants(toolName, input, contract)) {
       return null;
     }
   }
 
   // Publish guard block for observability / audit. A2: stamp the run id this
   // decision occurred in (so a headless step's block is attributable post-hoc)
-  // and the capability-contract version that governed it (null/undefined in
-  // A1/A2 where the seam carries no contract — Slice B fills it).
+  // and the capability-contract version that governed it (Slice B: real once a
+  // contract is present; null/undefined for an ungoverned run).
   if (channels.guardBlock.hasSubscribers) {
-    channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion });
+    channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion: contract?.version });
   }
 
   return warning;
+}
+
+/** A value matches if any glob pattern in the list matches it (empty list = no match). */
+function _matchesAnyGlob(value: string, patterns: string[] | undefined): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  for (const p of patterns) {
+    if (globToRegex(p).test(value)) return true;
+  }
+  return false;
+}
+
+/**
+ * Does the capability contract explicitly grant this exact tool call? Additive
+ * grant only (the caller already ruled out [BLOCKED] criticals). B1 scopes the
+ * grant to `http_request` — the documented exfil write vector — and requires the
+ * tool to be listed in `grantedTools` AND its method ∈ `httpMethods` AND the
+ * resolved hostname ∈ `hostPatterns` AND the resolved pathname ∈ `pathPatterns`.
+ * Any other tool is never granted (so e.g. a spawn_agent injection warning or a
+ * non-workspace write can't be laundered through a contract).
+ *
+ * Exported because the `http_request` tool has a SECOND, independent
+ * first-use-consent gate (`http.ts`) that the `isDangerous` grant alone doesn't
+ * satisfy — a contract that grants a write IS the pre-declared consent, so that
+ * gate (and its redirect re-validation) calls this to recognise the grant.
+ */
+export function contractGrants(toolName: string, input: unknown, contract: CapabilityContract): boolean {
+  if (!contract.grantedTools?.includes(toolName)) return false;
+  if (toolName !== 'http_request') return false;
+  if (!input || typeof input !== 'object') return false;
+
+  const obj = input as { url?: unknown; method?: unknown };
+  const method = (typeof obj.method === 'string' ? obj.method : 'GET').toUpperCase();
+  if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
+  if (typeof obj.url !== 'string') return false;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(obj.url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (!_matchesAnyGlob(host, contract.hostPatterns)) return false;
+  if (!_matchesAnyGlob(parsed.pathname, contract.pathPatterns)) return false;
+  return true;
 }
 
 /**

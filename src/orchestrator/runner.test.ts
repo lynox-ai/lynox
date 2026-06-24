@@ -3,10 +3,11 @@ import { channel } from 'node:diagnostics_channel';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runManifest, retryManifest } from './runner.js';
+import { runManifest, retryManifest, workflowBoundExceeded } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig } from '../types/index.js';
+import type { SessionCounters } from '../types/agent.js';
 
 const CONFIG: LynoxUserConfig = { api_key: 'test-key' };
 
@@ -911,5 +912,82 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
       h.close();
       cleanup();
     }
+  });
+});
+
+// === Slice B: per-workflow DoS bounds (S3) ===
+describe('workflowBoundExceeded', () => {
+  const counters: SessionCounters = {
+    httpRequests: 0,
+    writeBytes: 0,
+    costUSD: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
+
+  it('returns null when no limits are set (unbounded run)', () => {
+    expect(workflowBoundExceeded(undefined, Date.now(), 999, counters)).toBeNull();
+  });
+
+  it('returns null while within all bounds', () => {
+    const limits = { maxIterations: 50, maxWallClockMs: 60_000, maxSpendUsd: 5 };
+    expect(workflowBoundExceeded(limits, Date.now(), 3, { ...counters, costUSD: 0.2 })).toBeNull();
+  });
+
+  it('aborts on the step (iteration) limit', () => {
+    const r = workflowBoundExceeded({ maxIterations: 5 }, Date.now(), 5, counters);
+    expect(r).toContain('step limit');
+  });
+
+  it('aborts on the wall-clock limit', () => {
+    // Started 10s ago, limit 1s → exceeded.
+    const r = workflowBoundExceeded({ maxWallClockMs: 1_000 }, Date.now() - 10_000, 0, counters);
+    expect(r).toContain('wall-clock');
+  });
+
+  it('aborts on the spend limit (opt-in)', () => {
+    const r = workflowBoundExceeded({ maxSpendUsd: 1 }, Date.now(), 0, { ...counters, costUSD: 2.5 });
+    expect(r).toContain('spend limit');
+  });
+});
+
+describe('runManifest — DoS bound wiring', () => {
+  it('aborts a sequential run mid-way when the step limit is hit', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    // maxIterations:1 → step-1 runs, then the pre-step-2 check aborts the run.
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, limits: { maxIterations: 1 } });
+    expect(state.status).toBe('failed');
+    expect(state.error).toContain('step limit');
+    expect(state.outputs.has('step-1')).toBe(true);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('does not abort a run that stays within its limits', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, limits: { maxIterations: 50, maxWallClockMs: 60_000 } });
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(2);
+  });
+
+  it('also enforces the bound on the PARALLEL execution path (between phases)', async () => {
+    // manifest_version '1.1' with a dependency → 2 phases → parallel runner.
+    const parallelManifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'parallel-flow',
+      triggered_by: 'test',
+      context: {},
+      agents: [
+        { id: 'p1', agent: 'agent-a', runtime: 'mock' },
+        { id: 'p2', agent: 'agent-b', runtime: 'mock', input_from: ['p1'] },
+      ],
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const state = await runManifest(parallelManifest, CONFIG, { mockResponses, limits: { maxIterations: 1 } });
+    expect(state.status).toBe('failed');
+    expect(state.error).toContain('step limit');
+    expect(state.outputs.has('p1')).toBe(true);
+    expect(state.outputs.has('p2')).toBe(false);
   });
 });

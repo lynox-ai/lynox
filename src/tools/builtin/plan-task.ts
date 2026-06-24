@@ -185,12 +185,15 @@ function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: Run
   // future Workflows-editor save endpoints should call this gate too.
   assertPlannedPipelineIsValid(planned);
 
-  // Persist to the in-memory store AND pipeline_runs. plan_task is decoupled
-  // from run (D4) — the returned workflow_id must survive an engine restart or
-  // LRU eviction before run_workflow / a scheduled task_create resolves it;
-  // storePipeline alone is volatile (max 10 entries, lost on restart).
-  storePipeline(pipelineId, planned);
+  // Persist to pipeline_runs FIRST, then the in-memory store. plan_task is
+  // decoupled from run (D4) — the returned workflow_id must survive an engine
+  // restart or LRU eviction before run_workflow / a scheduled task_create
+  // resolves it; storePipeline alone is volatile (max 10 entries, lost on
+  // restart). The durable insert runs the fail-closed contract validator and
+  // throws on a bad contract, so the volatile store is only populated once the
+  // durable write succeeded (no cache holding a workflow the DB rejected).
   runHistory?.insertPlannedPipeline(planned);
+  storePipeline(pipelineId, planned);
   return pipelineId;
 }
 

@@ -5,6 +5,7 @@ import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, isPrivateIP } from '../../core/network-guard.js';
+import { contractGrants } from '../permission-guard.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -118,7 +119,18 @@ function shouldRewriteToGet(status: number, method: string): boolean {
   return (status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD';
 }
 
-export async function fetchWithValidatedRedirects(url: string, init: RequestInit, ctx?: ToolContext | undefined): Promise<Response> {
+export async function fetchWithValidatedRedirects(
+  url: string,
+  init: RequestInit,
+  ctx?: ToolContext | undefined,
+  // Slice B: for a capability-contract-governed write, every redirect hop must
+  // ALSO stay within the contract — `isDangerous`/the consent gate only saw the
+  // ORIGINAL url, so without this a 307/308 to another (network-allow-listed)
+  // host would carry the POST body past the contract's host/path pin (S1).
+  // Returns true if the hop is permitted. Omitted for non-contract calls (no
+  // redirect-behaviour change).
+  redirectGuard?: ((nextUrl: string, method: string) => boolean) | undefined,
+): Promise<Response> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
@@ -154,6 +166,9 @@ export async function fetchWithValidatedRedirects(url: string, init: RequestInit
     if (shouldRewriteToGet(response.status, method)) {
       method = 'GET';
       body = undefined;
+    }
+    if (redirectGuard && !redirectGuard(nextUrl, method)) {
+      throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
     currentUrl = nextUrl;
   }
@@ -511,7 +526,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // they don't leak between conversations. Concurrent tool_use blocks
     // against the same hostname share one prompt so we don't collide on
     // PromptStore's per-session unique index.
-    if (WRITE_METHODS.has(method)) {
+    //
+    // Slice B: a capability-contract that grants this exact (method, host, path)
+    // IS the pre-declared, human-confirmed consent — it satisfies this gate the
+    // same way an interactive "Allow" would (the grant `isDangerous` already
+    // enforced before this tool ran). This is what makes a contract-governed
+    // headless write actually execute; without it the gate below would block
+    // every unattended POST/PUT/PATCH (no `promptUser` in a background run).
+    const contractGrantsWrite =
+      agent.capabilityContract !== undefined &&
+      contractGrants('http_request', input, agent.capabilityContract);
+    if (WRITE_METHODS.has(method) && !contractGrantsWrite) {
       const hostname = new URL(input.url).hostname;
       const approved = agent.sessionCounters.approvedOutboundDomains;
       const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
@@ -576,8 +601,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     try {
       agent.sessionCounters.httpRequests++;
+      // For a contract-governed write, re-validate every redirect hop against
+      // the contract so a 307/308 can't carry the body past the host/path pin.
+      const contract = agent.capabilityContract;
+      const redirectGuard = (contractGrantsWrite && contract !== undefined)
+        ? (nextUrl: string, redirectMethod: string): boolean =>
+            contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
+        : undefined;
       const response = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, toolContext),
+        fetchWithValidatedRedirects(input.url, opts, toolContext, redirectGuard),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;

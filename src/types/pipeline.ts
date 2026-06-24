@@ -1,6 +1,26 @@
 // === Pipeline ===
 
 import type { ModelTier, ThinkingHint, EffortLevel } from './models.js';
+import type { CapabilityContract } from './capability-contract.js';
+
+/**
+ * Per-workflow resource bounds for unattended (headless/autonomous) runs — the
+ * DoS guard the entry-only `checkPersistentBudget` can't provide (PRD §4.2 S3).
+ * Enforced *inside* the run, between steps, by `runManifest`. Stored on the
+ * `PlannedPipeline` JSON blob; headless runs apply conservative defaults when a
+ * field is unset (`resolveHeadlessLimits`). The primary guard is wall-clock —
+ * it terminates a non-terminating run without capping legitimate spend (research
+ * workflows are legitimately expensive; spend is bounded by the tenant-level
+ * `checkPersistentBudget`, with `maxSpendUsd` an opt-in tighter per-run cap).
+ */
+export interface WorkflowLimits {
+  /** Abort once this much wall-clock elapsed (checked between steps). */
+  maxWallClockMs?: number | undefined;
+  /** Abort once this many steps have executed (backstop above MAX_STEPS). */
+  maxIterations?: number | undefined;
+  /** Abort once cumulative run cost exceeds this (opt-in; unset = no per-run cap). */
+  maxSpendUsd?: number | undefined;
+}
 
 export interface InlinePipelineStep {
   id: string;
@@ -107,6 +127,33 @@ export interface PlannedPipeline {
    * (`tools/builtin/pipeline.ts#backfillPlannedPipelineDefaults`).
    */
   parameters: ProcessParameter[];
+  /**
+   * Capability contract authorising this workflow's headless outbound writes
+   * (PRD §4.2). Absent = the safe autonomous-deny default (no outbound writes
+   * headless). Stored on this blob (PRD §8.1) so save→confirm→run is one seam;
+   * enforced per-tool-call at `isDangerous`. Round-trips for free
+   * (`insertPlannedPipeline` JSON-stringifies the whole pipeline); absent on
+   * legacy rows. Validated at save by `validateContractAgainstSteps` (every
+   * re-targetable param that flows into a tool call must be constrained).
+   */
+  capabilityContract?: CapabilityContract | undefined;
+  /**
+   * First-run-confirm timestamp (PRD §4.2 S2). Set once by a human at
+   * promote-to-cron after they've seen the resolved contract. **B1 defines this
+   * field as part of the storage seam; the scheduling surface that enforces it
+   * (refusing to schedule a contract-governed workflow whose `confirmedAt` is
+   * absent) is Slice B2** — until then there is no product path that writes a
+   * `capabilityContract` onto a saved workflow, so the gate is not yet
+   * load-bearing. Capture-time presence of a contract does NOT authorise
+   * unattended-N-times; this explicit human action does.
+   */
+  confirmedAt?: string | undefined;
+  /**
+   * Per-workflow DoS bounds for unattended runs (PRD §4.2 S3). Absent fields
+   * fall back to conservative headless defaults at run time
+   * (`resolveHeadlessLimits`). Round-trips on the blob.
+   */
+  limits?: WorkflowLimits | undefined;
 }
 
 // === Process Capture ===
