@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
-import type { TaskRecord, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 
 /**
@@ -70,7 +70,7 @@ export class TaskManager {
   constructor(private history: RunHistory) {}
 
   /**
-   * Look up a task by id (or id-prefix, for UX convenience). The optional
+   * Look up a USER-TODO by id (or id-prefix, for UX convenience). The optional
    * `scopeFilter` folds the ownership check into the same SQL read used by
    * the mutation path, so a sub-agent in scope A can never resolve a task
    * in scope B via short-prefix guess. Single-user installs leave it
@@ -80,7 +80,12 @@ export class TaskManager {
     return this.history.getTask(id, scopeFilter ? { scopeFilter } : undefined);
   }
 
-  create(params: TaskCreateParams): TaskRecord {
+  /** Look up an AGENT-TRIGGER by id (or id-prefix). Same scope guard as getTask. */
+  getTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TriggerRecord | undefined {
+    return this.history.getTrigger(id, scopeFilter ? { scopeFilter } : undefined);
+  }
+
+  create(params: TaskCreateParams): TaskRecord | TriggerRecord {
     const id = randomUUID().slice(0, 8);
 
     if (params.parentTaskId) {
@@ -107,21 +112,53 @@ export class TaskManager {
       resolvedTaskType = resolvedTaskType ?? 'manual';
     }
 
-    // Reject any pipeline destined for background execution (cron, explicit
-    // nextRunAt, or lynox auto-trigger above) whose mode is not 'autonomous'.
-    // All three paths detach execution from the calling session and end up at
-    // WorkerLoop, where ask_user has no live session to route back to. When
-    // the lookup is unwired (tests / headless CLI) the WorkerLoop hard gate
-    // is the backstop.
-    const willRunInBackground = Boolean(params.scheduleCron) || Boolean(resolvedNextRunAt);
-    if (willRunInBackground && params.pipelineId && pipelineModeLookup) {
-      const mode = pipelineModeLookup(params.pipelineId);
-      if (mode && mode !== 'autonomous') {
-        throw new Error(
-          `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines run via WorkerLoop (cron / nextRunAt / assignee=lynox). ` +
-          `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
-        );
+    // A row is an AGENT-TRIGGER (→ `triggers` table, fired by the WorkerLoop) if
+    // it carries ANY firing/agent attribute; otherwise it's a USER-TODO (→
+    // `tasks` table, never fired). Mirrors the migration-v42 predicate. The
+    // auto-trigger above already stamped resolvedNextRunAt for assignee=lynox.
+    const willBeTrigger = params.assignee === 'lynox'
+      || Boolean(resolvedNextRunAt)
+      || Boolean(params.scheduleCron)
+      || Boolean(params.watchConfig)
+      || Boolean(params.pipelineId)
+      || Boolean(resolvedTaskType && resolvedTaskType !== 'manual');
+
+    if (willBeTrigger) {
+      // Reject any pipeline destined for background execution (cron, explicit
+      // nextRunAt, or lynox auto-trigger above) whose mode is not 'autonomous'.
+      // All three paths detach execution from the calling session and end up at
+      // WorkerLoop, where ask_user has no live session to route back to. When
+      // the lookup is unwired (tests / headless CLI) the WorkerLoop hard gate
+      // is the backstop.
+      const willRunInBackground = Boolean(params.scheduleCron) || Boolean(resolvedNextRunAt);
+      if (willRunInBackground && params.pipelineId && pipelineModeLookup) {
+        const mode = pipelineModeLookup(params.pipelineId);
+        if (mode && mode !== 'autonomous') {
+          throw new Error(
+            `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines run via WorkerLoop (cron / nextRunAt / assignee=lynox). ` +
+            `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
+          );
+        }
       }
+
+      this.history.insertTrigger({
+        id,
+        title: params.title,
+        description: params.description,
+        assignee: params.assignee ?? 'lynox',
+        scopeType: params.scopeType ?? 'context',
+        scopeId: params.scopeId ?? '',
+        scheduleCron: params.scheduleCron,
+        nextRunAt: resolvedNextRunAt,
+        taskType: resolvedTaskType,
+        watchConfig: params.watchConfig,
+        maxRetries: params.maxRetries,
+        notificationChannel: params.notificationChannel,
+        pipelineId: params.pipelineId,
+        pipelineParams: params.pipelineParams,
+      });
+
+      return this.history.getTrigger(id)!;
     }
 
     this.history.insertTask({
@@ -135,21 +172,25 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
-      scheduleCron: params.scheduleCron,
-      nextRunAt: resolvedNextRunAt,
-      taskType: resolvedTaskType,
-      watchConfig: params.watchConfig,
-      maxRetries: params.maxRetries,
-      notificationChannel: params.notificationChannel,
-      pipelineId: params.pipelineId,
-      pipelineParams: params.pipelineParams,
     });
 
     return this.history.getTask(id)!;
   }
 
-  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | undefined {
+  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
+
+    // An AGENT-TRIGGER has no subtask cascade — just flip its status. Carry
+    // the scope guard into the UPDATE (same as the task branch) so a concurrent
+    // re-scope between getTrigger() and updateTrigger() can't let the write
+    // land on a now-out-of-scope row.
+    const trigger = this.history.getTrigger(id, scopeOpts);
+    if (trigger) {
+      const ok = this.history.updateTrigger(trigger.id, { status: 'completed' }, scopeOpts);
+      if (!ok) return undefined;
+      return this.history.getTrigger(trigger.id, scopeOpts);
+    }
+
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
 
@@ -173,18 +214,27 @@ export class TaskManager {
     return this.history.getTask(task.id, scopeOpts);
   }
 
-  reopen(id: string): TaskRecord | undefined {
-    const task = this.history.getTask(id);
-    if (!task) return undefined;
-
-    this.history.updateTask(task.id, { status: 'open', completedAt: '' });
-    return this.history.getTask(task.id);
-  }
-
-  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | undefined {
+  reopen(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
+
+    // Resolve + write under the same scope filter so a sub-agent in scope A
+    // can't reopen a trigger/task in scope B via short-prefix guess, and so
+    // the write can't land on a row re-scoped out from under the read.
+    const trigger = this.history.getTrigger(id, scopeOpts);
+    if (trigger) {
+      this.history.updateTrigger(trigger.id, { status: 'open' }, scopeOpts);
+      return this.history.getTrigger(trigger.id, scopeOpts);
+    }
+
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+
+    this.history.updateTask(task.id, { status: 'open', completedAt: '' }, scopeOpts);
+    return this.history.getTask(task.id, scopeOpts);
+  }
+
+  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | TriggerRecord | undefined {
+    const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     if (params.status && !VALID_STATUSES.has(params.status)) {
       throw new Error(`Invalid status: ${params.status}`);
@@ -211,6 +261,58 @@ export class TaskManager {
       throw new Error(`Invalid schedule: ${params.scheduleCron}. Use cron (e.g. '0 9 * * *') or shorthand ('30m', '1h', '1d').`);
     }
 
+    // AGENT-TRIGGER path: schedule fields live here (the `triggers` table). The
+    // schedule normalization is part of the trigger update — a TODO has no
+    // next_run_at / schedule_cron columns.
+    const trigger = this.history.getTrigger(id, scopeOpts);
+    if (trigger) {
+      const triggerUpdate: {
+        title?: string | undefined;
+        description?: string | undefined;
+        status?: string | undefined;
+        assignee?: string | undefined;
+        nextRunAt?: string | null | undefined;
+        scheduleCron?: string | null | undefined;
+      } = {};
+      if (params.title !== undefined) triggerUpdate.title = params.title;
+      if (params.description !== undefined) triggerUpdate.description = params.description;
+      if (params.status !== undefined) triggerUpdate.status = params.status;
+      if (params.assignee !== undefined) triggerUpdate.assignee = params.assignee;
+
+      // Schedule fields move as a pair: both nextRunAt and scheduleCron
+      // are kept consistent so the worker-loop ("next_run_at <= now") and
+      // the recurring re-fire path (recordTaskRun → nextOccurrence) never
+      // disagree on a trigger's intent. Empty-string clears wipe BOTH so an
+      // agent typing "cancel the schedule" can't leave a stale value
+      // behind; setting one positive clears the other (a one-shot drops
+      // any prior cron, a new cron drops any prior one-shot run_at).
+      if (params.nextRunAt !== undefined) {
+        // Normalise positive values to ISO so SQLite's lexicographic
+        // `next_run_at <= now` comparison stays monotonic.
+        triggerUpdate.nextRunAt = params.nextRunAt ? new Date(params.nextRunAt).toISOString() : '';
+        if (params.scheduleCron === undefined) {
+          triggerUpdate.scheduleCron = '';
+        }
+      }
+      if (params.scheduleCron !== undefined) {
+        triggerUpdate.scheduleCron = params.scheduleCron;
+        if (params.nextRunAt === undefined) {
+          // Positive cron → recompute the next fire from it.
+          // Empty cron → clear next_run_at too (full un-schedule).
+          triggerUpdate.nextRunAt = params.scheduleCron
+            ? nextOccurrence(params.scheduleCron).toISOString()
+            : '';
+        }
+      }
+
+      const ok = this.history.updateTrigger(trigger.id, triggerUpdate, scopeOpts);
+      if (!ok) return undefined;
+      return this.history.getTrigger(trigger.id, scopeOpts);
+    }
+
+    const task = this.history.getTask(id, scopeOpts);
+    if (!task) return undefined;
+
     const updateParams: {
       title?: string | undefined;
       description?: string | undefined;
@@ -220,8 +322,6 @@ export class TaskManager {
       dueDate?: string | undefined;
       tags?: string | undefined;
       completedAt?: string | undefined;
-      nextRunAt?: string | undefined;
-      scheduleCron?: string | undefined;
     } = {};
 
     if (params.title !== undefined) updateParams.title = params.title;
@@ -231,32 +331,6 @@ export class TaskManager {
     if (params.assignee !== undefined) updateParams.assignee = params.assignee;
     if (params.dueDate !== undefined) updateParams.dueDate = params.dueDate ? params.dueDate.slice(0, 10) : '';
     if (params.tags !== undefined) updateParams.tags = params.tags ? JSON.stringify(params.tags) : '';
-
-    // Schedule fields move as a pair: both nextRunAt and scheduleCron
-    // are kept consistent so the worker-loop ("next_run_at <= now") and
-    // the recurring re-fire path (recordTaskRun → nextOccurrence) never
-    // disagree on a task's intent. Empty-string clears wipe BOTH so an
-    // agent typing "cancel the schedule" can't leave a stale value
-    // behind; setting one positive clears the other (a one-shot drops
-    // any prior cron, a new cron drops any prior one-shot run_at).
-    if (params.nextRunAt !== undefined) {
-      // Normalise positive values to ISO so SQLite's lexicographic
-      // `next_run_at <= now` comparison stays monotonic.
-      updateParams.nextRunAt = params.nextRunAt ? new Date(params.nextRunAt).toISOString() : '';
-      if (params.scheduleCron === undefined) {
-        updateParams.scheduleCron = '';
-      }
-    }
-    if (params.scheduleCron !== undefined) {
-      updateParams.scheduleCron = params.scheduleCron;
-      if (params.nextRunAt === undefined) {
-        // Positive cron → recompute the next fire from it.
-        // Empty cron → clear next_run_at too (full un-schedule).
-        updateParams.nextRunAt = params.scheduleCron
-          ? nextOccurrence(params.scheduleCron).toISOString()
-          : '';
-      }
-    }
 
     if (params.status === 'completed' && task.status !== 'completed') {
       updateParams.completedAt = new Date().toISOString();
@@ -278,22 +352,36 @@ export class TaskManager {
     });
   }
 
-  getAssignedToLynox(scopes?: MemoryScopeRef[]): TaskRecord[] {
-    // Exclude terminal states. `failed` is terminal for one-shot tasks
+  /** List AGENT-TRIGGERs (the WorkerLoop-fired rows: cron/watch/pipeline/etc). */
+  listTriggers(opts?: { status?: TaskStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
+    return this.history.getTriggers({
+      status: opts?.status,
+      taskType: opts?.taskType,
+      scopeType: opts?.scope?.type,
+      scopeId: opts?.scope?.id,
+    });
+  }
+
+  /** The AGENT-TRIGGER rows lynox fires — surfaced in the briefing as "your
+   *  tasks". Post-split these all live in the `triggers` table (every trigger
+   *  is assignee=lynox), so no assignee filter is needed; just exclude terminal
+   *  states. */
+  getAssignedToLynox(scopes?: MemoryScopeRef[]): TriggerRecord[] {
+    // Exclude terminal states. `failed` is terminal for one-shot triggers
     // (no retries remaining) — same as `completed`, it must not count
     // as active work or get re-surfaced in the briefing.
-    const isActive = (t: TaskRecord) => t.status !== 'completed' && t.status !== 'failed';
+    const isActive = (t: TriggerRecord) => t.status !== 'completed' && t.status !== 'failed';
     if (scopes && scopes.length > 0) {
-      const all: TaskRecord[] = [];
+      const all: TriggerRecord[] = [];
       for (const scope of scopes) {
-        const tasks = this.history.getTasks({ assignee: 'lynox', scopeType: scope.type, scopeId: scope.id });
-        for (const t of tasks) {
+        const triggers = this.history.getTriggers({ scopeType: scope.type, scopeId: scope.id });
+        for (const t of triggers) {
           if (!all.some(existing => existing.id === t.id)) all.push(t);
         }
       }
       return all.filter(isActive);
     }
-    return this.history.getTasks({ assignee: 'lynox' }).filter(isActive);
+    return this.history.getTriggers().filter(isActive);
   }
 
   getWeekSummary(scopes?: MemoryScopeRef[]): WeekSummary {
@@ -359,8 +447,10 @@ export class TaskManager {
     if (pendingLynox.length > 0) {
       parts.push('Your tasks (assigned to lynox) — propose working on these:');
       for (const t of pendingLynox) {
-        const due = t.due_date ? `, due ${t.due_date}` : '';
-        parts.push(`  - "${t.title}" [${t.status}]${due}`);
+        // These are AGENT-TRIGGERs — no `due_date` column; surface the next
+        // scheduled fire instead when present.
+        const next = t.next_run_at ? `, next run ${t.next_run_at}` : '';
+        parts.push(`  - "${t.title}" [${t.status}]${next}`);
       }
     }
 
@@ -384,18 +474,19 @@ export class TaskManager {
   // Scheduling CRUD
   // ---------------------------------------------------------------------------
 
-  /** Create a scheduled recurring task. Sets task_type='scheduled', assignee='lynox', computes next_run_at. */
+  /** Create a scheduled recurring AGENT-TRIGGER. Sets task_type='scheduled', assignee='lynox', computes next_run_at. */
   createScheduled(params: TaskCreateParams & {
     scheduleCron: string;
     maxRetries?: number | undefined;
     notificationChannel?: string | undefined;
-  }): TaskRecord {
+  }): TriggerRecord {
     if (!isValidCron(params.scheduleCron)) {
       throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
     }
 
     const nextRun = nextOccurrence(params.scheduleCron);
 
+    // assignee='lynox' + schedule → always lands in the `triggers` table.
     return this.create({
       ...params,
       assignee: 'lynox',
@@ -404,15 +495,15 @@ export class TaskManager {
       nextRunAt: nextRun.toISOString(),
       maxRetries: params.maxRetries,
       notificationChannel: params.notificationChannel,
-    });
+    }) as TriggerRecord;
   }
 
-  /** Create a pipeline task. Sets task_type='pipeline', assignee='lynox'. Optionally recurring via scheduleCron. */
+  /** Create a pipeline AGENT-TRIGGER. Sets task_type='pipeline', assignee='lynox'. Optionally recurring via scheduleCron. */
   createPipelineTask(params: TaskCreateParams & {
     pipelineId: string;
     scheduleCron?: string | undefined;
     maxRetries?: number | undefined;
-  }): TaskRecord {
+  }): TriggerRecord {
     if (params.scheduleCron) {
       if (!isValidCron(params.scheduleCron)) {
         throw new Error(`Invalid cron expression: ${params.scheduleCron}`);
@@ -426,7 +517,7 @@ export class TaskManager {
         scheduleCron: params.scheduleCron,
         nextRunAt: nextRun.toISOString(),
         maxRetries: params.maxRetries,
-      });
+      }) as TriggerRecord;
     }
 
     return this.create({
@@ -435,23 +526,23 @@ export class TaskManager {
       taskType: 'pipeline',
       pipelineId: params.pipelineId,
       maxRetries: params.maxRetries,
-    });
+    }) as TriggerRecord;
   }
 
-  /** Slice B2: cron kill-switch — disable/enable a scheduled task without
+  /** Slice B2: cron kill-switch — disable/enable a scheduled trigger without
    *  deleting it (so its schedule + stored params survive). Returns false if no
-   *  task matched. */
+   *  trigger matched. */
   setEnabled(id: string, enabled: boolean): boolean {
-    return this.history.setTaskEnabled(id, enabled);
+    return this.history.setTriggerEnabled(id, enabled);
   }
 
-  /** Create a watch/monitor task. Sets task_type='watch', assignee='lynox', computes next_run_at from interval. */
+  /** Create a watch/monitor AGENT-TRIGGER. Sets task_type='watch', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;
     watchIntervalMinutes?: number | undefined;
     watchSelector?: string | undefined;
     notificationChannel?: string | undefined;
-  }): TaskRecord {
+  }): TriggerRecord {
     const intervalMinutes = params.watchIntervalMinutes ?? 60;
 
     const watchConfig = JSON.stringify({
@@ -467,24 +558,24 @@ export class TaskManager {
       watchConfig,
       nextRunAt: new Date(Date.now() + intervalMinutes * 60_000).toISOString(),
       notificationChannel: params.notificationChannel,
-    });
+    }) as TriggerRecord;
   }
 
-  /** Get tasks due for execution (next_run_at <= now, not completed). */
-  getDueTasks(): TaskRecord[] {
-    return this.history.getDueTasks();
+  /** Get AGENT-TRIGGERs due for execution (next_run_at <= now, not completed). */
+  getDueTriggers(): TriggerRecord[] {
+    return this.history.getDueTriggers();
   }
 
-  /** Update the watch_config JSON for a watch task (e.g. to store last_hash). */
+  /** Update the watch_config JSON for a watch trigger (e.g. to store last_hash). */
   updateWatchConfig(id: string, config: Record<string, unknown>): void {
-    this.history.updateTaskWatchConfig(id, JSON.stringify(config));
+    this.history.updateTriggerWatchConfig(id, JSON.stringify(config));
   }
 
-  /** Record the result of a worker task execution. Updates last_run_at, result, status, and optionally next_run_at for recurring tasks. */
+  /** Record the result of a worker trigger execution. Updates last_run_at, result, status, and optionally next_run_at for recurring triggers. */
   recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout'): void {
-    const task = this.history.getTask(id);
+    const task = this.history.getTrigger(id);
     if (!task) {
-      throw new Error(`Task not found: ${id}`);
+      throw new Error(`Trigger not found: ${id}`);
     }
 
     const now = new Date();
@@ -492,34 +583,34 @@ export class TaskManager {
       ? result.slice(0, MAX_RUN_RESULT_CHARS)
       : result;
 
-    // Determine next_run_at based on task type.
+    // Determine next_run_at based on trigger type.
     // `undefined` = leave column unchanged. `null` = explicitly clear
-    // the column (one-shot task reached a terminal state and must NOT
-    // be re-selected by getDueTasks the next tick).
+    // the column (one-shot trigger reached a terminal state and must NOT
+    // be re-selected by getDueTriggers the next tick).
     let nextRunAt: string | null | undefined;
     let retryCount: number | undefined;
 
     if (task.schedule_cron) {
-      // Recurring cron task — always compute next run
+      // Recurring cron trigger — always compute next run
       nextRunAt = nextOccurrence(task.schedule_cron, now).toISOString();
       // Reset retry count on success
       if (status === 'success') retryCount = 0;
       // Surface the latest run outcome in `status` so silently-failing
-      // cron tasks show up in the UI instead of staying 'open' forever.
+      // cron triggers show up in the UI instead of staying 'open' forever.
       // This is derived state, NOT terminal: the cron schedule (not
       // status) keeps determining re-runs, and a subsequent successful
       // run flips status back to 'open' (auto-recovery on next success).
-      // The `getDueTasks` SELECT was widened so cron rows stay in the
+      // The `getDueTriggers` SELECT was widened so cron rows stay in the
       // worker queue even when status='failed' — see
-      // run-history-persistence.ts `getDueTasks`.
+      // run-history-persistence.ts `getDueTriggers`.
       // Guard: don't resurrect a cron that was manually marked
       // 'completed' mid-tick (narrow race between complete() and the
       // finishing tick).
       if (task.status !== 'completed') {
-        this.history.updateTask(id, { status: status === 'success' ? 'open' : 'failed' });
+        this.history.updateTrigger(id, { status: status === 'success' ? 'open' : 'failed' });
       }
     } else if (task.watch_config) {
-      // Watch task — compute next run from interval
+      // Watch trigger — compute next run from interval
       const config = JSON.parse(task.watch_config) as { interval_minutes: number };
       nextRunAt = new Date(now.getTime() + config.interval_minutes * 60_000).toISOString();
       // Reset retry count on success
@@ -534,21 +625,21 @@ export class TaskManager {
       const backoffMs = Math.min(60_000 * Math.pow(2, retryCount - 1), 30 * 60_000); // 1m, 2m, 4m... cap 30m
       nextRunAt = new Date(now.getTime() + backoffMs).toISOString();
     } else if (status === 'success') {
-      // One-shot background task — mark as completed on success
-      this.history.updateTask(id, { status: 'completed', completedAt: now.toISOString() });
+      // One-shot background trigger — mark as completed on success
+      this.history.updateTrigger(id, { status: 'completed' });
     } else {
-      // One-shot task that failed permanently (no max_retries, or
+      // One-shot trigger that failed permanently (no max_retries, or
       // retries exhausted). Without this branch `next_run_at` would
-      // stay set and `getDueTasks` would re-select the task every
+      // stay set and `getDueTriggers` would re-select the trigger every
       // worker tick → runaway autonomous LLM spend. Mark it `failed`
       // and clear `next_run_at` so the worker leaves it alone, while
       // last_run_status preserves the actual outcome ('failed' vs
       // 'timeout') for the UI.
-      this.history.updateTask(id, { status: 'failed' });
+      this.history.updateTrigger(id, { status: 'failed' });
       nextRunAt = null;
     }
 
-    this.history.updateTaskRunResult(id, {
+    this.history.updateTriggerRunResult(id, {
       lastRunAt: now.toISOString(),
       lastRunResult: truncatedResult,
       lastRunStatus: status,

@@ -221,8 +221,9 @@ describe('Task Tools', () => {
       expect(result).toContain('Task scheduled for');
       expect(result).toContain(future);
       // Ensure the task did NOT auto-fire — nextRunAt should equal what we passed,
-      // not the creation timestamp.
-      const created = tm.list().find((t) => t.title === 'Tomorrow morning');
+      // not the creation timestamp. assignee='lynox' + run_at routes the row to
+      // the `triggers` table (post-v42 split), so read it back via listTriggers.
+      const created = tm.listTriggers().find((t) => t.title === 'Tomorrow morning');
       expect(created?.next_run_at).toBe(future);
     });
 
@@ -241,7 +242,8 @@ describe('Task Tools', () => {
         { title: 'Do it now', assignee: 'lynox' },
         makeAgent(),
       );
-      const created = tm.list().find((t) => t.title === 'Do it now');
+      // assignee='lynox' with no schedule auto-fires → trigger row.
+      const created = tm.listTriggers().find((t) => t.title === 'Do it now');
       expect(created?.next_run_at).toBeTruthy();
       // Should be roughly "now" (within 5 seconds of when we called it)
       const ts = new Date(created!.next_run_at!).getTime();
@@ -255,7 +257,8 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Scheduled task created');
-      const created = tm.list().find((t) => t.title === 'Daily check');
+      // A scheduled (cron) row is an AGENT-TRIGGER → `triggers` table.
+      const created = tm.listTriggers().find((t) => t.title === 'Daily check');
       expect(created?.schedule_cron).toBe('0 9 * * *');
       expect(created?.next_run_at).toBeTruthy();
     });
@@ -269,7 +272,8 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Workflow task created');
-      const created = tm.list().find((t) => t.title === 'Weekly report');
+      // A workflow (pipeline) row is an AGENT-TRIGGER → `triggers` table.
+      const created = tm.listTriggers().find((t) => t.title === 'Weekly report');
       expect(created?.pipeline_id).toBe('wf-abc123');
       expect(created?.task_type).toBe('pipeline');
       expect(created?.schedule_cron).toBe('0 9 * * 1');
@@ -331,7 +335,8 @@ describe('Task Tools', () => {
       );
       expect(result).toContain('Task updated');
       expect(result).toContain('2026-05-06T14:30:00.000Z');
-      const updated = tm.list().find((t) => t.id === task.id);
+      // assignee='lynox' + run_at → AGENT-TRIGGER (`triggers` table).
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.next_run_at).toBe('2026-05-06T14:30:00.000Z');
     });
 
@@ -343,7 +348,7 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Task updated');
-      const updated = tm.list().find((t) => t.id === task.id);
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.schedule_cron).toBe('0 14 * * *');
       expect(updated?.next_run_at).toBeTruthy();
       // The next-run timestamp must change — otherwise the worker keeps
@@ -358,7 +363,8 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Task updated');
-      const updated = tm.list().find((t) => t.id === task.id);
+      // assignee='lynox' + run_at → AGENT-TRIGGER (`triggers` table).
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.next_run_at).toBeFalsy();
       expect(updated?.status).toBe('open');
     });
@@ -392,7 +398,7 @@ describe('Task Tools', () => {
         { task_id: task.id, run_at: '2026-05-06T14:30:00Z' },
         makeAgent(),
       );
-      const updated = tm.list().find((t) => t.id === task.id);
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.next_run_at).toBe('2026-05-06T14:30:00.000Z');
       expect(updated?.schedule_cron).toBeFalsy();
     });
@@ -407,7 +413,7 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Task updated');
-      const updated = tm.list().find((t) => t.id === task.id);
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.schedule_cron).toBe('0 14 * * *');
       // The new next_run_at must NOT be the original one-shot value —
       // worker would otherwise fire at the stale time before the cron
@@ -438,7 +444,7 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Task updated');
-      const updated = tm.list().find((t) => t.id === task.id);
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.schedule_cron).toBeFalsy();
       expect(updated?.next_run_at).toBeFalsy();
     });
@@ -456,7 +462,8 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Task completed');
-      const updated = tm.list().find((t) => t.id === task.id);
+      // assignee='lynox' + nextRunAt → AGENT-TRIGGER (`triggers` table).
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.status).toBe('completed');
       // Completion runs through `complete()`, not `update()`, so run_at
       // stays at its original value (not the requested 14:30).
@@ -474,7 +481,7 @@ describe('Task Tools', () => {
         makeAgent(),
       );
       expect(result).toContain('Task updated');
-      const updated = tm.list().find((t) => t.id === task.id);
+      const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.next_run_at).toBeFalsy();
       expect(updated?.schedule_cron).toBeFalsy();
     });

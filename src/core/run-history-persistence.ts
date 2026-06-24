@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { TaskRecord } from '../types/index.js';
+import type { TaskRecord, TriggerRecord } from '../types/index.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import { randomUUID } from 'node:crypto';
 
@@ -533,7 +533,9 @@ export function markPipelineExecuted(db: Database.Database, id: string): void {
 }
 
 // ============================================================
-// Tasks
+// Tasks (USER-TODOs — `tasks` table) + Triggers (AGENT-TRIGGERs — `triggers`
+// table). Split in migration v42: Tasks track user work (perceive/track side,
+// never fired by the WorkerLoop); Triggers fire workflows (act side).
 // ============================================================
 
 export function insertTask(db: Database.Database, params: {
@@ -548,6 +550,30 @@ export function insertTask(db: Database.Database, params: {
   dueDate?: string | undefined;
   tags?: string | undefined;
   parentTaskId?: string | undefined;
+}): void {
+  db.prepare(`
+    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    params.id, params.title, params.description ?? '',
+    params.status ?? 'open', params.priority ?? 'medium',
+    params.assignee ?? null,
+    params.scopeType ?? 'project', params.scopeId ?? '',
+    params.dueDate ?? null, params.tags ?? null, params.parentTaskId ?? null,
+  );
+}
+
+/** Insert an AGENT-TRIGGER row (cron/watch/pipeline/reminder/backup). Mirrors
+ *  the old `insertTask` trigger half. `assignee` defaults to 'lynox' (all
+ *  triggers are fired by lynox), `taskType` to 'manual'. */
+export function insertTrigger(db: Database.Database, params: {
+  id: string;
+  title: string;
+  description?: string | undefined;
+  status?: string | undefined;
+  assignee?: string | undefined;
+  scopeType?: string | undefined;
+  scopeId?: string | undefined;
   scheduleCron?: string | undefined;
   nextRunAt?: string | undefined;
   taskType?: string | undefined;
@@ -558,14 +584,12 @@ export function insertTask(db: Database.Database, params: {
   pipelineParams?: string | undefined;
 }): void {
   db.prepare(`
-    INSERT INTO tasks (id, title, description, status, priority, assignee, scope_type, scope_id, due_date, tags, parent_task_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id, pipeline_params)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO triggers (id, title, description, status, assignee, scope_type, scope_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id, pipeline_params)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.title, params.description ?? '',
-    params.status ?? 'open', params.priority ?? 'medium',
-    params.assignee ?? null,
+    params.status ?? 'open', params.assignee ?? 'lynox',
     params.scopeType ?? 'project', params.scopeId ?? '',
-    params.dueDate ?? null, params.tags ?? null, params.parentTaskId ?? null,
     params.scheduleCron ?? null, params.nextRunAt ?? null,
     params.taskType ?? 'manual', params.watchConfig ?? null,
     params.maxRetries ?? 0, params.notificationChannel ?? null,
@@ -582,10 +606,10 @@ export function setWorkflowConfirmedAt(db: Database.Database, id: string, confir
   return res.changes > 0;
 }
 
-/** Slice B2: flip a scheduled task's cron kill-switch. */
-export function setTaskEnabled(db: Database.Database, id: string, enabled: boolean): boolean {
+/** Slice B2: flip a scheduled trigger's cron kill-switch. */
+export function setTriggerEnabled(db: Database.Database, id: string, enabled: boolean): boolean {
   const res = db.prepare(
-    "UPDATE tasks SET enabled = ?, updated_at = datetime('now') WHERE id = ?"
+    "UPDATE triggers SET enabled = ?, updated_at = datetime('now') WHERE id = ?"
   ).run(enabled ? 1 : 0, id);
   return res.changes > 0;
 }
@@ -599,8 +623,6 @@ export function updateTask(db: Database.Database, id: string, params: {
   dueDate?: string | undefined;
   tags?: string | undefined;
   completedAt?: string | undefined;
-  nextRunAt?: string | undefined;
-  scheduleCron?: string | undefined;
 }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -612,11 +634,6 @@ export function updateTask(db: Database.Database, id: string, params: {
   if (params.dueDate !== undefined) { sets.push('due_date = ?'); values.push(params.dueDate || null); }
   if (params.tags !== undefined) { sets.push('tags = ?'); values.push(params.tags || null); }
   if (params.completedAt !== undefined) { sets.push('completed_at = ?'); values.push(params.completedAt || null); }
-  // Empty string clears the column. Lets the agent un-schedule a one-shot
-  // task without deleting it (e.g. cancel a reminder while keeping the
-  // task open for later).
-  if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
-  if (params.scheduleCron !== undefined) { sets.push('schedule_cron = ?'); values.push(params.scheduleCron || null); }
   if (sets.length === 0) return false;
   sets.push("updated_at = datetime('now')");
 
@@ -636,6 +653,45 @@ export function updateTask(db: Database.Database, id: string, params: {
   return db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
 }
 
+/** Update an AGENT-TRIGGER row. `nextRunAt`/`scheduleCron`: `undefined` leaves
+ *  the column unchanged; empty-string/null clears it (mirrors the old
+ *  `updateTask` schedule half — lets the agent un-schedule a trigger without
+ *  deleting it). */
+export function updateTrigger(db: Database.Database, id: string, params: {
+  title?: string | undefined;
+  description?: string | undefined;
+  status?: string | undefined;
+  assignee?: string | undefined;
+  nextRunAt?: string | null | undefined;
+  scheduleCron?: string | null | undefined;
+}, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (params.title !== undefined) { sets.push('title = ?'); values.push(params.title); }
+  if (params.description !== undefined) { sets.push('description = ?'); values.push(params.description); }
+  if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
+  if (params.assignee !== undefined) { sets.push('assignee = ?'); values.push(params.assignee || null); }
+  // Empty string / null clears the column. Lets the agent un-schedule a
+  // one-shot trigger without deleting it (e.g. cancel a reminder).
+  if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
+  if (params.scheduleCron !== undefined) { sets.push('schedule_cron = ?'); values.push(params.scheduleCron || null); }
+  if (sets.length === 0) return false;
+  sets.push("updated_at = datetime('now')");
+
+  // Optional scope guard — same atomic check-and-write as updateTask: fold the
+  // (scope_type, scope_id) check INTO the UPDATE's WHERE so the row is never
+  // written if its scope falls outside the caller's active set, even under a
+  // hostile re-scope race between resolve and write (no TOCTOU window).
+  const where: string[] = ['id = ?'];
+  values.push(id);
+  if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
+    const ors = opts.scopeFilter.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+    where.push(`(${ors})`);
+    for (const s of opts.scopeFilter) { values.push(s.type, s.id); }
+  }
+  return db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
+}
+
 export function getTask(db: Database.Database, id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
   const where: string[] = ['(id = ? OR id LIKE ?)'];
   const params: unknown[] = [id, `${id}%`];
@@ -649,10 +705,31 @@ export function getTask(db: Database.Database, id: string, opts?: { scopeFilter?
   ).get(...params) as TaskRecord | undefined;
 }
 
+/** Look up an AGENT-TRIGGER by id (or id-prefix). Mirrors `getTask` incl. the
+ *  optional scope guard. */
+export function getTrigger(db: Database.Database, id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TriggerRecord | undefined {
+  const where: string[] = ['(id = ? OR id LIKE ?)'];
+  const params: unknown[] = [id, `${id}%`];
+  if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
+    const ors = opts.scopeFilter.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+    where.push(`(${ors})`);
+    for (const s of opts.scopeFilter) { params.push(s.type, s.id); }
+  }
+  return db.prepare(
+    `SELECT * FROM triggers WHERE ${where.join(' AND ')}`
+  ).get(...params) as TriggerRecord | undefined;
+}
+
 export function deleteTask(db: Database.Database, id: string): boolean {
   // Delete subtasks first
   db.prepare('DELETE FROM tasks WHERE parent_task_id = ?').run(id);
   return db.prepare('DELETE FROM tasks WHERE id = ?').run(id).changes > 0;
+}
+
+/** Delete an AGENT-TRIGGER. Triggers have no parent_task_id, so no subtask
+ *  cascade. */
+export function deleteTrigger(db: Database.Database, id: string): boolean {
+  return db.prepare('DELETE FROM triggers WHERE id = ?').run(id).changes > 0;
 }
 
 export function getTasks(db: Database.Database, opts?: {
@@ -684,6 +761,29 @@ export function getTasks(db: Database.Database, opts?: {
   ).all(...params) as TaskRecord[];
 }
 
+/** List AGENT-TRIGGERs. Ordered by next_run_at ASC (NULLS LAST), then
+ *  created_at DESC. */
+export function getTriggers(db: Database.Database, opts?: {
+  scopeType?: string | undefined;
+  scopeId?: string | undefined;
+  status?: string | undefined;
+  taskType?: string | undefined;
+  limit?: number | undefined;
+}): TriggerRecord[] {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (opts?.scopeType) { where.push('scope_type = ?'); params.push(opts.scopeType); }
+  if (opts?.scopeId) { where.push('scope_id = ?'); params.push(opts.scopeId); }
+  if (opts?.status) { where.push('status = ?'); params.push(opts.status); }
+  if (opts?.taskType) { where.push('task_type = ?'); params.push(opts.taskType); }
+  const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+  const limit = opts?.limit ?? 100;
+  params.push(limit);
+  return db.prepare(
+    `SELECT * FROM triggers ${whereClause} ORDER BY next_run_at ASC NULLS LAST, created_at DESC LIMIT ?`
+  ).all(...params) as TriggerRecord[];
+}
+
 export function getTasksDueInRange(db: Database.Database, start: string, end: string, scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
   if (scopes && scopes.length > 0) {
     const scopeConditions = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
@@ -711,41 +811,41 @@ export function getOverdueTasks(db: Database.Database, scopes?: Array<{ type: st
   ).all(now) as TaskRecord[];
 }
 
-/** Get tasks that are due for execution (next_run_at <= now, not in a
+/** Get triggers that are due for execution (next_run_at <= now, not in a
  * terminal status). Terminal = 'completed', or 'failed' for ONE-SHOT
- * tasks only. Cron tasks (`schedule_cron IS NOT NULL`) are kept in the
+ * triggers only. Cron triggers (`schedule_cron IS NOT NULL`) are kept in the
  * queue even when status='failed' so a single transient failure doesn't
  * permanently disable a recurring schedule — `recordTaskRun` derives the
- * cron task's status from the latest run (failed/open) and the cron
+ * cron trigger's status from the latest run (failed/open) and the cron
  * schedule itself determines re-fires. See task-manager.ts `recordTaskRun`
  * cron branch.
  *
- * We also clear next_run_at when a ONE-SHOT task reaches a terminal
+ * We also clear next_run_at when a ONE-SHOT trigger reaches a terminal
  * state, so each guard is redundant with the other for one-shots — but
- * keeping both prevents a failed task with a stale `next_run_at` (e.g.
+ * keeping both prevents a failed trigger with a stale `next_run_at` (e.g.
  * a row that pre-dates the v31 fix) from re-firing after migration.
  */
-export function getDueTasks(db: Database.Database): TaskRecord[] {
+export function getDueTriggers(db: Database.Database): TriggerRecord[] {
   const now = new Date().toISOString();
-  // Slice B2 — kill-switch: a disabled task (enabled=0) is simply NOT due, so it
-  // is never processed and never has its status / next_run_at mutated. This
+  // Slice B2 — kill-switch: a disabled trigger (enabled=0) is simply NOT due, so
+  // it is never processed and never has its status / next_run_at mutated. This
   // pauses it reversibly (re-enabling makes it due again with its schedule
   // intact) — unlike skipping it AFTER selection, which would route a one-shot
-  // task through recordTaskRun and permanently complete it. The column is
+  // trigger through recordTaskRun and permanently complete it. The column is
   // NOT NULL DEFAULT 1, so legacy/absent rows count as enabled.
   return db.prepare(
-    `SELECT * FROM tasks
+    `SELECT * FROM triggers
      WHERE next_run_at IS NOT NULL
        AND next_run_at <= ?
        AND enabled != 0
        AND status != 'completed'
        AND (status != 'failed' OR schedule_cron IS NOT NULL)
      ORDER BY next_run_at ASC`
-  ).all(now) as TaskRecord[];
+  ).all(now) as TriggerRecord[];
 }
 
 /**
- * Tasks that ACTIVELY reference a saved workflow — the destructive-edit guard
+ * Triggers that ACTIVELY reference a saved workflow — the destructive-edit guard
  * (Slice C, §4.6 U5). "Active" = enabled (not paused via the kill-switch) and
  * not a completed one-shot. A non-empty result means editing the workflow's
  * steps changes what an already-scheduled / still-pending run will do, so the
@@ -753,14 +853,14 @@ export function getDueTasks(db: Database.Database): TaskRecord[] {
  * `completed` rows are excluded — they cannot fire, so they don't make the
  * workflow "scheduled" for the purpose of the warning.
  */
-export function getTasksByPipelineId(db: Database.Database, pipelineId: string): TaskRecord[] {
+export function getTriggersByPipelineId(db: Database.Database, pipelineId: string): TriggerRecord[] {
   return db.prepare(
-    `SELECT * FROM tasks WHERE pipeline_id = ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`
-  ).all(pipelineId) as TaskRecord[];
+    `SELECT * FROM triggers WHERE pipeline_id = ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`
+  ).all(pipelineId) as TriggerRecord[];
 }
 
-/** Update task after a run execution. */
-export function updateTaskRunResult(
+/** Update a trigger after a run execution. */
+export function updateTriggerRunResult(
   db: Database.Database,
   id: string,
   update: {
@@ -768,8 +868,8 @@ export function updateTaskRunResult(
     lastRunResult: string;
     lastRunStatus: string;
     // `undefined` leaves next_run_at unchanged; `null` clears it
-    // (used when a one-shot task reaches a terminal state — without
-    // this, getDueTasks would keep re-selecting the failed task).
+    // (used when a one-shot trigger reaches a terminal state — without
+    // this, getDueTriggers would keep re-selecting the failed trigger).
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   },
@@ -794,7 +894,14 @@ export function updateTaskRunResult(
   }
   sets.push("updated_at = datetime('now')");
   values.push(id);
-  db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+}
+
+/** Update the watch_config JSON for a watch trigger (e.g. to store last_hash). */
+export function updateTriggerWatchConfig(db: Database.Database, id: string, watchConfig: string): void {
+  db.prepare(
+    "UPDATE triggers SET watch_config = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(watchConfig, id);
 }
 
 // ============================================================

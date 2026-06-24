@@ -120,6 +120,9 @@ vi.mock('../core/engine.js', () => ({
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
+      // The enabled-toggle (kill-switch) PATCH branch reads the row back via
+      // getTrigger (setEnabled toggles a `triggers` row), not getTask.
+      getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
     });
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,

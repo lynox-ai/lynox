@@ -1868,33 +1868,46 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('preserves indexes — the v31 idx_tasks_* set + the v39 pipeline-enabled index', () => {
+    it('preserves indexes — post-v42 the tasks table keeps only TODO indexes; firing indexes moved to triggers', () => {
       const h = createHistory();
       // Direct sqlite_master assertion — a botched migration that dropped
-      // an index would still let getDueTasks return the row on tiny data
-      // (full-scan), so we pin the seven v31 indexes plus the v39 kill-switch one.
+      // an index would still let a query return the row on tiny data
+      // (full-scan), so we pin the index sets per table.
+      //
+      // Post-v42 split: the `tasks` table holds USER-TODOs only, so the
+      // schedule/firing indexes (next_run, type, pipeline_enabled) moved to
+      // the `triggers` table. `tasks` keeps the TODO-only indexes.
       const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
-      const idxNames = db.prepare(
+      const taskIdx = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name LIKE 'idx_tasks_%'`,
       ).all().map(r => r.name).sort();
-      expect(idxNames).toEqual([
+      expect(taskIdx).toEqual([
         'idx_tasks_assignee',
         'idx_tasks_due_date',
-        'idx_tasks_next_run',
         'idx_tasks_parent',
-        'idx_tasks_pipeline_enabled',
         'idx_tasks_scope',
         'idx_tasks_status',
-        'idx_tasks_type',
       ]);
 
-      // Plus the existing functional smoke that getDueTasks works.
-      h.insertTask({
+      // The firing indexes now live on `triggers` (idx_triggers_*).
+      const triggerIdx = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='triggers' AND name LIKE 'idx_triggers_%'`,
+      ).all().map(r => r.name).sort();
+      expect(triggerIdx).toEqual([
+        'idx_triggers_next_run',
+        'idx_triggers_pipeline_enabled',
+        'idx_triggers_scope',
+        'idx_triggers_type',
+      ]);
+
+      // Plus the existing functional smoke that getDueTriggers works — a due
+      // trigger row lands in the worker queue.
+      h.insertTrigger({
         id: 'tdue',
         title: 'Due',
         nextRunAt: '2020-01-01T00:00:00.000Z',
       });
-      const due = h.getDueTasks();
+      const due = h.getDueTriggers();
       expect(due.some(t => t.id === 'tdue')).toBe(true);
       h.close();
     });
@@ -1907,40 +1920,268 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('a ONE-SHOT row written as status=failed is excluded from getDueTasks even with a stale next_run_at', () => {
+    it('a ONE-SHOT trigger written as status=failed is excluded from getDueTriggers even with a stale next_run_at', () => {
       // Defence in depth: recordTaskRun clears next_run_at when it
-      // moves a one-shot task to 'failed', but the SELECT also excludes
+      // moves a one-shot trigger to 'failed', but the SELECT also excludes
       // failed one-shot rows so a malformed row (e.g. surfaced by a
-      // future bug) cannot re-introduce the runaway loop.
+      // future bug) cannot re-introduce the runaway loop. Post-v42 the
+      // schedule/firing columns live on `triggers`, so insert via insertTrigger.
       const h = createHistory();
-      h.insertTask({
+      h.insertTrigger({
         id: 'tstale',
         title: 'Stale failed',
         status: 'failed',
         nextRunAt: '2020-01-01T00:00:00.000Z',
       });
-      const due = h.getDueTasks();
+      const due = h.getDueTriggers();
       expect(due.some(t => t.id === 'tstale')).toBe(false);
       h.close();
     });
 
-    it('a CRON row with status=failed IS picked up by getDueTasks (recurrence keeps firing)', () => {
-      // Counterpart to the one-shot exclusion above: cron tasks must
+    it('a CRON trigger with status=failed IS picked up by getDueTriggers (recurrence keeps firing)', () => {
+      // Counterpart to the one-shot exclusion above: cron triggers must
       // survive a transient failure. The SELECT exempts rows where
       // schedule_cron IS NOT NULL from the failed-status filter so a
       // failed daily cron (e.g. an API-health probe that 500ed once)
       // still re-runs tomorrow. recordTaskRun re-derives status from
       // the next run, so a success flips it back to 'open'.
       const h = createHistory();
-      h.insertTask({
+      h.insertTrigger({
         id: 'tcronfail',
         title: 'Failed daily cron',
         status: 'failed',
         scheduleCron: '0 9 * * *',
         nextRunAt: '2020-01-01T00:00:00.000Z',
       });
-      const due = h.getDueTasks();
+      const due = h.getDueTriggers();
       expect(due.some(t => t.id === 'tcronfail')).toBe(true);
+      h.close();
+    });
+  });
+
+  // Migration v42 split the single `tasks` table into two: `tasks` (USER-TODOs,
+  // never fired) and `triggers` (AGENT-TRIGGERs the WorkerLoop fires). The split
+  // predicate: a row is a TRIGGER if it carries ANY firing/agent attribute
+  // (assignee='lynox' OR next_run_at OR schedule_cron OR pipeline_id OR
+  // watch_config OR last_run_at OR task_type != 'manual'); otherwise it is a
+  // user-TODO. These tests verify, via the public API, that rows land in the
+  // right table, are returned by the right queries, the two tables are disjoint,
+  // and per-table column integrity survives.
+  describe('v42 migration — tasks/triggers split', () => {
+    // Helper: raw row counts straight from each table, to prove disjointness
+    // independent of the higher-level queries.
+    function rawCounts(h: RunHistory): { tasks: number; triggers: number } {
+      const db = (h as unknown as { db: { prepare(sql: string): { get(): { c: number } } } }).db;
+      return {
+        tasks: db.prepare('SELECT COUNT(*) AS c FROM tasks').get().c,
+        triggers: db.prepare('SELECT COUNT(*) AS c FROM triggers').get().c,
+      };
+    }
+
+    it('(a) a user-TODO lands in tasks and is NOT a trigger', () => {
+      const h = createHistory();
+      h.insertTask({
+        id: 'todo-1', title: 'Pay invoice', assignee: 'user',
+        priority: 'high', dueDate: '2026-07-01',
+      });
+      // In the TODO query…
+      expect(h.getTasks().some(t => t.id === 'todo-1')).toBe(true);
+      expect(h.getTask('todo-1')).toBeDefined();
+      // …and absent from every trigger query.
+      expect(h.getTriggers().some(t => t.id === 'todo-1')).toBe(false);
+      expect(h.getDueTriggers().some(t => t.id === 'todo-1')).toBe(false);
+      expect(h.getTrigger('todo-1')).toBeUndefined();
+      // Column integrity: a TODO's due_date + priority survive.
+      const todo = h.getTask('todo-1')!;
+      expect(todo.due_date).toBe('2026-07-01');
+      expect(todo.priority).toBe('high');
+      h.close();
+    });
+
+    it('(b) a cron trigger lands in triggers (getTriggers + getDueTriggers), NOT in tasks', () => {
+      const h = createHistory();
+      h.insertTrigger({
+        id: 'cron-1', title: 'Daily digest', taskType: 'scheduled',
+        scheduleCron: '0 9 * * *', nextRunAt: '2020-01-01T00:00:00.000Z',
+      });
+      expect(h.getTriggers().some(t => t.id === 'cron-1')).toBe(true);
+      // Past next_run_at + enabled + open → due.
+      expect(h.getDueTriggers().some(t => t.id === 'cron-1')).toBe(true);
+      // Not a user-TODO.
+      expect(h.getTasks().some(t => t.id === 'cron-1')).toBe(false);
+      expect(h.getTask('cron-1')).toBeUndefined();
+      // Column integrity: the cron schedule survives.
+      const trig = h.getTrigger('cron-1')!;
+      expect(trig.schedule_cron).toBe('0 9 * * *');
+      expect(trig.task_type).toBe('scheduled');
+      h.close();
+    });
+
+    it('(c) a watch trigger lands in triggers, NOT in tasks', () => {
+      const h = createHistory();
+      h.insertTrigger({
+        id: 'watch-1', title: 'Watch price', taskType: 'watch',
+        watchConfig: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }),
+        nextRunAt: '2020-01-01T00:00:00.000Z',
+      });
+      expect(h.getTriggers().some(t => t.id === 'watch-1')).toBe(true);
+      expect(h.getTasks().some(t => t.id === 'watch-1')).toBe(false);
+      const trig = h.getTrigger('watch-1')!;
+      expect(trig.task_type).toBe('watch');
+      expect(JSON.parse(trig.watch_config!).url).toBe('https://x.test');
+      h.close();
+    });
+
+    it('(d) a pipeline trigger lands in triggers, NOT in tasks — and its pipeline_id survives', () => {
+      const h = createHistory();
+      h.insertTrigger({
+        id: 'pipe-1', title: 'Monthly report', taskType: 'pipeline',
+        pipelineId: 'wf-xyz', scheduleCron: '0 9 1 * *',
+        nextRunAt: '2020-01-01T00:00:00.000Z',
+      });
+      expect(h.getTriggers().some(t => t.id === 'pipe-1')).toBe(true);
+      expect(h.getTasks().some(t => t.id === 'pipe-1')).toBe(false);
+      // pipeline_id column integrity + the pipeline-id lookup resolves it.
+      const trig = h.getTrigger('pipe-1')!;
+      expect(trig.pipeline_id).toBe('wf-xyz');
+      expect(h.getTriggersByPipelineId('wf-xyz').some(t => t.id === 'pipe-1')).toBe(true);
+      h.close();
+    });
+
+    it('(e) a TODO with assignee=NULL and no schedule stays a TODO (NULL-safety of the predicate)', () => {
+      const h = createHistory();
+      // No assignee, no schedule, no pipeline, default task_type='manual'.
+      h.insertTask({ id: 'todo-null', title: 'Loose note' });
+      const todo = h.getTask('todo-null');
+      expect(todo).toBeDefined();
+      // assignee defaults to NULL — the COALESCE-based predicate must NOT
+      // misclassify a NULL assignee as a trigger.
+      expect(todo!.assignee).toBeNull();
+      expect(h.getTriggers().some(t => t.id === 'todo-null')).toBe(false);
+      h.close();
+    });
+
+    it('(f) the two tables hold disjoint row sets', () => {
+      const h = createHistory();
+      h.insertTask({ id: 'd-todo-a', title: 'A', assignee: 'user' });
+      h.insertTask({ id: 'd-todo-b', title: 'B' });
+      h.insertTrigger({ id: 'd-trig-a', title: 'Cron', scheduleCron: '0 9 * * *', nextRunAt: '2020-01-01T00:00:00.000Z' });
+      h.insertTrigger({ id: 'd-trig-b', title: 'Lynox', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z' });
+
+      const counts = rawCounts(h);
+      expect(counts.tasks).toBe(2);
+      expect(counts.triggers).toBe(2);
+
+      const taskIds = new Set(h.getTasks().map(t => t.id));
+      const triggerIds = new Set(h.getTriggers().map(t => t.id));
+      // No id appears in both id-sets.
+      for (const id of taskIds) expect(triggerIds.has(id)).toBe(false);
+      expect(taskIds).toEqual(new Set(['d-todo-a', 'd-todo-b']));
+      expect(triggerIds).toEqual(new Set(['d-trig-a', 'd-trig-b']));
+      h.close();
+    });
+
+    it('(g) MOVES pre-existing mixed rows into the right table on the v42 boot migration', () => {
+      // Build a db at the PRE-v42 schema (one `tasks` table holding everything,
+      // schema_version=41) with REAL mixed rows, then open a RunHistory on it so
+      // the v42 boot migration runs the actual INSERT…SELECT move. This is the
+      // data-critical path that runs on existing prod tenants — the predicate
+      // tests above use the post-split API; this proves the MOVE itself.
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-v42-'));
+      tmpDirs.push(dir);
+      const dbPath = join(dir, 'premig.db');
+      const raw = new BetterSqlite3(dbPath);
+      raw.exec(`
+        CREATE TABLE tasks (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','failed')),
+          priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low','medium','high','urgent')),
+          scope_type TEXT NOT NULL DEFAULT 'project', scope_id TEXT NOT NULL DEFAULT '',
+          due_date TEXT, tags TEXT, parent_task_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT, assignee TEXT, schedule_cron TEXT, next_run_at TEXT,
+          last_run_at TEXT, last_run_result TEXT, last_run_status TEXT,
+          task_type TEXT NOT NULL DEFAULT 'manual', watch_config TEXT,
+          max_retries INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0,
+          notification_channel TEXT, pipeline_id TEXT, pipeline_params TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (41);
+        INSERT INTO tasks (id, title, assignee, priority, due_date) VALUES ('m-todo','Pay invoice','user','high','2026-07-01');
+        INSERT INTO tasks (id, title) VALUES ('m-todo-null','Loose note');
+        INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('m-cron','Digest','lynox','scheduled','0 9 * * *','2020-01-01T00:00:00.000Z');
+        INSERT INTO tasks (id, title, assignee, task_type, watch_config, next_run_at) VALUES ('m-watch','Watch','lynox','watch','{"url":"https://x.test","interval_minutes":60}','2020-01-01T00:00:00.000Z');
+        INSERT INTO tasks (id, title, assignee, task_type, pipeline_id, schedule_cron, next_run_at) VALUES ('m-pipe','Report','lynox','pipeline','wf-1','0 9 1 * *','2020-01-01T00:00:00.000Z');
+        INSERT INTO tasks (id, title, status, task_type, last_run_at, last_run_status) VALUES ('m-done','Ran once','completed','manual','2026-06-01T00:00:00.000Z','completed');
+      `);
+      raw.close();
+
+      // Boot RunHistory → runs the v42 migration (currentVersion 41 → 42).
+      const h = new RunHistory(dbPath);
+      // TODOs (2): the user-TODO + the bare NULL-assignee note (NULL-safe predicate).
+      expect(new Set(h.getTasks().map(t => t.id))).toEqual(new Set(['m-todo', 'm-todo-null']));
+      // Triggers (4): cron, watch, pipeline, and the completed one-shot moved by
+      // the last_run_at clause (no schedule/assignee left, but it HAS fired).
+      expect(new Set(h.getTriggers().map(t => t.id))).toEqual(new Set(['m-cron', 'm-watch', 'm-pipe', 'm-done']));
+      expect(rawCounts(h)).toEqual({ tasks: 2, triggers: 4 });
+      // Column integrity across the move.
+      const todo = h.getTask('m-todo')!;
+      expect(todo.due_date).toBe('2026-07-01');
+      expect(todo.priority).toBe('high');
+      expect(h.getTrigger('m-cron')!.schedule_cron).toBe('0 9 * * *');
+      expect(h.getTrigger('m-pipe')!.pipeline_id).toBe('wf-1');
+      expect(h.getTriggersByPipelineId('wf-1').some(t => t.id === 'm-pipe')).toBe(true);
+      expect(h.getTrigger('m-done')!.last_run_at).toBe('2026-06-01T00:00:00.000Z');
+      h.close();
+    });
+
+    it('(h) a TODO subtask whose parent moves to triggers does NOT crash the migration (FK-safe) — orphan ref nulled, TODO↔TODO link kept', () => {
+      // Regression: with foreign_keys=ON, a kept-TODO child referencing a
+      // parent that the split routes to `triggers` would violate the self-FK,
+      // abort the boot migration, and trip _openOrRecreate's catch → the WHOLE
+      // history DB renamed to .corrupt (total tenant data loss). The migration
+      // nulls cross-table parent refs; same-table (TODO↔TODO) links survive.
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-v42fk-'));
+      tmpDirs.push(dir);
+      const dbPath = join(dir, 'premig.db');
+      const raw = new BetterSqlite3(dbPath);
+      raw.exec(`
+        CREATE TABLE tasks (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','failed')),
+          priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('low','medium','high','urgent')),
+          scope_type TEXT NOT NULL DEFAULT 'project', scope_id TEXT NOT NULL DEFAULT '',
+          due_date TEXT, tags TEXT, parent_task_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT, assignee TEXT, schedule_cron TEXT, next_run_at TEXT,
+          last_run_at TEXT, last_run_result TEXT, last_run_status TEXT,
+          task_type TEXT NOT NULL DEFAULT 'manual', watch_config TEXT,
+          max_retries INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0,
+          notification_channel TEXT, pipeline_id TEXT, pipeline_params TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (41);
+        -- a TRIGGER parent (scheduled) + a kept-TODO child pointing at it (cross-table)
+        INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('par-trig','Weekly job','lynox','scheduled','0 9 * * 1','2020-01-01T00:00:00.000Z');
+        INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-trig','Subtask','user','par-trig');
+        -- a TODO parent + a TODO child (same-table link must be PRESERVED)
+        INSERT INTO tasks (id, title, assignee) VALUES ('par-todo','Project','user');
+        INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-todo','Step','user','par-todo');
+      `);
+      raw.close();
+
+      // Must NOT throw / nuke. If the FK aborts the migration, _openOrRecreate
+      // renames the db and starts fresh → all four rows would vanish.
+      const h = new RunHistory(dbPath);
+      // No data loss: the trigger parent + 3 TODOs all survived.
+      expect(new Set(h.getTasks().map(t => t.id))).toEqual(new Set(['child-of-trig', 'par-todo', 'child-of-todo']));
+      expect(h.getTriggers().some(t => t.id === 'par-trig')).toBe(true);
+      // Cross-table parent ref nulled (the trigger parent is gone from `tasks`).
+      expect(h.getTask('child-of-trig')!.parent_task_id).toBeNull();
+      // Same-table TODO↔TODO link preserved.
+      expect(h.getTask('child-of-todo')!.parent_task_id).toBe('par-todo');
       h.close();
     });
   });

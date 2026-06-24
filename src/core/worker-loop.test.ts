@@ -40,7 +40,7 @@ import { WorkerLoop } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
-import type { TaskRecord, PlannedPipeline } from '../types/index.js';
+import type { TriggerRecord, PlannedPipeline } from '../types/index.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
@@ -62,22 +62,20 @@ function makeRunState(overrides?: Partial<RunState>): RunState {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeTask(overrides?: Partial<TaskRecord>): TaskRecord {
+// Post-v42 split: the WorkerLoop fires AGENT-TRIGGERs (the `triggers` table),
+// so these fixtures are TriggerRecords — no user-TODO columns (priority,
+// due_date, tags, parent_task_id, completed_at).
+function makeTask(overrides?: Partial<TriggerRecord>): TriggerRecord {
   return {
     id: 'task-1',
     title: 'Daily Report',
     description: 'Generate the daily report',
     status: 'open',
-    priority: 'medium',
     assignee: 'lynox',
     scope_type: 'context',
     scope_id: '',
-    due_date: null,
-    tags: null,
-    parent_task_id: null,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
-    completed_at: null,
     schedule_cron: '0 9 * * *',
     next_run_at: '2026-01-01T09:00:00.000Z',
     task_type: 'scheduled',
@@ -85,9 +83,9 @@ function makeTask(overrides?: Partial<TaskRecord>): TaskRecord {
   };
 }
 
-function makeTaskManager(tasks: TaskRecord[] = []): TaskManager {
+function makeTaskManager(tasks: TriggerRecord[] = []): TaskManager {
   return {
-    getDueTasks: vi.fn<() => TaskRecord[]>().mockReturnValue(tasks),
+    getDueTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue(tasks),
     recordTaskRun: vi.fn(),
     setEnabled: vi.fn<(id: string, enabled: boolean) => boolean>().mockReturnValue(true),
   } as unknown as TaskManager;
@@ -177,7 +175,7 @@ describe('WorkerLoop', () => {
     // Wait for the fire-and-forget executeTask to settle
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(tm.getDueTasks).toHaveBeenCalled();
+    expect(tm.getDueTriggers).toHaveBeenCalled();
     expect(engine.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ autonomy: 'autonomous' }),
     );
@@ -335,15 +333,15 @@ describe('WorkerLoop', () => {
   it('tick does not overlap — second tick is skipped while first is running', async () => {
     let resolveFirst: (() => void) | null = null;
     const blockingTm: TaskManager = {
-      getDueTasks: vi.fn<() => TaskRecord[]>().mockImplementation(() => {
-        return new Promise<TaskRecord[]>((resolve) => {
+      getDueTriggers: vi.fn<() => TriggerRecord[]>().mockImplementation(() => {
+        return new Promise<TriggerRecord[]>((resolve) => {
           resolveFirst = () => resolve([]);
-        }) as unknown as TaskRecord[];
+        }) as unknown as TriggerRecord[];
       }),
       recordTaskRun: vi.fn(),
     } as unknown as TaskManager;
 
-    // Actually, getDueTasks is sync in the real impl, but tick() wraps everything
+    // Actually, getDueTriggers is sync in the real impl, but tick() wraps everything
     // in try/catch. Let's test the guard with a slow executeTask instead.
     const slowSession = {
       run: vi.fn<(task: string) => Promise<string>>().mockImplementation(
@@ -362,12 +360,12 @@ describe('WorkerLoop', () => {
 
     // First tick fires immediately on start
     await vi.advanceTimersByTimeAsync(0);
-    expect(tm.getDueTasks).toHaveBeenCalledTimes(1);
+    expect(tm.getDueTriggers).toHaveBeenCalledTimes(1);
 
-    // Advance to next interval — tick should complete since getDueTasks is sync
+    // Advance to next interval — tick should complete since getDueTriggers is sync
     // and executeTask is fire-and-forget. The ticking guard resets in the finally block.
     await vi.advanceTimersByTimeAsync(1000);
-    expect(tm.getDueTasks).toHaveBeenCalledTimes(2);
+    expect(tm.getDueTriggers).toHaveBeenCalledTimes(2);
 
     loop.stop();
     void resolveFirst; // unused in this path
@@ -621,7 +619,7 @@ describe('WorkerLoop', () => {
     _resetPipelineStore();
 
     await expect(
-      (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+      (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
         .executePipeline(task),
     ).resolves.toBeUndefined();
 
@@ -676,7 +674,7 @@ describe('WorkerLoop', () => {
     _resetPipelineStore();
 
     await expect(
-      (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+      (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
         .executePipeline(task),
     ).rejects.toThrow(/not a saved workflow/i);
   });
@@ -745,7 +743,7 @@ describe('WorkerLoop', () => {
       schedule_cron: '0 9 1 * *',
     });
 
-    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
       .executePipeline(task);
 
     // 1. The pipeline executed — success was recorded.
@@ -824,7 +822,7 @@ describe('WorkerLoop', () => {
       schedule_cron: '* * * * *',
     });
 
-    const fire = (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> }).executePipeline.bind(loop);
+    const fire = (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline.bind(loop);
 
     await fire(task);
     await fire(task);
@@ -890,7 +888,7 @@ describe('WorkerLoop', () => {
       schedule_cron: '0 9 * * *',
     });
 
-    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
       .executePipeline(task);
 
     // Orchestrator succeeded the call but the run ended 'failed' →
@@ -908,7 +906,7 @@ describe('WorkerLoop', () => {
   // ── Slice B2: confirmedAt gate · kill-switch · stored-param passing ──
   async function firePipeline(
     template: Record<string, unknown>,
-    taskOverrides: Partial<TaskRecord>,
+    taskOverrides: Partial<TriggerRecord>,
   ): Promise<TaskManager> {
     const templateJson = JSON.stringify(template);
     const taskManager = makeTaskManager();
@@ -930,7 +928,7 @@ describe('WorkerLoop', () => {
     _resetPipelineStore();
     storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
     const task = makeTask({ pipeline_id: template['id'] as string, task_type: 'pipeline', ...taskOverrides });
-    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> }).executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
     return taskManager;
   }
 
@@ -941,7 +939,7 @@ describe('WorkerLoop', () => {
     executionMode: 'orchestrated', template: true, mode: 'autonomous', ...extra,
   });
 
-  // The kill-switch lives in getDueTasks (a disabled task is never "due"), not in
+  // The kill-switch lives in getDueTriggers (a disabled trigger is never "due"), not in
   // executeTask — see run-history-persistence.test.ts / task-manager.test.ts. That
   // avoids routing a skipped one-shot through recordTaskRun (which would complete
   // it permanently). This block keeps the confirm + param-passing coverage.
@@ -1005,7 +1003,7 @@ describe('WorkerLoop', () => {
     storePipeline('b2-wf', JSON.parse(templateJson) as PlannedPipeline);
     const task = makeTask({ id: 't-failrun', pipeline_id: 'b2-wf', task_type: 'pipeline' });
 
-    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> }).executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
 
     // The failed run opens an escalation thread keyed by the task, with the run context.
     expect(escalateSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -1029,7 +1027,7 @@ describe('WorkerLoop', () => {
       escalateToUser: escalateSpy,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
-    const fire = (loop as unknown as { executeWatch: (t: TaskRecord) => Promise<void> }).executeWatch.bind(loop);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
 
     // First run (no last_hash) = baseline → records + stores hash, NO escalation.
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
@@ -1087,7 +1085,7 @@ describe('WorkerLoop', () => {
     const loop = new WorkerLoop(engine, router, 60_000);
 
     await expect(
-      (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> })
+      (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
         .executePipeline(task),
     ).rejects.toThrow(/only runs 'autonomous' pipelines/);
   });
@@ -1101,7 +1099,7 @@ describe('WorkerLoop', () => {
     const engine = makeEngine({ taskManager: tm, session });
     const router = makeNotificationRouter();
     const loop = new WorkerLoop(engine, router, 60_000);
-    await (loop as unknown as { executeTask: (t: TaskRecord) => Promise<void> }).executeTask(task);
+    await (loop as unknown as { executeTask: (t: TriggerRecord) => Promise<void> }).executeTask(task);
     // Reminder fired → notify called once, recordTaskRun stamped success.
     expect(router.notify).toHaveBeenCalledTimes(1);
     const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];

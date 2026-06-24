@@ -192,13 +192,17 @@ export interface ProcessRecord {
 export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
+/** A USER-TODO — project-management work lynox tracks FOR the user (the
+ *  "perceive/track" side of the agent loop). Lives in the `tasks` table; NEVER
+ *  fired by the WorkerLoop. Split out from the agent-trigger rows in migration
+ *  v42 ("Triggers fire workflows; Tasks track user work"). */
 export interface TaskRecord {
   id: string;
   title: string;
   description: string;
   status: TaskStatus;
   priority: TaskPriority;
-  assignee: string | null;      // 'user', 'lynox', or custom name
+  assignee: string | null;      // 'user', a team-member name, or null
   scope_type: string;
   scope_id: string;
   due_date: string | null;
@@ -207,6 +211,23 @@ export interface TaskRecord {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+}
+
+/** An AGENT-TRIGGER — a rule the WorkerLoop fires (cron / watch / pipeline /
+ *  reminder / backup) to DO work for the user (the "act" side of the agent
+ *  loop). Lives in the `triggers` table. Split out from user-TODOs in migration
+ *  v42. Scope of that split was TODO⟂trigger only — the trigger sub-types
+ *  (`task_type`) stay as-is; the universal "Trigger primitive" is deferred. */
+export interface TriggerRecord {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  assignee: string | null;      // 'lynox' for fired rows (kept for parity)
+  scope_type: string;
+  scope_id: string;
+  created_at: string;
+  updated_at: string;
   schedule_cron?: string | undefined;
   next_run_at?: string | undefined;
   last_run_at?: string | undefined;
