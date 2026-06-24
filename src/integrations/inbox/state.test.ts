@@ -146,9 +146,9 @@ describe('InboxStateDb — items', () => {
   });
 
   // Audit S-AT-02: getItem and the mutation surface (updateUserAction,
-  // setSnooze, attachDraft, deleteRule, markReminderNotified, getDraftById,
-  // listAuditForItem) must scope to tenant. Without this, a Phase-5
-  // multi-tenant deployment could mutate other tenants' items by id alone.
+  // setSnooze, deleteRule, markReminderNotified, listAuditForItem) must
+  // scope to tenant. Without this, a Phase-5 multi-tenant deployment could
+  // mutate other tenants' items by id alone.
   describe('tenant isolation (audit S-AT-02)', () => {
     it('getItem returns null when the tenant does not match', () => {
       const id = insertSampleItem();
@@ -172,12 +172,6 @@ describe('InboxStateDb — items', () => {
       expect(inbox.getItem(id)?.snoozeUntil).toBeUndefined();
     });
 
-    it('attachDraft is a no-op for the wrong tenant', () => {
-      const id = insertSampleItem();
-      expect(inbox.attachDraft(id, 'drf_x', 'other-tenant')).toBe(false);
-      expect(inbox.getItem(id)?.draftId).toBeUndefined();
-    });
-
     it('deleteRule is a no-op for the wrong tenant', () => {
       const ruleId = inbox.insertRule({
         accountId: TEST_ACCOUNT.id,
@@ -189,18 +183,6 @@ describe('InboxStateDb — items', () => {
       });
       expect(inbox.deleteRule(ruleId, 'other-tenant')).toBe(false);
       expect(inbox.deleteRule(ruleId)).toBe(true);
-    });
-
-    it('getDraftById returns null for the wrong tenant', () => {
-      const itemId = insertSampleItem();
-      const draftId = inbox.insertDraft({
-        itemId,
-        bodyMd: 'Hi there',
-        generatedAt: new Date(),
-        generatorVersion: 'haiku-2026-05',
-      });
-      expect(inbox.getDraftById(draftId, DEFAULT_TENANT_ID)).not.toBeNull();
-      expect(inbox.getDraftById(draftId, 'other-tenant')).toBeNull();
     });
 
     it('listAuditForItem returns empty for the wrong tenant', () => {
@@ -221,29 +203,6 @@ describe('InboxStateDb — items', () => {
       expect(inbox.markReminderNotified(itemId)).toBe(true);
     });
 
-    it('getActiveDraftForItem returns null for the wrong tenant', () => {
-      const itemId = insertSampleItem();
-      inbox.insertDraft({
-        itemId,
-        bodyMd: 'Draft body',
-        generatedAt: new Date(),
-        generatorVersion: 'haiku-2026-05',
-      });
-      expect(inbox.getActiveDraftForItem(itemId, DEFAULT_TENANT_ID)).not.toBeNull();
-      expect(inbox.getActiveDraftForItem(itemId, 'other-tenant')).toBeNull();
-    });
-
-    it('incrementDraftEdits is a no-op for the wrong tenant', () => {
-      const itemId = insertSampleItem();
-      const draftId = inbox.insertDraft({
-        itemId,
-        bodyMd: 'Draft body',
-        generatedAt: new Date(),
-        generatorVersion: 'haiku-2026-05',
-      });
-      expect(inbox.incrementDraftEdits(draftId, 'other-tenant')).toBe(false);
-      expect(inbox.incrementDraftEdits(draftId)).toBe(true);
-    });
   });
 
   it('hasAnyItemForAccount returns false for an empty account and true after one insert', () => {
@@ -291,14 +250,6 @@ describe('InboxStateDb — user actions and snooze', () => {
     expect(item?.snoozeUntil).toBeUndefined();
     expect(item?.snoozeCondition).toBeUndefined();
     expect(item?.unsnoozeOnReply).toBe(false); // preserved from prior set
-  });
-
-  it('attaches and detaches a draft id', () => {
-    const id = insertSampleItem();
-    expect(inbox.attachDraft(id, 'drf_x')).toBe(true);
-    expect(inbox.getItem(id)?.draftId).toBe('drf_x');
-    expect(inbox.attachDraft(id, null)).toBe(true);
-    expect(inbox.getItem(id)?.draftId).toBeUndefined();
   });
 
   it('hides snoozed items from listItems until snooze_until has passed', () => {
@@ -416,124 +367,6 @@ describe('InboxStateDb — audit log', () => {
       const out = inbox.runInTransaction(() => 'sentinel');
       expect(out).toBe('sentinel');
     });
-  });
-});
-
-describe('InboxStateDb — drafts', () => {
-  it('inserts and reads a draft', () => {
-    const itemId = insertSampleItem();
-    const id = inbox.insertDraft({
-      itemId,
-      bodyMd: 'Hi Max,\n\nDanke für die Nachricht.',
-      generatedAt: new Date('2026-05-10T12:30:00Z'),
-      generatorVersion: 'gen-2026-05',
-    });
-    const draft = inbox.getDraftById(id);
-    expect(draft).toMatchObject({
-      id,
-      itemId,
-      bodyMd: 'Hi Max,\n\nDanke für die Nachricht.',
-      generatorVersion: 'gen-2026-05',
-      userEditsCount: 0,
-      supersededBy: undefined,
-    });
-  });
-
-  it('marks the previous draft as superseded inside one transaction', () => {
-    const itemId = insertSampleItem();
-    const first = inbox.insertDraft({
-      itemId,
-      bodyMd: 'v1',
-      generatedAt: new Date('2026-05-10T12:00:00Z'),
-      generatorVersion: 'g1',
-    });
-    const second = inbox.insertDraft({
-      itemId,
-      bodyMd: 'v2',
-      generatedAt: new Date('2026-05-10T12:05:00Z'),
-      generatorVersion: 'g1',
-      supersededDraftId: first,
-    });
-    expect(inbox.getDraftById(first)?.supersededBy).toBe(second);
-    // Active draft = the new one
-    expect(inbox.getActiveDraftForItem(itemId)?.id).toBe(second);
-  });
-
-  it('returns null when an item has no draft', () => {
-    const itemId = insertSampleItem();
-    expect(inbox.getActiveDraftForItem(itemId)).toBeNull();
-  });
-
-  it('increments edit count', () => {
-    const itemId = insertSampleItem();
-    const id = inbox.insertDraft({
-      itemId,
-      bodyMd: 'x',
-      generatedAt: new Date(),
-      generatorVersion: 'g',
-    });
-    inbox.incrementDraftEdits(id);
-    inbox.incrementDraftEdits(id);
-    expect(inbox.getDraftById(id)?.userEditsCount).toBe(2);
-  });
-
-  it('updateDraftBody writes the body and increments the counter atomically', () => {
-    const itemId = insertSampleItem();
-    const id = inbox.insertDraft({
-      itemId,
-      bodyMd: 'initial body',
-      generatedAt: new Date('2026-05-10T12:00:00Z'),
-      generatorVersion: 'g',
-    });
-    expect(inbox.updateDraftBody(id, 'edited body')).toBe(true);
-    const draft = inbox.getDraftById(id);
-    expect(draft?.bodyMd).toBe('edited body');
-    expect(draft?.userEditsCount).toBe(1);
-    expect(inbox.updateDraftBody(id, 'edited again')).toBe(true);
-    expect(inbox.getDraftById(id)?.userEditsCount).toBe(2);
-  });
-
-  it('updateDraftBody returns false for an unknown id', () => {
-    expect(inbox.updateDraftBody('drf_missing', 'x')).toBe(false);
-  });
-
-  it('getItemBody returns null until a body is cached, then echoes the saved fields', () => {
-    const itemId = insertSampleItem();
-    expect(inbox.getItemBody(itemId)).toBeNull();
-    inbox.saveItemBody(itemId, 'Hi Max,\n\n…full body…', 'imap', new Date('2026-05-12T10:00:00Z'));
-    const row = inbox.getItemBody(itemId);
-    expect(row?.bodyMd).toBe('Hi Max,\n\n…full body…');
-    expect(row?.source).toBe('imap');
-    expect(row?.fetchedAt.toISOString()).toBe('2026-05-12T10:00:00.000Z');
-  });
-
-  it('saveItemBody is upsert — a refetch replaces the cached row', () => {
-    const itemId = insertSampleItem();
-    inbox.saveItemBody(itemId, 'v1', 'imap', new Date('2026-05-12T10:00:00Z'));
-    inbox.saveItemBody(itemId, 'v2', 'imap', new Date('2026-05-12T11:00:00Z'));
-    const row = inbox.getItemBody(itemId);
-    expect(row?.bodyMd).toBe('v2');
-    expect(row?.fetchedAt.toISOString()).toBe('2026-05-12T11:00:00.000Z');
-  });
-
-  it('inbox_item_bodies cascades on inbox_items delete', () => {
-    const itemId = insertSampleItem();
-    inbox.saveItemBody(itemId, 'body', 'imap');
-    expect(inbox.getItemBody(itemId)).not.toBeNull();
-    mail.getConnection().prepare('DELETE FROM inbox_items WHERE id = ?').run(itemId);
-    expect(inbox.getItemBody(itemId)).toBeNull();
-  });
-
-  it('insertDraftAndAttach atomically inserts the draft and writes inbox_items.draft_id', () => {
-    const itemId = insertSampleItem();
-    const id = inbox.insertDraftAndAttach({
-      itemId,
-      bodyMd: 'x',
-      generatedAt: new Date('2026-05-10T12:00:00Z'),
-      generatorVersion: 'g',
-    });
-    expect(inbox.getDraftById(id)?.itemId).toBe(itemId);
-    expect(inbox.getItem(itemId)?.draftId).toBe(id);
   });
 });
 

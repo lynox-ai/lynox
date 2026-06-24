@@ -5078,10 +5078,7 @@ export class LynoxHTTPApi {
         state: rt.state,
         rules: rt.rules,
         coldStartTracker: rt.coldStartTracker,
-        llm: rt.llm,
-        accountResolver: rt.accounts,
         sensitiveMode: rt.sensitiveMode,
-        generateRateLimiter: rt.generateRateLimiter,
       };
       if (rt.contactResolver !== null) deps.contactResolver = rt.contactResolver;
       // Mail provider lookup for the body-refresh handler. The mail
@@ -5091,8 +5088,8 @@ export class LynoxHTTPApi {
       if (mailCtx !== null) {
         deps.providerResolver = (accountId: string) => mailCtx.registry.get(accountId);
       }
-      // MailContext for handleSendInboxReply — exposes registry +
-      // follow-up state DB to the shared sendMail pipeline.
+      // MailContext for the reading-pane context handlers — exposes the
+      // followup + outbound-history state DB they read from.
       if (mailCtx !== null) {
         deps.mailContext = mailCtx;
         // Operator cold-start re-run: needs both a registered MailProvider
@@ -5191,22 +5188,6 @@ export class LynoxHTTPApi {
       };
       if (typeof b['force'] === 'boolean') runBody.force = b['force'];
       sendInbox(res, await handleRunColdStart(deps!, runBody));
-    });
-
-    this.addStatic('user', 'POST /api/inbox/compose-send', async (_req, res, _params, body) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleComposeSend } = await import('../integrations/inbox/api.js');
-      const b = (body ?? {}) as Record<string, unknown>;
-      const composeBody: import('../integrations/inbox/api.js').ComposeSendBody = {
-        accountId: typeof b['accountId'] === 'string' ? b['accountId'] : '',
-        to: typeof b['to'] === 'string' ? b['to'] : '',
-        subject: typeof b['subject'] === 'string' ? b['subject'] : '',
-        body: typeof b['body'] === 'string' ? b['body'] : '',
-      };
-      if (typeof b['cc'] === 'string') composeBody.cc = b['cc'];
-      if (typeof b['bcc'] === 'string') composeBody.bcc = b['bcc'];
-      sendInbox(res, await handleComposeSend(deps!, composeBody));
     });
 
     this.addStatic('user', 'POST /api/inbox/items/bulk-action', async (_req, res, _params, body) => {
@@ -5340,93 +5321,11 @@ export class LynoxHTTPApi {
       sendInbox(res, handleResolveContact(deps!, email));
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/draft', async (_req, res, params) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleGetItemDraft } = await import('../integrations/inbox/api.js');
-      sendInbox(res, handleGetItemDraft(deps!, params['id']!));
-    }));
-
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/draft', async (_req, res, params, body) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleCreateDraft } = await import('../integrations/inbox/api.js');
-      const b = (body ?? {}) as Record<string, unknown>;
-      const createBody: import('../integrations/inbox/api.js').CreateDraftBody = {
-        bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
-        generatorVersion: typeof b['generatorVersion'] === 'string' ? b['generatorVersion'] : '',
-      };
-      if (typeof b['supersededDraftId'] === 'string') {
-        createBody.supersededDraftId = b['supersededDraftId'];
-      }
-      if (typeof b['generatedAt'] === 'string') {
-        createBody.generatedAt = b['generatedAt'];
-      }
-      sendInbox(res, handleCreateDraft(deps!, params['id']!, createBody));
-    }));
-
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/drafts/:id', async (_req, res, params) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleGetDraft } = await import('../integrations/inbox/api.js');
-      sendInbox(res, handleGetDraft(deps!, params['id']!));
-    }));
-
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/inbox/drafts/:id', async (_req, res, params, body) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleUpdateDraft } = await import('../integrations/inbox/api.js');
-      const b = (body ?? {}) as Record<string, unknown>;
-      const updateBody: import('../integrations/inbox/api.js').UpdateDraftBody = {
-        bodyMd: typeof b['bodyMd'] === 'string' ? b['bodyMd'] : '',
-      };
-      sendInbox(res, handleUpdateDraft(deps!, params['id']!, updateBody));
-    }));
-
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/body/refresh', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleRefreshItemBody } = await import('../integrations/inbox/api.js');
       sendInbox(res, await handleRefreshItemBody(deps!, params['id']!));
-    }));
-
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/draft/generate', async (_req, res, params, body) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleGenerateDraft } = await import('../integrations/inbox/api.js');
-      const b = (body ?? {}) as Record<string, unknown>;
-      const generateBody: import('../integrations/inbox/api.js').GenerateDraftBody = {};
-      if (typeof b['tone'] === 'string') {
-        generateBody.tone = b['tone'] as import('../integrations/inbox/api.js').GenerateDraftBody['tone'];
-      }
-      if (typeof b['previousBodyMd'] === 'string') {
-        generateBody.previousBodyMd = b['previousBodyMd'];
-      }
-      sendInbox(res, await handleGenerateDraft(deps!, params['id']!, generateBody));
-    }));
-
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/drafts/:id/send', async (_req, res, params, body) => {
-      const deps = inboxDeps();
-      if (!requireService(res, deps, 'Inbox')) return;
-      const { handleSendInboxReply } = await import('../integrations/inbox/api.js');
-      const b = (body ?? {}) as Record<string, unknown>;
-      const sendBody: import('../integrations/inbox/api.js').SendInboxReplyBody = {};
-      if (typeof b['body'] === 'string') sendBody.body = b['body'];
-      // Forward cc/bcc so the handler's "single-recipient v1" guard actually
-      // sees them. Dropping them at the route layer silently allowed clients
-      // to bypass the mass-send guard by appending recipients the UI cannot
-      // confirm.
-      const asStringArray = (v: unknown): string[] | null => {
-        if (!Array.isArray(v)) return null;
-        const out: string[] = [];
-        for (const item of v) if (typeof item === 'string') out.push(item);
-        return out;
-      };
-      const cc = asStringArray(b['cc']);
-      if (cc !== null) sendBody.cc = cc;
-      const bcc = asStringArray(b['bcc']);
-      if (bcc !== null) sendBody.bcc = bcc;
-      sendInbox(res, await handleSendInboxReply(deps!, params['id']!, sendBody));
     }));
 
     this.addStatic('user', 'GET /api/inbox/rules', async (req, res) => {

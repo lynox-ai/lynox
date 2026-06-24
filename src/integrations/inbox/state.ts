@@ -21,7 +21,6 @@ import type {
   InboxAuditEntry,
   InboxBucket,
   InboxChannel,
-  InboxDraft,
   InboxItem,
   InboxRule,
   InboxRuleAction,
@@ -116,16 +115,6 @@ export interface InboxAuditInput {
   /** Pre-serialized JSON snapshot of relevant state. */
   payloadJson: string;
   createdAt?: Date | undefined;
-}
-
-export interface InboxDraftInput {
-  tenantId?: string | undefined;
-  itemId: string;
-  bodyMd: string;
-  generatedAt: Date;
-  generatorVersion: string;
-  /** Set when this draft replaces an earlier one (regenerate flow). */
-  supersededDraftId?: string | undefined;
 }
 
 export interface InboxRuleInput {
@@ -250,17 +239,6 @@ interface AuditRow {
   created_at: number;
 }
 
-interface DraftRow {
-  id: string;
-  tenant_id: string;
-  item_id: string;
-  body_md: string;
-  generated_at: number;
-  generator_version: string;
-  user_edits_count: number;
-  superseded_by: string | null;
-}
-
 interface RuleRow {
   id: string;
   tenant_id: string;
@@ -334,19 +312,6 @@ function rowToAudit(row: AuditRow): InboxAuditEntry {
     actor: row.actor as InboxAuditActor,
     payloadJson: row.payload_json,
     createdAt: new Date(row.created_at),
-  };
-}
-
-function rowToDraft(row: DraftRow): InboxDraft {
-  return {
-    id: row.id,
-    tenantId: row.tenant_id,
-    itemId: row.item_id,
-    bodyMd: row.body_md,
-    generatedAt: new Date(row.generated_at),
-    generatorVersion: row.generator_version,
-    userEditsCount: row.user_edits_count,
-    supersededBy: row.superseded_by ?? undefined,
   };
 }
 
@@ -1139,20 +1104,6 @@ export class InboxStateDb {
       .run(key, value, Date.now());
   }
 
-  /** Link a draft to its item. Pass `null` to detach. Scoped to tenant. */
-  attachDraft(
-    id: string,
-    draftId: string | null,
-    tenantId: string = DEFAULT_TENANT_ID,
-  ): boolean {
-    const result = this.db
-      .prepare<[string | null, string, string], unknown>(
-        `UPDATE inbox_items SET draft_id = ? WHERE id = ? AND tenant_id = ?`,
-      )
-      .run(draftId, id, tenantId) as { changes: number };
-    return result.changes > 0;
-  }
-
   // ── Audit (append-only) ──────────────────────────────────────────────────
 
   /** Append an audit entry. There is intentionally no update or delete API. */
@@ -1183,74 +1134,6 @@ export class InboxStateDb {
       )
       .all(itemId, tenantId);
     return rows.map(rowToAudit);
-  }
-
-  // ── Drafts ───────────────────────────────────────────────────────────────
-
-  /**
-   * Insert a new draft. When `supersededDraftId` is set, the previous draft
-   * is marked superseded in the same transaction — the regenerate flow.
-   */
-  insertDraft(input: InboxDraftInput): string {
-    const id = nextId('drf');
-    const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
-    const txn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO inbox_drafts (id, tenant_id, item_id, body_md, generated_at, generator_version, user_edits_count)
-           VALUES (?, ?, ?, ?, ?, ?, 0)`,
-        )
-        .run(id, tenantId, input.itemId, input.bodyMd, input.generatedAt.getTime(), input.generatorVersion);
-      if (input.supersededDraftId) {
-        this.db
-          .prepare(`UPDATE inbox_drafts SET superseded_by = ? WHERE id = ?`)
-          .run(id, input.supersededDraftId);
-      }
-    });
-    txn();
-    return id;
-  }
-
-  /**
-   * Insert + attach in one txn so `inbox_items.draft_id` cannot lag the
-   * actual draft row after a partial crash. Without the wrap, a SIGKILL
-   * between the two writes would leave the regenerate flow pointing at
-   * the prior (now-superseded) draft id forever.
-   */
-  insertDraftAndAttach(input: InboxDraftInput): string {
-    return this.db.transaction(() => {
-      const id = this.insertDraft(input);
-      this.attachDraft(input.itemId, id);
-      return id;
-    })();
-  }
-
-  getDraftById(id: string, tenantId: string = DEFAULT_TENANT_ID): InboxDraft | null {
-    const row = this.db
-      .prepare<[string, string], DraftRow>('SELECT * FROM inbox_drafts WHERE id = ? AND tenant_id = ?')
-      .get(id, tenantId);
-    return row ? rowToDraft(row) : null;
-  }
-
-  /** The current (non-superseded) draft for an item, or null. Scoped to tenant. */
-  getActiveDraftForItem(itemId: string, tenantId: string = DEFAULT_TENANT_ID): InboxDraft | null {
-    const row = this.db
-      .prepare<[string, string], DraftRow>(
-        `SELECT * FROM inbox_drafts
-         WHERE item_id = ? AND tenant_id = ? AND superseded_by IS NULL
-         ORDER BY generated_at DESC
-         LIMIT 1`,
-      )
-      .get(itemId, tenantId);
-    return row ? rowToDraft(row) : null;
-  }
-
-  /** Track keystroke-batches for the tone-change "edit-loss" guard. Scoped to tenant. */
-  incrementDraftEdits(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
-    const result = this.db
-      .prepare(`UPDATE inbox_drafts SET user_edits_count = user_edits_count + 1 WHERE id = ? AND tenant_id = ?`)
-      .run(id, tenantId) as { changes: number };
-    return result.changes > 0;
   }
 
   // ── v12 thread messages (per-message Reading-Pane storage) ─────────────
@@ -1371,7 +1254,7 @@ export class InboxStateDb {
     return row ? rowToThreadMessage(row) : null;
   }
 
-  // ── Item bodies (lazy cache for draft generation) ──────────────────────
+  // ── Item bodies (lazy cache for the reading-pane body refresh) ─────────
 
   /**
    * Fetch the cached mail body for an item, or null when nothing has been
@@ -1422,22 +1305,6 @@ export class InboxStateDb {
       bytesWritten: Buffer.byteLength(clamped, 'utf8'),
       clampedAtCacheLayer,
     };
-  }
-
-  /**
-   * Atomic body update + edits counter bump. Single txn so the tone-button
-   * "edit-loss" guard (`userEditsCount > 0`) never sees a body change without
-   * its matching counter increment.
-   */
-  updateDraftBody(id: string, bodyMd: string): boolean {
-    const result = this.db
-      .prepare(
-        `UPDATE inbox_drafts
-         SET body_md = ?, user_edits_count = user_edits_count + 1
-         WHERE id = ?`,
-      )
-      .run(bodyMd, id) as { changes: number };
-    return result.changes > 0;
   }
 
   // ── Rules ────────────────────────────────────────────────────────────────
