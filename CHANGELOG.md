@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.17.0 — 2026-06-24
+
+Saved workflows become a product surface: schedule one on a cron, get pulled into an unread chat thread when a run needs you, and edit or fix a workflow by chatting with the agent — on top of a hardened headless-run foundation (explicit autonomy, run-context threading, full observability, and the fail-closed capability-contract machinery). No control-plane database migration; the engine adds three additive per-tenant migrations (v39 cron params + kill-switch, v40 thread unread-state, v41 run→workflow link), run on boot.
+
+### Added
+
+- **Schedule a saved workflow on a cron** from the product — bound parameter values are stored with the schedule (a cron run can't prompt), gated behind a capability-contract consent step, with a per-schedule kill-switch. (#766)
+- **Agent→User escalation** — a failed run or a watcher finding now opens (or bumps) an unread chat thread carrying the full context, instead of failing silently; a push just points at it. (#767)
+- **Edit a saved workflow's steps via chat** — a "Bearbeiten" action opens a chat with the workflow loaded; the agent rewrites and re-saves steps through `update_workflow_steps`. No bespoke step-editor. (#768)
+- **Diagnose and fix a failed run via chat** — a "Fixen" action opens a chat with the run loaded; `diagnose_workflow_run` explains the per-step failure, you fix and re-run by talking to the agent. (#769)
+- **Deterministic replay** of a captured tool call with re-targeted `{{params.x}}` values. (#762)
+
+### Changed
+
+- Headless workflow runs now carry explicit autonomy + a complete run-context, record per-step execution with audit / error / cost surfacing and a tenant-isolation invariant, and enforce fail-closed capability contracts (host/path/method pins, per-param constraints, DoS wall-clock/iteration bounds, kill-switch) — the safe foundation under the features above. Without a contract a headless run does no outbound writes (the conservative safe-deny default). (#763, #764, #765, #771)
+
+### Fixed
+
+- An exploratory-capture quality eval (rubric + offline gate + online smoke) guards that capturing a workflow from a free-form session keeps producing a re-executable, correctly-parameterised workflow. (#770)
+
 ## 1.16.0 — 2026-06-22
 
 Engine context-cost tooling and a comprehensive thread debug-export, a memory-recall stability fix, and the managed credit-pack and usage-display fixes. No control-plane database migration; engine adds additive per-tenant history-DB migrations (run on boot).
