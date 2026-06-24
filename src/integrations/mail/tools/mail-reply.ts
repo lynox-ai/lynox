@@ -15,6 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
+import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
 import {
   checkMailRateLimit,
@@ -218,6 +219,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           input: sendInput,
           result,
           isReply: true,
+          // Always carry the thread key so the inbox reconcile can match a
+          // message-id-less original (no Message-ID header → originalMessageId
+          // absent); resolveThreadKey falls back to folder:uid.
+          originalThreadKey: resolveThreadKey(original.envelope),
           ...(origMessageId ? { originalMessageId: origMessageId } : {}),
         });
         return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;

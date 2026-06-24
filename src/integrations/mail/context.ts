@@ -106,6 +106,13 @@ export interface OutboundContext {
   result: MailSendResult;
   isReply: boolean;
   originalMessageId?: string | undefined;
+  /**
+   * Thread key of the replied-to message (`resolveThreadKey` of the original
+   * envelope). Lets the inbox reconcile fall back to a thread-key match when
+   * the original mail carried no Message-ID — `originalMessageId` is then
+   * absent and a message-id lookup can't fire.
+   */
+  originalThreadKey?: string | undefined;
 }
 
 export interface MailHooks {

@@ -305,9 +305,10 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     };
 
   const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
-    (_accountId, outboundCtx) => {
-      // Matched by Message-ID alone, so the send account is irrelevant here.
-      reconcileOutboundReply(state, outboundCtx);
+    (accountId, outboundCtx) => {
+      // Message-ID match is account-agnostic; the account scopes only the
+      // thread-key fallback (for message-id-less originals).
+      reconcileOutboundReply(state, accountId, outboundCtx);
       return Promise.resolve();
     };
 

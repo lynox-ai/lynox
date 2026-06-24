@@ -20,9 +20,24 @@ import type { InboxStateDb } from './state.js';
  *   overwrites an explicit archive/snooze the user already chose;
  * - an unknown message-id (the reply wasn't to a classified inbox item) no-ops.
  */
-export function reconcileOutboundReply(state: InboxStateDb, ctx: OutboundContext): void {
-  if (!ctx.isReply || !ctx.originalMessageId) return;
-  const item = state.findItemByMessageId(ctx.originalMessageId);
+export function reconcileOutboundReply(
+  state: InboxStateDb,
+  accountId: string,
+  ctx: OutboundContext,
+): void {
+  if (!ctx.isReply) return;
+  // Match the replied-to inbox item: prefer the globally-unique Message-ID
+  // (matches even when the reply leaves from a different account than the mail
+  // was received on). Fall back to the thread key when the original mail had
+  // no Message-ID — `originalMessageId` is then absent and the id lookup can't
+  // fire. The thread-key path is account-scoped (folder:uid is account-local),
+  // so the rare cross-account + no-Message-ID combination stays uncovered.
+  let item = ctx.originalMessageId ? state.findItemByMessageId(ctx.originalMessageId) : null;
+  let matchedBy = 'message_id';
+  if (!item && ctx.originalThreadKey) {
+    item = state.findItemByThread(accountId, ctx.originalThreadKey);
+    matchedBy = 'thread_key';
+  }
   if (!item || item.userAction) return;
   // Gate the audit on the UPDATE actually matching a row — a concurrent
   // delete/handle between the find and the update would otherwise leave a
@@ -34,6 +49,6 @@ export function reconcileOutboundReply(state: InboxStateDb, ctx: OutboundContext
     itemId: item.id,
     action: 'replied',
     actor: 'system',
-    payloadJson: JSON.stringify({ trigger: 'outbound_reply', via: 'chat' }),
+    payloadJson: JSON.stringify({ trigger: 'outbound_reply', via: 'chat', matchedBy }),
   });
 }

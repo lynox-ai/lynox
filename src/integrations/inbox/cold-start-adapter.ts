@@ -19,7 +19,8 @@ import { DEFAULT_THREAD_CAP, estimateCost } from './cold-start.js';
 import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxStateDb } from './state.js';
 import type { OnInboundMailHook } from './watcher-hook.js';
-import type { MailEnvelope, MailProvider } from '../mail/provider.js';
+import type { MailProvider } from '../mail/provider.js';
+import { resolveThreadKey } from '../mail/thread-key.js';
 
 /** Provider.list() batch — large enough for typical onboarding, well under the cap. */
 export const DEFAULT_BACKFILL_LIMIT = 200;
@@ -114,14 +115,3 @@ export async function runColdStartForAccount(
   }
 }
 
-/**
- * Mirror of the watcher-hook's thread-key resolution — duplicated here
- * so the adapter does not import an internal helper from another file.
- * Both call sites must agree on the synthesised key shape or dedup
- * collapses unrelated mails.
- */
-function resolveThreadKey(env: MailEnvelope): string {
-  if (env.threadKey) return env.threadKey;
-  if (env.messageId) return `imap:${env.messageId}`;
-  return `imap:${env.folder}:${String(env.uid)}`;
-}

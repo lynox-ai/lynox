@@ -18,7 +18,7 @@
 import type { MailEnvelope, MailProvider } from '../mail/provider.js';
 import { analyzeSensitiveContent, type SensitiveMode } from './sensitive-content.js';
 import { MAX_ITEM_BODY_CHARS, type InboxStateDb } from './state.js';
-import { resolveThreadKey } from './watcher-hook.js';
+import { resolveThreadKey } from '../mail/thread-key.js';
 
 /** Window for the provider.list() probe when the item has no `mailDate`. */
 const DEFAULT_LOOKUP_DAYS = 30;

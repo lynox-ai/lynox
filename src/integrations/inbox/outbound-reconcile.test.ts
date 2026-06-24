@@ -51,29 +51,29 @@ function auditCount(itemId: string): number {
 describe('reconcileOutboundReply (inbox ↔ chat reply sync)', () => {
   it('marks the open item replied + writes a system audit row', () => {
     const id = seedItem('<orig@example.com>');
-    reconcileOutboundReply(inbox, outCtx());
+    reconcileOutboundReply(inbox, ACCOUNT.id, outCtx());
     expect(inbox.getItem(id)?.userAction).toBe('replied');
     expect(auditCount(id)).toBe(1);
   });
 
-  it('no-ops for a fresh send (isReply=false) and a reply without originalMessageId', () => {
+  it('no-ops for a fresh send (isReply=false) and a reply with neither message-id nor thread-key', () => {
     const id = seedItem('<orig@example.com>');
-    reconcileOutboundReply(inbox, outCtx({ isReply: false }));
-    reconcileOutboundReply(inbox, outCtx({ originalMessageId: undefined }));
+    reconcileOutboundReply(inbox, ACCOUNT.id, outCtx({ isReply: false }));
+    reconcileOutboundReply(inbox, ACCOUNT.id, outCtx({ originalMessageId: undefined }));
     expect(inbox.getItem(id)?.userAction).toBeUndefined();
     expect(auditCount(id)).toBe(0);
   });
 
   it('no-ops when no item matches the replied-to message-id', () => {
     const id = seedItem('<orig@example.com>');
-    reconcileOutboundReply(inbox, outCtx({ originalMessageId: '<someone-else@example.com>' }));
+    reconcileOutboundReply(inbox, ACCOUNT.id, outCtx({ originalMessageId: '<someone-else@example.com>' }));
     expect(inbox.getItem(id)?.userAction).toBeUndefined();
   });
 
   it('does NOT overwrite an explicit user action (only open items are reconciled)', () => {
     const id = seedItem('<orig@example.com>');
     inbox.updateUserAction(id, 'archived', new Date(), 'default');
-    reconcileOutboundReply(inbox, outCtx());
+    reconcileOutboundReply(inbox, ACCOUNT.id, outCtx());
     expect(inbox.getItem(id)?.userAction).toBe('archived'); // untouched
     expect(auditCount(id)).toBe(0);
   });
@@ -83,7 +83,31 @@ describe('reconcileOutboundReply (inbox ↔ chat reply sync)', () => {
     // the mail was received on; matching by the (globally-unique) Message-ID
     // means the item is still found regardless of the sending account.
     const id = seedItem('<orig@example.com>');
-    reconcileOutboundReply(inbox, outCtx()); // OutboundContext carries no account
+    reconcileOutboundReply(inbox, 'some-other-account', outCtx()); // send account ≠ receive account
     expect(inbox.getItem(id)?.userAction).toBe('replied');
+  });
+
+  it('falls back to the thread key when the original mail had no Message-ID', () => {
+    // A message-id-less inbox item (no Message-ID header) can't be matched by
+    // id; mail_reply still carries the thread key, so the reconcile finds the
+    // item via findItemByThread(accountId, threadKey).
+    const id = seedItem(undefined); // threadKey 'imap:t1', no message-id
+    reconcileOutboundReply(
+      inbox,
+      ACCOUNT.id,
+      outCtx({ originalMessageId: undefined, originalThreadKey: 'imap:t1' }),
+    );
+    expect(inbox.getItem(id)?.userAction).toBe('replied');
+    expect(auditCount(id)).toBe(1);
+  });
+
+  it('thread-key fallback is account-scoped — a different send account does NOT match by thread key', () => {
+    const id = seedItem(undefined);
+    reconcileOutboundReply(
+      inbox,
+      'some-other-account',
+      outCtx({ originalMessageId: undefined, originalThreadKey: 'imap:t1' }),
+    );
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
   });
 });
