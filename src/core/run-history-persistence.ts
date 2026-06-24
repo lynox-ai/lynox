@@ -366,15 +366,19 @@ export function insertPipelineRun(db: Database.Database, params: {
   stepCount?: number | undefined;
   parentRunId?: string | undefined;
   error?: string | undefined;
+  /** Slice C2: the saved-workflow id this run executed (null for ad-hoc/inline
+   *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
+  workflowId?: string | undefined;
 }): void {
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, completed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, completed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
     params.totalTokensIn ?? 0, params.totalTokensOut ?? 0,
     params.stepCount ?? 0, params.parentRunId ?? null, params.error ?? null,
+    params.workflowId ?? null,
   );
 }
 
@@ -439,15 +443,22 @@ export function getPipelineRun(db: Database.Database, id: string): {
   id: string; manifest_name: string; status: string; manifest_json: string;
   total_duration_ms: number; total_cost_usd: number; total_tokens_in: number;
   total_tokens_out: number; step_count: number; parent_run_id: string | null;
-  error: string | null; started_at: string; completed_at: string | null;
+  error: string | null; workflow_id: string | null; started_at: string; completed_at: string | null;
 } | undefined {
+  // Escape LIKE metacharacters in the (possibly untrusted — LLM/client-supplied,
+  // Slice C2) id so a `%`/`_` can't widen the prefix match to arbitrary rows.
+  // Exclude `status='planned'` rows: those are saved-workflow TEMPLATES that
+  // share this table, and a workflow id passed as a run id must NOT resolve to
+  // one (it would render a bogus "run" with status 'planned'). A real run is
+  // never 'planned'.
+  const likePattern = `${id.replace(/[\\%_]/g, '\\$&')}%`;
   return db.prepare(
-    'SELECT * FROM pipeline_runs WHERE id = ? OR id LIKE ?'
-  ).get(id, `${id}%`) as {
+    "SELECT * FROM pipeline_runs WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status != 'planned'"
+  ).get(id, likePattern) as {
     id: string; manifest_name: string; status: string; manifest_json: string;
     total_duration_ms: number; total_cost_usd: number; total_tokens_in: number;
     total_tokens_out: number; step_count: number; parent_run_id: string | null;
-    error: string | null; started_at: string; completed_at: string | null;
+    error: string | null; workflow_id: string | null; started_at: string; completed_at: string | null;
   } | undefined;
 }
 

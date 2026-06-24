@@ -587,12 +587,13 @@ export interface RunOptions {
 	effort?: 'low' | 'medium' | 'high' | 'max';
 	thinking?: 'disabled';
 	/**
-	 * Chat-with-context entry (Slice C, §4.6): a "💬 Bearbeiten" button opens a
-	 * fresh chat referencing the object being worked on. The server resolves the
-	 * `{kind,id}` into a context preamble it prepends to this first message, so
-	 * the agent has the workflow loaded without the user pasting it.
+	 * Chat-with-context entry (Slice C, §4.6): a "💬 Bearbeiten" (kind 'workflow')
+	 * / "💬 Fixen" (kind 'run') button opens a fresh chat referencing the object
+	 * being worked on. The server resolves the `{kind,id}` into a context preamble
+	 * it prepends to this first message, so the agent has the object loaded
+	 * without the user pasting it.
 	 */
-	context?: { kind: 'workflow'; id: string };
+	context?: { kind: 'workflow' | 'run'; id: string };
 }
 
 export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[], runOptions?: RunOptions): Promise<void> {

@@ -8,17 +8,18 @@ import type { PlannedPipeline } from '../types/index.js';
  * user's first message, so the agent has the object loaded without the user
  * pasting it. This is the reusable entry — any future "discuss this X"
  * affordance passes the same shape and the server owns how each `kind` renders.
- * (C1 ships `workflow`; the Fix-via-chat slice widens this to a `run` kind for
- * the "💬 Fixen" button on a failed run.)
+ * `workflow` = a saved workflow to edit ("💬 Bearbeiten"); `run` = a (failed)
+ * workflow run to diagnose + fix ("💬 Fixen").
  */
 export interface ChatContextRef {
-  kind: 'workflow';
+  kind: 'workflow' | 'run';
   id: string;
 }
 
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
 const MAX_STEP_ID_CHARS = 80;
+const MAX_ERR_CHARS = 500;
 
 /**
  * Collapse control characters (incl. newlines/tabs) to spaces and clamp the
@@ -34,7 +35,7 @@ const MAX_STEP_ID_CHARS = 80;
  * plain `[\r\n]` class misses.
  */
 function oneLine(s: string, max: number): string {
-  const flat = s.replace(/[\r\n\t\x00-\x1f\x7f\u2028\u2029]/g, ' ').trim();
+  const flat = s.replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
@@ -72,5 +73,25 @@ export function resolveChatContext(runHistory: RunHistory | null, ref: ChatConte
     );
   }
 
-  return null;
+  // ref.kind === 'run' — a (failed) workflow run to diagnose + fix in chat.
+  const run = runHistory.getPipelineRun(ref.id);
+  if (!run) return null;
+  const stepResults = runHistory.getPipelineStepResults(run.id);
+  const trace = stepResults
+    .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .join('\n');
+  const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
+  // Only point at the editable workflow if it still exists — a run can outlive a
+  // deleted workflow, and naming a gone id would dead-end the fix.
+  const wfExists = !!run.workflow_id && runHistory.getPlannedPipeline(run.workflow_id) !== undefined;
+  return (
+    `[Loaded workflow run — id: ${run.id}]\n` +
+    `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
+    `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
+    (trace ? `Steps:\n${trace}\n` : '') +
+    (hasFailure
+      ? `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
+        (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
+      : '')
+  );
 }

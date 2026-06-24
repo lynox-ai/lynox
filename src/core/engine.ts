@@ -50,6 +50,7 @@ import {
   httpRequestTool,
   runWorkflowTool,
   updateWorkflowTool,
+  diagnoseWorkflowTool,
   taskCreateTool,
   taskUpdateTool,
   taskListTool,
@@ -1453,6 +1454,7 @@ export class Engine {
     this.registry
       .register(runWorkflowTool)
       .register(updateWorkflowTool)
+      .register(diagnoseWorkflowTool)
       .register(saveWorkflowTool);
     // Update tool context with pipeline dependencies
     this._toolContext.tools = this.registry.getEntries();

@@ -150,6 +150,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   httpRequestTool: { definition: { name: 'http_request' }, handler: vi.fn() },
   runWorkflowTool: { definition: { name: 'run_workflow' }, handler: vi.fn() },
   updateWorkflowTool: { definition: { name: 'update_workflow_steps' }, handler: vi.fn() },
+  diagnoseWorkflowTool: { definition: { name: 'diagnose_workflow_run' }, handler: vi.fn() },
   setPipelineConfig: vi.fn(),
   setPlanTaskConfig: vi.fn(),
   taskCreateTool: { definition: { name: 'task_create' }, handler: vi.fn() },

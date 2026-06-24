@@ -864,6 +864,14 @@ const MIGRATIONS: string[] = [
   // thread with context). Existing threads start read (DEFAULT 0).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (40);
    ALTER TABLE threads ADD COLUMN is_unread INTEGER NOT NULL DEFAULT 0;`,
+
+  // v41 (Slice C2): link a pipeline_runs execution back to the saved workflow it
+  // ran. A run → workflow mapping only existed via the scheduling task
+  // (task.pipeline_id); the failed-run → fix-in-chat flow needs it from the run
+  // itself so diagnose/edit/re-run can resolve the workflow from a run id.
+  // Nullable: ad-hoc / inline (non-saved-workflow) runs have no source workflow.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (41);
+   ALTER TABLE pipeline_runs ADD COLUMN workflow_id TEXT;`,
 ];
 
 export class RunHistory {
@@ -1828,6 +1836,7 @@ export class RunHistory {
     stepCount?: number | undefined;
     parentRunId?: string | undefined;
     error?: string | undefined;
+    workflowId?: string | undefined;
   }): void {
     persistence.insertPipelineRun(this.db, params);
   }
@@ -1867,7 +1876,7 @@ export class RunHistory {
     id: string; manifest_name: string; status: string; manifest_json: string;
     total_duration_ms: number; total_cost_usd: number; total_tokens_in: number;
     total_tokens_out: number; step_count: number; parent_run_id: string | null;
-    error: string | null; started_at: string; completed_at: string | null;
+    error: string | null; workflow_id: string | null; started_at: string; completed_at: string | null;
   } | undefined {
     return persistence.getPipelineRun(this.db, id);
   }

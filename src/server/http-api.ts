@@ -1832,19 +1832,20 @@ export class LynoxHTTPApi {
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
 
       // Chat-with-context entry (Slice C, §4.6 context-seam): a "💬 Bearbeiten"
-      // button opens this run with a typed `{kind,id}` reference to the object
-      // being worked on. The server resolves it to a context preamble it
-      // prepends to the user's first message — the reusable injection point, so
-      // any future "discuss this X" entry passes the same shape and the server
-      // owns how each kind renders. Best-effort: an unknown/foreign id yields no
-      // preamble and the chat still runs. Single-tenant container ⇒ the id is
-      // always the tenant's own (no cross-tenant read).
+      // (kind 'workflow') / "💬 Fixen" (kind 'run') button opens this run with a
+      // typed `{kind,id}` reference to the object being worked on. The server
+      // resolves it to a context preamble it prepends to the user's first
+      // message — the reusable injection point, so any future "discuss this X"
+      // entry passes the same shape and the server owns how each kind renders.
+      // Best-effort: an unknown/foreign id yields no preamble and the chat still
+      // runs. Single-tenant container ⇒ the id is always the tenant's own.
       let contextPreamble = '';
       const rawCtx = b?.['context'];
       if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
         const c = rawCtx as Record<string, unknown>;
-        if (c['kind'] === 'workflow' && typeof c['id'] === 'string' && c['id'].length > 0) {
-          const preamble = resolveChatContext(engine.getRunHistory(), { kind: 'workflow', id: c['id'] });
+        const ctxKind = c['kind'];
+        if ((ctxKind === 'workflow' || ctxKind === 'run') && typeof c['id'] === 'string' && c['id'].length > 0) {
+          const preamble = resolveChatContext(engine.getRunHistory(), { kind: ctxKind, id: c['id'] });
           if (preamble) contextPreamble = `${preamble}\n\n`;
         }
       }
