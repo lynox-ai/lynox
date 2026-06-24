@@ -434,11 +434,30 @@ export class WorkerLoop {
     }
 
     const success = result.status === 'completed';
-    const resultSummary = success
-      ? `Pipeline completed (run ${result.runId ?? 'unknown'})`
-      : `Pipeline ${result.status ?? 'unknown'}`;
+    if (success) {
+      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})`, true);
+      return;
+    }
 
-    this.recordAndNotify(task, resultSummary, success);
+    // Slice B3 — escalation primitive (consumer #1): a failed scheduled run does
+    // NOT just push. Record the failure, then open (or bump) an unread chat
+    // thread loaded with the run's context — the user opens it + fixes in chat
+    // (Slice C adds the retry/diagnose tools that act on the reply).
+    this.engine.getTaskManager()?.recordTaskRun(task.id, `Pipeline ${result.status ?? 'unknown'}`, 'failed');
+    const stepDetail = (result.stepErrors ?? [])
+      .filter(s => s.error)
+      .map(s => `• ${s.stepId}: ${s.error}`)
+      .join('\n');
+    this.engine.escalateToUser({
+      key: task.id,
+      title: `✗ ${task.title}`,
+      body:
+        `Your scheduled workflow "${task.title}" didn't complete (status: ${result.status ?? 'unknown'}).\n\n` +
+        (result.error ? `Error: ${result.error}\n\n` : '') +
+        (stepDetail ? `Failed steps:\n${stepDetail}\n\n` : '') +
+        `Reply here and I'll help you fix it — I have this run loaded.`,
+      data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
+    });
   }
 
   private recordAndNotify(task: TaskRecord, resultSummary: string, success: boolean): void {
@@ -538,13 +557,17 @@ export class WorkerLoop {
       taskManager.updateWatchConfig(task.id, config);
     }
 
-    // Notify — but not on first run (baseline only)
-    if (!isFirstRun && this.notificationRouter.hasChannels()) {
-      await this.notificationRouter.notify({
+    // Slice B3 — escalation primitive (consumer #2): a watcher finding opens (or
+    // bumps) an unread chat thread with the finding as context, instead of a
+    // push into the void. The user opens it to see what changed + can act on it
+    // in chat. Not on the first run (baseline only). escalateToUser fires its own
+    // push-as-wakeup (pointing at the thread).
+    if (!isFirstRun) {
+      this.engine.escalateToUser({
+        key: task.id,
         title: `\uD83D\uDD0D ${task.title}`,
-        body: truncatedAnalysis,
-        taskId: task.id,
-        priority: 'normal',
+        body: `${config.url} changed.\n\n${truncatedAnalysis}`,
+        data: { taskId: task.id },
       });
     }
   }

@@ -858,6 +858,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE tasks ADD COLUMN pipeline_params TEXT;
    ALTER TABLE tasks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
    CREATE INDEX IF NOT EXISTS idx_tasks_pipeline_enabled ON tasks(enabled) WHERE task_type = 'pipeline';`,
+
+  // v40 (Slice B3): per-thread unread state for the Agent→User escalation
+  // primitive (a failed run / a watcher finding opens or bumps an UNREAD chat
+  // thread with context). Existing threads start read (DEFAULT 0).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (40);
+   ALTER TABLE threads ADD COLUMN is_unread INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export class RunHistory {

@@ -32,10 +32,18 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
   // Inbox push payloads carry { data: { itemId } } so the click can land
-  // directly on the offending mail rather than the inbox root. Falls
-  // back to '/' for non-inbox pushes (reminders, scheduled-send results).
-  const itemId = event.notification.data && event.notification.data.itemId;
-  const target = itemId ? `/app/inbox?item=${encodeURIComponent(itemId)}` : '/';
+  // directly on the offending mail. Escalation pushes (Slice B3) carry
+  // { data: { threadId } } — the wakeup lands in the chat, where the unread
+  // escalated thread floats to the top of the list (a per-thread deep-link
+  // route doesn't exist yet; /app + unread-first surfacing is the target).
+  // Falls back to '/' for plain pushes (reminders, scheduled-send results).
+  const data = event.notification.data || {};
+  const itemId = data.itemId;
+  const threadId = data.threadId;
+  const target = itemId
+    ? `/app/inbox?item=${encodeURIComponent(itemId)}`
+    : (threadId ? '/app' : '/');
+  const deepLink = Boolean(itemId || threadId);
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
@@ -53,12 +61,12 @@ self.addEventListener('notificationclick', (event) => {
       const rest = inScope.slice(1);
       const navigateAll = () => Promise.all(
         rest.map((c) =>
-          itemId && 'navigate' in c
+          deepLink && 'navigate' in c
             ? c.navigate(target).catch(() => undefined)
             : Promise.resolve(),
         ),
       );
-      if (itemId && 'navigate' in first) {
+      if (deepLink && 'navigate' in first) {
         return first.navigate(target)
           .then(() => first.focus())
           .then(navigateAll)

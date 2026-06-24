@@ -43,6 +43,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.error_rename': { de: 'Thread konnte nicht umbenannt werden', en: 'Failed to rename thread' },
 	'threads.error_favorite': { de: 'Favorit konnte nicht geändert werden', en: 'Failed to update favorite' },
 	'threads.private': { de: 'Privat', en: 'Private' },
+	'threads.unread': { de: 'Ungelesen', en: 'Unread' },
 	'threads.run_running': { de: 'Agent arbeitet', en: 'Agent working' },
 	'threads.run_awaiting': { de: 'Wartet auf deine Eingabe', en: 'Awaiting your input' },
 	'threads.run_interrupted': { de: 'Lauf unterbrochen — erneut starten', en: 'Run interrupted — retry' },

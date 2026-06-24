@@ -4,7 +4,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId, getSkipExtraction, toggleSkipExtraction } from '../stores/chat.svelte.js';
-	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus } from '../stores/threads.svelte.js';
+	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus, markThreadRead } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -361,9 +361,14 @@
 
 	function selectThread(id: string) {
 		sidebarOpen = false;
-		void goto('/app').then(() => {
-			void resumeThread(id).then(() => { void loadThreads(); });
-		});
+		// Slice B3: opening an escalated thread clears its unread badge. Sequence
+		// the mark-read PATCH BEFORE the post-resume loadThreads so the reload
+		// doesn't re-fetch a still-unread row and flicker the badge back.
+		const read = markThreadRead(id);
+		void goto('/app')
+			.then(() => resumeThread(id))
+			.then(() => read)
+			.then(() => { void loadThreads(); });
 	}
 
 	function formatThreadDate(dateStr: string): string {
@@ -627,6 +632,7 @@
 														ondblclick={() => startRename(thread.id, thread.title || formatThreadDate(thread.created_at))}
 														class="flex-1 text-left px-2 py-2 text-sm truncate"
 													>
+														{#if thread.is_unread}<span class="inline-block h-1.5 w-1.5 rounded-full bg-accent mr-1.5 align-middle" aria-label={t('threads.unread')} title={t('threads.unread')}></span>{/if}
 														{#if hasVoicePrefix(thread.title)}
 															<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3 w-3 mr-1 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(thread.title!)}
 														{:else}

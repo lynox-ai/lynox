@@ -14,6 +14,10 @@ export interface ThreadRecord {
   is_archived: number; // SQLite boolean
   is_favorite: number; // SQLite boolean
   skip_extraction: number; // SQLite boolean — disable KG extraction for this thread
+  /** Slice B3: 1 = the agent opened/bumped this thread with context the user
+   *  hasn't seen yet (a failed run, a watcher finding). Floats to the top of the
+   *  thread list until opened. SQLite boolean. */
+  is_unread: number;
   created_at: string;
   updated_at: string;
 }
@@ -81,9 +85,11 @@ export class ThreadStore {
   }): ThreadRecord[] {
     const limit = Math.min(opts?.limit ?? 50, 200);
     const includeArchived = opts?.includeArchived ?? false;
+    // Slice B3: unread (agent-escalated) threads float to the very top, then the
+    // existing favorite/recency order.
     const sql = includeArchived
-      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_favorite DESC, updated_at DESC LIMIT ?'
-      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_favorite DESC, updated_at DESC LIMIT ?';
+      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?'
+      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?';
     return this.db.prepare(sql).all(limit) as ThreadRecord[];
   }
 
@@ -97,6 +103,7 @@ export class ThreadStore {
     is_archived?: boolean | undefined;
     is_favorite?: boolean | undefined;
     skip_extraction?: boolean | undefined;
+    is_unread?: boolean | undefined;
   }): void {
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -110,12 +117,19 @@ export class ThreadStore {
     if (updates.is_archived !== undefined) { sets.push('is_archived = ?'); params.push(updates.is_archived ? 1 : 0); }
     if (updates.is_favorite !== undefined) { sets.push('is_favorite = ?'); params.push(updates.is_favorite ? 1 : 0); }
     if (updates.skip_extraction !== undefined) { sets.push('skip_extraction = ?'); params.push(updates.skip_extraction ? 1 : 0); }
+    if (updates.is_unread !== undefined) { sets.push('is_unread = ?'); params.push(updates.is_unread ? 1 : 0); }
 
     if (sets.length === 0) return;
 
     sets.push("updated_at = datetime('now')");
     params.push(id);
     this.db.prepare(`UPDATE threads SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  /** Slice B3: clear the unread flag (the user opened the escalated thread).
+   *  Does NOT bump updated_at — reading shouldn't re-sort the list. */
+  markThreadRead(id: string): void {
+    this.db.prepare('UPDATE threads SET is_unread = 0 WHERE id = ?').run(id);
   }
 
   deleteThread(id: string): void {

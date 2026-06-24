@@ -88,6 +88,7 @@ import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc } from './memory-gc.js';
 import { NotificationRouter } from './notification-router.js';
+import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
@@ -1495,6 +1496,22 @@ export class Engine {
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
+
+  /**
+   * Slice B3 — the reusable **Agent→User escalation primitive**: open (or BUMP)
+   * an UNREAD chat thread seeded with `body` as context, and fire a push that
+   * merely POINTS at it (the wakeup, not the content). One thread per `key`
+   * (e.g. a task id), bumped on repeat (a flaky daily cron → one thread with
+   * history, not N threads). The thread is a normal resumable chat thread — the
+   * user opens it and replies; Slice C adds the fix/retry tools that act on the
+   * reply. Returns the thread id, or null when there is no ThreadStore (a
+   * headless setup) — in which case it degrades to a bare push so the user is
+   * still notified. Generic by design so the post-sprint Triggers primitive
+   * docks here with no second pour.
+   */
+  escalateToUser(opts: EscalateOpts): { threadId: string } | null {
+    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), opts);
+  }
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {

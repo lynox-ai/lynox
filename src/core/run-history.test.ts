@@ -1899,6 +1899,14 @@ describe('RunHistory', () => {
       h.close();
     });
 
+    it('Slice B3: the v40 migration adds threads.is_unread (default 0)', () => {
+      const h = createHistory();
+      const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
+      const cols = db.prepare('PRAGMA table_info(threads)').all().map(c => c.name);
+      expect(cols).toContain('is_unread');
+      h.close();
+    });
+
     it('a ONE-SHOT row written as status=failed is excluded from getDueTasks even with a stale next_run_at', () => {
       // Defence in depth: recordTaskRun clears next_run_at when it
       // moves a one-shot task to 'failed', but the SELECT also excludes

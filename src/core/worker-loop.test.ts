@@ -28,6 +28,14 @@ vi.mock('../orchestrator/validate.js', async (importOriginal) => {
   };
 });
 
+// Mock the pinned fetch so executeWatch's content-change detection is driven
+// deterministically without a real network call.
+const mockFetchPinned = vi.fn();
+vi.mock('./network-guard.js', async (importActual) => {
+  const actual = await importActual<typeof import('./network-guard.js')>();
+  return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
+});
+
 import { WorkerLoop } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -101,7 +109,7 @@ function makeEngine(opts?: {
   return {
     getTaskManager: vi.fn(() => tm),
     createSession: vi.fn(() => session),
-    getUserConfig: vi.fn(() => ({})),
+    getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
   } as unknown as Engine;
 }
 
@@ -495,7 +503,7 @@ describe('WorkerLoop', () => {
     // Intercept the session to capture promptUser after it's assigned
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager([makeTask()])),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       createSession: vi.fn(() => {
         // Return a proxy that captures promptUser assignment
         return new Proxy(session, {
@@ -538,7 +546,7 @@ describe('WorkerLoop', () => {
     const tm = makeTaskManager([task]);
     const engine = {
       getTaskManager: vi.fn(() => tm),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       createSession: vi.fn(() => session),
     } as unknown as Engine;
     const router = makeNotificationRouter();
@@ -590,7 +598,7 @@ describe('WorkerLoop', () => {
     const tm = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => tm),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -650,7 +658,7 @@ describe('WorkerLoop', () => {
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -706,7 +714,7 @@ describe('WorkerLoop', () => {
 
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -791,7 +799,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -857,7 +865,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -906,7 +914,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -970,6 +978,74 @@ describe('WorkerLoop', () => {
     expect(manifest.context?.params).toEqual({ month: '2026-06' });
   });
 
+  it('B3: a failed scheduled run escalates to an unread thread with the run context', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'r-fail', status: 'failed' }));
+    const templateJson = JSON.stringify(baseTemplate({ confirmedAt: CONFIRMED }));
+    const taskManager = makeTaskManager();
+    const escalateSpy = vi.fn(() => null);
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      escalateToUser: escalateSpy,
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'b2-wf', manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('b2-wf', JSON.parse(templateJson) as PlannedPipeline);
+    const task = makeTask({ id: 't-failrun', pipeline_id: 'b2-wf', task_type: 'pipeline' });
+
+    await (loop as unknown as { executePipeline: (t: TaskRecord) => Promise<void> }).executePipeline(task);
+
+    // The failed run opens an escalation thread keyed by the task, with the run context.
+    expect(escalateSpy).toHaveBeenCalledWith(expect.objectContaining({
+      key: 't-failrun',
+      title: expect.stringContaining('✗') as string, // ✗
+      data: expect.objectContaining({ taskId: 't-failrun' }) as Record<string, string>,
+    }));
+    // The failure is still recorded on the task.
+    expect(taskManager.recordTaskRun).toHaveBeenCalledWith('t-failrun', expect.stringContaining('Pipeline') as string, 'failed');
+  });
+
+  it('B3: a watcher finding escalates to an unread thread — but NOT on the first/baseline run', async () => {
+    vi.useRealTimers();
+    const escalateSpy = vi.fn(() => null);
+    const analysisSession = { run: vi.fn().mockResolvedValue('The price changed from $10 to $12.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: escalateSpy,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TaskRecord) => Promise<void> }).executeWatch.bind(loop);
+
+    // First run (no last_hash) = baseline → records + stores hash, NO escalation.
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+    await fire(makeTask({ id: 't-watch', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    expect(escalateSpy).not.toHaveBeenCalled();
+
+    // A later run with a CHANGED page (last_hash present + different) → escalate.
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2 — changed', { status: 200 }));
+    await fire(makeTask({ id: 't-watch', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', last_hash: 'STALE', interval_minutes: 60 }) }));
+    expect(escalateSpy).toHaveBeenCalledWith(expect.objectContaining({
+      key: 't-watch',
+      title: expect.stringContaining('🔍') as string, // 🔍
+      data: expect.objectContaining({ taskId: 't-watch' }) as Record<string, string>,
+    }));
+  });
+
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.
   // An interactive pipeline that somehow got onto a schedule (legacy data,
   // sync from another instance) must be rejected at the boundary so it
@@ -996,7 +1072,7 @@ describe('WorkerLoop', () => {
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
