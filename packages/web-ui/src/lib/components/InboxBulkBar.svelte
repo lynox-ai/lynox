@@ -30,25 +30,21 @@
 		<span class="text-text-muted">
 			{t('inbox.bulk_selected').replace('{count}', String(count))}
 		</span>
-		<div class="flex items-center gap-1.5">
+		<div class="flex flex-wrap items-center gap-1.5">
 			<button
 				type="button"
-				class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
+				class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2.5 py-1 pointer-coarse:min-h-[44px] text-[11px] text-text-muted hover:text-text"
 				onclick={() => void run('archived')}
 			>{t('inbox.bulk_archive')}</button>
 			<button
 				type="button"
-				class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
+				class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2.5 py-1 pointer-coarse:min-h-[44px] text-[11px] text-text-muted hover:text-text"
 				onclick={() => void run('snoozed')}
+				title={t('inbox.bulk_snooze_tomorrow_hint')}
 			>{t('inbox.bulk_snooze_tomorrow')}</button>
 			<button
 				type="button"
-				class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[11px] text-text-muted hover:text-text"
-				onclick={() => void run('unhandled')}
-			>{t('inbox.bulk_mark_unhandled')}</button>
-			<button
-				type="button"
-				class="rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-text-subtle hover:text-text"
+				class="rounded-[var(--radius-sm)] px-2 py-1 pointer-coarse:min-h-[44px] text-[11px] text-text-subtle hover:text-text"
 				onclick={() => clearBulkSelection()}
 				aria-label={t('inbox.bulk_clear')}
 			>×</button>

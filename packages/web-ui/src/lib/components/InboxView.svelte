@@ -28,6 +28,7 @@
 		startColdStartPolling,
 		startInboxVisibilityRefresh,
 		toggleBulkSelection,
+		clearBulkSelection,
 		undoLastAction,
 		type InboxItem,
 		type InboxZone,
@@ -103,6 +104,15 @@
 			if (zone !== 'requires_user') selectedItemId = null;
 			openSnoozeFor = null;
 		}
+	});
+
+	// Clear the bulk selection when the zone changes — a selection made in one
+	// zone can't be acted on in another (bulk targets the zone's bucket; a
+	// snoozed-zone selection would silently no-op). Depends ONLY on `zone` so
+	// typing in the search box doesn't drop an in-progress selection.
+	$effect(() => {
+		void zone;
+		clearBulkSelection();
 	});
 
 	// Triage is needs-you only; force it off when the user navigates away.
@@ -547,13 +557,18 @@
 										class="rounded-[var(--radius-sm)] border transition-colors {isActiveSelection ? 'border-accent bg-accent/5' : 'border-transparent hover:border-border hover:bg-bg-subtle/60'}"
 									>
 										<div class="flex items-start gap-2 px-2 py-2">
-											<div class="mt-1">
-												<Checkbox
-													checked={isSelectedForBulk(item.id)}
-													onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
-													ariaLabel={`Auswählen: ${item.subject || item.reasonDe}`}
-												/>
-											</div>
+											<!-- Bulk-select is for the actionable buckets only; snoozed items
+											     aren't targeted by applyBulkAction, so hide the checkbox there
+											     rather than offer a no-op selection. -->
+											{#if zone !== 'snoozed'}
+												<div class="mt-1">
+													<Checkbox
+														checked={isSelectedForBulk(item.id)}
+														onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
+														ariaLabel={`Auswählen: ${item.subject || item.reasonDe}`}
+													/>
+												</div>
+											{/if}
 											<button
 												type="button"
 												class="min-w-0 flex-1 text-left cursor-pointer"
