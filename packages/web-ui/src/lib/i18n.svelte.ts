@@ -1266,6 +1266,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.run': { de: 'Ausführen', en: 'Run' },
 	'workflow_library.running': { de: 'Läuft...', en: 'Running...' },
 	'workflow_library.rename': { de: 'Umbenennen', en: 'Rename' },
+	'workflow_library.edit_in_chat': { de: 'Bearbeiten', en: 'Edit' },
+	'workflow_library.edit_in_chat_prompt': { de: 'Ich möchte diesen gespeicherten Workflow bearbeiten:', en: "I'd like to edit this saved workflow:" },
 	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },
 	'workflow_library.save': { de: 'Speichern', en: 'Save' },
 	'workflow_library.cancel': { de: 'Abbrechen', en: 'Cancel' },

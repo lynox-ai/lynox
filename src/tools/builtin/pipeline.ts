@@ -7,6 +7,7 @@ import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
+import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
@@ -135,7 +136,7 @@ function truncateResult(result: string, limit = DEFAULT_RESULT_BYTES): string {
   return result.slice(0, limit) + `\n...[truncated — result was ${result.length} chars, showing first ${limitKB}KB. Set "pipeline_step_result_limit" in config to increase.]`;
 }
 
-function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'stop' | 'continue' | 'notify', context?: Record<string, unknown>): Manifest {
+export function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'stop' | 'continue' | 'notify', context?: Record<string, unknown>): Manifest {
   return {
     manifest_version: '1.1',
     name,
@@ -339,12 +340,6 @@ function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHist
 
 // ===== Private execution helpers =====
 
-interface StepModification {
-  step_id: string;
-  action: 'remove' | 'update_task';
-  value?: string | undefined;
-}
-
 async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
   const steps = input.steps!;
 
@@ -409,37 +404,6 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
-}
-
-function applyModifications(steps: InlinePipelineStep[], modifications: StepModification[]): string | null {
-  for (const mod of modifications) {
-    const idx = steps.findIndex(s => s.id === mod.step_id);
-
-    if (mod.action === 'remove') {
-      if (idx === -1) {
-        return `Error: Step "${mod.step_id}" not found for removal.`;
-      }
-      const removedId = steps[idx]!.id;
-      steps.splice(idx, 1);
-      for (const s of steps) {
-        if (s.input_from) {
-          s.input_from = s.input_from.filter(dep => dep !== removedId);
-          if (s.input_from.length === 0) {
-            s.input_from = undefined;
-          }
-        }
-      }
-    } else if (mod.action === 'update_task') {
-      if (idx === -1) {
-        return `Error: Step "${mod.step_id}" not found for task update.`;
-      }
-      if (!mod.value) {
-        return 'Error: "value" is required for update_task modification.';
-      }
-      steps[idx]!.task = mod.value;
-    }
-  }
-  return null; // no error
 }
 
 export interface PipelineDeps {

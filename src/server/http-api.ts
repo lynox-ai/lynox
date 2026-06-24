@@ -21,6 +21,7 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { readEnvAlias } from '../core/env.js';
+import { resolveChatContext } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
@@ -1830,6 +1831,25 @@ export class LynoxHTTPApi {
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
 
+      // Chat-with-context entry (Slice C, §4.6 context-seam): a "💬 Bearbeiten"
+      // button opens this run with a typed `{kind,id}` reference to the object
+      // being worked on. The server resolves it to a context preamble it
+      // prepends to the user's first message — the reusable injection point, so
+      // any future "discuss this X" entry passes the same shape and the server
+      // owns how each kind renders. Best-effort: an unknown/foreign id yields no
+      // preamble and the chat still runs. Single-tenant container ⇒ the id is
+      // always the tenant's own (no cross-tenant read).
+      let contextPreamble = '';
+      const rawCtx = b?.['context'];
+      if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
+        const c = rawCtx as Record<string, unknown>;
+        if (c['kind'] === 'workflow' && typeof c['id'] === 'string' && c['id'].length > 0) {
+          const preamble = resolveChatContext(engine.getRunHistory(), { kind: 'workflow', id: c['id'] });
+          if (preamble) contextPreamble = `${preamble}\n\n`;
+        }
+      }
+      const composedTask = `${contextPreamble}${taskText}`;
+
       // Pre-flight: provider key must be configured before we hand off to the
       // LLM SDK. Without this the Anthropic SDK throws deep inside
       // validateHeaders() ("Could not resolve authentication method ..."),
@@ -1949,10 +1969,10 @@ export class LynoxHTTPApi {
             content.push({ type: 'text', text: `[File: ${safeName}]\n${text}` });
           }
         }
-        content.push({ type: 'text', text: taskText });
+        content.push({ type: 'text', text: composedTask });
         task = content;
       } else {
-        task = taskText;
+        task = composedTask;
       }
 
       // SSE headers

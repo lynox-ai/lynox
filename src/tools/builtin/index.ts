@@ -7,6 +7,7 @@ export { askSecretTool } from './ask-secret.js';
 export { batchFilesTool } from './batch-files.js';
 export { httpRequestTool } from './http.js';
 export { runWorkflowTool } from './pipeline.js';
+export { updateWorkflowTool } from './update-workflow.js';
 export { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 export { planTaskTool } from './plan-task.js';
 export { dataStoreCreateTool, dataStoreInsertTool, dataStoreQueryTool, dataStoreListTool, dataStoreDeleteTool, dataStoreDropTool } from './data-store.js';

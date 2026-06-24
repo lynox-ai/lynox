@@ -2006,6 +2006,12 @@ export class RunHistory {
     return persistence.getDueTasks(this.db);
   }
 
+  /** Tasks that actively reference a saved workflow (Slice C destructive-edit
+   *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
+  getTasksByPipelineId(pipelineId: string): TaskRecord[] {
+    return persistence.getTasksByPipelineId(this.db, pipelineId);
+  }
+
   updateTaskRunResult(id: string, update: {
     lastRunAt: string;
     lastRunResult: string;
