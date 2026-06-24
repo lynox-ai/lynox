@@ -2,13 +2,20 @@ import type { CapabilityContract, ParamConstraint } from '../types/capability-co
 import type { InlinePipelineStep } from '../types/pipeline.js';
 
 /**
- * Base `params.<name>` reference. Captures the base name regardless of what
- * follows it (`}}`, `.sub`, `[...]`), because `resolveInputTemplate` →
- * `getByPath` resolves dotted paths against the base param, so a nested
- * `{{params.customer.id}}` still re-targets through the `customer` param and
- * must therefore require `customer` to be constrained.
+ * Base `params.<name>` reference. Captures the base name up to the next path
+ * separator (`.`), the closing brace, or whitespace — the SAME segment the
+ * runtime resolves: `resolveInputTemplate` → `getByPath` splits the path on `.`
+ * ONLY, so the base param key is everything after `params.` up to the first `.`,
+ * INCLUDING non-word chars (`-`, `$`, unicode). The capture class MUST match
+ * that, not `[a-zA-Z0-9_]+`: a narrower class makes a param named e.g.
+ * `target-host`, `data$x`, or a leading-non-ASCII `δata` capture the wrong
+ * prefix (or, leading-special, NOTHING) → its reference is invisible to the
+ * validator → it slips past fail-closed UNCONSTRAINED, reopening the S1 body-
+ * exfil vector (release-harden 2026-06-24). A nested `{{params.customer.id}}`
+ * still captures the base `customer` (stops at the `.`) — correct, getByPath
+ * re-targets through it, so constraining `customer` covers it.
  */
-const PARAM_REF = /\{\{\s*params\.([a-zA-Z0-9_]+)/g;
+const PARAM_REF = /\{\{\s*params\.([^.}\s]+)/g;
 
 /** A constraint is *effective* only if it actually narrows the value — an empty
  * `{}` or `{ enum: [] }` constrains nothing, which would silently re-open the

@@ -89,4 +89,26 @@ describe('validateContractAgainstSteps', () => {
     });
     expect(err).toContain('customer');
   });
+
+  // release-harden 2026-06-24: a param name with a non-[a-zA-Z0-9_] char is
+  // resolved RAW by the runtime (getByPath splits on '.' only), so the validator
+  // must SEE it — a narrower capture made it invisible → fail-open (S1).
+  it('catches an unconstrained re-target param with a NON-WORD name (hyphen / $ / leading-unicode)', () => {
+    for (const name of ['target-host', 'data$x', 'δata']) {
+      const err = validateContractAgainstSteps({
+        capabilityContract: baseContract, // constrains nothing
+        steps: [step({ url: `https://api.acme.test/v1/{{params.${name}}}` })],
+      });
+      expect(err, `param "${name}" must be caught as referenced-but-unconstrained`).not.toBeNull();
+      expect(err).toContain(name);
+    }
+  });
+
+  it('accepts a non-word-named param when constrained by its FULL name', () => {
+    const err = validateContractAgainstSteps({
+      capabilityContract: { ...baseContract, paramConstraints: { 'target-host': { enum: ['acme'] } } },
+      steps: [step({ url: 'https://api.acme.test/v1/{{params.target-host}}' })],
+    });
+    expect(err).toBeNull();
+  });
 });
