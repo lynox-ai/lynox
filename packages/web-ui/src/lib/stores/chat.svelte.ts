@@ -203,6 +203,10 @@ interface QueuedMessage {
 	id: string;
 	task: string;
 	files?: FileAttachment[];
+	/** Per-run options (effort/thinking/context) preserved across the queue so a
+	 *  context-bearing send (e.g. "Bearbeiten"/"Fixen") that lands mid-stream
+	 *  still carries its `{kind,id}` preamble when it flushes. */
+	runOptions?: RunOptions;
 }
 
 function newQueueId(): string {
@@ -504,7 +508,7 @@ if (typeof window !== 'undefined') {
 			setTimeout(() => {
 				if (messageQueue.length > 0) {
 					const next = messageQueue.shift()!;
-					void _executeRun(next.task, next.files, undefined, undefined, next.id);
+					void _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
 				}
 			}, 500);
 		}
@@ -582,6 +586,13 @@ export interface FileAttachment {
 export interface RunOptions {
 	effort?: 'low' | 'medium' | 'high' | 'max';
 	thinking?: 'disabled';
+	/**
+	 * Chat-with-context entry (Slice C, §4.6): a "💬 Bearbeiten" button opens a
+	 * fresh chat referencing the object being worked on. The server resolves the
+	 * `{kind,id}` into a context preamble it prepends to this first message, so
+	 * the agent has the workflow loaded without the user pasting it.
+	 */
+	context?: { kind: 'workflow'; id: string };
 }
 
 export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[], runOptions?: RunOptions): Promise<void> {
@@ -607,7 +618,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const fileNames = files?.map((f) => f.name).join(', ');
 		const id = newQueueId();
 		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id });
-		messageQueue.push({ id, task, files });
+		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
 		persistChatNow();
@@ -701,6 +712,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
+	if (runOptions?.context) payload['context'] = runOptions.context;
 	// User's local IANA timezone — server threads it into the per-turn
 	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
 	if (USER_TIMEZONE) payload['tz'] = USER_TIMEZONE;
@@ -1012,7 +1024,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		const next = messageQueue.shift()!;
 		persistChatNow(); // queue shrank — keep the durable copy in sync
 		// Small delay so the UI updates before next run starts
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, undefined, next.id); }, 100);
+		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
 	}
 }
 
@@ -2419,7 +2431,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (gen === _resumeGeneration && !isStreaming && !reattaching && !pendingChangeset && messageQueue.length > 0) {
 			const next = messageQueue.shift()!;
 			persistChatNow();
-			setTimeout(() => { void _executeRun(next.task, next.files, undefined, undefined, next.id); }, 100);
+			setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
 		}
 	} catch (err: unknown) {
 		// Silently ignore abort errors from superseded requests

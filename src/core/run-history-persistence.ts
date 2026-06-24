@@ -733,6 +733,21 @@ export function getDueTasks(db: Database.Database): TaskRecord[] {
   ).all(now) as TaskRecord[];
 }
 
+/**
+ * Tasks that ACTIVELY reference a saved workflow — the destructive-edit guard
+ * (Slice C, §4.6 U5). "Active" = enabled (not paused via the kill-switch) and
+ * not a completed one-shot. A non-empty result means editing the workflow's
+ * steps changes what an already-scheduled / still-pending run will do, so the
+ * edit tool requires explicit confirmation. Disabled (`enabled=0`) and
+ * `completed` rows are excluded — they cannot fire, so they don't make the
+ * workflow "scheduled" for the purpose of the warning.
+ */
+export function getTasksByPipelineId(db: Database.Database, pipelineId: string): TaskRecord[] {
+  return db.prepare(
+    `SELECT * FROM tasks WHERE pipeline_id = ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`
+  ).all(pipelineId) as TaskRecord[];
+}
+
 /** Update task after a run execution. */
 export function updateTaskRunResult(
   db: Database.Database,

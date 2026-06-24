@@ -49,6 +49,7 @@ import {
   batchFilesTool,
   httpRequestTool,
   runWorkflowTool,
+  updateWorkflowTool,
   taskCreateTool,
   taskUpdateTool,
   taskListTool,
@@ -1451,6 +1452,7 @@ export class Engine {
     this._pipelinesEnabled = true;
     this.registry
       .register(runWorkflowTool)
+      .register(updateWorkflowTool)
       .register(saveWorkflowTool);
     // Update tool context with pipeline dependencies
     this._toolContext.tools = this.registry.getEntries();

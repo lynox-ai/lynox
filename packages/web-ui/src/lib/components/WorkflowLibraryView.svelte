@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
@@ -68,6 +70,18 @@
 			error = t('common.load_failed');
 		}
 		loading = false;
+	}
+
+	// "💬 Bearbeiten" (§4.6): editing is chat-with-context, not a bespoke step
+	// form. Open a FRESH chat seeded with a typed reference to this workflow; the
+	// server resolves it into a context preamble (the steps + id) so the agent
+	// has the workflow loaded and can call update_workflow_steps. The user just
+	// says what to change.
+	function onEditInChat(wf: SavedWorkflow): void {
+		newChat();
+		const framing = `${t('workflow_library.edit_in_chat_prompt')} „${wf.name}".`;
+		void sendMessage(framing, undefined, undefined, { context: { kind: 'workflow', id: wf.id } });
+		void goto('/app');
 	}
 
 	// Run button: a workflow with parameters opens the value modal first; one
@@ -350,6 +364,13 @@
 										{t('workflow_library.schedule')}
 									</button>
 								{/if}
+								<button
+									onclick={() => onEditInChat(wf)}
+									class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity"
+								>
+									<Icon name="chat" size="xs" />
+									{t('workflow_library.edit_in_chat')}
+								</button>
 								<button onclick={() => startRename(wf)} class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-opacity">
 									<Icon name="pencil" size="xs" />
 									{t('workflow_library.rename')}

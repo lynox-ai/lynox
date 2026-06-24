@@ -160,8 +160,14 @@ function measureStaticPrefixTokens(): number {
  * stored workflow's {{params.<name>}} placeholders (§4.5 drift fix). A genuine
  * new capability, not accidental growth; description was trimmed to its minimal
  * form first (structural lever) — the residual +4 is irreducible.
+ *
+ * 2026-06-24: bump to 21150 (measured 21143) — Workflow Run-Engine C1 adds the
+ * `update_workflow_steps` builtin tool (edit + save a saved workflow's steps via
+ * chat, §4.6). A genuine new capability, not accidental growth; its definition
+ * was trimmed to minimal form first (structural lever) — the residual ~283 is
+ * one whole tool's serialized schema and is irreducible.
  */
-const STATIC_PREFIX_BUDGET = 20860;
+const STATIC_PREFIX_BUDGET = 21150;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

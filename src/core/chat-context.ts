@@ -1,0 +1,76 @@
+import type { RunHistory } from './run-history.js';
+import type { PlannedPipeline } from '../types/index.js';
+
+/**
+ * A typed reference to an object a chat is opened ON — the payload of the
+ * Slice-C context-injection seam (§4.6). A "💬 Bearbeiten" button passes
+ * `{kind, id}`; the server resolves it to a context preamble it prepends to the
+ * user's first message, so the agent has the object loaded without the user
+ * pasting it. This is the reusable entry — any future "discuss this X"
+ * affordance passes the same shape and the server owns how each `kind` renders.
+ * (C1 ships `workflow`; the Fix-via-chat slice widens this to a `run` kind for
+ * the "💬 Fixen" button on a failed run.)
+ */
+export interface ChatContextRef {
+  kind: 'workflow';
+  id: string;
+}
+
+const MAX_STEP_TASK_CHARS = 280;
+const MAX_NAME_CHARS = 200;
+const MAX_STEP_ID_CHARS = 80;
+
+/**
+ * Collapse control characters (incl. newlines/tabs) to spaces and clamp the
+ * length. The preamble interpolates user/agent-authored fields (the workflow
+ * name, step ids, step tasks) into a multi-line block that OPENS with a
+ * trusted-looking `[Loaded …]` marker; without this, a crafted name/task
+ * carrying an embedded line break + a fake `[System: …]` line could inject
+ * pseudo-system text that reads as a server directive. Provenance of these
+ * fields is not guaranteed user-authored (a prior agent run, an import, or a
+ * sync can write them), so sanitise always. The character class covers ASCII
+ * control chars AND the Unicode line/paragraph separators U+2028/U+2029 +
+ * DEL (U+007F), which JS and many model tokenizers treat as line breaks but a
+ * plain `[\r\n]` class misses.
+ */
+function oneLine(s: string, max: number): string {
+  const flat = s.replace(/[\r\n\t\x00-\x1f\x7f\u2028\u2029]/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * Resolve a context reference to a preamble string, or null when it can't be
+ * loaded (no run history, unknown id, or a non-template one-shot run that isn't
+ * an editable saved workflow). Best-effort by design: the caller prepends a
+ * non-null result to the task and otherwise just runs the chat normally, so a
+ * stale/foreign id degrades to a plain chat rather than an error. Single-tenant
+ * container ⇒ every id resolved here is the tenant's own.
+ */
+export function resolveChatContext(runHistory: RunHistory | null, ref: ChatContextRef): string | null {
+  if (!runHistory) return null;
+
+  if (ref.kind === 'workflow') {
+    const row = runHistory.getPlannedPipeline(ref.id);
+    if (!row) return null;
+    let wf: PlannedPipeline;
+    try {
+      wf = JSON.parse(row.manifest_json) as PlannedPipeline;
+    } catch {
+      return null;
+    }
+    if (wf.template !== true) return null; // only saved workflows are editable
+    const steps = (wf.steps ?? [])
+      .map((s, i) => `  ${i + 1}. [${oneLine(s.id, MAX_STEP_ID_CHARS)}] ${oneLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .join('\n');
+    return (
+      `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
+      `Name: "${oneLine(wf.name, MAX_NAME_CHARS)}"\n` +
+      `Mode: ${wf.mode ?? 'autonomous'}${wf.capabilityContract ? ' · contract-governed' : ''}\n` +
+      `Steps:\n${steps}\n\n` +
+      `To change it, call update_workflow_steps with workflow_id "${wf.id}". ` +
+      `Confirm destructive edits with the user first.`
+    );
+  }
+
+  return null;
+}
