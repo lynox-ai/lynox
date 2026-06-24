@@ -29,13 +29,15 @@ const MAX_ERR_CHARS = 500;
  * carrying an embedded line break + a fake `[System: …]` line could inject
  * pseudo-system text that reads as a server directive. Provenance of these
  * fields is not guaranteed user-authored (a prior agent run, an import, or a
- * sync can write them), so sanitise always. The character class covers ASCII
- * control chars AND the Unicode line/paragraph separators U+2028/U+2029 +
- * DEL (U+007F), which JS and many model tokenizers treat as line breaks but a
- * plain `[\r\n]` class misses.
+ * sync can write them), so sanitise always. The character class covers: all
+ * whitespace (`\s`, incl. the Unicode line/paragraph separators U+2028/U+2029
+ * + NBSP), the C0 control range + DEL (`\x00-\x1f`, `\x7f`), AND the C1 control
+ * range `\x80-\x9f` — which contains U+0085 (NEL, Next Line), a line-break char
+ * that `\s` and the C0 class both MISS (release-harden 2026-06-24). A plain
+ * `[\r\n]` class misses all of the above.
  */
 function oneLine(s: string, max: number): string {
-  const flat = s.replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim();
+  const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
