@@ -54,20 +54,20 @@
 		try {
 			const result = await refreshSelectedItemBody();
 			if (result.ok) {
-				addToast(t('inbox.draft_refresh_ok'), 'success');
+				addToast(t('inbox.body_refresh_ok'), 'success');
 				return;
 			}
 			if (result.reason.kind === 'aborted') return;
 			const keyMap: Record<string, string> = {
-				unavailable: 'inbox.draft_refresh_unavailable',
-				unsupported: 'inbox.draft_refresh_unsupported',
-				not_registered: 'inbox.draft_refresh_not_registered',
-				empty_body: 'inbox.draft_refresh_empty',
-				not_found: 'inbox.draft_refresh_not_found',
-				fetch_failed: 'inbox.draft_refresh_failed',
-				network: 'inbox.draft_refresh_failed',
+				unavailable: 'inbox.body_refresh_unavailable',
+				unsupported: 'inbox.body_refresh_unsupported',
+				not_registered: 'inbox.body_refresh_not_registered',
+				empty_body: 'inbox.body_refresh_empty',
+				not_found: 'inbox.body_refresh_not_found',
+				fetch_failed: 'inbox.body_refresh_failed',
+				network: 'inbox.body_refresh_failed',
 			};
-			addToast(t(keyMap[result.reason.kind] ?? 'inbox.draft_refresh_failed'), 'info');
+			addToast(t(keyMap[result.reason.kind] ?? 'inbox.body_refresh_failed'), 'info');
 		} finally {
 			refreshing = false;
 		}
@@ -232,10 +232,10 @@
 						type="button"
 						onclick={() => void onRefreshBody()}
 						disabled={refreshing}
-						title={t('inbox.draft_refresh_body_hint')}
-						aria-label={t('inbox.draft_refresh_body')}
+						title={t('inbox.body_refresh_body_hint')}
+						aria-label={t('inbox.body_refresh_body')}
 						class="ml-auto rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
-					>{refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_full_body')}</button>
+					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
 
@@ -294,10 +294,10 @@
 						type="button"
 						onclick={() => void onRefreshBody()}
 						disabled={refreshing}
-						title={t('inbox.draft_refresh_body_hint')}
-						aria-label={t('inbox.draft_refresh_body')}
+						title={t('inbox.body_refresh_body_hint')}
+						aria-label={t('inbox.body_refresh_body')}
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
-					>{refreshing ? t('inbox.draft_refresh_in_flight') : t('inbox.draft_refresh_full_body')}</button>
+					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
 		</header>
