@@ -402,6 +402,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow.error': { de: 'Fehler', en: 'Error' },
 	'workflow.started': { de: 'Gestartet', en: 'Started' },
 	'workflow.completed': { de: 'Abgeschlossen', en: 'Completed' },
+	'workflows.fix_in_chat': { de: 'Im Chat beheben', en: 'Fix in chat' },
+	'workflows.fix_in_chat_prompt': { de: 'Dieser Workflow-Lauf ist fehlgeschlagen — hilf mir, ihn zu beheben:', en: 'This workflow run failed — help me fix it:' },
 	'workflow.just_now': { de: 'Gerade eben', en: 'Just now' },
 	'workflow.load_detail_failed': { de: 'Details konnten nicht geladen werden.', en: 'Failed to load details.' },
 	'workflow.analytics_title': { de: 'Workflow-Analyse', en: 'Workflow Analytics' },

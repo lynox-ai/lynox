@@ -1,9 +1,22 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost, formatDuration } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { timeAgo } from '../utils/time.js';
+
+	// "💬 Fixen" (§4.6): fixing a failed run is chat-with-context, not a bespoke
+	// retry UI. Open a fresh chat seeded with a typed reference to this run; the
+	// server resolves it into a context preamble (the step trace + error + the
+	// source workflow id) so the agent can diagnose, edit the workflow, and re-run.
+	function onFixInChat(runId: string, name: string): void {
+		newChat();
+		const framing = `${t('workflows.fix_in_chat_prompt')} „${name}".`;
+		void sendMessage(framing, undefined, undefined, { context: { kind: 'run', id: runId } });
+		void goto('/app');
+	}
 
 	interface PipelineRun {
 		id: string;
@@ -194,6 +207,17 @@
 									<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger font-mono break-all">
 										{selectedRun.error}
 									</div>
+								{/if}
+
+								<!-- "💬 Fixen": discuss + fix a failed run in chat (§4.6) -->
+								{#if run.status === 'failed'}
+									<button
+										onclick={() => onFixInChat(run.id, run.manifest_name)}
+										class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2.5 py-1 text-xs text-accent-text hover:bg-accent/20 transition-colors"
+									>
+										<Icon name="chat" size="xs" />
+										{t('workflows.fix_in_chat')}
+									</button>
 								{/if}
 
 								<!-- DAG visualization -->

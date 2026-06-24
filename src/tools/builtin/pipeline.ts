@@ -299,7 +299,7 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   return JSON.stringify(result, null, 2);
 }
 
-function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number): void {
+function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number, workflowId?: string | undefined): void {
   if (!pipelineRunHistory) return;
   // Build step-id → model-tier lookup from manifest
   const stepModelMap = new Map<string, string>();
@@ -318,6 +318,9 @@ function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHist
       totalTokensOut: [...state.outputs.values()].reduce((s, o) => s + o.tokensOut, 0),
       stepCount: state.outputs.size,
       error: state.error,
+      // Slice C2: link the run to its saved workflow (undefined for inline/ad-hoc)
+      // so a failed run resolves back to the workflow for diagnose/fix/re-run.
+      ...(workflowId ? { workflowId } : {}),
     });
     for (const [, output] of state.outputs) {
       pipelineRunHistory.insertPipelineStepResult({
@@ -589,7 +592,7 @@ export async function runSavedWorkflow(
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
     }));
-    persistPipelineRun(state, manifest, runHistory, resultLimit);
+    persistPipelineRun(state, manifest, runHistory, resultLimit, planned.id);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
     // shows WHICH step failed (not just status). `ok:true` = the run executed;
@@ -650,7 +653,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }));
 
       executedStates.set(planned.id, { manifest: prev.manifest, state });
-      persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit);
+      persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit, planned.id);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -726,7 +729,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }));
 
     executedStates.set(planned.id, { manifest, state });
-    persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
+    persistPipelineRun(state, manifest, deps.runHistory, resultLimit, planned.id);
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }

@@ -448,6 +448,12 @@ export class WorkerLoop {
       .filter(s => s.error)
       .map(s => `• ${s.stepId}: ${s.error}`)
       .join('\n');
+    // The run + workflow ids ride in the seeded body so the agent, when the user
+    // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
+    // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
+    const ref = result.runId
+      ? `(run ${result.runId}${task.pipeline_id ? ` · workflow ${task.pipeline_id}` : ''})`
+      : (task.pipeline_id ? `(workflow ${task.pipeline_id})` : '');
     this.engine.escalateToUser({
       key: task.id,
       title: `✗ ${task.title}`,
@@ -455,7 +461,7 @@ export class WorkerLoop {
         `Your scheduled workflow "${task.title}" didn't complete (status: ${result.status ?? 'unknown'}).\n\n` +
         (result.error ? `Error: ${result.error}\n\n` : '') +
         (stepDetail ? `Failed steps:\n${stepDetail}\n\n` : '') +
-        `Reply here and I'll help you fix it — I have this run loaded.`,
+        `Reply here and I'll help you fix it — I have this run loaded${ref ? ` ${ref}` : ''}.`,
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
     });
   }

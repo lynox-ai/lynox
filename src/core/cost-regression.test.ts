@@ -166,8 +166,13 @@ function measureStaticPrefixTokens(): number {
  * chat, §4.6). A genuine new capability, not accidental growth; its definition
  * was trimmed to minimal form first (structural lever) — the residual ~283 is
  * one whole tool's serialized schema and is irreducible.
+ *
+ * 2026-06-24: bump to 21270 (measured 21260) — Workflow Run-Engine C2 adds the
+ * `diagnose_workflow_run` builtin tool (read a failed run's step trace + error so
+ * the agent can fix it in chat, §4.6). Lean definition (~110 tokens) — one tool's
+ * irreducible schema; a genuine new capability, not accidental growth.
  */
-const STATIC_PREFIX_BUDGET = 21150;
+const STATIC_PREFIX_BUDGET = 21270;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
