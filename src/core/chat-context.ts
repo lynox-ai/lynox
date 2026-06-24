@@ -1,5 +1,5 @@
 import type { RunHistory } from './run-history.js';
-import type { PlannedPipeline } from '../types/index.js';
+import type { InboxItem, PlannedPipeline } from '../types/index.js';
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -9,17 +9,36 @@ import type { PlannedPipeline } from '../types/index.js';
  * pasting it. This is the reusable entry — any future "discuss this X"
  * affordance passes the same shape and the server owns how each `kind` renders.
  * `workflow` = a saved workflow to edit ("💬 Bearbeiten"); `run` = a (failed)
- * workflow run to diagnose + fix ("💬 Fixen").
+ * workflow run to diagnose + fix ("💬 Fixen"); `mail` = an inbox item to reply
+ * to in chat ("💬 Im Chat beantworten") — the agent drafts + sends via the
+ * mail_reply tool instead of a bespoke composer.
  */
 export interface ChatContextRef {
-  kind: 'workflow' | 'run';
+  kind: 'workflow' | 'run' | 'mail';
   id: string;
+}
+
+/**
+ * The narrow read surface `resolveChatContext` needs to render a `mail`
+ * context — structurally satisfied by `InboxStateDb` (which sits on the shared
+ * mail-state.db connection, so it can also read the mail-owned
+ * `processed_mail_messages` uid map via `getUidByMessageId`). Kept as an
+ * interface so core/ stays decoupled from the inbox integration's concrete DB.
+ */
+export interface ChatInboxReader {
+  getItem(id: string): InboxItem | null;
+  getItemBody(id: string): { bodyMd: string } | null;
+  /** Resolve the IMAP uid+folder for a stored message-id, or null if unknown
+   *  (old/moved mail) — the caller then instructs a mail_search fallback. */
+  getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null;
 }
 
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
 const MAX_STEP_ID_CHARS = 80;
 const MAX_ERR_CHARS = 500;
+const MAX_MAIL_BODY_CHARS = 800;
+const MAX_FOLDER_CHARS = 80;
 
 /**
  * Collapse control characters (incl. newlines/tabs) to spaces and clamp the
@@ -49,7 +68,52 @@ function oneLine(s: string, max: number): string {
  * stale/foreign id degrades to a plain chat rather than an error. Single-tenant
  * container ⇒ every id resolved here is the tenant's own.
  */
-export function resolveChatContext(runHistory: RunHistory | null, ref: ChatContextRef): string | null {
+export function resolveChatContext(
+  runHistory: RunHistory | null,
+  ref: ChatContextRef,
+  inboxState?: ChatInboxReader | null,
+): string | null {
+  if (ref.kind === 'mail') {
+    // An inbox item the user wants to answer in chat. The agent drafts + sends
+    // via mail_reply (which has its own send-confirm) instead of a composer.
+    if (!inboxState) return null;
+    const item = inboxState.getItem(ref.id);
+    if (!item) return null;
+    // From/subject/body are the MOST untrusted fields in the app (an external
+    // sender authored them) — always oneLine() to neutralise injected
+    // pseudo-system lines, same as the workflow/run fields.
+    const from = item.fromName
+      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${oneLine(item.fromAddress, MAX_NAME_CHARS)}>`
+      : oneLine(item.fromAddress, MAX_NAME_CHARS);
+    // The cached body can be an EMPTY string (body-refresh persists '' for an
+    // all-markup/redacted mail), so `??` would leave a blank Message line — fall
+    // back to the snippet on empty, not just on null/undefined.
+    const cachedBody = inboxState.getItemBody(ref.id)?.bodyMd;
+    const bodyMd = cachedBody && cachedBody.length > 0 ? cachedBody : (item.snippet ?? '');
+    // The IMAP uid is account-SPECIFIC, so the reply MUST go from this item's
+    // account — name it so mail_reply resolves the uid against the right mailbox.
+    const acct = oneLine(item.accountId, MAX_NAME_CHARS);
+    // Resolve the IMAP uid mail_reply needs (data in processed_mail_messages).
+    // Absent for old/moved mail → fall back to a mail_search instruction.
+    const uidRow = item.messageId
+      ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+      : null;
+    const replyLine = uidRow
+      ? `To reply, call mail_reply with uid: ${uidRow.uid}, account: "${acct}"` +
+        `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}. `
+      : `To reply, first locate this message with mail_search ` +
+        `(by sender/subject${item.messageId ? ` or message-id "${oneLine(item.messageId, MAX_NAME_CHARS)}"` : ''}) ` +
+        `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
+    return (
+      `[Loaded mail for reply — item: ${item.id}]\n` +
+      `From: ${from}\n` +
+      `Subject: "${oneLine(item.subject, MAX_NAME_CHARS)}"\n` +
+      `Message:\n${oneLine(bodyMd, MAX_MAIL_BODY_CHARS)}\n\n` +
+      replyLine +
+      `Draft a reply, confirm the send with the user, then send it.`
+    );
+  }
+
   if (!runHistory) return null;
 
   if (ref.kind === 'workflow') {

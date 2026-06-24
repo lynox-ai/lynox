@@ -39,6 +39,7 @@ import {
   type InboxRunnerPolicy,
 } from './runner.js';
 import { InboxStateDb } from './state.js';
+import { reconcileOutboundReply } from './outbound-reconcile.js';
 import type { SensitiveMode } from './sensitive-content.js';
 import {
   type AccountResolver,
@@ -59,6 +60,9 @@ export interface InboxRuntime {
   hook: OnInboundMailHook;
   /** Wire as `MailHooks.onAccountAdded` — fires a backfill pass on connect. */
   onAccountAdded: NonNullable<import('../mail/context.js').MailHooks['onAccountAdded']>;
+  /** Wire as `MailHooks.onOutboundSent` — marks an item `replied` when the user
+   *  answers it in chat (the reply leaves via the generic mail_reply tool). */
+  onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']>;
   /**
    * Operator-driven cold-start re-run. The HTTP layer resolves the
    * `MailProvider` from its registry and hands it in; runtime closes over
@@ -307,6 +311,13 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       await runColdStartForAccount(adapterOpts);
     };
 
+  const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
+    (_accountId, outboundCtx) => {
+      // Matched by Message-ID alone, so the send account is irrelevant here.
+      reconcileOutboundReply(state, outboundCtx);
+      return Promise.resolve();
+    };
+
   const runColdStart: InboxRuntime['runColdStart'] = async (provider, runOpts) => {
     if (disabledAccounts?.has(provider.accountId)) return;
     const adapterOpts: Parameters<typeof runColdStartForAccount>[0] = {
@@ -345,6 +356,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     coldStartTracker,
     hook,
     onAccountAdded,
+    onOutboundReconcile,
     runColdStart,
     llm,
     accounts,

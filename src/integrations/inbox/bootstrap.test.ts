@@ -72,6 +72,8 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.budget).toBeInstanceOf(InboxCostBudget);
     expect(runtime.queue).toBeInstanceOf(ClassifierQueue);
     expect(runtime.hook).toBeInstanceOf(Function);
+    expect(runtime.onAccountAdded).toBeInstanceOf(Function);
+    expect(runtime.onOutboundReconcile).toBeInstanceOf(Function); // wired to MailHooks.onOutboundSent
     expect(runtime.contactResolver).toBeNull(); // no CRM provided
   });
 

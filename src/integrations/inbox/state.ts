@@ -499,6 +499,24 @@ export class InboxStateDb {
   }
 
   /**
+   * Resolve the IMAP uid + folder a `mail_reply` needs from a stored RFC
+   * message-id. The `processed_mail_messages` table is owned by `MailStateDb`
+   * but lives on the SAME connection (see file header), so the inbox reader can
+   * bridge an inbox item (message-id) to the uid the mail tools key on without
+   * a live IMAP round-trip. Null when the message isn't in the dedup table
+   * (pre-classify-window or moved folder) → the caller falls back to mail_search.
+   */
+  getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null {
+    if (!messageId) return null;
+    const row = this.db
+      .prepare<[string, string], { uid: number; folder: string }>(
+        'SELECT uid, folder FROM processed_mail_messages WHERE account_id = ? AND message_id = ? LIMIT 1',
+      )
+      .get(accountId, messageId);
+    return row ? { uid: row.uid, folder: row.folder } : null;
+  }
+
+  /**
    * Look up an existing item for `(accountId, threadKey)`. Used by the
    * classifier worker to decide between insert vs re-classify on a known
    * thread (re-classification updates the existing row in a future commit;
@@ -510,6 +528,25 @@ export class InboxStateDb {
         'SELECT * FROM inbox_items WHERE account_id = ? AND thread_key = ? ORDER BY classified_at DESC LIMIT 1',
       )
       .get(accountId, threadKey);
+    return row ? rowToItem(row) : null;
+  }
+
+  /**
+   * Look up the item whose source message has this RFC Message-ID — the bridge
+   * the outbound-reply reconcile (`onOutboundSent`) uses to find the item a sent
+   * reply answers. Keyed on message-id ALONE (NOT account): a Message-ID is
+   * globally unique, and a reply can legitimately go out from a different
+   * account than the one the mail was received on (mail_reply's smart
+   * reply-from), so account-scoping here would silently MISS the item. Newest
+   * -first if a re-classify ever duplicates a message-id across rows.
+   */
+  findItemByMessageId(messageId: string): InboxItem | null {
+    if (!messageId) return null;
+    const row = this.db
+      .prepare<[string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE message_id = ? ORDER BY classified_at DESC LIMIT 1',
+      )
+      .get(messageId);
     return row ? rowToItem(row) : null;
   }
 

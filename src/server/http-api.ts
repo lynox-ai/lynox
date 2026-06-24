@@ -1844,8 +1844,16 @@ export class LynoxHTTPApi {
       if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
         const c = rawCtx as Record<string, unknown>;
         const ctxKind = c['kind'];
-        if ((ctxKind === 'workflow' || ctxKind === 'run') && typeof c['id'] === 'string' && c['id'].length > 0) {
-          const preamble = resolveChatContext(engine.getRunHistory(), { kind: ctxKind, id: c['id'] });
+        if (
+          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail') &&
+          typeof c['id'] === 'string' &&
+          c['id'].length > 0
+        ) {
+          const preamble = resolveChatContext(
+            engine.getRunHistory(),
+            { kind: ctxKind, id: c['id'] },
+            engine.getInboxRuntime()?.state ?? null,
+          );
           if (preamble) contextPreamble = `${preamble}\n\n`;
         }
       }

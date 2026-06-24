@@ -212,6 +212,14 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
 
         const result = await sendProvider.send(sendInput);
         recordMailSend([...toAddrs, ...ccAddrs], subject);
+        // Reconcile the inbox: a reply sent here marks the open item answered
+        // (its own source of truth) without coupling this tool to inbox internals.
+        await ctx?.notifyOutboundSent(sendProvider.accountId, {
+          input: sendInput,
+          result,
+          isReply: true,
+          ...(origMessageId ? { originalMessageId: origMessageId } : {}),
+        });
         return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
       } catch (err: unknown) {
         if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;

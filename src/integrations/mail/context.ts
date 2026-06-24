@@ -269,6 +269,19 @@ export class MailContext {
   }
 
   /**
+   * Fire the outbound hook after a successful send — the symmetric twin of the
+   * inbound-hook firing in the watcher wrapper above. Currently driven by
+   * `mail_reply` so the inbox can reconcile a just-answered item to `replied`;
+   * `mail_send` can call this too when a consumer needs the outbound event.
+   * Best-effort: a throwing hook never fails the send that already happened.
+   */
+  async notifyOutboundSent(accountId: string, ctx: OutboundContext): Promise<void> {
+    if (this.hooks.onOutboundSent) {
+      try { await this.hooks.onOutboundSent(accountId, ctx); } catch { /* swallow */ }
+    }
+  }
+
+  /**
    * Check every registered account for follow-ups whose reminder is due.
    * Called from the watcher tick (or from a separate interval if preferred).
    * Marks each due follow-up as 'reminded' BEFORE firing the hook so we

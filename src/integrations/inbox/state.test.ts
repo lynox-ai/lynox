@@ -1052,3 +1052,38 @@ describe('InboxStateDb — sidebar context queries', () => {
     expect(list[0]?.id).toBe(remind);
   });
 });
+
+describe('getUidByMessageId (uid bridge for the chat reply context)', () => {
+  function seedProcessed(accountId: string, messageId: string, uid: number, folder: string): void {
+    mail.getConnection()
+      .prepare('INSERT INTO processed_mail_messages (account_id, message_id, uid, folder) VALUES (?, ?, ?, ?)')
+      .run(accountId, messageId, uid, folder);
+  }
+
+  it('resolves uid + folder from a processed message-id', () => {
+    seedProcessed(TEST_ACCOUNT.id, '<m-9@acme.example>', 99, 'Archive');
+    expect(inbox.getUidByMessageId(TEST_ACCOUNT.id, '<m-9@acme.example>')).toEqual({ uid: 99, folder: 'Archive' });
+  });
+
+  it('returns null for unknown id, empty id, and a different account (no cross-account leak)', () => {
+    seedProcessed(TEST_ACCOUNT.id, '<known@x>', 1, 'INBOX');
+    expect(inbox.getUidByMessageId(TEST_ACCOUNT.id, '<ghost@x>')).toBeNull();
+    expect(inbox.getUidByMessageId(TEST_ACCOUNT.id, '')).toBeNull();
+    expect(inbox.getUidByMessageId('other-acct', '<known@x>')).toBeNull();
+  });
+});
+
+describe('findItemByMessageId (outbound-reply reconcile lookup)', () => {
+  it('finds the item by message-id regardless of account, empty-guards, and null-misses', () => {
+    const id = insertSampleItem({ messageId: '<find-me@x>' });
+    expect(inbox.findItemByMessageId('<find-me@x>')?.id).toBe(id);
+    expect(inbox.findItemByMessageId('')).toBeNull();
+    expect(inbox.findItemByMessageId('<nope@x>')).toBeNull();
+  });
+
+  it('returns the newest item when a message-id repeats across rows', () => {
+    insertSampleItem({ messageId: '<dup@x>', threadKey: 't-old', classifiedAt: new Date('2026-05-01T00:00:00Z') });
+    const newer = insertSampleItem({ messageId: '<dup@x>', threadKey: 't-new', classifiedAt: new Date('2026-06-01T00:00:00Z') });
+    expect(inbox.findItemByMessageId('<dup@x>')?.id).toBe(newer);
+  });
+});

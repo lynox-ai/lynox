@@ -32,6 +32,9 @@ function makeStubContext(accounts: ReadonlyArray<MailAccountConfig>): MailContex
   return {
     getAccountConfig: (id: string) => byId.get(id) ?? null,
     findAccountByAddress: (addr: string) => byAddress.get(addr.toLowerCase()) ?? null,
+    // mail_reply fires this after a successful send (inbox reconcile hook); a
+    // spy so tests can assert the firing. No-ops (these tests wire no MailHooks).
+    notifyOutboundSent: vi.fn(async () => {}),
   } as unknown as MailContext;
 }
 
@@ -739,6 +742,12 @@ describe('mail_reply — smart reply-from', () => {
     expect(personal.send).not.toHaveBeenCalled();
     expect(business.send).toHaveBeenCalled();
     expect(out).toContain('Reply sent from business');
+    // Fires the inbox reconcile hook AFTER a successful send, carrying the
+    // REPLIED-TO message-id (what the reconcile matches the inbox item on).
+    expect(vi.mocked(ctx.notifyOutboundSent)).toHaveBeenCalledWith(
+      'business',
+      expect.objectContaining({ isReply: true, originalMessageId: '<inbound@x>' }),
+    );
   });
 
   it('falls back to the read account when no recipient matches a registered account', async () => {
