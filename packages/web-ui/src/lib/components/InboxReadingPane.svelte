@@ -18,6 +18,7 @@
 	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface Props {
 		/** Fires on archive/snooze actions so the parent can refresh the list. */
@@ -183,10 +184,10 @@
 				<div class="hidden sm:flex flex-wrap items-center gap-1.5 mt-3">
 					<button
 						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
+						class="flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-1.5 text-[11px] text-accent-fg hover:opacity-90 min-h-[36px]"
 						onclick={() => replyInChat(full!.item)}
 						aria-label={t('inbox.reply_in_chat')}
-					>{t('inbox.reply_in_chat')}</button>
+					><Icon name="chat" size="xs" />{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px]"
@@ -245,10 +246,10 @@
 				<div class="mt-3 flex items-center gap-1.5 sm:hidden">
 					<button
 						type="button"
-						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
+						class="flex-1 flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-2 text-[12px] text-accent-fg hover:opacity-90 min-h-[44px]"
 						onclick={() => replyInChat(full!.item)}
 						aria-label={t('inbox.reply_in_chat')}
-					>{t('inbox.reply_in_chat')}</button>
+					><Icon name="chat" size="xs" />{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
 						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"

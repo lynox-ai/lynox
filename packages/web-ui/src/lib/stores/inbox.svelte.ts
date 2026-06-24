@@ -146,12 +146,10 @@ export interface BulkActionResult {
 	bulkId: string;
 	action: BulkAction;
 	itemCount: number;
-	performedAt: number; // ms epoch — drives the 60s toast countdown
 }
 
 let selectedForBulk = $state(new Set<string>());
 let lastSelectedId = $state<string | null>(null);
-let recentBulks = $state<BulkActionResult[]>([]);
 
 export function getSelectedForBulk(): ReadonlySet<string> {
 	return selectedForBulk;
@@ -163,10 +161,6 @@ export function isSelectedForBulk(id: string): boolean {
 
 export function getSelectionCount(): number {
 	return selectedForBulk.size;
-}
-
-export function getRecentBulks(): ReadonlyArray<BulkActionResult> {
-	return recentBulks;
 }
 
 /**
@@ -231,9 +225,7 @@ export async function applyBulkAction(action: BulkAction): Promise<BulkActionRes
 		bulkId: data.bulkId,
 		action,
 		itemCount: data.applied.length,
-		performedAt: Date.now(),
 	};
-	recentBulks = [result, ...recentBulks].slice(0, 5);
 	clearBulkSelection();
 	void loadInboxCounts();
 	return result;
@@ -248,15 +240,9 @@ export async function undoBulk(bulkId: string, currentZone: InboxBucket): Promis
 		addToast(t('inbox.error_bulk_undo'), 'error');
 		return false;
 	}
-	recentBulks = recentBulks.filter((b) => b.bulkId !== bulkId);
 	void loadInboxCounts();
 	void loadInboxItems(currentZone);
 	return true;
-}
-
-/** Drop the local cache so a refresh kicks fresh from /undo/recent on next read. */
-export function pruneRecentBulks(now = Date.now(), windowMs = 60_000): void {
-	recentBulks = recentBulks.filter((b) => now - b.performedAt < windowMs);
 }
 
 // ── Reading-Pane wire shapes ───────────────────────────────────────────────

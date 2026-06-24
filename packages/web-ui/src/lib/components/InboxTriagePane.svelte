@@ -20,6 +20,7 @@
 	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface Props {
 		onActionApplied?: () => void;
@@ -230,9 +231,10 @@
 			<button
 				type="button"
 				onclick={() => replyInChat(full.item)}
-				class="rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[12px] hover:opacity-90"
+				class="flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent text-accent-fg px-3 py-1.5 text-[12px] hover:opacity-90"
 			>
-				💬 {t('inbox.reply_in_chat')}
+				<Icon name="chat" size="xs" />
+				{t('inbox.reply_in_chat')}
 			</button>
 			<button
 				type="button"

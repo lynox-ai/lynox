@@ -29,6 +29,7 @@
 		startInboxVisibilityRefresh,
 		toggleBulkSelection,
 		clearBulkSelection,
+		undoBulk,
 		undoLastAction,
 		type InboxItem,
 		type InboxZone,
@@ -46,7 +47,6 @@
 	import InboxReadingPane from './InboxReadingPane.svelte';
 	import InboxSearchBar from './InboxSearchBar.svelte';
 	import InboxTriagePane from './InboxTriagePane.svelte';
-	import InboxUndoToast from './InboxUndoToast.svelte';
 	import InboxZoneRail from './InboxZoneRail.svelte';
 	import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.svelte';
 
@@ -195,6 +195,19 @@
 			return;
 		}
 		await undoLastAction();
+	}
+
+	// Bulk actions surface their 60s undo through the shared toast (one toast
+	// region, not a second stack colliding in the same corner). The toast
+	// auto-dismisses after the undo window; clicking "Rückgängig" reverses it.
+	function showBulkUndo(bulkId: string, count: number): void {
+		const undoZone = zone === 'snoozed' ? 'requires_user' : zone;
+		addToast(
+			t('inbox.bulk_undo_toast').replace('{count}', String(count)),
+			'info',
+			60_000,
+			{ label: t('inbox.bulk_undo'), handler: () => void undoBulk(bulkId, undoZone) },
+		);
 	}
 
 	function closeOverlays(): void {
@@ -428,7 +441,7 @@
 					{@const reclassifyBanner = getReclassifyBanner()}
 					<ColdStartBanner />
 					<InboxSearchBar value={searchQuery} onChange={(q) => (searchQuery = q)} />
-					<InboxBulkBar />
+					<InboxBulkBar onApplied={(bulkId, _action, count) => showBulkUndo(bulkId, count)} />
 					{#if reclassifyBanner}
 						<div
 							class="mb-3 flex items-center justify-between gap-2 rounded-[var(--radius-md)] border border-accent bg-accent/5 px-3 py-2 text-[12px] text-text"
@@ -682,5 +695,3 @@
 </div>
 
 <KeyboardShortcutsHelp open={helpOpen} onClose={() => (helpOpen = false)} />
-
-<InboxUndoToast currentZone={zone === 'snoozed' ? 'requires_user' : zone} />
