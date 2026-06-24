@@ -1783,6 +1783,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.bulk_clear': { de: 'Auswahl löschen', en: 'Clear selection' },
 	'inbox.bulk_undo_toast': { de: '{count} archiviert', en: '{count} archived' },
 	'inbox.bulk_undo': { de: 'Rückgängig', en: 'Undo' },
+	'inbox.bulk_escalate': { de: '{count} im Chat', en: '{count} in chat' },
+	'inbox.bulk_escalate_prompt': { de: 'Hilf mir, diese E-Mails zu bearbeiten:', en: 'Help me work through these emails:' },
 	'inbox.search_placeholder': { de: 'In dieser Zone suchen…', en: 'Search this zone…' },
 	'inbox.search_clear': { de: 'Suche löschen', en: 'Clear search' },
 	'inbox.compose_new': { de: 'Neue Mail', en: 'New mail' },

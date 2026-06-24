@@ -21,7 +21,7 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { readEnvAlias } from '../core/env.js';
-import { resolveChatContext } from '../core/chat-context.js';
+import { resolveChatContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
@@ -1844,14 +1844,22 @@ export class LynoxHTTPApi {
       if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
         const c = rawCtx as Record<string, unknown>;
         const ctxKind = c['kind'];
+        let ref: ChatContextRef | null = null;
         if (
           (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail') &&
           typeof c['id'] === 'string' &&
           c['id'].length > 0
         ) {
+          ref = { kind: ctxKind, id: c['id'] };
+        } else if (ctxKind === 'mail-batch' && Array.isArray(c['ids'])) {
+          // The "💬 N im Chat" bulk affordance — carries the selected item ids.
+          const ids = c['ids'].filter((x): x is string => typeof x === 'string' && x.length > 0);
+          if (ids.length > 0) ref = { kind: 'mail-batch', ids };
+        }
+        if (ref) {
           const preamble = resolveChatContext(
             engine.getRunHistory(),
-            { kind: ctxKind, id: c['id'] },
+            ref,
             engine.getInboxRuntime()?.state ?? null,
           );
           if (preamble) contextPreamble = `${preamble}\n\n`;

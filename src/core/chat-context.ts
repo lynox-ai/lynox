@@ -11,12 +11,13 @@ import type { InboxItem, PlannedPipeline } from '../types/index.js';
  * `workflow` = a saved workflow to edit ("💬 Bearbeiten"); `run` = a (failed)
  * workflow run to diagnose + fix ("💬 Fixen"); `mail` = an inbox item to reply
  * to in chat ("💬 Im Chat beantworten") — the agent drafts + sends via the
- * mail_reply tool instead of a bespoke composer.
+ * mail_reply tool instead of a bespoke composer; `mail-batch` = N bulk-selected
+ * inbox items to work through in one chat ("💬 N im Chat"), carrying the id
+ * list instead of a single id.
  */
-export interface ChatContextRef {
-  kind: 'workflow' | 'run' | 'mail';
-  id: string;
-}
+export type ChatContextRef =
+  | { kind: 'workflow' | 'run' | 'mail'; id: string }
+  | { kind: 'mail-batch'; ids: string[] };
 
 /**
  * The narrow read surface `resolveChatContext` needs to render a `mail`
@@ -38,7 +39,9 @@ const MAX_NAME_CHARS = 200;
 const MAX_STEP_ID_CHARS = 80;
 const MAX_ERR_CHARS = 500;
 const MAX_MAIL_BODY_CHARS = 800;
+const MAX_MAIL_SNIPPET_CHARS = 200;
 const MAX_FOLDER_CHARS = 80;
+const MAX_BATCH_ITEMS = 20;
 
 /**
  * Collapse control characters (incl. newlines/tabs) to spaces and clamp the
@@ -111,6 +114,47 @@ export function resolveChatContext(
       `Message:\n${oneLine(bodyMd, MAX_MAIL_BODY_CHARS)}\n\n` +
       replyLine +
       `Draft a reply, confirm the send with the user, then send it.`
+    );
+  }
+
+  if (ref.kind === 'mail-batch') {
+    // N inbox items the user bulk-selected to work through in one chat (the
+    // "💬 N im Chat" bulk affordance). Same untrusted-content rules as the
+    // single 'mail' kind — every sender-authored field passes through oneLine()
+    // so a crafted From/Subject/snippet can't inject a pseudo-system line. The
+    // item count is capped so a huge selection can't blow up the preamble.
+    if (!inboxState) return null;
+    const lines: string[] = [];
+    for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
+      const item = inboxState.getItem(id);
+      if (!item) continue;
+      const from = item.fromName
+        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${oneLine(item.fromAddress, MAX_NAME_CHARS)}>`
+        : oneLine(item.fromAddress, MAX_NAME_CHARS);
+      const acct = oneLine(item.accountId, MAX_NAME_CHARS);
+      const uidRow = item.messageId
+        ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+        : null;
+      const locator = uidRow
+        ? `account "${acct}", uid ${uidRow.uid}` +
+          `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
+        : `account "${acct}" — locate via mail_search` +
+          `${item.messageId ? ` (message-id "${oneLine(item.messageId, MAX_NAME_CHARS)}")` : ''}`;
+      lines.push(
+        `${lines.length + 1}. From: ${from} — Subject: "${oneLine(item.subject, MAX_NAME_CHARS)}" — ${locator}\n` +
+        `   ${oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS)}`,
+      );
+    }
+    if (lines.length === 0) return null;
+    const more = ref.ids.length > MAX_BATCH_ITEMS
+      ? ` (first ${MAX_BATCH_ITEMS} of ${ref.ids.length})`
+      : '';
+    return (
+      `[Loaded ${lines.length} mails for batch triage${more}]\n` +
+      lines.join('\n') +
+      `\n\nWork through these with the user one at a time: for each, draft a ` +
+      `reply (mail_reply with the listed account + uid) and confirm the send, ` +
+      `or note if it only needs acknowledging. Use mail_search for any without a uid.`
     );
   }
 

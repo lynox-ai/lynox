@@ -240,6 +240,20 @@
 		void goto('/app');
 	}
 
+	// Bulk-escalate: open ONE chat with the selected items loaded as context so
+	// the agent works through them via mail_reply — the chat-over-bespoke-UI path
+	// for the "I selected 12 mails, now what" case (no bulk composer). Clear the
+	// selection first since we're navigating away from the list.
+	function escalateBulkToChat(ids: string[]): void {
+		if (ids.length === 0) return;
+		clearBulkSelection();
+		newChat();
+		void sendMessage(t('inbox.bulk_escalate_prompt'), undefined, undefined, {
+			context: { kind: 'mail-batch', ids },
+		});
+		void goto('/app');
+	}
+
 	function pickItem(item: InboxItem): void {
 		selectedItemId = item.id;
 		void openItem(item.id);
@@ -441,7 +455,10 @@
 					{@const reclassifyBanner = getReclassifyBanner()}
 					<ColdStartBanner />
 					<InboxSearchBar value={searchQuery} onChange={(q) => (searchQuery = q)} />
-					<InboxBulkBar onApplied={(bulkId, _action, count) => showBulkUndo(bulkId, count)} />
+					<InboxBulkBar
+						onApplied={(bulkId, _action, count) => showBulkUndo(bulkId, count)}
+						onEscalate={escalateBulkToChat}
+					/>
 					{#if reclassifyBanner}
 						<div
 							class="mb-3 flex items-center justify-between gap-2 rounded-[var(--radius-md)] border border-accent bg-accent/5 px-3 py-2 text-[12px] text-text"
