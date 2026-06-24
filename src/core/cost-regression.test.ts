@@ -171,8 +171,15 @@ function measureStaticPrefixTokens(): number {
  * `diagnose_workflow_run` builtin tool (read a failed run's step trace + error so
  * the agent can fix it in chat, §4.6). Lean definition (~110 tokens) — one tool's
  * irreducible schema; a genuine new capability, not accidental growth.
+ *
+ * 2026-06-25: bump to 21795 (measured 21785) — Contacts v1 adds the
+ * `contacts_save` + `contacts_search` builtin tools (the named, scope-correct
+ * surface over the CRM that the web UI already expected) and re-points the
+ * conditional CRM_PROMPT_SUFFIX at them. Two whole tool schemas — descriptions
+ * trimmed to minimal first (structural lever, −107 from the untrimmed 21892);
+ * the residual ~515 is two genuine new capabilities, not accidental growth.
  */
-const STATIC_PREFIX_BUDGET = 21270;
+const STATIC_PREFIX_BUDGET = 21795;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

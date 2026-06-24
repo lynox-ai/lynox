@@ -9,6 +9,7 @@
  * Properties are mutable so the orchestrator can update them without recreating the agent.
  */
 import type { DataStore } from './data-store.js';
+import type { CRM } from './crm.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunHistory } from './run-history.js';
 import type {
@@ -28,6 +29,10 @@ export interface ToolCallCountProvider {
 export interface ToolContext {
   // ── Core dependencies ──
   dataStore: DataStore | null;
+  /** Contact management (thin typed surface over DataStore). Wired after
+   *  CRM init so the `contacts_save`/`contacts_search` tools write into the
+   *  correct global CRM scope + schema. Null when DataStore is unavailable. */
+  crm: CRM | null;
   taskManager: TaskManager | null;
   knowledgeLayer: IKnowledgeLayer | null;
   runHistory: RunHistory | null;
@@ -69,6 +74,7 @@ export interface ToolContext {
 export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
   return {
     dataStore: null,
+    crm: null,
     taskManager: null,
     knowledgeLayer: null,
     runHistory: null,
