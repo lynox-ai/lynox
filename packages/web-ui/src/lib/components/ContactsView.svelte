@@ -152,8 +152,13 @@
 							<h2 class="font-medium">{selected.name}</h2>
 							<button onclick={() => selected = null} class="md:hidden p-1 rounded text-text-subtle hover:text-text">&times;</button>
 						</div>
-						{#if selected.email}<p class="text-xs text-text-muted">{selected.email}</p>{/if}
-						<button onclick={() => { if (selected) editInChat(selected); }} class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-border-hover hover:text-text">💬 {t('crm.edit_in_chat')}</button>
+						{#if selected.email}
+							<p class="text-xs text-text-muted">{selected.email}</p>
+							<!-- Edit-in-chat only when the contact has an email: contacts_save is
+							     email-keyed (crm uniqueKey ['email']), so editing an email-less
+							     contact would insert a duplicate instead of updating it. -->
+							<button onclick={() => { if (selected) editInChat(selected); }} class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-border-hover hover:text-text">💬 {t('crm.edit_in_chat')}</button>
+						{/if}
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
 						{#if parseTags(selected.tags).length > 0}
 							<div class="flex flex-wrap gap-1">{#each parseTags(selected.tags) as tag}<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-2 py-0.5 text-xs">{tag}</span>{/each}</div>
