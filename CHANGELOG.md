@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.18.0 — 2026-06-25
+
+The inbox becomes chat-first and contacts get a first-class identity. Replying to or composing a mail now opens a chat with the message loaded as context — the bespoke draft composer is gone, and the agent answers through its tools. Saved correspondents become real contacts keyed on email, and the task model splits into user-TODOs and agent-triggers. Two per-tenant engine migrations run on boot (mail-state v16 retires the draft table; run-history v42 splits `tasks` into `tasks` + `triggers`); both drop columns, so they are **forward-only** — roll the engine image forward, not back, past this release. No control-plane database migration.
+
+### Added
+
+- **Reply and compose mail in chat** — an inbox mail opens a chat with the message as context; the agent replies through `mail_reply`. The standalone reply/compose composer is removed. (#774, #775)
+- **Bulk-escalate** several selected inbox mails into a single chat thread. (#777)
+- **Contacts** — `contacts_save` and `contacts_search` agent tools over a CRM keyed on email identity (case-insensitive; saving the same email updates the contact instead of duplicating it). (#778)
+- **Agent-triggers as a distinct primitive** — the `tasks` table splits into user-TODOs (`tasks`) and agent-triggers (`triggers`, fired by the worker loop); a new `GET /api/triggers` lists them. (#773)
+- **Self-signed TLS opt-in** — `LYNOX_MAIL_INSECURE_TLS=1` lets an operator connect IMAP/SMTP servers that present self-signed certificates (default off; certificate validation stays on otherwise). (#777)
+
+### Changed
+
+- A mail you answer in chat is reconciled back to the inbox as `replied`, with a thread-key fallback when the message carries no Message-ID. (#774, #777)
+- CRM contact identity is keyed on email (lower-cased); a pre-existing name-keyed contact store keeps working and logs a one-time boot warning instead of silently changing dedup behaviour. (#778)
+- The inbox `draft_ready` zone is relabelled and the stale draft-era copy retired. (#777)
+
+### Removed
+
+- The autonomous inbox draft backend and its endpoints (`/api/inbox/.../draft`, `/draft/generate`, `/drafts/:id/send`, `/compose-send`) — replying moved into chat. (#776)
+
 ## 1.17.0 — 2026-06-24
 
 Saved workflows become a product surface: schedule one on a cron, get pulled into an unread chat thread when a run needs you, and edit or fix a workflow by chatting with the agent — on top of a hardened headless-run foundation (explicit autonomy, run-context threading, full observability, and the fail-closed capability-contract machinery). No control-plane database migration; the engine adds three additive per-tenant migrations (v39 cron params + kill-switch, v40 thread unread-state, v41 run→workflow link), run on boot.
