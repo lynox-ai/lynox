@@ -31,6 +31,7 @@ export { default as ApiStoreView } from './components/ApiStoreView.svelte';
 export { default as DataStoreView } from './components/DataStoreView.svelte';
 export { default as FileBrowserView } from './components/FileBrowserView.svelte';
 export { default as TasksView } from './components/TasksView.svelte';
+export { default as TriggersView } from './components/TriggersView.svelte';
 export { default as ArtifactsView } from './components/ArtifactsView.svelte';
 export { default as IntelligenceHub } from './components/IntelligenceHub.svelte';
 export { default as ArtifactsHub } from './components/ArtifactsHub.svelte';

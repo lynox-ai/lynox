@@ -2,15 +2,17 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
-	import Icon from '../primitives/Icon.svelte';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 
+	// User-TODOs only. Agent-triggers (cron/watch/pipeline/reminder/backup) live
+	// in their own home now (TriggersView) — the v42 storage split is finished
+	// in the UI too, so this view is the to-do list it is named for, not a
+	// merged everything-list.
 	interface TaskRecord {
 		id: string;
 		title: string;
 		status: string;
-		schedule_cron?: string;
 		next_run_at?: string;
 		last_run_at?: string;
 		last_run_status?: string;
@@ -19,26 +21,15 @@
 		task_type?: string;
 	}
 
-	interface Props {
-		/** Hide rows whose task_type doesn't match. When unset, show all
-		 *  (the legacy "everything" view); when set to 'reminder', the
-		 *  AutomationHub Reminders tab passes 'reminder' to scope the list. */
-		filterTaskType?: string | undefined;
-	}
-
-	const { filterTaskType }: Props = $props();
-
 	let tasks = $state<TaskRecord[]>([]);
 	let loading = $state(true);
 	let error = $state('');
 
-	// Tasks + triggers are created and managed by talking to the agent
-	// (task_create / task_update), not a bespoke cron form — the chat is the
-	// editor, and it can express schedules (cron, "every weekday at 9", watch
-	// URLs, workflow triggers) the form never could. "New task" opens a fresh
-	// chat to create one; per-row "Manage in chat" seeds it with the task id so
-	// the agent can reschedule, pause, or delete it. The title is user/agent-
-	// authored, so it passes through the client-side sanitiser first.
+	// Tasks are created and managed by talking to the agent (task_create /
+	// task_update), not a bespoke form — the chat is the editor. "New task"
+	// opens a fresh chat to create one; per-row "Manage in chat" seeds it with
+	// the task id so the agent can edit or reschedule it. The title is user/
+	// agent-authored, so it passes through the client-side sanitiser first.
 	function createInChat(): void {
 		newChat();
 		void sendMessage(t('tasks.create_in_chat_prompt'));
@@ -57,22 +48,12 @@
 		loading = true;
 		error = '';
 		try {
-			// v42 split user-TODOs (`/api/tasks`) and agent-triggers (`/api/triggers`)
-			// into separate tables; this view renders both so nothing vanished when
-			// the storage was split. TODOs show due_date/priority, triggers their
-			// schedule. `filterTaskType` (if a consumer passes it) narrows to a
-			// trigger sub-type — only triggers carry `task_type`.
-			const [tasksRes, triggersRes] = await Promise.all([
-				fetch(`${getApiBase()}/tasks`),
-				fetch(`${getApiBase()}/triggers`),
-			]);
-			if (!tasksRes.ok || !triggersRes.ok) throw new Error();
-			const todoData = (await tasksRes.json()) as { tasks: TaskRecord[] };
-			const triggerData = (await triggersRes.json()) as { triggers: TaskRecord[] };
-			const merged = [...todoData.tasks, ...triggerData.triggers];
-			tasks = filterTaskType !== undefined
-				? merged.filter((task) => (task.task_type ?? '') === filterTaskType)
-				: merged;
+			// User-TODOs only (`/api/tasks`). Agent-triggers (`/api/triggers`) have
+			// their own home (the Triggers tab) — the v42 split is reflected here.
+			const res = await fetch(`${getApiBase()}/tasks`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as { tasks: TaskRecord[] };
+			tasks = data.tasks;
 		} catch {
 			error = t('common.load_failed');
 		}
@@ -91,31 +72,6 @@
 			await fetch(`${getApiBase()}/tasks/${id}/complete`, { method: 'POST' });
 			await loadTasks();
 		} catch { error = t('common.save_failed'); }
-	}
-
-	// Render a UTC cron in the user's local time so "0 7 * * *" (created locally
-	// as 09:00 in CEST) displays back as "Täglich um 09:00" instead of "07:00".
-	function utcHmToLocal(mmStr: string, hhStr: string): string {
-		const mm = parseInt(mmStr, 10);
-		const hh = parseInt(hhStr, 10);
-		if (Number.isNaN(mm) || Number.isNaN(hh)) return `${hhStr}:${mmStr.padStart(2, '0')}`;
-		const d = new Date();
-		d.setUTCHours(hh, mm, 0, 0);
-		const pad = (n: number) => n.toString().padStart(2, '0');
-		return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-	}
-
-	function cronToHuman(cron: string): string {
-		if (cron === '0 * * * *') return t('tasks.every_hour');
-		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
-		if (!m) return cron;
-		const local = utcHmToLocal(m[1] ?? '0', m[2] ?? '0');
-		const day = m[3];
-		const weekday = m[4];
-		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
-		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
-		return `${t('tasks.daily_at')} ${local}`;
 	}
 
 	const statusLabel: Record<string, string> = {
@@ -155,12 +111,6 @@
 						<div class="flex-1 min-w-0">
 							<p class="text-sm font-medium line-clamp-2 break-words">{task.title}</p>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
-								{#if task.schedule_cron}
-									<span class="flex items-center gap-1">
-										<Icon name="clock" size="xs" />
-										{cronToHuman(task.schedule_cron)}
-									</span>
-								{/if}
 								{#if task.status === 'completed' || task.status === 'done'}
 									{#if task.last_run_at ?? task.next_run_at}
 										<span>{t('tasks.last_run')}: {new Date((task.last_run_at ?? task.next_run_at)!).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>

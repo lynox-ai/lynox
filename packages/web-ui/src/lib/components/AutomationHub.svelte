@@ -5,6 +5,7 @@
 	import ApiStoreView from './ApiStoreView.svelte';
 	import SecretsView from './SecretsView.svelte';
 	import TasksView from './TasksView.svelte';
+	import TriggersView from './TriggersView.svelte';
 	import WorkflowsView from './WorkflowsView.svelte';
 	import WorkflowLibraryView from './WorkflowLibraryView.svelte';
 
@@ -16,19 +17,20 @@
 	// moved here from /settings/llm/keys. Sits next to APIs (endpoints) so
 	// related Automation surfaces — endpoint definitions + their auth — share
 	// one place instead of straddling LLM Settings and Automation.
-	type Tab = 'workflows' | 'library' | 'tasks' | 'apis' | 'keys';
+	type Tab = 'workflows' | 'library' | 'triggers' | 'tasks' | 'apis' | 'keys';
 
 	// `?section=` (not `?tab=`) is intentional — historic collision-avoidance
 	// with the embedded ActivityHub which used `?tab=`. Now that Activity is
 	// gone the collision can't happen, but the URL contract is stable for
-	// bookmarks. `reminders` was a separate tab that just re-rendered
-	// TasksView with `filterTaskType="reminder"` — same widget, different
-	// filter, confusing. Folded into the unified Aufgaben tab; legacy URLs
-	// still rewrite via the $effect below (1-release grace; cleanup later).
+	// bookmarks. `reminders` was a separate tab that re-rendered TasksView
+	// filtered to reminders. Reminders are agent-triggers (the `triggers`
+	// table), so the IA Triggers-home is now their home: legacy
+	// `?section=reminders` rewrites to `?section=triggers` via the $effect
+	// below (1-release grace; cleanup later).
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('section');
-		if (p === 'library' || p === 'tasks' || p === 'apis' || p === 'keys') return p;
-		if (p === 'reminders') return 'tasks'; // backwards-compat
+		if (p === 'library' || p === 'triggers' || p === 'tasks' || p === 'apis' || p === 'keys') return p;
+		if (p === 'reminders') return 'triggers'; // back-compat: reminders are agent-triggers
 		return 'workflows';
 	})());
 
@@ -39,7 +41,7 @@
 	$effect(() => {
 		if ($page.url.searchParams.get('section') === 'reminders') {
 			const url = new URL($page.url);
-			url.searchParams.set('section', 'tasks');
+			url.searchParams.set('section', 'triggers');
 			void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
 		}
 	});
@@ -57,6 +59,7 @@
 	const tabs: ReadonlyArray<{ id: Tab; labelKey: string }> = [
 		{ id: 'workflows', labelKey: 'hub.automation.workflows' },
 		{ id: 'library', labelKey: 'hub.automation.library' },
+		{ id: 'triggers', labelKey: 'hub.automation.triggers' },
 		{ id: 'tasks', labelKey: 'hub.automation.tasks' },
 		{ id: 'apis', labelKey: 'hub.automation.apis' },
 		{ id: 'keys', labelKey: 'hub.automation.keys' },
@@ -78,6 +81,8 @@
 			<WorkflowsView />
 		{:else if tab === 'library'}
 			<WorkflowLibraryView />
+		{:else if tab === 'triggers'}
+			<TriggersView />
 		{:else if tab === 'tasks'}
 			<TasksView />
 		{:else if tab === 'apis'}

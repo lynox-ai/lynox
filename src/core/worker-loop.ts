@@ -155,6 +155,39 @@ export class WorkerLoop {
     return { question: active.pendingInput.question, options: active.pendingInput.options };
   }
 
+  /**
+   * Run a trigger immediately, off-schedule — the "Run now" UI action.
+   *
+   * Dispatches through the SAME `executeTask` path the scheduler uses, so a
+   * manual run inherits every gate and wrapper the scheduled run has:
+   * - the autonomous-only + first-run-confirm consent gate for pipeline
+   *   triggers (`executePipeline` refuses an un-confirmed workflow — a manual
+   *   run can't smuggle past consent any more than a cron tick can);
+   * - the abort/timeout controller, per-task context, Bugsink capture, and
+   *   result/failure notification.
+   *
+   * Fire-and-forget: a pipeline run can take minutes, so the caller is not made
+   * to await it — the outcome lands in the trigger's run history (and, on
+   * failure, the escalation thread). The typed result lets the HTTP layer 404 a
+   * stale id and 409 a trigger that is already running (the scheduler picked it
+   * up, or a previous Run-now is still in flight). Does NOT consult the
+   * `enabled` kill-switch: pausing stops the *schedule* from auto-firing; an
+   * explicit manual run is a deliberate override (the consent gate still bites).
+   */
+  async runTriggerNow(
+    triggerId: string,
+  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' }> {
+    const taskManager = this.engine.getTaskManager();
+    if (!taskManager) return { ok: false, reason: 'not_found' };
+    const trigger = taskManager.getTrigger(triggerId);
+    if (!trigger) return { ok: false, reason: 'not_found' };
+    if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
+    // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
+    // activeTasks guard + run history key on exactly the row we found.
+    void this.executeTask(trigger);
+    return { ok: true };
+  }
+
   /** @internal Exposed for testing. */
   async tick(): Promise<void> {
     if (this.ticking) return; // skip if previous tick still running
