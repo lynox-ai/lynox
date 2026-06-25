@@ -9,7 +9,6 @@
 	// PRD-IA-V2 P2-PR-D — Activity tab stripped. AutomationHub is now Builder-only.
 	// `/app/hub?section=activity*` is redirected SSR-side by
 	// `routes/app/hub/+page.ts` to `/app/activity?tab=*`.
-	// `hub.automation.activity` i18n key intentionally kept here; retire = P2-PR-E.
 	// IA reorg (D2): `apis` (API Profiles) + `keys` (3rd-party credentials) are
 	// low-frequency config — moved OUT of Automation into Settings
 	// (`/app/settings/apis`, `/app/settings/llm/keys`). Their legacy
