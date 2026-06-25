@@ -37,8 +37,12 @@
 	// reloads via localStorage so the user's preference sticks.
 	let railPinned = $state(false);
 	let railHovered = $state(false);
+	// Keyboard path: when focus enters the rail it expands too (labels become
+	// reachable for keyboard/AT users, not just on pointer hover).
+	let railFocused = $state(false);
+	let railEl = $state<HTMLElement | undefined>(undefined);
 	let railLeaveTimer: ReturnType<typeof setTimeout> | null = null;
-	const railExpanded = $derived(railPinned || railHovered);
+	const railExpanded = $derived(railPinned || railHovered || railFocused);
 	// Desktop = the persistent rail (≥ md). On mobile the full-width drawer shows
 	// the threads list based on the DRAWER being open (sidebarOpen), NOT hover/pin
 	// — otherwise Option A (no touch-hover) would hide mobile chat-history, and a
@@ -444,6 +448,27 @@
 		railLeaveTimer = setTimeout(() => { railHovered = false; railLeaveTimer = null; }, 150);
 	}
 
+	function onRailFocusIn(): void {
+		railFocused = true;
+	}
+
+	function onRailFocusOut(e: FocusEvent): void {
+		// Keep expanded while focus moves BETWEEN rail items; collapse only when
+		// focus leaves the rail entirely (relatedTarget is the next focus target).
+		if (railEl && e.relatedTarget instanceof Node && railEl.contains(e.relatedTarget)) return;
+		railFocused = false;
+	}
+
+	// Collapse the focus-expand after a client navigation. Activating a nav <a>
+	// keeps focus ON the link and SvelteKit routes without unmounting the rail —
+	// no blur fires — so without this the rail would stay flown-open over the new
+	// page for a keyboard user (the exact audience focus-expand serves). Pin and
+	// hover are untouched; Tabbing back into the rail re-expands it.
+	$effect(() => {
+		void $page.url.pathname;
+		railFocused = false;
+	});
+
 	onDestroy(() => {
 		stopVisibilityRefresh?.();
 		stopActiveRunsPoll?.();
@@ -469,8 +494,10 @@
 </script>
 
 <div class="fixed inset-0 flex flex-col overflow-hidden bg-bg" style="padding-top: env(safe-area-inset-top);">
-	<!-- Body: sidebar (full height) + right column -->
-	<div class="flex flex-1 min-h-0 overflow-hidden">
+	<!-- Body: sidebar (full height) + right column.
+		`relative` anchors the md+ icon-rail, which is absolutely positioned so it
+		can expand into a flyover ON HOVER without reflowing the right column. -->
+	<div class="relative flex flex-1 min-h-0 overflow-hidden">
 		<!-- Mobile overlay -->
 		{#if sidebarOpen}
 			<button
@@ -482,11 +509,17 @@
 
 		<!-- Left Sidebar — variant B icon-rail.
 			Mobile: full 64-wide drawer (sidebarOpen toggle), unchanged from before.
-			≥ md: 56px collapsed, 240px expanded on hover. Pin button locks open. -->
+			≥ md: 56px collapsed; expands to 240px on hover/focus as an ABSOLUTE
+			flyover (the sibling spacer below holds the 56px column) so the right
+			column never reflows. Pinning widens the spacer too — a deliberate,
+			persistent shift. -->
 		<nav
+			bind:this={railEl}
 			onmouseenter={onRailEnter}
 			onmouseleave={onRailLeave}
-			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle transition-[width,transform] duration-150 md:static md:translate-x-0
+			onfocusin={onRailFocusIn}
+			onfocusout={onRailFocusOut}
+			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-bg-subtle transition-[width,transform] duration-150 md:absolute md:translate-x-0
 			{sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
 			{railExpanded ? 'md:w-60' : 'md:w-14'}"
 			style="padding-top: calc(env(safe-area-inset-top, 0px) + 0.75rem);"
@@ -740,6 +773,14 @@
 				</div>
 			</div>
 		</nav>
+
+		<!-- md+ flow spacer: reserves the icon-rail's column width so the absolute
+			rail above can expand into a 240px flyover on hover/focus WITHOUT
+			reflowing the right column. Only pinning widens it (matches the rail). -->
+		<div
+			class="hidden md:block shrink-0 transition-[width] duration-150 {railPinned ? 'md:w-60' : 'md:w-14'}"
+			aria-hidden="true"
+		></div>
 
 		<!-- Right column: header + main content -->
 		<div class="flex-1 min-w-0 flex flex-col overflow-hidden">
