@@ -235,7 +235,7 @@
 						disabled={refreshing}
 						title={t('inbox.body_refresh_body_hint')}
 						aria-label={t('inbox.body_refresh_body')}
-						class="ml-auto rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
+						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-subtle hover:text-text hover:border-border-hover min-h-[36px] disabled:opacity-50 disabled:cursor-not-allowed"
 					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
