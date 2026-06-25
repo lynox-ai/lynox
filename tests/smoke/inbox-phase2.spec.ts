@@ -59,7 +59,23 @@ test.describe('Unified Inbox Phase 2 smoke', () => {
     expect(Array.isArray(body.recent)).toBe(true);
   });
 
-  test('Phase 2 draft endpoints return correct error shapes for missing resources', async ({ request }) => {
+  test('Phase 2 surviving endpoints return correct error shapes for missing resources', async ({ request }) => {
+    // The draft backend (GET .../draft, POST .../draft/generate, POST
+    // .../drafts/:id/send) was removed in the Inbox→Chat refactor — replies and
+    // compose now happen in chat, not via a bespoke draft endpoint. Only
+    // body-refresh and rules survive; assert their resource-level error shapes.
+    const bodyRefresh = await request.post('/api/inbox/items/__missing__/body/refresh');
+    expect(bodyRefresh.status()).toBe(404);
+
+    const rulesNoAccount = await request.post('/api/inbox/rules', { data: {} });
+    expect(rulesNoAccount.status()).toBe(400);
+    const rulesBody = (await rulesNoAccount.json()) as { error?: string };
+    expect(rulesBody.error ?? '').toMatch(/accountId/i);
+  });
+
+  test('removed draft endpoints are gone (404, not re-registered)', async ({ request }) => {
+    // Regression guard for the Inbox→Chat rip: if any of these draft routes
+    // gets accidentally re-registered, this fails so we notice.
     const draftGet = await request.get('/api/inbox/items/__missing__/draft');
     expect(draftGet.status()).toBe(404);
 
@@ -68,23 +84,8 @@ test.describe('Unified Inbox Phase 2 smoke', () => {
     });
     expect(draftGen.status()).toBe(404);
 
-    const draftGenBadTone = await request.post('/api/inbox/items/__missing__/draft/generate', {
-      data: { tone: 'flippant' },
-    });
-    expect(draftGenBadTone.status()).toBe(400);
-    const badToneBody = (await draftGenBadTone.json()) as { error?: string };
-    expect(badToneBody.error ?? '').toMatch(/tone/i);
-
-    const bodyRefresh = await request.post('/api/inbox/items/__missing__/body/refresh');
-    expect(bodyRefresh.status()).toBe(404);
-
     const draftSend = await request.post('/api/inbox/drafts/__missing__/send', { data: {} });
     expect(draftSend.status()).toBe(404);
-
-    const rulesNoAccount = await request.post('/api/inbox/rules', { data: {} });
-    expect(rulesNoAccount.status()).toBe(400);
-    const rulesBody = (await rulesNoAccount.json()) as { error?: string };
-    expect(rulesBody.error ?? '').toMatch(/accountId/i);
   });
 
   test('/app/inbox route renders the zone-tab shell without JS errors', async ({ page }) => {
