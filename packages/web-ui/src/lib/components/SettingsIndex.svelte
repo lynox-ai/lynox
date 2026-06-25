@@ -9,8 +9,8 @@
 		selfHostOnly?: boolean;
 		// PRD-IA-V2 P3-PR-E — symmetric mirror of `selfHostOnly`. Default-null
 		// pattern (see `managed = $state<boolean | null>(null)` below): hidden
-		// while we don't yet know the tier. Used to route ToolToggles to its
-		// Managed-home (`/settings/privacy/tools`) without an async redirect race.
+		// while we don't yet know the tier. Used e.g. for the Billing tile
+		// (Managed-only — no subscription on Self-Host) without an async race.
 		managedOnly?: boolean;
 		hideOnMobile?: boolean;
 	}
@@ -88,29 +88,31 @@
 				// primitives (a callable endpoint profile vs a secret), so two tiles.
 				{ href: '/app/settings/apis', titleKey: 'settings.apis', descKey: 'settings.apis_desc' },
 				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
+				// IA reorg (M6): ToolToggles unified from two identical tier-split
+				// mounts (workspace/tools Self-Host + privacy/tools Managed) into
+				// one all-tier entry here. The legacy routes 301 to /policy-tools.
+				{ href: '/app/settings/policy-tools', titleKey: 'tools.heading', descKey: 'tools.subtitle' },
 			],
 		},
 		{
-			// PRD-IA-V2 P3-PR-B: Workspace & System is Self-Host only — ToolToggles
-			// moves under Privacy on Managed in P3-PR-E.
+			// PRD-IA-V2 P3-PR-B: Workspace & System is Self-Host only.
+			// (IA reorg M6: the Tool-Toggles tile moved out to the all-tier
+			// `/app/settings/policy-tools` entry in section_main.)
 			labelKey: 'settings.section_workspace',
 			items: [
 				{ href: '/app/settings/workspace/backups', titleKey: 'settings.workspace.backups', descKey: 'settings.workspace.backups_desc', selfHostOnly: true },
 				{ href: '/app/settings/workspace/security', titleKey: 'settings.workspace.security', descKey: 'settings.workspace.security_desc', selfHostOnly: true },
 				{ href: '/app/settings/workspace/limits', titleKey: 'settings.workspace.limits', descKey: 'settings.workspace.limits_desc', selfHostOnly: true },
 				{ href: '/app/settings/workspace/updates', titleKey: 'settings.workspace.updates', descKey: 'settings.workspace.updates_desc', selfHostOnly: true },
-				{ href: '/app/settings/workspace/tools', titleKey: 'tools.heading', descKey: 'tools.subtitle', selfHostOnly: true },
 			],
 		},
 		{
-			// PRD-IA-V2 P3-PR-E — Privacy section. Currently hosts the Managed-home
-			// Tool-Toggles tile (mirror of `/workspace/tools` on Self-Host). Both
-			// routes mount `ToolToggles.svelte` and always 200 OK; `keepItem()`
-			// hides the tier-inappropriate entry from the nav — no redirect race.
+			// PRD-IA-V2 P3-PR-E — Privacy section.
+			// (IA reorg M6: the Managed-home Tool-Toggles tile moved out to the
+			// all-tier `/app/settings/policy-tools` entry in section_main.)
 			labelKey: 'settings.section_privacy',
 			items: [
 				{ href: '/app/settings/privacy', titleKey: 'privacy.title', descKey: 'privacy.subtitle' },
-				{ href: '/app/settings/privacy/tools', titleKey: 'tools.heading', descKey: 'tools.subtitle', managedOnly: true },
 			],
 		},
 		{
