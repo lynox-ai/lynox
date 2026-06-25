@@ -4,6 +4,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface Contact { name: string; email?: string; phone?: string; company?: string; type?: string; source?: string; tags?: string[]; notes?: string; _created_at?: string; }
 	interface Interaction { type: string; channel: string; summary: string; date?: string; }
@@ -157,7 +158,7 @@
 							<!-- Edit-in-chat only when the contact has an email: contacts_save is
 							     email-keyed (crm uniqueKey ['email']), so editing an email-less
 							     contact would insert a duplicate instead of updating it. -->
-							<button onclick={() => { if (selected) editInChat(selected); }} class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-border-hover hover:text-text">💬 {t('crm.edit_in_chat')}</button>
+							<button onclick={() => { if (selected) editInChat(selected); }} class="w-full inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-border-hover hover:text-text"><Icon name="chat" size="xs" /> {t('crm.edit_in_chat')}</button>
 						{/if}
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
 						{#if parseTags(selected.tags).length > 0}

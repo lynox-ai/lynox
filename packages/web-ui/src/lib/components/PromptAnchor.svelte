@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { t } from '../i18n.svelte.js';
+	import Icon from '../primitives/Icon.svelte';
 	import type { PendingPromptHead } from '../stores/chat.svelte.js';
 	import { findPromptFormByKind, formatRunElapsed, prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 
@@ -48,7 +49,7 @@
 	aria-label={t('prompt_anchor.aria_label')}
 >
 	<div class="max-w-3xl mx-auto flex items-center gap-2 min-w-0">
-		<span aria-hidden="true" class="flex-shrink-0">💬</span>
+		<Icon name="chat" size="xs" class="flex-shrink-0" />
 		<span class="text-xs md:text-sm text-text font-medium truncate min-w-0">{prompt.question}</span>
 
 		{#if showCounter || runForLabel}
