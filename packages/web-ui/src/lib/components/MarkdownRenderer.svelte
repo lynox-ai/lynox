@@ -8,7 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight, computeFitZoom } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, computeFitZoom, clearArtifactFitStyles } from '../utils/artifact-frame.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 
 	interface Props {
@@ -527,15 +527,15 @@
 		if (iframe) applyFullscreenFit(iframe, entering);
 	}
 
-	/** Clear every inline style applyFullscreenFit may have set. Idempotent —
-	 *  safe to call on collapse, on ESC, and on the no-fit branch. */
+	/** Revert the fit-to-width styles applyFullscreenFit may have set. Idempotent —
+	 *  safe on collapse, on ESC, and on the no-fit branch. Crucially does NOT clear
+	 *  `iframe.style.height`: that height is owned by the resize-message handler
+	 *  (the measured content height the scrolling fullscreen container needs).
+	 *  Clearing it collapsed the frame to the 150px iframe default, so a document
+	 *  that already fits the fullscreen width (cw ≤ frameW → no zoom) rendered as a
+	 *  thin clipped strip instead of the full page. See clearArtifactFitStyles. */
 	function clearFullscreenFit(iframe: HTMLIFrameElement) {
-		iframe.style.width = '';
-		iframe.style.height = '';
-		iframe.style.transform = '';
-		iframe.style.transformOrigin = '';
-		iframe.style.marginRight = '';
-		iframe.style.marginBottom = '';
+		clearArtifactFitStyles(iframe.style);
 	}
 
 	/** Fit a wide artifact (e.g. an A4-print HTML doc) to the fullscreen frame
