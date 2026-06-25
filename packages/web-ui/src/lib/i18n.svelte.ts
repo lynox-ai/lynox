@@ -457,6 +457,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'crm.no_contacts': { de: 'Keine Kontakte. Erwähne Personen im Chat, um sie automatisch zu erfassen.', en: 'No contacts. Mention people in chat to track them automatically.' },
 	'crm.no_deals': { de: 'Keine Deals. Erwähne Deals im Chat, um sie automatisch zu erfassen.', en: 'No deals. Mention deals in chat to track them automatically.' },
 	'crm.interactions': { de: 'Interaktionen', en: 'Interactions' },
+	'crm.create_in_chat': { de: 'Neuer Kontakt', en: 'New contact' },
+	'crm.create_in_chat_prompt': { de: 'Ich möchte einen neuen Kontakt erfassen.', en: "I'd like to add a new contact." },
+	'crm.edit_in_chat': { de: 'Im Chat bearbeiten', en: 'Edit in chat' },
+	'crm.edit_in_chat_prompt': { de: 'Ich möchte diesen Kontakt bearbeiten:', en: "I'd like to edit this contact:" },
 
 	// Backups
 	'backups.title': { de: 'Backups', en: 'Backups' },
