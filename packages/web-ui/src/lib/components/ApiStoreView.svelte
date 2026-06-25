@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
+	import { sanitizeFramingField } from '../utils/chat-framing.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
@@ -43,11 +46,34 @@
 		deleting = null;
 	}
 
+	// API integrations are set up + managed by talking to the agent (api_setup,
+	// with secrets collected out-of-band via ask_secret so they never enter the
+	// chat) — not a bespoke form. "New API" opens a fresh chat to bootstrap one;
+	// "Manage in chat" seeds the chat with the profile id so the agent can
+	// api_setup view/update/delete it. The id is app-generated, but the name is
+	// agent/user-authored so it passes through the client-side sanitiser.
+	function createInChat(): void {
+		newChat();
+		void sendMessage(t('apis.create_in_chat_prompt'));
+		void goto('/app');
+	}
+
+	function manageInChat(p: ApiProfile): void {
+		newChat();
+		const name = sanitizeFramingField(p.name);
+		const id = sanitizeFramingField(p.id, 80);
+		void sendMessage(`${t('apis.manage_in_chat_prompt')} ${name} (id: ${id}).`);
+		void goto('/app');
+	}
+
 	$effect(() => { loadProfiles(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<h1 class="text-xl font-light tracking-tight mb-4">{t('apis.title')}</h1>
+	<div class="flex items-center justify-between mb-4">
+		<h1 class="text-xl font-light tracking-tight">{t('apis.title')}</h1>
+		<button onclick={createInChat} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">+ {t('apis.create_in_chat')}</button>
+	</div>
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
@@ -70,6 +96,12 @@
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
+						</button>
+						<button onclick={() => manageInChat(profile)}
+							aria-label={t('apis.manage_in_chat')}
+							title={t('apis.manage_in_chat')}
+							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
+							💬
 						</button>
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}

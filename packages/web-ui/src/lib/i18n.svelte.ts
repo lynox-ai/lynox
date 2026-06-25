@@ -499,6 +499,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.delete': { de: 'Löschen', en: 'Delete' },
 	'apis.delete_confirm': { de: 'API-Profil "{name}" wirklich löschen?', en: 'Really delete API profile "{name}"?' },
 	'apis.delete_failed': { de: 'Löschen fehlgeschlagen.', en: 'Delete failed.' },
+	'apis.create_in_chat': { de: 'Neue API', en: 'New API' },
+	'apis.create_in_chat_prompt': { de: 'Ich möchte eine neue API-Integration einrichten.', en: "I'd like to set up a new API integration." },
+	'apis.manage_in_chat': { de: 'Im Chat verwalten', en: 'Manage in chat' },
+	'apis.manage_in_chat_prompt': { de: 'Ich möchte diese API-Integration verwalten:', en: "I'd like to manage this API integration:" },
 
 	// DataStore
 	'data.title': { de: 'Daten', en: 'Data' },
