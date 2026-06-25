@@ -25,6 +25,56 @@ const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
 const WATCH_ANALYSIS_MAX_USD = 0.5;
 const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost control)
 
+/**
+ * Reduce a fetched HTML page to a stable visible-content signal for change
+ * detection. Hashing raw HTML makes a watch fire on every <script> nonce, CSP
+ * token, build-id or timestamp churn even when nothing the user cares about
+ * changed (the mistral.ai/news watch fired its analysis LLM daily for ~$0.25
+ * on byte-churn alone). Stripping <script>/<style>/<noscript>/<meta>/<link>/
+ * comments and collapsing whitespace leaves the visible text + <title> — what
+ * "did the page change" actually means. An optional bare-tag `selector` (e.g.
+ * "main", "article") narrows to the first matching region; #id/.class selectors
+ * need a DOM parser and fall back to whole-page text.
+ *
+ * Detects visible-text + title changes; attribute/link-only changes (e.g. an
+ * href version bump) are intentionally NOT detected (including attributes would
+ * re-introduce the nonce/data-* churn this exists to remove). Input is
+ * length-capped + quantifiers bounded because it runs on untrusted page bytes.
+ * Exported for unit testing.
+ */
+export function extractWatchSignal(html: string, selector?: string): string {
+  // Cap before any regex — this runs synchronously on the WorkerLoop over an
+  // untrusted, uncapped fetched body; an unbounded tag-strip is O(n^2) on a
+  // page of unclosed '<' and would hang the loop. 256 KB is far more HTML than
+  // a content page a watch cares about.
+  const MAX_INPUT = 256 * 1024;
+  let s = (html.length > MAX_INPUT ? html.slice(0, MAX_INPUT) : html)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<script\b[^>]{0,2000}>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]{0,2000}>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript\b[^>]{0,2000}>[\s\S]*?<\/noscript>/gi, ' ')
+    // <meta>/<link> are the churn-heavy head elements (CSP nonces, preload
+    // hashes, csrf). Drop them but KEEP <title> (a title change is real).
+    .replace(/<(?:meta|link)\b[^>]{0,2000}>/gi, ' ');
+  // Best-effort region narrowing for a bare-tag selector (the common
+  // "watch the article list" case). Nested same-name tags aren't handled —
+  // it falls back to the whole body, which the text-strip below still
+  // stabilises. #id / .class selectors need a real DOM parser (follow-up).
+  if (selector) {
+    const tag = selector.trim().toLowerCase();
+    if (/^[a-z][a-z0-9]{0,40}$/.test(tag)) {
+      const m = new RegExp(`<${tag}\\b[^>]{0,2000}>([\\s\\S]*?)</${tag}>`, 'i').exec(s);
+      if (m && m[1]) s = m[1];
+    }
+  }
+  return s
+    // Bounded tag length keeps this linear instead of O(n^2) on '<' spam.
+    .replace(/<[^>]{0,1000}>/g, ' ')
+    .replace(/&(nbsp|amp|lt|gt|quot|#39);/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** Per-task execution context available via AsyncLocalStorage. */
 export interface WorkerTaskContext {
   taskId: string;
@@ -521,8 +571,17 @@ export class WorkerLoop {
       throw new Error(`Watch fetch failed for ${config.url}: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Hash the fetched content
-    const currentHash = createHash('sha256').update(fetchResult).digest('hex');
+    // Reduce to a stable visible-content signal before hashing. Hashing the raw
+    // HTML fired the analysis LLM on every nonce/CSP-token/build-id/timestamp
+    // churn even when no visible content changed (a daily watch cost ~$0.25/run
+    // for nothing). A watch created before this lands re-baselines once (its
+    // old last_hash was over raw HTML) — no migration needed.
+    const currentSignal = extractWatchSignal(fetchResult, config.selector);
+    // An empty signal (error/blank page) would otherwise collapse distinct
+    // responses to the same hash — key it by raw length so a 404 and a 500
+    // don't read as "no change" from each other.
+    const hashInput = currentSignal.length > 0 ? currentSignal : ` empty:${fetchResult.length}`;
+    const currentHash = createHash('sha256').update(hashInput).digest('hex');
     const previousHash = config.last_hash;
 
     if (previousHash && currentHash === previousHash) {
@@ -537,6 +596,11 @@ export class WorkerLoop {
     // Content changed (or first run) — run analysis via agent
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
+      // A watch is a single summarize-what-changed turn — a fast-tier job.
+      // Without this it inherited the engine's default tier (often
+      // 'balanced'/Sonnet), paying a premium model for change-detection. A
+      // worker_profile (below) may still override the tier if the user set one.
+      model: 'fast',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       costGuard: { maxBudgetUSD: WATCH_ANALYSIS_MAX_USD },
     });
@@ -546,9 +610,17 @@ export class WorkerLoop {
     }
 
     const isFirstRun = !previousHash;
+    // Pass the already-fetched, cleaned content inline and tell the agent NOT to
+    // re-fetch. The old prompt truncated raw HTML mid-tag at ~8 KB (often inside
+    // the <head>), so the agent re-fetched the full page via the http tool — a
+    // second network fetch AND a second billed turn on every run.
+    const WATCH_CONTENT_CHARS = 8000;
+    const contentForPrompt = currentSignal.length > WATCH_CONTENT_CHARS
+      ? currentSignal.slice(0, WATCH_CONTENT_CHARS) + ' […truncated]'
+      : currentSignal;
     const analysisPrompt = isFirstRun
-      ? `You are monitoring ${config.url} for changes. This is the first check — summarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
-      : `You are monitoring ${config.url} for changes. The content has changed since last check. Here is the current content:\n\n${fetchResult.slice(0, 8000)}\n\nPrevious result was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed.`;
+      ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
+      : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
     const analysis = await analysisSession.run(analysisPrompt);
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
