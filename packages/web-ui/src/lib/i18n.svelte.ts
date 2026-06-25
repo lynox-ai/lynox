@@ -100,8 +100,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.automation.triggers': { de: 'Trigger', en: 'Triggers' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
-	'hub.automation.apis': { de: 'APIs', en: 'APIs' },
-	'hub.automation.keys': { de: 'API-Schlüssel', en: 'API keys' },
 	// PRD-IA-V2 P2-PR-E (X6): orphan after V2 — AutomationHub loses the
 	// Activity tab in P2-PR-D. Key left in place to avoid merge-conflict
 	// with that parallel PR; final retire happens once P2-PR-D lands.
@@ -975,7 +973,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.workspace.updates_desc': { de: 'Beim Engine-Start nach neuen Versionen suchen', en: 'Check for new versions at engine startup' },
 	// `settings.workspace.tools[_desc]` keys removed — SettingsIndex tile reuses
 	// the existing `tools.heading` / `tools.subtitle` keys (i18n.svelte.ts:267-268).
+	// IA reorg (D2): API Profiles + 3rd-party keys moved from the Automation Hub
+	// into Settings. Two distinct primitives → two tiles in section_main.
+	'settings.apis': { de: 'APIs', en: 'APIs' },
+	'settings.apis_desc': { de: 'Wiederverwendbare API-Endpunkte, die lynox aufrufen kann', en: 'Reusable API endpoints lynox can call' },
 	'settings.keys': { de: 'API Keys', en: 'API Keys' },
+	'settings.keys_desc': { de: 'Schlüssel für Drittanbieter-Dienste (DataForSEO, etc.)', en: 'Keys for third-party services (DataForSEO, etc.)' },
 	// PRD-IA-V2 P3-PR-A2 — `settings.integrations*` retired in favour of
 	// `settings.channels*`. Old keys removed so dead translations don't
 	// drift; the legacy `/app/settings/integrations` routes still 301 to the

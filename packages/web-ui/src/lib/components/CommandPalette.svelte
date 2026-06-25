@@ -50,10 +50,10 @@
 		{ id: 'nav-intelligence', label: t('nav.intelligence'), group: t('cmd.nav'), action: () => goto('/app/intelligence'), keywords: 'intelligence dashboards reports knowledge memory wissen graph insights kpi contacts kontakte crm' },
 		{ id: 'nav-artifacts', label: t('nav.artifacts'), group: t('cmd.nav'), action: () => goto('/app/artifacts'), keywords: 'artifacts dashboards diagrams files galerie' },
 		{ id: 'nav-settings', label: t('nav.settings'), group: t('cmd.nav'), action: () => goto('/app/settings'), keywords: 'settings einstellungen config' },
-		// v1.5.2 (rafael QA 2026-05-18) — 3rd-party API-Key CRUD moved out of
-		// LLM Settings into the Automation Hub (next to API Profile endpoints).
-		// Palette skips the redirect bounce and lands directly on the new tab.
-		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/hub?section=keys'), keywords: 'keys api schluessel automation hub' },
+		// IA reorg (D2) — 3rd-party API keys are low-frequency config; their home
+		// is Settings. Palette lands directly on the Settings route (skips the
+		// `?section=keys` redirect bounce).
+		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel settings einstellungen' },
 		// PRD-IA-V2 P3-PR-A2 — `settings.integrations` retired in favour of
 		// `settings.channels`. Keywords still include the old "integrations"
 		// term so muscle-memory queries still hit the right command.
