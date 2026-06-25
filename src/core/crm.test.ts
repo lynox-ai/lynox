@@ -77,12 +77,65 @@ describe('CRM', () => {
       expect(crm.findContact({ name: 'Nobody' })).toBeNull();
     });
 
-    it('upserts existing contact (updates fields)', () => {
-      crm.upsertContact({ name: 'Alice', type: 'lead' });
-      crm.upsertContact({ name: 'Alice', type: 'customer', company: 'Acme' });
-      const found = crm.findContact({ name: 'Alice' });
+    it('upserts existing contact on email (updates fields, no duplicate)', () => {
+      crm.upsertContact({ name: 'Alice', email: 'alice@acme.com', type: 'lead' });
+      crm.upsertContact({ name: 'Alice', email: 'alice@acme.com', type: 'customer', company: 'Acme' });
+      const found = crm.findContact({ email: 'alice@acme.com' });
       expect(found!.type).toBe('customer');
       expect(found!.company).toBe('Acme');
+      expect(crm.listContacts({ email: 'alice@acme.com' })).toHaveLength(1);
+    });
+
+    // ── D2: email is the identity (dedup on email, not name) ──
+
+    it('updates the same contact when the email matches but the name changed', () => {
+      crm.upsertContact({ name: 'Alice', email: 'a@x.com' });
+      crm.upsertContact({ name: 'Alice Smith', email: 'a@x.com' });
+      const all = crm.listContacts({ email: 'a@x.com' });
+      expect(all).toHaveLength(1);
+      expect(all[0]!.name).toBe('Alice Smith');
+    });
+
+    it('keeps two people with the same name but different emails as distinct contacts', () => {
+      crm.upsertContact({ name: 'John Smith', email: 'john1@x.com' });
+      crm.upsertContact({ name: 'John Smith', email: 'john2@x.com' });
+      expect(crm.listContacts({ name: 'John Smith' })).toHaveLength(2);
+    });
+
+    it('dedups case-insensitively and stores email lower-cased (round-trips with the resolver lookup)', () => {
+      crm.upsertContact({ name: 'Casey', email: 'Casey@Example.COM' });
+      crm.upsertContact({ name: 'Casey C', email: 'casey@example.com' });
+      // The inbox contact-resolver looks up the lower-cased address — it must hit.
+      const found = crm.findContact({ email: 'casey@example.com' });
+      expect(found).not.toBeNull();
+      expect(found!.email).toBe('casey@example.com');
+      expect(crm.listContacts({ email: 'casey@example.com' })).toHaveLength(1);
+    });
+
+    it('inserts every email-less contact (NULL emails do not collide — phone-only dedup is out of scope)', () => {
+      crm.upsertContact({ name: 'Phone Only A', phone: '111' });
+      crm.upsertContact({ name: 'Phone Only B', phone: '222' });
+      expect(crm.listContacts()).toHaveLength(2);
+    });
+
+    it('does not crash or rebuild a pre-existing non-empty name-keyed contacts table (graceful degradation)', () => {
+      // Simulate a legacy table: rows the agent inserted on an older build,
+      // when the prompt steered to `data_store_insert into contacts` (name key).
+      // dropEmptyCrmOverlaps would NOT drop it (non-empty), so ensureSchema must
+      // tolerate it — no throw, no silent rebuild (a real migration is the
+      // escalation path).
+      ds.createCollection({
+        name: 'contacts',
+        scope: { type: 'global', id: '' },
+        columns: [{ name: 'name', type: 'string' }, { name: 'email', type: 'string' }],
+        uniqueKey: ['name'],
+      });
+      ds.insertRecords({ collection: 'contacts', records: [{ name: 'Legacy', email: 'legacy@x.com' }] });
+
+      expect(() => crm.ensureSchema()).not.toThrow();
+      // The legacy key survives (degrades to name-dedup) rather than being
+      // silently rebuilt under the agent's data.
+      expect(ds.getCollectionInfo('contacts')!.uniqueKey).toEqual(['name']);
     });
 
     it('lists contacts sorted by last update', () => {

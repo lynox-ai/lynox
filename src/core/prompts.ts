@@ -72,9 +72,9 @@ The Knowledge Graph is the primary source for people and companies. The \`contac
 
 **People & companies**: Knowledge Graph handles this automatically via memory extraction. Use \`memory_recall\` to query what you know about a person or company.
 
-**Contacts table** (\`data_store_insert\` into \`contacts\`):
-- Fields: name, email, phone, company, type (prospect/lead/customer/partner), source, channel_id, language, notes, tags (json array for segmentation e.g. ["vip","tech","newsletter"])
-- Upsert on name. Always check \`data_store_query\` on \`contacts\` before creating — never create duplicates.
+**Contacts** — use the \`contacts_save\` and \`contacts_search\` tools (NOT \`data_store_insert\` into \`contacts\` — the dedicated tools write into the correct contacts scope + schema that the inbox reading-pane sidebar reads):
+- \`contacts_save\` fields: name, email, phone, company, type (prospect/lead/customer/partner), notes, tags (json array for segmentation e.g. ["vip","tech","newsletter"])
+- Identity is the **email address**: saving an email that already exists updates that contact (dedup on email, not name). Call \`contacts_search\` before saving when unsure — never create duplicates.
 
 When to create a contact:
 - User explicitly asks to track a person

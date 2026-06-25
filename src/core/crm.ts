@@ -115,9 +115,34 @@ export class CRM {
       this.ds.createCollection({
         name: 'contacts',
         scope: SCOPE,
+        // Identity = email (unique). The display `name` can change freely
+        // (rename → same row, the autoincrement `_id` stays stable, so any
+        // history keyed on the contact survives). Two people with the same
+        // name but different emails are distinct rows; the same email saved
+        // again upserts. Email is normalised to lower-case on write
+        // (`upsertContact`) so the dedup — and the inbox contact-resolver's
+        // case-insensitive lookup — are consistent end-to-end.
         columns: CONTACTS_SCHEMA,
-        uniqueKey: ['name'],
+        uniqueKey: ['email'],
       });
+    } else {
+      // A `contacts` collection already exists. The empty case is dropped on
+      // boot (`dropEmptyCrmOverlaps`) BEFORE this runs, so it gets recreated
+      // above with the email key — the free migration. A NON-empty legacy
+      // table (e.g. rows the agent inserted via data_store on older builds,
+      // when the prompt still steered to `data_store_insert into contacts`)
+      // survives with its original unique key. We do NOT auto-rebuild it (that
+      // is a real DataStore migration, the escalation path) — but a silent
+      // degradation of the email-identity contract is worse than a visible
+      // one, so surface the mismatch in the boot log.
+      const info = this.ds.getCollectionInfo('contacts');
+      if (info && info.recordCount > 0 && (info.uniqueKey?.join(',') ?? '') !== 'email') {
+        process.stderr.write(
+          `[lynox] CRM: existing non-empty "contacts" collection has unique key ` +
+          `[${info.uniqueKey?.join(', ') ?? '(none)'}], not [email] — contacts_save will ` +
+          `dedup on that key until the table is migrated.\n`,
+        );
+      }
     }
 
     if (!existing.has('deals')) {
@@ -155,10 +180,21 @@ export class CRM {
     return (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
   }
 
-  /** Create or update a contact. Uses name as unique key (upsert). */
+  /**
+   * Create or update a contact. Identity is the email address (unique key):
+   * saving an existing email updates that contact (even under a new display
+   * name); a new email inserts a new contact. Email is normalised to a
+   * trimmed lower-case form so dedup and the inbox contact-resolver lookup
+   * (which lower-cases on read) agree. A contact without an email is always
+   * inserted (NULL emails do not collide) — phone-only dedup is out of scope.
+   */
   upsertContact(data: ContactData): void {
     this.ensureSchema();
-    this.ds.insertRecords({ collection: 'contacts', records: [data as unknown as Record<string, unknown>] });
+    const normalized: ContactData =
+      typeof data.email === 'string' && data.email.trim().length > 0
+        ? { ...data, email: data.email.trim().toLowerCase() }
+        : data;
+    this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>] });
   }
 
   /** Remove all contacts auto-created from knowledge graph entities. */

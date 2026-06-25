@@ -61,6 +61,8 @@ import {
   dataStoreListTool,
   dataStoreDeleteTool,
   dataStoreDropTool,
+  contactsSaveTool,
+  contactsSearchTool,
   saveWorkflowTool,
   apiSetupTool,
   artifactSaveTool,
@@ -1357,6 +1359,16 @@ export class Engine {
         // One-time cleanup: remove contacts auto-created from KG entities
         // (NER false positives polluted the contacts list with non-contact words)
         this._crm.purgeKnowledgeGraphContacts();
+
+        // Expose the CRM to tool handlers (contacts_save / contacts_search)
+        // so they write into the correct global CRM scope + schema instead of
+        // the agent's context-scoped data_store default. Register the two
+        // contact tools now that the CRM is live (mirrors the artifact tools
+        // registering after ArtifactStore init).
+        this._toolContext.crm = this._crm;
+        this.registry
+          .register(contactsSaveTool)
+          .register(contactsSearchTool);
       } catch {
         this._crm = null;
       }
