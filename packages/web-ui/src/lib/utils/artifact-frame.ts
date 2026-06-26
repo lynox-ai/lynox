@@ -58,6 +58,37 @@ export function computeFitZoom(contentWidth: number, frameWidth: number): number
 }
 
 /**
+ * The inline-style fields the fit-to-width transform OWNS on a fullscreen frame.
+ * Deliberately excludes `height`: the frame's height is the measured content
+ * height set by the resize-message handler (the scrolling fullscreen container
+ * needs an explicit frame height, `flex:none`). A plain object satisfies this so
+ * the reset is unit-testable without a DOM.
+ */
+export interface ArtifactFitStyle {
+	width: string;
+	transform: string;
+	transformOrigin: string;
+	marginRight: string;
+	marginBottom: string;
+}
+
+/**
+ * Revert ONLY the fit-to-width styles applyFullscreenFit may have set (width
+ * override + transform + the negative margins that pull back the scaled box).
+ * It must NOT touch `height`: clearing the resize-handler-owned height collapsed
+ * the frame to the iframe default (150px), so a "content already fits the
+ * fullscreen width" doc rendered as a thin clipped strip instead of the full
+ * page. Idempotent — safe on collapse, on ESC, and on the no-fit branch.
+ */
+export function clearArtifactFitStyles(style: ArtifactFitStyle): void {
+	style.width = '';
+	style.transform = '';
+	style.transformOrigin = '';
+	style.marginRight = '';
+	style.marginBottom = '';
+}
+
+/**
  * Script (string) injected into a fullscreen artifact preview iframe so a wide
  * fixed-width document (A4 contract ~794px, a 16:9 deck) fits the phone width
  * NATIVELY instead of clipping. It measures the content width and sets the

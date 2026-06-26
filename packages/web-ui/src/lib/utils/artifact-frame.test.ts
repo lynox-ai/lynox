@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview, ARTIFACT_FIT_SCRIPT } from './artifact-frame.js';
+import { isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview, ARTIFACT_FIT_SCRIPT, clearArtifactFitStyles } from './artifact-frame.js';
+import type { ArtifactFitStyle } from './artifact-frame.js';
 
 describe('injectArtifactPreview', () => {
 	it('injects head extras + a default viewport + the fit script into a full doc', () => {
@@ -119,5 +120,47 @@ describe('deckFrameHeight', () => {
 		// 960*9/16 = 540; ceil = 0.85*round? 0.85*635.3→ pick vh so ceil==540:
 		// 540 / 0.85 = 635.29 → round(635*0.85)=540. aspect==ceil → 540.
 		expect(deckFrameHeight(960, 635)).toBe(540);
+	});
+});
+
+describe('clearArtifactFitStyles', () => {
+	// A plain object stands in for an iframe's CSSStyleDeclaration (node, no DOM).
+	function makeStyle(): ArtifactFitStyle & { height: string } {
+		return {
+			width: '986px',
+			height: '1265px',
+			transform: 'scale(0.8)',
+			transformOrigin: 'top left',
+			marginRight: '-100px',
+			marginBottom: '-200px',
+		};
+	}
+
+	it('clears every fit-to-width style it owns', () => {
+		const style = makeStyle();
+		clearArtifactFitStyles(style);
+		expect(style.width).toBe('');
+		expect(style.transform).toBe('');
+		expect(style.transformOrigin).toBe('');
+		expect(style.marginRight).toBe('');
+		expect(style.marginBottom).toBe('');
+	});
+
+	it('NEVER clears height — the resize-handler-owned content height must survive', () => {
+		// Regression: clearing height collapsed the fullscreen frame to the 150px
+		// iframe default, so a doc that fits the fullscreen width rendered as a thin
+		// clipped strip instead of the full page.
+		const style = makeStyle();
+		clearArtifactFitStyles(style);
+		expect(style.height).toBe('1265px');
+	});
+
+	it('is idempotent (a second call leaves an already-cleared style untouched)', () => {
+		const style = makeStyle();
+		clearArtifactFitStyles(style);
+		clearArtifactFitStyles(style);
+		expect(style.width).toBe('');
+		expect(style.marginBottom).toBe('');
+		expect(style.height).toBe('1265px');
 	});
 });
