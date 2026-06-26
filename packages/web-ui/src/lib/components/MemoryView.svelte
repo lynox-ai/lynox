@@ -15,6 +15,23 @@
 	let editingIdx = $state<number | null>(null);
 	let editingText = $state('');
 
+	// Knowledge-graph stats surfaced in the Wissen header (M5): a glanceable
+	// "how much do I know" summary, mirroring StatusBar's /api/kg/stats panel.
+	interface KgStats {
+		memoryCount: number;
+		entityCount: number;
+		relationCount: number;
+		communityCount: number;
+	}
+	let kgStats = $state<KgStats | null>(null);
+
+	async function loadKgStats() {
+		try {
+			const res = await fetch(`${getApiBase()}/kg/stats`);
+			if (res.ok) kgStats = (await res.json()) as KgStats;
+		} catch { /* silent — stats are a non-critical header adornment */ }
+	}
+
 	async function loadNamespace() {
 		loading = true;
 		error = '';
@@ -110,11 +127,21 @@
 		loadNamespace();
 		editingIdx = null;
 	});
+
+	// Load once on mount — KG stats are workspace-wide, not per-namespace.
+	$effect(() => { void loadKgStats(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<div class="flex items-center justify-between mb-4">
+	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('memory.title')}</h1>
+		{#if kgStats && (kgStats.memoryCount > 0 || kgStats.entityCount > 0)}
+			<div class="shrink-0 flex items-center gap-3 text-xs font-mono text-text-subtle">
+				<span>{kgStats.memoryCount}&nbsp;{t('status.memories')}</span>
+				<span>{kgStats.entityCount}&nbsp;{t('status.entities')}</span>
+				<span>{kgStats.relationCount}&nbsp;{t('status.relations')}</span>
+			</div>
+		{/if}
 	</div>
 
 	<div class="mb-6 space-y-2">
