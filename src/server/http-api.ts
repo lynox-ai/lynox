@@ -18,6 +18,7 @@ import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypt
 import { Engine } from '../core/engine.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename } from '../core/sanitize.js';
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
+import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
@@ -1991,6 +1992,21 @@ export class LynoxHTTPApi {
               const extracted = await extractDocumentText(buf, safeName);
               if (extracted) {
                 content.push({ type: 'text', text: `[File: ${safeName}]\n${extracted.text}` });
+                // U1 persist+recall: store the document into the knowledge layer
+                // (best-effort, OFF the request path) so it survives the turn and
+                // is auto-recalled on later turns. Never awaited — embedding /
+                // entity-extraction must not delay the chat turn; a failure just
+                // means the document isn't recalled (its text was already inlined).
+                const kl = this.engine?.getKnowledgeLayer();
+                const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
+                if (kl && docScope) {
+                  void ingestDocumentText(kl, {
+                    text: extracted.text,
+                    fileName: safeName,
+                    scope: docScope,
+                    threadId: session.sessionId,
+                  }).catch(() => { /* best-effort */ });
+                }
                 continue;
               }
             } catch (err) {
