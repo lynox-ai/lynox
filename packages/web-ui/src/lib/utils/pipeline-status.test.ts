@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
 	formatRunElapsed,
+	isPipelineRunning,
 	prefersReducedMotion,
 	scrollBehaviorForMotion,
 	selectPendingPromptHead,
@@ -141,5 +142,43 @@ describe('scrollBehaviorForMotion', () => {
 		// Acceptance gate 4: "zur Frage springen" must not animate when the
 		// user has set prefers-reduced-motion.
 		expect(scrollBehaviorForMotion(true)).toBe('auto');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isPipelineRunning — the "open a pre-1.18 workflow thread" crash guard.
+// A localStorage-restored old thread can carry a `pipeline` whose `steps` is
+// missing / not an array; `.some()` on that throws and downs the ChatView
+// render. The guard must read those as "not running", never throw.
+// ---------------------------------------------------------------------------
+
+describe('isPipelineRunning', () => {
+	it('is false for a null/undefined pipeline', () => {
+		expect(isPipelineRunning(null)).toBe(false);
+		expect(isPipelineRunning(undefined)).toBe(false);
+	});
+
+	it('does NOT throw on a malformed pre-1.18 shape with a non-array steps', () => {
+		expect(isPipelineRunning({} as never)).toBe(false);
+		expect(isPipelineRunning({ steps: undefined })).toBe(false);
+		expect(isPipelineRunning({ steps: 'nope' as never })).toBe(false);
+		expect(isPipelineRunning({ steps: null as never })).toBe(false);
+	});
+
+	it('is false for an empty or all-finished pipeline', () => {
+		expect(isPipelineRunning({ steps: [] })).toBe(false);
+		expect(
+			isPipelineRunning({ steps: [{ status: 'completed' }, { status: 'skipped' }] }),
+		).toBe(false);
+	});
+
+	it('is true when any step is pending or running', () => {
+		expect(isPipelineRunning({ steps: [{ status: 'completed' }, { status: 'running' }] })).toBe(true);
+		expect(isPipelineRunning({ steps: [{ status: 'pending' }] })).toBe(true);
+	});
+
+	it('tolerates a null/garbage step entry without throwing', () => {
+		expect(isPipelineRunning({ steps: [null, { status: 'running' }] })).toBe(true);
+		expect(isPipelineRunning({ steps: [null] })).toBe(false);
 	});
 });

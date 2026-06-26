@@ -84,6 +84,26 @@ export function scrollBehaviorForMotion(reduced: boolean): ScrollBehavior {
 }
 
 /**
+ * True when a pipeline still has a step pending or running.
+ *
+ * Defensive against malformed PERSISTED shapes: a pre-1.18 workflow thread
+ * restored from localStorage can carry a `pipeline` whose `steps` is missing
+ * or not an array (its shape predates the current `PipelineInfo`). Calling
+ * `.some()` on a non-array there throws inside the `pipelineRunning` $derived
+ * and takes the whole ChatView render down — the "can't open an old workflow
+ * thread" crash. We guard the array before iterating, and tolerate a
+ * null/garbage step entry, so an old shape simply reads as "not running"
+ * instead of crashing. The param is intentionally loose (not `PipelineInfo`)
+ * because the danger is exactly the data that violates that type at runtime.
+ */
+export function isPipelineRunning(
+	pipeline: { steps?: ReadonlyArray<{ status?: string } | null> } | null | undefined,
+): boolean {
+	if (!pipeline || !Array.isArray(pipeline.steps)) return false;
+	return pipeline.steps.some((s) => s?.status === 'pending' || s?.status === 'running');
+}
+
+/**
  * Resolve the inline prompt form to scroll to. Permission and secret prompts
  * can be visible simultaneously (independent SSE events / state vars), so
  * the bare `[data-pending-prompt]` first-match would race the kind that
