@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.19.0 — 2026-06-26
+
+The product's navigation becomes the agent loop. Agent-triggers get an editable home, the workflow run-list joins a single "Aktivität & Kosten" surface, and low-frequency configuration (API profiles, third-party keys, tool permissions) moves into Settings — so each surface maps to a primitive instead of a feature. Watch change-detection gets dramatically cheaper, and a wave of UX fixes lands across chat, artifacts, the inbox, and the navigation rail. **No engine or control-plane database migration** — the run-now endpoint uses the existing per-tenant `triggers` table (shipped in 1.18.0); rollback to 1.18.0 is a clean single-image swap.
+
+### Added
+
+- **Triggers get an editable home** — an Automation "Triggers" tab lists agent-triggers (cron / watch / pipeline / reminder) with pause, delete, and **run-now**; creating or editing one is done by talking to the agent. A new `POST /api/triggers/:id/run` runs a trigger on demand (it routes through the same dispatch as the scheduler, so the capability-contract consent gate still applies). (#787)
+- **Aktivität & Kosten** — the full workflow run-list (per-run cost, status, and the "Fixen" failed-run flow) moves into the Activity surface alongside spend and history. (#788, #789)
+- **"Open in chat" actions** on tasks, contacts, and API profiles — create or edit them by chatting with the agent instead of through a bespoke form. (#786)
+
+### Changed
+
+- **Information-architecture reorg — the nav maps to the agent loop.** Automation is now Workflows (the saved-workflow library) / Triggers / Tasks; the workflow *run-list* lives under Aktivität & Kosten. API profiles and third-party API keys move into Settings. Tool permissions unify from two tier-split pages into one all-tier Settings entry. Every legacy URL 301-redirects, so existing bookmarks keep working: `?section=apis|keys` → Settings; `/settings/{workspace,privacy,integrations}/tools` → `/settings/policy-tools`; `?section=library` → the Workflows tab; `?section=reminders` → Triggers. (#788, #789, #790, #791, #792)
+- **Cheaper watch change-detection** — a watch now hashes the page's cleaned visible content (not the raw HTML, which churned on every nonce / CSP-token / build-id change), runs its change-summary on the fast model tier, and passes the already-fetched content inline instead of re-fetching. A watch created before this update re-baselines once on its first run (no migration). (#781)
+
+### Fixed
+
+- Chat lands at the bottom of the thread on open and holds position during streaming. (#782)
+- A fullscreen inline artifact shows the whole document instead of a clipped strip. (#783)
+- The inbox reading pane is no longer crushed at tablet widths. (#784)
+- The hover-expand navigation rail is an overlay flyover (no content reflow) and gains a keyboard-focus path. (#785)
+- The "open in chat" buttons use a monochrome chat icon, consistent with the rest of the UI. (#793)
+- Inbox "reply in chat" sanitizes the externally-authored mail subject before it seeds the chat framing, matching the other "open in chat" surfaces (which all collapse whitespace and control characters in untrusted fields). (#794)
+
 ## 1.18.0 — 2026-06-25
 
 The inbox becomes chat-first and contacts get a first-class identity. Replying to or composing a mail now opens a chat with the message loaded as context — the bespoke draft composer is gone, and the agent answers through its tools. Saved correspondents become real contacts keyed on email, and the task model splits into user-TODOs and agent-triggers. Two per-tenant engine migrations run on boot (mail-state v16 retires the draft table; run-history v42 splits `tasks` into `tasks` + `triggers`); both drop columns, so they are **forward-only** — roll the engine image forward, not back, past this release. No control-plane database migration.
