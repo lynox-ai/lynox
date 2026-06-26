@@ -63,6 +63,7 @@
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
+	import { isArtifactContentInline } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -382,12 +383,14 @@
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
 		const result: GroupedBlock[] = [];
 
-		// Check if agent already included an artifact inline in text
-		const hasInlineArtifact = blocks.some(b =>
-			b.type === 'text' && b.text &&
-			(b.text.includes('```artifact') ||
-			 (b.text.includes('```html') && (b.text.includes('<!DOCTYPE') || b.text.includes('<html'))))
-		);
+		// Prose text the agent wrote inline — used to skip rendering an artifact
+		// card whose content the agent already fenced in prose (avoids a
+		// duplicate), per isArtifactContentInline. A per-artifact (not
+		// per-message) check so an EDIT's updated card still renders.
+		const artifactTextBlocks: string[] = [];
+		for (const b of blocks) {
+			if (b.type === 'text' && b.text) artifactTextBlocks.push(b.text);
+		}
 
 		for (const block of blocks) {
 			if (block.type === 'thinking') {
@@ -407,17 +410,18 @@
 				// inside the container (no iframe — content is trusted prose);
 				// HTML/SVG/Mermaid wrap into a sandboxed iframe via buildArtifact.
 				if (tc.name === 'artifact_save') {
-					if (!hasInlineArtifact) {
-						const inp = tc.input as Record<string, unknown> | undefined;
-						const content = String(inp?.['content'] ?? '');
-						if (content) {
-							const title = String(inp?.['title'] ?? 'Artifact');
-							const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
-							const header = TYPED_ARTIFACT_FENCE.has(artifactType)
-								? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n`
-								: `<!-- title: ${title} -->\n`;
-							result.push({ type: 'text', text: artifactFenceWrap(header, content) });
-						}
+					const inp = tc.input as Record<string, unknown> | undefined;
+					const content = String(inp?.['content'] ?? '');
+					// Render the saved artifact as a card UNLESS the agent already
+					// showed this exact content in prose. An edit supplies new
+					// content not present inline, so its updated card still renders.
+					if (content && !isArtifactContentInline(content, artifactTextBlocks)) {
+						const title = String(inp?.['title'] ?? 'Artifact');
+						const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
+						const header = TYPED_ARTIFACT_FENCE.has(artifactType)
+							? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n`
+							: `<!-- title: ${title} -->\n`;
+						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
 					continue;
 				}
