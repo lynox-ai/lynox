@@ -36,7 +36,7 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -1044,6 +1044,49 @@ describe('WorkerLoop', () => {
     }));
   });
 
+  it('Q1-cost: watch analysis uses the fast tier, passes cleaned content + no-refetch, and ignores churn-only change', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const updateWatchConfig = vi.fn();
+    const recordTaskRun = vi.fn();
+    const taskManager = { recordTaskRun, updateWatchConfig } as unknown as TaskManager;
+    const createSession = vi.fn(() => analysisSession);
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession,
+      escalateToUser: vi.fn(() => null),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+
+    // First run = baseline. Page has a nonced <script> in <head> (the churn source).
+    const pageV1 = '<html><head><script nonce="abc123">var t=1;</script></head><body><main>Headline One</main></body></html>';
+    mockFetchPinned.mockResolvedValueOnce(new Response(pageV1, { status: 200 }));
+    await fire(makeTask({ id: 't-cost', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+
+    // (a) the analysis session runs on the FAST tier (was inheriting the default).
+    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'fast' }));
+    // (c) the prompt carries cleaned content + an explicit no-refetch instruction,
+    //     and NOT the raw HTML the agent used to re-fetch around.
+    const prompt = (analysisSession.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
+    expect(prompt).toContain('do NOT re-fetch');
+    expect(prompt).toContain('Headline One');
+    expect(prompt).not.toContain('<script');
+    expect(prompt).not.toContain('nonce');
+
+    const baselineHash = (updateWatchConfig as unknown as { mock: { calls: Array<[string, { last_hash?: string }]> } }).mock.calls[0]?.[1]?.last_hash;
+    expect(baselineHash).toBeTruthy();
+
+    // (b) churn-only change: identical visible text, DIFFERENT script nonce →
+    //     the signal hash is stable → NO second analysis session is created.
+    const pageChurn = '<html><head><script nonce="zzz999">var t=2;</script></head><body><main>Headline One</main></body></html>';
+    mockFetchPinned.mockResolvedValueOnce(new Response(pageChurn, { status: 200 }));
+    await fire(makeTask({ id: 't-cost', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: baselineHash }) }));
+    expect(createSession).toHaveBeenCalledTimes(1); // still just the baseline run
+    expect(recordTaskRun).toHaveBeenCalledWith('t-cost', 'No changes detected', 'success');
+  });
+
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.
   // An interactive pipeline that somehow got onto a schedule (legacy data,
   // sync from another instance) must be rejected at the boundary so it
@@ -1108,5 +1151,51 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'reminder fired', 'success');
     // No agent invocation — session.run never called.
     expect(session.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('extractWatchSignal', () => {
+  it('produces a stable signal across script-nonce / style / comment / head churn', () => {
+    const a = '<html><head><meta name="csrf" content="aaa"><script nonce="n1">x()</script><style>.a{color:red}</style></head><body><main>Article A · Article B</main><!-- build 123 --></body></html>';
+    const b = '<html><head><meta name="csrf" content="bbb"><script nonce="n2">x()</script><style>.a{color:blue}</style></head><body><main>Article A · Article B</main><!-- build 456 --></body></html>';
+    expect(extractWatchSignal(a)).toBe(extractWatchSignal(b));
+    expect(extractWatchSignal(a)).toContain('Article A');
+  });
+
+  it('changes when the visible text changes', () => {
+    const a = '<body><main>Article A</main></body>';
+    const b = '<body><main>Article A · Article C</main></body>';
+    expect(extractWatchSignal(a)).not.toBe(extractWatchSignal(b));
+  });
+
+  it('narrows to a bare-tag selector region', () => {
+    const html = '<body><nav>Home Login Cart</nav><main>The Real Content</main><footer>2026</footer></body>';
+    const sig = extractWatchSignal(html, 'main');
+    expect(sig).toBe('The Real Content');
+    expect(sig).not.toContain('Home');
+    expect(sig).not.toContain('2026');
+  });
+
+  it('falls back to whole-page text for an unsupported (#id/.class) selector', () => {
+    const html = '<body><main>Hello World</main></body>';
+    expect(extractWatchSignal(html, '#news')).toContain('Hello World');
+  });
+
+  it('is input-capped and linear on pathological input (no O(n^2) hang)', () => {
+    // A page of unclosed '<' would O(n^2) an unbounded tag-strip — this must
+    // return quickly; the test completing at all is the proof it is bounded.
+    const sig = extractWatchSignal('<'.repeat(300_000));
+    expect(typeof sig).toBe('string');
+    // Content past the 256 KB input cap is dropped.
+    const capped = extractWatchSignal('x'.repeat(256 * 1024) + ' NEEDLE_PAST_CAP');
+    expect(capped).not.toContain('NEEDLE_PAST_CAP');
+  });
+
+  it('keeps <title> but drops churn-heavy <meta>/<link>/<script>', () => {
+    const sig = extractWatchSignal('<html><head><title>My Title</title><meta name="csrf" content="abc123"><link rel="preload" href="/x-hash9.js"><script>track()</script></head><body>Body Text</body></html>');
+    expect(sig).toContain('My Title');
+    expect(sig).toContain('Body Text');
+    expect(sig).not.toContain('abc123');
+    expect(sig).not.toContain('track');
   });
 });
