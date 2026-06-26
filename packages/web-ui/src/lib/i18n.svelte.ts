@@ -208,7 +208,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.activity.view_all': { de: 'Alle anzeigen', en: 'View all' },
 	'hub.activity.thread_insights': { de: 'Thread-Performance', en: 'Thread Performance' },
 	// Activity Root (PRD-IA-V2 P2-PR-A) — canonical /app/activity surface.
-	'nav.activity': { de: 'Aktivität', en: 'Activity' },
+	'nav.activity': { de: 'Aktivität & Kosten', en: 'Activity & Cost' },
 	'activity.tab.overview':  { de: 'Übersicht',  en: 'Overview' },
 	'activity.tab.history':   { de: 'Verlauf',    en: 'History' },
 	'activity.tab.workflows': { de: 'Workflows',  en: 'Workflows' },

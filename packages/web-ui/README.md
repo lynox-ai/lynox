@@ -37,7 +37,7 @@ Entry points: `ChatView`, `AppShell`, `SettingsIndex`, `ChannelHub`, `Intelligen
 
 Settings views: `LLMSettings`, `VoiceSettings`, `PrivacyDataSettings`, `SystemSettings`, `MailSettings`, `GoogleSettings`, `NotificationsSettings`, `SearchSettings`, `WorkspaceSecurityView`, `WorkspaceUpdatesView`, `WorkspaceLimitsView`, `KeysView`, `SecretsView`.
 
-Domain views: `KnowledgeGraphView`, `MemoryInsightsView`, `MemoryView`, `HistoryView`, `ContactsView`, `BackupsView`, `ApiStoreView`, `DataStoreView`, `FileBrowserView`, `TasksView`, `ArtifactsView`, `ArtifactsHub`, `WorkflowsView`, `ActivityHub`, `ActivityOverview`, `RulesView`, `MigrationWizard`.
+Domain views: `KnowledgeGraphView`, `MemoryInsightsView`, `MemoryView`, `HistoryView`, `ContactsView`, `BackupsView`, `ApiStoreView`, `DataStoreView`, `FileBrowserView`, `TasksView`, `TriggersView`, `ArtifactsView`, `ArtifactsHub`, `WorkflowsView`, `ActivityOverview`, `RulesView`, `MigrationWizard`.
 
 UI: `CommandPalette`, `StatusBar`, `ContextPanel`, `MarkdownRenderer`, `ChangesetReview`, `ToastContainer`, `MobileAccess`, `ColdStartBanner`, `KeyboardShortcutsHelp`, `PromptAnchor`, `StreamingActivityBar`, `ToolToggles`.
 

@@ -35,7 +35,6 @@ export { default as TriggersView } from './components/TriggersView.svelte';
 export { default as ArtifactsView } from './components/ArtifactsView.svelte';
 export { default as IntelligenceHub } from './components/IntelligenceHub.svelte';
 export { default as ArtifactsHub } from './components/ArtifactsHub.svelte';
-export { default as ActivityHub } from './components/ActivityHub.svelte';
 export { default as ActivityOverview } from './components/ActivityOverview.svelte';
 export { default as WorkflowsView } from './components/WorkflowsView.svelte';
 export { default as AutomationHub } from './components/AutomationHub.svelte';

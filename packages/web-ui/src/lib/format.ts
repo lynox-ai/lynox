@@ -34,7 +34,7 @@ export function estimateCost(
 /**
  * Smart cost formatting — canonical SSoT (PRD-IA-V2 P1-PR-B).
  * Float-USD input. Used everywhere a precise per-run / per-step / per-day cost
- * is rendered (HistoryView, ActivityHub, WorkflowsView, StatusBar, ColdStartBanner, …).
+ * is rendered (HistoryView, ActivityOverview, WorkflowsView, StatusBar, ColdStartBanner, …).
  *
  * - null/0 → '-' (no-data sentinel)
  * - < $0.01 → '$0.0042' (4 decimals — preserves migration-estimate sub-cent precision)
