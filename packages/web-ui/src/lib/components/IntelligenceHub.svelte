@@ -7,6 +7,7 @@
 	import KnowledgeGraphView from './KnowledgeGraphView.svelte';
 	import MemoryInsightsView from './MemoryInsightsView.svelte';
 	import MemoryView from './MemoryView.svelte';
+	import { scrollFade } from '../utils/scroll-fade.js';
 
 	// PRD-IA-V2 P3-PR-H: IntelligenceHub shrinks 5 → 4 top-tabs.
 	// `insights` is folded as a sub-tab under `graph` (both Beta, both
@@ -58,7 +59,7 @@
 </script>
 
 <div class="flex flex-col h-full">
-	<div class="flex items-center gap-1 px-4 sm:px-5 py-3 border-b border-border shrink-0 overflow-x-auto scrollbar-none">
+	<div class="flex items-center gap-1 px-4 sm:px-5 py-3 border-b border-border shrink-0 overflow-x-auto scrollbar-none" use:scrollFade>
 		{#each tabs as t_item (t_item.id)}
 			<button
 				type="button"
@@ -68,7 +69,7 @@
 		{/each}
 	</div>
 	{#if tab === 'graph'}
-		<div class="flex items-center gap-1 px-4 sm:px-5 py-2 border-b border-border shrink-0 overflow-x-auto scrollbar-none">
+		<div class="flex items-center gap-1 px-4 sm:px-5 py-2 border-b border-border shrink-0 overflow-x-auto scrollbar-none" use:scrollFade>
 			{#each graphSubTabs as s_item (s_item.id)}
 				<button
 					type="button"
