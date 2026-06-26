@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename } from '../core/sanitize.js';
+import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
@@ -1983,8 +1984,25 @@ export class LynoxHTTPApi {
             // size so a 10 MB base64 can't push ~7.5 MB of arbitrary text
             // straight into the model context.
             const buf = Buffer.from(file.data, 'base64');
+            // U1: PDF / Word documents are extracted server-side instead of
+            // being rejected. Unsupported binary formats (xlsx/pptx/legacy doc)
+            // return null here and fall through to the 415 below.
+            try {
+              const extracted = await extractDocumentText(buf, safeName);
+              if (extracted) {
+                content.push({ type: 'text', text: `[File: ${safeName}]\n${extracted.text}` });
+                continue;
+              }
+            } catch (err) {
+              if (err instanceof DocumentExtractError) {
+                errorResponse(res, 422, `Couldn't read "${safeName}": ${err.message}. Export it to text and re-upload.`);
+                return;
+              }
+              // Unexpected extraction failure: fall through to the binary/415
+              // handling below rather than risk hanging the request.
+            }
             if (looksBinaryUpload(buf)) {
-              errorResponse(res, 415, `"${safeName}" looks like a binary document (Word/PDF/Excel/…). Inline text extraction isn't supported yet — paste the text, or upload a .txt/.md/.csv (or export to text first).`);
+              errorResponse(res, 415, `"${safeName}" looks like a binary document (Excel/PowerPoint/…). Inline text extraction for this format isn't supported yet — paste the text, or upload a PDF, Word (.docx), or .txt/.md/.csv.`);
               return;
             }
             const decoded = buf.toString('utf-8');
