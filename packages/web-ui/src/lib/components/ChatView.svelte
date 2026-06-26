@@ -63,6 +63,7 @@
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
+	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -1432,9 +1433,10 @@
 			return null;
 		})(),
 	);
-	const pipelineRunning = $derived(
-		activePipeline != null && activePipeline.steps.some(s => s.status === 'pending' || s.status === 'running'),
-	);
+	// Guarded against malformed persisted shapes (pre-1.18 thread localStorage) —
+	// see isPipelineRunning. A non-array `steps` would otherwise crash this
+	// $derived and the whole render when an old workflow thread is opened.
+	const pipelineRunning = $derived(isPipelineRunning(activePipeline));
 
 	const pendingPromptHead = $derived(getPendingPrompt());
 	const waitingOnUser = $derived(pendingPromptHead !== null);
