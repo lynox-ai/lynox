@@ -4,6 +4,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
+	import Icon from '../primitives/Icon.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
@@ -101,7 +102,7 @@
 							aria-label={t('apis.manage_in_chat')}
 							title={t('apis.manage_in_chat')}
 							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
-							💬
+							<Icon name="chat" size="xs" />
 						</button>
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}

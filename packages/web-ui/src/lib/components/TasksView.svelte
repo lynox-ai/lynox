@@ -4,6 +4,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
+	import Icon from '../primitives/Icon.svelte';
 
 	// User-TODOs only. Agent-triggers (cron/watch/pipeline/reminder/backup) live
 	// in their own home now (TriggersView) — the v42 storage split is finished
@@ -124,7 +125,7 @@
 							</div>
 						</div>
 						<div class="flex items-center gap-2 shrink-0 mt-0.5">
-							<button onclick={() => manageInChat(task)} aria-label={t('tasks.manage_in_chat')} title={t('tasks.manage_in_chat')} class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity">💬</button>
+							<button onclick={() => manageInChat(task)} aria-label={t('tasks.manage_in_chat')} title={t('tasks.manage_in_chat')} class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
 							{#if task.status !== 'completed' && task.status !== 'done'}
 								<button onclick={() => markDone(task.id)} class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] text-success hover:bg-success/20 transition-opacity">{t('tasks.done')}</button>
 							{/if}
