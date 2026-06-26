@@ -86,6 +86,10 @@ function makeTask(overrides?: Partial<TriggerRecord>): TriggerRecord {
 function makeTaskManager(tasks: TriggerRecord[] = []): TaskManager {
   return {
     getDueTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue(tasks),
+    // runTriggerNow resolves the trigger by id (or id-prefix) before dispatch.
+    getTrigger: vi.fn<(id: string) => TriggerRecord | undefined>(
+      (id) => tasks.find((t) => t.id === id || t.id.startsWith(id)),
+    ),
     recordTaskRun: vi.fn(),
     setEnabled: vi.fn<(id: string, enabled: boolean) => boolean>().mockReturnValue(true),
   } as unknown as TaskManager;
@@ -1151,6 +1155,88 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'reminder fired', 'success');
     // No agent invocation — session.run never called.
     expect(session.run).not.toHaveBeenCalled();
+  });
+
+  // ---- run-now (manual off-schedule dispatch, the Triggers-home control) ----
+
+  it('runTriggerNow dispatches a trigger via the same execute path', async () => {
+    // A standard trigger (no pipeline/watch/backup) → executeStandard → session.
+    const task = makeTask({ id: 'rn-ok', task_type: 'standard', schedule_cron: undefined, next_run_at: undefined });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Ran on demand.');
+    const engine = makeEngine({ taskManager: tm, session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+
+    const outcome = await loop.runTriggerNow('rn-ok');
+    await vi.advanceTimersByTimeAsync(0); // flush fire-and-forget executeTask
+
+    expect(outcome).toEqual({ ok: true });
+    expect(tm.getTrigger).toHaveBeenCalledWith('rn-ok');
+    expect(session.run).toHaveBeenCalledTimes(1);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('rn-ok', 'Ran on demand.', 'success');
+  });
+
+  it('runTriggerNow returns not_found for an unknown trigger id', async () => {
+    const tm = makeTaskManager([]); // getTrigger → undefined
+    const engine = makeEngine({ taskManager: tm });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+
+    expect(await loop.runTriggerNow('ghost')).toEqual({ ok: false, reason: 'not_found' });
+  });
+
+  it('runTriggerNow refuses a second concurrent run of the same trigger', async () => {
+    // Never-resolving session keeps the first run in activeTasks, so the second
+    // call must see it as already running (the scheduler-skip guard, reused).
+    const neverResolve = {
+      run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
+      _recreateAgent: vi.fn(),
+    } as unknown as Session;
+    const task = makeTask({ id: 'rn-busy', task_type: 'standard', schedule_cron: undefined, next_run_at: undefined });
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: neverResolve });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+
+    const first = await loop.runTriggerNow('rn-busy');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first).toEqual({ ok: true });
+    expect(loop.activeTaskCount).toBe(1);
+
+    const second = await loop.runTriggerNow('rn-busy');
+    expect(second).toEqual({ ok: false, reason: 'already_running' });
+    expect(neverResolve.run).toHaveBeenCalledTimes(1);
+
+    loop.stop();
+  });
+
+  it('run-now path: a manual run of an un-confirmed pipeline trigger is blocked by the consent gate (never executes)', async () => {
+    // runTriggerNow → executeTask (proven for the standard type above) → the
+    // pipeline branch → executePipeline. Drive executeTask directly with an
+    // un-confirmed pipeline trigger (deterministic, no fire-and-forget flush)
+    // to prove a MANUAL run still hits the first-run-confirm gate: it can't
+    // smuggle past consent any more than a scheduled tick can.
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    const template = baseTemplate({}); // no confirmedAt
+    const templateJson = JSON.stringify(template);
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
+    const trigger = makeTask({ id: 't-rn-unconfirmed', pipeline_id: template['id'] as string, task_type: 'pipeline', schedule_cron: undefined, next_run_at: undefined });
+
+    await (loop as unknown as { executeTask: (t: TriggerRecord) => Promise<void> }).executeTask(trigger);
+
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    expect(taskManager.setEnabled).toHaveBeenCalledWith('t-rn-unconfirmed', false);
   });
 });
 

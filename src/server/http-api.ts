@@ -4027,6 +4027,22 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
+    // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
+    // control). Delegates to the WorkerLoop so the manual run goes through the
+    // same execute path — and the same consent/autonomous gate — as a scheduled
+    // fire. 202 = accepted + dispatched (the run continues async; its result
+    // lands in the run history), 409 = already running, 404 = no such trigger.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/run', async (_req, res, params) => {
+      const workerLoop = engine.getWorkerLoop();
+      if (!requireService(res, workerLoop, 'Worker loop')) return;
+      const outcome = await workerLoop.runTriggerNow(params['id']!);
+      if (!outcome.ok) {
+        if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
+        errorResponse(res, 404, 'Trigger not found'); return;
+      }
+      jsonResponse(res, 202, { started: true });
+    }));
+
     // ── Artifacts ──
     this.addStatic('user', 'GET /api/artifacts', async (_req, res) => {
       const store = engine.getArtifactStore();
