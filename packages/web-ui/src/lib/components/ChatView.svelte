@@ -1580,27 +1580,29 @@
 	let userScrollLock = false;
 	let _lastScrollTop = 0;
 	function onMessagesScroll(): void {
-		// Engages auto-scroll when user is at the bottom; releases it as soon
-		// as they scroll up. Re-engages once they scroll back to the bottom.
-		// Coalesce per frame so wheel/touch streams don't force a layout read
-		// on every event during streaming — `isAtBottom` reads scrollHeight.
+		// Coalesce per frame so wheel/touch streams don't force a layout read on
+		// every event during streaming — `isAtBottom` reads scrollHeight.
 		if (_scrollFrame !== null) return;
 		_scrollFrame = requestAnimationFrame(() => {
 			_scrollFrame = null;
 			if (!messagesEl) return;
 			const top = messagesEl.scrollTop;
 			const atBottom = isAtBottom();
-			// User scrolled upward — lock autoscroll until they explicitly
-			// return to the bottom. Without this, the streaming effect's RAF
-			// pin race would pull them back to bottom on every token.
+			// Only a genuine USER scroll-up disengages autoscroll. A programmatic
+			// pin scrolls DOWN (top increases), so it never trips this branch —
+			// that's what stops the thread-open pin from self-disarming when it
+			// momentarily reads a mid-paint scrollHeight as "not at bottom" (the
+			// old unconditional `autoScroll = atBottom` flipped it off mid-pin and
+			// stranded the view at the top). A real up-scroll still aborts the pin,
+			// so the user is never trapped during the pin window.
 			if (top < _lastScrollTop && !atBottom) {
 				userScrollLock = true;
-			}
-			if (atBottom) {
+				autoScroll = false;
+			} else if (atBottom) {
 				userScrollLock = false;
+				autoScroll = true;
 			}
 			_lastScrollTop = top;
-			autoScroll = atBottom;
 		});
 	}
 
@@ -1623,20 +1625,26 @@
 		return s;
 	});
 
-	$effect(() => {
-		// Read reactive deps so the effect re-runs as content grows.
+	// Stick-to-bottom during streaming WITHOUT yanking a user who scrolled up.
+	// The trap the old `autoScroll && isAtBottom()` gate fell into: this effect
+	// runs AFTER Svelte grows the DOM, so reading isAtBottom() here sees the
+	// post-growth height and can't distinguish "user is following the stream"
+	// from "user scrolled up" — a big chunk reads as "not at bottom" and the pin
+	// is skipped (then autoScroll latched false). Fix: snapshot the answer in an
+	// $effect.pre (runs BEFORE the DOM update, on the pre-growth height), then
+	// pin only if they were at the bottom just before this chunk landed.
+	let _wasAtBottomPreRender = true;
+	$effect.pre(() => {
 		void streamSignal;
-		// Re-check the live scroll position rather than trusting the
-		// possibly-stale `autoScroll` flag. During fast token churn the
-		// effect could re-run before the scroll handler observed the user's
-		// upward motion — `userScrollLock` is the durable intent guard.
-		if (userScrollLock || !messagesEl) return;
-		if (autoScroll && isAtBottom()) {
-			requestAnimationFrame(() => {
-				if (!messagesEl || userScrollLock) return;
-				messagesEl.scrollTop = messagesEl.scrollHeight;
-			});
-		}
+		_wasAtBottomPreRender = !userScrollLock && (!messagesEl || isAtBottom());
+	});
+	$effect(() => {
+		void streamSignal;
+		if (!_wasAtBottomPreRender || userScrollLock || !messagesEl) return;
+		requestAnimationFrame(() => {
+			if (!messagesEl || userScrollLock) return;
+			messagesEl.scrollTop = messagesEl.scrollHeight;
+		});
 	});
 
 	// Jump to the newest message when a thread is opened (history click, or
@@ -1665,6 +1673,9 @@
 	function pinToBottomFor(ms: number): void {
 		autoScroll = true;
 		userScrollLock = false;
+		// We intend to be at the bottom — align the streaming-pin snapshot so it
+		// doesn't carry a stale "was scrolled up" from the previous thread.
+		_wasAtBottomPreRender = true;
 		pinUntil = performance.now() + ms;
 		if (pinFrame === null) pinFrame = requestAnimationFrame(pinToBottomStep);
 	}
