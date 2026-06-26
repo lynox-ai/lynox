@@ -6,7 +6,6 @@
 	import SecretsView from './SecretsView.svelte';
 	import TasksView from './TasksView.svelte';
 	import TriggersView from './TriggersView.svelte';
-	import WorkflowsView from './WorkflowsView.svelte';
 	import WorkflowLibraryView from './WorkflowLibraryView.svelte';
 
 	// PRD-IA-V2 P2-PR-D — Activity tab stripped. AutomationHub is now Builder-only.
@@ -17,7 +16,11 @@
 	// moved here from /settings/llm/keys. Sits next to APIs (endpoints) so
 	// related Automation surfaces — endpoint definitions + their auth — share
 	// one place instead of straddling LLM Settings and Automation.
-	type Tab = 'workflows' | 'library' | 'triggers' | 'tasks' | 'apis' | 'keys';
+	// IA reorg: the `workflows` tab is now the workflow *definitions* surface
+	// (Library). The separate `library` tab is retired — its `?section=library`
+	// URL rewrites to `workflows` (back-compat $effect below). The run-list moved
+	// to Activity & Cost (`/app/activity?tab=workflows`).
+	type Tab = 'workflows' | 'triggers' | 'tasks' | 'apis' | 'keys';
 
 	// `?section=` (not `?tab=`) is intentional — historic collision-avoidance
 	// with the embedded ActivityHub which used `?tab=`. Now that Activity is
@@ -29,19 +32,27 @@
 	// below (1-release grace; cleanup later).
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('section');
-		if (p === 'library' || p === 'triggers' || p === 'tasks' || p === 'apis' || p === 'keys') return p;
+		if (p === 'triggers' || p === 'tasks' || p === 'apis' || p === 'keys') return p;
 		if (p === 'reminders') return 'triggers'; // back-compat: reminders are agent-triggers
+		if (p === 'library') return 'workflows';  // back-compat: Library folded into the Workflows tab
 		return 'workflows';
 	})());
 
-	// Rewrite legacy `?section=reminders` to `?section=tasks` on first load
-	// so the URL bar matches the rendered tab. Without this the user is
-	// looking at Tasks but the URL says reminders — sharing/copying it
-	// would land the recipient on the same redirect dance.
+	// Rewrite legacy `?section=` values to their current canonical tab on first
+	// load so the URL bar matches the rendered tab (without this the user looks
+	// at one tab but the URL says another — sharing/copying it lands the
+	// recipient on the same redirect dance). `reminders` → `triggers` (reminders
+	// are agent-triggers); `library` → strip `?section=` (Library is now the
+	// default Workflows tab, whose canonical URL carries no `?section=`).
 	$effect(() => {
-		if ($page.url.searchParams.get('section') === 'reminders') {
+		const section = $page.url.searchParams.get('section');
+		if (section === 'reminders') {
 			const url = new URL($page.url);
 			url.searchParams.set('section', 'triggers');
+			void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
+		} else if (section === 'library') {
+			const url = new URL($page.url);
+			url.searchParams.delete('section');
 			void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
 		}
 	});
@@ -58,7 +69,6 @@
 
 	const tabs: ReadonlyArray<{ id: Tab; labelKey: string }> = [
 		{ id: 'workflows', labelKey: 'hub.automation.workflows' },
-		{ id: 'library', labelKey: 'hub.automation.library' },
 		{ id: 'triggers', labelKey: 'hub.automation.triggers' },
 		{ id: 'tasks', labelKey: 'hub.automation.tasks' },
 		{ id: 'apis', labelKey: 'hub.automation.apis' },
@@ -78,8 +88,6 @@
 	</div>
 	<div class="flex-1 overflow-y-auto">
 		{#if tab === 'workflows'}
-			<WorkflowsView />
-		{:else if tab === 'library'}
 			<WorkflowLibraryView />
 		{:else if tab === 'triggers'}
 			<TriggersView />

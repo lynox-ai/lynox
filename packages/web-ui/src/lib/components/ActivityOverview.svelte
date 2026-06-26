@@ -10,8 +10,10 @@
 	  - overview  KPI Cards (today / 7d / 30d / MTD) + 14d bar chart + by-model +
 	              by-kind (LLM / voice_tts / voice_stt) + projection-ETA banner.
 	  - history   <HistoryView /> — Run list, filters, CSV, grouped by thread.
-	  - workflows Aggregate-only per pipeline (cost / runs / avg duration).
-	              Per-step drill stays in Hub-Builder via the deep-link.
+	  - workflows <WorkflowsView /> — the full workflow run-list (per-run cost +
+	              status + "💬 Fixen" for failed runs). Moved here from Automation
+	              in the IA reorg: Activity & Cost owns *runs*, Automation owns the
+	              workflow *definitions* (Library).
 
 	Cost formatters come from `format.ts` (canonical SSoT — never re-implemented
 	locally). CostLimits-Page was deleted in P3-PR-X; AutomationHub Activity-Tab
@@ -21,9 +23,10 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { formatCost, formatCostCents, formatDuration, shortModel } from '../format.js';
+	import { formatCostCents, shortModel } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import HistoryView from './HistoryView.svelte';
+	import WorkflowsView from './WorkflowsView.svelte';
 
 	type Tab = 'overview' | 'history' | 'workflows';
 	type Period = 'current' | 'prev' | '7d' | '30d';
@@ -205,89 +208,10 @@
 		voice_tts: 'activity.kind.voice_tts',
 	};
 
-	// ── Workflows-tab data (aggregate-only) ───────────────────────────────
-	interface PipelineRun {
-		id: string;
-		manifest_name: string;
-		status: string;
-		total_duration_ms: number;
-		total_cost_usd: number;
-		step_count: number;
-		started_at: string;
-	}
-	interface PipelineAggregate {
-		name: string;
-		runCount: number;
-		totalCostUsd: number;
-		avgDurationMs: number;
-		lastRunIso: string;
-	}
-
-	let pipelineRuns = $state<PipelineRun[]>([]);
-	let workflowsLoading = $state(true);
-	let workflowsError = $state('');
-
-	async function loadWorkflows(): Promise<void> {
-		workflowsLoading = true;
-		workflowsError = '';
-		try {
-			const res = await fetch(`${getApiBase()}/workflows?limit=200`);
-			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { runs: PipelineRun[] };
-			pipelineRuns = data.runs;
-		} catch {
-			workflowsError = t('common.load_failed');
-			pipelineRuns = [];
-		}
-		workflowsLoading = false;
-	}
-
-	$effect(() => {
-		if (tab === 'workflows') void loadWorkflows();
-	});
-
-	const pipelineAggregates = $derived.by(() => {
-		const map = new Map<string, { runs: PipelineRun[] }>();
-		for (const run of pipelineRuns) {
-			const key = run.manifest_name || '(unnamed)';
-			const entry = map.get(key);
-			if (entry) entry.runs.push(run);
-			else map.set(key, { runs: [run] });
-		}
-		const out: PipelineAggregate[] = [];
-		for (const [name, { runs }] of map) {
-			const runCount = runs.length;
-			const totalCostUsd = runs.reduce((s, r) => s + (r.total_cost_usd || 0), 0);
-			const totalDuration = runs.reduce((s, r) => s + (r.total_duration_ms || 0), 0);
-			const avgDurationMs = runCount > 0 ? totalDuration / runCount : 0;
-			const lastRunIso = runs
-				.map(r => r.started_at)
-				.sort()
-				.reverse()[0] ?? '';
-			out.push({ name, runCount, totalCostUsd, avgDurationMs, lastRunIso });
-		}
-		// Sort highest-cost first — that's the "where is my money going" question.
-		out.sort((a, b) => b.totalCostUsd - a.totalCostUsd);
-		return out;
-	});
-
-	const isWorkflowsEmpty = $derived(
-		!workflowsLoading && !workflowsError && pipelineAggregates.length === 0,
-	);
-
-	function pipelineDeepLink(pipelineId: string): string {
-		// Per PRD: per-step drill stays in Hub-Builder.
-		return `/app/hub?section=workflows&pipeline=${encodeURIComponent(pipelineId)}`;
-	}
-
-	// Find the most recent run for a given pipeline name, used as the deep-link
-	// target (Hub-Builder opens by run-id).
-	function pipelineRunIdForName(name: string): string | null {
-		const matches = pipelineRuns
-			.filter(r => (r.manifest_name || '(unnamed)') === name)
-			.sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
-		return matches[0]?.id ?? null;
-	}
+	// ── Workflows tab ─────────────────────────────────────────────────────
+	// The full workflow run-list now lives in <WorkflowsView /> (moved here from
+	// Automation in the IA reorg). It owns its own load/empty/error states + the
+	// "💬 Fixen" failed-run flow, so there's no aggregate data to compute here.
 
 	// ── History-tab empty state (synthetic — HistoryView itself shows its own
 	// loading spinner; the empty-state we render here matches the Overview /
@@ -490,51 +414,9 @@
 				<HistoryView />
 			{/if}
 		{:else if tab === 'workflows'}
-			<div class="p-6 max-w-3xl mx-auto space-y-4">
-				{#if workflowsLoading}
-					<p class="text-text-muted text-sm">{t('common.loading')}</p>
-				{:else if workflowsError}
-					<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">
-						{workflowsError}
-					</div>
-				{:else if isWorkflowsEmpty}
-					<div class={cardClass + ' text-center py-10'}>
-						<h2 class="text-base font-medium text-text">{t('activity.empty.heading')}</h2>
-						<p class="text-sm text-text-muted mt-2 max-w-md mx-auto">{t('activity.empty.workflows.description')}</p>
-						<a
-							href="/app"
-							class="inline-flex items-center gap-1.5 mt-5 rounded-[var(--radius-sm)] bg-accent text-accent-fg px-4 py-2 text-sm hover:opacity-90 transition-opacity"
-						>
-							{t('activity.empty.cta')}
-						</a>
-					</div>
-				{:else}
-					<p class="text-xs text-text-subtle">{t('activity.workflows.subtitle')}</p>
-					<div class="space-y-2">
-						{#each pipelineAggregates as agg (agg.name)}
-							{@const runId = pipelineRunIdForName(agg.name)}
-							<div class={cardClass + ' flex items-center gap-3'}>
-								<div class="flex-1 min-w-0">
-									<p class="text-sm font-medium text-text truncate">{agg.name}</p>
-									<div class="flex flex-wrap gap-3 mt-1 text-[11px] text-text-subtle">
-										<span>{agg.runCount} {t('usage.runs')}</span>
-										<span>{t('activity.workflows.avg_label')}: {formatDuration(agg.avgDurationMs)}</span>
-									</div>
-								</div>
-								<div class="text-right shrink-0">
-									<p class="text-sm text-text tabular-nums">{formatCost(agg.totalCostUsd)}</p>
-									{#if runId}
-										<a
-											href={pipelineDeepLink(runId)}
-											class="text-[11px] text-accent-text hover:opacity-80"
-										>{t('activity.workflows.per_step_link')}</a>
-									{/if}
-								</div>
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</div>
+			<!-- Full workflow run-list (per-run cost + status + "💬 Fixen"). Owns its
+				 own load/empty/error states + p-6 padding — no extra wrapper here. -->
+			<WorkflowsView />
 		{/if}
 	</div>
 </div>

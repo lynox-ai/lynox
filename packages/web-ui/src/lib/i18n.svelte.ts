@@ -97,7 +97,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.insights': { de: 'Insights (Beta)', en: 'Insights (beta)' },
 	'hub.intelligence.graph_overview': { de: 'Graph', en: 'Graph' },
 	'hub.automation.workflows': { de: 'Workflows', en: 'Workflows' },
-	'hub.automation.library': { de: 'Gespeicherte Workflows', en: 'Saved Workflows' },
 	'hub.automation.triggers': { de: 'Trigger', en: 'Triggers' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
@@ -223,16 +222,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'activity.kind.voice_tts': { de: 'Sprachausgabe (TTS)',  en: 'Voice output (TTS)' },
 	'activity.kind.voice_stt': { de: 'Spracheingabe (STT)',  en: 'Voice input (STT)' },
 	'activity.projection.warning': { de: 'Beim aktuellen Tempo ist das Budget in {days} Tagen aufgebraucht.', en: 'At the current pace your budget is exhausted in {days} days.' },
-	'activity.workflows.subtitle':       { de: 'Aggregierte Workflow-Kosten. Klicke „Pro Schritt", um die Schritt-Aufschlüsselung im Hub-Builder zu öffnen.', en: 'Aggregated workflow costs. Click "Per step" to open the step-level breakdown in the Hub builder.' },
-	'activity.workflows.avg_label':      { de: 'Ø Dauer',     en: 'Avg duration' },
-	'activity.workflows.per_step_link':  { de: 'Pro Schritt →', en: 'Per step →' },
-	// Empty-state (PRD-IA-V2 P2-PR-A spec) — same heading + CTA across all 3
-	// tabs, description varies. Heading copy from PRD section "Empty-state spec".
+	// Empty-state (PRD-IA-V2 P2-PR-A spec) — same heading + CTA across the
+	// overview + history tabs, description varies. (The workflows tab now renders
+	// <WorkflowsView />, which owns its own empty state.)
 	'activity.empty.heading':                { de: 'Noch keine Runs heute',         en: 'No runs yet today' },
 	'activity.empty.description':            { de: 'Starte einen Chat oder einen Workflow, um zu sehen, was lynox für dich tut.', en: 'Start a chat or a workflow to see what lynox is doing for you.' },
 	'activity.empty.cta':                    { de: '→ Chat',                        en: '→ Chat' },
 	'activity.empty.history.description':    { de: 'Hier erscheinen abgeschlossene Runs, sobald der Agent zum ersten Mal gelaufen ist.', en: 'Completed runs show up here once the agent has run at least once.' },
-	'activity.empty.workflows.description':  { de: 'Hier sammeln sich Workflow-Läufe mit Kosten und Dauer, sobald der erste Workflow ausgeführt wurde.', en: 'Workflow runs with cost and duration land here once you execute your first workflow.' },
 	// Tool Toggles (T5 of deferred-batch)
 	'tools.heading':       { de: 'Tool-Berechtigungen',                                                          en: 'Tool permissions' },
 	'tools.subtitle':      { de: 'Bestimmt, welche Tools dem Agenten zur Verfügung stehen. Deaktivierte Tools werden serverseitig aus der Registry ausgeblendet — ein prompt-injizierter Aufruf erreicht sie nicht.', en: 'Controls which tools the agent has access to. Disabled tools are hidden from the registry server-side — a prompt-injected call cannot reach them.' },
