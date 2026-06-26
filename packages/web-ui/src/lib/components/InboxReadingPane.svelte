@@ -19,6 +19,7 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 	import Icon from '../primitives/Icon.svelte';
+	import { sanitizeFramingField } from '../utils/chat-framing.js';
 
 	interface Props {
 		/** Fires on archive/snooze actions so the parent can refresh the list. */
@@ -38,7 +39,12 @@
 	// "💬 Bearbeiten" entry.)
 	function replyInChat(item: InboxItem): void {
 		newChat();
-		const framing = `${t('inbox.reply_in_chat_prompt')} „${item.subject}".`;
+		// Sanitize the externally-authored mail subject before it seeds the chat —
+		// a crafted subject (newline / U+2028 / U+0085 NEL + "[System: …]") would
+		// otherwise inject a pseudo-directive on its own line into the framing the
+		// agent reads. Mirrors the other chat-over-bespoke consumers, which all
+		// wrap their external fields in sanitizeFramingField.
+		const framing = `${t('inbox.reply_in_chat_prompt')} „${sanitizeFramingField(item.subject)}".`;
 		void sendMessage(framing, undefined, undefined, { context: { kind: 'mail', id: item.id } });
 		void goto('/app');
 	}
