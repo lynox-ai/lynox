@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { parseActiveRuns, countLiveRuns } from '../utils/active-runs.js';
+	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
 	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
@@ -364,7 +365,7 @@
 <!-- Desktop: full status bar. No safe-area-inset — desktop has no Home Indicator
 	zone, and adding the env() call still consumed a few px on browsers that
 	report a non-zero value for the gesture pad (some macOS Safari builds). -->
-<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 overflow-x-auto scrollbar-none">
+<div class="hidden md:flex items-center gap-px border-t border-border bg-bg-subtle text-[11px] font-mono text-text-subtle min-h-8 px-1 overflow-x-auto scrollbar-none" use:scrollFade>
 	<!-- Engine Status (clickable) -->
 	<button onclick={togglePanel} class="flex items-center px-2.5 py-1 hover:text-text transition-colors shrink-0" aria-label={engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} title={engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}>
 		<span class="inline-block h-2 w-2 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -471,7 +472,7 @@
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-3 border-b border-border">
 			<h3 class="text-sm font-semibold text-text">{t('status.panel_title')}</h3>
-			<button onclick={closePanel} class="h-6 w-6 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors">&times;</button>
+			<button onclick={closePanel} class="h-6 w-6 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors">&times;</button>
 		</div>
 
 		<div class="max-h-[60vh] overflow-y-auto scrollbar-thin p-4 space-y-4 text-sm">

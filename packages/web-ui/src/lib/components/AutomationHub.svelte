@@ -5,6 +5,7 @@
 	import TasksView from './TasksView.svelte';
 	import TriggersView from './TriggersView.svelte';
 	import WorkflowLibraryView from './WorkflowLibraryView.svelte';
+	import { scrollFade } from '../utils/scroll-fade.js';
 
 	// PRD-IA-V2 P2-PR-D — Activity tab stripped. AutomationHub is now Builder-only.
 	// `/app/hub?section=activity*` is redirected SSR-side by
@@ -72,11 +73,11 @@
 </script>
 
 <div class="flex flex-col h-full">
-	<div class="flex items-center gap-1 px-4 sm:px-5 py-3 border-b border-border shrink-0 overflow-x-auto scrollbar-none">
+	<div class="flex items-center gap-1 px-4 sm:px-5 py-3 border-b border-border shrink-0 overflow-x-auto scrollbar-none" use:scrollFade>
 		{#each tabs as t_item (t_item.id)}
 			<button
 				type="button"
-				class="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors {tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+				class="inline-flex items-center justify-center min-h-[44px] sm:min-h-0 shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors {tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 				onclick={() => setTab(t_item.id)}
 			>{t(t_item.labelKey)}</button>
 		{/each}
