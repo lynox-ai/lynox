@@ -404,9 +404,12 @@
 	- < md (mobile): single-pane stack. Zone selector lives as horizontal pills
 	  at the top of the list view; clicking an item swaps in the reading pane.
 	  The zone-rail is hidden — its width budget is too expensive on phones.
-	- ≥ md: zone-rail (left, ~180px) + list (mid, fixed ~360-400px) + reader (right, flex-1).
-	  Reader defaults to the Inbox-Kopilot card; selecting an item swaps in
-	  the reading pane.
+	- md … lg (tablet / small laptop): zone-rail + ONE content column that swaps
+	  list ↔ reader (like mobile, but with the rail). Side-by-side list+reader
+	  would crush the reader to ~170px in this band, so it is deferred to lg.
+	- ≥ lg: zone-rail (left, ~190px) + list (mid, fixed 400px) + reader (right,
+	  flex-1). Reader defaults to the Inbox-Kopilot card; selecting an item swaps
+	  in the reading pane.
 	- Triage mode: zone-rail stays, list+reader columns are replaced by the
 	  full-width triage pane (one-mail-at-a-time). Toggle via the rail button
 	  or `t` shortcut. Esc exits.
@@ -434,7 +437,7 @@
 	{:else}
 		<!-- List column -->
 		<div
-			class="{readingOpen ? 'hidden md:flex' : 'flex'} flex-col w-full md:w-[360px] lg:w-[400px] shrink-0 md:border-r md:border-border min-w-0 overflow-y-auto"
+			class="{readingOpen ? 'hidden lg:flex' : 'flex'} flex-col flex-1 lg:flex-none lg:w-[400px] lg:shrink-0 lg:border-r lg:border-border min-w-0 overflow-y-auto"
 			aria-live="polite"
 		>
 			<div class="p-4 sm:p-5 pb-[max(1rem,env(safe-area-inset-bottom))]">
@@ -672,12 +675,13 @@
 			</div>
 		</div>
 
-		<!-- Reader column (md+): defaults to Kopilot card, swaps to ReadingPane when an item is selected.
+		<!-- Reader column (lg+ inline; below lg it swaps in over the list): defaults to
+			Kopilot card, swaps to ReadingPane when an item is selected.
 			Mail-Context-Sidebar mounts ONCE — its wrapper switches between an
 			lg+ inline split column and an md/sm drawer overlay via CSS-only
 			positioning so the component fetches context exactly once per item. -->
 		<div
-			class="{readingOpen ? 'flex' : 'hidden md:flex'} flex-1 min-w-0 overflow-hidden"
+			class="{readingOpen ? 'flex' : 'hidden lg:flex'} flex-1 min-w-0 overflow-hidden"
 		>
 			<!-- lg:min-w floor: the reader is the only flex-shrinkable column in
 				this row (zone-rail, list, and the context sidebar are all
