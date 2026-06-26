@@ -472,7 +472,7 @@
 		<!-- Header -->
 		<div class="flex items-center justify-between px-4 py-3 border-b border-border">
 			<h3 class="text-sm font-semibold text-text">{t('status.panel_title')}</h3>
-			<button onclick={closePanel} class="h-6 w-6 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors">&times;</button>
+			<button onclick={closePanel} class="h-6 w-6 min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors">&times;</button>
 		</div>
 
 		<div class="max-h-[60vh] overflow-y-auto scrollbar-thin p-4 space-y-4 text-sm">

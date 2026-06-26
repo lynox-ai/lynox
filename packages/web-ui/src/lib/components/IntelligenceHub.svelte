@@ -63,7 +63,7 @@
 		{#each tabs as t_item (t_item.id)}
 			<button
 				type="button"
-				class="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors {tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+				class="inline-flex items-center justify-center min-h-[44px] sm:min-h-0 shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors {tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 				onclick={() => setTab(t_item.id)}
 			>{t(t_item.labelKey)}</button>
 		{/each}
@@ -73,7 +73,7 @@
 			{#each graphSubTabs as s_item (s_item.id)}
 				<button
 					type="button"
-					class="shrink-0 whitespace-nowrap px-2.5 py-1 rounded-[var(--radius-sm)] text-[11px] font-medium transition-colors {graphSub === s_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
+					class="inline-flex items-center justify-center min-h-[44px] sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-[var(--radius-sm)] text-[11px] font-medium transition-colors {graphSub === s_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 					onclick={() => setGraphSub(s_item.id)}
 				>{t(s_item.labelKey)}</button>
 			{/each}
