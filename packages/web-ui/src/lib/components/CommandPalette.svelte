@@ -89,15 +89,10 @@
 		{ id: 'nav-workspace-security', label: t('settings.workspace.security'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/security'), keywords: 'security sicherheit vault schlüssel key engine token access workspace system', selfHostOnly: true },
 		{ id: 'nav-workspace-limits', label: t('settings.workspace.limits'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/limits'), keywords: 'limits caps spend ausgaben session day tag month monat http rate workspace system', selfHostOnly: true },
 		{ id: 'nav-workspace-updates', label: t('settings.workspace.updates'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/updates'), keywords: 'updates versions versionen upgrade engine startup workspace system', selfHostOnly: true },
-		// `/workspace/tools` and `/privacy/tools` mount the same ToolToggles
-		// view (PRD-IA-V2 P3-PR-E both-routes-mount). Tier-gating ensures only
-		// one shows up in the palette per instance — matches SettingsIndex.
-		{ id: 'nav-workspace-tools', label: t('tools.heading'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/tools'), keywords: 'tools tool-berechtigungen permissions registry whitelist enable disable workspace system', selfHostOnly: true },
-
-		// PRD-IA-V2 P3-PR-E — Privacy section. ToolToggles Managed-home (mirror
-		// of `/workspace/tools` on Self-Host). `managedOnly` hides it on
-		// Self-Host so the palette stays single-tier-clean.
-		{ id: 'nav-privacy-tools', label: t('tools.heading'), group: t('cmd.nav'), action: () => goto('/app/settings/privacy/tools'), keywords: 'tools tool-berechtigungen permissions registry whitelist enable disable privacy datenschutz', managedOnly: true },
+		// IA reorg (M6): ToolToggles unified from two tier-split mounts
+		// (workspace/privacy) into one all-tier route — a single palette entry
+		// for every instance.
+		{ id: 'nav-tools', label: t('tools.heading'), group: t('cmd.nav'), action: () => goto('/app/settings/policy-tools'), keywords: 'tools tool-berechtigungen permissions registry whitelist enable disable policy richtlinien' },
 		// PRD-IA-V2 P3-PR-D — Voice settings moved under Privacy. Reuses
 		// `voice.title` (i18n.svelte.ts:149) — SSoT for the page heading.
 		{ id: 'nav-privacy-voice', label: t('voice.title'), group: t('cmd.nav'), action: () => goto('/app/settings/privacy/voice'), keywords: 'voice sprache stt tts speech text whisper mistral mikrofon mic' },

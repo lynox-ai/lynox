@@ -4,9 +4,9 @@
 	`excludeTools` at session creation (session.ts), so a prompt-injected
 	tool_call never reaches the registry.
 
-	Mounted under /app/settings/workspace/tools (Self-Host) per PRD-IA-V2
-	P3-PR-B and /app/settings/privacy/tools (Managed) per P3-PR-E. Power
-	users disable web_research / http_request etc. for minimal-surface agents.
+	Mounted at /app/settings/policy-tools (all tiers; IA reorg M6 unified the
+	former tier-split workspace/privacy mounts into one route). Power users
+	disable web_research / http_request etc. for minimal-surface agents.
 
 	P3-FOLLOWUP-HOTFIX (2026-05-17): switched to right-aligned iOS-style
 	switches grouped by tool category for scan-ability.
