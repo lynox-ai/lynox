@@ -4,6 +4,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { onMount, onDestroy } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
+	import { keepSettingsItem } from '../utils/billing-tier.js';
 	import Icon from '../primitives/Icon.svelte';
 
 	interface PaletteItem {
@@ -104,17 +105,11 @@
 		{ id: 'nav-account-mobile', label: t('settings.account.mobile'), group: t('cmd.nav'), action: () => goto('/app/settings/account/mobile'), keywords: 'mobile pwa qr code install app phone telefon' },
 	];
 
-	// Mirror SettingsIndex.svelte:126-135 `keepItem()` — hide self-host-only
-	// items on Managed (or while tier unknown), and managed-only items on
-	// Self-Host (or while unknown). Default-null pattern ensures no flash.
-	const hideSelfHostOnly = $derived(managed !== false);
-	const hideManagedOnly = $derived(managed !== true);
-
-	const visibleItems = $derived(items.filter((i) => {
-		if (i.selfHostOnly && hideSelfHostOnly) return false;
-		if (i.managedOnly && hideManagedOnly) return false;
-		return true;
-	}));
+	// Tier visibility is the shared `keepSettingsItem` predicate — the same SSoT
+	// SettingsIndex uses. Default-null pattern (hide both kinds until probed)
+	// lives inside the helper, so the palette stays flash-free without
+	// reimplementing the rule.
+	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed)));
 
 	const filtered = $derived(
 		query.trim()

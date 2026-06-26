@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { keepSettingsItem } from '../utils/billing-tier.js';
 
 	interface SettingsItem {
 		href: string;
@@ -134,19 +135,13 @@
 		},
 	];
 
-	// Hide self-host-only items when managed is true OR still unknown.
-	// Hide managed-only items when managed is false OR still unknown — symmetric
-	// mirror of self-host-only (PRD-IA-V2 P3-PR-E). Both default to hidden until
-	// the /api/config probe confirms the tier, so the user never sees a
-	// tier-inappropriate flash during the ~300 ms before the response arrives.
-	// Hide mobile-only items on PWA / narrow viewports (and while unknown).
-	const hideSelfHostOnly = $derived(managed !== false);
-	const hideManagedOnly = $derived(managed !== true);
+	// Tier visibility is the shared `keepSettingsItem` predicate (same SSoT the
+	// Command Palette uses). The mobile dimension is non-tier and stays local:
+	// hide mobile-only items on PWA / narrow viewports (and while unknown).
 	const hideMobileOnly = $derived(isMobileOrPwa !== false);
 
 	function keepItem(i: SettingsItem): boolean {
-		if (i.selfHostOnly && hideSelfHostOnly) return false;
-		if (i.managedOnly && hideManagedOnly) return false;
+		if (!keepSettingsItem(i, managed)) return false;
 		if (i.hideOnMobile && hideMobileOnly) return false;
 		return true;
 	}
