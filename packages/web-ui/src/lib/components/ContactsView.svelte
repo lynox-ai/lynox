@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { newChat, sendMessage } from '../stores/chat.svelte.js';
+	import { sanitizeFramingField } from '../utils/chat-framing.js';
 
 	interface Contact { name: string; email?: string; phone?: string; company?: string; type?: string; source?: string; tags?: string[]; notes?: string; _created_at?: string; }
 	interface Interaction { type: string; channel: string; summary: string; date?: string; }
@@ -51,6 +54,27 @@
 		} catch { /* keep empty defaults */ }
 	}
 
+	// Contacts are created + edited by talking to the agent (contacts_save /
+	// contacts_search), not a bespoke form — the chat IS the editor. These
+	// affordances open a fresh chat seeded with the intent; for an edit, the
+	// contact's name/email (which can be externally authored — seeded from an
+	// inbound sender) is sanitised client-side before it goes into the message,
+	// since the message is composed here. The agent loads the contact via
+	// contacts_search and updates it via contacts_save (email-keyed upsert).
+	function createInChat(): void {
+		newChat();
+		void sendMessage(t('crm.create_in_chat_prompt'));
+		void goto('/app');
+	}
+
+	function editInChat(c: Contact): void {
+		newChat();
+		const name = sanitizeFramingField(c.name);
+		const ident = c.email ? `${name} <${sanitizeFramingField(c.email)}>` : name;
+		void sendMessage(`${t('crm.edit_in_chat_prompt')} ${ident}.`);
+		void goto('/app');
+	}
+
 	let hasDeals = $state(false);
 
 	async function checkDeals() {
@@ -92,6 +116,7 @@
 				<button onclick={() => { tab = 'deals'; loadDeals(); }} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'deals' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.deals')}</button>
 			</div>
 		{/if}
+		<button onclick={createInChat} class="ml-auto rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">+ {t('crm.create_in_chat')}</button>
 	</div>
 
 	{#if error}
@@ -127,7 +152,13 @@
 							<h2 class="font-medium">{selected.name}</h2>
 							<button onclick={() => selected = null} class="md:hidden p-1 rounded text-text-subtle hover:text-text">&times;</button>
 						</div>
-						{#if selected.email}<p class="text-xs text-text-muted">{selected.email}</p>{/if}
+						{#if selected.email}
+							<p class="text-xs text-text-muted">{selected.email}</p>
+							<!-- Edit-in-chat only when the contact has an email: contacts_save is
+							     email-keyed (crm uniqueKey ['email']), so editing an email-less
+							     contact would insert a duplicate instead of updating it. -->
+							<button onclick={() => { if (selected) editInChat(selected); }} class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-border-hover hover:text-text">💬 {t('crm.edit_in_chat')}</button>
+						{/if}
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
 						{#if parseTags(selected.tags).length > 0}
 							<div class="flex flex-wrap gap-1">{#each parseTags(selected.tags) as tag}<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-2 py-0.5 text-xs">{tag}</span>{/each}</div>
