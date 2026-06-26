@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
+import { readBodyCapped } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -24,6 +25,11 @@ const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
 // watch (e.g. a page that changes every tick) without affecting normal use.
 const WATCH_ANALYSIS_MAX_USD = 0.5;
 const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost control)
+// Hard ceiling on a watch target's response body. The 30s fetch timeout bounds
+// TIME, not BYTES — a hostile/misconfigured watch URL streaming multi-GB within
+// the window would buffer the whole body into memory and OOM the worker. 10 MB
+// is far above any real HTML page; the signal extractor caps further at 256 KB.
+const WATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 /**
  * Reduce a fetched HTML page to a stable visible-content signal for change
@@ -599,7 +605,7 @@ export class WorkerLoop {
       if (!res.ok) {
         throw new Error(`HTTP ${String(res.status)} ${res.statusText}`);
       }
-      fetchResult = await res.text();
+      fetchResult = await readBodyCapped(res, WATCH_MAX_BODY_BYTES);
     } catch (err: unknown) {
       throw new Error(`Watch fetch failed for ${config.url}: ${err instanceof Error ? err.message : String(err)}`);
     }

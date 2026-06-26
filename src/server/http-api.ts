@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import { stripUntrustedSeparators, sanitizeAttachmentFilename } from '../core/sanitize.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
@@ -1865,7 +1866,14 @@ export class LynoxHTTPApi {
           if (preamble) contextPreamble = `${preamble}\n\n`;
         }
       }
-      const composedTask = `${contextPreamble}${taskText}`;
+      // Defense-in-depth: the client sanitises chat-over-bespoke framings, but
+      // re-strip the EXOTIC line-separators server-side from any task text —
+      // U+2028/U+2029/NEL/C1 + C0-controls are never legitimately typed, so
+      // collapsing them to a space neutralises a pseudo-directive-on-its-own-line
+      // injection that bypasses the client gate, WITHOUT touching legitimate
+      // \n/\t/\r in a normal multi-line message.
+      const safeTaskText = stripUntrustedSeparators(taskText);
+      const composedTask = `${contextPreamble}${safeTaskText}`;
 
       // Pre-flight: provider key must be configured before we hand off to the
       // LLM SDK. Without this the Anthropic SDK throws deep inside
@@ -5991,7 +5999,7 @@ export class LynoxHTTPApi {
         const name = basename(resolved);
         res.writeHead(200, {
           'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${name.replace(/"/g, '\\"')}"`,
+          'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(name)}"`,
           'Content-Length': st.size,
         });
         createReadStream(resolved).pipe(res);
