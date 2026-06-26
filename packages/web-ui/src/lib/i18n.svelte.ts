@@ -99,11 +99,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.automation.workflows': { de: 'Workflows', en: 'Workflows' },
 	'hub.automation.triggers': { de: 'Trigger', en: 'Triggers' },
 	'hub.automation.tasks': { de: 'Aufgaben', en: 'Tasks' },
-	'hub.automation.reminders': { de: 'Erinnerungen', en: 'Reminders' },
-	// PRD-IA-V2 P2-PR-E (X6): orphan after V2 — AutomationHub loses the
-	// Activity tab in P2-PR-D. Key left in place to avoid merge-conflict
-	// with that parallel PR; final retire happens once P2-PR-D lands.
-	'hub.automation.activity': { de: 'Aktivität', en: 'Activity' },
+	// IA reorg final sweep (P6): `hub.automation.reminders` (reminders folded
+	// into the Triggers tab in P1) and `hub.automation.activity` (Activity tab
+	// stripped from the Hub in P2) retired — both had zero consumers left.
 	// PRD-IA-V2 P2-PR-E (X6): toast text rewritten — V2 moves Activity to
 	// its own root at /app/activity (not /app/hub). Shown when users land
 	// on the legacy /app/automation URL (which still 301s to /app/hub).
