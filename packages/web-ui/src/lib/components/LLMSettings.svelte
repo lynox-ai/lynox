@@ -743,8 +743,8 @@
 		descKey: string;
 	}
 	const llmSubRoutes: ReadonlyArray<SubRoute> = [
-		// v1.5.2: API keys for 3rd-party tools (DataForSEO, etc.) moved to
-		// /app/hub?section=keys so they live next to API Profile endpoints.
+		// IA reorg (D2): API keys for 3rd-party tools (DataForSEO, etc.) live at
+		// /app/settings/llm/keys (low-frequency config — Settings is the home).
 		// (Tavily was retired 2026-05-24; SearXNG uses a URL, not a key.)
 		// Settings v3 PR 4.6 (2026-05-19): /llm/advanced removed from this nav
 		// — Advanced settings now render inline below as an expandable section.

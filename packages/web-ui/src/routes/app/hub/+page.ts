@@ -21,8 +21,13 @@ import type { PageLoad } from './$types';
 
 // Hard-coded section → new-root mapping. Only keys present here trigger a
 // redirect; everything else falls through to the SPA render.
+// IA reorg (D2): `apis` + `keys` moved out of the Hub into Settings (API
+// Profiles + 3rd-party keys are low-frequency config). Their legacy
+// `?section=` URLs 301 to the Settings routes.
 const SECTION_REDIRECT_MAP: Readonly<Record<string, string>> = {
   activity: '/app/activity',
+  apis: '/app/settings/apis',
+  keys: '/app/settings/llm/keys',
 };
 
 // Legacy ActivityHub sub-tabs (when it lived under the Hub) → new Activity-root
@@ -39,7 +44,7 @@ const TAB_REWRITE_MAP: Readonly<Record<string, 'overview' | 'history' | 'workflo
 
 // Defence-in-depth allowlist: a future SECTION_REDIRECT_MAP edit must not
 // emit a non-`/app/` target. Final pathname must literally appear here.
-const ALLOWED_PATHS = new Set<string>(['/app/activity']);
+const ALLOWED_PATHS = new Set<string>(['/app/activity', '/app/settings/apis', '/app/settings/llm/keys']);
 
 export const load: PageLoad = ({ url }) => {
   const section = url.searchParams.get('section');
@@ -53,7 +58,10 @@ export const load: PageLoad = ({ url }) => {
   // we abort the redirect and let the hub render normally.
   if (!ALLOWED_PATHS.has(target) || !target.startsWith('/app/')) return;
 
-  const rawTab = url.searchParams.get('tab');
+  // Only the `activity` target has sub-tabs; for the other sections (apis/keys
+  // → Settings) the `tab` param is meaningless, so we never propagate it (a
+  // crafted `?section=apis&tab=…` redirects to the bare Settings path).
+  const rawTab = section === 'activity' ? url.searchParams.get('tab') : null;
   const rewrittenTab = rawTab && TAB_REWRITE_MAP[rawTab] ? TAB_REWRITE_MAP[rawTab] : null;
 
   // `overview` is the default tab on ActivityOverview — emit a bare URL when

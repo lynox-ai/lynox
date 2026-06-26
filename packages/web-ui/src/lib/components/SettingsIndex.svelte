@@ -83,6 +83,11 @@
 				// PRD-IA-V2 P3-PR-A2 — `/settings/integrations` retired in favour of
 				// the new `/settings/channels` hub + per-channel sub-routes.
 				{ href: '/app/settings/channels', titleKey: 'settings.channels', descKey: 'settings.channels_desc' },
+				// IA reorg (D2): API Profiles + 3rd-party keys are low-frequency
+				// config — moved here from the Automation Hub. Two distinct
+				// primitives (a callable endpoint profile vs a secret), so two tiles.
+				{ href: '/app/settings/apis', titleKey: 'settings.apis', descKey: 'settings.apis_desc' },
+				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
 			],
 		},
 		{

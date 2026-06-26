@@ -2,8 +2,6 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { t } from '../i18n.svelte.js';
-	import ApiStoreView from './ApiStoreView.svelte';
-	import SecretsView from './SecretsView.svelte';
 	import TasksView from './TasksView.svelte';
 	import TriggersView from './TriggersView.svelte';
 	import WorkflowLibraryView from './WorkflowLibraryView.svelte';
@@ -12,15 +10,15 @@
 	// `/app/hub?section=activity*` is redirected SSR-side by
 	// `routes/app/hub/+page.ts` to `/app/activity?tab=*`.
 	// `hub.automation.activity` i18n key intentionally kept here; retire = P2-PR-E.
-	// v1.5.2 (rafael QA 2026-05-18): "API Keys" 3rd-party-credentials view
-	// moved here from /settings/llm/keys. Sits next to APIs (endpoints) so
-	// related Automation surfaces — endpoint definitions + their auth — share
-	// one place instead of straddling LLM Settings and Automation.
+	// IA reorg (D2): `apis` (API Profiles) + `keys` (3rd-party credentials) are
+	// low-frequency config — moved OUT of Automation into Settings
+	// (`/app/settings/apis`, `/app/settings/llm/keys`). Their legacy
+	// `?section=apis|keys` URLs 301 to Settings via `routes/app/hub/+page.ts`.
 	// IA reorg: the `workflows` tab is now the workflow *definitions* surface
 	// (Library). The separate `library` tab is retired — its `?section=library`
 	// URL rewrites to `workflows` (back-compat $effect below). The run-list moved
 	// to Activity & Cost (`/app/activity?tab=workflows`).
-	type Tab = 'workflows' | 'triggers' | 'tasks' | 'apis' | 'keys';
+	type Tab = 'workflows' | 'triggers' | 'tasks';
 
 	// `?section=` (not `?tab=`) is intentional — historic collision-avoidance
 	// with the embedded ActivityHub which used `?tab=`. Now that Activity is
@@ -32,7 +30,7 @@
 	// below (1-release grace; cleanup later).
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('section');
-		if (p === 'triggers' || p === 'tasks' || p === 'apis' || p === 'keys') return p;
+		if (p === 'triggers' || p === 'tasks') return p;
 		if (p === 'reminders') return 'triggers'; // back-compat: reminders are agent-triggers
 		if (p === 'library') return 'workflows';  // back-compat: Library folded into the Workflows tab
 		return 'workflows';
@@ -71,8 +69,6 @@
 		{ id: 'workflows', labelKey: 'hub.automation.workflows' },
 		{ id: 'triggers', labelKey: 'hub.automation.triggers' },
 		{ id: 'tasks', labelKey: 'hub.automation.tasks' },
-		{ id: 'apis', labelKey: 'hub.automation.apis' },
-		{ id: 'keys', labelKey: 'hub.automation.keys' },
 	];
 </script>
 
@@ -91,12 +87,8 @@
 			<WorkflowLibraryView />
 		{:else if tab === 'triggers'}
 			<TriggersView />
-		{:else if tab === 'tasks'}
-			<TasksView />
-		{:else if tab === 'apis'}
-			<ApiStoreView />
 		{:else}
-			<SecretsView />
+			<TasksView />
 		{/if}
 	</div>
 </div>
