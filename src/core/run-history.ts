@@ -992,6 +992,50 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
    CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
    CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);`,
+
+  // v43: Widen pending_prompts.prompt_type CHECK to admit 'connect_mail' and
+  // add a payload_json column. The new `connect_mail` prompt lets the agent
+  // stage a mailbox (preset/autodiscover) and hand off to an in-chat consent
+  // step where the user enters the app-password — the password goes straight
+  // to POST /api/mail/accounts, never through the agent/model context. The
+  // staged account fields ride in payload_json. SQLite cannot ALTER a CHECK
+  // constraint in place — the table must be recreated.
+  //
+  // Unlike the tasks rebuilds (v31/v42), this DROPs and recreates instead of
+  // INSERT..SELECT-preserving rows: pending_prompts is EPHEMERAL — a pending
+  // prompt is bound to a live SSE connection that a restart already severed,
+  // and the engine calls expireAll() on every cold boot (see v27), so no row
+  // here outlives the restart that runs this migration. Dropping is therefore
+  // lossless in practice AND robust to a partial-schema DB (DROP IF EXISTS
+  // tolerates a table that a minimal seed never created).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
+
+   DROP TABLE IF EXISTS pending_prompts;
+
+   CREATE TABLE pending_prompts (
+     id TEXT PRIMARY KEY,
+     session_id TEXT NOT NULL,
+     prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+     question TEXT NOT NULL,
+     options_json TEXT,
+     secret_name TEXT,
+     secret_key_type TEXT,
+     answer TEXT,
+     answer_saved INTEGER,
+     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     answered_at TEXT,
+     expires_at TEXT NOT NULL,
+     questions_json TEXT,
+     partial_answers_json TEXT,
+     answer_error TEXT,
+     multi_select INTEGER,
+     payload_json TEXT
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_pending_prompts_session ON pending_prompts(session_id, status);
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_prompts_session_unique
+     ON pending_prompts(session_id) WHERE status = 'pending';`,
 ];
 
 export class RunHistory {

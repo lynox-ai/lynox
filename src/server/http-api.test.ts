@@ -1092,7 +1092,7 @@ describe('LynoxHTTPApi', () => {
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
-        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
         question TEXT NOT NULL,
         options_json TEXT,
         questions_json TEXT,
@@ -1103,6 +1103,7 @@ describe('LynoxHTTPApi', () => {
         answer_saved INTEGER,
         answer_error TEXT,
         multi_select INTEGER,
+        payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1428,10 +1429,10 @@ describe('LynoxHTTPApi', () => {
       const db = new Database(':memory:');
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
-        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
         question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
-        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -1526,6 +1527,82 @@ describe('LynoxHTTPApi', () => {
         // 200 if the route ever becomes idempotent) is incidental.
         expect(ps.getById(promptId)?.status).toBe('pending');
         expect(ps.getById(promptId)?.answer_error).toBeNull();
+      });
+    });
+  });
+
+  describe('POST /api/sessions/:id/mail-connected', () => {
+    async function withStore(test: (sid: string, ps: import('../core/prompt-store.js').PromptStore) => Promise<void>): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      try { await test('mc-1', realPromptStore); }
+      finally { engineRef.getPromptStore = original; db.close(); }
+    }
+
+    const payload = JSON.stringify({ id: 'a', address: 'a@gmail.com', preset: 'gmail' });
+
+    it('status="connected" settles the prompt (answer_saved=1, no password ever stored)', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertConnectMail(sid, 'Connect mailbox a@gmail.com', payload);
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'connected', promptId }),
+        });
+        expect(res.status).toBe(200);
+        const row = ps.getById(promptId);
+        expect(row?.answer_saved).toBe(1);
+        expect(row?.status).toBe('answered');
+        // The resolve route never carries a credential — the row holds config only.
+        expect(row?.payload_json).toBe(payload);
+      });
+    });
+
+    it('a missing/unknown status reads as canceled (answer_saved=0), not connected', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertConnectMail(sid, 'q', payload);
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ promptId }),
+        });
+        expect(res.status).toBe(200);
+        expect(ps.getById(promptId)?.answer_saved).toBe(0);
+      });
+    });
+
+    it('S4: rejects a cross-session promptId (409) and leaves the row pending', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertConnectMail(sid, 'q', payload);
+        const res = await jsonFetch(`/api/sessions/other-1/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'connected', promptId }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(promptId)?.status).toBe('pending');
+      });
+    });
+
+    it('is idempotent once answered', async () => {
+      await withStore(async (sid, ps) => {
+        const promptId = ps.insertConnectMail(sid, 'q', payload);
+        await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'connected', promptId }),
+        });
+        const again = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'connected', promptId }),
+        });
+        expect(again.status).toBe(200);
       });
     });
   });

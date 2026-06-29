@@ -45,6 +45,52 @@ export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Prom
 export type SecretOutcome = 'saved' | 'canceled' | 'managed_blocked' | 'vault_error';
 export type PromptSecretFn = (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => Promise<SecretOutcome>;
 
+/** One IMAP or SMTP endpoint, as shown in the connect-mail consent UI. */
+export interface MailConnectServer {
+  host: string;
+  port: number;
+  /** Implicit TLS (true) vs STARTTLS/plain upgrade (false). */
+  secure: boolean;
+}
+
+/**
+ * Staged mail-account data carried by a `connect_mail` prompt. This is the
+ * UI/wire projection the in-chat consent step renders + forwards to
+ * `POST /api/mail/accounts` — deliberately a flat DTO of primitives (NOT the
+ * internal `MailAccountConfig`) so the IAgent layer stays free of mail-
+ * integration imports. The PASSWORD is never part of this payload: the user
+ * enters it in the consent field and it goes straight to the mail-account
+ * route, never through the agent/model.
+ */
+export interface MailConnectPromptData {
+  /** Account id the new mailbox is stored under (collision-checked at addAccount). */
+  id: string;
+  /** Human-friendly account label. */
+  displayName: string;
+  /** The email address being connected (also the IMAP/SMTP username). */
+  address: string;
+  /** Preset slug ('gmail' | 'icloud' | 'fastmail' | 'yahoo' | 'outlook' | 'custom'). */
+  preset: string;
+  /** Semantic account role (a `MailAccountType`, default 'personal'). */
+  type: string;
+  imap: MailConnectServer;
+  smtp: MailConnectServer;
+  /** Preset-specific URL where the user generates an app-password. Undefined for 'custom'. */
+  appPasswordUrl?: string | undefined;
+  /** True when the provider gates app-passwords behind 2FA enrolment — a UI hint. */
+  requires2FA?: boolean | undefined;
+}
+
+/** Two outcomes for a connect_mail prompt:
+ *  - 'connected' : user submitted, the mail-account route accepted the account
+ *  - 'canceled'  : user dismissed the consent step (or it expired/aborted)
+ *
+ * No managed-block outcome exists here (unlike SecretOutcome): the mail-account
+ * route is NOT walled by the infra-secret deny-list, so the managed wall that
+ * blocks agent-driven `ask_secret` for MAIL_ACCOUNT_* names does not apply. */
+export type MailConnectOutcome = 'connected' | 'canceled';
+export type PromptMailConnectFn = (data: MailConnectPromptData, meta?: PromptMeta) => Promise<MailConnectOutcome>;
+
 /**
  * Mutable per-Session state previously held as module-level globals in
  * the tools layer. Session owns the object and threads the same
@@ -130,6 +176,11 @@ export interface IAgent {
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
+  /** Raise an in-chat `connect_mail` consent prompt so the user enters the
+   * mailbox app-password in a secure field that never enters the agent/model
+   * context. Undefined when no interactive surface is available (autonomous
+   * mode, headless). See {@link PromptMailConnectFn}. */
+  promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   readonly spawnDepth?: number | undefined;

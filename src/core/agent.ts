@@ -21,6 +21,7 @@ import type {
   PromptUserFn,
   PromptTabsFn,
   PromptSecretFn,
+  PromptMailConnectFn,
 } from '../types/index.js';
 import { getBetasForProvider, CHARS_PER_TOKEN, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
@@ -75,6 +76,7 @@ export class Agent implements IAgent {
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
+  promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   readonly spawnDepth: number;
@@ -354,6 +356,7 @@ export class Agent implements IAgent {
     this.promptUser = config.promptUser;
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
+    this.promptMailConnect = config.promptMailConnect;
     this.systemPrompt = config.systemPrompt;
     // Provider capability detection:
     //   anthropic:       all features

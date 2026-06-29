@@ -21,6 +21,8 @@ import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
 import { createMailReplyTool } from './mail-reply.js';
 import { createMailTriageTool } from './mail-triage.js';
+import { createMailConnectTool } from './mail-connect.js';
+import type { MailConnectPromptData } from '../../../types/index.js';
 import { configureMailRateLimits, resetMailRateLimits } from './rate-limit.js';
 import type { MailContext, MailAccountView } from '../context.js';
 import type { MailAccountConfig } from '../provider.js';
@@ -1057,5 +1059,155 @@ describe('mail_send + mail_reply — audit redactor strips body', () => {
     expect(redacted.body_chars).toBe(15);
     expect(redacted.uid).toBe(42);
     expect(redacted.reply_all).toBe(true);
+  });
+});
+
+// ── mail_connect ─────────────────────────────────────────────────────────────
+
+describe('mail_connect', () => {
+  /** Agent stub capturing the staged data passed to the consent handoff. */
+  function connectAgent(outcome: 'connected' | 'canceled') {
+    const calls: MailConnectPromptData[] = [];
+    const agent = {
+      promptMailConnect: async (data: MailConnectPromptData) => { calls.push(data); return outcome; },
+    } as unknown as IAgent;
+    return { agent, calls };
+  }
+
+  it('resolves a known provider to its preset (Gmail) and stages it for consent', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    const out = await tool.handler({ email: 'anna@gmail.com' }, agent);
+    expect(calls).toHaveLength(1);
+    const data = calls[0]!;
+    expect(data.preset).toBe('gmail');
+    expect(data.address).toBe('anna@gmail.com');
+    expect(data.imap.host).toBe('imap.gmail.com');
+    expect(data.appPasswordUrl).toContain('myaccount.google.com');
+    expect(out).toContain('connected successfully');
+  });
+
+  it('maps provider aliases (me.com → iCloud, googlemail.com → Gmail)', async () => {
+    const tool = createMailConnectTool();
+    const icloud = connectAgent('connected');
+    await tool.handler({ email: 'x@me.com' }, icloud.agent);
+    expect(icloud.calls[0]!.preset).toBe('icloud');
+    const gmail = connectAgent('connected');
+    await tool.handler({ email: 'x@googlemail.com' }, gmail.agent);
+    expect(gmail.calls[0]!.preset).toBe('gmail');
+  });
+
+  it('SEC: the staged data carries config only — never a password/credentials', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    await tool.handler({ email: 'anna@gmail.com' }, agent);
+    const data = calls[0]!;
+    // The handoff payload exposes no credential-bearing field (appPasswordUrl
+    // is a public URL, not a secret — so assert on keys, not substrings).
+    expect(data).not.toHaveProperty('credentials');
+    expect(Object.keys(data)).not.toContain('pass');
+    expect(Object.keys(data)).not.toContain('password');
+    // The tool's own input schema exposes no password field either — the user
+    // never types the password into a tool call, only into the consent form.
+    const props = Object.keys(tool.definition.input_schema.properties ?? {});
+    expect(props).not.toContain('password');
+    expect(props).not.toContain('pass');
+  });
+
+  it('returns the cancel guidance (no plaintext fallback) when the user dismisses', async () => {
+    const tool = createMailConnectTool();
+    const { agent } = connectAgent('canceled');
+    const out = await tool.handler({ email: 'anna@gmail.com' }, agent);
+    expect(out).toContain('dismissed');
+    expect(out).toMatch(/DO NOT ask/i);
+  });
+
+  it('refuses (no prompt) when no interactive surface is available', async () => {
+    const tool = createMailConnectTool();
+    const out = await tool.handler({ email: 'anna@gmail.com' }, {} as IAgent);
+    expect(out).toMatch(/not available/i);
+    expect(out).toMatch(/Settings/);
+  });
+
+  it('rejects an invalid email before any handoff', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    const out = await tool.handler({ email: 'not-an-email' }, agent);
+    expect(out).toContain('not a valid email');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('accepts explicit host/port as a custom account (public IPs pass the SSRF guard)', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    // Literal public IPs keep assertPublicHost network-free + deterministic.
+    await tool.handler({ email: 'ops@corp.example', imap_host: '1.1.1.1', smtp_host: '8.8.8.8' }, agent);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.preset).toBe('custom');
+    expect(calls[0]!.imap.host).toBe('1.1.1.1');
+    expect(calls[0]!.smtp.host).toBe('8.8.8.8');
+  });
+
+  it('SEC (anti-phishing): a known provider domain forces its trusted preset, ignoring agent-supplied hosts', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    // A prompt-injected agent tries to point a @gmail.com login at an attacker
+    // host (public → passes the private-IP guard). The tool must bind gmail to
+    // its real servers so the user's password can't be phished to attacker.tld.
+    await tool.handler({ email: 'victim@gmail.com', imap_host: 'attacker.tld', smtp_host: 'attacker.tld' }, agent);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.preset).toBe('gmail');
+    expect(calls[0]!.imap.host).toBe('imap.gmail.com');
+    expect(calls[0]!.smtp.host).toBe('smtp.gmail.com');
+    expect(JSON.stringify(calls[0])).not.toContain('attacker.tld');
+  });
+
+  it('H2: blocks a private/loopback custom host and never opens the consent step', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    const out = await tool.handler({ email: 'ops@corp.example', imap_host: '10.0.0.5', smtp_host: '10.0.0.6' }, agent);
+    expect(out.toLowerCase()).toContain('blocked');
+    expect(out).toMatch(/public address/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('autodiscovers an unknown domain via ISPDB, then stages a custom account', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    const xml = `<?xml version="1.0"?><clientConfig><emailProvider>
+      <incomingServer type="imap"><hostname>1.1.1.1</hostname><port>993</port><socketType>SSL</socketType><username>%EMAILADDRESS%</username></incomingServer>
+      <outgoingServer type="smtp"><hostname>8.8.8.8</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+    </emailProvider></clientConfig>`;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(xml, { status: 200 }));
+    try {
+      await tool.handler({ email: 'someone@unknown-host.example' }, agent);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.preset).toBe('custom');
+    expect(calls[0]!.imap.host).toBe('1.1.1.1');
+    expect(calls[0]!.imap.secure).toBe(true);
+  });
+
+  it('asks for manual host/port when autodiscover fails', async () => {
+    const tool = createMailConnectTool();
+    const { agent, calls } = connectAgent('connected');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'));
+    let out: string;
+    try {
+      out = await tool.handler({ email: 'someone@unknown-host.example' }, agent);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(out).toContain('imap_host');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is registered + permission-gated as a write tool', async () => {
+    const { createMailTools, MAIL_WRITE_TOOLS } = await import('./index.js');
+    const names = createMailTools(new InMemoryMailRegistry()).map(t => t.definition.name);
+    expect(names).toContain('mail_connect');
+    expect(MAIL_WRITE_TOOLS.has('mail_connect')).toBe(true);
   });
 });

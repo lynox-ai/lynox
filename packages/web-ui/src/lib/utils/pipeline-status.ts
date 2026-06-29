@@ -10,13 +10,14 @@ import type {
 	PermissionPrompt,
 	PromptKind,
 	TabsPrompt,
+	MailConnectPromptView,
 } from '../stores/chat.svelte.js';
 
 /**
- * Collapse the three legacy pendingX vars into the unified head shape the
- * PromptAnchor renders. Priority: secret > permission > tabs. Secret takes
- * precedence because if it surfaces, blocking the question with a permission
- * UI would risk leaking the secret-prompt context.
+ * Collapse the legacy pendingX vars into the unified head shape the
+ * PromptAnchor renders. Priority: mail > secret > permission > tabs. Mail and
+ * secret take precedence because both collect credentials — blocking them with
+ * a permission UI would risk leaking the credential-prompt context.
  */
 export function selectPendingPromptHead(
 	pendingPermission: PermissionPrompt | null,
@@ -24,7 +25,15 @@ export function selectPendingPromptHead(
 	pendingSecretPrompt:
 		| { name: string; prompt: string; keyType?: string; promptId?: string }
 		| null,
+	pendingMailConnect?: MailConnectPromptView | null,
 ): PendingPromptHead | null {
+	if (pendingMailConnect) {
+		return {
+			kind: 'mail',
+			question: pendingMailConnect.address,
+			promptId: pendingMailConnect.promptId,
+		};
+	}
 	if (pendingSecretPrompt) {
 		return {
 			kind: 'secret',

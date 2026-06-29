@@ -9,6 +9,7 @@ import {
 import type {
 	PermissionPrompt,
 	TabsPrompt,
+	MailConnectPromptView,
 } from '../stores/chat.svelte.js';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,36 @@ describe('selectPendingPromptHead', () => {
 		// Without secret, permission wins.
 		const perm = selectPendingPromptHead(permission('PermQ'), tabs('TabsQ'), null);
 		expect(perm?.kind).toBe('permission');
+	});
+
+	function mailConnect(address: string, promptId = 'mc-1'): MailConnectPromptView {
+		return {
+			promptId,
+			id: address.replace(/[^a-z0-9]+/g, '-'),
+			displayName: address,
+			address,
+			preset: 'gmail',
+			type: 'personal',
+			imap: { host: 'imap.gmail.com', port: 993, secure: true },
+			smtp: { host: 'smtp.gmail.com', port: 587, secure: false },
+		};
+	}
+
+	it('surfaces a pending connect_mail prompt as a mail head', () => {
+		const head = selectPendingPromptHead(null, null, null, mailConnect('anna@gmail.com'));
+		expect(head?.kind).toBe('mail');
+		expect(head?.question).toBe('anna@gmail.com');
+		expect(head?.promptId).toBe('mc-1');
+	});
+
+	it('prioritises mail (a credential prompt) over permission and tabs', () => {
+		const head = selectPendingPromptHead(permission('PermQ'), tabs('TabsQ'), null, mailConnect('a@b.com'));
+		expect(head?.kind).toBe('mail');
+	});
+
+	it('omitting the mail arg preserves the legacy 3-arg behaviour', () => {
+		expect(selectPendingPromptHead(null, null, null)).toBeNull();
+		expect(selectPendingPromptHead(permission('Q'), null, null)?.kind).toBe('permission');
 	});
 
 	it('multi-prompt: a second prompt does not erase the previous answer', () => {

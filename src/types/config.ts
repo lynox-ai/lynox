@@ -5,7 +5,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ProviderKey } from './provider-registry.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
-import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn } from './agent.js';
+import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
@@ -26,6 +26,7 @@ export interface AgentConfig {
   promptUser?:      PromptUserFn | undefined;
   promptTabs?:      PromptTabsFn | undefined;
   promptSecret?:    PromptSecretFn | undefined;
+  promptMailConnect?: PromptMailConnectFn | undefined;
   maxIterations?:      number | undefined;
   continuationPrompt?: string | undefined;
   excludeTools?:       string[] | undefined;

@@ -19,7 +19,7 @@ import type { TabQuestion, SecretOutcome } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type PromptType = 'ask_user' | 'ask_secret';
+export type PromptType = 'ask_user' | 'ask_secret' | 'connect_mail';
 export type PromptStatus = 'pending' | 'answered' | 'expired';
 
 export interface PendingPromptRow {
@@ -32,6 +32,12 @@ export interface PendingPromptRow {
   partial_answers_json: string | null;
   secret_name: string | null;
   secret_key_type: string | null;
+  /** JSON-encoded `MailConnectPromptData` for a `connect_mail` prompt — the
+   * staged mail-account fields + appPasswordUrl the consent step renders and
+   * forwards to POST /api/mail/accounts. NULL for ask_user/ask_secret rows and
+   * every pre-v43 row. Never carries a password (the value goes client→route,
+   * not through the prompt store). */
+  payload_json: string | null;
   /** 1 when a single-question ask_user opted into multi-select pills
    * (meta.multiSelect). NULL for ordinary single-select prompts, tabs, and
    * secrets — and for every pre-v33 row. Lets a reconnect via /pending-prompt
@@ -112,6 +118,7 @@ export class PromptStore {
       secretName: null,
       secretKeyType: null,
       multiSelect: multiSelect === true,
+      payloadJson: null,
     });
   }
 
@@ -130,6 +137,7 @@ export class PromptStore {
       secretName: null,
       secretKeyType: null,
       multiSelect: false,
+      payloadJson: null,
     });
   }
 
@@ -143,6 +151,25 @@ export class PromptStore {
       secretName: name,
       secretKeyType: keyType ?? null,
       multiSelect: false,
+      payloadJson: null,
+    });
+  }
+
+  /** Insert a `connect_mail` prompt carrying the staged mail-account data
+   * (JSON `MailConnectPromptData`). The consent step renders it and forwards
+   * the account to POST /api/mail/accounts; the password is entered there and
+   * never touches this row. Throws PromptConflictError on collision. */
+  insertConnectMail(sessionId: string, question: string, payloadJson: string): string {
+    return this._insert({
+      sessionId,
+      promptType: 'connect_mail',
+      question,
+      optionsJson: null,
+      questionsJson: null,
+      secretName: null,
+      secretKeyType: null,
+      multiSelect: false,
+      payloadJson,
     });
   }
 
@@ -155,6 +182,7 @@ export class PromptStore {
     secretName: string | null;
     secretKeyType: string | null;
     multiSelect: boolean;
+    payloadJson: string | null;
   }): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
@@ -173,6 +201,7 @@ export class PromptStore {
         'pending',
         expiresAt,
         args.multiSelect ? 1 : null,
+        args.payloadJson,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -225,6 +254,18 @@ export class PromptStore {
     // 'managed_blocked' and 'vault_error' = server-side rejection → record reason.
     const errorReason = outcome === 'saved' || outcome === 'canceled' ? null : outcome;
     const result = this._getAnswerSecretStmt().run(savedFlag, errorReason, promptId);
+    const changed = result.changes > 0;
+    if (changed) this._emitSettled(promptId);
+    return changed;
+  }
+
+  /** Settle a `connect_mail` prompt. `connected` = the mail-account route
+   * accepted the account; false = the user dismissed the consent step. Reuses
+   * the answer_saved column as the connected flag (1 = connected, 0 =
+   * canceled); answer_error stays NULL — there is no managed-block path here.
+   * The password is never seen by the store. */
+  answerMailConnect(promptId: string, connected: boolean): boolean {
+    const result = this._getAnswerSecretStmt().run(connected ? 1 : 0, null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -344,8 +385,8 @@ export class PromptStore {
     return (this._stmtInsert ??= this.db.prepare(`
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json,
-         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

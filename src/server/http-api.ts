@@ -33,7 +33,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -2238,6 +2238,36 @@ export class LynoxHTTPApi {
         return 'canceled';
       };
 
+      // Wire promptMailConnect — the staged account metadata rides the SSE
+      // event; the app-password is entered in the in-chat consent step and
+      // goes client→POST /api/mail/accounts→vault, NEVER through this callback
+      // or the agent/model context. The route is NOT walled by the infra-
+      // secret deny-list (mail accounts have their own path), so there is no
+      // managed-block path here — unlike ask_secret for MAIL_ACCOUNT_* names.
+      session.promptMailConnect = async (data: MailConnectPromptData, meta?: PromptMeta): Promise<MailConnectOutcome> => {
+        if (!promptStore) return 'canceled';
+        const promptId = promptStore.insertConnectMail(
+          sessionId,
+          `Connect mailbox ${data.address}`,
+          JSON.stringify(data),
+        );
+        hasActivePendingPrompt = true;
+        if (!aborted && !res.writableEnded) {
+          const payload = JSON.stringify({
+            promptId, ...data,
+            step_id: meta?.stepId, step_task: meta?.stepTask,
+          });
+          res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
+        }
+        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        hasActivePendingPrompt = false;
+        // answer_saved === 1 means the consent step POSTed the account and the
+        // route accepted it. No row (expired / session aborted) or a 0 flag is
+        // a dismissal — the agent must NOT fall back to asking for the password
+        // in chat (the tool result spells that out).
+        return row?.answer_saved === 1 ? 'connected' : 'canceled';
+      };
+
       // Heartbeat — every 10s emit a real SSE event (not a comment line) so
       // the client can update its "last alive" timestamp and surface a soft
       // "Verbindung scheint langsam" hint when the gap grows. 10s sits well
@@ -2504,11 +2534,18 @@ export class LynoxHTTPApi {
       if (!row) { jsonResponse(res, 200, { pending: false }); return; }
       // Never leak secret answers back to client
       const isTabs = row.prompt_type === 'ask_user' && !!row.questions_json;
+      const kind = isTabs
+        ? 'tabs'
+        : row.prompt_type === 'ask_secret'
+          ? 'secret'
+          : row.prompt_type === 'connect_mail'
+            ? 'mail'
+            : 'single';
       jsonResponse(res, 200, {
         pending: true,
         promptId: row.id,
         promptType: row.prompt_type,
-        kind: isTabs ? 'tabs' : row.prompt_type === 'ask_secret' ? 'secret' : 'single',
+        kind,
         question: row.question,
         options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
         // Restore the multi-select-pills opt-in (v33) so a reconnect mid-prompt
@@ -2518,6 +2555,8 @@ export class LynoxHTTPApi {
         partialAnswers: row.partial_answers_json ? JSON.parse(row.partial_answers_json) as unknown[] : undefined,
         secretName: row.secret_name,
         secretKeyType: row.secret_key_type,
+        // The staged mail-account fields for a connect_mail prompt (no password).
+        mailConnect: row.payload_json ? JSON.parse(row.payload_json) as unknown : undefined,
         timeoutMs: PROMPT_TIMEOUT_MS,
         createdAt: row.created_at,
       });
@@ -2665,6 +2704,47 @@ export class LynoxHTTPApi {
         }
       }
       if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
+      jsonResponse(res, 200, { ok: true });
+    }));
+
+    // POST /sessions/:id/mail-connected — settle a connect_mail prompt after the
+    // in-chat consent step has POSTed the account to /api/mail/accounts. Body:
+    // { promptId: string, status: 'connected' | 'canceled' }. The password is
+    // never part of this call — it went straight to the mail-account route.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/mail-connected', async (_req, res, params, body) => {
+      const ps = this.engine?.getPromptStore();
+      if (!ps) { errorResponse(res, 404, 'No pending mail prompt'); return; }
+
+      const b = body as Record<string, unknown> | null;
+      const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      const rawStatus = b && typeof b['status'] === 'string' ? b['status'] : undefined;
+      // Default to 'canceled' when the status is missing/unknown: a connect_mail
+      // dismissal is benign (the agent just acknowledges), unlike ask_secret
+      // where an unknown outcome must not be read as a hard user-cancel.
+      const connected = rawStatus === 'connected';
+
+      // Bind the promptId to the URL session so an authenticated client can't
+      // settle another session's prompt (mirrors /secret-saved). Fails closed
+      // to the per-session lookup.
+      let answered = false;
+      if (promptId) {
+        const existing = ps.getById(promptId);
+        if (existing) {
+          if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+          if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
+          if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+          if (existing.prompt_type === 'connect_mail') {
+            answered = ps.answerMailConnect(promptId, connected);
+          }
+        }
+      }
+      if (!answered) {
+        const pending = ps.getPending(params['id']!);
+        if (pending && pending.prompt_type === 'connect_mail') {
+          answered = ps.answerMailConnect(pending.id, connected);
+        }
+      }
+      if (!answered) { errorResponse(res, 404, 'No pending mail prompt'); return; }
       jsonResponse(res, 200, { ok: true });
     }));
 
