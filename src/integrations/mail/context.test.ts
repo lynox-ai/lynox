@@ -323,11 +323,11 @@ describe('MailContext — listAccounts (safe view)', () => {
 });
 
 describe('MailContext — tools()', () => {
-  it('returns the five mail tools backed by the context registry', async () => {
+  it('returns the mail tools backed by the context registry (incl. mail_connect)', async () => {
     await ctx.addAccount(INPUT_GMAIL);
     const tools = ctx.tools();
     const names = tools.map(t => t.definition.name).sort();
-    expect(names).toEqual(['mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage']);
+    expect(names).toEqual(['mail_connect', 'mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage']);
   });
 });
 

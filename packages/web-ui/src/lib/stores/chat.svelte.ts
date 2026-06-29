@@ -397,6 +397,26 @@ let pendingTabsPrompt = $state<TabsPrompt | null>(null);
 let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
 let secretPromptGeneration = $state(0);
 
+/** One IMAP/SMTP endpoint as shown in the connect-mail consent step. */
+export interface MailConnectServerView { host: string; port: number; secure: boolean }
+/** Staged mail-account fields for a `connect_mail` prompt. The password is NOT
+ *  part of this — the user enters it in the consent field and it goes straight
+ *  to POST /api/mail/accounts, never through chat/SSE. */
+export interface MailConnectPromptView {
+	promptId?: string;
+	id: string;
+	displayName: string;
+	address: string;
+	preset: string;
+	type: string;
+	imap: MailConnectServerView;
+	smtp: MailConnectServerView;
+	appPasswordUrl?: string;
+	requires2FA?: boolean;
+}
+let pendingMailConnect = $state<MailConnectPromptView | null>(null);
+let mailConnectGeneration = $state(0);
+
 // Pipeline-status-v2 PromptAnchor inputs. Both reset on newChat /
 // resumeThread; runStartedAt is set on `pipeline_start`; runPromptCount
 // increments on each pending* null→non-null transition while a run is active.
@@ -789,7 +809,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		// the run will only progress once the user answers, and a bare
 		// "Agent arbeitet noch — wartet…" banner with the actual prompt
 		// hidden somewhere is exactly the dead-end the user reported.
-		if (pendingPermission || pendingSecretPrompt || pendingTabsPrompt) {
+		if (pendingPermission || pendingSecretPrompt || pendingTabsPrompt || pendingMailConnect) {
 			// If a prior 409 poll loop is still running (re-entrant call before
 			// its finally block ran), cut it now so its tick doesn't flip
 			// `isStreaming` back on after we clear it below.
@@ -1303,6 +1323,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (pendingPermission?.promptId === promptId) pendingPermission = null;
 			if (pendingTabsPrompt?.promptId === promptId) pendingTabsPrompt = null;
 			if (pendingSecretPrompt?.promptId === promptId) pendingSecretPrompt = null;
+			if (pendingMailConnect?.promptId === promptId) pendingMailConnect = null;
 			break;
 		}
 		case 'secret_prompt':
@@ -1315,6 +1336,22 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			};
 			// Reset UI state for fresh prompt (handles retry after cancel)
 			secretPromptGeneration++;
+			break;
+		case 'mail_connect_prompt':
+			if (!pendingMailConnect) runPromptCount++;
+			pendingMailConnect = {
+				promptId: data['promptId'] as string | undefined,
+				id: String(data['id'] ?? ''),
+				displayName: String(data['displayName'] ?? ''),
+				address: String(data['address'] ?? ''),
+				preset: String(data['preset'] ?? ''),
+				type: String(data['type'] ?? 'personal'),
+				imap: data['imap'] as MailConnectServerView,
+				smtp: data['smtp'] as MailConnectServerView,
+				appPasswordUrl: data['appPasswordUrl'] as string | undefined,
+				requires2FA: data['requires2FA'] as boolean | undefined,
+			};
+			mailConnectGeneration++;
 			break;
 		case 'turn_end': {
 			retryStatus = null;
@@ -1711,6 +1748,84 @@ export function getSecretPromptGeneration() {
 	return secretPromptGeneration;
 }
 
+/** Outcome of a connect-mail submit. On `ok:false` the prompt stays open so
+ *  the user can correct the app-password and retry (the engine turn keeps
+ *  waiting); the error string drives a toast. */
+export interface MailConnectSubmitResult { ok: boolean; error?: string }
+const MAIL_CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * Submit the app-password for a pending connect_mail prompt. The password goes
+ * STRAIGHT to POST /api/mail/accounts (the allowed-on-managed route) → vault —
+ * it never enters chat, SSE, or the agent context. On success the prompt is
+ * settled `connected`; on failure it's left pending for a retry.
+ */
+export async function submitMailConnect(password: string): Promise<MailConnectSubmitResult> {
+	if (!sessionId || !pendingMailConnect) return { ok: false, error: 'No pending connection' };
+	const sid = sessionId;
+	const p = pendingMailConnect;
+	const promptId = p.promptId;
+	const body: Record<string, unknown> = {
+		id: p.id,
+		displayName: p.displayName,
+		address: p.address,
+		preset: p.preset,
+		type: p.type,
+		credentials: { user: p.address, pass: password },
+	};
+	// The route rebuilds preset accounts from the preset table; for 'custom' it
+	// needs the explicit servers (which it re-validates via assertPublicHost).
+	if (p.preset === 'custom') {
+		body['custom'] = { imap: p.imap, smtp: p.smtp };
+	}
+	const ac = new AbortController();
+	const timer = setTimeout(() => ac.abort(), MAIL_CONNECT_TIMEOUT_MS);
+	try {
+		const res = await fetch(`${getApiBase()}/mail/accounts`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+			signal: ac.signal,
+		});
+		clearTimeout(timer);
+		if (!res.ok) {
+			const err = (await res.json().catch(() => ({}))) as { error?: string };
+			// Keep the prompt pending — the engine turn is still awaiting, the user
+			// can correct the password and resubmit.
+			return { ok: false, error: err.error ?? `Connection failed (${res.status})` };
+		}
+		pendingMailConnect = null;
+		await fetch(`${getApiBase()}/sessions/${sid}/mail-connected`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ status: 'connected', promptId }),
+		});
+		return { ok: true };
+	} catch {
+		clearTimeout(timer);
+		return { ok: false, error: 'Connection failed — please try again.' };
+	}
+}
+
+export async function cancelMailConnect(): Promise<void> {
+	if (!sessionId || !pendingMailConnect) return;
+	const promptId = pendingMailConnect.promptId;
+	pendingMailConnect = null;
+	await fetch(`${getApiBase()}/sessions/${sessionId}/mail-connected`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ status: 'canceled', promptId }),
+	});
+}
+
+export function getPendingMailConnect() {
+	return pendingMailConnect;
+}
+
+export function getMailConnectGeneration() {
+	return mailConnectGeneration;
+}
+
 /**
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it.
@@ -1752,6 +1867,21 @@ export async function checkPendingPrompt(): Promise<void> {
 				promptId: data['promptId'] as string | undefined,
 			};
 			secretPromptGeneration++;
+		} else if (promptType === 'connect_mail' && data['mailConnect']) {
+			const mc = data['mailConnect'] as Record<string, unknown>;
+			pendingMailConnect = {
+				promptId: data['promptId'] as string | undefined,
+				id: String(mc['id'] ?? ''),
+				displayName: String(mc['displayName'] ?? ''),
+				address: String(mc['address'] ?? ''),
+				preset: String(mc['preset'] ?? ''),
+				type: String(mc['type'] ?? 'personal'),
+				imap: mc['imap'] as MailConnectServerView,
+				smtp: mc['smtp'] as MailConnectServerView,
+				appPasswordUrl: mc['appPasswordUrl'] as string | undefined,
+				requires2FA: mc['requires2FA'] as boolean | undefined,
+			};
+			mailConnectGeneration++;
 		}
 	} catch {
 		// Non-critical — prompt check failed, user can still interact normally
@@ -1961,7 +2091,7 @@ export function getPendingTabsPrompt() {
  * > tabs. PromptAnchor renders the question text; the existing inline
  * forms still drive the answer.
  */
-export type PromptKind = 'permission' | 'tabs' | 'secret';
+export type PromptKind = 'permission' | 'tabs' | 'secret' | 'mail';
 
 export interface PendingPromptHead {
 	kind: PromptKind;
@@ -1971,7 +2101,7 @@ export interface PendingPromptHead {
 }
 
 export function getPendingPrompt(): PendingPromptHead | null {
-	return selectPendingPromptHead(pendingPermission, pendingTabsPrompt, pendingSecretPrompt);
+	return selectPendingPromptHead(pendingPermission, pendingTabsPrompt, pendingSecretPrompt, pendingMailConnect);
 }
 
 /** Epoch ms when the active pipeline run started. null when no run. */
@@ -2084,6 +2214,7 @@ export function newChat() {
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	pendingSecretPrompt = null;
+	pendingMailConnect = null;
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;
@@ -2274,6 +2405,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	// it; resumeThread originally didn't because no surface rendered it
 	// independently). See PR #236 review.
 	pendingSecretPrompt = null;
+	pendingMailConnect = null;
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;

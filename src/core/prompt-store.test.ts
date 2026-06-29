@@ -3,14 +3,15 @@ import Database from 'better-sqlite3';
 import { PromptStore, PromptConflictError } from './prompt-store.js';
 
 /** Build a fresh SQLite instance with just the pending_prompts schema the
- * PromptStore depends on. Mirrors migrations v25 + v27 + v29 + v33 (post-rewrite). */
+ * PromptStore depends on. Mirrors migrations v25 + v27 + v29 + v33 + v43
+ * (post-rewrite — connect_mail in the CHECK + payload_json column). */
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
   const stmts = [
     `CREATE TABLE pending_prompts (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
-      prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+      prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
       question TEXT NOT NULL,
       options_json TEXT,
       questions_json TEXT,
@@ -21,6 +22,7 @@ function makeDb(): Database.Database {
       answer_saved INTEGER,
       answer_error TEXT,
       multi_select INTEGER,
+      payload_json TEXT,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       answered_at TEXT,
@@ -234,6 +236,59 @@ describe('PromptStore', () => {
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(0);
       expect(row?.answer_error).toBe('vault_error');
+    });
+  });
+
+  describe('connect_mail prompt (v43)', () => {
+    const payload = JSON.stringify({ id: 'a', address: 'a@gmail.com', preset: 'gmail' });
+
+    it('inserts a connect_mail row carrying payload_json, never a password', () => {
+      const id = store.insertConnectMail('s1', 'Connect mailbox a@gmail.com', payload);
+      const row = store.getById(id);
+      expect(row?.prompt_type).toBe('connect_mail');
+      expect(row?.payload_json).toBe(payload);
+      // No secret columns are populated for a mail prompt.
+      expect(row?.secret_name).toBeNull();
+      // The store never holds a password — the payload carries only config.
+      expect(row?.payload_json).not.toContain('pass');
+    });
+
+    it('getPending restores the connect_mail row with its payload (reconnect path)', () => {
+      store.insertConnectMail('s1', 'Connect mailbox a@gmail.com', payload);
+      const pending = store.getPending('s1');
+      expect(pending?.prompt_type).toBe('connect_mail');
+      expect(pending?.payload_json).toBe(payload);
+    });
+
+    it('answerMailConnect(true) → answer_saved=1 (connected), answer_error=NULL', () => {
+      const id = store.insertConnectMail('s1', 'q', payload);
+      expect(store.answerMailConnect(id, true)).toBe(true);
+      const row = store.getById(id);
+      expect(row?.answer_saved).toBe(1);
+      expect(row?.answer_error).toBeNull();
+      expect(row?.status).toBe('answered');
+    });
+
+    it('answerMailConnect(false) → answer_saved=0 (canceled)', () => {
+      const id = store.insertConnectMail('s1', 'q', payload);
+      expect(store.answerMailConnect(id, false)).toBe(true);
+      const row = store.getById(id);
+      expect(row?.answer_saved).toBe(0);
+      expect(row?.answer_error).toBeNull();
+    });
+
+    it('settles a waiting turn via the event bus (connected)', async () => {
+      const id = store.insertConnectMail('s1', 'q', payload);
+      const wait = store.waitForAnswer(id);
+      setTimeout(() => { store.answerMailConnect(id, true); }, 10);
+      const row = await wait;
+      expect(row?.status).toBe('answered');
+      expect(row?.answer_saved).toBe(1);
+    });
+
+    it('shares the one-pending-prompt-per-session unicity guard', () => {
+      store.insertConnectMail('s1', 'q', payload);
+      expect(() => store.insertConnectMail('s1', 'q2', payload)).toThrow(PromptConflictError);
     });
   });
 });

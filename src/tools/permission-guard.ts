@@ -612,12 +612,12 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // Mail (provider-agnostic IMAP/SMTP) write tools — block in autonomous mode.
   // In interactive mode, the ToolEntry.requiresConfirmation flag causes the
   // agent to skip this generic warning (the tool shows its own email preview).
-  const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply']);
+  const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply', 'mail_connect']);
   if (MAIL_WRITE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
-      return `⚠ ${toolName} [BLOCKED — sending mail needs your OK]`;
+      return `⚠ ${toolName} [BLOCKED — connecting/sending mail needs your OK]`;
     }
-    return `⚠ ${toolName} — sends external mail`;
+    return toolName === 'mail_connect' ? `⚠ ${toolName} — connects a mailbox` : `⚠ ${toolName} — sends external mail`;
   }
 
   // Declarative destructive-tool gate. Each tool registers

@@ -19,6 +19,8 @@ import type {
   PromptUserFn,
   PromptTabsFn,
   PromptSecretFn,
+  PromptMailConnectFn,
+  MailConnectPromptData,
   PromptMeta,
 } from '../types/index.js';
 import { effectiveContextWindow, getProviderDescriptor } from '../types/index.js';
@@ -121,6 +123,7 @@ export interface SessionOptions {
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
+  promptMailConnect?: PromptMailConnectFn | undefined;
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
@@ -188,6 +191,7 @@ export class Session {
   private _promptUser: PromptUserFn | null = null;
   private _promptTabs: PromptTabsFn | null = null;
   private _promptSecret: PromptSecretFn | null = null;
+  private _promptMailConnect: PromptMailConnectFn | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
   /**
@@ -277,6 +281,7 @@ export class Session {
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
     this._promptSecret = opts?.promptSecret ?? null;
+    this._promptMailConnect = opts?.promptMailConnect ?? null;
     this._tenantId = opts?.tenantId ?? null;
     if (opts?.systemPromptSuffix) {
       this.agentOverrides.systemPromptSuffix = opts.systemPromptSuffix;
@@ -354,6 +359,19 @@ export class Session {
     if (this.agent) {
       this.agent.promptSecret = fn
         ? (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => fn(name, prompt, keyType, meta)
+        : undefined;
+    }
+  }
+
+  get promptMailConnect(): PromptMailConnectFn | null {
+    return this._promptMailConnect;
+  }
+
+  set promptMailConnect(fn: PromptMailConnectFn | null) {
+    this._promptMailConnect = fn;
+    if (this.agent) {
+      this.agent.promptMailConnect = fn
+        ? (data: MailConnectPromptData, meta?: PromptMeta) => fn(data, meta)
         : undefined;
     }
   }
@@ -1519,6 +1537,9 @@ export class Session {
         : undefined,
       promptSecret: this._promptSecret
         ? (name: string, prompt: string, keyType?: string, meta?: PromptMeta) => this._promptSecret!(name, prompt, keyType, meta)
+        : undefined,
+      promptMailConnect: this._promptMailConnect
+        ? (data: MailConnectPromptData, meta?: PromptMeta) => this._promptMailConnect!(data, meta)
         : undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,

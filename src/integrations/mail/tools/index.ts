@@ -7,6 +7,7 @@ export { createMailReadTool } from './mail-read.js';
 export { createMailSendTool } from './mail-send.js';
 export { createMailReplyTool } from './mail-reply.js';
 export { createMailTriageTool } from './mail-triage.js';
+export { createMailConnectTool } from './mail-connect.js';
 
 import type { ToolEntry } from '../../../types/index.js';
 import { createMailSearchTool } from './mail-search.js';
@@ -14,6 +15,7 @@ import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
 import { createMailReplyTool } from './mail-reply.js';
 import { createMailTriageTool } from './mail-triage.js';
+import { createMailConnectTool } from './mail-connect.js';
 import type { MailRegistry } from './registry.js';
 import type { MailContext } from '../context.js';
 
@@ -33,8 +35,9 @@ export function createMailTools(registry: MailRegistry, ctx?: MailContext): Tool
     createMailSendTool(registry, ctx) as ToolEntry,
     createMailReplyTool(registry, ctx) as ToolEntry,
     createMailTriageTool(registry) as ToolEntry,
+    createMailConnectTool() as ToolEntry,
   ];
 }
 
 /** Names of the mail tools that mutate external state (need permission guard). */
-export const MAIL_WRITE_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
+export const MAIL_WRITE_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply', 'mail_connect']);
