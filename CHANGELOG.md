@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.20.0 — 2026-06-29
+
+Documents become readable. A PDF or Word file dropped into chat is now text-extracted server-side and read by the agent instead of being rejected, and the extracted text persists into the knowledge layer so the document is auto-recalled in later turns and threads. The Wissen header gains a glanceable memories / entities / relations summary, scrollable tab rows fade at the edge to signal more content, and editing an artifact now re-renders its card in chat. **No engine or control-plane database migration** — uploaded documents ride the existing per-tenant knowledge layer; rollback to 1.19.0 is a clean single-image swap.
+
+### Added
+
+- **Read PDF and Word uploads** — a `.pdf` or `.docx` dropped into chat is text-extracted server-side and read by the agent instead of being rejected. Corrupt, encrypted, or scanned image-only files return a clear error; unsupported binaries (`.xlsx` / `.pptx` / legacy `.doc`) keep an updated "paste the text" message. (#801)
+- **Uploaded documents are remembered** — an uploaded document's text persists into the knowledge layer and is auto-recalled in later turns and threads, the same way the agent's own memories are. (#803)
+- **Wissen header summary** — the knowledge view shows a glanceable memories / entities / relations count. (#798)
+- **Scroll affordance + larger mobile touch targets** — scrollable tab rows fade at the edge to signal more content, and small mobile chrome meets the 44px minimum touch-target size. (#800)
+
+### Fixed
+
+- Editing an artifact re-renders its updated card in chat instead of showing only the update text. (#802)
+- **Engine hardening (upload + watch surface)** — uploaded PDF/Word extraction is bounded against decompression bombs (peak memory capped) and wrapped in a timeout so a malformed file can't hang a request; and exotic line-separator characters (NEL / U+2028 / U+2029 / C1) are stripped from untrusted inputs framed to the model — the uploaded filename, the extracted document body, and a watch's fetched page text — extending the chat-input hardening already in place. (#796, #804)
+
+### Internal
+
+- Shared `keepSettingsItem` tier-gate predicate extracted; pipeline-running derivation guarded against malformed shapes. (#797, #799)
+
 ## 1.19.0 — 2026-06-26
 
 The product's navigation becomes the agent loop. Agent-triggers get an editable home, the workflow run-list joins a single "Aktivität & Kosten" surface, and low-frequency configuration (API profiles, third-party keys, tool permissions) moves into Settings — so each surface maps to a primitive instead of a feature. Watch change-detection gets dramatically cheaper, and a wave of UX fixes lands across chat, artifacts, the inbox, and the navigation rail. **No engine or control-plane database migration** — the run-now endpoint uses the existing per-tenant `triggers` table (shipped in 1.18.0); rollback to 1.18.0 is a clean single-image swap.
