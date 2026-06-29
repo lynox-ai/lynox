@@ -387,8 +387,12 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       }
     }
     store = new SecretStore(userConfig, vault ?? undefined);
-    if (store.size > 0) {
-      const names = store.listNames().map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
+    // Only advertise agent-visible secrets — infrastructure secrets (mail
+    // account / OAuth / SMTP/IMAP / engine-internal) are excluded so their
+    // names never enter the model context (and cannot be referenced for exfil).
+    const visibleNames = store.listAgentVisibleNames();
+    if (visibleNames.length > 0) {
+      const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
       parts.push(`<secrets>${names}</secrets>`);
     }
   } catch {

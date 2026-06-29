@@ -5,6 +5,36 @@ import type { SecretVault } from './secret-vault.js';
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
 /**
+ * Infrastructure / engine-internal secret names that the agent must NOT see
+ * or resolve. These are channel/engine credentials (mail-account blobs, OAuth
+ * tokens, SMTP and IMAP, engine-internal LYNOX_ and MANAGED_) — managed by the
+ * platform and the dedicated integration UIs, never authored or referenced by
+ * the agent. Single source of truth: the same set the secrets-write API uses
+ * to reject non-admin writes (`isAdminOnlySecret` in http-api).
+ *
+ * Why agent-invisible: a vault-backed secret is auto-consented (see
+ * `_loadFromVault`), so without this gate `secret:MAIL_ACCOUNT_<id>` in a tool
+ * input expands to the full `{user,pass}` credential and is sent to whatever
+ * host the tool targets — a credential-exfil handle reachable via prompt
+ * injection. These names are excluded from the session briefing AND left
+ * unresolved in tool inputs. They remain in `maskSecrets` so a value that
+ * does surface is still redacted.
+ */
+export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
+  /^LYNOX_/,
+  /^MANAGED_/,
+  /^MAIL_ACCOUNT_/,
+  /^GOOGLE_OAUTH_/,
+  /^SMTP_/,
+  /^IMAP_/,
+];
+
+/** True if `name` is an infrastructure/engine-internal secret (agent-invisible). */
+export function isInfraSecret(name: string): boolean {
+  return INFRA_SECRET_PATTERNS.some(p => p.test(name));
+}
+
+/**
  * Common secret patterns — regex-based detection for accidental secret leaks.
  * Used by ask_user guard and chat input warning.
  */
@@ -193,6 +223,16 @@ export class SecretStore implements SecretStoreLike {
     return [...this.secrets.keys()];
   }
 
+  /**
+   * Secret names the agent may see + reference. Excludes infrastructure secrets
+   * (mail-account / OAuth / SMTP/IMAP / engine-internal) so they are never
+   * advertised in the session briefing. `listNames()` still returns everything
+   * for masking + the settings UI.
+   */
+  listAgentVisibleNames(): string[] {
+    return [...this.secrets.keys()].filter(n => !isInfraSecret(n));
+  }
+
   containsSecret(text: string): boolean {
     for (const secret of this.secrets.values()) {
       if (secret.value.length < 2) continue; // skip single-char values to avoid false positives
@@ -279,6 +319,10 @@ export class SecretStore implements SecretStoreLike {
     const text = JSON.stringify(input);
     const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
     const resolved = text.replace(pattern, (_match, name: string) => {
+      // Infrastructure secrets are never resolved into agent tool input — leave
+      // the literal `secret:NAME` so the credential cannot be exfiltrated to an
+      // external host (the value stays in the vault / credStore path only).
+      if (isInfraSecret(name)) return `secret:${name}`;
       const value = this.resolve(name);
       // Escape for JSON string context
       return value !== null ? value.replace(/["\\\n\r\t]/g, c => {
