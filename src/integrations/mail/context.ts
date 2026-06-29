@@ -20,7 +20,7 @@
 import type { ToolEntry } from '../../types/index.js';
 import type { GoogleAuth } from '../google/google-auth.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
-import { MailCredentialStore } from './auth/app-password.js';
+import { MailCredentialStore, vaultKeyForAccount } from './auth/app-password.js';
 import { ImapSmtpProvider } from './providers/imap-smtp.js';
 import { OAuthGmailProvider } from './providers/oauth-gmail.js';
 import {
@@ -515,6 +515,24 @@ export class MailContext {
    * provider and attaches it to the watcher.
    */
   async addAccount(input: AddAccountInput): Promise<void> {
+    // Identity guard: the per-account vault key (vaultKeyForAccount) is derived
+    // from the id and is lossy — distinct ids like "a.b" / "a-b" collapse to the
+    // same key. Reject a NEW account whose key collides with a DIFFERENT existing
+    // account, so its credentials can never overwrite or be resolved as another
+    // account's. A same-id re-auth recomputes the same key and is allowed (update).
+    const newKey = vaultKeyForAccount(input.config.id);
+    for (const existing of this.stateDb.listAccounts()) {
+      // Only IMAP accounts store credentials under the per-account vault key
+      // (OAuth tokens live under a fixed shared key), so a collision can only
+      // matter against another IMAP account.
+      if (existing.authType === 'imap' && existing.id !== input.config.id && vaultKeyForAccount(existing.id) === newKey) {
+        throw new MailError(
+          'unsupported',
+          `Account id "${input.config.id}" collides with existing account "${existing.id}" on its credential key — choose a distinct id.`,
+        );
+      }
+    }
+
     this.stateDb.upsertAccount(input.config);
     this.credStore.save(input.config.id, input.credentials);
 
