@@ -434,8 +434,13 @@
 				if (tc.name === 'plan_task') {
 					const inp = tc.input as Record<string, unknown> | undefined;
 					const summary = String(inp?.['summary'] ?? '');
-					const rawPhases = (inp?.['phases'] ?? []) as Array<{ name: string; steps?: string[] }>;
-					const phases = rawPhases.map(p => ({ name: p.name, steps: p.steps ?? [] }));
+					// Guard a malformed/legacy stored plan_task whose `phases` is not an
+					// array: `?? []` only catches null/undefined, so a truthy non-array
+					// would throw on `.map` and crash the whole thread render on open.
+					const rawPhases = inp?.['phases'];
+					const phases = Array.isArray(rawPhases)
+						? (rawPhases as Array<{ name: string; steps?: string[] }>).map(p => ({ name: p.name, steps: p.steps ?? [] }))
+						: [];
 					result.push({ type: 'plan', summary, phases });
 					continue;
 				}
