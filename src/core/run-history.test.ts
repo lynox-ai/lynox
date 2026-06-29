@@ -2186,6 +2186,95 @@ describe('RunHistory', () => {
     });
   });
 
+  // Migration v43 widens pending_prompts.prompt_type to admit 'connect_mail' and
+  // adds a payload_json column. SQLite can't ALTER a CHECK in place, so v43 DROPs
+  // and recreates the table. The table is EPHEMERAL (expired on every cold boot),
+  // so the drop is lossless. These tests boot a RunHistory on a real PRE-v43 db
+  // and prove the recreate runs — the data-critical path that runs on existing
+  // tenants — not just the post-migration API.
+  describe('v43 migration — pending_prompts connect_mail widening', () => {
+    /** Typed handle to the private db, same access the v42 tests use. */
+    function rawDb(h: RunHistory): import('better-sqlite3').Database {
+      return (h as unknown as { db: import('better-sqlite3').Database }).db;
+    }
+
+    it('(a) recreates pending_prompts so a connect_mail row + payload_json are accepted on a v42 db', () => {
+      // Build a db at the PRE-v43 schema: schema_version=42 and a pending_prompts
+      // table at the OLD shape — prompt_type CHECK admits only ask_user/ask_secret
+      // and there is NO payload_json column. Seed one pending row so the
+      // ephemeral-drop behaviour is observable.
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-v43-'));
+      tmpDirs.push(dir);
+      const dbPath = join(dir, 'premig.db');
+      const raw = new BetterSqlite3(dbPath);
+      raw.exec(`
+        CREATE TABLE pending_prompts (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret')),
+          question TEXT NOT NULL,
+          options_json TEXT,
+          secret_name TEXT,
+          secret_key_type TEXT,
+          answer TEXT,
+          answer_saved INTEGER,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          answered_at TEXT,
+          expires_at TEXT NOT NULL,
+          questions_json TEXT,
+          partial_answers_json TEXT,
+          answer_error TEXT,
+          multi_select INTEGER
+        );
+        CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status);
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (42);
+        INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
+          VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
+      `);
+      raw.close();
+
+      // Boot RunHistory → runs the v43 migration (currentVersion 42 → 43). Must
+      // NOT throw / rename the db to .corrupt.
+      const h = new RunHistory(dbPath);
+      const db = rawDb(h);
+
+      // Version bumped (>=43 — tolerant of future migrations stacking on top).
+      const ver = (db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
+      expect(ver).toBeGreaterThanOrEqual(43);
+
+      // Ephemeral drop: the pre-existing pending row did NOT survive (documented
+      // behaviour — a pending prompt is bound to a severed SSE connection).
+      const oldCount = (db.prepare("SELECT COUNT(*) AS c FROM pending_prompts WHERE id='old-1'").get() as { c: number }).c;
+      expect(oldCount).toBe(0);
+
+      // The CORE proof: a connect_mail row WITH payload_json now inserts. On the
+      // old schema this throws — CHECK violation on prompt_type AND no such
+      // column payload_json. Its success proves both DDL changes ran.
+      expect(() => {
+        db.prepare(
+          `INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at, payload_json)
+           VALUES (?,?,?,?,?,?,?)`,
+        ).run('cm-1', 's-cm', 'connect_mail', 'Connect mailbox?', 'pending', '2099-01-01T00:00:00.000Z', '{"id":"anna"}');
+      }).not.toThrow();
+
+      const row = db.prepare("SELECT prompt_type, payload_json FROM pending_prompts WHERE id='cm-1'").get() as { prompt_type: string; payload_json: string };
+      expect(row.prompt_type).toBe('connect_mail');
+      expect(JSON.parse(row.payload_json).id).toBe('anna');
+
+      // The CHECK is widened, not removed — an unknown prompt_type is still rejected.
+      expect(() => {
+        db.prepare(
+          `INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
+           VALUES (?,?,?,?,?,?)`,
+        ).run('bogus-1', 's-x', 'totally_bogus', 'q', 'pending', '2099-01-01T00:00:00.000Z');
+      }).toThrow();
+
+      h.close();
+    });
+  });
+
   // === A2 observability: pipeline_step run rows ===
   describe('pipeline_step observability overlay', () => {
     function insertCompleted(h: RunHistory, params: Parameters<RunHistory['insertRun']>[0], cost: number, createdAt?: string): string {

@@ -1097,16 +1097,28 @@ describe('mail_connect', () => {
     expect(gmail.calls[0]!.preset).toBe('gmail');
   });
 
-  it('SEC: the staged data carries config only — never a password/credentials', async () => {
+  it('SEC: the staged data carries config only — a strict whitelist, no credential field', async () => {
     const tool = createMailConnectTool();
     const { agent, calls } = connectAgent('connected');
     await tool.handler({ email: 'anna@gmail.com' }, agent);
     const data = calls[0]!;
-    // The handoff payload exposes no credential-bearing field (appPasswordUrl
-    // is a public URL, not a secret — so assert on keys, not substrings).
-    expect(data).not.toHaveProperty('credentials');
-    expect(Object.keys(data)).not.toContain('pass');
-    expect(Object.keys(data)).not.toContain('password');
+    // Strict whitelist (not a substring scan): the staged DTO may carry ONLY
+    // these config keys. Any future field — a credential, a token, a raw
+    // password — that leaks into the handoff payload fails this test, because
+    // it would not be in the allowed set. (appPasswordUrl is a public help URL,
+    // not a secret; requires2FA is a bool flag — both config.)
+    const allowedTop = new Set(['id', 'displayName', 'address', 'preset', 'type', 'imap', 'smtp', 'appPasswordUrl', 'requires2FA']);
+    for (const k of Object.keys(data)) {
+      expect(allowedTop.has(k), `unexpected staged field "${k}" — not in the config whitelist`).toBe(true);
+    }
+    // The server sub-objects likewise carry only connection coordinates — never
+    // an embedded user/pass.
+    const allowedServer = new Set(['host', 'port', 'secure']);
+    for (const srv of [data.imap, data.smtp]) {
+      for (const k of Object.keys(srv)) {
+        expect(allowedServer.has(k), `unexpected server field "${k}"`).toBe(true);
+      }
+    }
     // The tool's own input schema exposes no password field either — the user
     // never types the password into a tool call, only into the consent form.
     const props = Object.keys(tool.definition.input_schema.properties ?? {});
@@ -1137,71 +1149,35 @@ describe('mail_connect', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('accepts explicit host/port as a custom account (public IPs pass the SSRF guard)', async () => {
+  it('SEC (anti-phishing, structural): the tool exposes NO host/port parameter — the agent cannot influence the server set', () => {
     const tool = createMailConnectTool();
-    const { agent, calls } = connectAgent('connected');
-    // Literal public IPs keep assertPublicHost network-free + deterministic.
-    await tool.handler({ email: 'ops@corp.example', imap_host: '1.1.1.1', smtp_host: '8.8.8.8' }, agent);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.preset).toBe('custom');
-    expect(calls[0]!.imap.host).toBe('1.1.1.1');
-    expect(calls[0]!.smtp.host).toBe('8.8.8.8');
-  });
-
-  it('SEC (anti-phishing): a known provider domain forces its trusted preset, ignoring agent-supplied hosts', async () => {
-    const tool = createMailConnectTool();
-    const { agent, calls } = connectAgent('connected');
-    // A prompt-injected agent tries to point a @gmail.com login at an attacker
-    // host (public → passes the private-IP guard). The tool must bind gmail to
-    // its real servers so the user's password can't be phished to attacker.tld.
-    await tool.handler({ email: 'victim@gmail.com', imap_host: 'attacker.tld', smtp_host: 'attacker.tld' }, agent);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.preset).toBe('gmail');
-    expect(calls[0]!.imap.host).toBe('imap.gmail.com');
-    expect(calls[0]!.smtp.host).toBe('smtp.gmail.com');
-    expect(JSON.stringify(calls[0])).not.toContain('attacker.tld');
-  });
-
-  it('H2: blocks a private/loopback custom host and never opens the consent step', async () => {
-    const tool = createMailConnectTool();
-    const { agent, calls } = connectAgent('connected');
-    const out = await tool.handler({ email: 'ops@corp.example', imap_host: '10.0.0.5', smtp_host: '10.0.0.6' }, agent);
-    expect(out.toLowerCase()).toContain('blocked');
-    expect(out).toMatch(/public address/i);
-    expect(calls).toHaveLength(0);
-  });
-
-  it('autodiscovers an unknown domain via ISPDB, then stages a custom account', async () => {
-    const tool = createMailConnectTool();
-    const { agent, calls } = connectAgent('connected');
-    const xml = `<?xml version="1.0"?><clientConfig><emailProvider>
-      <incomingServer type="imap"><hostname>1.1.1.1</hostname><port>993</port><socketType>SSL</socketType><username>%EMAILADDRESS%</username></incomingServer>
-      <outgoingServer type="smtp"><hostname>8.8.8.8</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
-    </emailProvider></clientConfig>`;
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(xml, { status: 200 }));
-    try {
-      await tool.handler({ email: 'someone@unknown-host.example' }, agent);
-    } finally {
-      fetchSpy.mockRestore();
+    // Capability-scope: a known provider has exactly one correct server set,
+    // bound from a constant. The agent path is therefore un-phishable BY
+    // CONSTRUCTION — there is no imap_host/smtp_host knob a prompt-injected
+    // agent could turn to point a "@gmail.com" login at an attacker's server.
+    // (The arbitrary-host variant lives in the deliberate Settings → Mail UI.)
+    const props = Object.keys(tool.definition.input_schema.properties ?? {});
+    for (const knob of ['imap_host', 'imap_port', 'smtp_host', 'smtp_port', 'host', 'port', 'server']) {
+      expect(props, `tool must not expose a "${knob}" knob`).not.toContain(knob);
     }
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.preset).toBe('custom');
-    expect(calls[0]!.imap.host).toBe('1.1.1.1');
-    expect(calls[0]!.imap.secure).toBe(true);
+    // And a known domain still resolves to its real, trusted servers.
+    // (covered live by the Gmail-staging test above; this asserts the
+    // structural guarantee that makes that binding un-overridable.)
   });
 
-  it('asks for manual host/port when autodiscover fails', async () => {
+  it('capability-scope: a non-preset domain is routed to Settings → Mail and stages NOTHING', async () => {
     const tool = createMailConnectTool();
     const { agent, calls } = connectAgent('connected');
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network down'));
-    let out: string;
-    try {
-      out = await tool.handler({ email: 'someone@unknown-host.example' }, agent);
-    } finally {
-      fetchSpy.mockRestore();
-    }
-    expect(out).toContain('imap_host');
+    // A custom / non-mainstream provider is NOT handled by the agent tool — it
+    // would require an attacker-influenceable host parameter. The tool must
+    // refuse, point the user at the deliberate UI, and raise NO consent step
+    // (no agent-supplied host ever reaches the connect path).
+    const out = await tool.handler({ email: 'ops@corp.example' }, agent);
     expect(calls).toHaveLength(0);
+    expect(out).toMatch(/Settings/);
+    expect(out).toMatch(/major providers/i);
+    // It must not have silently opened a connect form for the unknown host.
+    expect(out).not.toMatch(/connected successfully/i);
   });
 
   it('is registered + permission-gated as a write tool', async () => {

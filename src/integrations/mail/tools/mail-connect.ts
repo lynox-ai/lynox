@@ -1,22 +1,33 @@
 // === mail_connect tool ===
 //
-// Agent-driven mailbox onboarding. The tool does DISCOVERY + CONFIG only —
-// it resolves the IMAP/SMTP servers (provider preset, or Thunderbird ISPDB
-// autodiscover, or explicit host/port) and then hands off to an in-chat
-// consent step (`connect_mail` prompt) where the USER enters the app-password.
+// Agent-driven mailbox onboarding for KNOWN consumer providers ONLY. The tool
+// does DISCOVERY + CONFIG for a recognised provider (Gmail, iCloud, Fastmail,
+// Yahoo, Outlook/Hotmail) — it resolves that provider's TRUSTED CONSTANT
+// IMAP/SMTP servers and hands off to an in-chat consent step (`connect_mail`
+// prompt) where the USER enters the app-password.
+//
+// CAPABILITY-SCOPE — why the agent path is preset-only (see
+// feedback_agent_tool_surface_is_attack_surface): the always-on tool registry
+// IS prompt-injection attack surface — a malicious mail body / web-fetch result
+// / uploaded doc the agent reads could invoke this tool on any turn. So the
+// agent path is scoped to the PARAMETER-SAFE subset: a known provider has
+// exactly ONE correct server set, bound from a constant, with ZERO agent host
+// control. An injected agent therefore cannot point a "@gmail.com" login at an
+// attacker's IMAP server to phish the user's real provider password. The
+// arbitrary-target variant (a custom / non-mainstream provider with an
+// attacker-influenceable IMAP/SMTP host) is deliberately NOT handled here — it
+// goes through the Settings → Mail UI, which is not prompt-injectable.
 //
 // SECURITY (SEC-3): the password is NEVER collected, seen, or returned by this
 // tool. The consent step posts it straight to POST /api/mail/accounts (which is
 // not walled by the infra-secret deny-list, so it works on managed) → vault.
 // The agent only ever receives a `connected | canceled` outcome. That is the
 // whole reason this is a bespoke prompt and not `ask_secret`: ask_secret for a
-// MAIL_ACCOUNT_* name is managed-blocked, and the account config (host/port)
-// can't ride a secret prompt anyway.
+// MAIL_ACCOUNT_* name is managed-blocked, and the account config can't ride a
+// secret prompt anyway.
 
-import type { IAgent, ToolEntry, MailConnectPromptData, MailConnectServer } from '../../../types/index.js';
-import { assertPublicHost } from '../../../core/network-guard.js';
+import type { IAgent, ToolEntry, MailConnectPromptData } from '../../../types/index.js';
 import { describePreset } from '../providers/presets.js';
-import { autodiscover } from '../providers/presets.js';
 import type { MailPresetSlug } from '../provider.js';
 
 interface MailConnectInput {
@@ -27,17 +38,12 @@ interface MailConnectInput {
   account_id?: string | undefined;
   /** Semantic role (a MailAccountType, e.g. 'personal'). Defaults to 'personal'. */
   account_type?: string | undefined;
-  /** Explicit IMAP host — supply (with smtp_host) to force a custom account
-   * instead of preset/autodiscover (e.g. a non-mainstream provider). */
-  imap_host?: string | undefined;
-  imap_port?: number | undefined;
-  smtp_host?: string | undefined;
-  smtp_port?: number | undefined;
 }
 
 // Common consumer-domain → provider-preset aliases. The preset table is keyed
 // by slug, not domain, and there is no domain lookup elsewhere — so build it
-// here. Unknown domains fall through to autodiscover.
+// here. This IS the agent-tool's supported-provider allowlist: an unknown
+// domain is routed to the Settings → Mail UI, never auto-discovered here.
 const DOMAIN_PRESET: Readonly<Record<string, Exclude<MailPresetSlug, 'custom'>>> = {
   'gmail.com': 'gmail',
   'googlemail.com': 'gmail',
@@ -62,26 +68,18 @@ function deriveId(address: string): string {
   return slug || 'mailbox';
 }
 
-/** Reject private/loopback hosts on the agent-supplied (custom/autodiscover)
- * connect path — mirrors the assertPublicHost the HTTP mail-account route runs
- * for custom presets (http-api custom branch). Preset hosts are trusted
- * constants and skip this. Throws on a private host. */
-async function assertPublicServers(imap: MailConnectServer, smtp: MailConnectServer): Promise<void> {
-  await assertPublicHost(imap.host);
-  await assertPublicHost(smtp.host);
-}
-
 export function createMailConnectTool(): ToolEntry<MailConnectInput> {
   return {
     definition: {
       name: 'mail_connect',
       description:
-        'Connect an email mailbox (IMAP/SMTP) so it can be read, searched, and replied to. ' +
-        'Give the user\'s email address; the tool auto-detects the provider (Gmail, iCloud, Fastmail, ' +
-        'Yahoo, Outlook) or discovers servers via autoconfig, then opens a SECURE in-chat form where the ' +
-        'user enters their app-password. NEVER ask the user to type their email password into the chat — ' +
-        'this tool collects it securely. You only learn whether the connection succeeded. ' +
-        'For an uncommon provider, pass imap_host + smtp_host explicitly.',
+        'Connect an email mailbox for a KNOWN provider (Gmail, iCloud, Fastmail, Yahoo, ' +
+        'Outlook/Hotmail) so it can be read, searched, and replied to. Give the user\'s email ' +
+        'address; the tool detects the provider and opens a SECURE in-chat form where the user ' +
+        'enters their app-password. NEVER ask the user to type their email password into chat — ' +
+        'this tool collects it securely, and you only learn whether the connection succeeded. ' +
+        'For ANY other or custom mail provider, tell the user to add the account in ' +
+        'Settings → Mail — this chat tool only supports the major providers.',
       input_schema: {
         type: 'object' as const,
         properties: {
@@ -92,10 +90,6 @@ export function createMailConnectTool(): ToolEntry<MailConnectInput> {
             type: 'string',
             description: 'Optional semantic role: personal, business, support, sales, info, etc. Defaults to personal.',
           },
-          imap_host: { type: 'string', description: 'Explicit IMAP host (with imap_port) for an uncommon provider. Omit to auto-detect.' },
-          imap_port: { type: 'number', description: 'IMAP port (default 993, implicit TLS).' },
-          smtp_host: { type: 'string', description: 'Explicit SMTP host (with smtp_port) for an uncommon provider.' },
-          smtp_port: { type: 'number', description: 'SMTP port (default 465, implicit TLS).' },
         },
         required: ['email'],
       },
@@ -116,56 +110,32 @@ export function createMailConnectTool(): ToolEntry<MailConnectInput> {
       }
 
       const domain = email.slice(at + 1).toLowerCase();
+      const slug = DOMAIN_PRESET[domain];
+      if (!slug) {
+        // Capability-scope: a non-preset domain implies an arbitrary mail host
+        // the agent (and thus a prompt injection) could influence. Connecting it
+        // would need IMAP/SMTP host parameters this tool deliberately does NOT
+        // expose — that arbitrary-target variant lives in the deliberate
+        // Settings → Mail UI, which is not prompt-injectable. Stage NOTHING and
+        // raise no consent step; just route the user to the UI.
+        return `mail_connect only supports the major providers (Gmail, iCloud, Fastmail, Yahoo, Outlook/Hotmail). "${domain}" isn't one of them. Ask the user to add this mailbox in Settings → Mail, where they can enter the custom IMAP/SMTP server details themselves. Do NOT ask the user to paste their email password into chat.`;
+      }
+
       const id = (input.account_id ?? deriveId(email)).trim() || deriveId(email);
       const displayName = (input.display_name ?? email).trim() || email;
       const type = (input.account_type ?? 'personal').trim() || 'personal';
 
-      let data: MailConnectPromptData;
-
-      const slug = DOMAIN_PRESET[domain];
-      if (slug) {
-        // 1. KNOWN consumer provider → ALWAYS its trusted constant hosts.
-        // This branch is checked FIRST and deliberately ignores any agent-
-        // supplied imap_host/smtp_host: otherwise a prompt-injected agent could
-        // stage `address=victim@gmail.com` + `imap_host=attacker.tld` and phish
-        // the user's real provider password against an attacker's IMAP server
-        // (a public attacker host passes assertPublicHost). A "@gmail.com" login
-        // has exactly one correct server set — bind it, don't trust the agent's
-        // hosts or rely on the user noticing the wrong host in the consent card.
-        const d = describePreset(slug);
-        data = {
-          id, displayName, address: email, preset: slug, type,
-          imap: d.imap, smtp: d.smtp,
-          appPasswordUrl: d.appPasswordUrl,
-          requires2FA: d.requires2FA,
-        };
-      } else if (input.imap_host && input.smtp_host) {
-        // 2. Genuinely custom domain (no known preset) → explicit host/port.
-        const imap: MailConnectServer = { host: input.imap_host.trim(), port: input.imap_port ?? 993, secure: (input.imap_port ?? 993) !== 143 };
-        const smtp: MailConnectServer = { host: input.smtp_host.trim(), port: input.smtp_port ?? 465, secure: (input.smtp_port ?? 465) === 465 };
-        try {
-          await assertPublicServers(imap, smtp);
-        } catch (err) {
-          return `mail_connect blocked: ${err instanceof Error ? err.message : String(err)}. The mail server must be reachable on a public address.`;
-        }
-        data = { id, displayName, address: email, preset: 'custom', type, imap, smtp };
-      } else {
-        // 3. Unknown custom domain, no explicit hosts → autodiscover (Thunderbird ISPDB, constant host).
-        let discovered;
-        try {
-          discovered = await autodiscover(email);
-        } catch (err) {
-          return `mail_connect could not auto-detect mail servers for "${domain}" (${err instanceof Error ? err.message : String(err)}). Ask the user for their IMAP and SMTP host, then call mail_connect again with imap_host + smtp_host.`;
-        }
-        const imap: MailConnectServer = { host: discovered.imap.host, port: discovered.imap.port, secure: discovered.imap.secure };
-        const smtp: MailConnectServer = { host: discovered.smtp.host, port: discovered.smtp.port, secure: discovered.smtp.secure };
-        try {
-          await assertPublicServers(imap, smtp);
-        } catch (err) {
-          return `mail_connect blocked: ${err instanceof Error ? err.message : String(err)}. The discovered mail server must be reachable on a public address.`;
-        }
-        data = { id, displayName, address: email, preset: 'custom', type, imap, smtp };
-      }
+      // KNOWN consumer provider → ALWAYS its trusted constant hosts. A
+      // "@gmail.com" login has exactly one correct server set; bind it from the
+      // preset constant. The agent has no host parameter to influence, so this
+      // is structurally un-phishable.
+      const d = describePreset(slug);
+      const data: MailConnectPromptData = {
+        id, displayName, address: email, preset: slug, type,
+        imap: d.imap, smtp: d.smtp,
+        appPasswordUrl: d.appPasswordUrl,
+        requires2FA: d.requires2FA,
+      };
 
       const outcome = await agent.promptMailConnect(data);
       switch (outcome) {
