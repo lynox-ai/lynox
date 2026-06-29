@@ -51,6 +51,29 @@ export function sanitizeAttachmentFilename(name: string): string {
 }
 
 /**
+ * Sanitise an uploaded file's name before it is interpolated into the LLM-facing
+ * `[File: name]` / `[Document: name]` framing (chat upload + knowledge-layer
+ * ingestion). A crafted name with a line break — a real C0 control OR an exotic
+ * separator (NEL/U+2028/U+2029/C1) — would otherwise put a pseudo-directive on
+ * its own visual line. Replaces all of them with a space (so the name stays a
+ * single readable line) and caps length. Unlike `stripUntrustedSeparators`,
+ * this also collapses TAB/LF/CR — a filename has no business containing them.
+ */
+export function sanitizeUploadFilename(name: string): string {
+  let out = '';
+  for (const ch of name) {
+    const cp = ch.codePointAt(0) ?? 0;
+    const exotic =
+      cp <= 31 || // C0 controls incl. TAB/LF/CR
+      (cp >= 127 && cp <= 159) || // DEL + C1 (incl. NEL 0x85)
+      cp === 8232 || // U+2028 LINE SEPARATOR
+      cp === 8233; // U+2029 PARAGRAPH SEPARATOR
+    out += exotic ? ' ' : ch;
+  }
+  return out.slice(0, 256);
+}
+
+/**
  * Read a fetch Response body as UTF-8 text, aborting once it exceeds maxBytes.
  * The fetch timeout bounds TIME, not BYTES — a hostile target streaming a
  * multi-GB body within the window would otherwise buffer it all and OOM the
