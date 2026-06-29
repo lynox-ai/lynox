@@ -1357,6 +1357,10 @@
 	div :global(.artifact-fullscreen) {
 		position: fixed;
 		inset: 0;
+		/* inset:0 stretches the height, but the card keeps its inline content
+		   width (~290px) so "fullscreen" rendered as a narrow left strip. Force
+		   full width so the overlay actually covers the viewport. */
+		width: 100%;
 		z-index: 9999;
 		margin: 0;
 		border-radius: 0;
