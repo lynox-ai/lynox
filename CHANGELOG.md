@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.21.0 — 2026-06-29
+
+Connect a mailbox from chat. A new agent flow resolves a known provider's servers and hands off to an in-chat consent step where you enter the app password — the password goes straight from the browser to the vault and never enters the agent context, run history, the SSE stream, or the prompt store; the agent only learns whether the connection succeeded. Plus chat-render robustness and agent-surface secret hardening. **No control-plane database migration**; the engine adds one additive per-tenant history-DB migration (v43, pending-prompts) applied on boot — rollback to 1.20.0 is a clean single-image swap.
+
+### Added
+- **Connect a mailbox from chat via a secure consent step.** A new `mail_connect` agent tool resolves a known provider's IMAP/SMTP servers (Gmail, iCloud, Fastmail, Yahoo, Outlook) and opens an in-chat `connect_mail` consent prompt where you enter the app password. The password posts straight from the browser to the vault — it never enters the agent context, run history, the SSE stream, or the prompt store; the agent only learns whether the connection succeeded. Custom or uncommon hosts stay in Settings → Mail. (#808)
+
+### Fixed
+- Inline chat artifact **fullscreen** now covers the full viewport instead of a narrow strip. (#811)
+- A stored plan with a malformed `phases` shape no longer crashes the thread on open; it degrades to an empty phase list. (#812)
+
+### Security
+- Keep **infrastructure/engine-internal secrets off the agent surface** — excluded from the session briefing and left unresolved in tool input. (#806)
+- **Reject mail account ids that collide** on the derived credential-vault key, so one account cannot resolve another's stored credential. (#807)
+- Render the connect-mail consent help link only for `https://` URLs — defense-in-depth on the new consent UI. (#813)
+
 ## 1.20.0 — 2026-06-29
 
 Documents become readable. A PDF or Word file dropped into chat is now text-extracted server-side and read by the agent instead of being rejected, and the extracted text persists into the knowledge layer so the document is auto-recalled in later turns and threads. The Wissen header gains a glanceable memories / entities / relations summary, scrollable tab rows fade at the edge to signal more content, and editing an artifact now re-renders its card in chat. **No engine or control-plane database migration** — uploaded documents ride the existing per-tenant knowledge layer; rollback to 1.19.0 is a clean single-image swap.
