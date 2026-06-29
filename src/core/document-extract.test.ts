@@ -5,6 +5,8 @@ import {
 	detectDocumentFormat,
 	DocumentExtractError,
 	MAX_EXTRACTED_CHARS,
+	withTimeout,
+	assertDocxWithinDecompressedBound,
 } from './document-extract.js';
 
 // ---------------------------------------------------------------------------
@@ -125,5 +127,141 @@ describe('extractDocumentText', () => {
 		expect(res!.truncated).toBe(true);
 		expect(res!.text.length).toBeGreaterThan(MAX_EXTRACTED_CHARS);
 		expect(res!.text).toContain('truncated');
+	});
+});
+
+// A single STORED entry whose headers declare a huge size — the cheap "honest"
+// bomb form (no real payload bytes, so the test stays light). Method 0 means the
+// real uncompressed size IS the compressed size, which the bound reads directly.
+function buildOversizeStoredDocx(declared: number): Buffer {
+	const name = Buffer.from('word/document.xml', 'utf-8');
+	const lh = Buffer.alloc(30);
+	lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); // local file header (magic-byte gate), method 0
+	lh.writeUInt16LE(name.length, 26);
+	const local = Buffer.concat([lh, name]);
+	const ch = Buffer.alloc(46);
+	ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); // method 0 (stored)
+	ch.writeUInt32LE(declared >>> 0, 20); // compressed size == real uncompressed for stored
+	ch.writeUInt32LE(declared >>> 0, 24);
+	ch.writeUInt16LE(name.length, 28);
+	const central = Buffer.concat([ch, name]);
+	const eocd = Buffer.alloc(22);
+	eocd.writeUInt32LE(0x06054b50, 0);
+	eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+	eocd.writeUInt32LE(central.length, 12);
+	eocd.writeUInt32LE(local.length, 16);
+	return Buffer.concat([local, central, eocd]);
+}
+
+// A DEFLATE entry whose stream really inflates to `uncompressed.length`, with the
+// declared size set HONESTLY here — the point is that the bound inflates with a
+// cap and measures the REAL output (a lying declared size would not help an
+// attacker, since the cap is on the actual inflation).
+function buildDeflateDocx(uncompressed: Buffer): Buffer {
+	const name = Buffer.from('word/document.xml', 'utf-8');
+	const comp = zlib.deflateRawSync(uncompressed);
+	const crc = zlib.crc32(uncompressed) >>> 0;
+	const lh = Buffer.alloc(30);
+	lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(8, 8); // method 8 (deflate)
+	lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(uncompressed.length, 22);
+	lh.writeUInt16LE(name.length, 26);
+	const local = Buffer.concat([lh, name, comp]);
+	const ch = Buffer.alloc(46);
+	ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(8, 10);
+	ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(uncompressed.length, 24);
+	ch.writeUInt16LE(name.length, 28); ch.writeUInt32LE(0, 42);
+	const central = Buffer.concat([ch, name]);
+	const eocd = Buffer.alloc(22);
+	eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+	eocd.writeUInt32LE(central.length, 12); eocd.writeUInt32LE(local.length, 16);
+	return Buffer.concat([local, central, eocd]);
+}
+
+// A two-entry archive: entry[0] is a method-8 entry with a GARBAGE deflate
+// stream (inflate throws a non-cap error — the shape that made the first
+// implementation `return` and abandon the whole scan); entry[1] is the real
+// DEFLATE bomb in word/document.xml (the part mammoth actually inflates). The
+// bound must keep scanning past entry[0] and still catch entry[1].
+function buildScanAbortBombDocx(): Buffer {
+	function localAndCentral(name: string, data: Buffer, crc: number, uncompressed: number, offset: number) {
+		const nameBuf = Buffer.from(name, 'utf-8');
+		const lh = Buffer.alloc(30);
+		lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(8, 8); // method 8
+		lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(uncompressed, 22);
+		lh.writeUInt16LE(nameBuf.length, 26);
+		const local = Buffer.concat([lh, nameBuf, data]);
+		const ch = Buffer.alloc(46);
+		ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(8, 10);
+		ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(uncompressed, 24);
+		ch.writeUInt16LE(nameBuf.length, 28); ch.writeUInt32LE(offset, 42);
+		const central = Buffer.concat([ch, nameBuf]);
+		return { local, central };
+	}
+	const junk = Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // invalid deflate -> Z_DATA_ERROR
+	const e0 = localAndCentral('junk.bin', junk, 0, junk.length, 0);
+	const bombRaw = Buffer.alloc(1024 * 1024, 0x41);
+	const bombData = zlib.deflateRawSync(bombRaw);
+	const e1 = localAndCentral('word/document.xml', bombData, zlib.crc32(bombRaw) >>> 0, bombRaw.length, e0.local.length);
+	const locals = Buffer.concat([e0.local, e1.local]);
+	const central = Buffer.concat([e0.central, e1.central]);
+	const eocd = Buffer.alloc(22);
+	eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(2, 8); eocd.writeUInt16LE(2, 10);
+	eocd.writeUInt32LE(central.length, 12); eocd.writeUInt32LE(locals.length, 16);
+	return Buffer.concat([locals, central, eocd]);
+}
+
+describe('assertDocxWithinDecompressedBound', () => {
+	it('keeps scanning past a corrupt entry to catch a bomb in a later entry (no scan-abort bypass)', () => {
+		expect(() => assertDocxWithinDecompressedBound(buildScanAbortBombDocx(), 64 * 1024)).toThrow(DocumentExtractError);
+	});
+
+	it('rejects when entries inflate past the cap — measures REAL inflation, bounded memory', () => {
+		// 1 MB of 'A' compresses to a few KB but inflates to 1 MB; a 64 KB cap must
+		// reject it without materializing the full output.
+		const docx = buildDeflateDocx(Buffer.alloc(1024 * 1024, 0x41));
+		expect(docx.length).toBeLessThan(10_000); // tiny on disk
+		expect(() => assertDocxWithinDecompressedBound(docx, 64 * 1024)).toThrow(DocumentExtractError);
+	});
+
+	it('rejects a stored entry whose size exceeds the cap', () => {
+		expect(() => assertDocxWithinDecompressedBound(buildOversizeStoredDocx(60 * 1024 * 1024), 50 * 1024 * 1024))
+			.toThrow(DocumentExtractError);
+	});
+
+	it('rejects a ZIP64 size sentinel outright', () => {
+		expect(() => assertDocxWithinDecompressedBound(buildOversizeStoredDocx(0xffffffff), 50 * 1024 * 1024))
+			.toThrow(DocumentExtractError);
+	});
+
+	it('passes a normal small DOCX (no false-positive) and an unparseable buffer (deferred to mammoth)', () => {
+		expect(() => assertDocxWithinDecompressedBound(buildDocx('a short memo'), 50 * 1024 * 1024)).not.toThrow();
+		expect(() => assertDocxWithinDecompressedBound(Buffer.from('not a zip'), 50 * 1024 * 1024)).not.toThrow();
+	});
+});
+
+describe('extractDocumentText — hostile-input bounds', () => {
+	it('rejects an oversized DOCX end-to-end before mammoth inflates it', async () => {
+		const bomb = buildOversizeStoredDocx(60 * 1024 * 1024);
+		expect(detectDocumentFormat(bomb, 'bomb.docx')).toBe('docx');
+		await expect(extractDocumentText(bomb, 'bomb.docx')).rejects.toBeInstanceOf(DocumentExtractError);
+	});
+
+	it('still extracts a normal DOCX (the bound does not false-positive)', async () => {
+		const res = await extractDocumentText(buildDocx('A normal short memo'), 'memo.docx');
+		expect(res).not.toBeNull();
+		expect(res!.text).toContain('A normal short memo');
+	});
+});
+
+describe('withTimeout', () => {
+	it('rejects with the supplied error when the work does not settle in time', async () => {
+		const never = new Promise<string>(() => { /* never settles */ });
+		await expect(
+			withTimeout(never, 5, () => new DocumentExtractError('pdf', 'extraction timed out')),
+		).rejects.toBeInstanceOf(DocumentExtractError);
+	});
+
+	it('returns the value when the work settles in time', async () => {
+		await expect(withTimeout(Promise.resolve('ok'), 1000, () => new Error('x'))).resolves.toBe('ok');
 	});
 });

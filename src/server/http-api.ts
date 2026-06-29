@@ -16,7 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
-import { stripUntrustedSeparators, sanitizeAttachmentFilename } from '../core/sanitize.js';
+import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
@@ -1958,10 +1958,11 @@ export class LynoxHTTPApi {
           // Sanitize file.name before any interpolation: it's user-controlled
           // (POST body), and naive interpolation into the LLM prompt as
           // `[File: ${name}]\n${text}` lets a crafted name break out of the
-          // header line via embedded newlines and inject pseudo-system text.
-          const safeName = (typeof file.name === 'string' ? file.name : 'unknown')
-            .replace(/[\r\n\x00-\x1f]/g, ' ')
-            .slice(0, 256);
+          // header line via an embedded line break and inject pseudo-system
+          // text. sanitizeUploadFilename collapses C0 AND the exotic separators
+          // (NEL/U+2028/U+2029/C1) a bare `[\r\n\x00-\x1f]` strip would miss,
+          // and the same safeName flows into the knowledge-layer ingestion below.
+          const safeName = sanitizeUploadFilename(typeof file.name === 'string' ? file.name : 'unknown');
           const rawType = typeof file.type === 'string' ? file.type : '';
           const isImage = rawType.startsWith('image/');
           if (isImage && !ALLOWED_IMAGE_TYPES.has(rawType)) {
@@ -1991,7 +1992,14 @@ export class LynoxHTTPApi {
             try {
               const extracted = await extractDocumentText(buf, safeName);
               if (extracted) {
-                content.push({ type: 'text', text: `[File: ${safeName}]\n${extracted.text}` });
+                // The extracted body is untrusted third-party content (the doc
+                // may have been authored by someone other than the uploader).
+                // Strip the exotic separators (NEL/U+2028/U+2029/C1) that would
+                // otherwise put a pseudo-directive on its own line — the same
+                // hygiene the user's own message text and the watch page-text
+                // get — before it is framed to the model AND persisted+recalled.
+                const safeBody = stripUntrustedSeparators(extracted.text);
+                content.push({ type: 'text', text: `[File: ${safeName}]\n${safeBody}` });
                 // U1 persist+recall: store the document into the knowledge layer
                 // (best-effort, OFF the request path) so it survives the turn and
                 // is auto-recalled on later turns. Never awaited — embedding /
@@ -2001,7 +2009,7 @@ export class LynoxHTTPApi {
                 const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
                 if (kl && docScope) {
                   void ingestDocumentText(kl, {
-                    text: extracted.text,
+                    text: safeBody,
                     fileName: safeName,
                     scope: docScope,
                     threadId: session.sessionId,

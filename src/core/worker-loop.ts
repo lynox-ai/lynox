@@ -11,7 +11,7 @@
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
-import { readBodyCapped } from './sanitize.js';
+import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -73,10 +73,17 @@ export function extractWatchSignal(html: string, selector?: string): string {
       if (m && m[1]) s = m[1];
     }
   }
-  return s
-    // Bounded tag length keeps this linear instead of O(n^2) on '<' spam.
-    .replace(/<[^>]{0,1000}>/g, ' ')
-    .replace(/&(nbsp|amp|lt|gt|quot|#39);/g, ' ')
+  // Strip exotic separators/control chars (NEL/U+2028/U+2029/C0/C1) the `\s+`
+  // collapse below would otherwise leave on this attacker-controlled page text
+  // before it is framed into the analysis LLM prompt — the same hardening #796
+  // applies to the user's own message text. (`\s` already covers space/tab/LF/
+  // CR/U+2028/U+2029 but NOT NEL or the rest of C0/C1.)
+  return stripUntrustedSeparators(
+    s
+      // Bounded tag length keeps this linear instead of O(n^2) on '<' spam.
+      .replace(/<[^>]{0,1000}>/g, ' ')
+      .replace(/&(nbsp|amp|lt|gt|quot|#39);/g, ' '),
+  )
     .replace(/\s+/g, ' ')
     .trim();
 }
