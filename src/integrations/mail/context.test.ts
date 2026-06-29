@@ -192,6 +192,21 @@ describe('MailContext — addAccount', () => {
     expect(ctx.registry.list()).toEqual(['rafael-gmail']);
     expect(ctx.credStore.resolve('rafael-gmail').pass).toBe('rotated-password');
   });
+
+  it('rejects a new account whose id collides with an existing one on the vault key', async () => {
+    await ctx.addAccount(INPUT_GMAIL); // id 'rafael-gmail' → MAIL_ACCOUNT_RAFAEL_GMAIL
+    // 'rafael.gmail' sanitizes to the SAME vault key — must be refused so its
+    // credential cannot overwrite or be resolved as the existing account's.
+    await expect(
+      ctx.addAccount({
+        ...INPUT_GMAIL,
+        config: { ...GMAIL_ACCOUNT, id: 'rafael.gmail', address: 'other@gmail.com' },
+        credentials: { user: 'other@gmail.com', pass: 'attacker-pass' },
+      }),
+    ).rejects.toThrow(/collides/);
+    expect(ctx.registry.list()).toEqual(['rafael-gmail']);
+    expect(ctx.credStore.resolve('rafael-gmail').pass).not.toBe('attacker-pass');
+  });
 });
 
 describe('MailContext — removeAccount', () => {
