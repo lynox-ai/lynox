@@ -140,21 +140,33 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  *     Cookie auth is promoted to admin scope at L~1049, so all gates below
  *     are no-ops for cookie users. The user *is* the admin.
  *
- *  2. **Managed BYOK / starter** — `LYNOX_HTTP_ADMIN_SECRET` IS set,
- *     billing tier `starter` (canonical `hosted`). Customer brings their own
- *     key via the SetupBanner. Provider + api_base_url + cost-caps stay
- *     configurable (it's their key, their bill). Only the secret-store write
- *     needs the BYOK whitelist (otherwise a managed cookie user — who has user
- *     scope — can't save their key).
+ *  2. **Managed BYOK / starter** — billing tier `starter` (canonical `hosted`).
+ *     Customer brings their own key via the SetupBanner. Provider +
+ *     api_base_url + cost-caps stay configurable (it's their key, their bill).
+ *     Only the secret-store write needs the BYOK whitelist.
  *
  *  3. **Managed pool** — billing tier `managed|managed_pro|eu`.
  *     CP delivers the LLM. Provider, cost caps, MCP servers, OAuth ids,
  *     search/backup config, etc. are all CP-managed. Only UI preferences
  *     are user-writable.
  *
+ * IMPORTANT scope-reality note: the control plane does NOT currently
+ * provision `LYNOX_HTTP_ADMIN_SECRET`, so on a managed instance the customer's
+ * session cookie actually resolves to **admin** scope, not user. The managed
+ * gates below DON'T depend on cookie scope — they key on the billing tier
+ * (`requiresAdminSplitGate`/`requiresConfigLockGate`), so the secret-write
+ * deny-list + config-lock hold regardless. The remaining exposure (admin-scoped
+ * routes the customer can therefore reach) is handled per-route:
+ * `/api/vault/*` + `/api/auth/token` self-guard inline, and data-exfil /
+ * lifecycle routes (migration export of the decrypted vault, bulk delete,
+ * backup restore) use `denyOnManagedInstance`. Any NEW such route must add that
+ * guard. The broader fail-closed remediation — pinning the managed cookie to
+ * `user` — is deferred (it collides with the deliberate admin scope of the
+ * mail-account routes the managed mail-connect flow drives through the cookie).
+ *
  * Two predicates so a single tier never accidentally pulls in the wrong gate:
- *   - `requiresAdminSplitGate()` → true for both BYOK and pool (admin secret
- *     is present, cookie users get user scope, secret writes need whitelist).
+ *   - `requiresAdminSplitGate()` → true for both BYOK and pool (secret writes
+ *     need the whitelist; keyed on billing tier, not cookie scope).
  *   - `requiresConfigLockGate()` → true ONLY for pool (BYOK keeps full config
  *     control because the customer pays for and operates their own LLM).
  */
@@ -326,6 +338,29 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 
 function errorResponse(res: ServerResponse, status: number, message: string): void {
   jsonResponse(res, status, { error: message });
+}
+
+/**
+ * Deny a request on a control-plane-managed instance. These admin routes
+ * exfiltrate data off-box (full export, migration export of the *decrypted
+ * vault*) or run instance-wide data lifecycle (wipe, backup-restore) that the
+ * control plane owns. On a single-tenant managed box the customer's session
+ * cookie carries admin scope (no `LYNOX_HTTP_ADMIN_SECRET` is provisioned — the
+ * missing-admin-secret drift), so route scope alone does not stop them; this billing-tier
+ * guard does. Mirrors the inline guard already on /api/vault/* + /api/auth/token.
+ *
+ * NOTE: this is a deny-list. Any NEW admin route that exfiltrates data or
+ * mutates instance-wide state must add this guard (or the customer cookie can
+ * reach it). The broader fail-closed fix — pinning the managed cookie to `user`
+ * scope — is deferred (it conflicts with the deliberate admin-scope of the
+ * mail-account routes the managed mail-connect flow needs; see PR notes).
+ */
+function denyOnManagedInstance(res: ServerResponse, what: string): boolean {
+  if (readEnvAlias('LYNOX_BILLING_TIER')) {
+    errorResponse(res, 403, `Managed instance: ${what} is system-controlled`);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -3276,9 +3311,19 @@ export class LynoxHTTPApi {
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('admin', 'DELETE', '/api/secrets/:name', async (_req, res, params) => {
+      const name = params['name']!;
+      // Mirror the PUT /api/secrets/:name gate: on a managed instance the
+      // customer cookie carries admin scope, so without this an infra /
+      // channel-managed secret (LYNOX_VAULT_KEY, MANAGED_*, MAIL_ACCOUNT_*,
+      // GOOGLE_*, …) could be deleted — breaking the instance. Their own tool
+      // credentials (SHOPIFY_*, …) still delete freely.
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
+        errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Manage this via the relevant integration UI or contact support@lynox.ai.`);
+        return;
+      }
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
-      const deleted = store.deleteSecret(params['name']!);
+      const deleted = store.deleteSecret(name);
       jsonResponse(res, 200, { deleted });
     }));
 
@@ -5664,6 +5709,7 @@ export class LynoxHTTPApi {
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/backups/:id/restore', async (_req, res, params) => {
+      if (denyOnManagedInstance(res, 'backup restore')) return;
       const bm = engine.getBackupManager();
       if (!requireService(res, bm, 'Backup manager')) return;
       const backupPath = bm.getBackupPath(params['id']!);
@@ -5909,6 +5955,7 @@ export class LynoxHTTPApi {
 
     // DELETE /api/data — GDPR Art. 17 (Right to Erasure)
     this.addStatic('admin', 'DELETE /api/data', async (_req, res, _params, body) => {
+      if (denyOnManagedInstance(res, 'bulk data deletion')) return;
       const b = body as Record<string, unknown> | null;
       const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';
       if (confirm !== 'DELETE_ALL_DATA') {
@@ -6176,6 +6223,11 @@ export class LynoxHTTPApi {
     this.addStatic('admin', 'POST /api/migration/export', async (req, res, _params, body) => {
       // Orchestrated migration: engine handles ECDH + export + transfer to target.
       // Browser is just the orchestrator — progress reported via SSE.
+      // The exporter ships the ENTIRE decrypted vault (all infra + customer
+      // secrets) + every SQLite DB to a caller-chosen target. On a managed box
+      // that is a full off-box exfil the control plane must own — managed data
+      // portability is CP-mediated, not a raw customer-cookie transfer.
+      if (denyOnManagedInstance(res, 'migration export')) return;
       const b = body as Record<string, unknown> | null;
       const targetUrl = typeof b?.['targetUrl'] === 'string' ? b['targetUrl'] : '';
       const migrationToken = typeof b?.['migrationToken'] === 'string' ? b['migrationToken'] : '';

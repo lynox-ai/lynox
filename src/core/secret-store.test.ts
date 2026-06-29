@@ -213,6 +213,10 @@ describe('SecretStore', () => {
     it('isInfraSecret matches infra prefixes, not integration secrets', () => {
       expect(isInfraSecret('MAIL_ACCOUNT_RAFAEL_GMAIL')).toBe(true);
       expect(isInfraSecret('GOOGLE_OAUTH_TOKENS')).toBe(true);
+      // OAuth *app* credentials are CP-provisioned infra (repointing them =
+      // OAuth hijacking), same class as the OAuth tokens above.
+      expect(isInfraSecret('GOOGLE_CLIENT_ID')).toBe(true);
+      expect(isInfraSecret('GOOGLE_CLIENT_SECRET')).toBe(true);
       expect(isInfraSecret('SMTP_PASSWORD')).toBe(true);
       expect(isInfraSecret('IMAP_PASSWORD')).toBe(true);
       expect(isInfraSecret('LYNOX_HTTP_SECRET')).toBe(true);
