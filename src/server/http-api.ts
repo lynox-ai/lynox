@@ -20,6 +20,7 @@ import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFil
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
+import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
@@ -4516,6 +4517,19 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Managed credit gate — TTS hits the lynox-supplied pool key on managed
+      // instances, so it must clear the same onBeforeRun gate as a chat run:
+      // a credit-exhausted tenant (or one whose control plane is stale →
+      // fail-closed) is blocked here BEFORE any provider spend, and before the
+      // 200 SSE head is written so the client gets a clean error status. No-op
+      // on self-host (no hooks registered). The matching debit fires after
+      // synthesis below, keyed on this run id.
+      const gate = await fireBeforeRunGate(engine, 'fast');
+      if (gate.blockedReason) {
+        errorResponse(res, 402, gate.blockedReason);
+        return;
+      }
+
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'X-lynox-AI-Generated': 'true',
@@ -4548,6 +4562,12 @@ export class LynoxHTTPApi {
         // counter — it isn't tied to a chat Session, and the dashboard's
         // daily/monthly caps still pick the cost up via RunHistory.)
         const costUsd = meta.characters * SPEAK_USD_PER_CHAR;
+        // Debit the spend to the control-plane balance on managed instances
+        // (no-op on self-host). Keyed on the gate's run id so the CP dedups the
+        // debit. Mirrors Session.run's onAfterRun — non-fatal, never breaks the
+        // audio response. Without this the pool-key TTS cost was written to the
+        // local dashboard but never deducted from the customer's balance.
+        reportMeteredCost(engine, gate.runId, costUsd, 'fast');
         // Persist as a RunRecord so the Usage Dashboard can show voice TTS
         // cost as its own line item. See prd/usage-dashboard.md. Best-effort:
         // history failure must not break audio streaming to the client.
@@ -4602,6 +4622,21 @@ export class LynoxHTTPApi {
         : null;
       if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
       const buffer = Buffer.from(audioData, 'base64');
+
+      // Managed credit gate — STT shares the lynox-supplied pool key, so a
+      // credit-exhausted / fail-closed tenant is blocked here before any
+      // provider spend (same onBeforeRun gate as TTS + chat runs). No-op on
+      // self-host. NOTE: the matching onAfterRun debit is intentionally NOT
+      // wired yet — STT has no per-call cost rate in the codebase (unlike
+      // SPEAK_USD_PER_CHAR for TTS). The audio duration is already captured
+      // below (`durationSec`), so once a Voxtral STT $/min rate is confirmed
+      // the debit is a one-line reportMeteredCost() call. Tracked as a
+      // follow-up; the gate alone closes the uncapped-drive abuse path.
+      const sttGate = await fireBeforeRunGate(engine, 'fast');
+      if (sttGate.blockedReason) {
+        errorResponse(res, 402, sttGate.blockedReason);
+        return;
+      }
 
       // Session context pulls CRM contacts, API profile names, thread titles
       // and KG entity labels so the session glossary can correct proper-noun
