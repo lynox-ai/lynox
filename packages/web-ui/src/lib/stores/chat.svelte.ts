@@ -2219,6 +2219,10 @@ export function newChat() {
 	changesetLoading = false;
 	skipExtraction = false;
 	chatError = null;
+	// Detach the interrupted-run banner too — it belongs to the thread we just
+	// left, not the empty new chat (the state otherwise leaks across as a stale
+	// "run interrupted" warning on a chat that never ran anything).
+	runInterrupted = null;
 	messageQueue = [];
 	sessionModel = null;
 	contextBudget = null;
