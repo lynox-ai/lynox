@@ -32,7 +32,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
-import { maskSecretPatterns } from '../core/secret-store.js';
+import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -204,17 +204,12 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  * Everything else passes: SHOPIFY_*, STRIPE_*, DATAFORSEO_*, BREVO_*,
  * HETZNER_*, ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.
  */
-const INFRA_ADMIN_ONLY_PATTERNS: ReadonlyArray<RegExp> = [
-  /^LYNOX_/,
-  /^MANAGED_/,
-  /^MAIL_ACCOUNT_/,
-  /^GOOGLE_OAUTH_/,
-  /^SMTP_/,
-  /^IMAP_/,
-];
-
+// Single source of truth: `INFRA_SECRET_PATTERNS` / `isInfraSecret` in
+// secret-store.ts. The same set is used there to keep these names out of the
+// agent's session briefing + tool-input secret resolution (exfil guard), so
+// the write deny-list and the agent-invisible set can never drift apart.
 function isAdminOnlySecret(name: string): boolean {
-  return INFRA_ADMIN_ONLY_PATTERNS.some((p) => p.test(name));
+  return isInfraSecret(name);
 }
 
 /**

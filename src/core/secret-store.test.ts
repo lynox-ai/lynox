@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, isInfraSecret } from './secret-store.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
 
@@ -204,6 +204,59 @@ describe('SecretStore', () => {
         matches.push(match[1]!);
       }
       expect(matches).toEqual(['MY_API_KEY', 'GITHUB_TOKEN']);
+    });
+  });
+
+  // === Infrastructure secrets (exfil guard) ===
+
+  describe('infrastructure secrets (exfil guard)', () => {
+    it('isInfraSecret matches infra prefixes, not integration secrets', () => {
+      expect(isInfraSecret('MAIL_ACCOUNT_RAFAEL_GMAIL')).toBe(true);
+      expect(isInfraSecret('GOOGLE_OAUTH_TOKENS')).toBe(true);
+      expect(isInfraSecret('SMTP_PASSWORD')).toBe(true);
+      expect(isInfraSecret('IMAP_PASSWORD')).toBe(true);
+      expect(isInfraSecret('LYNOX_HTTP_SECRET')).toBe(true);
+      expect(isInfraSecret('MANAGED_TOKEN')).toBe(true);
+      expect(isInfraSecret('STRIPE_API_KEY')).toBe(false);
+      expect(isInfraSecret('ANTHROPIC_API_KEY')).toBe(false);
+      expect(isInfraSecret('SHOPIFY_ACCESS_TOKEN')).toBe(false);
+    });
+
+    it('listAgentVisibleNames excludes infra secrets but keeps integration secrets', () => {
+      const vault = mockVault([
+        ['MAIL_ACCOUNT_RAFAEL_GMAIL', { value: '{"user":"r","pass":"app-pw-secret"}', scope: 'any', ttlMs: 0 }],
+        ['STRIPE_API_KEY', { value: 'sk_live_xxxxxxxxxx', scope: 'any', ttlMs: 0 }],
+      ]);
+      const store = new SecretStore(undefined, vault);
+      const visible = store.listAgentVisibleNames();
+      expect(visible).toContain('STRIPE_API_KEY');
+      expect(visible).not.toContain('MAIL_ACCOUNT_RAFAEL_GMAIL');
+      // listNames() still returns everything (masking + settings UI rely on it)
+      expect(store.listNames()).toContain('MAIL_ACCOUNT_RAFAEL_GMAIL');
+    });
+
+    it('resolveSecretRefs never expands an infra secret ref into tool input', () => {
+      const vault = mockVault([
+        ['MAIL_ACCOUNT_RAFAEL_GMAIL', { value: '{"user":"r","pass":"app-pw-secret"}', scope: 'any', ttlMs: 0 }],
+        ['STRIPE_API_KEY', { value: 'sk_live_realstripekey', scope: 'any', ttlMs: 0 }],
+      ]);
+      const store = new SecretStore(undefined, vault);
+      // both are vault-backed → auto-consented; only the infra ref must stay literal
+      const out = store.resolveSecretRefs({
+        body: 'mail=secret:MAIL_ACCOUNT_RAFAEL_GMAIL key=secret:STRIPE_API_KEY',
+      }) as { body: string };
+      expect(out.body).toContain('secret:MAIL_ACCOUNT_RAFAEL_GMAIL'); // unresolved literal
+      expect(out.body).not.toContain('app-pw-secret');                // credential value never leaks
+      expect(out.body).toContain('sk_live_realstripekey');            // integration secret still resolves
+    });
+
+    it('maskSecrets still redacts an infra secret value if it surfaces', () => {
+      const vault = mockVault([
+        ['MAIL_ACCOUNT_RAFAEL_GMAIL', { value: 'app-pw-secret-value', scope: 'any', ttlMs: 0 }],
+      ]);
+      const store = new SecretStore(undefined, vault);
+      const masked = store.maskSecrets('leaked app-pw-secret-value here');
+      expect(masked).not.toContain('app-pw-secret-value');
     });
   });
 
