@@ -35,6 +35,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = createEngineDb();
     const expected = [
       'subjects', 'people', 'organizations', 'engagements', 'products', 'services',
+      'threads', 'thread_messages', 'pending_prompts',
       'memories', 'memory_subjects', 'subject_cooccurrences', 'supersedes', 'relationships',
       'connections', 'artifacts', 'workflows', 'triggers', 'tasks', 'conflicts',
     ];
@@ -56,6 +57,12 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     ).toThrow(/UNIQUE/i);
     // A different kind is allowed (the unique key is (lower(name), kind, owner)).
     db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3', 'product', 'Acme Industries')").run();
+    // The guard is scoped to person/organization — engagement identity is
+    // provider×client×period, not name, so two same-named engagements coexist.
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('e1', 'engagement', 'Website Redesign')").run();
+    expect(() =>
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('e2', 'engagement', 'Website Redesign')").run(),
+    ).not.toThrow();
     // Archiving s1 frees the slot (partial index: WHERE archived_at IS NULL).
     db.prepare("UPDATE subjects SET archived_at = datetime('now') WHERE id = 's1'").run();
     expect(() =>
@@ -95,14 +102,25 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
-  it('keeps thread/run references SOFT (no FK) in S0', () => {
+  it('keeps source_run_id SOFT but enforces source_thread_id as a real FK', () => {
     const e = createEngineDb();
     const db = e.getDb();
     db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s', 'person', 'X')").run();
-    // source_run_id (history.db) + source_thread_id (pre-S2) are bare TEXT — arbitrary values accepted.
+    // source_run_id → history.db runs: permanently SOFT, arbitrary value accepted.
     expect(() =>
-      db.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_run_id, source_thread_id) VALUES ('m','t','knowledge','global','','run-does-not-exist','thread-does-not-exist')").run(),
+      db.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_run_id) VALUES ('m1','t','knowledge','global','','run-does-not-exist')").run(),
     ).not.toThrow();
+    // source_thread_id is now a REAL FK (the spine is in engine.db): a bad ref throws.
+    expect(() =>
+      db.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_thread_id) VALUES ('m2','t','knowledge','global','','thread-does-not-exist')").run(),
+    ).toThrow(/FOREIGN KEY/i);
+    // A real thread satisfies it, and deleting that thread SET NULLs the memory's ref.
+    db.prepare("INSERT INTO threads (id) VALUES ('th1')").run();
+    db.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_thread_id) VALUES ('m3','t','knowledge','global','','th1')").run();
+    db.prepare("INSERT INTO artifacts (id, type, thread_id) VALUES ('a1','html','th1')").run();
+    db.prepare("DELETE FROM threads WHERE id='th1'").run();
+    expect((db.prepare("SELECT source_thread_id s FROM memories WHERE id='m3'").get() as { s: string | null }).s).toBeNull();
+    expect((db.prepare("SELECT thread_id t FROM artifacts WHERE id='a1'").get() as { t: string | null }).t).toBeNull();
     e.close();
   });
 

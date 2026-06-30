@@ -18,11 +18,17 @@ import { ensureDirSync } from './atomic-write.js';
  *   - Additive: this file is created ALONGSIDE the legacy 6 DB files; nothing
  *     reads or writes it yet. S1 re-points the read/write paths; S2 does the
  *     one-time data re-map + folds the legacy files in + deletes them.
- *   - Refs to `threads`/`runs` are SOFT (bare TEXT) here: `runs` stays in
- *     history.db permanently (accepted cross-file softness); the `threads` spine
- *     physically moves into engine.db during the S2 consolidation, at which point
- *     `source_thread_id` is upgraded to a real FK. Every OTHER reference below is
- *     an intra-file FK with real cascade.
+ *   - The `threads` spine (threads/thread_messages/pending_prompts) IS created
+ *     here, so `memories.source_thread_id` + `artifacts.thread_id` are REAL FKs.
+ *     Three reference classes stay SOFT (bare TEXT) by design, NOT FK:
+ *       · `*.source_run_id` / `created_in_run_id` — `runs` lives in history.db
+ *         permanently (accepted cross-file softness; runs are append-only logs);
+ *       · `*.scope_type`/`scope_id` — the `scopes` axis consolidates at S2;
+ *       · `memories.superseded_by` — a denormalized pointer; the `supersedes`
+ *         join table is the FK'd source of truth.
+ *     The legacy inbox/datastore/policy tables likewise fold in at S2 (verbatim
+ *     ATTACH-copy, no re-authoring). Every OTHER reference below is an intra-file
+ *     FK with real cascade.
  *   - Encryption posture mirrors RunHistory (D2): at-rest AES-256-GCM via an
  *     HKDF-derived key from the vault key. The S1 store classes that share this
  *     connection call `enc()`/`dec()` for sensitive columns.
@@ -42,7 +48,7 @@ function getDefaultDbPath(): string {
 // ── Migration SQL ───────────────────────────────────────────────
 //
 // v1 = the full S0 baseline. A fresh install gets this single clean CREATE per
-// table (the legacy 41/5/16-step replays collapse into one baseline). Forward
+// table (the legacy 43/5/16-step replays collapse into one baseline). Forward
 // FK references (e.g. relationships → memories) are fine in one exec(): SQLite
 // defers parent-table existence to row-DML, and all tables are created together.
 
@@ -67,8 +73,16 @@ const MIGRATIONS: string[] = [
      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
    );
+   -- Canonical dedup guard the legacy 'entities' table never had — but scoped to
+   -- the IDENTITY-BY-NAME kinds. An engagement's identity is provider×client×period
+   -- (not its name) and two same-named products/services can legitimately coexist;
+   -- name-dedup is only correct for person/organization. NOTE: 'name' MUST stay
+   -- PLAINTEXT (never enc()'d) — this index is on LOWER(name), and random-IV GCM
+   -- ciphertext would defeat dedup (AquaNatura×3 would slip through). S1 encrypts
+   -- only non-indexed sensitive columns (people.email/phone, memories.text).
    CREATE UNIQUE INDEX idx_subjects_canonical
-     ON subjects(LOWER(name), kind, owner_user_id) WHERE archived_at IS NULL;
+     ON subjects(LOWER(name), kind, owner_user_id)
+     WHERE archived_at IS NULL AND kind IN ('person','organization');
    CREATE INDEX idx_subjects_kind     ON subjects(kind);
    CREATE INDEX idx_subjects_self     ON subjects(is_self);
    CREATE INDEX idx_subjects_parent   ON subjects(parent_id);
@@ -88,12 +102,14 @@ const MIGRATIONS: string[] = [
    -- engagement = customer × OWN-firm × time. provider/client make the
    -- multi-firm dimension EXPLICIT so a customer shared across two of the
    -- operator's firms is ONE subject with TWO engagements (no duplicate).
+   -- Lifecycle lives on subjects.status (the generic, kind-specific status field) —
+   -- NOT a second engagements.state, which would encode it twice with no authority.
    CREATE TABLE engagements (
      subject_id          TEXT PRIMARY KEY REFERENCES subjects(id) ON DELETE CASCADE,
      provider_subject_id TEXT REFERENCES subjects(id) ON DELETE SET NULL,  -- the is_self firm
      client_subject_id   TEXT REFERENCES subjects(id) ON DELETE SET NULL,  -- the customer
      started_at TEXT, ended_at TEXT, budget_cents INTEGER, currency TEXT,
-     billing_model TEXT, state TEXT NOT NULL DEFAULT 'open'
+     billing_model TEXT
    );
    CREATE INDEX idx_engagements_provider ON engagements(provider_subject_id);
    CREATE INDEX idx_engagements_client   ON engagements(client_subject_id);
@@ -106,9 +122,73 @@ const MIGRATIONS: string[] = [
      hourly_rate_cents INTEGER, currency TEXT
    );
 
+   -- ── SPINE: threads / thread_messages / pending_prompts ─────────
+   -- The durable interaction + reasoning log. Authored to match the live v43
+   -- history.db shape verbatim (so the S2 data-move is a pure INSERT..SELECT),
+   -- plus primary_subject_id — so the memories/artifacts → threads FKs are REAL
+   -- here, not soft. Empty in S0; live threads stay in history.db until S2.
+   CREATE TABLE threads (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL DEFAULT '',
+     model_tier TEXT NOT NULL DEFAULT 'sonnet',
+     context_id TEXT NOT NULL DEFAULT '',
+     message_count INTEGER NOT NULL DEFAULT 0,
+     total_tokens INTEGER NOT NULL DEFAULT 0,
+     total_cost_usd REAL NOT NULL DEFAULT 0,
+     summary TEXT,
+     summary_up_to INTEGER NOT NULL DEFAULT 0,
+     is_archived INTEGER NOT NULL DEFAULT 0,
+     is_favorite INTEGER NOT NULL DEFAULT 0,
+     skip_extraction INTEGER NOT NULL DEFAULT 0,
+     is_unread INTEGER NOT NULL DEFAULT 0,
+     primary_subject_id TEXT REFERENCES subjects(id) ON DELETE SET NULL,  -- NEW: default subject for this thread's writes
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX idx_threads_updated  ON threads(updated_at);
+   CREATE INDEX idx_threads_archived ON threads(is_archived);
+   CREATE INDEX idx_threads_favorite ON threads(is_favorite);
+   CREATE INDEX idx_threads_subject  ON threads(primary_subject_id);
+
+   CREATE TABLE thread_messages (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     role TEXT NOT NULL,
+     content_json TEXT NOT NULL,
+     usage_json TEXT,
+     display_only INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX idx_thread_messages_thread ON thread_messages(thread_id, seq);
+
+   CREATE TABLE pending_prompts (
+     id TEXT PRIMARY KEY,
+     session_id TEXT NOT NULL,
+     prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+     question TEXT NOT NULL,
+     options_json TEXT,
+     secret_name TEXT,
+     secret_key_type TEXT,
+     answer TEXT,
+     answer_saved INTEGER,
+     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+     questions_json TEXT,
+     partial_answers_json TEXT,
+     answer_error TEXT,
+     multi_select INTEGER,
+     payload_json TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     answered_at TEXT,
+     expires_at TEXT NOT NULL
+   );
+   CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status);
+   CREATE UNIQUE INDEX idx_pending_prompts_session_unique
+     ON pending_prompts(session_id) WHERE status = 'pending';
+
    -- ── NOUNS: memory (provenance-stamped statement) + kg adjuncts ──
-   -- subject_id is the new canonical attachment. source_thread_id / source_run_id
-   -- are SOFT refs in S0 (threads moves in here at S2; runs stays in history.db).
+   -- subject_id is the canonical attachment. source_thread_id is a REAL FK (the
+   -- spine is in this file); source_run_id stays soft (runs in history.db).
    CREATE TABLE memories (
      id TEXT PRIMARY KEY,
      text TEXT NOT NULL,
@@ -117,7 +197,7 @@ const MIGRATIONS: string[] = [
      scope_type TEXT NOT NULL,
      scope_id TEXT NOT NULL,
      source_run_id TEXT,            -- soft ref → history.db runs (permanent cross-file softness)
-     source_thread_id TEXT,         -- soft ref → threads until S2 consolidates the spine
+     source_thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,  -- REAL FK (spine in-file)
      source_type TEXT NOT NULL DEFAULT 'agent_inferred',
      source_tool_name TEXT,
      provider TEXT,
@@ -134,6 +214,7 @@ const MIGRATIONS: string[] = [
    CREATE INDEX idx_memories_subject ON memories(subject_id);
    CREATE INDEX idx_memories_scope   ON memories(scope_type, scope_id);
    CREATE INDEX idx_memories_active  ON memories(is_active);
+   CREATE INDEX idx_memories_thread  ON memories(source_thread_id);  -- FK child: thread-delete SET NULL
 
    -- memory_subjects replaces legacy 'mentions' (memory↔entity → memory↔subject).
    CREATE TABLE memory_subjects (
@@ -148,7 +229,10 @@ const MIGRATIONS: string[] = [
    -- full-scan the junction without this (subject_id is the trailing PK column).
    CREATE INDEX idx_memory_subjects_subject ON memory_subjects(subject_id);
 
-   -- subject_cooccurrences replaces legacy 'cooccurrences'.
+   -- subject_cooccurrences = a DERIVED materialization (the pairwise co-mention
+   -- count over a memory's memory_subjects), kept as a table for graph-traversal
+   -- perf like the legacy 'cooccurrences' — NOT a third semantic edge primitive
+   -- (relationships is the asserted edge; this is a denormalized index of it).
    CREATE TABLE subject_cooccurrences (
      subject_a_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
      subject_b_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
@@ -213,12 +297,13 @@ const MIGRATIONS: string[] = [
      content_path TEXT,
      content_text TEXT,
      description TEXT,
-     thread_id TEXT,                           -- soft ref → threads until S2
+     thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,  -- REAL FK (spine in-file)
      created_in_run_id TEXT,                   -- soft ref → history.db runs
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX idx_artifacts_subject ON artifacts(subject_id);
+   CREATE INDEX idx_artifacts_thread  ON artifacts(thread_id);  -- FK child: thread-delete SET NULL
 
    -- ── VERBS: Workflow / Trigger / Task (Run stays in history.db) ──
    -- Promotes the legacy PlannedPipeline (a pipeline_runs row, status='planned',
@@ -243,6 +328,10 @@ const MIGRATIONS: string[] = [
      title TEXT NOT NULL,
      description TEXT NOT NULL DEFAULT '',
      source TEXT NOT NULL DEFAULT 'manual',    -- cron|watch|webhook|inbox_event|manual
+     -- An INBOUND trigger's source IS a Connection (PRD §inbound): a REAL FK, not a
+     -- soft pointer buried in condition_json — that would re-introduce the exact
+     -- cross-ref softness this consolidation exists to kill (a second seam).
+     source_connection_id TEXT REFERENCES connections(id) ON DELETE SET NULL,
      condition_json TEXT NOT NULL DEFAULT '{}',-- schedule_cron / watch_config / webhook spec
      target_workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL,
      params_json TEXT NOT NULL DEFAULT '{}',
@@ -253,6 +342,7 @@ const MIGRATIONS: string[] = [
      enabled INTEGER NOT NULL DEFAULT 1,
      next_run_at TEXT,
      last_run_at TEXT,
+     last_run_id TEXT,                         -- soft ref → the history.db run it last minted
      last_run_result TEXT,
      last_run_status TEXT,
      notification_channel TEXT,
@@ -263,7 +353,8 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX idx_triggers_enabled ON triggers(enabled, next_run_at);
    CREATE INDEX idx_triggers_subject ON triggers(subject_id);
-   CREATE INDEX idx_triggers_target_workflow ON triggers(target_workflow_id);  -- FK child: workflow-delete SET NULL
+   CREATE INDEX idx_triggers_target_workflow ON triggers(target_workflow_id);     -- FK child: workflow-delete SET NULL
+   CREATE INDEX idx_triggers_source_connection ON triggers(source_connection_id);  -- FK child: connection-delete SET NULL
 
    -- TRACK: human TODO, fires nothing. due_trigger_id captures the
    -- "Task with a due-Trigger" shape (the legacy mail_followups lifecycle).
@@ -280,6 +371,9 @@ const MIGRATIONS: string[] = [
      scope_type TEXT,
      scope_id TEXT,
      tags TEXT,
+     -- due_date = the passive deadline (display/sort); due_trigger_id = the OPTIONAL
+     -- active reminder that fires at it. When both are set, the trigger's next_run_at
+     -- is the firing time and due_date mirrors it — S3 keeps them in sync.
      due_date TEXT,
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
