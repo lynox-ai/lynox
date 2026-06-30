@@ -182,31 +182,50 @@
 				bind:value={query}
 				onkeydown={handleKeydown}
 				placeholder={t('cmd.placeholder')}
+				aria-label={t('cmd.placeholder')}
+				role="combobox"
+				aria-autocomplete="list"
+				aria-controls="cmd-listbox"
+				aria-expanded={filtered.length > 0}
+				aria-activedescendant={filtered[selectedIdx] ? `cmd-opt-${selectedIdx}` : undefined}
 				class="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-text-subtle"
 			/>
 			<kbd class="text-[10px] font-mono text-text-subtle bg-bg-muted px-1.5 py-0.5 rounded">ESC</kbd>
 		</div>
 
 		<!-- Results -->
+		<!-- a11y (WCAG 4.1.2): ARIA 1.2 combobox/listbox pattern. The input is the
+			 combobox; the role="listbox" below is its popup, rendered ONLY when
+			 there are options (so the input's aria-expanded={filtered.length>0}
+			 matches reality and the no-results text is not a stray non-option
+			 child of the listbox). Each result is a role="option" with
+			 tabindex=-1 (focus stays on the input; selection is conveyed via
+			 aria-activedescendant). Group labels are role="presentation". -->
 		<div class="max-h-72 overflow-y-auto py-2">
 			{#if filtered.length === 0}
 				<p class="px-4 py-3 text-sm text-text-subtle">{t('cmd.no_results')}</p>
 			{:else}
 				{@const groups = [...new Set(filtered.map((i) => i.group))]}
-				{#each groups as group}
-					<p class="px-4 pt-2 pb-1 text-[10px] font-mono uppercase tracking-widest text-text-subtle">{group}</p>
-					{#each filtered.filter((i) => i.group === group) as item, i}
-						{@const globalIdx = filtered.indexOf(item)}
-						<button
-							onclick={() => execute(item)}
-							onmouseenter={() => (selectedIdx = globalIdx)}
-							class="w-full px-4 py-2 text-sm text-left transition-colors
-							{globalIdx === selectedIdx ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-						>
-							{item.label}
-						</button>
+				<div role="listbox" id="cmd-listbox" aria-label={t('cmd.placeholder')}>
+					{#each groups as group}
+						<p role="presentation" class="px-4 pt-2 pb-1 text-[10px] font-mono uppercase tracking-widest text-text-subtle">{group}</p>
+						{#each filtered.filter((i) => i.group === group) as item, i}
+							{@const globalIdx = filtered.indexOf(item)}
+							<button
+								role="option"
+								tabindex="-1"
+								id={`cmd-opt-${globalIdx}`}
+								aria-selected={globalIdx === selectedIdx}
+								onclick={() => execute(item)}
+								onmouseenter={() => (selectedIdx = globalIdx)}
+								class="w-full px-4 py-2 text-sm text-left transition-colors
+								{globalIdx === selectedIdx ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								{item.label}
+							</button>
+						{/each}
 					{/each}
-				{/each}
+				</div>
 			{/if}
 		</div>
 	</div>

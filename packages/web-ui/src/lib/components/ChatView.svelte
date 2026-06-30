@@ -2796,6 +2796,7 @@
 							bind:this={secretInputEl}
 							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
+							aria-label={pendingSecret.prompt || pendingSecret.name}
 							placeholder={pendingSecret.name}
 							autocomplete="off"
 							data-1p-ignore
@@ -2851,6 +2852,7 @@
 							bind:this={mailInputEl}
 							onkeydown={(e) => { if (e.key === 'Enter') handleMailConnectSave(); }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
+							aria-label={t('chat.mail_connect_password_placeholder')}
 							placeholder={t('chat.mail_connect_password_placeholder')}
 							autocomplete="off"
 							data-1p-ignore
@@ -3007,6 +3009,7 @@
 						oninput={autoResize}
 						onpaste={handlePaste}
 						placeholder={placeholderText}
+						aria-label={t('chat.input_label')}
 						rows="1"
 						disabled={inputGateDisabled}
 						class="flex-1 resize-none border-0 bg-transparent px-4 py-2.5 text-[16px] md:text-sm text-text placeholder:text-text-subtle outline-none disabled:opacity-50 overflow-hidden"

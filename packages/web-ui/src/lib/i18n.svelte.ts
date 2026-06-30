@@ -632,6 +632,9 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Chat
 	'chat.placeholder': { de: 'Nachricht eingeben...', en: 'Type a message...' },
+	// a11y: stable accessible name for the chat composer (the placeholder
+	// disappears on focus in some AT, so it can't be the only label).
+	'chat.input_label': { de: 'Nachricht an lynox', en: 'Message lynox' },
 	'chat.send': { de: 'Senden', en: 'Send' },
 	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
