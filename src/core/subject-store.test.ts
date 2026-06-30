@@ -55,13 +55,32 @@ describe('SubjectStore (Foundation Rework v2 — S1a)', () => {
     engine.close();
   });
 
-  it('does NOT name-dedup engagement/product (identity is not the name)', () => {
+  it('does NOT name-dedup engagement (identity is provider×client×period, not the name)', () => {
     const { store, engine } = makeStore();
     const a = store.findOrCreate({ kind: 'engagement', name: 'Website Redesign' });
     const b = store.findOrCreate({ kind: 'engagement', name: 'Website Redesign' });
     expect(b.created).toBe(true);
     expect(b.id).not.toBe(a.id);
     expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(2);
+    engine.close();
+  });
+
+  it('name-dedups product and service (catalogue identity is the name, case-insensitive)', () => {
+    const { store, engine } = makeStore();
+    const p1 = store.findOrCreate({ kind: 'product', name: 'Widget Pro' });
+    const p2 = store.findOrCreate({ kind: 'product', name: 'widget pro' });
+    expect(p2.created).toBe(false);
+    expect(p2.id).toBe(p1.id);
+    expect(store.listSubjects({ kind: 'product' })).toHaveLength(1);
+
+    const s1 = store.findOrCreate({ kind: 'service', name: 'SEO Retainer' });
+    const s2 = store.findOrCreate({ kind: 'service', name: 'SEO Retainer' });
+    expect(s2.created).toBe(false);
+    expect(s2.id).toBe(s1.id);
+    // a product and a service of the same name are distinct (dedup is per-kind)
+    const px = store.findOrCreate({ kind: 'product', name: 'SEO Retainer' });
+    expect(px.created).toBe(true);
+    expect(px.id).not.toBe(s1.id);
     engine.close();
   });
 

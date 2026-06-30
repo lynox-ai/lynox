@@ -45,8 +45,13 @@ export function entityTypeToSubjectKind(entityType: string): SubjectKind | null 
   }
 }
 
-/** The kinds the canonical-UNIQUE dedup guard covers (per `idx_subjects_canonical`). */
-const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(['person', 'organization']);
+/**
+ * The kinds the canonical-UNIQUE dedup guard covers (per `idx_subjects_canonical`).
+ * MUST stay in sync with the index DDL predicate (engine-db.ts) + findCanonical's
+ * kind-IN list. `engagement` (identity = provider×client×period) and `other`
+ * (unstructured) are deliberately excluded — they are not name-identified.
+ */
+const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(['person', 'organization', 'product', 'service']);
 
 export interface SubjectRow {
   id: string;
@@ -89,14 +94,13 @@ export class SubjectStore {
   // ── Dedup-converged write ─────────────────────────────────────
 
   /**
-   * The single converged find-or-create. For person/organization it resolves an
-   * existing subject by canonical name (case-insensitive, per-kind, per-owner)
-   * then by alias, and inserts only when neither matches (the
-   * `idx_subjects_canonical` UNIQUE index is the structural backstop). All OTHER
-   * kinds (engagement/product/service/other) are NOT name-deduped — the lookup is
-   * skipped and every call inserts a new subject — because their identity is not
-   * their name (an engagement's identity is provider×client×period). Note: whether
-   * `product`/`service` should also name-dedup is an open boundary decision.
+   * The single converged find-or-create. For the identity-by-name kinds
+   * (person/organization/product/service) it resolves an existing subject by
+   * canonical name (case-insensitive, per-kind, per-owner) then by alias, and
+   * inserts only when neither matches (the `idx_subjects_canonical` UNIQUE index is
+   * the structural backstop). `engagement` (identity = provider×client×period) and
+   * `other` (unstructured) are NOT name-deduped — the lookup is skipped and every
+   * call inserts a new subject.
    */
   findOrCreate(params: {
     kind: SubjectKind;
@@ -149,20 +153,20 @@ export class SubjectStore {
 
   /**
    * Canonical lookup against the `idx_subjects_canonical` index. Meaningful only
-   * for the canonical-identity kinds (person/organization) — other kinds carry no
-   * name-uniqueness and this returns null for them.
+   * for the identity-by-name kinds (person/organization/product/service) — the
+   * other kinds carry no name-uniqueness and this returns null for them.
    *
    * The WHERE is shaped to make the planner USE the partial expression index
    * (verified via EXPLAIN QUERY PLAN — a naive `name = ? COLLATE NOCASE AND kind = ?`
    * full-scans): `LOWER(name)` matches the `LOWER(name)` expression index, and the
-   * literal `kind IN ('person','organization')` matches the index's partial
-   * predicate (a bound `kind = ?` alone cannot satisfy it). The trailing
-   * `kind = ?` still selects the specific kind.
+   * literal kind-IN list matches the index's partial predicate (a bound `kind = ?`
+   * alone cannot satisfy it). The trailing `kind = ?` still selects the specific
+   * kind. This IN list MUST stay in sync with `NAME_DEDUP_KINDS` + the index DDL.
    */
   findCanonical(name: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
     return this.db.prepare(`
       SELECT * FROM subjects
-      WHERE LOWER(name) = LOWER(?) AND kind IN ('person','organization') AND kind = ?
+      WHERE LOWER(name) = LOWER(?) AND kind IN ('person','organization','product','service') AND kind = ?
         AND owner_user_id = ? AND archived_at IS NULL
       LIMIT 1
     `).get(name, kind, ownerUserId) as SubjectRow | undefined ?? null;

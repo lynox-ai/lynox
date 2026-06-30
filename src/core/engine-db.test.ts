@@ -57,8 +57,13 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     ).toThrow(/UNIQUE/i);
     // A different kind is allowed (the unique key is (lower(name), kind, owner)).
     db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3', 'product', 'Acme Industries')").run();
-    // The guard is scoped to person/organization — engagement identity is
-    // provider×client×period, not name, so two same-named engagements coexist.
+    // The guard now also covers product/service (catalogue identity = name): a
+    // second same-name product is rejected (case-insensitive).
+    expect(() =>
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s5', 'product', 'acme industries')").run(),
+    ).toThrow(/UNIQUE/i);
+    // engagement identity is provider×client×period (not name) and 'other' is
+    // unstructured, so the guard excludes them: two same-named engagements coexist.
     db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('e1', 'engagement', 'Website Redesign')").run();
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('e2', 'engagement', 'Website Redesign')").run(),

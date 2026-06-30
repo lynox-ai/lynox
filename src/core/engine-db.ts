@@ -73,16 +73,20 @@ const MIGRATIONS: string[] = [
      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
    );
-   -- Canonical dedup guard the legacy 'entities' table never had — but scoped to
-   -- the IDENTITY-BY-NAME kinds. An engagement's identity is provider×client×period
-   -- (not its name) and two same-named products/services can legitimately coexist;
-   -- name-dedup is only correct for person/organization. NOTE: 'name' MUST stay
-   -- PLAINTEXT (never enc()'d) — this index is on LOWER(name), and random-IV GCM
-   -- ciphertext would defeat dedup (AquaNatura×3 would slip through). S1 encrypts
-   -- only non-indexed sensitive columns (people.email/phone, memories.text).
+   -- Canonical dedup guard the legacy 'entities' table never had — scoped to the
+   -- IDENTITY-BY-NAME kinds (person/organization/product/service: a tenant's
+   -- catalogue holds one 'Widget Pro', so a product/service is name-identified like
+   -- an org). An engagement's identity is provider×client×period (not its name) and
+   -- 'other' is unstructured, so those two stay non-deduped; a genuine same-name
+   -- collision among the dedup kinds routes to merge-review (like two real
+   -- "Schmidt GmbH"). NOTE: 'name' MUST stay PLAINTEXT (never enc()'d) — this index
+   -- is on LOWER(name), and random-IV GCM ciphertext would defeat dedup (one
+   -- customer would slip through as N rows). S1 encrypts only non-indexed sensitive
+   -- columns (people.email/phone, memories.text). This predicate MUST match
+   -- SubjectStore.NAME_DEDUP_KINDS + findCanonical's kind-IN list.
    CREATE UNIQUE INDEX idx_subjects_canonical
      ON subjects(LOWER(name), kind, owner_user_id)
-     WHERE archived_at IS NULL AND kind IN ('person','organization');
+     WHERE archived_at IS NULL AND kind IN ('person','organization','product','service');
    CREATE INDEX idx_subjects_kind     ON subjects(kind);
    CREATE INDEX idx_subjects_self     ON subjects(is_self);
    CREATE INDEX idx_subjects_parent   ON subjects(parent_id);
