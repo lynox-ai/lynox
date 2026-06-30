@@ -4,7 +4,7 @@ import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { fetchPinned, isPrivateIP } from '../../core/network-guard.js';
+import { fetchPinned, isPrivateIP, flattenHeaders, redirectHopHeaders } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -134,12 +134,17 @@ export async function fetchWithValidatedRedirects(
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
+  // Carried explicitly so credential headers (incl. the engine-attached OAuth2
+  // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
+  // redirectHopHeaders.
+  let headers = flattenHeaders(init.headers);
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     applyHostPolicy(currentUrl, ctx);
     const requestInit: RequestInit = {
       ...init,
       method,
+      headers,
     };
     if (body !== undefined) {
       requestInit.body = body;
@@ -167,6 +172,9 @@ export async function fetchWithValidatedRedirects(
       method = 'GET';
       body = undefined;
     }
+    // Drop credential headers before a cross-origin hop (mirror fetch()) so the
+    // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
+    headers = redirectHopHeaders(headers, currentUrl, nextUrl);
     if (redirectGuard && !redirectGuard(nextUrl, method)) {
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
