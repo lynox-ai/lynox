@@ -227,12 +227,13 @@ export class CRM {
     // engine.db subject-graph behind the flag. Fully isolated — the ds_contacts
     // write above is authoritative; a mirror failure is logged and swallowed so
     // CRM behaviour is never affected. Prod (flag OFF) keeps the legacy path only.
-    if (this.subjectGraphEnabled && this.engineDb && this.subjectStore && this.relationshipStore) {
+    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore) {
       try {
         this._mirrorContactToSubjectGraph(normalized);
       } catch (err: unknown) {
+        // Contact name omitted from the log — it is plaintext PII (data minimisation).
         process.stderr.write(
-          `[lynox:subject-graph] CRM contact mirror failed for ${normalized.name}: ${err instanceof Error ? err.message : String(err)}\n`,
+          `[lynox:subject-graph] CRM contact mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
     }
@@ -250,17 +251,21 @@ export class CRM {
    * of truth through S1.
    */
   private _mirrorContactToSubjectGraph(c: ContactData): void {
-    const name = c.name?.trim();
+    const name = c.name.trim();
     if (!name) return;
-    this.engineDb!.getDb().transaction(() => {
-      const { id: personId } = this.subjectStore!.findOrCreate({ kind: 'person', name });
+    // Non-null by the call-site guard (stores exist iff engineDb does).
+    const engine = this.engineDb!;
+    const subjects = this.subjectStore!;
+    const relationships = this.relationshipStore!;
+    engine.getDb().transaction(() => {
+      const { id: personId } = subjects.findOrCreate({ kind: 'person', name });
       if (c.email || c.phone || c.type) {
-        this.subjectStore!.setPersonDetail(personId, { email: c.email, phone: c.phone, type: c.type });
+        subjects.setPersonDetail(personId, { email: c.email, phone: c.phone, type: c.type });
       }
       const company = c.company?.trim();
       if (company) {
-        const { id: orgId } = this.subjectStore!.findOrCreate({ kind: 'organization', name: company });
-        this.relationshipStore!.createRelationship({ fromSubjectId: personId, toSubjectId: orgId, kind: 'works_for' });
+        const { id: orgId } = subjects.findOrCreate({ kind: 'organization', name: company });
+        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: orgId, kind: 'works_for' });
       }
     })();
   }

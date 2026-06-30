@@ -83,7 +83,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
     ds.close();
   });
 
-  it('name-dedup: two contacts with the same name → one person subject', () => {
+  it('name-dedup: same name → one person subject + one idempotent works_for edge', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
     crm.upsertContact({ name: 'Jane Doe', email: 'jane@a.com', company: 'Acme GmbH' });
     crm.upsertContact({ name: 'jane doe', email: 'jane@b.com', company: 'Acme GmbH' }); // same name (diff email + case)
@@ -91,8 +91,12 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
     const subs = new SubjectStore(engine!);
     expect(subs.listSubjects({ kind: 'person' })).toHaveLength(1);       // one person (name-deduped)
     expect(subs.listSubjects({ kind: 'organization' })).toHaveLength(1); // one org (name-deduped)
+    const person = subs.findCanonical('Jane Doe', 'person')!;
     // detail MERGEd, not wiped — the later email wins.
-    expect(subs.getPersonDetail(subs.findCanonical('Jane Doe', 'person')!.id)!.email).toBe('jane@b.com');
+    expect(subs.getPersonDetail(person.id)!.email).toBe('jane@b.com');
+    // the works_for edge is idempotent on re-save — exactly one, NOT one-per-upsert
+    // (the common path: every inbound contact upserts the same person+company).
+    expect(new RelationshipStore(engine!).getRelationshipsFrom(person.id)).toHaveLength(1);
     // ds_contacts keeps both rows (email-keyed identity).
     expect(crm.listContacts()).toHaveLength(2);
 
@@ -109,6 +113,47 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
     expect(subs.listSubjects({ kind: 'organization' })).toHaveLength(0);
     const person = subs.findCanonical('Solo Person', 'person')!;
     expect(new RelationshipStore(engine!).getRelationshipsFrom(person.id)).toHaveLength(0);
+
+    engine!.close();
+    ds.close();
+  });
+
+  it('whitespace-only company: person subject only, no org/edge (trim guard)', () => {
+    const { crm, ds, engine } = makeCrm({ flag: true });
+    crm.upsertContact({ name: 'Eve', email: 'eve@x.com', company: '   ' });
+
+    const subs = new SubjectStore(engine!);
+    expect(subs.listSubjects({ kind: 'person' })).toHaveLength(1);
+    expect(subs.listSubjects({ kind: 'organization' })).toHaveLength(0);
+    expect(new RelationshipStore(engine!).getRelationshipsFrom(subs.findCanonical('Eve', 'person')!.id)).toHaveLength(0);
+
+    engine!.close();
+    ds.close();
+  });
+
+  it('company present but no person detail: person+org+edge, people detail row null', () => {
+    const { crm, ds, engine } = makeCrm({ flag: true });
+    crm.upsertContact({ name: 'Frank', company: 'Stark Industries' }); // no email/phone/type
+
+    const subs = new SubjectStore(engine!);
+    const person = subs.findCanonical('Frank', 'person')!;
+    const org = subs.findCanonical('Stark Industries', 'organization')!;
+    expect(subs.getPersonDetail(person.id)).toBeNull(); // detail write skipped — nothing to store
+    const from = new RelationshipStore(engine!).getRelationshipsFrom(person.id);
+    expect(from).toHaveLength(1);
+    expect(from[0]!.kind).toBe('works_for');
+    expect(from[0]!.to_subject_id).toBe(org.id);
+
+    engine!.close();
+    ds.close();
+  });
+
+  it('whitespace-only name: no person subject mirrored (guard returns)', () => {
+    const { crm, ds, engine } = makeCrm({ flag: true });
+    crm.upsertContact({ name: '   ', email: 'ws@x.com' });
+
+    expect(new SubjectStore(engine!).listSubjects()).toHaveLength(0); // mirror skipped
+    expect(crm.listContacts()).toHaveLength(1);                       // ds write still happened
 
     engine!.close();
     ds.close();
