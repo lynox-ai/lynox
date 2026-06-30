@@ -155,6 +155,22 @@ export function loadConfig(): LynoxUserConfig {
   } else if (subjectGraph === 'false' || subjectGraph === '0') {
     merged.subject_graph_enabled = false;
   }
+  // Outbound egress policy. Lets the CP set it per-tenant via env without
+  // editing config.json (the CP env emit itself is a separate slice). Explicit
+  // enum parse — an unrecognised value is ignored (falls back to config/default
+  // 'allow-all'), never coerced. NOT in PROJECT_SAFE_KEYS: a project config must
+  // not be able to weaken a user/operator-set egress policy.
+  const netPolicy = process.env['LYNOX_NETWORK_POLICY'];
+  if (netPolicy === 'allow-all' || netPolicy === 'allow-list' || netPolicy === 'deny-all') {
+    merged.network_policy = netPolicy;
+  }
+  const netHosts = process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
+  if (netHosts !== undefined && netHosts.trim() !== '') {
+    merged.network_allowed_hosts = netHosts
+      .split(',')
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0);
+  }
   if (process.env['LYNOX_USER']) {
     merged.user_id = process.env['LYNOX_USER'];
   }

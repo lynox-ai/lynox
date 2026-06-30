@@ -29,7 +29,7 @@ import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists } from './config.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget } from './session-budget.js';
-import { applyHttpRateLimits, applyEnforceHttps } from './tool-context.js';
+import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
 import { resolveActiveScopes } from './scope-resolver.js';
@@ -92,6 +92,15 @@ export function configureBudgetAndRateLimits(
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
+  // Outbound egress policy for the http tool. Default 'allow-all' = unchanged
+  // behaviour. 'allow-list'/'deny-all' are opt-in operator/CP controls; the
+  // enforcement lives in http.ts applyHostPolicy (already wired for all three
+  // gated callers: http_request, api_setup, web-search content fetch).
+  applyNetworkPolicy(
+    toolContext,
+    userConfig.network_policy ?? 'allow-all',
+    userConfig.network_allowed_hosts,
+  );
 }
 
 export function setupHistorySubscriptions(

@@ -38,7 +38,8 @@ function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
     }
   }
   if (ctx?.networkPolicy === 'deny-all') {
-    throw new Error('Network access denied: air-gapped isolation');
+    // 'Blocked:' prefix to mirror tools/builtin/http.ts (friendly-message layer).
+    throw new Error('Blocked: network access denied (air-gapped isolation)');
   }
   if (ctx?.networkPolicy === 'allow-list') {
     let allowed = false;
