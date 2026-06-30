@@ -36,6 +36,7 @@ import { resolveActiveScopes } from './scope-resolver.js';
 import { createEmbeddingProvider } from './embedding.js';
 import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
+import type { EngineDb } from './engine-db.js';
 import { DataStoreBridge } from './datastore-bridge.js';
 import { getLynoxDir } from './config.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
@@ -598,12 +599,19 @@ export async function initKnowledgeLayer(
   embeddingProvider: EmbeddingProvider | null,
   client: Anthropic,
   runHistory?: RunHistory | null | undefined,
+  engineDb?: EngineDb | null | undefined,
 ): Promise<KnowledgeLayer | null> {
   if (userConfig.knowledge_graph_enabled === false || !embeddingProvider) return null;
   try {
     const lynoxDir = getLynoxDir();
     const dbPath = `${lynoxDir}/${AGENT_MEMORY_DB_NAME}`;
-    const layer = new KnowledgeLayer(dbPath, embeddingProvider, client, runHistory ?? undefined);
+    // Foundation Rework v2 (S1b): pass the engine.db handle + flag so the layer
+    // additively mirrors extraction into the subject-graph when enabled.
+    const subjectGraphEnabled = userConfig.subject_graph_enabled === true;
+    const layer = new KnowledgeLayer(
+      dbPath, embeddingProvider, client, runHistory ?? undefined,
+      engineDb ?? undefined, subjectGraphEnabled,
+    );
     await layer.init();
     return layer;
   } catch (err: unknown) {

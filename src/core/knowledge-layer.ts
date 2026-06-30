@@ -25,6 +25,10 @@ import { detectContradictions, hasHeuristicContradiction } from './contradiction
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
+import type { EngineDb } from './engine-db.js';
+import { SubjectStore, entityTypeToSubjectKind } from './subject-store.js';
+import { RelationshipStore } from './relationship-store.js';
+import { MemoryGraphStore } from './memory-graph-store.js';
 import { channels } from './observability.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
@@ -46,12 +50,25 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly runHistory: RunHistory | null;
   /** Tool-call extractor (Haiku + strict schema). Default since v1.3.4; opt-out via LYNOX_KG_EXTRACTOR=v1. */
   private readonly useV2Extractor: boolean;
+  /**
+   * Foundation Rework v2 (S1b): when `subjectGraphEnabled`, each stored memory's
+   * extraction is additively mirrored into the engine.db subject-graph via these
+   * stores. Null when no engine.db was provided (older callers / tests). The
+   * legacy agent-memory.db writes above stay authoritative regardless.
+   */
+  private readonly subjectGraphEnabled: boolean;
+  private readonly subjectStore: SubjectStore | null;
+  private readonly relationshipStore: RelationshipStore | null;
+  private readonly memoryGraphStore: MemoryGraphStore | null;
+  private readonly engineDb: EngineDb | null;
 
   constructor(
     dbPath: string,
     embeddingProvider: EmbeddingProvider,
     anthropicClient?: Anthropic | undefined,
     runHistory?: RunHistory | undefined,
+    engineDb?: EngineDb | undefined,
+    subjectGraphEnabled?: boolean | undefined,
   ) {
     this.db = new AgentMemoryDb(dbPath);
     this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
@@ -64,6 +81,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.runHistory = runHistory ?? null;
     this.kpiEngine = runHistory ? new KpiEngine(runHistory, this.db) : null;
     this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] !== 'v1';
+    this.engineDb = engineDb ?? null;
+    this.subjectGraphEnabled = subjectGraphEnabled ?? false;
+    if (this.engineDb) {
+      this.subjectStore = new SubjectStore(this.engineDb);
+      this.relationshipStore = new RelationshipStore(this.engineDb);
+      this.memoryGraphStore = new MemoryGraphStore(this.engineDb);
+    } else {
+      this.subjectStore = null;
+      this.relationshipStore = null;
+      this.memoryGraphStore = null;
+    }
   }
 
   /**
@@ -177,6 +205,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       && shouldExtractV2(trimmedText, namespace)
       ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
       : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
+
+    // 9. Foundation Rework v2 (S1b): additively mirror the extraction into the
+    // engine.db subject-graph behind the flag. Fully isolated — the legacy writes
+    // above are authoritative; a mirror failure is logged and swallowed so the
+    // agent's memory/retrieval path is never affected.
+    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
+      try {
+        this._mirrorToSubjectGraph(
+          memoryId, trimmedText, namespace, scope, options,
+          resolvedEntities, resolvedRelations, contradictions,
+        );
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] mirror failed for ${memoryId}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
 
     // 10. Publish event
     if (channels.knowledgeGraph.hasSubscribers) {
@@ -316,6 +361,95 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
       return { resolvedEntities: entities, resolvedRelations: relations };
     });
+  }
+
+  /**
+   * Foundation Rework v2 (S1b): additively mirror one stored memory's extraction
+   * into the engine.db subject-graph — entities → subjects (the converged
+   * `findOrCreate` dedup, kind-mapped; concept/location/collection dropped),
+   * relations → typed relationships, plus the memory provenance stub, its subject
+   * links, and pairwise co-occurrence counts. One engine.db transaction (atomic
+   * per memory). Re-resolves from the extraction by name/type — it does NOT reuse
+   * the legacy agent-memory.db entity ids (those stay on the legacy graph).
+   */
+  private _mirrorToSubjectGraph(
+    memoryId: string,
+    text: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    options: {
+      sourceRunId?: string | undefined;
+      sourceType?: ProvenanceKind | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+    entities: EntityRecord[],
+    relations: RelationRecord[],
+    contradictions: ContradictionInfo[],
+  ): void {
+    const subjects = this.subjectStore!;
+    const relationships = this.relationshipStore!;
+    const memoryGraph = this.memoryGraphStore!;
+
+    this.engineDb!.getDb().transaction(() => {
+      // 1. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
+      //    entity-id → subject-id map so relations can re-point onto subjects.
+      const entityToSubject = new Map<string, string>();
+      const subjectIds: string[] = [];
+      let primarySubjectId: string | null = null;
+      let primaryIsPersonOrg = false;
+
+      for (const e of entities) {
+        const kind = entityTypeToSubjectKind(e.entityType);
+        if (!kind) continue;
+        const { id: subjectId } = subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
+        entityToSubject.set(e.id, subjectId);
+        subjectIds.push(subjectId);
+        // primary = the first person/organization the memory concerns; else the
+        // first resolved subject of any kind. Deterministic (extraction order).
+        const isPersonOrg = kind === 'person' || kind === 'organization';
+        if (primarySubjectId === null || (isPersonOrg && !primaryIsPersonOrg)) {
+          primarySubjectId = subjectId;
+          primaryIsPersonOrg = isPersonOrg;
+        }
+      }
+
+      // A memory that resolved no subjects contributes nothing to the graph —
+      // skip the stub entirely (keeps engine.db memories meaningful).
+      if (subjectIds.length === 0) return;
+
+      // 2. memory provenance stub — must exist before the relationship /
+      //    memory_subjects FKs reference it.
+      memoryGraph.upsertStub({
+        id: memoryId, text, namespace, scopeType: scope.type, scopeId: scope.id,
+        subjectId: primarySubjectId,
+        sourceRunId: options?.sourceRunId ?? null,
+        sourceType: options?.sourceType,
+        sourceToolName: options?.sourceToolName ?? null,
+        provider: this.embeddingProvider.name,
+      });
+
+      // 3. relations → typed subject↔subject edges (skip any endpoint that
+      //    mapped to no subject, e.g. a concept/location).
+      for (const r of relations) {
+        const fromSid = entityToSubject.get(r.fromEntityId);
+        const toSid = entityToSubject.get(r.toEntityId);
+        if (!fromSid || !toSid || fromSid === toSid) continue;
+        relationships.createRelationship({
+          fromSubjectId: fromSid, toSubjectId: toSid,
+          kind: r.relationType, description: r.description,
+          sourceMemoryId: memoryId, confidence: r.confidence,
+        });
+      }
+
+      // 4. mention junction + 5. co-occurrence counts.
+      memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
+      memoryGraph.bumpCooccurrences(subjectIds);
+
+      // 6. supersession mirror (no-op when the old memory has no stub).
+      for (const c of contradictions) {
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+      }
+    })();
   }
 
   /**

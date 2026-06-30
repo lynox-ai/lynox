@@ -25,6 +25,26 @@ export const KNOWN_SUBJECT_KINDS = [
 ] as const;
 export type SubjectKind = (typeof KNOWN_SUBJECT_KINDS)[number];
 
+/**
+ * Map a legacy KG `entity_type` to a Subject kind, or `null` when the entity is
+ * NOT a subject. The S1b extraction mirror uses this to decide which extracted
+ * entities become subjects: a `concept`/`location`/`collection` is knowledge-graph
+ * metadata (a topic, a place, a data table) — not an actor/record the user shapes
+ * — so it is dropped. Defensive on unknown inputs (the extractor is the boundary):
+ *   person → person · organization → organization ·
+ *   project → engagement (a scoped piece of work) · product → product ·
+ *   concept | location | collection | unknown → null
+ */
+export function entityTypeToSubjectKind(entityType: string): SubjectKind | null {
+  switch (entityType) {
+    case 'person': return 'person';
+    case 'organization': return 'organization';
+    case 'project': return 'engagement';
+    case 'product': return 'product';
+    default: return null;
+  }
+}
+
 /** The kinds the canonical-UNIQUE dedup guard covers (per `idx_subjects_canonical`). */
 const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(['person', 'organization']);
 
