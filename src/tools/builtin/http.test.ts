@@ -553,11 +553,11 @@ describe('httpRequestTool', () => {
     });
   });
 
-  // SEC-NW-1: fetchWithValidatedRedirects must NOT replay credential headers
-  // across a cross-origin redirect (mirror fetch()). Uses an opaque token that
-  // does NOT match SECRET_PATTERNS, so the pre-flight egress header scan lets it
-  // through to the redirect loop — exactly the case the per-hop scan misses.
-  describe('cross-origin redirect credential strip (SEC-NW-1)', () => {
+  // fetchWithValidatedRedirects must NOT replay credential headers across a
+  // cross-origin redirect (mirror fetch()). Uses an opaque token that does NOT
+  // match SECRET_PATTERNS, so the pre-flight egress header scan lets it through
+  // to the redirect loop — exactly the case the per-hop scan misses.
+  describe('cross-origin redirect credential strip', () => {
     const lc = (h: Record<string, string>): Record<string, string> =>
       Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
 
@@ -596,6 +596,50 @@ describe('httpRequestTool', () => {
 
       expect(lastPinnedInputs.length).toBe(2);
       expect(lc(lastPinnedInputs[1]!.headers)['authorization']).toBe('Bearer opaque-session-xyz');
+    });
+
+    // A 307/308 preserves the method + body, so a cross-origin hop would replay
+    // a secret-bearing body (e.g. an OAuth token-exchange POST) to the new origin
+    // even after the header strip. The body must be dropped too.
+    it('drops the request BODY + downgrades to GET on a CROSS-origin 307', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.test/token' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'https://api.example.test/token',
+        method: 'POST',
+        body: 'grant_type=client_credentials&field=opaque-value-xyz',
+      }, agentWithPromptFn());
+
+      expect(lastPinnedInputs.length).toBe(2);
+      // Hop 0 (same origin) carries the POST body.
+      expect(lastPinnedInputs[0]!.method).toBe('POST');
+      expect(lastPinnedInputs[0]!.body?.toString()).toContain('field=opaque-value-xyz');
+      // Hop 1 crossed origin (api.example.test → other.test): body dropped, GET.
+      expect(lastPinnedInputs[1]!.method).toBe('GET');
+      expect(lastPinnedInputs[1]!.body).toBeUndefined();
+    });
+
+    it('KEEPS the body on a SAME-origin 307', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.test/token-2' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'https://api.example.test/token',
+        method: 'POST',
+        body: 'grant_type=client_credentials',
+      }, agentWithPromptFn());
+
+      expect(lastPinnedInputs.length).toBe(2);
+      // Same origin → the 307 legitimately replays the POST body.
+      expect(lastPinnedInputs[1]!.method).toBe('POST');
+      expect(lastPinnedInputs[1]!.body?.toString()).toContain('grant_type=client_credentials');
     });
   });
 

@@ -4,7 +4,7 @@ import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { fetchPinned, isPrivateIP, flattenHeaders, redirectHopHeaders } from '../../core/network-guard.js';
+import { fetchPinned, isPrivateIP, flattenHeaders, redirectHopHeaders, isCrossOriginHop } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -177,6 +177,13 @@ export async function fetchWithValidatedRedirects(
     // Drop credential headers before a cross-origin hop (mirror fetch()) so the
     // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
     headers = redirectHopHeaders(headers, currentUrl, nextUrl);
+    // A 307/308 preserves the method + body — drop the body too on a cross-origin
+    // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
+    // open redirect), degrading to a bodyless GET like the 301/302/303 path.
+    if (body !== undefined && isCrossOriginHop(currentUrl, nextUrl)) {
+      method = 'GET';
+      body = undefined;
+    }
     if (redirectGuard && !redirectGuard(nextUrl, method)) {
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
