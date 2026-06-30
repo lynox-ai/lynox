@@ -391,7 +391,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const memoryGraph = this.memoryGraphStore!;
 
     this.engineDb!.getDb().transaction(() => {
-      // 1. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
+      // 1. Supersession mirror FIRST. It only flips OLD memories' stubs and is
+      //    independent of whether THIS memory resolves any subjects, so it must
+      //    run even when the subject-less guard below returns early — else a
+      //    subject-less superseding memory would leave the old stub is_active=1,
+      //    diverging from the legacy store. markSuperseded no-ops when the old
+      //    memory has no stub; superseded_by is a soft column (no FK), so it may
+      //    point at this memory even if it gets no stub of its own.
+      for (const c of contradictions) {
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+      }
+
+      // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
       //    entity-id → subject-id map so relations can re-point onto subjects.
       const entityToSubject = new Map<string, string>();
       const subjectIds: string[] = [];
@@ -414,10 +425,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
 
       // A memory that resolved no subjects contributes nothing to the graph —
-      // skip the stub entirely (keeps engine.db memories meaningful).
+      // skip the stub entirely (keeps engine.db memories meaningful). The
+      // supersession above has already run.
       if (subjectIds.length === 0) return;
 
-      // 2. memory provenance stub — must exist before the relationship /
+      // 3. memory provenance stub — must exist before the relationship /
       //    memory_subjects FKs reference it.
       memoryGraph.upsertStub({
         id: memoryId, text, namespace, scopeType: scope.type, scopeId: scope.id,
@@ -428,8 +440,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         provider: this.embeddingProvider.name,
       });
 
-      // 3. relations → typed subject↔subject edges (skip any endpoint that
-      //    mapped to no subject, e.g. a concept/location).
+      // 4. relations → typed subject↔subject edges. Skip any endpoint that
+      //    mapped to no subject (a concept/location), and any self-loop — two
+      //    surface forms of one subject (V2-alias dedup) collapse to one node.
       for (const r of relations) {
         const fromSid = entityToSubject.get(r.fromEntityId);
         const toSid = entityToSubject.get(r.toEntityId);
@@ -441,14 +454,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         });
       }
 
-      // 4. mention junction + 5. co-occurrence counts.
+      // 5. mention junction + 6. co-occurrence counts.
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
-
-      // 6. supersession mirror (no-op when the old memory has no stub).
-      for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
-      }
     })();
   }
 

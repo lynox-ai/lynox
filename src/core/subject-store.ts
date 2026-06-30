@@ -89,12 +89,14 @@ export class SubjectStore {
   // ── Dedup-converged write ─────────────────────────────────────
 
   /**
-   * The single converged find-or-create. Resolves an existing subject by
-   * canonical name (case-insensitive, per-kind, per-owner) then by alias, and
-   * only inserts when neither matches. For person/organization the
-   * `idx_subjects_canonical` UNIQUE index is the structural backstop; other
-   * kinds dedup best-effort by this lookup (they carry no name-uniqueness, by
-   * design — an engagement's identity is provider×client×period, not its name).
+   * The single converged find-or-create. For person/organization it resolves an
+   * existing subject by canonical name (case-insensitive, per-kind, per-owner)
+   * then by alias, and inserts only when neither matches (the
+   * `idx_subjects_canonical` UNIQUE index is the structural backstop). All OTHER
+   * kinds (engagement/product/service/other) are NOT name-deduped — the lookup is
+   * skipped and every call inserts a new subject — because their identity is not
+   * their name (an engagement's identity is provider×client×period). Note: whether
+   * `product`/`service` should also name-dedup is an open boundary decision.
    */
   findOrCreate(params: {
     kind: SubjectKind;

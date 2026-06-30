@@ -1,6 +1,14 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 
+/** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
+export interface MemoryStubRow {
+  id: string;
+  subject_id: string | null;
+  is_active: number;
+  superseded_by: string | null;
+}
+
 /**
  * MemoryGraphStore — the S1b memory-provenance layer over engine.db: a
  * lightweight `memories` STUB + the `memory_subjects` mention junction + the
@@ -72,12 +80,12 @@ export class MemoryGraphStore {
    * the subject-graph successor to legacy `mentions`). Idempotent on
    * (memory_id, subject_id). The stub for `memoryId` must exist first (FK).
    */
-  linkSubjects(memoryId: string, subjectIds: Iterable<string>, mentionType = 'direct'): void {
+  linkSubjects(memoryId: string, subjectIds: Iterable<string>): void {
     const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO memory_subjects (memory_id, subject_id, mention_type)
-      VALUES (?, ?, ?)
+      INSERT OR IGNORE INTO memory_subjects (memory_id, subject_id)
+      VALUES (?, ?)
     `);
-    for (const sid of subjectIds) stmt.run(memoryId, sid, mentionType);
+    for (const sid of subjectIds) stmt.run(memoryId, sid);
   }
 
   /**
@@ -117,9 +125,9 @@ export class MemoryGraphStore {
   }
 
   /** Read a stub (test/inspection helper). */
-  getStub(id: string): { id: string; subject_id: string | null; is_active: number; superseded_by: string | null } | null {
+  getStub(id: string): MemoryStubRow | null {
     return this.db.prepare('SELECT id, subject_id, is_active, superseded_by FROM memories WHERE id = ?')
-      .get(id) as { id: string; subject_id: string | null; is_active: number; superseded_by: string | null } | undefined ?? null;
+      .get(id) as MemoryStubRow | undefined ?? null;
   }
 
   /** Subjects linked to a memory (test/inspection helper). */
