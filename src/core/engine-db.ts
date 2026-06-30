@@ -143,6 +143,11 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      PRIMARY KEY (memory_id, subject_id)
    );
+   -- Reverse-side index: SQLite does NOT auto-index FK children, so the
+   -- "which memories mention subject X" read AND the subject-delete CASCADE would
+   -- full-scan the junction without this (subject_id is the trailing PK column).
+   CREATE INDEX idx_memory_subjects_subject ON memory_subjects(subject_id);
+
    -- subject_cooccurrences replaces legacy 'cooccurrences'.
    CREATE TABLE subject_cooccurrences (
      subject_a_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
@@ -151,6 +156,8 @@ const MIGRATIONS: string[] = [
      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
      PRIMARY KEY (subject_a_id, subject_b_id)
    );
+   CREATE INDEX idx_subject_cooccur_b ON subject_cooccurrences(subject_b_id);
+
    CREATE TABLE supersedes (
      new_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
      old_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -158,6 +165,7 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      PRIMARY KEY (new_memory_id, old_memory_id)
    );
+   CREATE INDEX idx_supersedes_old ON supersedes(old_memory_id);
 
    -- Typed edges between subjects. description is meant to be FILLED (the legacy
    -- relations.description='' context-free-edge gap is fixed forward in S1).
@@ -175,6 +183,7 @@ const MIGRATIONS: string[] = [
    CREATE INDEX idx_rel_from ON relationships(from_subject_id, kind);
    CREATE INDEX idx_rel_to   ON relationships(to_subject_id, kind);
    CREATE INDEX idx_rel_kind ON relationships(kind);
+   CREATE INDEX idx_rel_source_memory ON relationships(source_memory_id);  -- FK child: memory-delete SET NULL
 
    -- ── NOUNS: Connection + Artifact ──────────────────────────────
    -- Credential-bearing capability. Absorbs api_profiles (flat JSON today),
@@ -254,6 +263,7 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX idx_triggers_enabled ON triggers(enabled, next_run_at);
    CREATE INDEX idx_triggers_subject ON triggers(subject_id);
+   CREATE INDEX idx_triggers_target_workflow ON triggers(target_workflow_id);  -- FK child: workflow-delete SET NULL
 
    -- TRACK: human TODO, fires nothing. due_trigger_id captures the
    -- "Task with a due-Trigger" shape (the legacy mail_followups lifecycle).
@@ -277,6 +287,10 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX idx_tasks_status  ON tasks(status);
    CREATE INDEX idx_tasks_subject ON tasks(subject_id);
+   -- FK children (parent-delete SET NULL would otherwise full-scan tasks):
+   CREATE INDEX idx_tasks_assignee     ON tasks(assignee_subject_id);
+   CREATE INDEX idx_tasks_due_trigger  ON tasks(due_trigger_id);
+   CREATE INDEX idx_tasks_parent       ON tasks(parent_task_id);
 
    -- ── Conflict tracking (populated in S6; empty baseline now) ────
    CREATE TABLE conflicts (
@@ -290,7 +304,10 @@ const MIGRATIONS: string[] = [
      resolved_at TEXT,
      resolved_by TEXT
    );
-   CREATE INDEX idx_conflicts_status ON conflicts(status);`,
+   CREATE INDEX idx_conflicts_status ON conflicts(status);
+   -- FK children: memory-delete CASCADE would otherwise full-scan conflicts.
+   CREATE INDEX idx_conflicts_new_memory ON conflicts(new_memory_id);
+   CREATE INDEX idx_conflicts_old_memory ON conflicts(old_memory_id);`,
 ];
 
 /**
@@ -332,7 +349,10 @@ export class EngineDb {
     this.db.close();
   }
 
-  /** True when at-rest encryption is active (a vault key was available). */
+  /**
+   * True when at-rest encryption is active (a vault key was available).
+   * @internal — posture introspection; not a public API.
+   */
   get isEncrypted(): boolean { return this._encKey !== null; }
 
   /**
@@ -392,7 +412,12 @@ export class EngineDb {
     }
   }
 
-  /** Encrypt text for storage. Returns prefixed ciphertext, or plaintext if no key. */
+  /**
+   * Encrypt text for storage. Returns prefixed ciphertext, or plaintext if no key.
+   * @internal — the at-rest seam for the S1 store classes that share this
+   * connection via {@link getDb}; not for external callers. If S1's stores end up
+   * nested rather than separate modules, fold this back to a private `_enc`.
+   */
   enc(text: string): string {
     if (!this._encKey || !text) return text;
     const iv = randomBytes(CRYPTO_IV_LENGTH);
@@ -402,7 +427,10 @@ export class EngineDb {
     return ENCRYPTED_PREFIX + Buffer.concat([iv, tag, encrypted]).toString('base64');
   }
 
-  /** Decrypt text from storage. Handles both encrypted and plaintext (mixed mode). */
+  /**
+   * Decrypt text from storage. Handles both encrypted and plaintext (mixed mode).
+   * @internal — see {@link enc}.
+   */
   dec(text: string): string {
     if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
     if (!this._encKey) {
