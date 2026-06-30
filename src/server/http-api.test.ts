@@ -4,8 +4,23 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { LynoxHooks } from '../core/engine.js';
 
 // === Mock dependencies ===
+
+// Metered-path credit lifecycle: the speak/transcribe routes fire the engine's
+// onBeforeRun gate + onAfterRun debit (managed only). Injected per-test so the
+// route tests can drive a blocking / billing hook. Reset to [] in beforeEach.
+let mockEngineHooks: LynoxHooks[] = [];
+// Voice TTS/STT module facades. Partial-mocked (real module spread, only the
+// availability + stream entry points overridden) so the capabilities endpoint
+// keeps its real shape while the speak/transcribe ROUTE tests stay hermetic.
+const mockHasSpeakProvider = vi.fn(() => true);
+const mockSpeakStream = vi.fn();
+// STT route entry points — overridden so the transcribe route tests can assert
+// the gate fires before the provider is touched, and drive a happy path.
+const mockTranscribeWithStream = vi.fn();
+const mockExtractSessionContext = vi.fn(() => ({}));
 
 const mockSessionRun = vi.fn().mockResolvedValue('Agent response');
 const mockSessionAbort = vi.fn();
@@ -136,7 +151,7 @@ vi.mock('../core/engine.js', () => ({
     // The saved-workflow run path now flows through the budget/credit
     // lifecycle (runGuardedSavedWorkflow), which reads these off the engine.
     this.getContext = vi.fn().mockReturnValue(null);
-    this.getHooks = vi.fn().mockReturnValue([]);
+    this.getHooks = vi.fn(() => mockEngineHooks);
     this.getSecurityAudit = vi.fn().mockReturnValue({
       // Content-free aggregate rows only — no input_preview/detail by construction.
       getContentFreeAggregates: vi.fn().mockReturnValue([
@@ -211,6 +226,23 @@ vi.mock('../tools/builtin/pipeline.js', () => ({
   runSavedWorkflow: mockRunSavedWorkflow,
   forgetPipeline: mockForgetPipeline,
   getPipeline: mockGetPipeline,
+}));
+
+// Partial mocks for the voice facades: spread the real module so the
+// capabilities endpoint keeps every export it reads (getActiveSpeakProvider,
+// listMistralVoices, provider .isAvailable flags, …) and only override the
+// availability check + stream entry the /api/speak route uses, plus HAS_WHISPER
+// so the /api/transcribe route reaches the credit gate.
+vi.mock('../core/speak.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/speak.js')>()),
+  hasSpeakProvider: mockHasSpeakProvider,
+  speakStream: mockSpeakStream,
+}));
+vi.mock('../core/transcribe.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/transcribe.js')>()),
+  HAS_WHISPER: true,
+  transcribeWithStream: mockTranscribeWithStream,
+  extractSessionContext: mockExtractSessionContext,
 }));
 
 // === Import after mocks ===
@@ -306,6 +338,15 @@ beforeEach(() => {
   mockMemoryLoad.mockResolvedValue('knowledge content');
   mockMemoryUpdate.mockResolvedValue(true);
   mockMemoryDelete.mockResolvedValue(2);
+  // Metered-path defaults: no hooks (self-host) + TTS available with a benign
+  // synth result. Per-test overrides drive the gate-block / debit cases.
+  mockEngineHooks = [];
+  mockHasSpeakProvider.mockReturnValue(true);
+  mockSpeakStream.mockReset();
+  mockSpeakStream.mockResolvedValue({ characters: 100, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+  mockExtractSessionContext.mockReturnValue({});
+  mockTranscribeWithStream.mockReset();
+  mockTranscribeWithStream.mockResolvedValue('transcribed text');
 });
 
 // === Tests ===
@@ -4021,6 +4062,100 @@ describe('looksBinaryUpload', () => {
     expect(looksBinaryUpload(Buffer.from('PKW-Liste 2026: Audi, BMW, VW — Bestand'))).toBe(false);
     // A 2-byte "PK" buffer is too short for the signature → generic path → text
     expect(looksBinaryUpload(Buffer.from('PK'))).toBe(false);
+  });
+});
+
+describe('metered audio routes: managed credit gate + debit', () => {
+  /** Read an SSE response body to completion as a single string. */
+  async function readSse(res: Response): Promise<string> {
+    return res.text();
+  }
+
+  describe('POST /api/speak', () => {
+    it('blocks with 402 when the onBeforeRun hook denies (budget exhausted) — never synthesizes', async () => {
+      mockEngineHooks = [{ onBeforeRun: vi.fn().mockRejectedValue(new Error('AI budget for this period reached.')) }];
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(res.status).toBe(402);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('AI budget');
+      // The credit gate fires BEFORE synthesis — the provider is never hit.
+      expect(mockSpeakStream).not.toHaveBeenCalled();
+    });
+
+    it('blocks with 402 when the control plane is stale (fail-closed)', async () => {
+      mockEngineHooks = [{ onBeforeRun: vi.fn(() => { throw new Error('Managed control plane temporarily unreachable'); }) }];
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(res.status).toBe(402);
+      expect(mockSpeakStream).not.toHaveBeenCalled();
+    });
+
+    it('synthesizes and debits the TTS cost via onAfterRun on the happy path', async () => {
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun, onAfterRun }];
+      // 100 chars × ($0.016 / 1 000) = $0.0016.
+      mockSpeakStream.mockResolvedValue({ characters: 100, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello world' }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect(mockSpeakStream).toHaveBeenCalledOnce();
+      expect(onAfterRun).toHaveBeenCalledOnce();
+      const [runIdArg, costArg] = onAfterRun.mock.calls[0]!;
+      // Same run id the gate produced (CP dedups debits on it).
+      expect(runIdArg).toBe(onBeforeRun.mock.calls[0]![0]);
+      expect(costArg).toBeCloseTo(0.0016, 6);
+    });
+
+    it('does not debit when synthesis fails (meta null) — no money for no audio', async () => {
+      const onAfterRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun: vi.fn(), onAfterRun }];
+      mockSpeakStream.mockResolvedValue(null);
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect(onAfterRun).not.toHaveBeenCalled();
+    });
+
+    it('self-host (no hooks) synthesizes unchanged — gate + debit are no-ops', async () => {
+      mockEngineHooks = [];
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect(mockSpeakStream).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('POST /api/transcribe', () => {
+    it('blocks with 402 when the onBeforeRun hook denies — provider never touched', async () => {
+      // The gate is wired immediately after audio decode, before the route
+      // touches extractSessionContext / transcribeWithStream — so a denied
+      // tenant gets a 402 and the pool key is never used for STT.
+      mockEngineHooks = [{ onBeforeRun: vi.fn().mockRejectedValue(new Error('AI budget for this period reached.')) }];
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(402);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('AI budget');
+      // Gate fired before any provider work — STT was never invoked.
+      expect(mockExtractSessionContext).not.toHaveBeenCalled();
+      expect(mockTranscribeWithStream).not.toHaveBeenCalled();
+    });
+
+    it('transcribes on the happy path and does NOT debit (STT debit deliberately unwired)', async () => {
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun, onAfterRun }];
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      // Gate passes (no-op when allowed) and STT streams.
+      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
+      // No STT cost rate exists yet, so the debit is intentionally NOT fired —
+      // this pins that deliberate gap so a future debit wiring is a conscious
+      // change, not a silent regression.
+      expect(onAfterRun).not.toHaveBeenCalled();
+    });
   });
 });
 
