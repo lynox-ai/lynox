@@ -26,8 +26,10 @@ import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind } from './subject-store.js';
+import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS } from './subject-store.js';
+import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
+import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 import { channels } from './observability.js';
 
@@ -521,10 +523,37 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Entity Operations ===
 
   async listEntities(opts?: { type?: string; limit?: number; offset?: number }): Promise<EntityRecord[]> {
+    if (this.subjectGraphEnabled && this.subjectStore) {
+      try { return this._listSubjectEntities(opts); }
+      catch (err: unknown) { this._logReadFallback('listEntities', err); }
+    }
     return this.db.listEntities(opts).map(toEntityRecord);
   }
 
+  /**
+   * Entity browse-search (the `/api/kg/entities?q=` path). When the subject-graph
+   * read path is active this is a case-insensitive name/alias substring match over
+   * subjects (no semantic search over subjects yet — substring is predictable for a
+   * "find by name" browse box); otherwise the legacy semantic `retrieve`. Kept
+   * ID-coherent with {@link listEntities}/{@link getEntity} so a searched entity
+   * resolves through `/api/kg/entities/:id`.
+   */
+  async searchEntities(query: string, limit: number): Promise<EntityRecord[]> {
+    if (this.subjectGraphEnabled && this.subjectStore) {
+      try { return this._listSubjectEntities({ q: query, limit }); }
+      catch (err: unknown) { this._logReadFallback('searchEntities', err); }
+    }
+    const result = await this.retrieve(query, [{ type: 'global', id: 'global' }], { topK: limit });
+    return result.entities ?? [];
+  }
+
   async getEntity(id: string): Promise<EntityRecord | null> {
+    if (this.subjectGraphEnabled && this.subjectStore) {
+      try {
+        const row = this.subjectStore.getSubject(id);
+        return row ? this._subjectRowToEntityRecord(row) : null;
+      } catch (err: unknown) { this._logReadFallback('getEntity', err); }
+    }
     const row = this.db.getEntity(id);
     return row ? toEntityRecord(row) : null;
   }
@@ -534,7 +563,16 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   async getEntityRelations(entityId: string, depth?: number | undefined): Promise<RelationRecord[]> {
-    const rows = this.db.getEntityRelations(entityId, depth === undefined ? 50 : depth * 20);
+    // The legacy `depth` arg is really a row LIMIT (db.getEntityRelations(id, limit), newest-first,
+    // clamped [1,200]). Mirror the same bound + ORDER on the subject path so a hub entity can't return
+    // unbounded edges (the export loops this over 200 entities) and the cap returns the SAME newest-N as legacy.
+    const limit = Math.max(1, Math.min(depth === undefined ? 50 : depth * 20, 200));
+    if (this.subjectGraphEnabled && this.relationshipStore) {
+      try {
+        return this.relationshipStore.getRelationshipsForSubject(entityId, limit).map(r => this._relRowToRelationRecord(r));
+      } catch (err: unknown) { this._logReadFallback('getEntityRelations', err); }
+    }
+    const rows = this.db.getEntityRelations(entityId, limit);
     return rows.map(r => ({
       fromEntityId: r.from_entity_id,
       toEntityId: r.to_entity_id,
@@ -544,6 +582,92 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       sourceMemoryId: r.source_memory_id ?? '',
       createdAt: r.created_at,
     }));
+  }
+
+  // === Subject-graph read mappers (S1d — flag-gated, additive) ===
+
+  /**
+   * A subject-graph READ that throws (closed/corrupt engine.db) must never crash the
+   * API — it falls back to the legacy store (the read authority through S1) and logs
+   * for observability, mirroring the S1b mirror-WRITE isolation. A by-id fallback
+   * degrades to "not found" (subject ids don't resolve legacy rows) rather than
+   * returning wrong data.
+   */
+  private _logReadFallback(method: string, err: unknown): void {
+    process.stderr.write(
+      `[lynox:subject-graph] read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+
+  /**
+   * The subject-graph read of the entity list: maps Subjects back to the stable
+   * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
+   * Filter order: kind (`type`) → name/alias substring (`q`) → offset/limit slice.
+   * Rows come `updated_at DESC` (via `listSubjects`); the legacy path orders by
+   * `mention_count DESC`, but subjects carry no mention count, so browse order +
+   * `mentionCount` (0) differ from legacy — tracked with the memory sprint.
+   */
+  private _listSubjectEntities(
+    opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
+  ): EntityRecord[] {
+    const store = this.subjectStore;
+    if (!store) return [];
+    // A `type` from the legacy KG vocabulary maps to a subject kind; one that maps
+    // to nothing (concept/location/collection) yields no rows.
+    const kindFilter = opts?.type ? entityTypeToSubjectKind(opts.type) : null;
+    if (opts?.type && !kindFilter) return [];
+    const rows = store.listSubjects(kindFilter ? { kind: kindFilter } : undefined);
+    let mapped = rows
+      .map(r => this._subjectRowToEntityRecord(r))
+      .filter((e): e is EntityRecord => e !== null);
+    const q = opts?.q?.trim().toLowerCase();
+    if (q) {
+      mapped = mapped.filter(e =>
+        e.canonicalName.toLowerCase().includes(q) ||
+        e.aliases.some(a => a.toLowerCase().includes(q)),
+      );
+    }
+    const offset = Math.max(opts?.offset ?? 0, 0);
+    const limit = opts?.limit ?? mapped.length;
+    return mapped.slice(offset, offset + limit);
+  }
+
+  /** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
+  private _subjectRowToEntityRecord(row: SubjectRow): EntityRecord | null {
+    const entityType = subjectKindToEntityType(row.kind);
+    if (!entityType) return null;
+    let aliases: string[];
+    try {
+      const parsed: unknown = JSON.parse(row.aliases || '[]');
+      aliases = Array.isArray(parsed) ? parsed.filter((a): a is string => typeof a === 'string') : [];
+    } catch {
+      aliases = [];
+    }
+    return {
+      id: row.id,
+      canonicalName: row.name,
+      entityType,
+      aliases,
+      description: '',
+      scopeType: 'global',
+      scopeId: 'global',
+      mentionCount: 0,
+      firstSeenAt: row.created_at,
+      lastSeenAt: row.updated_at,
+    };
+  }
+
+  /** Map a relationship row to the stable `RelationRecord` DTO. */
+  private _relRowToRelationRecord(r: RelationshipRow): RelationRecord {
+    return {
+      fromEntityId: r.from_subject_id,
+      toEntityId: r.to_subject_id,
+      relationType: r.kind,
+      description: r.description,
+      confidence: r.confidence,
+      sourceMemoryId: r.source_memory_id ?? '',
+      createdAt: r.created_at,
+    };
   }
 
   async mergeEntities(sourceId: string, targetId: string): Promise<void> {
@@ -609,6 +733,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   async stats(): Promise<KnowledgeGraphStats> {
+    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore) {
+      try {
+        return {
+          // Entities + relations are mirrored into the subject-graph (S1b/S1c), so
+          // they count from there. MEMORIES are NOT migrated in S1 — the engine.db
+          // `memories` table holds only a provenance STUB, and only for memories that
+          // resolved a subject (knowledge-layer store(): no subject → no stub). Counting
+          // it would undercount + skew the legacy memory-gc consolidation trigger, so
+          // memoryCount stays on the legacy authority until the memory sprint.
+          memoryCount: this.db.getActiveMemoryCount(),
+          entityCount: this.subjectStore.count({ kinds: ENTITY_MAPPABLE_SUBJECT_KINDS }),
+          relationCount: this.relationshipStore.count(),
+          communityCount: 0,
+        };
+      } catch (err: unknown) { this._logReadFallback('stats', err); }
+    }
     return {
       memoryCount: this.db.getActiveMemoryCount(),
       entityCount: this.db.getEntityCount(),

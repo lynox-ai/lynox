@@ -5623,8 +5623,7 @@ export class LynoxHTTPApi {
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
       try {
         if (query) {
-          const result = await kg.retrieve(query, [{ type: 'global', id: 'global' }], { topK: limit });
-          const entities = result.entities ?? [];
+          const entities = await kg.searchEntities(query, limit);
           jsonResponse(res, 200, { entities });
         } else {
           const listOpts: { type?: string; limit?: number; offset?: number } = { limit, offset };

@@ -106,9 +106,24 @@ export class RelationshipStore {
     return this.db.prepare('SELECT * FROM relationships WHERE to_subject_id = ?').all(subjectId) as RelationshipRow[];
   }
 
-  /** All edges touching a subject, either direction. */
-  getRelationshipsForSubject(subjectId: string): RelationshipRow[] {
+  /**
+   * All edges touching a subject, either direction. With `limit`, returns the
+   * newest `limit` edges (`ORDER BY created_at DESC LIMIT ?`) — matching the legacy
+   * `agent-memory.db getEntityRelations` cap so the read-migration is result-faithful
+   * and a hub entity can't materialize unbounded edges.
+   */
+  getRelationshipsForSubject(subjectId: string, limit?: number | undefined): RelationshipRow[] {
+    if (limit !== undefined) {
+      return this.db.prepare(
+        'SELECT * FROM relationships WHERE from_subject_id = ? OR to_subject_id = ? ORDER BY created_at DESC LIMIT ?',
+      ).all(subjectId, subjectId, limit) as RelationshipRow[];
+    }
     return this.db.prepare('SELECT * FROM relationships WHERE from_subject_id = ? OR to_subject_id = ?')
       .all(subjectId, subjectId) as RelationshipRow[];
+  }
+
+  /** Total edge count. */
+  count(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM relationships').get() as { n: number }).n;
   }
 }
