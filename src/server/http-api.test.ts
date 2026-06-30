@@ -4225,4 +4225,136 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     const tool = await jsonFetch('/api/secrets/SHOPIFY_TOKEN', { method: 'DELETE' });
     expect(tool.status).not.toBe(403);
   });
+
+  describe('GDPR export + erasure — engine.db coverage (Foundation Rework v2 — S2-pre0)', () => {
+    function swapEngine(overrides: Record<string, unknown>, test: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origs: Record<string, unknown> = {};
+      for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+      return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+    }
+
+    it('GET /api/export pages through ALL entities (no silent 200-cap drop)', async () => {
+      // 250 entities: the old single { limit: 200 } call silently dropped 50 from
+      // a user's GDPR export. The route must paginate and return every one.
+      const all = Array.from({ length: 250 }, (_, i) => ({
+        id: `e${i}`, canonicalName: `Entity ${i}`, entityType: 'person', aliases: [],
+        description: '', scopeType: 'global', scopeId: 'global', mentionCount: 0,
+        firstSeenAt: '', lastSeenAt: '',
+      }));
+      const listEntities = vi.fn(({ limit, offset }: { limit: number; offset: number }) =>
+        Promise.resolve(all.slice(offset, offset + limit)));
+      await swapEngine({
+        getKnowledgeLayer: () => ({
+          listEntities,
+          stats: () => Promise.resolve({ entityCount: 250, relationCount: 0, memoryCount: 0 }),
+          getEntityRelations: () => Promise.resolve([]),
+        }),
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { knowledge_graph: { entities: unknown[] } };
+        expect(body.knowledge_graph.entities).toHaveLength(250);
+        // The loop made exactly 2 page calls (200 + 50) then stopped on the
+        // short page — not a single capped fetch, not an extra offset:400 fetch.
+        expect(listEntities).toHaveBeenCalledWith({ limit: 200, offset: 0 });
+        expect(listEntities).toHaveBeenCalledWith({ limit: 200, offset: 200 });
+        expect(listEntities).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {
+      // A store that always returns a full PAGE would loop forever without the
+      // MAX_PAGES bound — assert the loop stops at the 1000-page cap.
+      const full = Array.from({ length: 200 }, (_, i) => ({
+        id: `e${i}`, canonicalName: `E${i}`, entityType: 'person', aliases: [],
+        description: '', scopeType: 'global', scopeId: 'global', mentionCount: 0,
+        firstSeenAt: '', lastSeenAt: '',
+      }));
+      const listEntities = vi.fn(() => Promise.resolve(full));
+      await swapEngine({
+        getKnowledgeLayer: () => ({
+          listEntities,
+          stats: () => Promise.resolve({ entityCount: 0, relationCount: 0, memoryCount: 0 }),
+          getEntityRelations: () => Promise.resolve([]),
+        }),
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        expect(listEntities).toHaveBeenCalledTimes(1000);
+      });
+    });
+
+    it('DELETE /api/data wipes engine.db PII via deleteAllData (Right to Erasure)', async () => {
+      const deleteAllData = vi.fn();
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({
+            listEntities: () => [],
+            deleteEntity: () => undefined,
+            deactivateMemoriesByPattern: () => undefined,
+          }),
+        }),
+        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', {
+          method: 'DELETE',
+          body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
+        });
+        expect(res.status).toBe(200);
+        expect(deleteAllData).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('DELETE /api/data still 200s (best-effort) when deleteAllData throws', async () => {
+      const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => undefined }),
+        }),
+        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        expect(deleteAllData).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('DELETE /api/data without the confirm token 400s and never touches engine.db (guard still holds after the DELETE-body-parse fix)', async () => {
+      const deleteAllData = vi.fn();
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => undefined }),
+        }),
+        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'nope' }) });
+        expect(res.status).toBe(400);
+        expect(deleteAllData).not.toHaveBeenCalled();
+      });
+    });
+
+    it('DELETE /api/data still 200s when engine.db is absent (getEngineDb null)', async () => {
+      await swapEngine({
+        getEngineDb: () => null,
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => undefined }),
+        }),
+        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', {
+          method: 'DELETE',
+          body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
+        });
+        expect(res.status).toBe(200);
+      });
+    });
+  });
 });

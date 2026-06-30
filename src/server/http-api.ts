@@ -34,7 +34,7 @@ import { SessionStore } from '../core/session-store.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -1437,9 +1437,14 @@ export class LynoxHTTPApi {
       }
     }
 
-    // Parse body for POST/PUT/PATCH
+    // Parse body for POST/PUT/PATCH/DELETE. DELETE carries a JSON body for
+    // confirm-guarded destructive routes (e.g. DELETE /api/data's
+    // { "confirm": "DELETE_ALL_DATA" } Right-to-Erasure gate) — without parsing
+    // it the guard could never be satisfied and the route was unreachable. A
+    // body-less DELETE parses to null (no Content-Type ⇒ no 415), so existing
+    // DELETE routes are unaffected.
     let body: unknown = null;
-    if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+    if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
       const ct = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
       if (ct && ct !== 'application/json') {
         errorResponse(res, 415, 'Content-Type must be application/json');
@@ -5907,7 +5912,26 @@ export class LynoxHTTPApi {
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         try {
-          const entities = await kg.listEntities({ limit: 200 });
+          // Page through ALL entities. A single { limit: 200 } call silently
+          // dropped every entity past the first 200 from a user's GDPR export
+          // (an Art. 15/20 completeness gap, on the legacy KG today and the
+          // subject-graph once the flag flips). The page cap bounds a runaway
+          // loop. (The per-entity relation cap below stays at 200 newest — a
+          // documented bounded loss; the global relation scan is S2-main.)
+          const PAGE = 200;
+          const MAX_PAGES = 1000;
+          const entities: EntityRecord[] = [];
+          let truncated = true;
+          for (let page = 0; page < MAX_PAGES; page++) {
+            const batch = await kg.listEntities({ limit: PAGE, offset: page * PAGE });
+            entities.push(...batch);
+            if (batch.length < PAGE) { truncated = false; break; }
+          }
+          if (truncated) {
+            // Surfaced, not silent: hitting the cap means the export may be
+            // incomplete (an Art.15/20 gap) — log so it's observable, never drop quietly.
+            process.stderr.write(`⚠ /api/export: entity export hit the ${MAX_PAGES * PAGE}-row cap — dump may be incomplete\n`);
+          }
           const stats = await kg.stats();
           // Collect all relations by iterating entity relations
           const relationSet = new Map<string, unknown>();
@@ -6029,6 +6053,24 @@ export class LynoxHTTPApi {
           // Also deactivate all memories
           db.deactivateMemoriesByPattern('%');
         } catch { /* best effort */ }
+      }
+
+      // Delete all subject-graph data (engine.db) — Foundation Rework v2 tables.
+      // The legacy KG wipe above clears agent-memory.db; this clears the engine.db
+      // mirror (people.email/phone, memories.text, subjects.name, organizations,
+      // artifacts, …) so a Right-to-Erasure request leaves no PII once the S1b/c
+      // mirror writes are enabled. Mirror writes are flag-gated, so this lands with
+      // the same release that turns them on — the engine.db is empty until then.
+      const engineDb = engine.getEngineDb();
+      if (engineDb) {
+        try {
+          engineDb.deleteAllData();
+        } catch (err) {
+          // The wipe is one atomic transaction: a failure leaves ALL engine.db
+          // PII intact while the route still 200s. Surface it (an Art.17 erasure
+          // must not silently fail) rather than swallowing best-effort.
+          process.stderr.write(`⚠ /api/data: engine.db wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
 
       // Delete all DataStore collections (includes CRM tables)
