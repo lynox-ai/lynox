@@ -806,6 +806,33 @@ export class AgentMemoryDb {
     return row.cnt;
   }
 
+  /**
+   * Offset-paged scan over the ENTIRE relations table (Foundation Rework v2 S2
+   * backfill). `getEntityRelations` is per-entity + capped at 200 newest — it
+   * cannot enumerate the global edge set (a hub entity's older edges drop), so the
+   * data re-map needs this stable-ordered full scan. Ordered by the PRIMARY KEY so
+   * pagination is stable across pages even as rows are read.
+   */
+  listAllRelations(opts?: { limit?: number | undefined; offset?: number | undefined }): RelationRow[] {
+    const limit = Math.max(1, opts?.limit ?? 500);
+    const offset = Math.max(0, opts?.offset ?? 0);
+    return this.db.prepare('SELECT * FROM relations ORDER BY id LIMIT ? OFFSET ?').all(limit, offset) as RelationRow[];
+  }
+
+  /**
+   * Offset-paged scan over the ENTIRE entities table (Foundation Rework v2 S2
+   * backfill). Distinct from {@link listEntities}, which HARD-CLAMPS its limit to
+   * 200 (a browse-list cap) and orders by `mention_count` — both wrong for a full
+   * re-map: the clamp would silently drop every entity past the first page, and the
+   * unindexed sort costs a full sort per page. This is unclamped and PK-ordered so
+   * pagination is stable + sort-free and no entity is ever dropped.
+   */
+  listAllEntities(opts?: { limit?: number | undefined; offset?: number | undefined }): EntityRow[] {
+    const limit = Math.max(1, opts?.limit ?? 500);
+    const offset = Math.max(0, opts?.offset ?? 0);
+    return this.db.prepare('SELECT * FROM entities ORDER BY id LIMIT ? OFFSET ?').all(limit, offset) as EntityRow[];
+  }
+
   getMemoriesMentioningEntity(entityId: string, activeOnly = true, limit = 10): MemoryRow[] {
     const safeLimit = Math.max(1, Math.min(limit, 100));
     const activeClause = activeOnly ? 'AND m.is_active = 1' : '';

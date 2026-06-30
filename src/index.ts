@@ -122,87 +122,16 @@ export { setTenantWorkspace, ensureContextWorkspace } from './core/workspace.js'
 import { stdout, stderr, argv } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
-import { existsSync, readFileSync, realpathSync, statSync, lstatSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, realpathSync } from 'node:fs';
 
 import { setDataDir } from './core/config.js';
-import { DIM, YELLOW, RESET } from './cli/ui.js';
+import { loadVaultKeyFromDotEnv } from './core/engine-init.js';
+import { DIM, RESET } from './cli/ui.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
 import { getErrorMessage } from './core/utils.js';
-
-/**
- * Load ~/.lynox/.env if it exists and LYNOX_VAULT_KEY is not already set.
- * This ensures the vault key survives restarts without requiring the user
- * to manually source the file. The entrypoint.sh does this for Docker;
- * this is the equivalent for local npm/npx usage.
- *
- * Security:
- * - Only reads LYNOX_VAULT_KEY from the file (line-by-line parsing, no eval)
- * - Rejects symlinks (must be a regular file)
- * - Rejects files with group/other permissions (must be 0o600 or 0o400)
- * - Rejects files not owned by the current user (Unix only)
- * - Validates vault key format (base64, reasonable length)
- */
-const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
-
-function loadDotEnv(): void {
-  if (process.env['LYNOX_VAULT_KEY']) return; // already set
-  try {
-    const envPath = join(homedir(), '.lynox', '.env');
-    if (!existsSync(envPath)) return;
-
-    // Security: reject symlinks
-    const lstats = lstatSync(envPath);
-    if (!lstats.isFile()) {
-      stderr.write(`${YELLOW}⚠${RESET} ~/.lynox/.env is not a regular file — skipping\n`);
-      return;
-    }
-
-    // Security: check ownership (Unix only — process.getuid available on POSIX)
-    const stats = statSync(envPath);
-    const uid = process.getuid?.();
-    if (uid !== undefined && stats.uid !== uid) {
-      stderr.write(`${YELLOW}⚠${RESET} ~/.lynox/.env is not owned by you — skipping\n`);
-      return;
-    }
-
-    // Security: reject group/other readable (must be 0o600 or stricter)
-    if ((stats.mode & 0o077) !== 0) {
-      stderr.write(`${YELLOW}⚠${RESET} ~/.lynox/.env has insecure permissions (${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ~/.lynox/.env\n`);
-      return;
-    }
-
-    const content = readFileSync(envPath, 'utf-8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      const value = trimmed.slice(eqIdx + 1).trim();
-      // Only load vault key — never auto-set API keys or other secrets from dotenv
-      if (key === 'LYNOX_VAULT_KEY' && value) {
-        // Validate format: base64 string, reasonable length (32-128 chars)
-        if (!VAULT_KEY_PATTERN.test(value)) {
-          stderr.write(`${YELLOW}⚠${RESET} Invalid LYNOX_VAULT_KEY format in ~/.lynox/.env — skipping\n`);
-          return;
-        }
-        // Lightweight entropy check: warn if key has very few unique chars
-        const uniqueChars = new Set(value).size;
-        if (uniqueChars < 10) {
-          stderr.write(`${YELLOW}⚠${RESET} Vault key has low entropy (${uniqueChars} unique chars). Generate a strong key: openssl rand -base64 48\n`);
-        }
-        process.env['LYNOX_VAULT_KEY'] = value;
-        return;
-      }
-    }
-  } catch {
-    // Best-effort: if the file is unreadable, vault init will warn later
-  }
-}
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -230,7 +159,7 @@ async function runCLI(): Promise<void> {
   const args = argv.slice(2);
 
   // Load vault key from ~/.lynox/.env before anything else
-  loadDotEnv();
+  loadVaultKeyFromDotEnv();
 
   // === --help flag ===
   if (args.includes('--help') || args.includes('-h')) {

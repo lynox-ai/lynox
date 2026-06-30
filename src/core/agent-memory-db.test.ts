@@ -286,6 +286,20 @@ describe('AgentMemoryDb', () => {
       db.createSupersedes(m2, m1, 'contradiction');
       // No crash = success (supersedes table doesn't have a query method yet)
     });
+
+    it('listAllRelations enumerates the GLOBAL edge set across pages (S2 backfill scan)', () => {
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) ids.push(db.createEntity({ canonicalName: `E${i}`, entityType: 'person', scopeType: 'global', scopeId: 'g' }));
+      for (let i = 0; i < 4; i++) db.createRelation(ids[i]!, ids[i + 1]!, 'knows', '', '');
+      // A hub edge older than getEntityRelations' 200-cap would normally drop; the
+      // global scan must still surface every row.
+      const all = db.listAllRelations();
+      expect(all).toHaveLength(4);
+      // Paged scan covers the exact same set with no gap/dup at the boundary.
+      const paged = [...db.listAllRelations({ limit: 2, offset: 0 }), ...db.listAllRelations({ limit: 2, offset: 2 }), ...db.listAllRelations({ limit: 2, offset: 4 })];
+      expect(paged.map(r => r.id).sort()).toEqual(all.map(r => r.id).sort());
+      expect(paged).toHaveLength(4);
+    });
   });
 
   // ── Graph Traversal ──────────────────────────────────────────

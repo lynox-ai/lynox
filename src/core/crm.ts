@@ -270,6 +270,44 @@ export class CRM {
     })();
   }
 
+  /**
+   * Foundation Rework v2 (S2 backfill): replay the contact→subject mirror over
+   * EVERY existing `ds_contacts` row (the live `upsertContact` only mirrors NEW
+   * saves). Reuses the same private `_mirrorContactToSubjectGraph` so the field
+   * mapping + enc boundary stay single-sourced with the live path. Idempotent —
+   * findOrCreate name-dedup + setPersonDetail merge + the (from,kind,to) edge
+   * upsert make a re-run convergent. Requires the subject-graph flag ON + an
+   * engineDb (the binary constructs the CRM that way); a no-op otherwise.
+   * Returns the number of contacts mirrored. Pages via the DataStore offset (the
+   * `listContacts` wrapper has no offset).
+   */
+  backfillSubjectGraph(opts?: { pageSize?: number | undefined }): { contacts: number } {
+    if (!this.subjectGraphEnabled || !this.subjectStore) return { contacts: 0 };
+    this.ensureSchema();
+    const pageSize = Math.max(1, opts?.pageSize ?? 500);
+    let offset = 0;
+    let mirrored = 0;
+    for (;;) {
+      const { rows } = this.ds.queryRecords({ collection: 'contacts', limit: pageSize, offset });
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        try {
+          this._mirrorContactToSubjectGraph(row as unknown as ContactData);
+          mirrored++;
+        } catch (err: unknown) {
+          // One malformed row must not abort the batch; the name is plaintext PII,
+          // so it is omitted from the log (matches the live upsertContact path).
+          process.stderr.write(
+            `[lynox:subject-graph] S2 contact backfill skipped a row: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+    return { contacts: mirrored };
+  }
+
   /** Remove all contacts auto-created from knowledge graph entities. */
   purgeKnowledgeGraphContacts(): number {
     this.ensureSchema();
