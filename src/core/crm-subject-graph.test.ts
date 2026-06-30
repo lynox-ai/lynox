@@ -192,4 +192,50 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
     expect(crm.findContact({ name: 'Dave' })!.email).toBe('dave@x.com');
     ds.close();
   });
+
+  describe('S2 backfillSubjectGraph — mirror PRE-EXISTING contacts', () => {
+    it('mirrors every ds_contacts row a flag-OFF era left behind (person+detail, org, works_for); idempotent', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-crm-s2-'));
+      tmpDirs.push(dir);
+      const ds = new DataStore(join(dir, 'datastore.db'));
+      const engine = new EngineDb(join(dir, 'engine.db'), TEST_VAULT_KEY);
+
+      // Era 1: flag OFF — contacts land in ds_contacts only, never mirrored.
+      const crmOff = new CRM(ds, { engineDb: engine, subjectGraphEnabled: false });
+      crmOff.upsertContact({ name: 'Beatrice Vogt', email: 'bea@helvetia.ch', phone: '+41790000001', company: 'Helvetia AG', type: 'customer' });
+      crmOff.upsertContact({ name: 'Quentin Zephyr', email: 'q@zephyr.io', company: 'Zephyr Robotics' });
+      expect(new SubjectStore(engine).listSubjects()).toHaveLength(0); // nothing mirrored yet
+
+      // Era 2: flag ON — the S2 backfill replays the existing rows.
+      const crmOn = new CRM(ds, { engineDb: engine, subjectGraphEnabled: true });
+      const r1 = crmOn.backfillSubjectGraph();
+      expect(r1.contacts).toBe(2);
+
+      const subs = new SubjectStore(engine);
+      expect(subs.listSubjects().map(s => s.name).sort())
+        .toEqual(['Beatrice Vogt', 'Helvetia AG', 'Quentin Zephyr', 'Zephyr Robotics']);
+      const bea = subs.findCanonical('Beatrice Vogt', 'person')!;
+      const detail = subs.getPersonDetail(bea.id)!;
+      expect(detail.email).toBe('bea@helvetia.ch');     // decrypts
+      expect(detail.phone).toBe('+41790000001');
+      const rawEmail = (engine.getDb().prepare('SELECT email FROM people WHERE subject_id = ?').get(bea.id) as { email: string }).email;
+      expect(rawEmail).toMatch(/^enc:/);                  // encrypted at rest
+      const rels = new RelationshipStore(engine);
+      expect(rels.getRelationshipsFrom(bea.id)[0]!.kind).toBe('works_for');
+
+      // Idempotent: a second backfill re-visits both rows but adds no duplicate subjects/edges.
+      expect(crmOn.backfillSubjectGraph().contacts).toBe(2);
+      expect(subs.listSubjects()).toHaveLength(4);
+      expect((engine.getDb().prepare('SELECT COUNT(*) n FROM relationships').get() as { n: number }).n).toBe(2);
+
+      ds.close(); engine.close();
+    });
+
+    it('flag OFF / no engineDb: backfill is a no-op', () => {
+      const { crm, ds } = makeCrm({ flag: false });
+      crm.upsertContact({ name: 'Ed', email: 'ed@x.com' });
+      expect(crm.backfillSubjectGraph()).toEqual({ contacts: 0 });
+      ds.close();
+    });
+  });
 });

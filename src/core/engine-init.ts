@@ -3,9 +3,10 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, lstatSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from './utils.js';
 import { writeFileAtomicSync } from './atomic-write.js';
@@ -296,6 +297,59 @@ export function ensureHttpSecret(): void {
     // ephemeral case where this branch fires.
     process.env['LYNOX_HTTP_SECRET'] = value;
     process.stderr.write('⚠ Could not persist engine HTTP secret. Auth is enforced for this process only.\n');
+  }
+}
+
+const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
+
+/**
+ * Load `LYNOX_VAULT_KEY` from `~/.lynox/.env` into `process.env` if not already
+ * set. The Docker entrypoint persists the key to `~/.lynox/.env` (NOT vault.key)
+ * and `export`s it into PID 1 only — so a process started via `docker exec` (e.g.
+ * an operator running the S2 backfill) does NOT inherit it. This is the same
+ * security-checked read the CLI boot does (`src/index.ts`); the S2 backfill calls
+ * it before {@link ensureVaultKey} so it derives engine.db's HKDF from the SAME
+ * key the engine uses, never a divergent/auto-generated one.
+ *
+ * Security: only reads LYNOX_VAULT_KEY (no eval); rejects symlinks, foreign
+ * ownership, group/other-readable perms, and malformed keys.
+ */
+export function loadVaultKeyFromDotEnv(): void {
+  if (process.env['LYNOX_VAULT_KEY']) return;
+  try {
+    const envPath = join(homedir(), '.lynox', '.env');
+    if (!existsSync(envPath)) return;
+    if (!lstatSync(envPath).isFile()) {
+      process.stderr.write('⚠ ~/.lynox/.env is not a regular file — skipping\n');
+      return;
+    }
+    const stats = statSync(envPath);
+    const uid = process.getuid?.();
+    if (uid !== undefined && stats.uid !== uid) {
+      process.stderr.write('⚠ ~/.lynox/.env is not owned by you — skipping\n');
+      return;
+    }
+    if ((stats.mode & 0o077) !== 0) {
+      process.stderr.write(`⚠ ~/.lynox/.env has insecure permissions (${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ~/.lynox/.env\n`);
+      return;
+    }
+    for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      if (trimmed.slice(0, eqIdx).trim() !== 'LYNOX_VAULT_KEY') continue;
+      const value = trimmed.slice(eqIdx + 1).trim();
+      if (!value) continue;
+      if (!VAULT_KEY_PATTERN.test(value)) {
+        process.stderr.write('⚠ Invalid LYNOX_VAULT_KEY format in ~/.lynox/.env — skipping\n');
+        return;
+      }
+      process.env['LYNOX_VAULT_KEY'] = value;
+      return;
+    }
+  } catch {
+    // Best-effort: if unreadable, vault init warns later.
   }
 }
 
