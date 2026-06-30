@@ -249,7 +249,7 @@ export interface SecretResult {
 
 /**
  * Auto-generate and persist the engine HTTP API bearer secret if none is
- * configured. Mirrors `_ensureVaultKey`'s pattern — env > persisted file >
+ * configured. Mirrors `ensureVaultKey`'s pattern — env > persisted file >
  * generate-and-persist. Called from `LynoxHTTPApi.start()` for the Web UI
  * mode (where the server binds to 0.0.0.0); API-only mode keeps its
  * localhost-only fallback and never auto-generates.
@@ -288,12 +288,18 @@ export function ensureHttpSecret(): void {
 }
 
 /**
- * Auto-generate and persist a vault key if none is configured.
- * New users get a working vault out of the box.
+ * Auto-generate and persist a vault key if none is configured, loading it into
+ * `process.env['LYNOX_VAULT_KEY']`. New users get a working vault out of the box.
  *
  * Priority: LYNOX_VAULT_KEY env > ~/.lynox/vault.key file > auto-generate (if no vault.db exists)
+ *
+ * MUST run BEFORE the persistence stores (RunHistory, EngineDb) are constructed —
+ * they capture the encryption key once, at construction. On self-hosted (key in
+ * vault.key, not exported as env), running this only at initSecrets-time (after
+ * _initPersistence) left those stores with no key → plaintext at rest. Exported
+ * + idempotent so `Engine.init()` can hoist it ahead of persistence.
  */
-function _ensureVaultKey(): void {
+export function ensureVaultKey(): void {
   if (process.env['LYNOX_VAULT_KEY']) return;
 
   const lynoxDir = getLynoxDir();
@@ -330,8 +336,10 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   let vault: SecretVault | null = null;
   let store: SecretStore | null = null;
 
-  // Auto-generate vault key for new users
-  _ensureVaultKey();
+  // Auto-generate vault key for new users (idempotent — Engine.init() already
+  // hoists this ahead of _initPersistence so the stores are encrypted; this
+  // remains as the belt-and-suspenders call for any path that skips the hoist).
+  ensureVaultKey();
 
   try {
     try {

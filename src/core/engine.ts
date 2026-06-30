@@ -79,6 +79,7 @@ import {
   configureBudgetAndRateLimits,
   generateInitBriefing,
   initSecrets,
+  ensureVaultKey,
   initScopes,
   initMemoryInstance,
   initEmbeddingProvider,
@@ -791,6 +792,13 @@ export class Engine {
 
   /** RunHistory, ThreadStore, PromptStore, SecurityAudit, persistent budget + HTTP rate limits. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
   private async _initPersistence(): Promise<void> {
+
+    // Load the vault key into the env BEFORE constructing the persistence stores.
+    // RunHistory + EngineDb derive their at-rest encryption key once, at
+    // construction; initSecrets (which used to be the first caller) runs AFTER
+    // this phase, so on self-hosted (key in ~/.lynox/vault.key, not exported)
+    // both stores would otherwise capture no key and write plaintext. Idempotent.
+    ensureVaultKey();
 
     // Initialize run history (optional — fails gracefully)
     try {
