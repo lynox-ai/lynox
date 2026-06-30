@@ -242,6 +242,23 @@ export function redirectHopHeaders(
   return out;
 }
 
+/**
+ * True when a redirect hop changes origin. The body counterpart to
+ * `redirectHopHeaders`: a 307/308 preserves the method + request body, so a
+ * cross-origin hop would replay the body verbatim to the new origin. Used to
+ * drop a preserved body when the origin changes, so a secret carried in the
+ * body — e.g. an OAuth `client_secret` POST whose `token_url` issues an open
+ * redirect — is not exfiltrated off-origin (the header strip alone misses it).
+ * Fails closed: an unparseable URL is treated as cross-origin.
+ */
+export function isCrossOriginHop(fromUrl: string, toUrl: string): boolean {
+  try {
+    return new URL(fromUrl).origin !== new URL(toUrl).origin;
+  } catch {
+    return true;
+  }
+}
+
 /** Convert init.headers (HeadersInit) into a flat Record<string, string>. */
 export function flattenHeaders(input: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -509,6 +526,13 @@ export async function fetchWithPublicRedirects(
     }
     // Drop credential headers before a cross-origin hop (mirror fetch()).
     headers = redirectHopHeaders(headers, currentUrl, nextUrl);
+    // A 307/308 preserves the body — drop it too on a cross-origin hop so a
+    // secret in the body is not replayed off-origin, degrading to a bodyless
+    // GET (matches the 301/302/303 rewrite path).
+    if (body !== undefined && isCrossOriginHop(currentUrl, nextUrl)) {
+      method = 'GET';
+      body = undefined;
+    }
     currentUrl = nextUrl;
   }
 

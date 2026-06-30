@@ -6191,15 +6191,19 @@ export class LynoxHTTPApi {
       const showHidden = url.searchParams.get('hidden') === '1';
       try {
         const { readdir, stat, access } = (await import('node:fs/promises'));
-        const { join, resolve } = await import('node:path');
+        const { join } = await import('node:path');
         const { getWorkspaceDir } = await import('../core/workspace.js');
         const { getLynoxDir } = await import('../core/config.js');
         const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
 
         const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
         try { await access(base); } catch { ensureDir(base); }
-        const target = resolve(base, dirPath);
-        if (target !== base && !target.startsWith(base + '/')) { errorResponse(res, 403, 'Outside workspace'); return; }
+        // Resolve + reject traversal AND symlink-escape (realpath) — the same
+        // confinement /read, /download and DELETE apply via resolveWorkspacePath.
+        // Without the realpath check a symlink inside the workspace pointing out
+        // would let readdir enumerate the target directory's entries.
+        const target = await resolveWorkspacePath(dirPath);
+        if (target === null) { errorResponse(res, 403, 'Outside workspace'); return; }
         const dirEntries = await readdir(target, { withFileTypes: true });
         const filtered = dirEntries.filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
         const entries = await Promise.all(filtered.map(async e => ({
@@ -6223,10 +6227,18 @@ export class LynoxHTTPApi {
       const resolved = resolve(base, filePath);
       // Logical path must be within workspace
       if (resolved !== base && !resolved.startsWith(base + '/')) return null;
-      // Real path (after symlink resolution) must also be within workspace
+      // Real path (after symlink resolution) must also be within workspace.
+      // Canonicalize the base too: if the base itself contains a symlinked
+      // component (e.g. macOS /tmp -> /private/tmp, a symlinked $HOME, or a
+      // symlinked Docker volume), realpath(resolved) would otherwise mismatch
+      // the literal base and false-reject every legitimate in-workspace path.
+      // realpathSync(base) may throw if the base hasn't been created yet — fall
+      // back to the literal base in that case.
       try {
+        let realBase = base;
+        try { realBase = realpathSync(base); } catch { /* base not created yet */ }
         const real = realpathSync(resolved);
-        if (real !== base && !real.startsWith(base + '/')) return null;
+        if (real !== realBase && !real.startsWith(realBase + '/')) return null;
       } catch {
         // File doesn't exist yet — logical path check above is sufficient
       }

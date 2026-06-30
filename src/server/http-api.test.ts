@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LynoxHooks } from '../core/engine.js';
@@ -4069,6 +4069,72 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ title: 'X', content: 'y', type: 'pdf' }),
       });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe('GET /api/files — workspace confinement', () => {
+    // Regression for the symlink-escape fix on the directory-list handler:
+    // GET /api/files now routes `path` through resolveWorkspacePath(), which
+    // adds a realpathSync-based symlink-escape check on top of the lexical
+    // prefix check. A symlink placed INSIDE the workspace that points OUTSIDE
+    // it must yield 403 — NOT enumerate the target directory's entries.
+    let dataDir: string;
+    let externalDir: string;
+    let base: string;
+    let prevDataDir: string | undefined;
+
+    beforeAll(() => {
+      // The route computes base = getWorkspaceDir() ?? join(getLynoxDir(),
+      // 'workspace'). getWorkspaceDir() is unmocked and returns null here
+      // (LYNOX_WORKSPACE unset), so base = join(getLynoxDir(), 'workspace');
+      // getLynoxDir() (mocked) returns process.env.LYNOX_DATA_DIR. We point it
+      // at a *canonical* (realpath-resolved) temp dir so the legitimate
+      // prefix check isn't tripped by macOS resolving /tmp -> /private/tmp.
+      const canonicalTmp = realpathSync(tmpdir());
+      dataDir = mkdtempSync(join(canonicalTmp, 'lynox-files-confine-'));
+      prevDataDir = process.env['LYNOX_DATA_DIR'];
+      process.env['LYNOX_DATA_DIR'] = dataDir;
+      base = join(dataDir, 'workspace');
+      mkdirSync(base, { recursive: true });
+
+      // Happy-path fixture: a real subdir + file INSIDE the workspace.
+      mkdirSync(join(base, 'safe'), { recursive: true });
+      writeFileSync(join(base, 'safe', 'ok.txt'), 'hello');
+
+      // The attack: a symlink INSIDE the workspace pointing OUTSIDE it.
+      externalDir = mkdtempSync(join(canonicalTmp, 'lynox-files-external-'));
+      writeFileSync(join(externalDir, 'secret.txt'), 'must-not-be-listed');
+      symlinkSync(externalDir, join(base, 'escape'));
+    });
+
+    afterAll(() => {
+      rmSync(join(base, 'escape'), { force: true });
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(externalDir, { recursive: true, force: true });
+      if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    });
+
+    it('lists entries for a normal subdirectory inside the workspace (happy path)', async () => {
+      const res = await jsonFetch('/api/files?path=safe');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { entries: Array<{ name: string }> };
+      expect(body.entries.map(e => e.name)).toContain('ok.txt');
+    });
+
+    it('rejects a symlink that escapes the workspace with 403 (does NOT enumerate the target)', async () => {
+      const res = await jsonFetch('/api/files?path=escape');
+      // Must be 403 — NOT a 200 listing externalDir's `secret.txt`.
+      expect(res.status).toBe(403);
+      // Defense-in-depth: even if a regression returned 200 instead of 403, the
+      // external dir's file must never appear in the listing.
+      const body = await res.json().catch(() => ({})) as { entries?: Array<{ name: string }> };
+      expect((body.entries ?? []).map(e => e.name)).not.toContain('secret.txt');
+    });
+
+    it('rejects plain path traversal with 403', async () => {
+      const res = await jsonFetch('/api/files?path=../../etc');
+      expect(res.status).toBe(403);
     });
   });
 });

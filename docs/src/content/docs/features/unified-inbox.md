@@ -60,7 +60,7 @@ Two flavors of unsnooze:
 - **Time-based** — fires at the scheduled time. The Kopilot top-card at the top of the inbox surfaces snoozes due today, with the wake-up time + a one-line reason ("Vertrag läuft am 18.05. aus").
 - **Reply-based** — if `unsnoozeOnReply` is on (default), the message re-emerges the moment the sender replies. Useful for "ping me if you haven't heard back from them."
 
-Reminders not tied to a specific message live in the **AutomationHub** tab — a flat list you can sort by due-date. From chat, asking the agent in natural language ("remind me tomorrow 10:00 about the Roland inquiry") creates a standalone reminder; the same phrasing inside an open thread anchors one to that thread.
+Reminders not tied to a specific message live in the **AutomationHub** tab — a flat list you can sort by due-date. From chat, asking the agent in natural language ("remind me tomorrow 10:00 about the Mara inquiry") creates a standalone reminder; the same phrasing inside an open thread anchors one to that thread.
 
 ## Push notifications
 

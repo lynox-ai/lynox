@@ -33,9 +33,9 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — ~95 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
+- `src/core/` — ~119 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, engine-db (subject-graph store, flag-gated OFF), subject-store, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream-handler, docker-installer, approval-dialog, changeset-review, dag-visualizer, markdown, interactive)
-- `src/tools/builtin/` — 31 builtin tool functions across 16 modules (incl. api_setup, artifact_save/list/delete); `src/tools/` holds the registry + permission guard
+- `src/tools/builtin/` — 31 builtin tool functions across 20 modules (incl. api_setup, artifact_save/list/delete); `src/tools/` holds the registry + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, DuckDuckGo HTML-scrape fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/src/content/docs/setup/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/src/content/docs/archive/whatsapp-inbox.md`.)
 - `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see core PR #536.)
@@ -81,12 +81,12 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 - Types: single source of truth in src/types/index.ts — never duplicate
 - Tools: ToolRegistry + ToolContext dependency injection
-- Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`) + malicious-write scan (`checkWriteContent` in `output-guard.ts`, wired into `write_file`/`edit_file`). `ToolCallTracker` (H-024 shadow-mode anomaly detector) is wired via `Session._toolCallTracker`. Env vars always override vault (priority: env > vault > config).
+- Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`) + malicious-write scan (`checkWriteContent` in `output-guard.ts`, wired into `write_file`/`edit_file`) + configurable outbound network policy (`network_policy`: allow-all default / deny-all / allow-list, gates `http_request`/`api_setup`/`web_research`). `ToolCallTracker` (H-024 shadow-mode anomaly detector) is wired via `Session._toolCallTracker`. Env vars always override vault (priority: env > vault > config).
 - Cost & rate limits: Session $50, daily $100, monthly $500 (all configurable via config.json). HTTP tool: 200 req/hr, 2000 req/day default. Per-session: 100 HTTP requests, 500 max agent iterations. Spawn depth: 5 levels, $5 default budget per spawn.
 - Resumable Prompts: PromptStore (SQLite, shared DB with RunHistory) — ask_user/ask_secret survive SSE disconnects, page refreshes, thread switches. Agent polls SQLite every 2s. 24h expiry.
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
 - Background tasks: WorkerLoop + CronParser + NotificationRouter
-- Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, thread insights (per-thread aggregated stats), pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal
+- Agent Memory: SQLite (AgentMemoryDb, `~/.lynox/agent-memory.db`) — entity graph, thread insights (per-thread aggregated stats), pattern detection, KPI metrics, confidence evolution, memory consolidation, retrieval feedback loop. ONNX embeddings, brute-force cosine search, recursive CTE graph traversal. The Foundation-Rework-v2 subject-graph store (`engine.db`, `engine-db.ts`/`subject-store.ts`) is flag-gated OFF (`subject_graph_enabled` config / `LYNOX_SUBJECT_GRAPH_ENABLED` env) — legacy agent-memory path stays default until a per-tenant cutover
 - Backup: VACUUM INTO + AES-256-GCM encryption + GDrive upload
 - Migration: Zero-knowledge self-hosted→managed transfer. X25519 ECDH + AES-256-GCM chunk encryption + HMAC-signed handshake. Engine-to-engine (browser orchestrates via SSE). Migration token auth, DB name whitelist, 64 chunks × 8 MB each (~512 MB total ceiling).
 - API Store: profile-first enforcement, agent-driven setup

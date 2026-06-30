@@ -154,6 +154,23 @@ See [Backups](/features/backup/) for details.
 
 When `enforce_https` is `true`, all outbound HTTP requests from tools are blocked — only HTTPS is allowed.
 
+### Network Policy
+
+```json
+{
+  "network_policy": "allow-all",
+  "network_allowed_hosts": []
+}
+```
+
+Controls the agent's outbound network access for the `http_request`, `api_setup`, and `web_research` tools:
+
+- `allow-all` (default) — no restriction; existing behavior.
+- `deny-all` — block all outbound requests from these tools.
+- `allow-list` — allow only the hosts listed in `network_allowed_hosts`.
+
+Override with the `LYNOX_NETWORK_POLICY` and `LYNOX_NETWORK_ALLOWED_HOSTS` (comma-separated) environment variables.
+
 ### Extensions
 
 ```json

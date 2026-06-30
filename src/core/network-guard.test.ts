@@ -15,6 +15,7 @@ import {
   fetchWithPublicRedirects,
   setPinnedTransportForTests,
   redirectHopHeaders,
+  isCrossOriginHop,
   __pinnedAgentForTests,
 } from './network-guard.js';
 import type { PinnedTransportInput } from './network-guard.js';
@@ -299,6 +300,79 @@ describe('fetchPinned / fetchWithPublicRedirects', () => {
     const hop1 = Object.fromEntries(Object.entries(captured[1]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
     // Same origin (api1/start → api1/final) → Authorization is retained.
     expect(hop1['authorization']).toBe('Bearer secret-token');
+  });
+
+  it('fetchWithPublicRedirects: drops the BODY + downgrades to GET on a CROSS-origin 307 (a 307 preserves the body)', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
+      // 307 keeps method+body; the hop crosses origin (api1 → api2).
+      new Response(null, { status: 307, headers: { location: 'https://api2.fake.test/token' } }),
+      new Response('ok', { status: 200 }),
+    );
+
+    const res = await fetchWithPublicRedirects('https://api1.fake.test/token', {
+      method: 'POST',
+      body: 'client_id=x&client_secret=super-secret',
+    });
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(2);
+    // First hop (same origin) carries the secret body as POST.
+    expect(captured[0]!.method).toBe('POST');
+    expect(captured[0]!.body?.toString()).toContain('client_secret=super-secret');
+    // Second hop crossed origin: body dropped, method degraded to GET — the
+    // secret is NOT replayed to api2.
+    expect(captured[1]!.method).toBe('GET');
+    expect(captured[1]!.body).toBeUndefined();
+  });
+
+  it('fetchWithPublicRedirects: KEEPS the BODY on a SAME-origin 307', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
+      new Response(null, { status: 307, headers: { location: 'https://api1.fake.test/token-2' } }),
+      new Response('ok', { status: 200 }),
+    );
+
+    const res = await fetchWithPublicRedirects('https://api1.fake.test/token', {
+      method: 'POST',
+      body: 'client_secret=super-secret',
+    });
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(2);
+    // Same origin (api1 → api1) → the 307 legitimately replays the POST body.
+    expect(captured[1]!.method).toBe('POST');
+    expect(captured[1]!.body?.toString()).toContain('client_secret=super-secret');
+  });
+
+  it('fetchWithPublicRedirects: drops the BODY + downgrades to GET on a CROSS-origin 308 (308 also preserves the body)', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
+      new Response(null, { status: 308, headers: { location: 'https://api2.fake.test/token' } }),
+      new Response('ok', { status: 200 }),
+    );
+
+    const res = await fetchWithPublicRedirects('https://api1.fake.test/token', {
+      method: 'POST',
+      body: 'client_secret=super-secret',
+    });
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(2);
+    // 308 (like 307) keeps method+body; the cross-origin hop must still drop both.
+    expect(captured[1]!.method).toBe('GET');
+    expect(captured[1]!.body).toBeUndefined();
+  });
+});
+
+describe('isCrossOriginHop', () => {
+  it('is false for a same-origin hop (path change only)', () => {
+    expect(isCrossOriginHop('https://h.test/a', 'https://h.test/b')).toBe(false);
+  });
+  it('is true when host, port, or scheme changes', () => {
+    expect(isCrossOriginHop('https://h.test/', 'https://other.test/')).toBe(true);
+    expect(isCrossOriginHop('https://h.test/', 'https://h.test:8443/')).toBe(true);
+    expect(isCrossOriginHop('https://h.test/', 'http://h.test/')).toBe(true);
+  });
+  it('fails closed (cross-origin) on an unparseable URL', () => {
+    expect(isCrossOriginHop('not a url', 'https://h.test/')).toBe(true);
   });
 });
 

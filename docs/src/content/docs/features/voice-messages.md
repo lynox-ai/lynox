@@ -74,7 +74,7 @@ Defaults to the `base` model; falls back to `tiny` for clips under 10 seconds.
 Speech-to-text systems mis-hear proper nouns and product vocabulary in predictable ways. lynox applies a two-layer glossary to the raw transcript before returning it:
 
 - **Core glossary** — lynox product vocabulary (`Setup Wizard`, `Go-Live`, `Knowledge Graph`, …). Seeded from known mishearings; extended via PR as new surface-area names ship.
-- **Session glossary** — built at call time from your own context: CRM contact names, registered API/tool names, recent thread titles, Knowledge-Graph entity labels, custom workflow names. A short edit-distance match (≤2) rewrites nearby tokens when they are not in a common-language stop list — so `Rolland` becomes `Roland` but `rund` is left alone.
+- **Session glossary** — built at call time from your own context: CRM contact names, registered API/tool names, recent thread titles, Knowledge-Graph entity labels, custom workflow names. A short edit-distance match (≤2) rewrites nearby tokens when they are not in a common-language stop list — so `Marra` becomes `Mara` but `rund` is left alone.
 
 Both passes run in single-digit milliseconds. The glossary never leaves the lynox process; your vocabulary is never part of the audio-transcription API request.
 

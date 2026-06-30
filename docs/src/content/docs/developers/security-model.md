@@ -36,6 +36,7 @@ Every outbound URL from the agent flows through `fetchWithPublicRedirects` in `s
 - Scheme restricted to `http` / `https`.
 - 5-second connect timeout per hop.
 - Private IP ranges (RFC 1918, loopback, link-local) blocked by default; an opt-in escape hatch exists for Docker / LAN deployments via configured allow-list.
+- Outbound egress can be further restricted via the configurable network policy (`allow-all` / `deny-all` / `allow-list`) — see [Configuration](/daily-use/configuration/#network-policy).
 
 ## Bash tool guard
 
