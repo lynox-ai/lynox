@@ -1379,7 +1379,13 @@ export class Engine {
     if (this._dataStore) {
       try {
         const { CRM } = await import('./crm.js');
-        this._crm = new CRM(this._dataStore);
+        // Foundation Rework v2 (S1c): hand the CRM the engine.db handle + flag so
+        // a saved contact is additively mirrored into the subject-graph. Inert in
+        // prod (flag OFF) and when engine.db failed to open (graceful degrade).
+        this._crm = new CRM(this._dataStore, {
+          engineDb: this.engineDb ?? undefined,
+          subjectGraphEnabled: this.userConfig.subject_graph_enabled === true,
+        });
         this._crm.ensureSchema();
 
         // One-time cleanup: remove contacts auto-created from KG entities
