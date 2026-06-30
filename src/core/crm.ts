@@ -11,6 +11,9 @@
  */
 
 import type { DataStore } from './data-store.js';
+import type { EngineDb } from './engine-db.js';
+import { SubjectStore } from './subject-store.js';
+import { RelationshipStore } from './relationship-store.js';
 
 // ── Types ──
 
@@ -92,15 +95,39 @@ const INTERACTIONS_SCHEMA = [
 ];
 
 /**
+ * Optional engine.db subject-graph wiring for the CRM (Foundation Rework v2,
+ * S1c). When `subjectGraphEnabled` is true and an `engineDb` is supplied, a
+ * saved contact is additively mirrored into the subject-graph. Default: inert
+ * (prod stays legacy-only until the S2 data migration flips the flag).
+ */
+export interface CrmSubjectGraphOpts {
+  engineDb?: EngineDb | undefined;
+  subjectGraphEnabled?: boolean | undefined;
+}
+
+/**
  * CRM — contact management, deal pipeline, and interaction logging.
  * Auto-creates schema on first use. All operations are synchronous (SQLite).
  */
 export class CRM {
   private readonly ds: DataStore;
   private _initialized = false;
+  private readonly engineDb: EngineDb | null;
+  private readonly subjectGraphEnabled: boolean;
+  private readonly subjectStore: SubjectStore | null;
+  private readonly relationshipStore: RelationshipStore | null;
 
-  constructor(dataStore: DataStore) {
+  constructor(dataStore: DataStore, opts?: CrmSubjectGraphOpts) {
     this.ds = dataStore;
+    this.engineDb = opts?.engineDb ?? null;
+    this.subjectGraphEnabled = opts?.subjectGraphEnabled ?? false;
+    if (this.engineDb) {
+      this.subjectStore = new SubjectStore(this.engineDb);
+      this.relationshipStore = new RelationshipStore(this.engineDb);
+    } else {
+      this.subjectStore = null;
+      this.relationshipStore = null;
+    }
   }
 
   // ── Schema ──
@@ -195,6 +222,52 @@ export class CRM {
         ? { ...data, email: data.email.trim().toLowerCase() }
         : data;
     this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>] });
+
+    // Foundation Rework v2 (S1c): additively mirror the contact into the
+    // engine.db subject-graph behind the flag. Fully isolated — the ds_contacts
+    // write above is authoritative; a mirror failure is logged and swallowed so
+    // CRM behaviour is never affected. Prod (flag OFF) keeps the legacy path only.
+    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore) {
+      try {
+        this._mirrorContactToSubjectGraph(normalized);
+      } catch (err: unknown) {
+        // Contact name omitted from the log — it is plaintext PII (data minimisation).
+        process.stderr.write(
+          `[lynox:subject-graph] CRM contact mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Mirror a contact into the engine.db subject-graph (S1c): the contact → a
+   * `person` subject (+ encrypted PersonDetail), its `company` → an
+   * `organization` subject, joined by a `works_for` edge. Name-deduped via
+   * SubjectStore.findOrCreate — the contact's email identity can't be reused
+   * (email is encrypted at rest in engine.db and not queryable), so identity in
+   * the graph is canonical name, not email (CRM↔subject is not 1:1 by design).
+   * Plaintext PII is passed in; the detail store encrypts at its own boundary.
+   * One engine.db transaction; the email-keyed ds_contacts row stays the source
+   * of truth through S1.
+   */
+  private _mirrorContactToSubjectGraph(c: ContactData): void {
+    const name = c.name.trim();
+    if (!name) return;
+    // Non-null by the call-site guard (stores exist iff engineDb does).
+    const engine = this.engineDb!;
+    const subjects = this.subjectStore!;
+    const relationships = this.relationshipStore!;
+    engine.getDb().transaction(() => {
+      const { id: personId } = subjects.findOrCreate({ kind: 'person', name });
+      if (c.email || c.phone || c.type) {
+        subjects.setPersonDetail(personId, { email: c.email, phone: c.phone, type: c.type });
+      }
+      const company = c.company?.trim();
+      if (company) {
+        const { id: orgId } = subjects.findOrCreate({ kind: 'organization', name: company });
+        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: orgId, kind: 'works_for' });
+      }
+    })();
   }
 
   /** Remove all contacts auto-created from knowledge graph entities. */
