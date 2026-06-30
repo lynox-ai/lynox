@@ -128,7 +128,6 @@ const TZ_MAX_LENGTH = 64;
  * pollute the in-memory sessionStore Map + the SQLite primary key
  * namespace (DoS / hygiene; SQLi is neutralised by parameterised
  * statements). Matches the shape `randomUUID()` produces (lowercase hex).
- * /pr-review #456 finding S-M1.
  */
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -151,19 +150,14 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  *     search/backup config, etc. are all CP-managed. Only UI preferences
  *     are user-writable.
  *
- * IMPORTANT scope-reality note: the control plane does NOT currently
- * provision `LYNOX_HTTP_ADMIN_SECRET`, so on a managed instance the customer's
- * session cookie actually resolves to **admin** scope, not user. The managed
- * gates below DON'T depend on cookie scope — they key on the billing tier
- * (`requiresAdminSplitGate`/`requiresConfigLockGate`), so the secret-write
- * deny-list + config-lock hold regardless. The remaining exposure (admin-scoped
- * routes the customer can therefore reach) is handled per-route:
- * `/api/vault/*` + `/api/auth/token` self-guard inline, and data-exfil /
- * lifecycle routes (migration export of the decrypted vault, bulk delete,
- * backup restore) use `denyOnManagedInstance`. Any NEW such route must add that
- * guard. The broader fail-closed remediation — pinning the managed cookie to
- * `user` — is deferred (it collides with the deliberate admin scope of the
- * mail-account routes the managed mail-connect flow drives through the cookie).
+ * Managed defense-in-depth: the deny-list + config-lock gates below key on the
+ * billing tier (`requiresAdminSplitGate`/`requiresConfigLockGate`), independent
+ * of cookie scope, so they hold however the cookie resolves. Sensitive
+ * data-export / destructive / lifecycle routes additionally carry
+ * `denyOnManagedInstance`, and `/api/vault/*` + `/api/auth/token` self-guard
+ * inline. Any new data-export, destructive, or lifecycle route MUST add the
+ * appropriate gate — never rely on cookie scope alone to keep it out of a
+ * managed customer's reach.
  *
  * Two predicates so a single tier never accidentally pulls in the wrong gate:
  *   - `requiresAdminSplitGate()` → true for both BYOK and pool (secret writes
@@ -342,19 +336,14 @@ function errorResponse(res: ServerResponse, status: number, message: string): vo
 }
 
 /**
- * Deny a request on a control-plane-managed instance. These admin routes
- * exfiltrate data off-box (full export, migration export of the *decrypted
- * vault*) or run instance-wide data lifecycle (wipe, backup-restore) that the
- * control plane owns. On a single-tenant managed box the customer's session
- * cookie carries admin scope (no `LYNOX_HTTP_ADMIN_SECRET` is provisioned — the
- * missing-admin-secret drift), so route scope alone does not stop them; this billing-tier
- * guard does. Mirrors the inline guard already on /api/vault/* + /api/auth/token.
+ * Deny a request on a control-plane-managed instance. These routes export data
+ * off-box or run instance-wide data lifecycle that the control plane owns, so
+ * they must never be reachable by a managed customer — this billing-tier guard
+ * is that boundary, enforced independently of route scope. Mirrors the inline
+ * guard already on /api/vault/* + /api/auth/token.
  *
- * NOTE: this is a deny-list. Any NEW admin route that exfiltrates data or
- * mutates instance-wide state must add this guard (or the customer cookie can
- * reach it). The broader fail-closed fix — pinning the managed cookie to `user`
- * scope — is deferred (it conflicts with the deliberate admin-scope of the
- * mail-account routes the managed mail-connect flow needs; see PR notes).
+ * This is a deny-list: any NEW route that exports data off-box or mutates
+ * instance-wide state MUST add this guard.
  */
 function denyOnManagedInstance(res: ServerResponse, what: string): boolean {
   if (readEnvAlias('LYNOX_BILLING_TIER')) {
@@ -1757,7 +1746,6 @@ export class LynoxHTTPApi {
       // UUID resend would mint a NEW sessionStore Map entry + a NEW thread row
       // in SQLite, silently forking history. `randomUUID()` always emits
       // lowercase; normalising here makes resume tolerant to either case.
-      // /pr-review #456 round-3 Security finding, 2026-05-18.
       const threadId = rawThreadId?.toLowerCase();
       if (threadId !== undefined && !UUID_REGEX.test(threadId)) {
         errorResponse(res, 400, 'Invalid threadId — expected UUID');
@@ -6299,10 +6287,9 @@ export class LynoxHTTPApi {
     this.addStatic('admin', 'POST /api/migration/export', async (req, res, _params, body) => {
       // Orchestrated migration: engine handles ECDH + export + transfer to target.
       // Browser is just the orchestrator — progress reported via SSE.
-      // The exporter ships the ENTIRE decrypted vault (all infra + customer
-      // secrets) + every SQLite DB to a caller-chosen target. On a managed box
-      // that is a full off-box exfil the control plane must own — managed data
-      // portability is CP-mediated, not a raw customer-cookie transfer.
+      // The exporter ships sensitive instance data (secrets + databases) to a
+      // caller-chosen target. On a managed box that off-box transfer is one the
+      // control plane must own — managed data portability is CP-mediated.
       if (denyOnManagedInstance(res, 'migration export')) return;
       const b = body as Record<string, unknown> | null;
       const targetUrl = typeof b?.['targetUrl'] === 'string' ? b['targetUrl'] : '';
