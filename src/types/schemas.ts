@@ -142,6 +142,12 @@ export const LynoxUserConfigSchema = z.object({
   http_response_limit:     z.number().min(1_000).max(5_242_880).optional(),
   google_oauth_scopes:     z.array(z.string()).optional(),
   enforce_https:           z.boolean().optional(),
+  // Outbound egress control for the http_request tool. Operator/CP security
+  // control (NOT user/agent-writable). The .strict() schema would otherwise
+  // reject these keys from config.json — which nulls the WHOLE config, silently
+  // dropping every setting, not just these. Default 'allow-all' = unchanged.
+  network_policy:          z.enum(['allow-all', 'allow-list', 'deny-all']).optional(),
+  network_allowed_hosts:   z.array(z.string()).optional(),
   bugsink_dsn:             z.string().optional(),
   backup_dir:              z.string().optional(),
   backup_schedule:         z.string().optional(),

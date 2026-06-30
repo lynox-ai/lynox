@@ -37,6 +37,8 @@ describe('Config', () => {
     delete process.env['MISTRAL_API_KEY'];
     delete process.env['LYNOX_LLM_PROVIDER'];
     delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
+    delete process.env['LYNOX_NETWORK_POLICY'];
+    delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
     delete process.env['LYNOX_API_BASE_URL'];
     delete process.env['LYNOX_MAX_TIER'];
@@ -96,6 +98,58 @@ describe('Config', () => {
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.api_key).toBe('sk-from-env');
+  });
+
+  it('keeps network_policy + network_allowed_hosts from config.json (not stripped by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      network_policy: 'allow-list',
+      network_allowed_hosts: ['api.example.com', '*.internal.example.com'],
+    }));
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.network_policy).toBe('allow-list');
+    expect(config.network_allowed_hosts).toEqual(['api.example.com', '*.internal.example.com']);
+  });
+
+  it('rejects an invalid network_policy enum (whole config nulled by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    // A bad enum fails safeParse → readConfigFile returns null → empty config.
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      network_policy: 'open-everything',
+    }));
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.network_policy).toBeUndefined();
+    expect(config.default_tier).toBeUndefined();
+  });
+
+  it('reads network_policy + allowed hosts from env (CP injection path)', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'deny-all';
+    process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] = 'api.example.com, *.cdn.example.com ,';
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.network_policy).toBe('deny-all');
+    // trimmed, empty segments dropped
+    expect(config.network_allowed_hosts).toEqual(['api.example.com', '*.cdn.example.com']);
+  });
+
+  it('ignores an unrecognised LYNOX_NETWORK_POLICY value', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ network_policy: 'allow-list' }));
+    process.env['LYNOX_NETWORK_POLICY'] = 'bogus';
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    // env value rejected → config.json value retained, never coerced
+    expect(config.network_policy).toBe('allow-list');
   });
 
   it('saveUserConfig writes with 0600 permissions', async () => {

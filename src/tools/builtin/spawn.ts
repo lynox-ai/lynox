@@ -355,10 +355,12 @@ async function executeThinker(
     // T2-X1 part 1: shallow-copy parent's toolContext so the child sees the
     // engine's DataStore / RunHistory / ApiStore / KnowledgeLayer / network
     // policy refs (sub-agents need these to use tools). Shallow copy =
-    // distinct object, shared refs — safe today because `applyNetworkPolicy`
-    // is unwired (toolContext.networkPolicy is always undefined in core).
-    // Wiring `childIsolation → networkPolicy` is explicitly post-launch (PRD
-    // §6); T2-X1 does NOT claim to close child network isolation.
+    // distinct object, shared refs — so the child INHERITS the parent's
+    // `networkPolicy`/`allowedHosts` and cannot escape to broader egress than
+    // its parent (the safe direction). Child-side TIGHTENING (a child more
+    // restricted than its parent, via `childIsolation → networkPolicy`) is
+    // still explicitly post-launch (PRD §6); T2-X1 does NOT claim to close
+    // child network isolation, only that a child never widens egress.
     //
     // Reach delta (intentional, autonomy-inheritance): the shared refs are
     // also write-reachable — a child can mutate parent state through

@@ -56,7 +56,8 @@ vi.mock('./project.js', () => ({
   detectProjectRoot: vi.fn(),
 }));
 
-import { generateInitBriefing, initMemoryInstance } from './engine-init.js';
+import { generateInitBriefing, initMemoryInstance, configureBudgetAndRateLimits } from './engine-init.js';
+import { createToolContext } from './tool-context.js';
 import type { LynoxContext, LynoxConfig, LynoxUserConfig } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
 
@@ -172,5 +173,36 @@ describe('initMemoryInstance — provider-resolved key', () => {
     } finally {
       if (prevA !== undefined) process.env['ANTHROPIC_API_KEY'] = prevA;
     }
+  });
+});
+
+describe('configureBudgetAndRateLimits — http-tool security wiring', () => {
+  // configurePersistentBudget is mocked above; applyEnforceHttps + applyNetworkPolicy
+  // (from tool-context.js) run for real and mutate the ToolContext.
+  const base: LynoxUserConfig = {};
+
+  it('applies network_policy + allowed hosts from config onto the ToolContext', () => {
+    const ctx = createToolContext(base);
+    configureBudgetAndRateLimits(
+      mockRunHistory,
+      { ...base, network_policy: 'allow-list', network_allowed_hosts: ['api.example.com', '*.cdn.example.com'] },
+      ctx,
+    );
+    expect(ctx.networkPolicy).toBe('allow-list');
+    expect(ctx.allowedHosts).toEqual(new Set(['api.example.com']));
+    expect(ctx.allowedWildcards).toEqual(['cdn.example.com']);
+  });
+
+  it('defaults to allow-all (no egress restriction) when unset — zero behaviour change', () => {
+    const ctx = createToolContext(base);
+    configureBudgetAndRateLimits(mockRunHistory, base, ctx);
+    expect(ctx.networkPolicy).toBe('allow-all');
+    expect(ctx.allowedHosts).toBeUndefined();
+  });
+
+  it('wires enforce_https from config (pre-existing gap, now covered)', () => {
+    const ctx = createToolContext(base);
+    configureBudgetAndRateLimits(mockRunHistory, { ...base, enforce_https: true }, ctx);
+    expect(ctx.enforceHttps).toBe(true);
   });
 });

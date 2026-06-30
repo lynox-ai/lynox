@@ -9,7 +9,7 @@ import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMai
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
-import type { SecretStoreLike, IsolationConfig } from './security.js';
+import type { SecretStoreLike, IsolationConfig, NetworkPolicy } from './security.js';
 import type { CapabilityContract } from './capability-contract.js';
 
 export interface AgentConfig {
@@ -407,6 +407,35 @@ export interface LynoxUserConfig {
   google_oauth_scopes?: string[] | undefined;
   /** Block plain HTTP requests (except localhost). Default: false */
   enforce_https?: boolean | undefined;
+  /**
+   * Outbound egress policy for the agent's GENERAL-PURPOSE network tools:
+   * `http_request`, the `api_setup` probe, and `web_research` (both the search
+   * query AND the page/content fetch). Default 'allow-all' = today's behaviour,
+   * unchanged. 'deny-all' = those tools cannot reach the network. 'allow-list' =
+   * they may reach ONLY the hosts in `network_allowed_hosts`.
+   *
+   * SCOPE — this is NOT a full process air-gap. It gates the agent-driven HTTP
+   * tool surface only. It does NOT gate: the LLM provider call (separate client),
+   * mail IMAP/SMTP, push notifications, Google Workspace, voice transcribe/TTS,
+   * backup upload, or error reporting — each is its own separately-configured
+   * egress surface. A cross-integration air-gap is a separate control.
+   *
+   * The allow-list is AUTHORITATIVE: it is NOT auto-extended by configured API
+   * profiles, because `api_setup` is agent-callable and auto-trusting profile
+   * hosts would let the agent self-authorise egress and defeat the gate. An
+   * operator who opts into allow-list lists the hosts they want reachable.
+   *
+   * Operator/CP security control — deliberately NOT in
+   * `MANAGED_USER_WRITABLE_CONFIG` and not agent-writable (a tenant/agent must
+   * not be able to widen its own egress).
+   */
+  network_policy?: NetworkPolicy | undefined;
+  /**
+   * Hosts reachable when `network_policy` is 'allow-list'. Exact hostnames plus
+   * `*.example.com` wildcards (matches the apex + any subdomain). Ignored for
+   * 'allow-all'/'deny-all'. See `applyNetworkPolicy` in tool-context.ts.
+   */
+  network_allowed_hosts?: string[] | undefined;
   /** Bugsink DSN for opt-in error reporting. No data sent unless configured. */
   bugsink_dsn?: string | undefined;
   /** Toggle for the error-reporting pipe. Default true when DSN is set. */

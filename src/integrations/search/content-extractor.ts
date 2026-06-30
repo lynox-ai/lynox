@@ -21,7 +21,14 @@ const MAX_REDIRECTS = 5;
 // incl. hex form, and pins the http(s) connection to the validated IP to
 // close the DNS-rebinding window between validate + connect).
 
-function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
+/**
+ * Shared egress gate for the web_research tool surface — used by BOTH the
+ * content/page fetch (below) AND the search-query path (search-provider.ts), so
+ * an air-gapped / allow-listed policy can't be bypassed by phrasing exfil as a
+ * search query. enforce_https + deny-all + allow-list + private-IP, mirroring
+ * tools/builtin/http.ts applyHostPolicy.
+ */
+export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefined): void {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
@@ -38,7 +45,8 @@ function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
     }
   }
   if (ctx?.networkPolicy === 'deny-all') {
-    throw new Error('Network access denied: air-gapped isolation');
+    // 'Blocked:' prefix to mirror tools/builtin/http.ts (friendly-message layer).
+    throw new Error('Blocked: network access denied (air-gapped isolation)');
   }
   if (ctx?.networkPolicy === 'allow-list') {
     let allowed = false;
@@ -70,7 +78,7 @@ function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
 async function fetchWithRedirects(url: string, ctx?: ToolContext | undefined): Promise<Response> {
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    applyHostPolicy(currentUrl, ctx);
+    assertEgressAllowed(currentUrl, ctx);
     // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
     // one shot — no rebind window between validate and connect.
     const response = await fetchPinned(currentUrl, {

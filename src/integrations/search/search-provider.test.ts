@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider } from './search-provider.js';
 import type { WebSearchEvent } from './search-provider.js';
 import { channels } from '../../core/observability.js';
+import { createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -763,5 +764,48 @@ describe('DuckDuckGoProvider', () => {
     const provider = new DuckDuckGoProvider();
     const results = await provider.search('anything');
     expect(results).toEqual([]);
+  });
+});
+
+describe('network policy gating (search query)', () => {
+  const ctxWith = (policy: 'deny-all' | 'allow-list', hosts?: string[]) => {
+    const c = createToolContext({});
+    applyNetworkPolicy(c, policy, hosts);
+    return c;
+  };
+
+  it('SearXNG: deny-all blocks the query before any fetch', async () => {
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await expect(provider.search('secret data', undefined, ctxWith('deny-all')))
+      .rejects.toThrow('Blocked');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('SearXNG: allow-list blocks when the SearXNG host is not listed', async () => {
+    const provider = new SearXNGProvider('https://searx.example.org');
+    await expect(provider.search('q', undefined, ctxWith('allow-list', ['api.example.com'])))
+      .rejects.toThrow('not in network allow-list');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('SearXNG: allow-list permits the query when the host is listed', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+    const provider = new SearXNGProvider('https://searx.example.org');
+    await provider.search('q', undefined, ctxWith('allow-list', ['searx.example.org']));
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
+  it('DuckDuckGo: deny-all blocks the query before any fetch', async () => {
+    const provider = new DuckDuckGoProvider();
+    await expect(provider.search('secret', undefined, ctxWith('deny-all')))
+      .rejects.toThrow('Blocked');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('no policy (undefined ctx) leaves the query ungated — default behaviour', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('q');
+    expect(mockFetch).toHaveBeenCalled();
   });
 });

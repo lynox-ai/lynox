@@ -62,7 +62,9 @@ function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
 
   // Network policy enforcement
   if (ctx?.networkPolicy === 'deny-all') {
-    throw new Error('Network access denied: air-gapped isolation');
+    // 'Blocked:' prefix so the handler's friendly-message layer rewrites it
+    // (consistent with every other block); 'air-gapped' keeps the mapping match.
+    throw new Error('Blocked: network access denied (air-gapped isolation)');
   }
   if (ctx?.networkPolicy === 'allow-list') {
     let allowed = false;

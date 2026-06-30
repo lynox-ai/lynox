@@ -8,7 +8,7 @@ vi.mock('node:dns/promises', () => ({
 
 import dns from 'node:dns/promises';
 import { httpRequestTool, detectSecretInContent } from './http.js';
-import { applyHttpRateLimits, createToolContext } from '../../core/tool-context.js';
+import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
@@ -893,6 +893,67 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
       const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
+    });
+  });
+
+  describe('network policy', () => {
+    // Fresh ToolContext per test (outer beforeEach) → networkPolicy=undefined
+    // (= 'allow-all' behaviour). applyNetworkPolicy mirrors the engine-init wiring.
+
+    it('allows any host by default (allow-all / unset)', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const result = await handler({ url: 'https://anything.example.com' }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+
+    it('blocks every host under deny-all (air-gapped)', async () => {
+      applyNetworkPolicy(testCtx, 'deny-all', undefined);
+      mockDnsPublic();
+      // deny-all → friendly-rewritten via the 'Blocked:'-prefixed message.
+      await expect(handler({ url: 'https://api.example.com' }, makeAgent()))
+        .rejects.toThrow('Network access is disabled in this security mode');
+    });
+
+    it('allows a listed host under allow-list', async () => {
+      applyNetworkPolicy(testCtx, 'allow-list', ['api.example.com']);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const result = await handler({ url: 'https://api.example.com/v1' }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+
+    it('blocks an unlisted host under allow-list', async () => {
+      applyNetworkPolicy(testCtx, 'allow-list', ['api.example.com']);
+      mockDnsPublic();
+      await expect(handler({ url: 'https://evil.com' }, makeAgent()))
+        .rejects.toThrow('not in the allowed list');
+    });
+
+    it('matches subdomains AND the apex under a *. wildcard', async () => {
+      applyNetworkPolicy(testCtx, 'allow-list', ['*.example.com']);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      expect(await handler({ url: 'https://sub.example.com' }, makeAgent())).toContain('HTTP 200');
+      expect(await handler({ url: 'https://example.com' }, makeAgent())).toContain('HTTP 200');
+    });
+
+    it('does not let an api_setup-style host bypass the allow-list (authoritative)', async () => {
+      // The allow-list is NOT auto-extended by configured API profiles — register
+      // a profile for a host that is NOT on the list and confirm it stays blocked.
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'evil',
+        name: 'Evil',
+        base_url: 'https://attacker.example.org/v1',
+        description: 'profile for an off-list host',
+      });
+      testCtx.apiStore = store;
+      applyNetworkPolicy(testCtx, 'allow-list', ['api.example.com']);
+      mockDnsPublic();
+      await expect(handler({ url: 'https://attacker.example.org/v1' }, makeAgent()))
+        .rejects.toThrow('not in the allowed list');
     });
   });
 
