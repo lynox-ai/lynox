@@ -177,3 +177,26 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
     });
   }
 });
+
+describe('env-ABI consume-side: behavior-critical vars are read at their engine consumer', () => {
+  // CP-emitted vars that drive engine BEHAVIOR (cost caps, feature flags,
+  // capability switches) must actually be READ at their consumer — a B2-class
+  // "the CP emits it but the engine silently stops reading it" drop (e.g. a
+  // dropped cost-cap read → uncapped spend) is a money / capability bug a
+  // value-equality test never catches. Each row pins the real read FORM at the
+  // real FILE, so a renamed/removed read fails CI even if the manifest + a
+  // comment still name it. Add a row when the CP starts emitting a new
+  // behavior-affecting var.
+  const BEHAVIOR_CONSUMERS: ReadonlyArray<readonly [name: string, file: string, readPattern: string]> = [
+    ['LYNOX_MAX_SESSION_COST_USD',  'src/core/engine-init.ts',     "envFloat\\('LYNOX_MAX_SESSION_COST_USD'\\)"],
+    ['LYNOX_MAX_DAILY_COST_USD',    'src/core/engine-init.ts',     "envFloat\\('LYNOX_MAX_DAILY_COST_USD'\\)"],
+    ['LYNOX_MAX_MONTHLY_COST_USD',  'src/core/engine-init.ts',     "envFloat\\('LYNOX_MAX_MONTHLY_COST_USD'\\)"],
+    ['LYNOX_KG_EXTRACTOR',          'src/core/knowledge-layer.ts', "process\\.env\\['LYNOX_KG_EXTRACTOR'\\]"],
+    ['LYNOX_FEATURE_UNIFIED_INBOX', 'src/core/features.ts',        "'LYNOX_FEATURE_UNIFIED_INBOX'"],
+  ];
+  for (const [name, file, readPattern] of BEHAVIOR_CONSUMERS) {
+    it(`${file} reads ${name}`, () => {
+      expect(read(file)).toMatch(new RegExp(readPattern));
+    });
+  }
+});
