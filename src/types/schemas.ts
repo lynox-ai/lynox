@@ -156,6 +156,10 @@ export const LynoxUserConfigSchema = z.object({
   // cost-cut investigation). Off by default; zero overhead when unset.
   context_cost_log:        z.boolean().optional(),
   knowledge_graph_enabled: z.boolean().optional(),
+  // Foundation Rework v2 (S1b): additively mirror extraction into the engine.db
+  // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
+  // would otherwise reject this key from config.json (silently disabling the flag).
+  subject_graph_enabled:   z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
   transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),

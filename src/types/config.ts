@@ -390,6 +390,17 @@ export interface LynoxUserConfig {
   context_cost_log?: boolean | undefined;
   /** Enable Knowledge Graph for entity-aware memory. Default: true */
   knowledge_graph_enabled?: boolean | undefined;
+  /**
+   * Foundation Rework v2 (S1b): mirror the agent's knowledge extraction into the
+   * engine.db subject-graph (subjects + relationships + cooccurrences + a memory
+   * provenance stub) ADDITIVELY, alongside the legacy agent-memory.db writes.
+   * Default: false — prod stays legacy-only until the S2 data migration flips it.
+   * Staging/local set `true` to populate + verify the new graph in place. The
+   * legacy stores remain the read/retrieval authority through S1 regardless.
+   * Requires `knowledge_graph_enabled` (the mirror feeds off KG extraction): on a
+   * KG-disabled tenant, or one with no embedding provider, this flag is inert.
+   */
+  subject_graph_enabled?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

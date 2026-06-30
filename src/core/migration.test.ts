@@ -135,6 +135,15 @@ describe('migration E2E', () => {
       expect(preview.artifacts).toBe(1);
       expect(preview.hasConfig).toBe(true);
     });
+
+    it('includes engine.db (Foundation Rework v2 subject-graph) in the migratable set', () => {
+      // Regression guard: engine.db is portable user data and MUST migrate, else
+      // the subject-graph is silently lost on self-hosted→managed transfer (and
+      // catastrophically at S2 when engine.db becomes authoritative).
+      createTestDatabase(srcDir, 'engine.db', [{ id: 1, text: 'subject-graph data' }]);
+      const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+      expect(exporter.preview().databases).toContain('engine.db');
+    });
   });
 
   // ── Full Export + Import ──
