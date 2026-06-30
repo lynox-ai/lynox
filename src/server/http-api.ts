@@ -3164,10 +3164,12 @@ export class LynoxHTTPApi {
     }));
 
     // ── Secrets ──
-    // user scope: the name list (no values) is the instance owner's own secret
-    // inventory. Values are never returned here, and per-key write policy is
-    // enforced separately on PUT/DELETE. Self-host user == admin; on managed this
-    // lets the customer see/manage the integration keys they connect.
+    // user scope: the name list for the Settings UI — `listNames()` returns key
+    // NAMES only, never values. The list is unfiltered (it includes infra/channel
+    // key names too, not just the customer's own); that's names-only and exposes
+    // no secret material, and PUT/DELETE still gate infra/channel secrets via
+    // isAdminOnlySecret. (A managed-customer-visible filter is a possible
+    // follow-up; not needed for the scope fix.)
     this.addStatic('user', 'GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;

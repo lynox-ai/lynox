@@ -3676,12 +3676,17 @@ describe('LynoxHTTPApi', () => {
       // Handler-level lock survives the user re-scope: deleting an infra /
       // channel-managed secret is still blocked on a managed instance even
       // though DELETE /api/secrets/:name is now user-scoped.
-      it('DELETE /api/secrets/SMTP_PASSWORD still 403s on a managed instance (inner gate)', async () => {
+      it('DELETE /api/secrets/SMTP_PASSWORD still 403s on a managed instance (inner gate, not route scope)', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
         try {
           const res = await jsonFetch('/api/secrets/SMTP_PASSWORD', { method: 'DELETE' });
           expect(res.status).toBe(403);
+          // Prove the 403 is the inner isAdminOnlySecret gate (the route itself is
+          // user-scoped now), not a route-scope rejection — the body carries the
+          // admin-managed message, which a route-scope 403 would not.
+          const body = await res.json() as { error?: string };
+          expect(body.error).toContain('admin-managed');
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
