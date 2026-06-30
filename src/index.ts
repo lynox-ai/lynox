@@ -126,7 +126,7 @@ import { existsSync, realpathSync } from 'node:fs';
 
 import { setDataDir } from './core/config.js';
 import { loadVaultKeyFromDotEnv } from './core/engine-init.js';
-import { DIM, YELLOW, RESET } from './cli/ui.js';
+import { DIM, RESET } from './cli/ui.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
