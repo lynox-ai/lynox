@@ -448,6 +448,33 @@ export class EngineDb {
   }
 
   /**
+   * GDPR Art. 17 (Right to Erasure): delete every user-data row in engine.db,
+   * leaving only the schema_version bookkeeping (so the schema stays intact and
+   * is NOT re-migrated on next open). Tables are enumerated from sqlite_master so
+   * any table a later sprint (S3–S6) adds is wiped automatically — a hardcoded
+   * list would silently leak PII the day a new table lands. `defer_foreign_keys`
+   * postpones every FK check to COMMIT, by which point all rows are gone, so the
+   * delete order is irrelevant and a future RESTRICT/CASCADE edge can't fail
+   * mid-wipe. Table names come from sqlite_master (schema identifiers, never user
+   * input) — the interpolation is injection-safe.
+   */
+  deleteAllData(): void {
+    const tables = this.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_version' AND name NOT LIKE 'sqlite_%'",
+      )
+      .all() as { name: string }[];
+    this.db.transaction(() => {
+      this.db.pragma('defer_foreign_keys = ON');
+      for (const { name } of tables) {
+        // name is a sqlite_master identifier (never user input); quoted anyway
+        // as defense-in-depth so a future dynamic table can't break the statement.
+        this.db.prepare(`DELETE FROM "${name}"`).run();
+      }
+    })();
+  }
+
+  /**
    * True when at-rest encryption is active (a vault key was available).
    * @internal — posture introspection; not a public API.
    */

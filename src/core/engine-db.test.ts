@@ -229,6 +229,61 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
+  it('deleteAllData wipes every user table (GDPR Art. 17) but keeps the schema intact', () => {
+    const e = createEngineDb('vault-key-for-wipe-test');
+    const db = e.getDb();
+    // Populate a representative slice spanning the FK graph: subjects + detail,
+    // the thread spine, memories + junction + supersedes, edges, and the verb layer.
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice')").run();
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s2','organization','Acme')").run();
+    db.prepare(`INSERT INTO people (subject_id, email, phone) VALUES ('s1', ?, ?)`).run(e.enc('a@b.ch'), e.enc('+41'));
+    db.prepare("INSERT INTO organizations (subject_id, domain) VALUES ('s2','acme.ch')").run();
+    db.prepare("INSERT INTO threads (id, title) VALUES ('t1','Chat')").run();
+    db.prepare("INSERT INTO thread_messages (thread_id, seq, role, content_json) VALUES ('t1',0,'user','{}')").run();
+    db.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id, subject_id, source_thread_id) VALUES ('m1',?,'knowledge','global','','s1','t1')").run(e.enc('secret note'));
+    db.prepare("INSERT INTO memory_subjects (memory_id, subject_id) VALUES ('m1','s1')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('r1','s1','s2','works_for')").run();
+    db.prepare("INSERT INTO subject_cooccurrences (subject_a_id, subject_b_id) VALUES ('s1','s2')").run();
+    db.prepare("INSERT INTO workflows (id, name, definition_json) VALUES ('wf','W','{}')").run();
+    db.prepare("INSERT INTO triggers (id, title, target_workflow_id) VALUES ('tr','T','wf')").run();
+    db.prepare("INSERT INTO tasks (id, title, due_trigger_id) VALUES ('tk','Todo','tr')").run();
+    db.prepare("INSERT INTO connections (id, kind, name) VALUES ('cn','api','API')").run();
+    db.prepare("INSERT INTO artifacts (id, type, thread_id) VALUES ('ar','html','t1')").run();
+
+    // Sanity: the slice really populated rows, so "all empty after" is not vacuous
+    // (a future no-op INSERT couldn't make the wipe assertion trivially green).
+    expect((db.prepare("SELECT COUNT(*) c FROM subjects").get() as { c: number }).c).toBe(2);
+    expect((db.prepare("SELECT COUNT(*) c FROM relationships").get() as { c: number }).c).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) c FROM memory_subjects").get() as { c: number }).c).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) c FROM tasks").get() as { c: number }).c).toBe(1);
+
+    e.deleteAllData();
+
+    // Every user table is empty — no PII left in any of them.
+    const userTables = (db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_version' AND name NOT LIKE 'sqlite_%'")
+      .all() as { name: string }[]).map(r => r.name);
+    expect(userTables.length).toBeGreaterThan(15);
+    for (const t of userTables) {
+      const { c } = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get() as { c: number };
+      expect(c, `table ${t} should be empty after wipe`).toBe(0);
+    }
+    // The schema itself survives — version stays v1, no re-migration on next open.
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(1);
+    // And the DB is still usable (inserts work — the tables weren't dropped).
+    expect(() =>
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
+    ).not.toThrow();
+    e.close();
+  });
+
+  it('deleteAllData is idempotent on an already-empty database', () => {
+    const e = createEngineDb();
+    expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(1);
+    e.close();
+  });
+
   it('recovers from a corrupt database file by renaming it aside and recreating', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-engine-'));
     tmpDirs.push(dir);
