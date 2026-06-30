@@ -25,6 +25,11 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
   /^GOOGLE_OAUTH_/,
+  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials the
+  // control plane provisions (cp-managed, "OAuth hijacking" if a tenant could
+  // repoint them) — same admin-only class as the OAuth tokens above. Resolved
+  // engine-internally via secretStore.resolve(); never an agent tool-input ref.
+  /^GOOGLE_CLIENT_/,
   /^SMTP_/,
   /^IMAP_/,
 ];

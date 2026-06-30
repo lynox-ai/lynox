@@ -553,6 +553,52 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // SEC-NW-1: fetchWithValidatedRedirects must NOT replay credential headers
+  // across a cross-origin redirect (mirror fetch()). Uses an opaque token that
+  // does NOT match SECRET_PATTERNS, so the pre-flight egress header scan lets it
+  // through to the redirect loop — exactly the case the per-hop scan misses.
+  describe('cross-origin redirect credential strip (SEC-NW-1)', () => {
+    const lc = (h: Record<string, string>): Record<string, string> =>
+      Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+
+    it('drops Authorization on a CROSS-origin redirect, keeps non-cred headers', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://other.test/final' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'https://api.example.test/start',
+        headers: { Authorization: 'Bearer opaque-session-xyz', 'X-Keep': 'v' },
+      }, makeAgent());
+
+      expect(lastPinnedInputs.length).toBe(2);
+      // Hop 0 (same origin as the request) carries the credential.
+      expect(lc(lastPinnedInputs[0]!.headers)['authorization']).toBe('Bearer opaque-session-xyz');
+      // Hop 1 crossed origin (api.example.test → other.test): credential stripped, others kept.
+      const hop1 = lc(lastPinnedInputs[1]!.headers);
+      expect(hop1['authorization']).toBeUndefined();
+      expect(hop1['x-keep']).toBe('v');
+    });
+
+    it('KEEPS Authorization across a SAME-origin redirect', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.example.test/final' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'https://api.example.test/start',
+        headers: { Authorization: 'Bearer opaque-session-xyz' },
+      }, makeAgent());
+
+      expect(lastPinnedInputs.length).toBe(2);
+      expect(lc(lastPinnedInputs[1]!.headers)['authorization']).toBe('Bearer opaque-session-xyz');
+    });
+  });
+
   describe('Session rate limit', () => {
     it('under limit passes', async () => {
       mockDnsPublic();

