@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.22.0 — 2026-06-30
+
+Foundation Rework v2 lands as dormant infrastructure: a new consolidated per-tenant `engine.db` subject-graph store (subjects · people · organizations · memories · relationships · artifacts · the workflow/trigger/task verb layer), wired behind the `subject_graph_enabled` flag which ships **off**. The legacy agent-memory path stays authoritative until a separate per-tenant data cutover, so this release is behaviourally inert on existing instances. Alongside it: a configurable outbound network policy, customer-route auth scoping, GDPR engine.db erasure + paginated export, a managed credit gate on voice, and cross-origin credential-replay hardening. **No control-plane database migration**; the engine creates the additive `engine.db` on boot (idempotent) — rollback to 1.21.0 is a clean single-image swap (the new DB is simply orphaned).
+
+### Added
+- **Foundation Rework v2 — the engine.db subject-graph store (flag-gated off).** A new consolidated per-tenant `engine.db` holds the subject graph (people, organizations, engagements, products, services), memories, relationships, connections, artifacts, and the workflow/trigger/task verb layer. The legacy knowledge layer additively mirrors into it, a flag-gated read path can serve from it, and an operator-run `s2-backfill` CLI re-maps existing agent-memory + CRM data. All behind `subject_graph_enabled` (env `LYNOX_SUBJECT_GRAPH_ENABLED`), default off — existing instances stay on the legacy path until a per-tenant cutover. (#821, #822, #823, #826)
+- **Configurable outbound network policy.** `network_policy` (`allow-all` default · `deny-all` · `allow-list` with `network_allowed_hosts`), with env overrides `LYNOX_NETWORK_POLICY` / `LYNOX_NETWORK_ALLOWED_HOSTS`, gating the agent's `http_request`, `api_setup`, and `web_research` egress. The default `allow-all` preserves existing behaviour. (#824)
+
+### Fixed
+- **GDPR:** erasure now wipes the engine.db PII alongside the legacy stores, and the data export paginates entities so large datasets export completely. (#825)
+- **Backups** now include inbox/mail state (`mail-state.db`), the engine.db subject-graph store, and web-push subscriptions. (#821)
+- Customer-facing engine routes are scoped to the user tier; infra-only secrets, vault-key reveal, and the auth token stay admin-gated on managed instances. (#828)
+- Data-lifecycle operations (export / erasure / migration) route through the control plane on managed instances. (#815)
+- Voice TTS/STT routes enforce the managed credit gate. (#816)
+- Credential headers are stripped — and request bodies dropped — on cross-origin redirects, so an open redirect cannot replay an Authorization header or a secret-bearing request body off-origin. (#819, #829)
+- The workspace file-list route is confined to the workspace with the same realpath check as read / download / delete. (#829)
+- **Web UI:** screen-reader semantics for toasts, the command palette, and inputs (#817); the interrupted-run banner now clears when starting a new chat (#814).
+
+### Internal
+- Tidy the two-tier-auth + managed-deny doc comments (#827); document the engine.db subject-graph, the network policy, and the backup scope (#829).
+
 ## 1.21.0 — 2026-06-29
 
 Connect a mailbox from chat. A new agent flow resolves a known provider's servers and hands off to an in-chat consent step where you enter the app password — the password goes straight from the browser to the vault and never enters the agent context, run history, the SSE stream, or the prompt store; the agent only learns whether the connection succeeded. Plus chat-render robustness and agent-surface secret hardening. **No control-plane database migration**; the engine adds one additive per-tenant history-DB migration (v43, pending-prompts) applied on boot — rollback to 1.20.0 is a clean single-image swap.
