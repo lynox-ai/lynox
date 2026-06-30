@@ -3164,8 +3164,13 @@ export class LynoxHTTPApi {
     }));
 
     // ── Secrets ──
-    // Full name list — admin-scoped (enforced by requiresAdmin)
-    this.addStatic('admin', 'GET /api/secrets', async (_req, res) => {
+    // user scope: the name list for the Settings UI — `listNames()` returns key
+    // NAMES only, never values. The list is unfiltered (it includes infra/channel
+    // key names too, not just the customer's own); that's names-only and exposes
+    // no secret material, and PUT/DELETE still gate infra/channel secrets via
+    // isAdminOnlySecret. (A managed-customer-visible filter is a possible
+    // follow-up; not needed for the scope fix.)
+    this.addStatic('user', 'GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = store.listNames();
@@ -3304,13 +3309,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: true, hot_reload: hotReload });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('admin', 'DELETE', '/api/secrets/:name', async (_req, res, params) => {
+    // user scope (matches PUT): the instance owner manages their own integration
+    // keys. The real protection is the tier-keyed gate below, not the route scope.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/secrets/:name', async (_req, res, params) => {
       const name = params['name']!;
-      // Mirror the PUT /api/secrets/:name gate: on a managed instance the
-      // customer cookie carries admin scope, so without this an infra /
-      // channel-managed secret (LYNOX_VAULT_KEY, MANAGED_*, MAIL_ACCOUNT_*,
-      // GOOGLE_*, …) could be deleted — breaking the instance. Their own tool
-      // credentials (SHOPIFY_*, …) still delete freely.
+      // Defense-in-depth, independent of route scope: on a managed instance an
+      // infra / channel-managed secret (LYNOX_VAULT_KEY, MANAGED_*, MAIL_ACCOUNT_*,
+      // GOOGLE_*, …) must never be deletable — only the customer's own tool
+      // credentials (SHOPIFY_*, …) delete freely. Mirrors the PUT gate.
       if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Manage this via the relevant integration UI or contact support@lynox.ai.`);
         return;
@@ -5108,7 +5114,11 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { accounts: ctx.listAccounts() });
     });
 
-    this.addStatic('admin', 'POST /api/mail/accounts', async (_req, res, _params, body) => {
+    // user scope: connecting/managing a mailbox is an instance-owner action. The
+    // managed mail-connect flow drives this route through the customer's session
+    // cookie after the in-chat consent step, so it must be reachable at user scope.
+    // (Mailbox credentials are the owner's own; nothing here is off-box.)
+    this.addStatic('user', 'POST /api/mail/accounts', async (_req, res, _params, body) => {
       const ctx = engine.getMailContext();
       if (!requireService(res, ctx, 'Mail integration')) return;
 
@@ -5215,7 +5225,8 @@ export class LynoxHTTPApi {
       return null;
     };
 
-    this.addStatic('admin', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
+    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    this.addStatic('user', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
       const rateErr = mailTestRateCheck(req);
       if (rateErr) { errorResponse(res, 429, rateErr); return; }
 
@@ -5280,7 +5291,8 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.dynamicRoutes.push(parseDynamicRoute('admin', 'DELETE', '/api/mail/accounts/:id', async (_req, res, params) => {
+    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/mail/accounts/:id', async (_req, res, params) => {
       const ctx = engine.getMailContext();
       if (!requireService(res, ctx, 'Mail integration')) return;
       const removed = await ctx!.removeAccount(params['id']!);
@@ -5291,7 +5303,8 @@ export class LynoxHTTPApi {
     // Set the default mailbox. Persists `is_default=1` on the target row and
     // updates the in-memory registry so subsequent tool calls fall back to
     // this account when none is explicitly named.
-    this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/mail/accounts/:id/default', async (_req, res, params) => {
+    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/mail/accounts/:id/default', async (_req, res, params) => {
       const ctx = engine.getMailContext();
       if (!requireService(res, ctx, 'Mail integration')) return;
       try {
@@ -6091,7 +6104,10 @@ export class LynoxHTTPApi {
 
     // ── Vault ─────────────────────────────────────────────────────
 
-    this.addStatic('admin', 'GET /api/vault/key', async (req, res) => {
+    // user scope: a managed customer's settings page reads configured-status.
+    // reveal=true (the actual key) stays 403 on managed via the inline guard below,
+    // so user scope never exposes the secret.
+    this.addStatic('user', 'GET /api/vault/key', async (req, res) => {
       const key = process.env['LYNOX_VAULT_KEY'];
       if (!key) {
         jsonResponse(res, 200, { configured: false });
@@ -6141,7 +6157,9 @@ export class LynoxHTTPApi {
 
     // ── Access token (read-only, for Settings UI) ────────────────
 
-    this.addStatic('admin', 'GET /api/auth/token', async (req, res) => {
+    // user scope: status read for the Settings UI. reveal=true (the actual token)
+    // stays 403 on managed via the inline guard below, so user scope is safe.
+    this.addStatic('user', 'GET /api/auth/token', async (req, res) => {
       const secret = process.env['LYNOX_HTTP_SECRET'];
       if (!secret) {
         jsonResponse(res, 200, { configured: false });
@@ -6163,7 +6181,11 @@ export class LynoxHTTPApi {
 
     const HIDDEN_PATTERNS = new Set(['.git', '.env', '.DS_Store', 'node_modules', '.cache', '__pycache__', 'thumbs.db']);
 
-    this.addStatic('admin', 'GET /api/files', async (req, res) => {
+    // user scope: the workspace file browser operates on the instance owner's own
+    // files. Path-traversal/symlink-escape is rejected in resolveWorkspacePath and
+    // HIDDEN_PATTERNS hides .env/.git, so user scope adds no exposure beyond the
+    // owner's own workspace (it's not off-box — see denyOnManagedInstance routes).
+    this.addStatic('user', 'GET /api/files', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const dirPath = url.searchParams.get('path') ?? '.';
       const showHidden = url.searchParams.get('hidden') === '1';
@@ -6211,7 +6233,7 @@ export class LynoxHTTPApi {
       return resolved;
     }
 
-    this.addStatic('admin', 'GET /api/files/download', async (req, res) => {
+    this.addStatic('user', 'GET /api/files/download', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
@@ -6236,7 +6258,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.addStatic('admin', 'GET /api/files/read', async (req, res) => {
+    this.addStatic('user', 'GET /api/files/read', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
@@ -6254,7 +6276,7 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.addStatic('admin', 'DELETE /api/files', async (req, res) => {
+    this.addStatic('user', 'DELETE /api/files', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }

@@ -3520,31 +3520,37 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    // Audit S2: mail account mutations swap IMAP/SMTP credentials — a
-    // user-scope bearer must NOT be able to silently re-route outbound
-    // mail. Listing stays user-scope; mutations + the connectivity probe
-    // are admin-only.
-    it('rejects POST /api/mail/accounts with user-scope token', async () => {
+    // Mail account mutations are user-scope: connecting / managing a mailbox is
+    // an instance-owner action, and on managed the owner's session cookie is
+    // user-scope. The managed mail-connect flow (consent step → POST
+    // /api/mail/accounts via the cookie) depends on this being reachable at user
+    // scope. The only user-scope holders on a single-tenant managed box are the
+    // owner + the control plane; the agent reaches mail only through the
+    // consent-gated mail_connect tool, not these bearer routes — so user-scope
+    // must NOT 403 here.
+    it('allows POST /api/mail/accounts at user scope (reachable, not 403)', async () => {
       vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
       try {
         const res = await jsonFetch('/api/mail/accounts', {
           method: 'POST',
           body: JSON.stringify({ preset: 'gmail' }),
         });
-        expect(res.status).toBe(403);
+        // May 4xx/5xx on the stub body / absent mail backend; the lock is only
+        // that the route is REACHED at user scope, i.e. not 403'd by route scope.
+        expect(res.status).not.toBe(403);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
       }
     });
 
-    it('rejects DELETE /api/mail/accounts/:id with user-scope token', async () => {
+    it('allows DELETE /api/mail/accounts/:id at user scope (reachable, not 403)', async () => {
       vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
       try {
         const res = await jsonFetch('/api/mail/accounts/acct-1', {
           method: 'DELETE',
         });
-        expect(res.status).toBe(403);
+        expect(res.status).not.toBe(403);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -3555,28 +3561,7 @@ describe('LynoxHTTPApi', () => {
       vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
       try {
         const res = await jsonFetch('/api/mail/accounts', { method: 'GET' });
-        // Should NOT be 403 — listing remains user-scope. May return
-        // 503 if no mail backend is wired in the test harness; the only
-        // thing this assertion is locking is that requiresAdmin doesn't
-        // mistakenly trip on the GET.
         expect(res.status).not.toBe(403);
-      } finally {
-        vi.unstubAllEnvs();
-        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
-      }
-    });
-
-    // Defense-in-depth: a trailing slash on the admin-gated path must
-    // not lift the admin check, even if the dynamic-route matcher
-    // happens to 404 the request today.
-    it('admin-gates POST /api/mail/accounts/ (trailing slash) with user-scope token', async () => {
-      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
-      try {
-        const res = await jsonFetch('/api/mail/accounts/', {
-          method: 'POST',
-          body: JSON.stringify({ preset: 'gmail' }),
-        });
-        expect(res.status).toBe(403);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -3605,22 +3590,19 @@ describe('LynoxHTTPApi', () => {
     // mirrors the old `requiresAdmin` enumeration verbatim so a code-search
     // for `requiresAdmin` lands on this guard.
     describe('admin-scope coverage (T3 regression backstop)', () => {
-      // PUT /api/config and PUT /api/secrets/:name (BYOK whitelist) were
-      // intentionally downgraded to `user` scope so managed-tier cookie users
-      // (which the auth layer pins to user-scope when LYNOX_HTTP_ADMIN_SECRET
-      // is present) can save their own provider API key via SetupBanner.
-      // Field-level + name-whitelist gates inside the handlers preserve the
-      // managed-mode lock — see the "managed-mode BYOK" tests below.
+      // Several routes are intentionally at `user` scope so a managed customer
+      // (whose cookie the auth layer pins to user when LYNOX_HTTP_ADMIN_SECRET is
+      // present) can operate on their OWN instance data — config, their
+      // provider/integration keys, their mailbox, their workspace files.
+      // Handler-level gates (field/name whitelists, denyOnManagedInstance, the
+      // reveal=true managed guard) preserve the managed-mode locks; see the
+      // "managed-mode BYOK" tests + the USER_ROUTES backstop below.
+      //
+      // ADMIN_ROUTES = the routes that MUST stay admin: off-box data export +
+      // instance-wide lifecycle the control plane owns. A refactor that
+      // downgrades one of these to user surfaces here as a missing 403.
       const ADMIN_ROUTES: Array<[method: string, path: string]> = [
-        ['GET',    '/api/vault/key'],
         ['POST',   '/api/vault/rotate'],
-        ['GET',    '/api/files'],
-        ['GET',    '/api/files/download'],
-        ['GET',    '/api/files/read'],
-        ['DELETE', '/api/files'],
-        ['GET',    '/api/secrets'],
-        ['DELETE', '/api/secrets/foo'],
-        ['GET',    '/api/auth/token'],
         ['GET',    '/api/export'],
         ['DELETE', '/api/data'],
         ['POST',   '/api/migration/export'],
@@ -3632,10 +3614,6 @@ describe('LynoxHTTPApi', () => {
         ['DELETE', '/api/migration'],
         ['POST',   '/api/kg/cleanup'],
         ['POST',   '/api/backups/some-id/restore'],
-        ['POST',   '/api/mail/accounts'],
-        ['POST',   '/api/mail/accounts/test'],
-        ['DELETE', '/api/mail/accounts/acct-1'],
-        ['POST',   '/api/mail/accounts/acct-1/default'],
       ];
 
       for (const [method, path] of ADMIN_ROUTES) {
@@ -3656,6 +3634,64 @@ describe('LynoxHTTPApi', () => {
           }
         });
       }
+
+      // Inverse backstop: routes deliberately re-scoped to `user` so the managed
+      // customer reaches their OWN data. A "re-harden" back to admin would break
+      // managed mail-connect / secrets / files management — the assertion that
+      // these are NOT 403 at user scope locks the re-scope in. (Secret-value
+      // reveal + infra-secret deletion stay blocked by handler-level gates,
+      // asserted right after.)
+      const USER_ROUTES: Array<[method: string, path: string]> = [
+        ['GET',    '/api/secrets'],
+        ['DELETE', '/api/secrets/foo'],
+        ['GET',    '/api/vault/key'],
+        ['GET',    '/api/auth/token'],
+        ['GET',    '/api/files'],
+        ['GET',    '/api/files/download'],
+        ['GET',    '/api/files/read'],
+        ['DELETE', '/api/files'],
+        ['POST',   '/api/mail/accounts'],
+        ['POST',   '/api/mail/accounts/test'],
+        ['DELETE', '/api/mail/accounts/acct-1'],
+        ['POST',   '/api/mail/accounts/acct-1/default'],
+      ];
+
+      for (const [method, path] of USER_ROUTES) {
+        it(`reaches ${method} ${path} at user scope (not 403)`, async () => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          try {
+            const init: RequestInit = { method };
+            if (method === 'PUT' || method === 'POST' || method === 'PATCH') {
+              init.body = JSON.stringify({});
+            }
+            const res = await jsonFetch(path, init);
+            expect(res.status, `${method} ${path}`).not.toBe(403);
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        });
+      }
+
+      // Handler-level lock survives the user re-scope: deleting an infra /
+      // channel-managed secret is still blocked on a managed instance even
+      // though DELETE /api/secrets/:name is now user-scoped.
+      it('DELETE /api/secrets/SMTP_PASSWORD still 403s on a managed instance (inner gate, not route scope)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/SMTP_PASSWORD', { method: 'DELETE' });
+          expect(res.status).toBe(403);
+          // Prove the 403 is the inner isAdminOnlySecret gate (the route itself is
+          // user-scoped now), not a route-scope rejection — the body carries the
+          // admin-managed message, which a route-scope 403 would not.
+          const body = await res.json() as { error?: string };
+          expect(body.error).toContain('admin-managed');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
     });
   });
 
