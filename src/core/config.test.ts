@@ -36,6 +36,7 @@ describe('Config', () => {
     delete process.env['LYNOX_ACCOUNT_TIER'];
     delete process.env['MISTRAL_API_KEY'];
     delete process.env['LYNOX_LLM_PROVIDER'];
+    delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
     delete process.env['LYNOX_API_BASE_URL'];
     delete process.env['LYNOX_MAX_TIER'];
@@ -256,6 +257,27 @@ describe('Config', () => {
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.client_id).toBe('client1');
+  });
+
+  // ── Foundation Rework v2 (S1b): subject-graph flag (deploy wiring) ──────────
+
+  it('LYNOX_SUBJECT_GRAPH_ENABLED env flips subject_graph_enabled (true/1, false/0)', async () => {
+    process.env['LYNOX_SUBJECT_GRAPH_ENABLED'] = 'true';
+    let { loadConfig } = await import('./config.js');
+    expect(loadConfig().subject_graph_enabled).toBe(true);
+
+    vi.resetModules();
+    process.env['LYNOX_SUBJECT_GRAPH_ENABLED'] = '0';
+    ({ loadConfig } = await import('./config.js'));
+    expect(loadConfig().subject_graph_enabled).toBe(false);
+  });
+
+  it('subject_graph_enabled survives the .strict() config.json schema (not stripped)', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ subject_graph_enabled: true }));
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().subject_graph_enabled).toBe(true);
   });
 
   // ── Managed profile bridge (CP delivers worker/model profiles via env) ──────

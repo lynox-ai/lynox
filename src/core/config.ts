@@ -145,6 +145,16 @@ export function loadConfig(): LynoxUserConfig {
       merged.embedding_provider = ep;
     }
   }
+  // Foundation Rework v2 (S1b): the engine.db subject-graph mirror flag. The CP
+  // sets this env per-tenant to flip the flag (staging now, prod at S2) without
+  // editing the instance's config.json. Explicit 'true'/'1' vs 'false'/'0' parse
+  // (no z.coerce, which would treat any non-empty string as true).
+  const subjectGraph = process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
+  if (subjectGraph === 'true' || subjectGraph === '1') {
+    merged.subject_graph_enabled = true;
+  } else if (subjectGraph === 'false' || subjectGraph === '0') {
+    merged.subject_graph_enabled = false;
+  }
   if (process.env['LYNOX_USER']) {
     merged.user_id = process.env['LYNOX_USER'];
   }
