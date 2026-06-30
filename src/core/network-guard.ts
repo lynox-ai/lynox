@@ -199,8 +199,51 @@ function pinnedAgent(protocol: 'http:' | 'https:', pinnedIp: string, family: 4 |
   return protocol === 'https:' ? new https.Agent(opts) : new http.Agent(opts);
 }
 
+/** Credential headers that must NOT survive a cross-origin redirect. WHATWG
+ *  fetch() strips only authorization/cookie/proxy-authorization, but the engine
+ *  forwards API keys as x-api-key (custom-provider probe) and recognises
+ *  x-api-key/x-auth-token/x-csrf-token as credentials elsewhere (REDACTED_HEADERS
+ *  in http.ts). The pre-flight egress secret scan runs ONCE (not per hop) and
+ *  only matches SECRET_PATTERNS, so a key that doesn't match a regex would
+ *  otherwise replay off-origin — strip these too. */
+const CROSS_ORIGIN_DROP_HEADERS = new Set([
+  'authorization', 'cookie', 'proxy-authorization',
+  'x-api-key', 'x-auth-token', 'x-csrf-token',
+]);
+
+/**
+ * Mirror WHATWG `fetch()` redirect semantics: when a redirect hop changes
+ * origin, drop credential headers (Authorization / Cookie / Proxy-Authorization)
+ * so they are not replayed to the new origin. Our hand-rolled redirect loops
+ * (`fetchWithValidatedRedirects`, `fetchWithPublicRedirects`) re-issue the
+ * request with the ORIGINAL headers each hop, so without this an auth header —
+ * worst case the engine-attached OAuth2 `Bearer <vault access_token>`, which is
+ * deliberately exempt from the egress secret scan — would leak verbatim to
+ * whatever host a profiled API 30x-redirects to (an open redirect → credential
+ * exfil). Same-origin hops keep all headers. Fails closed: if either URL can't
+ * be parsed, the headers are stripped.
+ */
+export function redirectHopHeaders(
+  headers: Record<string, string>,
+  fromUrl: string,
+  toUrl: string,
+): Record<string, string> {
+  let sameOrigin = false;
+  try {
+    sameOrigin = new URL(fromUrl).origin === new URL(toUrl).origin;
+  } catch {
+    sameOrigin = false; // unparseable → treat as cross-origin, strip credentials
+  }
+  if (sameOrigin) return headers;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!CROSS_ORIGIN_DROP_HEADERS.has(k.toLowerCase())) out[k] = v;
+  }
+  return out;
+}
+
 /** Convert init.headers (HeadersInit) into a flat Record<string, string>. */
-function flattenHeaders(input: HeadersInit | undefined): Record<string, string> {
+export function flattenHeaders(input: HeadersInit | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!input) return out;
   if (input instanceof Headers) {
@@ -426,11 +469,15 @@ export async function fetchWithPublicRedirects(
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
+  // Carried explicitly so credential headers can be dropped on a cross-origin
+  // hop (mirror fetch()); see redirectHopHeaders.
+  let headers = flattenHeaders(init.headers);
 
   for (let i = 0; i <= max; i++) {
     const hopInit: RequestInit = {
       ...init,
       method,
+      headers,
     };
     if (body !== undefined) {
       hopInit.body = body;
@@ -460,6 +507,8 @@ export async function fetchWithPublicRedirects(
       method = 'GET';
       body = undefined;
     }
+    // Drop credential headers before a cross-origin hop (mirror fetch()).
+    headers = redirectHopHeaders(headers, currentUrl, nextUrl);
     currentUrl = nextUrl;
   }
 

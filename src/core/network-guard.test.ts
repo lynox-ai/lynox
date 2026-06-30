@@ -14,6 +14,7 @@ import {
   fetchPinned,
   fetchWithPublicRedirects,
   setPinnedTransportForTests,
+  redirectHopHeaders,
   __pinnedAgentForTests,
 } from './network-guard.js';
 import type { PinnedTransportInput } from './network-guard.js';
@@ -258,6 +259,74 @@ describe('fetchPinned / fetchWithPublicRedirects', () => {
     await expect(
       fetchWithPublicRedirects('https://a.fake.test/', {}, { maxRedirects: 1 }),
     ).rejects.toThrow(/too many redirects/i);
+  });
+
+  it('fetchWithPublicRedirects: drops Authorization/Cookie on a CROSS-origin redirect (mirror fetch)', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
+      new Response(null, { status: 302, headers: { location: 'https://api2.fake.test/final' } }),
+      new Response('ok', { status: 200 }),
+    );
+
+    const res = await fetchWithPublicRedirects('https://api1.fake.test/start', {
+      headers: { Authorization: 'Bearer secret-token', Cookie: 'sid=abc', 'X-Keep': 'yes' },
+    });
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(2);
+    // First hop (same origin as the request) carries the credentials.
+    const hop0 = Object.fromEntries(Object.entries(captured[0]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
+    expect(hop0['authorization']).toBe('Bearer secret-token');
+    expect(hop0['cookie']).toBe('sid=abc');
+    // Second hop crossed origin (api1 → api2): credentials stripped, others kept.
+    const hop1 = Object.fromEntries(Object.entries(captured[1]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
+    expect(hop1['authorization']).toBeUndefined();
+    expect(hop1['cookie']).toBeUndefined();
+    expect(hop1['x-keep']).toBe('yes');
+  });
+
+  it('fetchWithPublicRedirects: KEEPS Authorization on a SAME-origin redirect', async () => {
+    mockDns([{ address: '93.184.216.34', family: 4 }]);
+    transportResponses.push(
+      new Response(null, { status: 302, headers: { location: 'https://api1.fake.test/final' } }),
+      new Response('ok', { status: 200 }),
+    );
+
+    const res = await fetchWithPublicRedirects('https://api1.fake.test/start', {
+      headers: { Authorization: 'Bearer secret-token' },
+    });
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(2);
+    const hop1 = Object.fromEntries(Object.entries(captured[1]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
+    // Same origin (api1/start → api1/final) → Authorization is retained.
+    expect(hop1['authorization']).toBe('Bearer secret-token');
+  });
+});
+
+describe('redirectHopHeaders', () => {
+  it('keeps all headers on a same-origin hop', () => {
+    const h = { Authorization: 'Bearer x', Cookie: 'a=b', 'X-Other': 'y' };
+    expect(redirectHopHeaders(h, 'https://h.test/a', 'https://h.test/b')).toEqual(h);
+  });
+
+  it('drops all credential headers (case-insensitive) on a cross-origin hop', () => {
+    const out = redirectHopHeaders(
+      {
+        authorization: 'Bearer x', COOKIE: 'a=b', 'Proxy-Authorization': 'z',
+        'X-API-Key': 'k', 'x-auth-token': 't', 'X-Csrf-Token': 'c', 'X-Keep': 'y',
+      },
+      'https://h.test/a',
+      'https://evil.test/b',
+    );
+    expect(out).toEqual({ 'X-Keep': 'y' });
+  });
+
+  it('treats a different port/scheme as cross-origin (strips)', () => {
+    expect(redirectHopHeaders({ authorization: 'x' }, 'https://h.test/', 'https://h.test:8443/')).toEqual({});
+    expect(redirectHopHeaders({ authorization: 'x' }, 'https://h.test/', 'http://h.test/')).toEqual({});
+  });
+
+  it('fails closed (strips) when a URL cannot be parsed', () => {
+    expect(redirectHopHeaders({ authorization: 'x', 'X-Keep': 'y' }, 'not a url', 'https://h.test/')).toEqual({ 'X-Keep': 'y' });
   });
 });
 
