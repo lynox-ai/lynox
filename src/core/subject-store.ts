@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import type { EntityType } from '../types/index.js';
 
 /**
  * SubjectStore — the S1 write/read layer over the engine.db subject graph
@@ -50,6 +51,33 @@ export function entityTypeToSubjectKind(entityType: string): SubjectKind | null 
     default: return null;
   }
 }
+
+/**
+ * Reverse of {@link entityTypeToSubjectKind} for the S1d read path: map a Subject
+ * kind back to the legacy KG `entity_type` the `EntityRecord` DTO expects, or `null`
+ * when the kind has no KG equivalent (`service`/`other` were never knowledge-graph
+ * entities). `engagement → project` inverts the forward `project → engagement`. The
+ * return type is tied to `EntityType` so a rename of its members breaks here.
+ */
+export function subjectKindToEntityType(
+  kind: string,
+): Extract<EntityType, 'person' | 'organization' | 'project' | 'product'> | null {
+  switch (kind) {
+    case 'person': return 'person';
+    case 'organization': return 'organization';
+    case 'engagement': return 'project';
+    case 'product': return 'product';
+    default: return null;
+  }
+}
+
+/**
+ * The subject kinds that map back to a legacy KG `entity_type` — the S1d read
+ * surface. DERIVED from {@link subjectKindToEntityType} (single source of truth) so
+ * the count predicate in `stats()` can never drift from the list-path's null-filter.
+ */
+export const ENTITY_MAPPABLE_SUBJECT_KINDS: readonly SubjectKind[] =
+  KNOWN_SUBJECT_KINDS.filter(k => subjectKindToEntityType(k) !== null);
 
 /**
  * The kinds the canonical-UNIQUE dedup guard covers (per `idx_subjects_canonical`).
@@ -208,6 +236,19 @@ export class SubjectStore {
     if (!opts?.includeArchived) where.push('archived_at IS NULL');
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     return this.db.prepare(`SELECT * FROM subjects ${clause} ORDER BY updated_at DESC`).all(...args) as SubjectRow[];
+  }
+
+  /** Count subjects, optionally restricted to a set of kinds. Active only unless `includeArchived`. */
+  count(opts?: { kinds?: readonly string[] | undefined; includeArchived?: boolean | undefined }): number {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (opts?.kinds && opts.kinds.length > 0) {
+      where.push(`kind IN (${opts.kinds.map(() => '?').join(', ')})`);
+      args.push(...opts.kinds);
+    }
+    if (!opts?.includeArchived) where.push('archived_at IS NULL');
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM subjects ${clause}`).get(...args) as { n: number }).n;
   }
 
   /** Soft-archive (queries default to active; cascades remain via FK ON DELETE on hard purge). */

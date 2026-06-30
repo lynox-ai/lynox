@@ -111,4 +111,9 @@ export class RelationshipStore {
     return this.db.prepare('SELECT * FROM relationships WHERE from_subject_id = ? OR to_subject_id = ?')
       .all(subjectId, subjectId) as RelationshipRow[];
   }
+
+  /** Total edge count. */
+  count(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM relationships').get() as { n: number }).n;
+  }
 }
