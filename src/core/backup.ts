@@ -48,7 +48,12 @@ export interface BackupConfig {
   gdriveUploader?: import('./backup-upload-gdrive.js').GDriveBackupUploader | undefined;
 }
 
-const SQLITE_DBS = ['history.db', 'vault.db', 'datastore.db', 'agent-memory.db', 'push-subscriptions.db'] as const;
+// Foundation Rework v2: `engine.db` is the new consolidated subject-graph store.
+// During S0/S1 it co-exists with the legacy files (which still hold the live
+// data), so ALL are backed up — `mail-state.db` is added here too, fixing a
+// pre-existing omission (inbox/mail state was never backed up). At S2 the legacy
+// files fold into engine.db and are deleted; trim this list to the 3-file set then.
+const SQLITE_DBS = ['engine.db', 'history.db', 'vault.db', 'datastore.db', 'agent-memory.db', 'mail-state.db', 'push-subscriptions.db'] as const;
 const COPY_DIRS = ['memory', 'sessions'] as const;
 const COPY_FILES = ['config.json', 'vapid-keys.json'] as const;
 
