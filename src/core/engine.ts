@@ -20,6 +20,7 @@ import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
+import { EngineDb } from './engine-db.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
@@ -176,6 +177,12 @@ export class Engine {
   private readonly batchIndex = new BatchIndex();
   private memory: Memory | null = null;
   private runHistory: RunHistory | null = null;
+  /**
+   * Foundation Rework v2 (S0): the consolidated subject-graph store (engine.db).
+   * Provisioned EMPTY alongside the legacy DBs — no store reads/writes it yet
+   * (S1 re-points the read/write paths). Null when init fails (graceful degrade).
+   */
+  private engineDb: EngineDb | null = null;
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
@@ -792,6 +799,17 @@ export class Engine {
     } catch (err) {
       process.stderr.write(`[lynox] RunHistory init failed: ${err instanceof Error ? err.message : String(err)} — history, threads, and tasks will be unavailable\n`);
       this.runHistory = null;
+    }
+
+    // Foundation Rework v2 (S0): provision the consolidated subject-graph store
+    // (engine.db) EMPTY, alongside the legacy DBs. Open + migrate only — no store
+    // is re-pointed to it yet (S1). Additive + optional: a failure here must not
+    // break the engine, since nothing depends on it during S0/S1.
+    try {
+      this.engineDb = new EngineDb();
+    } catch (err) {
+      process.stderr.write(`[lynox] EngineDb init failed: ${err instanceof Error ? err.message : String(err)} — subject-graph store unavailable\n`);
+      this.engineDb = null;
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
@@ -1504,6 +1522,7 @@ export class Engine {
   getRegistry(): ToolRegistry { return this.registry; }
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
+  getEngineDb(): EngineDb | null { return this.engineDb; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
   getActiveScopes(): MemoryScopeRef[] { return this.activeScopes; }
@@ -1730,6 +1749,9 @@ export class Engine {
     }
     if (this.runHistory) {
       try { this.runHistory.close(); } catch { /* ignore */ }
+    }
+    if (this.engineDb) {
+      try { this.engineDb.close(); } catch { /* ignore */ }
     }
     if (this.secretVault) {
       try { this.secretVault.close(); } catch { /* ignore */ }
