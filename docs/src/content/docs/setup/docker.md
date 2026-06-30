@@ -100,6 +100,9 @@ This directory contains:
 - `history.db` — Threads, runs, and conversation history
 - `agent-memory.db` — Knowledge graph and embeddings
 - `datastore.db` — CRM contacts, deals, and DataStore collections
+- `engine.db` — Subject-graph store (flag-gated, off by default)
+- `mail-state.db` — Inbox and mail state
+- `push-subscriptions.db` — Web-push subscriptions
 - `memory/` — Flat-file memory
 - `sessions/` — Active session state
 - `backups/` — Automatic backups

@@ -13,6 +13,8 @@ lynox can back up your data automatically — encrypted and optionally uploaded 
 - **Thread history** — Your conversation threads
 - **Vault** — Encrypted secrets and credentials
 - **DataStore** — CRM contacts, deals, and custom collections
+- **Inbox & mail state** — Inbox and mail state (`mail-state.db`)
+- **Subject graph** — The `engine.db` subject-graph store
 - **Sessions** — Active session state
 - **Configuration** — Settings and preferences
 

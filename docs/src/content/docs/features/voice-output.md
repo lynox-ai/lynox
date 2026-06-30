@@ -78,7 +78,7 @@ Assistant replies are Markdown. Reading them verbatim would produce "asterisk-as
 
 ## Cost
 
-At $0.016 per 1 000 characters, typical use is well inside existing tier budgets. A user listening to 30 replies of ~300 characters per month pays about 15 cents. Heavy use (500 replies, 500 characters each) still lands at roughly $4 / month. Phase 1 ships without per-tier gating — if a pathological pattern emerges, per-tenant character counts are logged and can be reviewed.
+At $0.016 per 1 000 characters, typical use is well inside existing tier budgets. A user listening to 30 replies of ~300 characters per month pays about 15 cents. Heavy use (500 replies, 500 characters each) still lands at roughly $4 / month. Managed tenants gate voice on their credit balance — synthesis draws from the same included-AI budget as other usage — and per-tenant character counts are logged for review.
 
 ## Troubleshooting
 
