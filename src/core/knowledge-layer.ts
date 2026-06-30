@@ -365,12 +365,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /**
    * Foundation Rework v2 (S1b): additively mirror one stored memory's extraction
-   * into the engine.db subject-graph — entities → subjects (the converged
-   * `findOrCreate` dedup, kind-mapped; concept/location/collection dropped),
-   * relations → typed relationships, plus the memory provenance stub, its subject
-   * links, and pairwise co-occurrence counts. One engine.db transaction (atomic
-   * per memory). Re-resolves from the extraction by name/type — it does NOT reuse
-   * the legacy agent-memory.db entity ids (those stay on the legacy graph).
+   * into the engine.db subject-graph. In execution order: a supersession mirror
+   * (flips superseded old stubs), then entities → subjects (the converged
+   * `findOrCreate` dedup, kind-mapped; concept/location/collection dropped), the
+   * memory provenance stub, relations → typed relationships, subject links, and
+   * pairwise co-occurrence counts. One engine.db transaction (atomic per memory).
+   * Re-resolves from the extraction by name/type — it does NOT reuse the legacy
+   * agent-memory.db entity ids (those stay on the legacy graph).
    */
   private _mirrorToSubjectGraph(
     memoryId: string,

@@ -82,8 +82,9 @@ const MAX_CHUNKS = 64;
 /** Maximum total plaintext size across all chunks (500 MB). */
 const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
 
-/** Whitelist of allowed database file names — prevents path traversal via crafted manifests. */
-const ALLOWED_DB_NAMES = new Set(['history.db', 'agent-memory.db', 'datastore.db']);
+/** Whitelist of allowed database file names — prevents path traversal via crafted manifests.
+ *  engine.db (Foundation Rework v2 subject-graph) is portable user data — mirrors the export set. */
+const ALLOWED_DB_NAMES = new Set(['history.db', 'agent-memory.db', 'datastore.db', 'engine.db']);
 
 /** Config fields the importer will accept — defense-in-depth re-validation (matches exporter allowlist). */
 const SAFE_CONFIG_FIELDS = new Set([

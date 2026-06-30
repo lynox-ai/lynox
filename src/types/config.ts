@@ -397,6 +397,8 @@ export interface LynoxUserConfig {
    * Default: false — prod stays legacy-only until the S2 data migration flips it.
    * Staging/local set `true` to populate + verify the new graph in place. The
    * legacy stores remain the read/retrieval authority through S1 regardless.
+   * Requires `knowledge_graph_enabled` (the mirror feeds off KG extraction): on a
+   * KG-disabled tenant, or one with no embedding provider, this flag is inert.
    */
   subject_graph_enabled?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */

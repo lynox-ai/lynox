@@ -5,10 +5,13 @@ import type { EngineDb } from './engine-db.js';
 /**
  * SubjectStore — the S1 write/read layer over the engine.db subject graph
  * (Foundation Rework v2). It owns `subjects` + the person/organization detail
- * tables, and is the SINGLE converged dedup entry point (`findOrCreate`) that
- * both legacy producers — the inline `KnowledgeLayer` find-or-create and the
- * standalone `EntityResolver` — adopt in S1b, replacing their two divergent
- * implementations with the `idx_subjects_canonical` guard as the backstop.
+ * tables, and is the converged `findOrCreate` dedup entry point for that graph
+ * (`idx_subjects_canonical` is the structural backstop). S1b uses it as the
+ * target of an ADDITIVE mirror of the KnowledgeLayer extraction — the legacy
+ * `agent-memory.db` inline find-or-create and the standalone `EntityResolver`
+ * still run and stay AUTHORITATIVE; converging/retiring those two divergent
+ * legacy dedup paths onto this one is deferred to the read-migration (S1d) +
+ * the data migration (S2).
  *
  * Encryption boundary (S0 D2/D4): `subjects.name` stays PLAINTEXT — the canonical
  * dedup index is on `LOWER(name)`, so GCM ciphertext would defeat dedup. The
@@ -34,6 +37,9 @@ export type SubjectKind = (typeof KNOWN_SUBJECT_KINDS)[number];
  *   person → person · organization → organization ·
  *   project → engagement (a scoped piece of work) · product → product ·
  *   concept | location | collection | unknown → null
+ * Note: no KG `entity_type` maps to `service`, so this mirror never mints a
+ * `service` subject — service name-dedup (NAME_DEDUP_KINDS) is forward-ready for
+ * other producers (e.g. CRM in S1c), not exercised by the extraction path.
  */
 export function entityTypeToSubjectKind(entityType: string): SubjectKind | null {
   switch (entityType) {

@@ -60,7 +60,11 @@ interface PlaintextChunk {
 
 // ── Constants ──
 
-const SQLITE_DBS = ['history.db', 'agent-memory.db', 'datastore.db'] as const;
+// Foundation Rework v2: engine.db (the subject-graph) is portable user data and
+// must migrate with the rest. Safe to list before it has data — the export loop
+// skips any DB that doesn't exist (existsSync guard below), so a pre-S0 or
+// flag-off (empty/absent engine.db) instance migrates it harmlessly.
+const SQLITE_DBS = ['history.db', 'agent-memory.db', 'datastore.db', 'engine.db'] as const;
 
 /** Config fields that are safe to migrate (no credentials, no paths). */
 const SAFE_CONFIG_FIELDS = [
