@@ -130,7 +130,7 @@ describe('KnowledgeLayer subject-graph READ migration (S1d)', () => {
     });
     expect(typeof rels[0]!.confidence).toBe('number');
     expect(rels[0]!.createdAt).toBeTruthy();
-    expect(rels[0]!.sourceMemoryId).toBeDefined();  // '' or an id, never undefined
+    expect(typeof rels[0]!.sourceMemoryId).toBe('string');  // '' or an id, never null/undefined (the `?? ''` guard)
   });
 
   it('flag ON: stats — entities/relations from subject-graph; memoryCount stays legacy (counts subject-less)', async () => {
@@ -189,6 +189,17 @@ describe('KnowledgeLayer subject-graph READ migration (S1d)', () => {
     expect(await layer.getEntity(svc.id)).toBeNull();    // kind has no EntityType → null
     expect(await layer.getEntity(other.id)).toBeNull();
     expect((await layer.getEntity(bob.id))!.aliases.sort()).toEqual(['Bobby', 'Robert']);
+  });
+
+  it('flag ON: listEntities honours limit + offset (pagination slice)', async () => {
+    const { layer, engine } = makeLayer({ flag: true });
+    await layer.init();
+    const subs = new SubjectStore(engine!);
+    for (let i = 0; i < 5; i++) subs.findOrCreate({ kind: 'person', name: `Person ${i}` });
+
+    expect(await layer.listEntities({ limit: 2 })).toHaveLength(2);            // limit-truncation
+    expect(await layer.listEntities({ limit: 2, offset: 4 })).toHaveLength(1); // offset → only 1 left of 5
+    expect(await layer.listEntities({ offset: 5 })).toHaveLength(0);           // offset past end
   });
 
   it('flag ON: getEntityRelations caps at the legacy default (50)', async () => {

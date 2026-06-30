@@ -563,15 +563,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   async getEntityRelations(entityId: string, depth?: number | undefined): Promise<RelationRecord[]> {
-    // The legacy `depth` arg is really a row LIMIT (db.getEntityRelations(id, limit=50)).
-    // Mirror that cap on the subject path so a hub entity can't return unbounded edges
-    // (the export loops this over 200 entities).
-    const limit = depth === undefined ? 50 : depth * 20;
+    // The legacy `depth` arg is really a row LIMIT (db.getEntityRelations(id, limit), newest-first,
+    // clamped [1,200]). Mirror the same bound + ORDER on the subject path so a hub entity can't return
+    // unbounded edges (the export loops this over 200 entities) and the cap returns the SAME newest-N as legacy.
+    const limit = Math.max(1, Math.min(depth === undefined ? 50 : depth * 20, 200));
     if (this.subjectGraphEnabled && this.relationshipStore) {
       try {
-        return this.relationshipStore.getRelationshipsForSubject(entityId)
-          .slice(0, limit)
-          .map(r => this._relRowToRelationRecord(r));
+        return this.relationshipStore.getRelationshipsForSubject(entityId, limit).map(r => this._relRowToRelationRecord(r));
       } catch (err: unknown) { this._logReadFallback('getEntityRelations', err); }
     }
     const rows = this.db.getEntityRelations(entityId, limit);
@@ -605,6 +603,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * The subject-graph read of the entity list: maps Subjects back to the stable
    * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
    * Filter order: kind (`type`) → name/alias substring (`q`) → offset/limit slice.
+   * Rows come `updated_at DESC` (via `listSubjects`); the legacy path orders by
+   * `mention_count DESC`, but subjects carry no mention count, so browse order +
+   * `mentionCount` (0) differ from legacy — tracked with the memory sprint.
    */
   private _listSubjectEntities(
     opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
