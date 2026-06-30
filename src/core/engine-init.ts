@@ -92,10 +92,12 @@ export function configureBudgetAndRateLimits(
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
-  // Outbound egress policy for the http tool. Default 'allow-all' = unchanged
-  // behaviour. 'allow-list'/'deny-all' are opt-in operator/CP controls; the
-  // enforcement lives in http.ts applyHostPolicy (already wired for all three
-  // gated callers: http_request, api_setup, web-search content fetch).
+  // Outbound egress policy for the agent's HTTP tool surface. Default
+  // 'allow-all' = unchanged behaviour. 'allow-list'/'deny-all' are opt-in
+  // operator/CP controls enforced in http.ts applyHostPolicy + the web-search
+  // egress gate (assertEgressAllowed) — covering http_request, api_setup, and
+  // web_research (query + content). Other egress surfaces (LLM, mail, push,
+  // backup, Google, voice) are out of scope — see the network_policy doc.
   applyNetworkPolicy(
     toolContext,
     userConfig.network_policy ?? 'allow-all',

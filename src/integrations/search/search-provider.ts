@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { channels } from '../../core/observability.js';
+import type { ToolContext } from '../../core/tool-context.js';
+import { assertEgressAllowed } from './content-extractor.js';
 
 export interface SearchResult {
   title: string;
@@ -49,7 +51,10 @@ export interface SearchOptions {
 
 export interface SearchProvider {
   readonly name: string;
-  search(query: string, opts?: SearchOptions): Promise<SearchResult[]>;
+  // ctx threads the session's network policy so deny-all / allow-list also gates
+  // the search QUERY (not just the downstream content fetch) — the query string
+  // is agent-controllable and would otherwise be an exfil channel past the gate.
+  search(query: string, opts?: SearchOptions, ctx?: ToolContext | undefined): Promise<SearchResult[]>;
 }
 
 // Tavily backend removed 2026-05-24 — the UI hadn't surfaced it since the
@@ -94,7 +99,7 @@ export class SearXNGProvider implements SearchProvider {
     validateSearxngUrl(baseUrl);
   }
 
-  async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+  async search(query: string, opts?: SearchOptions, ctx?: ToolContext | undefined): Promise<SearchResult[]> {
     const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 20);
     const params = new URLSearchParams({
@@ -121,6 +126,7 @@ export class SearXNGProvider implements SearchProvider {
     }
 
     const url = `${this.baseUrl.replace(/\/+$/, '')}/search?${params.toString()}`;
+    assertEgressAllowed(url, ctx);
     const response = await fetch(url, {
       headers: { Accept: 'application/json' },
     });
@@ -199,10 +205,11 @@ export class SearXNGProvider implements SearchProvider {
 export class DuckDuckGoProvider implements SearchProvider {
   readonly name = 'duckduckgo-fallback';
 
-  async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+  async search(query: string, opts?: SearchOptions, ctx?: ToolContext | undefined): Promise<SearchResult[]> {
     const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 10);
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    assertEgressAllowed(url, ctx);
     let response: Response;
     try {
       response = await fetch(url, {

@@ -68,7 +68,7 @@ describe('search action', () => {
       maxResults: 10,
       topic: 'news',
       timeRange: 'week',
-    });
+    }, undefined);
   });
 
   it('returns error when query is missing', async () => {
@@ -186,7 +186,7 @@ describe('search edge cases', () => {
       maxResults: undefined,
       topic: undefined,
       timeRange: undefined,
-    });
+    }, undefined);
   });
 
   it('formats publishedDate only when present', async () => {
@@ -253,7 +253,7 @@ describe('search edge cases', () => {
     const tool = createWebSearchTool(provider);
     // Whitespace query is passed through — provider/SearXNG decides
     await tool.handler({ action: 'search', query: '   ' }, {} as never);
-    expect(provider.search).toHaveBeenCalledWith('   ', expect.any(Object));
+    expect(provider.search).toHaveBeenCalledWith('   ', expect.any(Object), undefined);
   });
 });
 

@@ -166,10 +166,15 @@ export function loadConfig(): LynoxUserConfig {
   }
   const netHosts = process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
   if (netHosts !== undefined && netHosts.trim() !== '') {
-    merged.network_allowed_hosts = netHosts
-      .split(',')
-      .map((h) => h.trim())
-      .filter((h) => h.length > 0);
+    const parsedHosts = netHosts.split(',').map((h) => h.trim()).filter((h) => h.length > 0);
+    if (parsedHosts.length > 0) {
+      merged.network_allowed_hosts = parsedHosts;
+    } else {
+      // Non-blank but no usable hosts (e.g. ","). Warn + retain the config.json
+      // value rather than silently overwriting it with an empty list — which
+      // under allow-list would block ALL egress with no signal.
+      process.stderr.write('⚠ LYNOX_NETWORK_ALLOWED_HOSTS set but parsed to no hosts — ignoring it\n');
+    }
   }
   if (process.env['LYNOX_USER']) {
     merged.user_id = process.env['LYNOX_USER'];

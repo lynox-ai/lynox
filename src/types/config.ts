@@ -408,17 +408,26 @@ export interface LynoxUserConfig {
   /** Block plain HTTP requests (except localhost). Default: false */
   enforce_https?: boolean | undefined;
   /**
-   * Outbound network policy for the http_request tool (and the api_setup probe +
-   * web-search content fetch, which share the same gate). Default 'allow-all' =
-   * today's behaviour, unchanged. 'deny-all' = air-gapped (the LLM still works —
-   * it does not route through the http tool). 'allow-list' = ONLY the hosts in
-   * `network_allowed_hosts` are reachable. The allow-list is AUTHORITATIVE: it is
-   * NOT auto-extended by configured API profiles, because `api_setup` is
-   * agent-callable and auto-trusting profile hosts would let the agent
-   * self-authorise egress and defeat the gate. An operator who opts into
-   * allow-list lists the hosts they want reachable. This is an operator/CP
-   * security control — deliberately NOT in `MANAGED_USER_WRITABLE_CONFIG` and
-   * not agent-writable (a tenant/agent must not be able to widen its own egress).
+   * Outbound egress policy for the agent's GENERAL-PURPOSE network tools:
+   * `http_request`, the `api_setup` probe, and `web_research` (both the search
+   * query AND the page/content fetch). Default 'allow-all' = today's behaviour,
+   * unchanged. 'deny-all' = those tools cannot reach the network. 'allow-list' =
+   * they may reach ONLY the hosts in `network_allowed_hosts`.
+   *
+   * SCOPE — this is NOT a full process air-gap. It gates the agent-driven HTTP
+   * tool surface only. It does NOT gate: the LLM provider call (separate client),
+   * mail IMAP/SMTP, push notifications, Google Workspace, voice transcribe/TTS,
+   * backup upload, or error reporting — each is its own separately-configured
+   * egress surface. A cross-integration air-gap is a separate control.
+   *
+   * The allow-list is AUTHORITATIVE: it is NOT auto-extended by configured API
+   * profiles, because `api_setup` is agent-callable and auto-trusting profile
+   * hosts would let the agent self-authorise egress and defeat the gate. An
+   * operator who opts into allow-list lists the hosts they want reachable.
+   *
+   * Operator/CP security control — deliberately NOT in
+   * `MANAGED_USER_WRITABLE_CONFIG` and not agent-writable (a tenant/agent must
+   * not be able to widen its own egress).
    */
   network_policy?: NetworkPolicy | undefined;
   /**

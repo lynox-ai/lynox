@@ -159,7 +159,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
             maxResults: input.max_results,
             topic: input.topic,
             timeRange: input.time_range,
-          });
+          }, ctx);
           // Rerank BEFORE enrichment: dropping low-relevance hits first
           // avoids fetching full pages for results we're about to discard.
           // No-op unless LYNOX_SEARCH_RERANK is enabled; falls through on
