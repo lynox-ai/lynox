@@ -64,11 +64,11 @@ export class RelationshipStore {
       this.db.prepare(`
         UPDATE relationships
         SET description = COALESCE(NULLIF(?, ''), description),
-            confidence = ?, source_memory_id = COALESCE(?, source_memory_id),
+            confidence = COALESCE(?, confidence), source_memory_id = COALESCE(?, source_memory_id),
             since = COALESCE(?, since), until = COALESCE(?, until), notes = COALESCE(?, notes)
         WHERE id = ?
       `).run(
-        params.description ?? '', params.confidence ?? 1.0,
+        params.description ?? '', params.confidence ?? null,
         params.sourceMemoryId ?? null, params.since ?? null, params.until ?? null,
         params.notes ?? null, existing.id,
       );

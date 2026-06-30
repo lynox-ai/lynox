@@ -26,7 +26,8 @@ describe('RelationshipStore (Foundation Rework v2 — S1a)', () => {
     const person = subs.findOrCreate({ kind: 'person', name: 'Alice' }).id;
     const org = subs.findOrCreate({ kind: 'organization', name: 'Acme' }).id;
     const id = rels.createRelationship({ fromSubjectId: person, toSubjectId: org, kind: 'works_at', description: 'CTO since 2024' });
-    expect(id).toBeTruthy();
+    expect(typeof id).toBe('string');
+    expect(id.length).toBeGreaterThan(0);
 
     expect(rels.getRelationshipsFrom(person)).toHaveLength(1);
     expect(rels.getRelationshipsFrom(person, 'works_at')[0]!.description).toBe('CTO since 2024');
@@ -47,6 +48,32 @@ describe('RelationshipStore (Foundation Rework v2 — S1a)', () => {
     expect(edges).toHaveLength(1);
     expect(edges[0]!.description).toBe('now filled');   // empty description didn't overwrite, but the filled one did
     expect(edges[0]!.confidence).toBe(0.9);
+    engine.close();
+  });
+
+  it('preserves description and confidence on a bare re-assert (no silent clobber)', () => {
+    const { rels, subs, engine } = make();
+    const a = subs.findOrCreate({ kind: 'person', name: 'A' }).id;
+    const b = subs.findOrCreate({ kind: 'organization', name: 'B' }).id;
+    rels.createRelationship({ fromSubjectId: a, toSubjectId: b, kind: 'works_at', description: 'CTO', confidence: 0.9 });
+    // Re-assert with NEITHER description nor confidence: both must be preserved
+    // (empty description must not wipe; confidence must not reset to 1.0).
+    rels.createRelationship({ fromSubjectId: a, toSubjectId: b, kind: 'works_at' });
+    const edge = rels.getRelationshipsFrom(a, 'works_at')[0]!;
+    expect(edge.description).toBe('CTO');
+    expect(edge.confidence).toBe(0.9);
+    engine.close();
+  });
+
+  it('filters directional reads by kind', () => {
+    const { rels, subs, engine } = make();
+    const a = subs.findOrCreate({ kind: 'person', name: 'A' }).id;
+    const b = subs.findOrCreate({ kind: 'organization', name: 'B' }).id;
+    rels.createRelationship({ fromSubjectId: a, toSubjectId: b, kind: 'works_at' });
+    rels.createRelationship({ fromSubjectId: a, toSubjectId: b, kind: 'invoiced_by' });
+    expect(rels.getRelationshipsTo(b, 'works_at')).toHaveLength(1);
+    expect(rels.getRelationshipsTo(b, 'no_such_kind')).toHaveLength(0);
+    expect(rels.getRelationshipsTo(b)).toHaveLength(2);
     engine.close();
   });
 

@@ -87,9 +87,6 @@ export class SubjectStore {
     embedding?: Buffer | undefined;
   }): { id: string; created: boolean } {
     const owner = params.ownerUserId ?? DEFAULT_OWNER;
-    // Only person/organization dedup by name (the `idx_subjects_canonical` kinds).
-    // engagement/product/service carry no name-uniqueness by design — an
-    // engagement's identity is provider×client×period — so they always insert.
     if (NAME_DEDUP_KINDS.has(params.kind)) {
       const existing = this.findCanonical(params.name, params.kind, owner)
         ?? this.findByAlias(params.name, params.kind, owner);
@@ -128,11 +125,23 @@ export class SubjectStore {
     return id;
   }
 
-  /** Canonical lookup — mirrors the (LOWER(name), kind, owner) dedup key, active rows only. */
+  /**
+   * Canonical lookup against the `idx_subjects_canonical` index. Meaningful only
+   * for the canonical-identity kinds (person/organization) — other kinds carry no
+   * name-uniqueness and this returns null for them.
+   *
+   * The WHERE is shaped to make the planner USE the partial expression index
+   * (verified via EXPLAIN QUERY PLAN — a naive `name = ? COLLATE NOCASE AND kind = ?`
+   * full-scans): `LOWER(name)` matches the `LOWER(name)` expression index, and the
+   * literal `kind IN ('person','organization')` matches the index's partial
+   * predicate (a bound `kind = ?` alone cannot satisfy it). The trailing
+   * `kind = ?` still selects the specific kind.
+   */
   findCanonical(name: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
     return this.db.prepare(`
       SELECT * FROM subjects
-      WHERE name = ? COLLATE NOCASE AND kind = ? AND owner_user_id = ? AND archived_at IS NULL
+      WHERE LOWER(name) = LOWER(?) AND kind IN ('person','organization') AND kind = ?
+        AND owner_user_id = ? AND archived_at IS NULL
       LIMIT 1
     `).get(name, kind, ownerUserId) as SubjectRow | undefined ?? null;
   }
@@ -176,18 +185,30 @@ export class SubjectStore {
 
   // ── Detail tables (enc boundary lives here) ───────────────────
 
-  /** Upsert person detail. email/phone are encrypted at rest; name stays on `subjects` (plaintext). */
+  /**
+   * Upsert person detail — MERGE semantics: an omitted field preserves the
+   * stored value (a later `{role}` call does not wipe a prior `{email}`). To set
+   * a field, pass it. email/phone are encrypted at rest; name stays on `subjects`
+   * (plaintext).
+   */
   setPersonDetail(subjectId: string, d: PersonDetail): void {
+    // `type` re-binds the raw param in DO UPDATE (NOT excluded.type) — the VALUES
+    // COALESCE(?, 'contact') defaults a fresh insert, but that default would leak
+    // through excluded.type and clobber a stored value on a bare update.
     this.db.prepare(`
       INSERT INTO people (subject_id, email, phone, role, type)
       VALUES (?, ?, ?, ?, COALESCE(?, 'contact'))
       ON CONFLICT(subject_id) DO UPDATE SET
-        email = excluded.email, phone = excluded.phone, role = excluded.role, type = excluded.type
+        email = COALESCE(excluded.email, email),
+        phone = COALESCE(excluded.phone, phone),
+        role  = COALESCE(excluded.role, role),
+        type  = COALESCE(?, type)
     `).run(
       subjectId,
       d.email ? this.engine.enc(d.email) : null,
       d.phone ? this.engine.enc(d.phone) : null,
       d.role ?? null,
+      d.type ?? null,
       d.type ?? null,
     );
   }
@@ -205,14 +226,29 @@ export class SubjectStore {
     };
   }
 
-  /** Upsert organization detail (no encrypted columns today — domain/vat are identifiers, not indexed). */
+  /**
+   * Upsert organization detail — MERGE semantics (see {@link setPersonDetail}).
+   * `vat_id` is a tax identifier (PII for sole proprietors) → encrypted at rest;
+   * `domain` stays plaintext (often public + a future lookup key). Neither is
+   * indexed, so encrypting vat_id breaks no query.
+   */
   setOrganizationDetail(subjectId: string, d: OrganizationDetail): void {
     this.db.prepare(`
       INSERT INTO organizations (subject_id, domain, vat_id, country, type)
       VALUES (?, ?, ?, ?, COALESCE(?, 'other'))
       ON CONFLICT(subject_id) DO UPDATE SET
-        domain = excluded.domain, vat_id = excluded.vat_id, country = excluded.country, type = excluded.type
-    `).run(subjectId, d.domain ?? null, d.vat_id ?? null, d.country ?? null, d.type ?? null);
+        domain  = COALESCE(excluded.domain, domain),
+        vat_id  = COALESCE(excluded.vat_id, vat_id),
+        country = COALESCE(excluded.country, country),
+        type    = COALESCE(?, type)
+    `).run(
+      subjectId,
+      d.domain ?? null,
+      d.vat_id ? this.engine.enc(d.vat_id) : null,
+      d.country ?? null,
+      d.type ?? null,
+      d.type ?? null,
+    );
   }
 
   getOrganizationDetail(subjectId: string): (OrganizationDetail & { subject_id: string }) | null {
@@ -222,7 +258,7 @@ export class SubjectStore {
     return {
       subject_id: row.subject_id,
       domain: row.domain ?? undefined,
-      vat_id: row.vat_id ?? undefined,
+      vat_id: row.vat_id ? this.engine.dec(row.vat_id) : undefined,
       country: row.country ?? undefined,
       type: row.type,
     };

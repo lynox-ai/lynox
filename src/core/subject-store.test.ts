@@ -117,4 +117,59 @@ describe('SubjectStore (Foundation Rework v2 — S1a)', () => {
     expect(b.id).not.toBe(a.id);
     engine.close();
   });
+
+  it('person detail upsert MERGES — an omitted field is preserved, not nulled', () => {
+    const { store, engine } = makeStore('k');
+    const { id } = store.findOrCreate({ kind: 'person', name: 'Pat Lee' });
+    store.setPersonDetail(id, { email: 'pat@x.com', phone: '+41790000000', type: 'customer' });
+    // A later incremental call setting only role must NOT wipe email/phone/type.
+    store.setPersonDetail(id, { role: 'CEO' });
+    const d = store.getPersonDetail(id)!;
+    expect(d.email).toBe('pat@x.com');
+    expect(d.phone).toBe('+41790000000');
+    expect(d.type).toBe('customer');
+    expect(d.role).toBe('CEO');
+    engine.close();
+  });
+
+  it('organization detail: vat_id encrypted at rest, domain plaintext, merge-preserving', () => {
+    const { store, engine } = makeStore('k');
+    const { id } = store.findOrCreate({ kind: 'organization', name: 'Globex' });
+    store.setOrganizationDetail(id, { domain: 'globex.example', vat_id: 'CHE-123.456.789', country: 'CH', type: 'customer' });
+    const raw = engine.getDb().prepare('SELECT domain, vat_id FROM organizations WHERE subject_id = ?').get(id) as { domain: string; vat_id: string };
+    expect(raw.domain).toBe('globex.example');        // plaintext (public-ish + lookup key)
+    expect(raw.vat_id).toMatch(/^enc:/);              // PII → encrypted
+    expect(raw.vat_id).not.toContain('CHE-123');
+    const d = store.getOrganizationDetail(id)!;
+    expect(d.vat_id).toBe('CHE-123.456.789');         // decrypted on read
+    expect(d.type).toBe('customer');
+    // merge: setting only country preserves domain/vat/type
+    store.setOrganizationDetail(id, { country: 'DE' });
+    const d2 = store.getOrganizationDetail(id)!;
+    expect(d2.country).toBe('DE');
+    expect(d2.domain).toBe('globex.example');
+    expect(d2.vat_id).toBe('CHE-123.456.789');
+    engine.close();
+  });
+
+  it('findByAlias does not false-match a substring of a longer alias', () => {
+    const { store, engine } = makeStore();
+    store.findOrCreate({ kind: 'person', name: 'Bobby Tables', aliases: ['Bobby Tables', 'Bobby'] });
+    // 'Bob' is a substring of the alias 'Bobby' but NOT an alias → must create new.
+    const r = store.findOrCreate({ kind: 'person', name: 'Bob' });
+    expect(r.created).toBe(true);
+    engine.close();
+  });
+
+  it('round-trips create params (isSelf/parentId/status) and returns null for a missing id', () => {
+    const { store, engine } = makeStore();
+    const parent = store.findOrCreate({ kind: 'organization', name: 'Holding' }).id;
+    const childId = store.createSubject({ kind: 'organization', name: 'Subsidiary', isSelf: true, parentId: parent, status: 'active' });
+    const row = store.getSubject(childId)!;
+    expect(row.is_self).toBe(1);
+    expect(row.parent_id).toBe(parent);
+    expect(row.status).toBe('active');
+    expect(store.getSubject('nope')).toBeNull();
+    engine.close();
+  });
 });
