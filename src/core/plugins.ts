@@ -11,6 +11,7 @@ import type {
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getErrorMessage } from './utils.js';
 import { getLynoxDir } from './config.js';
+import { stripSecretsForPlugin } from './secret-fields.js';
 
 function getPluginsDir(): string {
   return join(getLynoxDir(), 'plugins');
@@ -76,11 +77,13 @@ export class PluginManager {
 
     if (enabledNames.length === 0) return;
 
-    // Strip secrets before passing config to plugins
-    const { api_key: _api_key, api_base_url: _api_base_url, ...safeConfig } = this.config;
+    // Strip ALL secrets before passing config to 3rd-party plugin code: the
+    // top-level keys, the nested tier_set/model_profiles api_keys, AND the
+    // endpoint URLs (the old destructure only removed top-level api_key +
+    // api_base_url, leaking every nested key + search/google/bugsink secret).
     const ctx: PluginContext = {
       projectDir: process.cwd(),
-      config: safeConfig as LynoxUserConfig,
+      config: stripSecretsForPlugin(this.config),
       log: this.log,
     };
 

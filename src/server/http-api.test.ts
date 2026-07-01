@@ -3412,6 +3412,94 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      // On managed, api_base_url must be validated for EVERY curated provider,
+      // not just openai — an earlier revision left it unchecked when a provider
+      // field accompanied it, so a curated provider could carry a non-curated
+      // endpoint. confirm_custom_endpoint:true must NOT relax this — the
+      // constraint fires before the endpoint-disclosure gate.
+      it('PUT /api/config rejects a non-curated api_base_url paired with any curated provider in managed mode', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              provider: 'anthropic',
+              api_base_url: 'https://attacker.example',
+              confirm_custom_endpoint: true,
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('api_base_url');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config does NOT reject the curated Anthropic host as an endpoint (no over-rejection of the legit switch)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'anthropic', api_base_url: 'https://api.anthropic.com' }),
+          });
+          // The endpoint constraint must accept the curated Anthropic host; if any
+          // 403 comes back it must NOT be the api_base_url-rejection message.
+          if (res.status === 403) {
+            const body = await res.json() as { error: string };
+            expect(body.error).not.toContain('only the curated Anthropic/Mistral endpoints');
+          }
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // Hybrid-routing tier_set slots carry a per-slot api_base_url — the same
+      // endpoint surface as the top-level field, so the managed gate rejects a
+      // non-curated slot endpoint at write time too.
+      it('PUT /api/config REJECTS a tier_set slot with a non-curated api_base_url in managed mode', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'https://attacker.example' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('tier_set');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config does NOT reject a tier_set slot on the curated Mistral host (no over-rejection)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'mistral-large-2512', api_base_url: 'https://api.mistral.ai/v1' } },
+            }),
+          });
+          if (res.status === 403) {
+            const body = await res.json() as { error: string };
+            expect(body.error).not.toContain('tier_set slot');
+          }
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       // Starter (BYOK) — provider/api_base_url/cost-caps are NOT locked.
       // Customer owns their LLM, owns the config. Config-lock gate must
       // skip them entirely.

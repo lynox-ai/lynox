@@ -39,6 +39,7 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
+import { redactConfigForResponse } from '../core/secret-fields.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -85,12 +86,6 @@ const PKG_VERSION: string = (() => {
     return (JSON.parse(raw) as { version: string }).version;
   } catch { return 'unknown'; }
 })();
-
-// Keys stripped from GET /api/config responses (secrets that must not leak)
-const REDACTED_CONFIG_KEYS = new Set([
-  'api_key',
-  'search_api_key', 'google_client_id', 'google_client_secret',
-]);
 
 // Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, admin-scoped routes
 // require the admin token; user-scoped routes accept either. When only
@@ -291,6 +286,15 @@ const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
   'https://api.mistral.ai/v1',
   'https://api.mistral.ai',
 ]);
+// Every api_base_url a managed tenant may set: the curated Mistral preset hosts
+// (for the openai-compat protocol slot) PLUS Anthropic's canonical host (the
+// Anthropic provider default — normally sent empty/unset). Any other non-empty
+// value is an attacker-controlled endpoint. Section 2 below enforces this
+// allowlist for EVERY provider, not just openai.
+const MANAGED_CURATED_HOSTS = new Set<string>([
+  ...MANAGED_OPENAI_MISTRAL_HOSTS,
+  'https://api.anthropic.com',
+]);
 
 function enforceManagedProviderConstraints(update: Record<string, unknown>): string | null {
   // 1. provider field present — must be in the curated allowlist (anthropic
@@ -307,14 +311,33 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
       }
     }
   }
-  // 2. api_base_url alone (without provider) — only the Mistral host is
-  //    accepted on Managed. Attacker-controlled URLs are rejected even if
-  //    the field is in MANAGED_USER_WRITABLE_CONFIG, because a free-text URL
-  //    would let a managed customer redirect engine traffic.
-  if ('api_base_url' in update && !('provider' in update)) {
+  // 2. api_base_url present with ANY provider (or none) — a non-empty custom URL
+  //    is only accepted when it is a curated host. Runs UNCONDITIONALLY on any
+  //    api_base_url write (an earlier revision validated it only when no provider
+  //    field was present, which left the field unguarded for a curated provider
+  //    carrying an explicit endpoint). On managed the engine may only reach a
+  //    curated endpoint regardless of provider. Empty/unset = the provider default.
+  if ('api_base_url' in update) {
     const baseUrl = update['api_base_url'];
-    if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_OPENAI_MISTRAL_HOSTS.has(baseUrl)) {
-      return `Managed instance: cannot change api_base_url to '${baseUrl}' — only the curated Mistral preset is allowed.`;
+    if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(baseUrl)) {
+      return `Managed instance: cannot set api_base_url to '${baseUrl}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+    }
+  }
+  // 3. tier_set (hybrid routing) carries a per-slot api_base_url — the SAME
+  //    endpoint surface as the top-level field. `applyManagedTierSetConstraints`
+  //    (config.ts, run at loadConfig() on cp_supplied tenants) already strips slot
+  //    base_urls + keys at READ time, and the engine's `_enforceEndpointAllowlist`
+  //    backstop checks ONLY the top-level url (never slots) — so validate slots
+  //    here too, at WRITE time, rather than resting entirely on the load-time
+  //    sanitizer. Guarded surface == executed surface.
+  const tierSet = update['tier_set'];
+  if (tierSet && typeof tierSet === 'object') {
+    for (const [tier, slot] of Object.entries(tierSet as Record<string, unknown>)) {
+      if (!slot || typeof slot !== 'object') continue;
+      const slotUrl = (slot as Record<string, unknown>)['api_base_url'];
+      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(slotUrl)) {
+        return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
+      }
     }
   }
   return null;
@@ -3423,13 +3446,9 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/config', async (_req, res) => {
       const { readUserConfig } = await import('../core/config.js');
       const config = readUserConfig();
-      const redacted: Record<string, unknown> = { ...config };
-      for (const key of REDACTED_CONFIG_KEYS) {
-        if (key in redacted && redacted[key]) {
-          delete redacted[key];
-          redacted[`${key}_configured`] = true;
-        }
-      }
+      // Canonical redaction: strips top-level secrets (with `${key}_configured`
+      // markers for the UI) AND nested tier_set/model_profiles api_keys.
+      const redacted = redactConfigForResponse(config);
       // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro = CP-supplied LLM)
       const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
@@ -6004,14 +6023,7 @@ export class LynoxHTTPApi {
       try {
         const { readUserConfig } = await import('../core/config.js');
         const config = readUserConfig();
-        const redacted: Record<string, unknown> = { ...config };
-        for (const key of REDACTED_CONFIG_KEYS) {
-          if (key in redacted && redacted[key]) {
-            delete redacted[key];
-            redacted[`${key}_configured`] = true;
-          }
-        }
-        exportData['config'] = redacted;
+        exportData['config'] = redactConfigForResponse(config);
       } catch {
         exportData['config'] = {};
       }

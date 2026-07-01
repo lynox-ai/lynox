@@ -317,7 +317,13 @@ export class Engine {
     // see `_reconcileBugsink` for why both sides matter.
     const oldDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
     const oldBugsinkActive = !!oldDsn && this.userConfig.bugsink_enabled !== false;
-    this.userConfig = loadConfig();
+    // Validate-before-commit: install the candidate, run the endpoint gate, and
+    // roll back to the prior config if it refuses — a rejected `api_base_url`
+    // must NOT leave the engine holding the poisoned config (the gate reads
+    // `this.userConfig`, so we assign first, then restore on throw).
+    const candidateConfig = loadConfig();
+    const prevConfig = this.userConfig;
+    this.userConfig = candidateConfig;
     // Wave 5d BYOK liability gate — defense-in-depth: re-evaluate the
     // allowlist BEFORE the LLM client is recreated against the new config.
     // The HTTP PUT /api/config handler pre-checks via `evaluateEndpointBootGate`
@@ -325,7 +331,12 @@ export class Engine {
     // mutation path (config.json edit + SIGHUP, vault rotation, future admin
     // tooling) installs a non-allowlisted `api_base_url`, this gate still
     // catches it before the client swap. Throws on `refuse`; caller catches.
-    this._enforceEndpointAllowlist();
+    try {
+      this._enforceEndpointAllowlist();
+    } catch (e) {
+      this.userConfig = prevConfig;
+      throw e;
+    }
     const newProvider = this.userConfig.provider;
     // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
     // EVERY reload — a routing_mode/tier_set-only change carries no credential
@@ -355,14 +366,24 @@ export class Engine {
    * init + batch) would keep a stale key after a BYOK rotation.
    */
   async reloadCredentials(): Promise<void> {
-    this.userConfig = loadConfig();
+    // Validate-before-commit (symmetric with `reloadUserConfig`): install the
+    // candidate, gate it, roll back on refuse so a rejected endpoint never
+    // survives in `this.userConfig`.
+    const candidateConfig = loadConfig();
+    const prevConfig = this.userConfig;
+    this.userConfig = candidateConfig;
     // Wave 5d BYOK liability gate — defense-in-depth re-check (symmetric with
     // `reloadUserConfig` and the engine-boot gate). A vault rotation that
     // changes the resolved provider's base_url, or any code-path that lands
     // a non-allowlisted endpoint into `loadConfig()` output without going
     // through PUT /api/config, must still be blocked before the new LLM
     // client is built. Throws on `refuse`; caller catches.
-    this._enforceEndpointAllowlist();
+    try {
+      this._enforceEndpointAllowlist();
+    } catch (e) {
+      this.userConfig = prevConfig;
+      throw e;
+    }
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
