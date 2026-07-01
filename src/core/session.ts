@@ -872,25 +872,28 @@ export class Session {
         }
       }).catch(() => {});
 
+      // Record the tokens this run actually spent BEFORE it failed/aborted.
+      // Without this, an interrupted or errored run records cost 0, so its real
+      // spend (the tokens were billed by the provider) silently drops out of the
+      // thread + daily totals — under-reporting cost. With the resilience work
+      // making interrupts common, this is a material gap (rafael 2026-06-05).
+      // usageBefore/model are the same anchors the success path uses; partial
+      // deltas are >= 0 (this.usage only grows). Computed OUTSIDE the persistence
+      // try so it is also available to the debit-hook fire below even if the
+      // local run-history write hiccups.
+      const failedTokensIn = this.usage.input_tokens - usageBefore.input_tokens;
+      const failedTokensOut = this.usage.output_tokens - usageBefore.output_tokens;
+      const failedCacheRead = this.usage.cache_read_input_tokens - usageBefore.cache_read_input_tokens;
+      const failedCacheWrite = this.usage.cache_creation_input_tokens - usageBefore.cache_creation_input_tokens;
+      const failedCostUsd = calculateCost(model, {
+        input_tokens: failedTokensIn,
+        output_tokens: failedTokensOut,
+        cache_creation_input_tokens: failedCacheWrite,
+        cache_read_input_tokens: failedCacheRead,
+      });
+
       if (runHistory && this.currentRunId) {
         try {
-          // Record the tokens this run actually spent BEFORE it failed/aborted.
-          // Without this, an interrupted or errored run records cost 0, so its
-          // real spend (the tokens were billed by the provider) silently drops
-          // out of the thread + daily totals — under-reporting cost. With the
-          // resilience work making interrupts common, this is a material gap
-          // (rafael 2026-06-05). usageBefore/model are the same anchors the
-          // success path uses; partial deltas are >= 0 (this.usage only grows).
-          const tokensIn = this.usage.input_tokens - usageBefore.input_tokens;
-          const tokensOut = this.usage.output_tokens - usageBefore.output_tokens;
-          const cacheRead = this.usage.cache_read_input_tokens - usageBefore.cache_read_input_tokens;
-          const cacheWrite = this.usage.cache_creation_input_tokens - usageBefore.cache_creation_input_tokens;
-          const costUsd = calculateCost(model, {
-            input_tokens: tokensIn,
-            output_tokens: tokensOut,
-            cache_creation_input_tokens: cacheWrite,
-            cache_read_input_tokens: cacheRead,
-          });
           // Debug-export Tier 2: raw structured error detail (status/type/body/
           // cause) for failure-class triage. Masked for the user's KNOWN stored
           // secrets (a provider 401 body can echo the provisioned key) before it
@@ -902,11 +905,11 @@ export class Session {
           const errorDetail = extractErrorDetail(err);
           runHistory.updateRun(this.currentRunId, {
             responseText: getErrorMessage(err),
-            tokensIn,
-            tokensOut,
-            tokensCacheRead: cacheRead,
-            tokensCacheWrite: cacheWrite,
-            costUsd,
+            tokensIn: failedTokensIn,
+            tokensOut: failedTokensOut,
+            tokensCacheRead: failedCacheRead,
+            tokensCacheWrite: failedCacheWrite,
+            costUsd: failedCostUsd,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: 'failed',
@@ -914,6 +917,40 @@ export class Session {
           });
         } catch {
           // Fire-and-forget
+        }
+      }
+
+      // Fire onAfterRun for the FAILED run too. The success path is the only
+      // other place that fires it, and onAfterRun is where the managed hook
+      // reports spend to the control plane for debit — so a run that consumed
+      // tokens and then errored/interrupted was NEVER reported, and lynox
+      // silently ate the provider cost (an attacker could drain the fleet budget
+      // by forcing failures after burning tokens). Mirror the success-path loop
+      // with the partial cost. Guarded so a hook error can never mask the
+      // original `err`. onAfterRun only QUEUES here (no network), and the managed
+      // hook skips costUsd<=0, so a crashed-before-any-token run is a no-op.
+      // No double-debit: this fires with `this.currentRunId`, the SAME id the
+      // success path would use, and the control plane's debitUsage is idempotent
+      // per run_id (ledger unique index) — so even the narrow window where the
+      // success path fired onAfterRun and then threw before returning is deduped
+      // CP-side to a single debit.
+      if (this.currentRunId) {
+        const failedRunContext: RunContext = {
+          runId: this.currentRunId,
+          contextId: context?.id ?? '',
+          modelTier: this._model,
+          durationMs: Date.now() - startTime,
+          source: context?.source ?? 'cli',
+          ...(this._tenantId ? { tenantId: this._tenantId } : {}),
+        };
+        for (const hook of this.engine.getHooks()) {
+          if (hook.onAfterRun) {
+            try {
+              hook.onAfterRun(this.currentRunId, failedCostUsd, failedRunContext);
+            } catch {
+              // Never let a hook error mask the original failure.
+            }
+          }
         }
       }
 

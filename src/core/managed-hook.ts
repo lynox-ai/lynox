@@ -103,6 +103,41 @@ export function createManagedHook(): LynoxHooks {
   let flushTimer: ReturnType<typeof setInterval> | null = null;
   let resyncTimer: ReturnType<typeof setInterval> | null = null;
   let flushing = false;
+  // Cumulative un-debited spend the hook has had to drop this process lifetime.
+  let droppedReports = 0;
+  let droppedCents = 0;
+
+  /**
+   * A usage report is money owed to lynox — every drop is spend the tenant used
+   * but was never billed for. The in-memory queue is best-effort (the durable
+   * at-least-once reconciler is the follow-up), so when a drop is unavoidable it
+   * must be LOUD, not vanish into stderr: track the running total and capture to
+   * Bugsink so the loss shows up in monitoring instead of silently eroding
+   * margin. Best-effort itself — monitoring must never throw into the caller.
+   */
+  function reportDrop(dropped: UsageReport[], reason: string): void {
+    if (dropped.length === 0) return;
+    const cents = dropped.reduce((n, r) => n + (Number.isFinite(r.cost_cents) ? r.cost_cents : 0), 0);
+    droppedReports += dropped.length;
+    droppedCents += cents;
+    try {
+      process.stderr.write(
+        `[lynox] Managed usage DROP (${reason}): ${dropped.length} report(s), ${cents}c un-debited; ` +
+        `lifetime ${droppedReports} report(s)/${droppedCents}c\n`,
+      );
+    } catch { /* stderr unavailable — the Bugsink capture below still fires */ }
+    void import('./error-reporting.js')
+      .then(({ captureError }) => {
+        captureError(
+          new Error(
+            `Managed usage report dropped (${reason}) on instance ${instanceId}: ` +
+            `${dropped.length} report(s) / ${cents}c un-debited this event; ` +
+            `${droppedReports} report(s) / ${droppedCents}c cumulative`,
+          ),
+        );
+      })
+      .catch(() => { /* monitoring is best-effort */ });
+  }
 
   async function flush(): Promise<void> {
     if (flushing || pending.length === 0) return;
@@ -139,8 +174,15 @@ export function createManagedHook(): LynoxHooks {
   /** Put failed batch back, respecting the max queue size. */
   function requeueBatch(batch: UsageReport[]): void {
     const available = MAX_PENDING - pending.length;
-    if (available <= 0) return; // Queue full, drop batch
+    if (available <= 0) {
+      reportDrop(batch, 'requeue-queue-full'); // Queue full, whole batch lost
+      return;
+    }
     const toKeep = batch.slice(-available); // Keep newest entries
+    if (toKeep.length < batch.length) {
+      // The oldest entries that didn't fit are dropped — report them.
+      reportDrop(batch.slice(0, batch.length - toKeep.length), 'requeue-partial');
+    }
     pending.unshift(...toKeep);
   }
 
@@ -223,9 +265,10 @@ export function createManagedHook(): LynoxHooks {
         cost_cents: costCents,
       });
 
-      // Drop oldest if over capacity
+      // Drop oldest if over capacity — report each dropped report as un-debited.
       while (pending.length > MAX_PENDING) {
-        pending.shift();
+        const evicted = pending.shift();
+        if (evicted) reportDrop([evicted], 'overflow-evict');
       }
 
       if (pending.length >= FLUSH_BATCH_SIZE) {
@@ -243,7 +286,8 @@ export function createManagedHook(): LynoxHooks {
         await new Promise(r => setTimeout(r, 1_000));
       }
       if (pending.length > 0) {
-        process.stderr.write(`[lynox] Managed hook shutdown: ${pending.length} usage reports lost\n`);
+        // Reports that survived all retries at shutdown are lost — report them.
+        reportDrop(pending.splice(0), 'shutdown-unflushed');
       }
     },
   };
