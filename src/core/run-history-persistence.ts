@@ -726,6 +726,16 @@ export function deleteTask(db: Database.Database, id: string): boolean {
   return db.prepare('DELETE FROM tasks WHERE id = ?').run(id).changes > 0;
 }
 
+/** Ids of the DIRECT subtasks of a task — the exact set {@link deleteTask}
+ *  cascades. Read BEFORE that delete so the engine.db verb-graph mirror can
+ *  remove the same set: the mirror's own `parent_task_id` may be FK-guarded to
+ *  NULL for a pre-flag orphan (parent created before the mirror was enabled), so
+ *  it can't reliably recompute the cascade from its own links. */
+export function getTaskChildIds(db: Database.Database, id: string): string[] {
+  return (db.prepare('SELECT id FROM tasks WHERE parent_task_id = ?').all(id) as Array<{ id: string }>)
+    .map(r => r.id);
+}
+
 /** Delete an AGENT-TRIGGER. Triggers have no parent_task_id, so no subtask
  *  cascade. */
 export function deleteTrigger(db: Database.Database, id: string): boolean {

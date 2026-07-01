@@ -6,6 +6,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { WorkflowStore } from './workflow-store.js';
 import { TriggerStore } from './trigger-store.js';
+import { TaskStore } from './task-store.js';
 
 /**
  * S3a — the RunHistory → engine.db workflow-definition dual-write mirror. Proves:
@@ -315,6 +316,188 @@ describe('RunHistory verb-graph mirror — triggers (Foundation Rework v2 — S3
     history.insertTrigger(trig());
     expect(history.getTrigger('tr-1')).toBeDefined();
     expect(reader.get('tr-1')).toBeUndefined();
+    engine.close();
+    history.close();
+  });
+});
+
+/**
+ * S3c — the RunHistory → engine.db TASK dual-write mirror (human TODOs; fires
+ * nothing, so no money-path). Proves: flag OFF inert, flag ON re-projects every
+ * write path (insert/update/delete), the free-text `assignee` is dropped, the
+ * self-FK parent_task_id resolves, deleteTask replicates the legacy subtask
+ * cascade in engine.db (not the schema's ON DELETE SET NULL orphaning), and a
+ * mirror failure never breaks the authoritative legacy write/read.
+ */
+describe('RunHistory verb-graph mirror — tasks (Foundation Rework v2 — S3c)', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const histories: RunHistory[] = [];
+
+  function make(enabled: boolean, key = ''): { history: RunHistory; engine: EngineDb; reader: TaskStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-kvm-'));
+    tmpDirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'), key);
+    const engine = new EngineDb(join(dir, 'engine.db'), key);
+    histories.push(history);
+    engines.push(engine);
+    history.setVerbGraph(engine, enabled);
+    return { history, engine, reader: new TaskStore(engine) };
+  }
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    for (const h of histories) { try { h.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    histories.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  function task(over: {
+    id?: string; title?: string; status?: string; priority?: string;
+    scopeType?: string; scopeId?: string; dueDate?: string; tags?: string;
+    parentTaskId?: string; assignee?: string;
+  } = {}) {
+    return {
+      id: over.id ?? 'kk-1',
+      title: over.title ?? 'Call the accountant',
+      description: 'about the Q3 filing',
+      status: over.status ?? 'open',
+      priority: over.priority ?? 'high',
+      assignee: over.assignee,
+      scopeType: over.scopeType ?? 'project',
+      scopeId: over.scopeId ?? '',
+      dueDate: over.dueDate ?? '2026-07-10',
+      tags: over.tags ?? '["finance"]',
+      parentTaskId: over.parentTaskId,
+    };
+  }
+
+  it('flag OFF → legacy task write only, NO engine.db row', () => {
+    const { history, engine, reader } = make(false);
+    history.insertTask(task());
+    expect(history.getTask('kk-1')).toBeDefined(); // legacy authoritative
+    expect(reader.get('kk-1')).toBeUndefined();     // mirror inert
+    engine.close();
+    history.close();
+  });
+
+  it('flag ON → insertTask re-projects the mapped row; free-text assignee is dropped', () => {
+    const { history, engine, reader } = make(true, 'vault-key');
+    history.insertTask(task({ assignee: 'Britta', tags: '["finance"]' }));
+    const mirror = reader.get('kk-1');
+    expect(mirror).toBeDefined();
+    expect(mirror!.title).toBe('Call the accountant');
+    expect(mirror!.status).toBe('open');
+    expect(mirror!.priority).toBe('high');
+    expect(mirror!.tags).toBe('["finance"]');
+    expect(mirror!.dueDate).toBe('2026-07-10');
+    // assignee is legacy free-text with no engine.db string column → never mirrored.
+    const raw = engine.getDb().prepare("SELECT assignee_subject_id FROM tasks WHERE id = 'kk-1'")
+      .get() as { assignee_subject_id: string | null };
+    expect(raw.assignee_subject_id).toBeNull();
+    engine.close();
+    history.close();
+  });
+
+  it('flag ON → self-FK parent_task_id resolves when the parent was mirrored', () => {
+    const { history, engine, reader } = make(true);
+    history.insertTask(task({ id: 'parent' }));
+    history.insertTask(task({ id: 'child', parentTaskId: 'parent' }));
+    expect(reader.get('child')!.parentTaskId).toBe('parent');
+    engine.close();
+    history.close();
+  });
+
+  it('flag ON → updateTask re-projects the change AND preserves fields it did not touch', () => {
+    const { history, engine, reader } = make(true, 'k');
+    history.insertTask(task({ tags: '["finance"]' }));
+    // updateTask touches only status/completedAt. Because the mirror RE-PROJECTS the
+    // full legacy row, the untouched tags must survive — a per-field patch would drop them.
+    history.updateTask('kk-1', { status: 'completed', completedAt: '2026-07-05' });
+    const mirror = reader.get('kk-1')!;
+    expect(mirror.status).toBe('completed');          // changed field re-projected
+    expect(mirror.completedAt).toBe('2026-07-05');
+    expect(mirror.tags).toBe('["finance"]');          // untouched field preserved
+    engine.close();
+    history.close();
+  });
+
+  it('flag ON → deleteTask cascades subtasks in engine.db (matches legacy, no orphans)', () => {
+    const { history, engine, reader } = make(true);
+    history.insertTask(task({ id: 'p1' }));
+    history.insertTask(task({ id: 'c1', parentTaskId: 'p1' }));
+    history.insertTask(task({ id: 'c2', parentTaskId: 'p1' }));
+    expect(reader.get('c1')).toBeDefined();
+    history.deleteTask('p1');
+    // parent + subtasks all gone in engine.db — deleteTask captures legacy's child
+    // ids and the store removes them explicitly (the schema's ON DELETE SET NULL
+    // would instead leave orphaned c1/c2).
+    expect(reader.get('p1')).toBeUndefined();
+    expect(reader.get('c1')).toBeUndefined();
+    expect(reader.get('c2')).toBeUndefined();
+    const n = engine.getDb().prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number };
+    expect(n.n).toBe(0);
+    engine.close();
+    history.close();
+  });
+
+  it('flag ON → deleteTask removes a child whose parent predates the flag (no phantom orphan)', () => {
+    const { history, engine, reader } = make(false); // start flag OFF
+    history.insertTask(task({ id: 'p-old' }));         // parent created pre-flag → never mirrored
+    expect(reader.get('p-old')).toBeUndefined();
+    history.setVerbGraph(engine, true);                // flip flag ON
+    history.insertTask(task({ id: 'c-new', parentTaskId: 'p-old' }));
+    // The child mirrors, but the FK-guard nulls its mirror parent (p-old absent) —
+    // so a cascade keyed on the mirror's own parent_task_id would MISS it on delete.
+    expect(reader.get('c-new')!.parentTaskId).toBeNull();
+    history.deleteTask('p-old');
+    // Legacy cascades c-new; the mirror removes it too, driven by the legacy
+    // child-id capture (NOT the nulled mirror link) → no phantom survives.
+    expect(reader.get('c-new')).toBeUndefined();
+    engine.close();
+    history.close();
+  });
+
+  it('mirror failure is isolated — legacy task write + read are unperturbed', () => {
+    const { history, engine } = make(true);
+    engine.close(); // every subsequent TaskStore op now throws
+    expect(() => history.insertTask(task())).not.toThrow();
+    expect(history.getTask('kk-1')).toBeDefined();                    // legacy read authoritative
+    expect(history.getTasks().some(t => t.id === 'kk-1')).toBe(true); // list read intact
+    history.close();
+  });
+
+  it('mirror failure is isolated on the DELETE path — legacy cascade + child capture unperturbed', () => {
+    const { history, engine } = make(true);
+    history.insertTask(task({ id: 'p1' }));
+    history.insertTask(task({ id: 'c1', parentTaskId: 'p1' }));
+    engine.close(); // TaskStore.remove now throws; getTaskChildIds still runs on the open history.db
+    // Exercises the S3c-unique delete path: legacy child-id capture (history.db, open)
+    // + the swallowed engine.db remove (closed) — the legacy cascade must still land.
+    expect(() => history.deleteTask('p1')).not.toThrow();
+    expect(history.getTask('p1')).toBeUndefined(); // legacy delete authoritative
+    expect(history.getTask('c1')).toBeUndefined(); // legacy subtask cascade intact
+    history.close();
+  });
+
+  it('flag ON → an update to a non-existent task re-projects nothing (raced-delete no-op)', () => {
+    const { history, engine, reader } = make(true);
+    // updateTask matches no row → _reprojectTask reads back undefined → the
+    // `if (rec)` guard makes it a no-op (no throw, no phantom mirror row).
+    expect(() => history.updateTask('ghost', { status: 'completed' })).not.toThrow();
+    expect(reader.get('ghost')).toBeUndefined();
+    engine.close();
+    history.close();
+  });
+
+  it('setVerbGraph(false) after ON reverts task writes to legacy-only', () => {
+    const { history, engine, reader } = make(true);
+    history.setVerbGraph(engine, false);
+    history.insertTask(task());
+    expect(history.getTask('kk-1')).toBeDefined();
+    expect(reader.get('kk-1')).toBeUndefined();
     engine.close();
     history.close();
   });
