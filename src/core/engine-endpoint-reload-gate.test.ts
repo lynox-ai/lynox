@@ -204,6 +204,23 @@ describe('Engine.reloadUserConfig — Wave 5d allowlist gate', () => {
     await expect(engine.reloadUserConfig()).rejects.toThrow(/my-litellm\.example\.com/);
   });
 
+  it('a refused reload ROLLS BACK — the engine keeps the prior config, not the rejected candidate', async () => {
+    const engine = makeEngine();
+    // Sanity: constructor installed the baseline.
+    expect(engine.getUserConfig().provider).toBe('anthropic');
+    mockLoadConfig.mockReturnValueOnce(NON_ALLOWLISTED_CONFIG);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-byok-key');
+
+    await expect(engine.reloadUserConfig()).rejects.toThrow();
+
+    // The candidate (provider:'openai' + my-litellm host) must NOT have survived
+    // the throw — validate-before-commit restores the prior config.
+    const after = engine.getUserConfig();
+    expect(after.provider).toBe('anthropic');
+    expect(after.api_base_url).toBeUndefined();
+    expect(after.api_key).toBe('sk-ant-baseline');
+  });
+
   it('non-allowlisted base_url + LYNOX_CUSTOM_ENDPOINT_ACCEPTED=true → succeeds + stderr WARNING', async () => {
     process.env['LYNOX_CUSTOM_ENDPOINT_ACCEPTED'] = 'true';
     const engine = makeEngine();
