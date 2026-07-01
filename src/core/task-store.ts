@@ -121,15 +121,19 @@ export class TaskStore {
    * FK-guards `parent_task_id`: engine.db enforces `foreign_keys = ON`, so a
    * candidate pointing at a not-yet-mirrored parent is stored NULL instead of
    * throwing — keeping the mirror non-fatal; the S3d backfill re-links it.
+   *
+   * `ts` (S3d backfill only) preserves the legacy timestamps; the live mirror
+   * omits it → both columns resolve to `datetime('now')` via COALESCE, identical
+   * to the prior behaviour. See {@link WorkflowStore.upsert} for the rationale.
    */
-  upsert(row: TaskRow): void {
+  upsert(row: TaskRow, ts?: { createdAt?: string | undefined; updatedAt?: string | undefined }): void {
     const parentTaskId = this._resolveParentTaskId(row.parentTaskId ?? null);
     this.db.prepare(`
       INSERT INTO tasks (
         id, title, description, status, priority, scope_type, scope_id,
-        tags, due_date, parent_task_id, completed_at
+        tags, due_date, parent_task_id, completed_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -141,7 +145,7 @@ export class TaskStore {
         due_date = excluded.due_date,
         parent_task_id = excluded.parent_task_id,
         completed_at = excluded.completed_at,
-        updated_at = datetime('now')
+        updated_at = excluded.updated_at
     `).run(
       row.id,
       row.title,
@@ -154,6 +158,8 @@ export class TaskStore {
       row.dueDate ?? null,
       parentTaskId,
       row.completedAt ?? null,
+      ts?.createdAt ?? null,
+      ts?.updatedAt ?? null,
     );
   }
 
