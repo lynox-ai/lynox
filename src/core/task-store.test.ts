@@ -63,6 +63,28 @@ describe('TaskStore (Foundation Rework v2 — S3c)', () => {
     expect(got?.parentTaskId).toBeNull();
   });
 
+  it('upsert ts (S3d backfill) preserves timestamps; no-ts defaults to now', () => {
+    const { store, engine } = make();
+    const ts = (id: string) => engine.getDb()
+      .prepare('SELECT created_at, updated_at FROM tasks WHERE id = ?')
+      .get(id) as { created_at: string; updated_at: string };
+
+    store.upsert(baseRow({ id: 'bf' }), { createdAt: '2025-03-03T03:03:03Z', updatedAt: '2025-03-03T03:03:03Z' });
+    expect(ts('bf')).toEqual({ created_at: '2025-03-03T03:03:03Z', updated_at: '2025-03-03T03:03:03Z' });
+
+    store.upsert(baseRow({ id: 'nw' }));
+    const now = ts('nw');
+    expect(now.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(now.updated_at).toBe(now.created_at);
+
+    // conflict paths: a no-ts re-upsert bumps updated_at to now; a with-ts re-upsert
+    // restores it to the legacy ts (the backfill-idempotency path).
+    store.upsert(baseRow({ id: 'bf' }));
+    expect(ts('bf').updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    store.upsert(baseRow({ id: 'bf' }), { createdAt: '2025-03-03T03:03:03Z', updatedAt: '2025-03-03T03:03:03Z' });
+    expect(ts('bf').updated_at).toBe('2025-03-03T03:03:03Z');
+  });
+
   it('upsert is idempotent by id and preserves created_at across a re-projection', () => {
     const { store, engine } = make();
     store.upsert(baseRow({ title: 'v1' }));

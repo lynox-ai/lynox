@@ -39,6 +39,36 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     expect(got?.definitionJson).toBe(def);
   });
 
+  it('upsert ts (S3d backfill) preserves timestamps; no-ts still defaults to now + bumps on re-save', () => {
+    const { store, engine } = make();
+    const ts = (id: string) => engine.getDb()
+      .prepare('SELECT created_at, updated_at FROM workflows WHERE id = ?')
+      .get(id) as { created_at: string; updated_at: string };
+
+    // backfill path: explicit legacy timestamps land verbatim on both columns.
+    store.upsert({ id: 'wf-bf', name: 'N', description: '', definitionJson: '{}', isTemplate: false },
+      { createdAt: '2025-01-01T00:00:00Z', updatedAt: '2025-01-01T00:00:00Z' });
+    expect(ts('wf-bf')).toEqual({ created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z' });
+
+    // live-mirror path: no ts → both default to datetime('now') (space form, not the ISO sentinel).
+    store.upsert({ id: 'wf-now', name: 'N', description: '', definitionJson: '{}', isTemplate: false });
+    const now = ts('wf-now');
+    expect(now.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(now.updated_at).toBe(now.created_at);
+
+    // re-save without ts: created_at preserved, updated_at bumped (unchanged S3a invariant).
+    store.upsert({ id: 'wf-bf', name: 'N2', description: '', definitionJson: '{}', isTemplate: false });
+    const after = ts('wf-bf');
+    expect(after.created_at).toBe('2025-01-01T00:00:00Z');
+    expect(after.updated_at).not.toBe('2025-01-01T00:00:00Z');
+
+    // re-upsert WITH ts on conflict restores updated_at to the legacy ts (the
+    // backfill-idempotency path — a regression to datetime('now') would fail here).
+    store.upsert({ id: 'wf-bf', name: 'N3', description: '', definitionJson: '{}', isTemplate: false },
+      { createdAt: '2025-01-01T00:00:00Z', updatedAt: '2025-01-01T00:00:00Z' });
+    expect(ts('wf-bf').updated_at).toBe('2025-01-01T00:00:00Z');
+  });
+
   it('upsert is idempotent by id and preserves created_at across a re-save', () => {
     const { store, engine } = make();
     store.upsert({ id: 'wf1', name: 'v1', definitionJson: '{"id":"wf1","name":"v1"}', isTemplate: false });

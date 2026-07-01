@@ -154,17 +154,21 @@ export class TriggerStore {
    * candidate pointing at a not-yet-mirrored workflow (a pre-flag orphan) is
    * stored NULL instead of throwing — keeping the mirror non-fatal; the S3d
    * backfill re-links it in dependency order (workflows before triggers).
+   *
+   * `ts` (S3d backfill only) preserves the legacy timestamps; the live mirror
+   * omits it → both columns resolve to `datetime('now')` via COALESCE, identical
+   * to the prior behaviour. See {@link WorkflowStore.upsert} for the rationale.
    */
-  upsert(row: TriggerRow): void {
+  upsert(row: TriggerRow, ts?: { createdAt?: string | undefined; updatedAt?: string | undefined }): void {
     const targetWorkflowId = this._resolveTargetWorkflowId(row.targetWorkflowId ?? null);
     this.db.prepare(`
       INSERT INTO triggers (
         id, title, description, source, condition_json, target_workflow_id,
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
-        max_retries, retry_count
+        max_retries, retry_count, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -183,7 +187,7 @@ export class TriggerStore {
         notification_channel = excluded.notification_channel,
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
-        updated_at = datetime('now')
+        updated_at = excluded.updated_at
     `).run(
       row.id,
       row.title,
@@ -203,6 +207,8 @@ export class TriggerStore {
       row.notificationChannel ?? null,
       row.maxRetries ?? null,
       row.retryCount,
+      ts?.createdAt ?? null,
+      ts?.updatedAt ?? null,
     );
   }
 

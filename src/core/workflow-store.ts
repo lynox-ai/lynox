@@ -70,18 +70,25 @@ export class WorkflowStore {
    * `triggers.target_workflow_id` ON DELETE SET NULL on any child trigger).
    * `updated_at` bumps so {@link list} floats a re-saved workflow to the top,
    * matching the legacy `pipeline_runs.started_at` that INSERT OR REPLACE resets.
+   *
+   * `ts` (S3d backfill only) preserves the legacy timestamps so a backfilled
+   * pre-existing workflow keeps its true creation order (post-read-cutover the
+   * library list would otherwise float every backfilled row to "now"). The live
+   * mirror omits `ts` → both columns resolve to `datetime('now')` via COALESCE,
+   * byte-for-byte the prior behaviour (verified: no-ts INSERT = DDL default now,
+   * no-ts conflict-update `updated_at` = now).
    */
-  upsert(row: WorkflowRow): void {
+  upsert(row: WorkflowRow, ts?: { createdAt?: string | undefined; updatedAt?: string | undefined }): void {
     this.db.prepare(`
-      INSERT INTO workflows (id, name, description, definition_json, is_template, source_run_id, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'active')
+      INSERT INTO workflows (id, name, description, definition_json, is_template, source_run_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         description = excluded.description,
         definition_json = excluded.definition_json,
         is_template = excluded.is_template,
         source_run_id = excluded.source_run_id,
-        updated_at = datetime('now')
+        updated_at = excluded.updated_at
     `).run(
       row.id,
       row.name,
@@ -89,6 +96,8 @@ export class WorkflowStore {
       row.definitionJson,
       row.isTemplate ? 1 : 0,
       row.sourceRunId ?? null,
+      ts?.createdAt ?? null,
+      ts?.updatedAt ?? null,
     );
   }
 

@@ -508,6 +508,25 @@ export function getPlannedPipelines(db: Database.Database, limit = 100): Array<{
 }
 
 /**
+ * UNBOUNDED full-scan of every planned-pipeline (workflow) definition — the S3d
+ * backfill source. Deliberately NO `LIMIT`: the clamped {@link getPlannedPipelines}
+ * (default 100) would silently drop rows past the first page, undercounting the
+ * backfill. Verb-def volume is human-bounded (dozens, not the KG's thousands), so
+ * an unbounded scan is correct-by-construction, never a memory risk. Ordered by
+ * `started_at` so the backfill upserts in the legacy library-read order. Mirrors
+ * the S2 backfill's `listAllEntities` (unclamped) vs the clamped `listEntities`.
+ */
+export function getAllPlannedPipelines(db: Database.Database): Array<{
+  id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+}> {
+  return db.prepare(
+    "SELECT id, manifest_name, manifest_json, step_count, started_at FROM pipeline_runs WHERE status = 'planned' ORDER BY started_at DESC"
+  ).all() as Array<{
+    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+  }>;
+}
+
+/**
  * Rename a planned pipeline's display name. The name lives in TWO places — the
  * `manifest_name` column AND the serialized `PlannedPipeline.name` inside
  * `manifest_json` (which the library list and `getPipeline`'s SQLite fallback
@@ -792,6 +811,24 @@ export function getTriggers(db: Database.Database, opts?: {
   return db.prepare(
     `SELECT * FROM triggers ${whereClause} ORDER BY next_run_at ASC NULLS LAST, created_at DESC LIMIT ?`
   ).all(...params) as TriggerRecord[];
+}
+
+/**
+ * UNBOUNDED full-scan of every USER-TODO (`tasks`) row — the S3d backfill source.
+ * NO `LIMIT` (the clamped {@link getTasks} default-100 would undercount). Ordered
+ * `created_at ASC` so a PARENT task is upserted before its children whenever the
+ * parent was created first (the common case) — the backfill's pass-2 re-link then
+ * only has to fix genuinely out-of-order parent/child pairs. See {@link getAllPlannedPipelines}.
+ */
+export function getAllTasks(db: Database.Database): TaskRecord[] {
+  return db.prepare('SELECT * FROM tasks ORDER BY created_at ASC').all() as TaskRecord[];
+}
+
+/** UNBOUNDED full-scan of every AGENT-TRIGGER (`triggers`) row — the S3d backfill
+ *  source. NO `LIMIT` (see {@link getAllTasks}). Ordered `created_at ASC` for a
+ *  stable, deterministic backfill order. */
+export function getAllTriggers(db: Database.Database): TriggerRecord[] {
+  return db.prepare('SELECT * FROM triggers ORDER BY created_at ASC').all() as TriggerRecord[];
 }
 
 export function getTasksDueInRange(db: Database.Database, start: string, end: string, scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
