@@ -39,7 +39,7 @@ export interface ExtractionResultV2 {
    * `parseToolInput` path). The managed debit reports this so aux fast-tier
    * extraction spend converges on the same onAfterRun debit as chat runs.
    */
-  costUsd?: number;
+  costUsd?: number | undefined;
 }
 
 /** Fixed predicate vocabulary — forces the model into known categories. */
@@ -301,16 +301,11 @@ export async function extractEntitiesV2(
     });
 
     const response = await stream.finalMessage();
-    const toolUse = response.content.find(
-      (b): b is Extract<typeof b, { type: 'tool_use' }> =>
-        b.type === 'tool_use' && b.name === TOOL_NAME,
-    );
-    if (!toolUse) return { entities: [], relations: [] };
-
-    const parsed = parseToolInput(toolUse.input);
-    // Cost of this pool-key helper call, for the managed debit. calculateCost is
-    // priced by the resolved fast-tier model (Anthropic or Mistral); normalize
-    // the SDK's `null` cache fields to `undefined`. Best-effort — 0 without usage.
+    // Cost of this pool-key helper call, for the managed debit. Computed BEFORE
+    // the no-tool-use early return so the spend is surfaced (and debited) even
+    // when the model didn't emit the forced tool. calculateCost is priced by the
+    // resolved fast-tier model (Anthropic or Mistral); normalize the SDK's `null`
+    // cache fields to `undefined`. Best-effort — 0 without usage.
     const u = response.usage;
     const costUsd = u
       ? calculateCost(fast.modelId, {
@@ -320,6 +315,13 @@ export async function extractEntitiesV2(
           cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
         })
       : 0;
+    const toolUse = response.content.find(
+      (b): b is Extract<typeof b, { type: 'tool_use' }> =>
+        b.type === 'tool_use' && b.name === TOOL_NAME,
+    );
+    if (!toolUse) return { entities: [], relations: [], costUsd };
+
+    const parsed = parseToolInput(toolUse.input);
     return { ...parsed, costUsd };
   } catch {
     return { entities: [], relations: [] };

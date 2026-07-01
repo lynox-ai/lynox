@@ -69,8 +69,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * engine after construction (the engine isn't available at construction time).
    * Null on self-host / tests → extraction runs ungated + undebited, exactly as
    * before. When set on a managed instance, extraction clears the same
-   * onBeforeRun credit gate as a chat run (blocks an exhausted tenant, closing
-   * the document-ingest side-door) and reports its cost via onAfterRun.
+   * onBeforeRun credit gate as a chat run (so an exhausted tenant is blocked on
+   * every ingest-triggered extraction path) and reports its cost via onAfterRun.
    */
   private meteredHost: HookHost | null = null;
 
@@ -224,11 +224,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
     // 6. Extract entities and relations (async LLM call — outside transaction).
     // Managed credit lifecycle for the pool-key extraction call: gate BEFORE the
-    // spend so an exhausted/stale tenant is blocked (closes the document-ingest
-    // side-door — extraction is best-effort enrichment, safely skipped), debit
-    // AFTER with the extractor's reported cost. The gate fires only when a host
-    // is wired AND a client exists (an LLM call is possible); a null gate (self
-    // host / no client) runs extraction unchanged + never debits.
+    // spend so an exhausted/stale tenant is blocked (extraction is best-effort
+    // enrichment, safely skipped), debit AFTER with the extractor's reported
+    // cost. The gate fires only when a host is wired AND a client exists (an LLM
+    // call is possible); a null gate (self-host / no client) runs extraction
+    // unchanged + never debits.
     let resolvedEntities: EntityRecord[] = [];
     let resolvedRelations: RelationRecord[] = [];
     const extractGate = this.meteredHost && this.anthropicClient

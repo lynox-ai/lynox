@@ -160,7 +160,10 @@ describe('RetrievalEngine — HyDE pool-key debit (managed)', () => {
     expect(onAfterRun).toHaveBeenCalledOnce();
     const [runId, cost, ctx] = onAfterRun.mock.calls[0]!;
     expect(runId).toMatch(/^[0-9a-f-]{36}$/);
+    // Bounded (not just > 0) so a mispricing / NaN would fail: a ~340-token fast
+    // call is well under a cent.
     expect(cost as number).toBeGreaterThan(0);
+    expect(cost as number).toBeLessThan(0.1);
     expect((ctx as { modelTier?: string }).modelTier).toBe('fast');
   });
 

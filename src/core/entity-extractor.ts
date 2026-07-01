@@ -22,7 +22,7 @@ export interface ExtractionResult {
   entities: ExtractedEntity[];
   relations: ExtractedRelation[];
   /** USD cost of the pool-key LLM extraction (absent on the regex-only path). */
-  costUsd?: number;
+  costUsd?: number | undefined;
 }
 
 // === Tier 1: Regex-based extraction (zero cost, always runs) ===
@@ -268,9 +268,9 @@ export async function extractEntitiesLLM(
     });
     const response = await stream.finalMessage();
 
-    const textBlock = response.content.find(b => b.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') return { entities: [], relations: [] };
-
+    // Cost BEFORE the no-text-block early return so the spend is surfaced (and
+    // debited) even when the response carried no usable text. Best-effort — 0
+    // without usage; SDK null cache fields normalized to undefined.
     const u = response.usage;
     const costUsd = u
       ? calculateCost(fast.modelId, {
@@ -280,6 +280,9 @@ export async function extractEntitiesLLM(
           cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
         })
       : 0;
+    const textBlock = response.content.find(b => b.type === 'text');
+    if (!textBlock || textBlock.type !== 'text') return { entities: [], relations: [], costUsd };
+
     return { ...parseExtractionResponse(textBlock.text), costUsd };
   } catch {
     return { entities: [], relations: [] };

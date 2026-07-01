@@ -41,7 +41,7 @@ export interface RerankOutcome {
   durationMs: number;
   /** Actual USD cost of the pool-key rerank call (from response.usage), for the
    *  managed in-run debit. Undefined when no LLM call was made (skip/error). */
-  costUsd?: number;
+  costUsd?: number | undefined;
 }
 
 const DEFAULT_THRESHOLD = 4;

@@ -4287,6 +4287,21 @@ describe('metered audio routes: managed credit gate + debit', () => {
       // Same run id as the gate → the CP dedups the debit against the gate.
       expect(debitRunId).toBe(onBeforeRun.mock.calls[0]?.[0]);
     });
+
+    it('does not debit Voxtral when the audio-duration probe fails (no per-minute basis)', async () => {
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun, onAfterRun }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      mockGetAudioDurationSec.mockResolvedValue(null); // probe failed → no duration
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      // Transcription still returned to the user; the debit is skipped because the
+      // Voxtral cost is per-minute and there is no duration to price it against.
+      expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
+      expect(onAfterRun).not.toHaveBeenCalled();
+    });
   });
 });
 

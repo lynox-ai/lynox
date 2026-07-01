@@ -97,9 +97,8 @@ export interface BuildInboxRunnerOptions {
    * Managed credit lifecycle host. When wired (managed tenants), each classify
    * fires the `onBeforeRun` gate BEFORE the pool-key LLM call, so a
    * credit-exhausted (or fail-closed) tenant short-circuits to `requires_user`
-   * instead of spending — closing the inbox email-bomb cost-amplification path.
-   * No-op on self-host / BYOK (no hooks registered). Distinct from `budget`,
-   * which is the local per-instance daily $ cap.
+   * instead of spending against an empty balance. No-op on self-host / BYOK (no
+   * hooks registered). Distinct from `budget`, the local per-instance daily $ cap.
    */
   meteredHost?: HookHost | undefined;
   /**
