@@ -89,22 +89,26 @@ describe('entity-extractor-v2 parseToolInput', () => {
     expect(parseToolInput({ entities: 'nope' })).toEqual({ entities: [], relations: [] });
   });
 
-  it('drops created_by when the creator (object) is not a person/organization', () => {
+  it('created_by: keeps person/org creators, drops event/project creators', () => {
     // "X created_by <event/project/place>" is a direction/kind error — a creator
-    // is a who, not a what/where/when. Keeps the org-creator edge.
+    // is a who (person OR organization), not a what/where/when.
     const result = parseToolInput({
       entities: [
         { canonical_name: 'Gemini 3.1 Pro', type: 'product', confidence: 0.95, aliases: [], evidence_span: 'Gemini 3.1 Pro' },
         { canonical_name: 'Google I/O', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'at Google I/O' },
         { canonical_name: 'Google', type: 'organization', confidence: 0.95, aliases: [], evidence_span: 'by Google' },
+        { canonical_name: 'Linux', type: 'product', confidence: 0.95, aliases: [], evidence_span: 'Linux' },
+        { canonical_name: 'Linus Torvalds', type: 'person', confidence: 0.95, aliases: [], evidence_span: 'by Linus Torvalds' },
       ],
       relations: [
-        { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google I/O', confidence: 0.9 },
-        { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google', confidence: 0.9 },
+        { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google I/O', confidence: 0.9 }, // event → drop
+        { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google', confidence: 0.9 },     // org → keep
+        { subject: 'Linux', predicate: 'created_by', object: 'Linus Torvalds', confidence: 0.9 },       // person → keep
       ],
     });
     expect(result.relations).toEqual([
       { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google', confidence: 0.9 },
+      { subject: 'Linux', predicate: 'created_by', object: 'Linus Torvalds', confidence: 0.9 },
     ]);
   });
 

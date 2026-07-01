@@ -48,6 +48,12 @@ describe('kg-cleanup', () => {
       expect(isCleanupTarget('10/1k')).toBe(true);
       expect(isCleanupTarget('5/100')).toBe(true);
       expect(isCleanupTarget('1/2m')).toBe(true);
+      // 2026-07: bare/plural period units (guards against a typo in the new alternatives)
+      expect(isCleanupTarget('153/h')).toBe(true);
+      expect(isCleanupTarget('8/d')).toBe(true);
+      expect(isCleanupTarget('30/min')).toBe(true);
+      expect(isCleanupTarget('2/hrs')).toBe(true);
+      expect(isCleanupTarget('100/years')).toBe(true);
     });
 
     it('rejects slash enums and lowercase phrase-fragment pairs', () => {
