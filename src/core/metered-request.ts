@@ -4,6 +4,14 @@ import type { Engine, RunContext } from './engine.js';
 import type { ModelTier } from '../types/index.js';
 
 /**
+ * Minimal engine surface these helpers need. Lets a non-`Session` caller that
+ * does NOT hold the full Engine (e.g. the KG extractor inside KnowledgeLayer)
+ * still gate + debit through the same lifecycle. `Engine` satisfies this, so
+ * existing callers pass `engine` unchanged.
+ */
+export type HookHost = Pick<Engine, 'getHooks' | 'getContext'>;
+
+/**
  * Gate + debit a metered request that does NOT flow through `Session.run()`.
  *
  * Voice TTS (`POST /api/speak`) and STT (`POST /api/transcribe`) proxy directly
@@ -44,8 +52,8 @@ export interface MeteredGateResult {
   blockedReason: string | null;
 }
 
-function buildRunContext(engine: Engine, runId: string, modelTier: ModelTier): RunContext {
-  const context = engine.getContext();
+function buildRunContext(host: HookHost, runId: string, modelTier: ModelTier): RunContext {
+  const context = host.getContext();
   return {
     runId,
     contextId: context?.id ?? '',
@@ -62,10 +70,10 @@ function buildRunContext(engine: Engine, runId: string, modelTier: ModelTier): R
  * when `blockedReason` is non-null. Returns the run id to thread into the
  * matching `reportMeteredCost()` on the success path.
  */
-export async function fireBeforeRunGate(engine: Engine, modelTier: ModelTier): Promise<MeteredGateResult> {
+export async function fireBeforeRunGate(host: HookHost, modelTier: ModelTier): Promise<MeteredGateResult> {
   const runId = randomUUID();
-  const runContext = buildRunContext(engine, runId, modelTier);
-  for (const hook of engine.getHooks()) {
+  const runContext = buildRunContext(host, runId, modelTier);
+  for (const hook of host.getHooks()) {
     if (hook.onBeforeRun) {
       try {
         await hook.onBeforeRun(runId, runContext);
@@ -83,10 +91,10 @@ export async function fireBeforeRunGate(engine: Engine, modelTier: ModelTier): P
  * Hook errors are non-fatal — the managed flush retries on the next run — so a
  * billing hiccup never breaks the audio response to the client.
  */
-export function reportMeteredCost(engine: Engine, runId: string, costUsd: number, modelTier: ModelTier): void {
+export function reportMeteredCost(host: HookHost, runId: string, costUsd: number, modelTier: ModelTier): void {
   if (costUsd <= 0) return;
-  const runContext = buildRunContext(engine, runId, modelTier);
-  for (const hook of engine.getHooks()) {
+  const runContext = buildRunContext(host, runId, modelTier);
+  for (const hook of host.getHooks()) {
     if (hook.onAfterRun) {
       try {
         hook.onAfterRun(runId, costUsd, runContext);

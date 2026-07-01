@@ -960,6 +960,9 @@ export class Engine {
     this.embeddingProvider = initEmbeddingProvider(this.userConfig, this.runHistory);
     this.knowledgeLayer = await initKnowledgeLayer(this.userConfig, this.embeddingProvider, this.client, this.runHistory, this.engineDb);
     this._toolContext.knowledgeLayer = this.knowledgeLayer;
+    // Route pool-key KG-extraction spend through the managed gate + debit (same
+    // onBeforeRun/onAfterRun lifecycle as chat/voice). No-op on self-host.
+    this.knowledgeLayer?.setMeteredHost(this);
 
     // Initialize DataStore ↔ Knowledge Graph Bridge
     if (this.knowledgeLayer && this._dataStore) {

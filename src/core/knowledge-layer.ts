@@ -21,6 +21,7 @@ import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
+import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { detectContradictions, hasHeuristicContradiction } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
@@ -63,6 +64,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
   private readonly engineDb: EngineDb | null;
+  /**
+   * Managed gate+debit host for the pool-key KG-extraction call. Set by the
+   * engine after construction (the engine isn't available at construction time).
+   * Null on self-host / tests → extraction runs ungated + undebited, exactly as
+   * before. When set on a managed instance, extraction clears the same
+   * onBeforeRun credit gate as a chat run (blocks an exhausted tenant, closing
+   * the document-ingest side-door) and reports its cost via onAfterRun.
+   */
+  private meteredHost: HookHost | null = null;
 
   constructor(
     dbPath: string,
@@ -109,6 +119,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   setAnthropicClient(client: Anthropic | undefined): void {
     this.anthropicClient = client;
     this.retrievalEngine.setAnthropicClient(client);
+  }
+
+  /**
+   * Wire the managed gate+debit host so pool-key KG-extraction converges on the
+   * same onBeforeRun gate + onAfterRun debit as chat/voice. No-op path when
+   * unset (self-host / tests).
+   */
+  setMeteredHost(host: HookHost | null): void {
+    this.meteredHost = host;
   }
 
   // === Lifecycle ===
@@ -201,12 +220,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       return id;
     });
 
-    // 6. Extract entities and relations (async LLM call — outside transaction)
-    const { resolvedEntities, resolvedRelations } = this.useV2Extractor
-      && this.anthropicClient
-      && shouldExtractV2(trimmedText, namespace)
-      ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
-      : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
+    // 6. Extract entities and relations (async LLM call — outside transaction).
+    // Managed credit lifecycle for the pool-key extraction call: gate BEFORE the
+    // spend so an exhausted/stale tenant is blocked (closes the document-ingest
+    // side-door — extraction is best-effort enrichment, safely skipped), debit
+    // AFTER with the extractor's reported cost. The gate fires only when a host
+    // is wired AND a client exists (an LLM call is possible); a null gate (self
+    // host / no client) runs extraction unchanged + never debits.
+    let resolvedEntities: EntityRecord[] = [];
+    let resolvedRelations: RelationRecord[] = [];
+    const extractGate = this.meteredHost && this.anthropicClient
+      ? await fireBeforeRunGate(this.meteredHost, 'fast')
+      : null;
+    if (!extractGate || extractGate.blockedReason === null) {
+      const extracted = this.useV2Extractor
+        && this.anthropicClient
+        && shouldExtractV2(trimmedText, namespace)
+        ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
+        : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
+      resolvedEntities = extracted.resolvedEntities;
+      resolvedRelations = extracted.resolvedRelations;
+      if (extractGate && this.meteredHost && extracted.costUsd) {
+        reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
+      }
+    }
 
     // 9. Foundation Rework v2 (S1b): additively mirror the extraction into the
     // engine.db subject-graph behind the flag. Fully isolated — the legacy writes
@@ -247,10 +284,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     namespace: MemoryNamespace,
     scope: MemoryScopeRef,
     memoryId: string,
-  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] }> {
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
     const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
 
-    return this.db.transaction(() => {
+    const persisted = this.db.transaction(() => {
       const entities: EntityRecord[] = [];
       const entityIdMap = new Map<string, string>();
 
@@ -299,6 +336,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
       return { resolvedEntities: entities, resolvedRelations: relations };
     });
+    return { ...persisted, costUsd: extraction.costUsd };
   }
 
   /** V2 extraction path — Haiku + strict tool-call schema with aliases. */
@@ -306,10 +344,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     trimmedText: string,
     scope: MemoryScopeRef,
     memoryId: string,
-  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] }> {
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
     const extraction = await extractEntitiesV2(trimmedText, this.anthropicClient!);
 
-    return this.db.transaction(() => {
+    const persisted = this.db.transaction(() => {
       const entities: EntityRecord[] = [];
       const entityIdMap = new Map<string, string>();
 
@@ -363,6 +401,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
       return { resolvedEntities: entities, resolvedRelations: relations };
     });
+    return { ...persisted, costUsd: extraction.costUsd };
   }
 
   /**
