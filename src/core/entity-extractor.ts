@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
+import { isCleanupTarget } from './kg-stopwords.js';
 
 export interface ExtractedEntity {
   name: string;
@@ -47,9 +48,15 @@ const COMMON_WORDS = new Set([
   'das', 'die', 'der', 'ein', 'eine', 'es', 'wir', 'sie', 'man',
 ]);
 
-/** Project references: project "Name", Projekt "Name", org/repo */
+/**
+ * Project references: explicit quoted form only — project "Name", Projekt "Name".
+ * The bare `org/repo` slash regex was removed (2026-07): it promoted ANY
+ * `a/b` token to a project @0.7 with no context, which flooded the graph with
+ * phrase fragments ("death/disability", "home/lynox"). A real github org/repo
+ * is better captured by the v2 LLM tier with surrounding context; the regex was
+ * net-negative on precision. (See kg-stopwords single-source gate.)
+ */
 const PROJECT_QUOTED_RE = /\b(?:project|Projekt)\s+["']([^"']+)["']/gi;
-const REPO_RE = /\b([a-z0-9][-a-z0-9]*\/[a-z0-9][-a-z0-9]*)\b/g;
 
 /** Location markers: "in Zurich", "located in Berlin", "based in" */
 const LOCATION_RE = /\b(?:in|from|located\s+in|based\s+in|aus|in)\s+([A-ZÄÖÜ][a-zäöüß]{2,}(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/g;
@@ -105,6 +112,10 @@ function isEnumValue(name: string): boolean {
 export function isValidEntity(name: string, _type: EntityType): boolean {
   const trimmed = name.trim();
   if (trimmed.length < 2) return false;
+  // Apply the shared single-source KG gate (kg-stopwords) so the regex tier
+  // drops the same generic nouns / pricing fragments / slash-enums as the v2
+  // LLM post-filter and the cleanup pass — no drift between the three.
+  if (isCleanupTarget(trimmed)) return false;
   // Reject slash-separated enum values (deal stages, status labels)
   if (isEnumValue(trimmed)) return false;
   // Reject single-word stopwords (case-insensitive)
@@ -170,11 +181,6 @@ export function extractEntitiesRegex(text: string): ExtractionResult {
   // Projects: quoted names
   for (const match of text.matchAll(PROJECT_QUOTED_RE)) {
     if (match[1]) addEntity(match[1], 'project', 0.8);
-  }
-
-  // Projects: org/repo format
-  for (const match of text.matchAll(REPO_RE)) {
-    if (match[1]) addEntity(match[1], 'project', 0.7);
   }
 
   // Locations

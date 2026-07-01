@@ -106,11 +106,20 @@ describe('extractEntitiesRegex', () => {
       );
     });
 
-    it('extracts org/repo format', () => {
+    it('no longer auto-captures bare org/repo slash tokens (precision over recall)', () => {
+      // REPO_RE removed 2026-07: promoting any `a/b` to a project @0.7 flooded
+      // the graph with phrase fragments. A real org/repo is caught by the v2 LLM
+      // tier with context instead.
       const result = extractEntitiesRegex('Source at lynox-ai/lynox.');
-      expect(result.entities).toContainEqual(
-        expect.objectContaining({ name: 'lynox-ai/lynox', type: 'project' }),
-      );
+      const names = result.entities.map(e => e.name);
+      expect(names).not.toContain('lynox-ai/lynox');
+    });
+
+    it('does not capture phrase-fragment slash tokens', () => {
+      const result = extractEntitiesRegex('The plan covers death/disability and risk/safety.');
+      const names = result.entities.map(e => e.name);
+      expect(names).not.toContain('death/disability');
+      expect(names).not.toContain('risk/safety');
     });
   });
 
@@ -210,6 +219,23 @@ describe('isValidEntity', () => {
 
   it('rejects entities shorter than 2 characters', () => {
     expect(isValidEntity('A', 'person')).toBe(false);
+  });
+
+  it('rejects the shared kg-stopwords gaps (2026-07): generics, pricing, fragments', () => {
+    // Now routed through isCleanupTarget (single-source gate) — no drift with v2.
+    expect(isValidEntity('management', 'organization')).toBe(false);
+    expect(isValidEntity('data', 'person')).toBe(false);
+    expect(isValidEntity('page', 'person')).toBe(false);
+    expect(isValidEntity('website', 'organization')).toBe(false);
+    expect(isValidEntity('ist', 'person')).toBe(false);
+    expect(isValidEntity('153/h', 'project')).toBe(false);
+    expect(isValidEntity('death/disability', 'project')).toBe(false);
+  });
+
+  it('still accepts real proper nouns near the new stopwords', () => {
+    expect(isValidEntity('Hetzner', 'organization')).toBe(true);
+    expect(isValidEntity('Peter Huber', 'person')).toBe(true);
+    expect(isValidEntity('Personal Access Token', 'concept')).toBe(true); // compound, not a stopword
   });
 });
 

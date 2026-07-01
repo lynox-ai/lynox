@@ -48,12 +48,24 @@ describe('kg-cleanup', () => {
       expect(isCleanupTarget('10/1k')).toBe(true);
       expect(isCleanupTarget('5/100')).toBe(true);
       expect(isCleanupTarget('1/2m')).toBe(true);
+      // 2026-07: bare/plural period units (guards against a typo in the new alternatives)
+      expect(isCleanupTarget('153/h')).toBe(true);
+      expect(isCleanupTarget('8/d')).toBe(true);
+      expect(isCleanupTarget('30/min')).toBe(true);
+      expect(isCleanupTarget('2/hrs')).toBe(true);
+      expect(isCleanupTarget('100/years')).toBe(true);
     });
 
-    it('rejects slash enums where either half is generic', () => {
-      expect(isCleanupTarget('create/update')).toBe(true);
-      expect(isCleanupTarget('open/closed')).toBe(false); // neither in stopwords
+    it('rejects slash enums and lowercase phrase-fragment pairs', () => {
+      expect(isCleanupTarget('create/update')).toBe(true);       // known generic half
       expect(isCleanupTarget('process/launch')).toBe(true);
+      // 2026-07: both-lowercase-word pairs are now rejected as phrase fragments
+      // (status enums, prose fragments) — closes the old "neither half generic" gap.
+      expect(isCleanupTarget('open/closed')).toBe(true);
+      expect(isCleanupTarget('death/disability')).toBe(true);
+      // Precision boundary: real slash-entities with uppercase or a short half survive.
+      expect(isCleanupTarget('AC/DC')).toBe(false);
+      expect(isCleanupTarget('TCP/IP')).toBe(false);
     });
 
     it('rejects empty / whitespace-only names', () => {
