@@ -21,8 +21,8 @@ const mockSpeakStream = vi.fn();
 // the gate fires before the provider is touched, and drive a happy path.
 const mockTranscribeWithStream = vi.fn();
 const mockExtractSessionContext = vi.fn(() => ({}));
-// STT debit (SEC-LC-1): the route debits pool-key Voxtral spend only when Voxtral
-// is the active backend AND the audio-duration probe succeeded. Both are made
+// STT debit: the route debits pool-key Voxtral spend only when Voxtral is the
+// active backend AND the audio-duration probe succeeded. Both are made
 // controllable so the debit-fires / debit-skipped branches can be asserted.
 const mockGetActiveTranscribeProvider = vi.fn((): { name: string } | null => ({ name: 'whisper-cpp' }));
 const mockGetAudioDurationSec = vi.fn(async (): Promise<number | null> => null);

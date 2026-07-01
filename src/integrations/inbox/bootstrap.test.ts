@@ -130,6 +130,31 @@ describe('bootstrapInbox — wiring', () => {
     expect(snap.spentUSD).toBeGreaterThan(0);
   });
 
+  it('debits managed classifier spend to the tenant balance via onAfterRun', async () => {
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({
+        bucket: 'requires_user',
+        confidence: 0.9,
+        one_line_why_de: 'Kunde fragt nach Termin',
+      }) }],
+      usage: { input_tokens: 500, output_tokens: 80 },
+    });
+    const onAfterRun = vi.fn();
+    const meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, meteredHost });
+    await runtime.hook(ACCOUNT.id, envelope());
+    await runtime.shutdown();
+
+    expect(onAfterRun).toHaveBeenCalledOnce();
+    const call = onAfterRun.mock.calls[0]!;
+    // Same local cost basis as the daily cap: input $1/Mtok, output $5/Mtok →
+    // 500/1e6·1 + 80/1e6·5 = 0.0009 USD, labelled on the `fast` tier.
+    expect(call[1] as number).toBeCloseTo(0.0009, 6);
+    expect((call[2] as { modelTier?: string }).modelTier).toBe('fast');
+    // The debit matches what the local budget recorded (single source of truth).
+    expect(runtime.budget.snapshot().spentUSD).toBeCloseTo(call[1] as number, 6);
+  });
+
   it('rule short-circuit bypasses the LLM call entirely', async () => {
     const create = vi.fn(async () => ({ content: [{ type: 'text', text: '{}' }] }));
     const client = { messages: { create } } as unknown as Anthropic;

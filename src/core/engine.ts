@@ -578,6 +578,8 @@ export class Engine {
       bootOpts.notificationRouter = this._notificationRouter;
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
+      // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
+      bootOpts.meteredHost = this;
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -1325,6 +1327,8 @@ export class Engine {
         // in the dashboard.
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
+        // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
+        bootOpts.meteredHost = this;
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured

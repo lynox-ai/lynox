@@ -27,6 +27,7 @@ import {
 export { scrubErrorMessage } from './sensitive-content.js';
 import { scrubErrorMessage as _scrubErrorMessage } from './sensitive-content.js';
 import type { InboxCostBudget } from './cost-budget.js';
+import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
 
@@ -93,6 +94,15 @@ export interface BuildInboxRunnerOptions {
    */
   budget?: InboxCostBudget | undefined;
   /**
+   * Managed credit lifecycle host. When wired (managed tenants), each classify
+   * fires the `onBeforeRun` gate BEFORE the pool-key LLM call, so a
+   * credit-exhausted (or fail-closed) tenant short-circuits to `requires_user`
+   * instead of spending — closing the inbox email-bomb cost-amplification path.
+   * No-op on self-host / BYOK (no hooks registered). Distinct from `budget`,
+   * which is the local per-instance daily $ cap.
+   */
+  meteredHost?: HookHost | undefined;
+  /**
    * Optional inbox push notifier. Fires on a NEW classification with
    * bucket=`requires_user`. Absent on instances without web-push wiring.
    */
@@ -108,21 +118,32 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
   const policy = opts.policy ?? {};
 
   const budget = opts.budget;
+  const meteredHost = opts.meteredHost;
   const versionStamp = opts.classifierVersionOverride ?? CLASSIFIER_VERSION;
+
+  const budgetExceededVerdict = (reasonDe: string): ClassifyResult => ({
+    bucket: 'requires_user',
+    confidence: 0,
+    reasonDe,
+    failReason: 'budget_exceeded',
+    classifierVersion: versionStamp,
+    bodyTruncated: false,
+  });
 
   const queueOptions: ClassifierQueueOptions<InboxQueuePayload> = {
     classify: async (payload, ctx) => {
-      // Circuit-breaker: budget exhausted → no LLM call, fail-closed verdict.
+      // Circuit-breaker: local daily $ budget exhausted → no LLM call.
       if (budget?.isExceeded()) {
-        const verdict: ClassifyResult = {
-          bucket: 'requires_user',
-          confidence: 0,
-          reasonDe: 'Tagesbudget für Klassifizierer erreicht — manuell prüfen.',
-          failReason: 'budget_exceeded',
-          classifierVersion: versionStamp,
-          bodyTruncated: false,
-        };
-        return verdict;
+        return budgetExceededVerdict('Tagesbudget für Klassifizierer erreicht — manuell prüfen.');
+      }
+      // Managed credit gate: a credit-exhausted (or control-plane-stale →
+      // fail-closed) managed tenant must not drive the pool key per inbound
+      // mail. No-op on self-host / BYOK.
+      if (meteredHost) {
+        const gate = await fireBeforeRunGate(meteredHost, 'fast');
+        if (gate.blockedReason !== null) {
+          return budgetExceededVerdict('AI-Guthaben erschöpft — manuell prüfen.');
+        }
       }
       return classifyMail(payload.classifierInput, llm, {
         signal: ctx.signal,

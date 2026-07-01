@@ -1101,13 +1101,13 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
-  // -- SEC-LC-2: the fast-tier LLM thread-title call spends the managed pool key
-  // and must fire the same gate + debit lifecycle as an interactive run. It runs
+  // -- The fast-tier LLM thread-title call spends the managed pool key and must
+  // fire the same gate + debit lifecycle as an interactive run. It runs
   // fire-and-forget (`void _generateLLMTitle`) off the first turn of a fresh
   // thread, so the assertions wait for the pending title promise to settle. The
   // title uses tier `fast`; the main run uses `balanced` — filter hook calls by
   // tier to separate the two. --
-  describe('managed thread-title metering (SEC-LC-2)', () => {
+  describe('managed thread-title metering', () => {
     type Ctx = { modelTier?: string };
     const cannedTitleResponse = {
       content: [{ type: 'text', text: 'Weekly Budget Review' }],
