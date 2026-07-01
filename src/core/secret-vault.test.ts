@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { SecretVault, estimateKeyEntropy } from './secret-vault.js';
 
 const TEST_KEY = 'test-master-key-for-vault-testing-1234';
@@ -126,6 +128,62 @@ describe('SecretVault', () => {
       expect(vOld.get('API_KEY')).toBe('super-secret-value-1');
       vOld.close();
       expect(existsSync(`${path}.rotate-bak`)).toBe(false);
+    });
+
+    it('refuses to re-key when some secrets are undecryptable (no data loss)', () => {
+      const path = join(tmpDir, 'vault.db');
+      const v = createVault();
+      v.set('SECRET_GOOD', 'good-value-123456');
+      v.set('SECRET_BAD', 'bad-value-7890123');
+      v.close();
+
+      // Corrupt ONE row's auth_tag so it can no longer be decrypted with the
+      // current key — simulating a partial-decrypt vault. getAll() will skip it.
+      const raw = new Database(path);
+      raw.prepare("UPDATE vault_secrets SET auth_tag = ? WHERE name = 'SECRET_BAD'")
+        .run(randomBytes(16));
+      raw.close();
+
+      // rotateVault must ABORT rather than silently drop the unreadable secret.
+      expect(() => SecretVault.rotateVault(path, TEST_KEY, NEW_KEY))
+        .toThrow('Cannot decrypt 1 of 2');
+
+      // Nothing was dropped: the DELETE-then-re-encrypt never ran, so both rows
+      // still exist and the readable one still decrypts under the ORIGINAL key.
+      const after = new SecretVault({ path, masterKey: TEST_KEY });
+      expect(after.size).toBe(2);
+      expect(after.get('SECRET_GOOD')).toBe('good-value-123456');
+      after.close();
+    });
+  });
+
+  // === Shared-cache key safety (H-1) ===
+
+  describe('shared-cache key safety', () => {
+    it('closing one vault does not corrupt another live vault on the same key', () => {
+      const path = join(tmpDir, 'vault.db');
+      const live = createVault();
+      live.set('LIVE_SECRET', 'live-value-1234567');
+
+      // A second vault on the SAME (path, key) shares the cached derived key —
+      // this mirrors rotateVault()/migration-export opening a transient vault
+      // while the engine's vault is still live.
+      const transient = createVault();
+      expect(transient.get('LIVE_SECRET')).toBe('live-value-1234567');
+      transient.close(); // must NOT zero the key material the live vault uses
+
+      // The live vault must still decrypt AND encrypt correctly after its
+      // sibling closed (the bug: a shared Buffer got filled with zeros).
+      expect(live.get('LIVE_SECRET')).toBe('live-value-1234567');
+      live.set('AFTER_CLOSE', 'written-after-sibling-close-123');
+      expect(live.get('AFTER_CLOSE')).toBe('written-after-sibling-close-123');
+      live.close();
+
+      // Reopen fresh: the after-close write must be intact — proof it was not
+      // encrypted under a zeroed key.
+      const reopened = createVault();
+      expect(reopened.get('AFTER_CLOSE')).toBe('written-after-sibling-close-123');
+      reopened.close();
     });
   });
 
@@ -339,7 +397,7 @@ describe('SecretVault', () => {
       vault.close();
     });
 
-    it('renames source file to .bak after migration', () => {
+    it('securely removes the plaintext source after migration (no .bak left)', () => {
       const secretsPath = join(tmpDir, 'secrets.json');
       writeFileSync(secretsPath, JSON.stringify({
         KEY1: { value: 'value-to-migrate-123' },
@@ -347,10 +405,33 @@ describe('SecretVault', () => {
 
       const vault = createVault();
       vault.migrateFromFile(secretsPath);
+      // Secret lives in the encrypted vault...
+      expect(vault.get('KEY1')).toBe('value-to-migrate-123');
       vault.close();
 
+      // ...and NO plaintext copy is left on disk — neither the source nor a
+      // .bak (leaving plaintext defeats the "no plaintext on disk" guarantee).
       expect(existsSync(secretsPath)).toBe(false);
-      expect(existsSync(`${secretsPath}.bak`)).toBe(true);
+      expect(existsSync(`${secretsPath}.bak`)).toBe(false);
+    });
+
+    it('keeps the plaintext source if a migrated secret does not read back', () => {
+      const secretsPath = join(tmpDir, 'secrets.json');
+      writeFileSync(secretsPath, JSON.stringify({
+        KEY1: { value: 'value-to-migrate-123' },
+      }));
+
+      const vault = createVault();
+      // Simulate a vault where the just-written secret cannot be read back
+      // (corruption / wrong key): get() returns null → source must be kept.
+      const getSpy = vi.spyOn(vault, 'get').mockReturnValue(null);
+      const count = vault.migrateFromFile(secretsPath);
+      getSpy.mockRestore();
+
+      expect(count).toBe(1);
+      // Plaintext source preserved so the secret isn't lost.
+      expect(existsSync(secretsPath)).toBe(true);
+      vault.close();
     });
 
     it('returns 0 for missing file', () => {

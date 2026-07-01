@@ -130,6 +130,21 @@ describe('SecretStore', () => {
       delete process.env['LYNOX_SECRET_SHORT3'];
     });
 
+    it('maskSecrets does not hang when a value contains its own mask', () => {
+      // maskValue('***ab') === '*****ab', which CONTAINS '***ab'. The old
+      // `while (result.includes(value))` loop re-scanned the growing output and
+      // spun forever (and leaked the value through its own replacement). The fix
+      // does a single pass and falls back to a fixed token in this degenerate
+      // case. If this regresses, the test fails via vitest's per-test timeout.
+      process.env['LYNOX_SECRET_STARVAL'] = '***ab';
+      const store = new SecretStore();
+      const masked = store.maskSecrets('leak: ***ab end');
+      expect(masked).not.toContain('***ab'); // value not leaked through the mask
+      expect(masked).toContain('leak:');
+      expect(masked).toContain('end');
+      delete process.env['LYNOX_SECRET_STARVAL'];
+    });
+
     it('maskSecrets skips single-char secrets', () => {
       process.env['LYNOX_SECRET_TINY'] = 'x';
       const store = new SecretStore();

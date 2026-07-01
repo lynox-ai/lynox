@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, createHash, hkdfSync } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, chmodSync, copyFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, chmodSync, copyFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SecretScope } from '../types/index.js';
 import { getLynoxDir } from './config.js';
@@ -129,19 +129,29 @@ export class SecretVault {
     // Use hash of passphrase as cache key to avoid keeping plaintext in memory
     const passphraseHash = createHash('sha256').update(passphrase).digest('hex');
     const cacheKey = `${dbPath}:${passphraseHash}:${salt.toString('hex')}`;
-    const cached = _derivedKeyCache.get(cacheKey);
-    if (cached) {
-      this.derivedKey = cached;
-    } else {
-      this.derivedKey = pbkdf2Sync(
+    let canonical = _derivedKeyCache.get(cacheKey);
+    if (!canonical) {
+      canonical = pbkdf2Sync(
         passphrase,
         salt,
         PBKDF2_ITERATIONS,
         CRYPTO_KEY_LENGTH,
         PBKDF2_DIGEST,
       );
-      _derivedKeyCache.set(cacheKey, this.derivedKey);
+      _derivedKeyCache.set(cacheKey, canonical);
     }
+    // Hold a PER-INSTANCE copy of the key — never the cached Buffer itself.
+    // The cache is shared across every SecretVault opened on the same
+    // (dbPath, passphrase, salt); if instances shared one Buffer, close()'s
+    // fill(0) — or a transient rotateVault()/migration-export vault closing —
+    // would zero the key material out from under a still-live vault, silently
+    // corrupting every subsequent encrypt/decrypt. The cache retains the
+    // canonical key for the process lifetime (its whole point: skip the
+    // 600K-iteration PBKDF2 on re-open) — so unlike before, the cached copy is
+    // never scrubbed. That is an accepted tradeoff: the passphrase it derives
+    // from already lives in process.env for the whole process, so an attacker
+    // who can read process memory can re-derive the key regardless.
+    this.derivedKey = Buffer.from(canonical);
   }
 
   private _migrate(): void {
@@ -297,24 +307,36 @@ export class SecretVault {
       const parsed = JSON.parse(raw) as Record<string, { value?: string; scope?: SecretScope; ttlMs?: number }>;
       if (typeof parsed !== 'object' || parsed === null) return 0;
 
-      let count = 0;
+      const migrated: Array<{ name: string; value: string }> = [];
       for (const [name, entry] of Object.entries(parsed)) {
         if (!entry || typeof entry.value !== 'string' || !entry.value) continue;
         if (this.has(name)) continue; // Don't overwrite
         this.set(name, entry.value, entry.scope, entry.ttlMs);
-        count++;
+        migrated.push({ name, value: entry.value });
       }
 
-      // Rename source file to .bak after migration
-      if (count > 0) {
-        try {
-          renameSync(path, `${path}.bak`);
-        } catch {
-          // Best-effort rename
+      // The source file holds PLAINTEXT secrets; leaving it on disk (even
+      // renamed to .bak) defeats the vault's "no plaintext on disk" guarantee.
+      // Only after confirming every migrated secret reads back correctly out of
+      // the encrypted vault do we remove the plaintext source. If any read-back
+      // fails, KEEP the source (secrets not lost) and warn.
+      if (migrated.length > 0) {
+        const allVerified = migrated.every(({ name, value }) => this.get(name) === value);
+        if (allVerified) {
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            // Best-effort removal — the secrets are safely in the vault regardless.
+          }
+        } else {
+          process.stderr.write(
+            `⚠ Vault: kept ${path} — a migrated secret failed to read back from the vault; ` +
+            `not deleting the plaintext source.\n`,
+          );
         }
       }
 
-      return count;
+      return migrated.length;
     } catch {
       return 0;
     }
@@ -362,8 +384,17 @@ export class SecretVault {
     oldVault.db.pragma('wal_checkpoint(TRUNCATE)');
     oldVault.close();
 
-    if (entries.size === 0 && metadata.length > 0) {
-      throw new Error('Cannot decrypt existing secrets — wrong current key?');
+    // Abort if ANY secret failed to decrypt — not only if ALL did. getAll()
+    // silently SKIPS undecryptable rows, so a partial-decrypt (e.g. 3 of 5
+    // readable) would otherwise pass an `size === 0` guard, and the
+    // DELETE-then-re-encrypt below would PERMANENTLY DROP the unreadable
+    // secrets. Re-keying must be all-or-nothing: if we can't read every secret
+    // with the old key, refuse rather than silently lose data.
+    if (entries.size !== metadata.length) {
+      throw new Error(
+        `Cannot decrypt ${metadata.length - entries.size} of ${metadata.length} secrets ` +
+        `— wrong current key or corrupted vault? Refusing to re-key (would drop unreadable secrets).`,
+      );
     }
 
     // Re-keying is destructive and NON-atomic: it deletes the salt + every
@@ -445,13 +476,12 @@ export class SecretVault {
    * Close the database connection and clear key material from memory.
    */
   close(): void {
-    // Find and remove cache entry BEFORE zeroing (same Buffer reference)
-    const cacheKey = [..._derivedKeyCache.entries()]
-      .find(([, v]) => v === this.derivedKey)?.[0];
-    if (cacheKey) {
-      _derivedKeyCache.delete(cacheKey);
-    }
-    // Zero the derived key material (single fill — cache held same reference)
+    // Zero ONLY this instance's copy of the key material. We deliberately do
+    // NOT touch _derivedKeyCache: the cached Buffer is the shared canonical key
+    // that other still-live vaults (and future re-opens) rely on. Because each
+    // instance owns an independent copy (see constructor), scrubbing ours is
+    // safe and cannot corrupt another vault — the bug that arose when close()
+    // zeroed a Buffer shared via the cache.
     if (this.derivedKey) {
       this.derivedKey.fill(0);
     }

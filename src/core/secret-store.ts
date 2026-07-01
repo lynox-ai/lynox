@@ -250,9 +250,18 @@ export class SecretStore implements SecretStoreLike {
     let result = text;
     for (const secret of this.secrets.values()) {
       if (secret.value.length < 2) continue;
-      // Use split+join for literal replacement (no regex special char issues)
-      while (result.includes(secret.value)) {
-        result = result.split(secret.value).join(maskValue(secret.value));
+      let masked = maskValue(secret.value);
+      // Guard against a degenerate mask that CONTAINS the raw value (e.g. a
+      // value made of the mask's own '*' chars, like "***ab" → "*****ab"): it
+      // would both loop forever below AND leak the secret through its own
+      // replacement. Fall back to a fixed token that cannot embed the value.
+      if (masked.includes(secret.value)) masked = '[redacted]';
+      // Single global pass — split+join replaces every (non-overlapping)
+      // occurrence at once (literal replacement, no regex special-char issues).
+      // The previous `while (result.includes(...))` loop re-scanned the output
+      // and hung whenever the mask re-introduced the pattern.
+      if (result.includes(secret.value)) {
+        result = result.split(secret.value).join(masked);
       }
     }
     return result;
