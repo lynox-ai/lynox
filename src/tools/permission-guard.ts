@@ -486,6 +486,44 @@ export function splitCommandSegments(cmd: string): string[] {
   return segments;
 }
 
+/**
+ * Remove shell quoting/escaping the same way a POSIX shell does before it word-
+ * splits — so the danger scan sees the command the shell will ACTUALLY run, not
+ * the quoted spelling. Without this, intra-word quotes/backslashes defeat the
+ * literal-token patterns: `r''m -rf /`, `s\udo`, `"docker" run` all pass the
+ * guard as written yet execute as `rm -rf /` / `sudo` / `docker run`.
+ */
+export function stripShellQuotes(cmd: string): string {
+  let out = '';
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i]!;
+    if (inSingle) {
+      if (ch === "'") { inSingle = false; continue; } // single quotes are literal — no escapes
+      out += ch;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '\\' && i + 1 < cmd.length) {
+        const next = cmd[i + 1]!;
+        // Inside double quotes a backslash only escapes $ ` " \ — otherwise it's literal.
+        if (next === '$' || next === '`' || next === '"' || next === '\\') { out += next; i++; continue; }
+        out += ch;
+        continue;
+      }
+      if (ch === '"') { inDouble = false; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i + 1]!; i++; continue; } // unquoted backslash escapes the next char
+    if (ch === "'") { inSingle = true; continue; }
+    if (ch === '"') { inDouble = true; continue; }
+    out += ch;
+  }
+  return out;
+}
+
 function _checkPatterns(segments: string[], patterns: Array<{ pattern: RegExp; label: string }>): { label: string } | null {
   for (const segment of segments) {
     for (const { pattern, label } of patterns) {
@@ -507,9 +545,15 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       : rawCmd;
     // Normalize to defeat encoding bypasses, then split into segments for per-segment checking
     const normalized = normalizeCommand(truncated);
+    const stripped = stripShellQuotes(normalized);
     const segments = splitCommandSegments(normalized);
+    // Also scan the quote-removed form the shell actually executes + its
+    // segments — intra-word quotes/backslashes (`r''m -rf /`) otherwise slip a
+    // dangerous command past the literal-token patterns. Only when stripping
+    // changed something (no extra work for the common unquoted command).
+    const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
     // Also check the full normalized string (catches cross-segment patterns like pipes)
-    const allSegments = [normalized, ...segments];
+    const allSegments = [normalized, stripped, ...segments, ...strippedSegments];
 
     // Short preview for user display (first line, max 80 chars)
     const firstLine = rawCmd.split('\n')[0]!;

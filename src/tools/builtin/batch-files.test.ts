@@ -1,9 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { batchFilesTool } from './batch-files.js';
+import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 
 let dir: string;
 
@@ -58,6 +59,34 @@ describe('batchFilesTool', () => {
         {} as never,
       );
       expect(result).toBe('rename_pattern is required for rename operation');
+    });
+
+    it('blocks a rename whose target escapes the workspace (path traversal)', async () => {
+      const d = await makeTempDir();
+      writeFileSync(join(d, 'report.txt'), 'data');
+      // realpath so the stored workspace matches the handler's realpath'd dir
+      // (on macOS the tmpdir path is a /var → /private/var symlink).
+      setTenantWorkspace(realpathSync(d)); // activate workspace isolation for this test
+      try {
+        const result = await batchFilesTool.handler(
+          {
+            pattern: '*.txt',
+            directory: d,
+            operation: 'rename',
+            // `join()` collapses the `../` — this resolves to /etc (never an
+            // allowed root). validatePath must reject it BEFORE renameSync; the
+            // block reason (not an OS error) is what proves the guard ran.
+            rename_pattern: '../../../../../../../../../../etc/lynox-batch-traversal-test',
+          },
+          {} as never,
+        );
+        expect(result).toMatch(/outside allowed directories/);
+        // The file was not moved out of the workspace.
+        expect(existsSync(join(d, 'report.txt'))).toBe(true);
+        expect(existsSync('/etc/lynox-batch-traversal-test')).toBe(false);
+      } finally {
+        clearTenantWorkspace();
+      }
     });
   });
 

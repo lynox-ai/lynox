@@ -38,7 +38,12 @@ interface DriveFileListResponse {
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DRIVE_FILES_BASE = 'https://www.googleapis.com/drive/v3/files';
 
-const CONFIRM_ACTIONS = new Set(['write', 'append']);
+// `format` is included: handleFormat forwards `format_requests` verbatim to the
+// Sheets :batchUpdate endpoint, which supports destructive request types
+// (deleteSheet / deleteRange / deleteDimension / updateCells) — i.e. arbitrary
+// spreadsheet mutation, not cosmetics. It must be confirmed + flagged destructive
+// like write/append. (`create` only makes a NEW spreadsheet → left unconfirmed.)
+const CONFIRM_ACTIONS = new Set(['write', 'append', 'format']);
 const WRITE_ACTIONS = new Set(['write', 'append', 'create', 'format']);
 
 // === Helpers ===
@@ -81,11 +86,12 @@ function valuesToMarkdownTable(values: string[][]): string {
 
 // === Tool Creation ===
 
-// NOTE: keeps strict parity with the legacy enumerated guard list (write, append).
-// `create` and `format` are also writes but are NOT gated here today — an audit
-// follow-up will broaden coverage. Do not silently expand this set: changing
-// it changes user-visible permission prompts.
-const SHEETS_WRITE_ACTIONS = new Set<SheetsInput['action']>(['write', 'append']);
+// Actions flagged destructive to the permission guard. `format` is included
+// because handleFormat forwards raw :batchUpdate requests that can delete/
+// overwrite cells + sheets (see CONFIRM_ACTIONS). `create` only makes a new
+// spreadsheet (no existing data at risk) → left out. Do not silently expand
+// this set: changing it changes user-visible permission prompts.
+const SHEETS_WRITE_ACTIONS = new Set<SheetsInput['action']>(['write', 'append', 'format']);
 
 export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
   return {
@@ -151,7 +157,9 @@ export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          const confirmMsg = `Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
+          const confirmMsg = input.action === 'format'
+            ? `Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
+            : `Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
           const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
           if (answer.toLowerCase() !== 'yes' && answer !== '1') {
             return 'Action cancelled by user.';
