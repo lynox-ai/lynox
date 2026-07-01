@@ -13,6 +13,7 @@ import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
 import { WorkflowStore } from './workflow-store.js';
 import { TriggerStore, triggerRecordToRow } from './trigger-store.js';
+import { TaskStore, taskRecordToRow } from './task-store.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
@@ -1055,12 +1056,14 @@ export class RunHistory {
    * additively; the legacy history.db row stays authoritative + is written first.
    * A mirror failure is swallowed — it must never break the legacy write.
    *
-   * The two stores are set/cleared ATOMICALLY by {@link setVerbGraph}, so
-   * `_workflowStore` set ⟺ `_triggerStore` set — {@link _verbMirror} gates on the
-   * former and the trigger closures assert the latter safely.
+   * The three stores are set/cleared ATOMICALLY by {@link setVerbGraph}, so
+   * `_workflowStore` set ⟺ `_triggerStore` set ⟺ `_taskStore` set —
+   * {@link _verbMirror} gates on the first and the trigger/task closures assert
+   * the others safely.
    */
   private _workflowStore: WorkflowStore | null = null;
   private _triggerStore: TriggerStore | null = null;
+  private _taskStore: TaskStore | null = null;
   private _verbGraphWarned = false;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
@@ -1079,18 +1082,19 @@ export class RunHistory {
   }
 
   /**
-   * Foundation Rework v2 (S3a + S3b): wire the engine.db verb-layer mirror. Called
-   * once during engine boot, after both RunHistory and EngineDb exist. When
-   * `enabled`, builds a {@link WorkflowStore} (workflow defs) AND a
-   * {@link TriggerStore} (triggers) on the shared engine.db connection; the
-   * corresponding write methods then dual-write to them. Both stores are set (or
-   * cleared) together so their presence stays in lockstep. Idempotent + reversible
-   * (enabled=false clears both → back to legacy-only). Additive: never touches the
-   * legacy history.db path.
+   * Foundation Rework v2 (S3a + S3b + S3c): wire the engine.db verb-layer mirror.
+   * Called once during engine boot, after both RunHistory and EngineDb exist. When
+   * `enabled`, builds a {@link WorkflowStore} (workflow defs), a
+   * {@link TriggerStore} (triggers) AND a {@link TaskStore} (human TODOs) on the
+   * shared engine.db connection; the corresponding write methods then dual-write to
+   * them. All three stores are set (or cleared) together so their presence stays in
+   * lockstep. Idempotent + reversible (enabled=false clears all → back to
+   * legacy-only). Additive: never touches the legacy history.db path.
    */
   setVerbGraph(engineDb: EngineDb, enabled: boolean): void {
     this._workflowStore = enabled ? new WorkflowStore(engineDb) : null;
     this._triggerStore = enabled ? new TriggerStore(engineDb) : null;
+    this._taskStore = enabled ? new TaskStore(engineDb) : null;
   }
 
   /** Swallow a mirror failure: the legacy write already succeeded, so a broken
@@ -1120,6 +1124,17 @@ export class RunHistory {
   private _reprojectTrigger(id: string): void {
     const rec = persistence.getTrigger(this.db, id);
     if (rec) this._triggerStore!.upsert(triggerRecordToRow(rec));
+  }
+
+  /**
+   * S3c: re-project the CURRENT legacy task row onto the engine.db mirror. Same
+   * read-back-and-upsert shape as {@link _reprojectTrigger} — insert/update both
+   * route here so the mirror always reflects the full current row. A missing row
+   * (raced delete) is a no-op. Runs inside {@link _verbMirror} (swallowed).
+   */
+  private _reprojectTask(id: string): void {
+    const rec = persistence.getTask(this.db, id);
+    if (rec) this._taskStore!.upsert(taskRecordToRow(rec));
   }
 
   /**
@@ -2246,6 +2261,7 @@ export class RunHistory {
     parentTaskId?: string | undefined;
   }): void {
     persistence.insertTask(this.db, params);
+    this._verbMirror(() => { this._reprojectTask(params.id); });
   }
 
   /** Insert an AGENT-TRIGGER row (cron/watch/pipeline/reminder/backup). */
@@ -2286,7 +2302,9 @@ export class RunHistory {
     tags?: string | undefined;
     completedAt?: string | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
-    return persistence.updateTask(this.db, id, params, opts);
+    const ok = persistence.updateTask(this.db, id, params, opts);
+    this._verbMirror(() => { this._reprojectTask(id); });
+    return ok;
   }
 
   /** Update an AGENT-TRIGGER row. */
@@ -2312,7 +2330,13 @@ export class RunHistory {
   }
 
   deleteTask(id: string): boolean {
-    return persistence.deleteTask(this.db, id);
+    // Capture legacy's direct-subtask ids BEFORE its cascade delete, so the mirror
+    // removes exactly the set legacy removes. The mirror's own parent_task_id may be
+    // FK-guarded to NULL for a pre-flag orphan, so it can't recompute the cascade.
+    const childIds = this._taskStore ? persistence.getTaskChildIds(this.db, id) : [];
+    const ok = persistence.deleteTask(this.db, id);
+    this._verbMirror(() => { this._taskStore!.remove(id, childIds); });
+    return ok;
   }
 
   deleteTrigger(id: string): boolean {
