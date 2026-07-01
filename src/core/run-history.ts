@@ -12,6 +12,7 @@ import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
 import { WorkflowStore } from './workflow-store.js';
+import { TriggerStore, triggerRecordToRow } from './trigger-store.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
@@ -1046,15 +1047,20 @@ export class RunHistory {
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
   /**
-   * Foundation Rework v2 (S3a): the engine.db verb-layer mirror. Non-null only
-   * when `verb_graph_enabled` is ON and an EngineDb opened — set post-construction
-   * by {@link setVerbGraph} (engine.db is built AFTER RunHistory, so it cannot be
-   * a ctor arg; the setter mirrors RetrievalEngine.setMeteredHost). When set,
-   * every workflow-DEFINITION write dual-writes here additively; the legacy
-   * history.db `pipeline_runs` row stays authoritative + is written first. A
-   * mirror failure is swallowed — it must never break the legacy write.
+   * Foundation Rework v2: the engine.db verb-layer mirror. Non-null only when
+   * `verb_graph_enabled` is ON and an EngineDb opened — set post-construction by
+   * {@link setVerbGraph} (engine.db is built AFTER RunHistory, so it cannot be a
+   * ctor arg; the setter mirrors RetrievalEngine.setMeteredHost). When set, every
+   * workflow-DEFINITION write (S3a) and every TRIGGER write (S3b) dual-writes here
+   * additively; the legacy history.db row stays authoritative + is written first.
+   * A mirror failure is swallowed — it must never break the legacy write.
+   *
+   * The two stores are set/cleared ATOMICALLY by {@link setVerbGraph}, so
+   * `_workflowStore` set ⟺ `_triggerStore` set — {@link _verbMirror} gates on the
+   * former and the trigger closures assert the latter safely.
    */
   private _workflowStore: WorkflowStore | null = null;
+  private _triggerStore: TriggerStore | null = null;
   private _verbGraphWarned = false;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
@@ -1073,15 +1079,18 @@ export class RunHistory {
   }
 
   /**
-   * Foundation Rework v2 (S3a): wire the engine.db verb-layer mirror. Called once
-   * during engine boot, after both RunHistory and EngineDb exist. When `enabled`,
-   * builds a {@link WorkflowStore} on the engine.db connection; the workflow-def
-   * write methods then dual-write to it. Idempotent + reversible (enabled=false
-   * clears the store → back to legacy-only). Additive: never touches the legacy
-   * history.db path.
+   * Foundation Rework v2 (S3a + S3b): wire the engine.db verb-layer mirror. Called
+   * once during engine boot, after both RunHistory and EngineDb exist. When
+   * `enabled`, builds a {@link WorkflowStore} (workflow defs) AND a
+   * {@link TriggerStore} (triggers) on the shared engine.db connection; the
+   * corresponding write methods then dual-write to them. Both stores are set (or
+   * cleared) together so their presence stays in lockstep. Idempotent + reversible
+   * (enabled=false clears both → back to legacy-only). Additive: never touches the
+   * legacy history.db path.
    */
   setVerbGraph(engineDb: EngineDb, enabled: boolean): void {
     this._workflowStore = enabled ? new WorkflowStore(engineDb) : null;
+    this._triggerStore = enabled ? new TriggerStore(engineDb) : null;
   }
 
   /** Swallow a mirror failure: the legacy write already succeeded, so a broken
@@ -1098,6 +1107,19 @@ export class RunHistory {
         );
       }
     }
+  }
+
+  /**
+   * S3b: re-project the CURRENT legacy trigger row onto the engine.db mirror. The
+   * engine.db `triggers` table is a REDESIGN (not a 1:1 of the legacy table), so
+   * rather than patching mapped columns per-write, every trigger write reads the
+   * post-write legacy row back and upserts the full mapped projection — one path
+   * for insert/update/setEnabled/runResult/watchConfig, always faithful. A missing
+   * row (raced delete) is a no-op. Runs inside {@link _verbMirror} (swallowed).
+   */
+  private _reprojectTrigger(id: string): void {
+    const rec = persistence.getTrigger(this.db, id);
+    if (rec) this._triggerStore!.upsert(triggerRecordToRow(rec));
   }
 
   /**
@@ -2150,7 +2172,9 @@ export class RunHistory {
 
   /** Slice B2: flip a scheduled trigger's cron kill-switch. */
   setTriggerEnabled(id: string, enabled: boolean): boolean {
-    return persistence.setTriggerEnabled(this.db, id, enabled);
+    const ok = persistence.setTriggerEnabled(this.db, id, enabled);
+    this._verbMirror(() => { this._reprojectTrigger(id); });
+    return ok;
   }
 
   /** Delete a planned pipeline. Returns false if no row matched. */
@@ -2203,6 +2227,7 @@ export class RunHistory {
     pipelineParams?: string | undefined;
   }): void {
     persistence.insertTrigger(this.db, params);
+    this._verbMirror(() => { this._reprojectTrigger(params.id); });
   }
 
   /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */
@@ -2233,7 +2258,9 @@ export class RunHistory {
     nextRunAt?: string | null | undefined;
     scheduleCron?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
-    return persistence.updateTrigger(this.db, id, params, opts);
+    const ok = persistence.updateTrigger(this.db, id, params, opts);
+    this._verbMirror(() => { this._reprojectTrigger(id); });
+    return ok;
   }
 
   getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
@@ -2249,7 +2276,9 @@ export class RunHistory {
   }
 
   deleteTrigger(id: string): boolean {
-    return persistence.deleteTrigger(this.db, id);
+    const ok = persistence.deleteTrigger(this.db, id);
+    this._verbMirror(() => { this._triggerStore!.remove(id); });
+    return ok;
   }
 
   getTasks(opts?: {
@@ -2305,11 +2334,13 @@ export class RunHistory {
     retryCount?: number | undefined;
   }): void {
     persistence.updateTriggerRunResult(this.db, id, update);
+    this._verbMirror(() => { this._reprojectTrigger(id); });
   }
 
   /** Update the watch_config JSON for a watch trigger. */
   updateTriggerWatchConfig(id: string, watchConfig: string): void {
     persistence.updateTriggerWatchConfig(this.db, id, watchConfig);
+    this._verbMirror(() => { this._reprojectTrigger(id); });
   }
 
   /**
