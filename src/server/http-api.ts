@@ -4652,6 +4652,8 @@ export class LynoxHTTPApi {
         HAS_WHISPER,
         transcribeWithStream,
         extractSessionContext,
+        getActiveTranscribeProvider,
+        VOXTRAL_USD_PER_MIN,
       } = await import('../core/transcribe.js');
       if (!HAS_WHISPER) {
         errorResponse(res, 503, 'Transcription not available (set MISTRAL_API_KEY or install whisper.cpp + ffmpeg)');
@@ -4670,12 +4672,8 @@ export class LynoxHTTPApi {
       // Managed credit gate — STT shares the lynox-supplied pool key, so a
       // credit-exhausted / fail-closed tenant is blocked here before any
       // provider spend (same onBeforeRun gate as TTS + chat runs). No-op on
-      // self-host. NOTE: the matching onAfterRun debit is intentionally NOT
-      // wired yet — STT has no per-call cost rate in the codebase (unlike
-      // SPEAK_USD_PER_CHAR for TTS). The audio duration is already captured
-      // below (`durationSec`), so once a Voxtral STT $/min rate is confirmed
-      // the debit is a one-line reportMeteredCost() call. Tracked as a
-      // follow-up; the gate alone closes the uncapped-drive abuse path.
+      // self-host. The matching onAfterRun debit fires after transcription
+      // below, keyed on this run id, when Voxtral (pool key) was the backend.
       const sttGate = await fireBeforeRunGate(engine, 'fast');
       if (sttGate.blockedReason) {
         errorResponse(res, 402, sttGate.blockedReason);
@@ -4724,6 +4722,15 @@ export class LynoxHTTPApi {
         // failure → `units: 0` (same as pre-0.5 behavior; dashboard shows
         // run count but no duration).
         const durationSec = await durationPromise;
+        // Debit managed pool-key STT to the tenant balance, keyed on the gate's
+        // run id (the CP dedups on it) — the STT twin of TTS's reportMeteredCost.
+        // Only when Voxtral is the active backend (local whisper.cpp is free → no
+        // pool-key spend) and the duration probe succeeded. $0.003/min × minutes.
+        // No-op on self-host. Non-fatal — never breaks the transcription response.
+        const sttProvider = getActiveTranscribeProvider();
+        if (sttProvider?.name === 'mistral-voxtral' && durationSec !== null && durationSec > 0) {
+          reportMeteredCost(engine, sttGate.runId, (durationSec / 60) * VOXTRAL_USD_PER_MIN, 'fast');
+        }
         try {
           const history = engine.getRunHistory();
           if (history) {
