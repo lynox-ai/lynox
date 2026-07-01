@@ -330,11 +330,13 @@ export function parseToolInput(input: unknown): ExtractionResultV2 {
   }
 
   const relations: ExtractedRelationV2[] = [];
-  const entityNames = new Set(entities.map(e => e.canonicalName.toLowerCase()));
+  const entityKinds = new Map<string, EntityType>(
+    entities.map(e => [e.canonicalName.toLowerCase(), e.type]),
+  );
 
   if (Array.isArray(obj['relations'])) {
     for (const raw of obj['relations']) {
-      const parsed = parseRelation(raw, entityNames);
+      const parsed = parseRelation(raw, entityKinds);
       if (parsed) relations.push(parsed);
     }
   }
@@ -374,7 +376,10 @@ function parseEntity(raw: unknown): ExtractedEntityV2 | null {
   };
 }
 
-function parseRelation(raw: unknown, knownEntities: Set<string>): ExtractedRelationV2 | null {
+function parseRelation(
+  raw: unknown,
+  knownEntities: Map<string, EntityType>,
+): ExtractedRelationV2 | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Record<string, unknown>;
 
@@ -388,6 +393,14 @@ function parseRelation(raw: unknown, knownEntities: Set<string>): ExtractedRelat
   if (confidence < MIN_CONFIDENCE || confidence > 1) return null;
   if (!knownEntities.has(subject.toLowerCase())) return null;
   if (!knownEntities.has(object.toLowerCase())) return null;
+
+  // Endpoint-kind constraint: a creator is a WHO (person/organization), never a
+  // what/where/when. Drops the recurring "X created_by <event/project/place>"
+  // class (e.g. a product "created_by" the conference it was announced at).
+  if (predicate === 'created_by') {
+    const objectKind = knownEntities.get(object.toLowerCase());
+    if (objectKind !== 'person' && objectKind !== 'organization') return null;
+  }
 
   return {
     subject,

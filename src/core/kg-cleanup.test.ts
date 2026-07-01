@@ -50,10 +50,16 @@ describe('kg-cleanup', () => {
       expect(isCleanupTarget('1/2m')).toBe(true);
     });
 
-    it('rejects slash enums where either half is generic', () => {
-      expect(isCleanupTarget('create/update')).toBe(true);
-      expect(isCleanupTarget('open/closed')).toBe(false); // neither in stopwords
+    it('rejects slash enums and lowercase phrase-fragment pairs', () => {
+      expect(isCleanupTarget('create/update')).toBe(true);       // known generic half
       expect(isCleanupTarget('process/launch')).toBe(true);
+      // 2026-07: both-lowercase-word pairs are now rejected as phrase fragments
+      // (status enums, prose fragments) — closes the old "neither half generic" gap.
+      expect(isCleanupTarget('open/closed')).toBe(true);
+      expect(isCleanupTarget('death/disability')).toBe(true);
+      // Precision boundary: real slash-entities with uppercase or a short half survive.
+      expect(isCleanupTarget('AC/DC')).toBe(false);
+      expect(isCleanupTarget('TCP/IP')).toBe(false);
     });
 
     it('rejects empty / whitespace-only names', () => {

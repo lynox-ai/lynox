@@ -58,6 +58,21 @@ export const KG_COMMON_NOUNS: ReadonlySet<string> = new Set([
   // Adjective fragments
   'standard', 'default', 'custom',
   'strict', 'strictest',
+  // Generic business/process nouns observed polluting the graph (2026-07 cleanup).
+  // These reached the graph as bare person/org entities @≥0.8 — never a proper noun.
+  'management', 'compliance', 'data', 'input', 'inputs', 'output', 'outputs',
+  'page', 'pages', 'website', 'websites', 'information', 'feedback',
+  'segment', 'segments', 'target', 'targets', 'estimate', 'estimates',
+  'note', 'notes', 'owner', 'owners', 'shareholder', 'shareholders',
+  'identifying', 'deployment', 'deployments', 'dismissal',
+  'clarification', 'confirmation', 'communication', 'communications',
+  'count', 'counts', 'agreement', 'agreements', 'opt', 'import', 'imports',
+  'service', 'services', 'testimonial', 'testimonials', 'meeting', 'meetings',
+  'online', 'offline', 'news',
+  // English function words mis-promoted to person/org
+  'as', 'before', 'has', 'have', 'had', 'must', 'will', 'would', 'work', 'works',
+  // German function/generic words
+  'ist', 'sitzt', 'als', 'vor', 'hat', 'muss', 'wird',
 ]);
 
 /**
@@ -69,7 +84,7 @@ export const KG_COMMON_NOUNS: ReadonlySet<string> = new Set([
  *   2. Plain number + slash + number(+ optional k/m/b)     →  "10/1k", "5/100"
  */
 export const KG_PRICING_RE =
-  /^(?:(?:chf|eur|usd|gbp|\$|€|£)\s*)?\d+(?:[.,]\d+)?\s*\/\s*(?:\d+[kmb]?|mo|yr|k|month|year|hour|hr|day|week|wk)$/i;
+  /^(?:(?:chf|eur|usd|gbp|\$|€|£)\s*)?\d+(?:[.,]\d+)?\s*\/\s*(?:\d+[kmb]?|mo|mos|month|months|yr|yrs|year|years|k|hour|hours|hr|hrs|h|day|days|d|week|weeks|wk|min|mins|sec)$/i;
 
 /**
  * Slash-separated enum/verb pairs that aren't org/repo. v1 captured these
@@ -90,6 +105,11 @@ export function isCleanupTarget(name: string): boolean {
   if (KG_PRICING_RE.test(trimmed)) return true;
   const lower = trimmed.toLowerCase();
   if (!lower.includes(' ') && KG_COMMON_NOUNS.has(lower)) return true;
+  // Phrase-fragment slash pairs: two all-lowercase alphabetic words (≥3 chars
+  // each, no digits/hyphens/domains). Real slash-entities (AC/DC, TCP/IP,
+  // S/4HANA, hyphenated org/repo) survive — they carry uppercase, digits, or
+  // hyphens. Catches "death/disability", "risk/safety", "home/lynox".
+  if (/^[a-z]{3,}\/[a-z]{3,}$/.test(lower)) return true;
   if (KG_ENUM_RE.test(lower)) {
     const parts = lower.match(/^([a-z0-9-]+)\/([a-z0-9-]+)$/i);
     if (parts) {

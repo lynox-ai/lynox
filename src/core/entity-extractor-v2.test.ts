@@ -88,4 +88,39 @@ describe('entity-extractor-v2 parseToolInput', () => {
     expect(parseToolInput({})).toEqual({ entities: [], relations: [] });
     expect(parseToolInput({ entities: 'nope' })).toEqual({ entities: [], relations: [] });
   });
+
+  it('drops created_by when the creator (object) is not a person/organization', () => {
+    // "X created_by <event/project/place>" is a direction/kind error — a creator
+    // is a who, not a what/where/when. Keeps the org-creator edge.
+    const result = parseToolInput({
+      entities: [
+        { canonical_name: 'Gemini 3.1 Pro', type: 'product', confidence: 0.95, aliases: [], evidence_span: 'Gemini 3.1 Pro' },
+        { canonical_name: 'Google I/O', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'at Google I/O' },
+        { canonical_name: 'Google', type: 'organization', confidence: 0.95, aliases: [], evidence_span: 'by Google' },
+      ],
+      relations: [
+        { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google I/O', confidence: 0.9 },
+        { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google', confidence: 0.9 },
+      ],
+    });
+    expect(result.relations).toEqual([
+      { subject: 'Gemini 3.1 Pro', predicate: 'created_by', object: 'Google', confidence: 0.9 },
+    ]);
+  });
+
+  it('drops the 2026-07 stopword/pricing/fragment gaps at ≥0.8 confidence', () => {
+    const result = parseToolInput({
+      entities: [
+        { canonical_name: 'management', type: 'organization', confidence: 0.9, aliases: [], evidence_span: 'the management' },
+        { canonical_name: 'data', type: 'person', confidence: 0.85, aliases: [], evidence_span: 'the data' },
+        { canonical_name: 'page', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'the page' },
+        { canonical_name: 'website', type: 'organization', confidence: 0.88, aliases: [], evidence_span: 'the website' },
+        { canonical_name: 'ist', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'das ist' },
+        { canonical_name: '153/h', type: 'project', confidence: 0.85, aliases: [], evidence_span: '153/h rate' },
+        { canonical_name: 'death/disability', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'death/disability cover' },
+      ],
+      relations: [],
+    });
+    expect(result.entities).toEqual([]);
+  });
 });
