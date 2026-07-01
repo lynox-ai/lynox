@@ -847,6 +847,22 @@ export class Engine {
       this.engineDb = null;
     }
 
+    // Foundation Rework v2 (S3a): wire the engine.db verb-layer mirror onto
+    // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
+    // Flag OFF (prod default) → inert; engine.db failed to open → inert (graceful
+    // degrade). When ON, workflow-definition writes dual-write into engine.db.
+    if (this.runHistory && this.engineDb) {
+      // Wrap the wiring like the EngineDb/RunHistory inits above: a throw while
+      // constructing the mirror store must not break engine boot — the whole
+      // point of S3a is additive isolation. On failure the mirror stays inert
+      // (setVerbGraph never reassigns _workflowStore, so it remains null).
+      try {
+        this.runHistory.setVerbGraph(this.engineDb, this.userConfig.verb_graph_enabled === true);
+      } catch (err) {
+        process.stderr.write(`[lynox] verb-graph mirror wiring failed: ${err instanceof Error ? err.message : String(err)} — mirror inert\n`);
+      }
+    }
+
     // Initialize thread store (shares DB connection with RunHistory)
     if (this.runHistory) {
       try {

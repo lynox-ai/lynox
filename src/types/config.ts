@@ -401,6 +401,18 @@ export interface LynoxUserConfig {
    * KG-disabled tenant, or one with no embedding provider, this flag is inert.
    */
   subject_graph_enabled?: boolean | undefined;
+  /**
+   * Foundation Rework v2 (S3a): additively mirror the verb-layer DEFINITIONS
+   * (saved workflows / planned pipelines — S3b/S3c extend to triggers + tasks)
+   * from the legacy history.db `pipeline_runs` representation into the
+   * first-class engine.db `workflows` table (real `is_template` column, FK-able
+   * id), alongside the legacy write. Default: false — prod stays legacy-only.
+   * The legacy history.db store remains the read authority through S3a-c; reads
+   * cut over to engine.db only after the S3d backfill. Separate from
+   * `subject_graph_enabled` (the noun mirror) on purpose: the verb read-cutover
+   * must be gated by its own backfill, not piggyback the already-ON noun flag.
+   */
+  verb_graph_enabled?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */
