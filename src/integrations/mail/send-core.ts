@@ -124,15 +124,18 @@ export async function sendMail(
     if (rateBlock) return { ok: false, status: 'rate_limit', message: rateBlock };
   }
 
-  // Secret-in-content scan BEFORE provider lookup — cheaper to bail
-  // and keeps the rejection reason at the body layer where it belongs.
+  // Secret-in-content scan BEFORE provider lookup — cheaper to bail early.
+  // Scan the Subject as well as the body: the Subject is an equally valid
+  // exfil channel (it rides the wire in the `Subject:` header) and was
+  // previously unscanned. Two separate scans (not a concatenation) avoid a
+  // false match straddling the subject/body seam.
   const { detectSecretInContent } = await import('../../tools/builtin/http.js');
-  const secretMatch = detectSecretInContent(input.body);
+  const secretMatch = detectSecretInContent(input.subject) ?? detectSecretInContent(input.body);
   if (secretMatch) {
     return {
       ok: false,
       status: 'secret_in_body',
-      message: `body contains a ${secretMatch}; refusing to send`,
+      message: `outbound message contains a ${secretMatch}; refusing to send`,
     };
   }
 

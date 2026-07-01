@@ -33,36 +33,58 @@ export interface WriteCheckResult {
   warning?: string | undefined;
 }
 
+// Single combined matcher for the fast no-match path — one pass instead of 14,
+// and (critically) it fails FAST on benign content so scanning a large legit
+// write stays cheap.
+const COMBINED_MALICIOUS_WRITE = new RegExp(
+  MALICIOUS_WRITE_PATTERNS.map(p => `(?:${p.pattern.source})`).join('|'),
+  'i',
+);
+
+// Overlapping scan window. The window bounds the cost of the backtracking
+// patterns (several have multiple `.*`, so a single full-length pass could be
+// O(n²) on crafted input); the overlap (> any realistic payload length) means a
+// match straddling a window boundary is still caught. A payload longer than the
+// overlap isn't a realistic laundered reverse-shell / key-injection one-liner.
+const SCAN_WINDOW = 64 * 1024;
+const SCAN_OVERLAP = 4 * 1024;
+
+function scanForMaliciousWrite(text: string): string | null {
+  if (!COMBINED_MALICIOUS_WRITE.test(text)) return null; // fast path: no match
+  for (const { pattern, label } of MALICIOUS_WRITE_PATTERNS) {
+    if (pattern.test(text)) return label; // rare path: recover which pattern hit
+  }
+  return 'malicious pattern';
+}
+
 /**
  * Scan file content for malicious patterns before writing.
+ *
+ * Scans the ENTIRE content in overlapping windows. The previous head/middle/
+ * tail sampling left two large gaps a payload could hide in (e.g. an SSH-key
+ * injection at offset 50K of a 200K file evaded all three windows).
  */
 export function checkWriteContent(content: string, filePath: string): WriteCheckResult {
-  // Scan head, middle samples, and tail to prevent evasion via mid-file payload placement.
-  // Total scan budget: ~60K chars for large files, full content for small files.
-  const SCAN_SIZE = 20_000;
-  let text: string;
-  if (content.length <= SCAN_SIZE * 3) {
-    text = content; // Small file — scan everything
+  let label: string | null = null;
+  if (content.length <= SCAN_WINDOW) {
+    label = scanForMaliciousWrite(content);
   } else {
-    const head = content.slice(0, SCAN_SIZE);
-    const midStart = Math.floor(content.length / 2) - SCAN_SIZE / 2;
-    const mid = content.slice(midStart, midStart + SCAN_SIZE);
-    const tail = content.slice(-SCAN_SIZE);
-    text = head + mid + tail;
-  }
-  for (const { pattern, label } of MALICIOUS_WRITE_PATTERNS) {
-    if (pattern.test(text)) {
-      if (channels.securityBlocked.hasSubscribers) {
-        channels.securityBlocked.publish({
-          event_type: 'malicious_write',
-          tool_name: 'write_file',
-          input_preview: `${filePath}: ${label}`,
-          decision: 'blocked',
-          detail: label,
-        });
-      }
-      return { safe: false, warning: `Blocked: file contains ${label} — "${filePath}"` };
+    for (let start = 0; start < content.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
+      label = scanForMaliciousWrite(content.slice(start, start + SCAN_WINDOW));
+      if (label) break;
     }
+  }
+  if (label) {
+    if (channels.securityBlocked.hasSubscribers) {
+      channels.securityBlocked.publish({
+        event_type: 'malicious_write',
+        tool_name: 'write_file',
+        input_preview: `${filePath}: ${label}`,
+        decision: 'blocked',
+        detail: label,
+      });
+    }
+    return { safe: false, warning: `Blocked: file contains ${label} — "${filePath}"` };
   }
   return { safe: true };
 }

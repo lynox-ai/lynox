@@ -158,6 +158,21 @@ describe('sendMail — gates', () => {
     expect(provider.send).not.toHaveBeenCalled();
   });
 
+  it('blocks a secret smuggled into the SUBJECT (not just the body)', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const result = await sendMail(
+      registry,
+      // Body is clean — the secret rides the Subject header (the mock detects
+      // the 'Bearer eyJ' shape regardless of which field it's called on).
+      { to: [RECIPIENT], subject: 'Re: token Bearer eyJhbGciOiXYZ', body: 'looks fine' },
+      {},
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe('secret_in_body');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('returns invalid_recipients when to is empty', async () => {
     const provider = fakeProvider();
     const registry = fakeRegistry(provider);
