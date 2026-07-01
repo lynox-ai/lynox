@@ -1717,6 +1717,49 @@ describe('api_setup tool', () => {
       fetchSpy.mockRestore();
     });
 
+    it('enforces network_policy on the token POST (client_secret cannot exfiltrate under deny-all)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      }));
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Lock the tenant to deny-all. The token POST carries client_secret — it
+      // must be blocked by the same egress policy http_request obeys, proving
+      // agent.toolContext is now threaded into the token fetch (before the fix
+      // the policy was bypassed and the secret would POST to token_url anyway).
+      (agent as unknown as { toolContext: { networkPolicy: string } }).toolContext.networkPolicy = 'deny-all';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/failed/i);         // blocked pre-flight, exchange failed
+      expect(fetchSpy).not.toHaveBeenCalled();    // never reached the network
+      fetchSpy.mockRestore();
+    });
+
+    it('charges the token exchange against the session HTTP budget (not a freebie)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      }));
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      const counters = (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters;
+      const before = counters.httpRequests;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'at-abc', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        })
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/Token exchange OK/i);
+      expect(counters.httpRequests).toBe(before + 1);
+      fetchSpy.mockRestore();
+    });
+
     it('surfaces external 4xx without blaming the tool', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, makeMockSecretStore({

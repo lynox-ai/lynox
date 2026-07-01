@@ -70,6 +70,17 @@ describe('isPrivateIP', () => {
       ['fd12::34', true],
       ['ff02::1', true],
       ['2001:4860:4860::8888', false],
+      // Non-canonical representations of loopback must ALSO be rejected — an
+      // exact-string `=== '::1'` check let these reach loopback (SSRF).
+      ['0::1', true],
+      ['0:0:0:0:0:0:0:1', true],
+      ['0000:0000:0000:0000:0000:0000:0000:0001', true],
+      ['0:0::1', true],
+      ['0000::', true],                       // non-canonical unspecified
+      ['fe80:0:0:0:0:0:0:1', true],           // expanded link-local
+      ['fd00:0:0:0:0:0:0:34', true],          // expanded unique-local
+      // Public IPv6 in various forms stays allowed (no over-block).
+      ['2001:4860:4860:0:0:0:0:8888', false],
     ])('isPrivateIP(%s) → %s', (ip, expected) => {
       expect(isPrivateIP(ip)).toBe(expected);
     });

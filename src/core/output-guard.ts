@@ -3,25 +3,34 @@ import { detectInjectionAttempt } from './data-boundary.js';
 
 // === Write content scanning ===
 
-/** Patterns that indicate malicious content being written to files. */
+/**
+ * Patterns that indicate malicious content being written to files.
+ *
+ * ReDoS discipline: gaps between anchors use BOUNDED `[^\n]{0,N}` rather than
+ * chained `.*`. A single-line payload's parts are within a few hundred chars of
+ * each other, and chained unbounded `.*` (e.g. `.*x.*y.*z`) backtracks
+ * super-linearly on crafted input — a ~400-byte file froze the scanner for 18s
+ * in review. Bounded quantifiers keep every match linear so a full-content scan
+ * is safe.
+ */
 const MALICIOUS_WRITE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   // Reverse shells
   { pattern: /bash\s+-i\s+>&\s*\/dev\/tcp\//i, label: 'bash reverse shell' },
-  { pattern: /python[23]?\s.*socket\b.*\.connect\s*\(/i, label: 'python reverse shell' },
+  { pattern: /python[23]?\s[^\n]{0,300}socket\b[^\n]{0,300}\.connect\s*\(/i, label: 'python reverse shell' },
   { pattern: /\bnc\s+(-e|--exec)\s+\/bin\/(sh|bash)\b/i, label: 'netcat reverse shell' },
-  { pattern: /\bperl\s+-e\b.*\bsocket\b/i, label: 'perl reverse shell' },
+  { pattern: /\bperl\s+-e\b[^\n]{0,300}\bsocket\b/i, label: 'perl reverse shell' },
   { pattern: /\bruby\s+-rsocket\b/i, label: 'ruby reverse shell' },
-  { pattern: /\bsocat\b.*EXEC:.*\/bin\/(sh|bash)/i, label: 'socat reverse shell' },
-  { pattern: /\bphp\s+-r\b.*\bfsockopen\b/i, label: 'php reverse shell' },
+  { pattern: /\bsocat\b[^\n]{0,300}EXEC:[^\n]{0,300}\/bin\/(sh|bash)/i, label: 'socat reverse shell' },
+  { pattern: /\bphp\s+-r\b[^\n]{0,300}\bfsockopen\b/i, label: 'php reverse shell' },
 
   // Crypto miners
   { pattern: /stratum\+tcp:\/\//i, label: 'crypto miner stratum URL' },
   { pattern: /\bxmrig\b/i, label: 'XMRig crypto miner' },
   { pattern: /\bcoinhive\b/i, label: 'Coinhive crypto miner' },
 
-  // Persistence mechanisms
-  { pattern: /\*\/\d+.*\*.*\*.*\*.*\*.*\b(curl|wget|bash|sh)\b/i, label: 'cron-based persistence' },
-  { pattern: /ssh-(?:rsa|ed25519|ecdsa)\s+\S+.*>>\s*.*authorized_keys/i, label: 'SSH key injection' },
+  // Persistence mechanisms — cron schedule (6-field) launching a fetch/shell.
+  { pattern: /\*\/\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+[^\n]{0,300}\b(curl|wget|bash|sh)\b/i, label: 'cron-based persistence' },
+  { pattern: /ssh-(?:rsa|ed25519|ecdsa)\s+\S+[^\n]{0,500}>>[^\n]{0,300}authorized_keys/i, label: 'SSH key injection' },
 
   // Keyloggers / credential stealers
   { pattern: /\bkeylog(?:ger|ging)\b/i, label: 'keylogger' },
@@ -33,36 +42,58 @@ export interface WriteCheckResult {
   warning?: string | undefined;
 }
 
+// Single combined matcher for the fast no-match path — one pass instead of 14,
+// and (critically) it fails FAST on benign content so scanning a large legit
+// write stays cheap.
+const COMBINED_MALICIOUS_WRITE = new RegExp(
+  MALICIOUS_WRITE_PATTERNS.map(p => `(?:${p.pattern.source})`).join('|'),
+  'i',
+);
+
+// Overlapping scan window. The window bounds the cost of the backtracking
+// patterns (several have multiple `.*`, so a single full-length pass could be
+// O(n²) on crafted input); the overlap (> any realistic payload length) means a
+// match straddling a window boundary is still caught. A payload longer than the
+// overlap isn't a realistic laundered reverse-shell / key-injection one-liner.
+const SCAN_WINDOW = 64 * 1024;
+const SCAN_OVERLAP = 4 * 1024;
+
+function scanForMaliciousWrite(text: string): string | null {
+  if (!COMBINED_MALICIOUS_WRITE.test(text)) return null; // fast path: no match
+  for (const { pattern, label } of MALICIOUS_WRITE_PATTERNS) {
+    if (pattern.test(text)) return label; // rare path: recover which pattern hit
+  }
+  return 'malicious pattern';
+}
+
 /**
  * Scan file content for malicious patterns before writing.
+ *
+ * Scans the ENTIRE content in overlapping windows. The previous head/middle/
+ * tail sampling left two large gaps a payload could hide in (e.g. an SSH-key
+ * injection at offset 50K of a 200K file evaded all three windows).
  */
 export function checkWriteContent(content: string, filePath: string): WriteCheckResult {
-  // Scan head, middle samples, and tail to prevent evasion via mid-file payload placement.
-  // Total scan budget: ~60K chars for large files, full content for small files.
-  const SCAN_SIZE = 20_000;
-  let text: string;
-  if (content.length <= SCAN_SIZE * 3) {
-    text = content; // Small file — scan everything
+  let label: string | null = null;
+  if (content.length <= SCAN_WINDOW) {
+    label = scanForMaliciousWrite(content);
   } else {
-    const head = content.slice(0, SCAN_SIZE);
-    const midStart = Math.floor(content.length / 2) - SCAN_SIZE / 2;
-    const mid = content.slice(midStart, midStart + SCAN_SIZE);
-    const tail = content.slice(-SCAN_SIZE);
-    text = head + mid + tail;
-  }
-  for (const { pattern, label } of MALICIOUS_WRITE_PATTERNS) {
-    if (pattern.test(text)) {
-      if (channels.securityBlocked.hasSubscribers) {
-        channels.securityBlocked.publish({
-          event_type: 'malicious_write',
-          tool_name: 'write_file',
-          input_preview: `${filePath}: ${label}`,
-          decision: 'blocked',
-          detail: label,
-        });
-      }
-      return { safe: false, warning: `Blocked: file contains ${label} — "${filePath}"` };
+    for (let start = 0; start < content.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
+      label = scanForMaliciousWrite(content.slice(start, start + SCAN_WINDOW));
+      if (label) break;
     }
+  }
+  if (label) {
+    if (channels.securityBlocked.hasSubscribers) {
+      channels.securityBlocked.publish({
+        event_type: 'malicious_write',
+        tool_name: 'write_file',
+        input_preview: `${filePath}: ${label}`,
+        decision: 'blocked',
+        detail: label,
+      });
+    }
+    return { safe: false, warning: `Blocked: file contains ${label} — "${filePath}"` };
   }
   return { safe: true };
 }

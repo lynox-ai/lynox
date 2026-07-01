@@ -152,6 +152,49 @@ describe('google_sheets tool', () => {
     });
   });
 
+  // `format` forwards raw :batchUpdate requests (deleteSheet / deleteRange /
+  // updateCells) — arbitrary spreadsheet mutation. It must be confirmed +
+  // destructive-flagged like write/append, not run silently.
+  describe('format (destructive gate)', () => {
+    const FORMAT_REQ = [{ deleteSheet: { sheetId: 0 } }];
+
+    it('is flagged destructive to the permission guard', () => {
+      const tool = createSheetsTool(createMockAuth(['https://www.googleapis.com/auth/spreadsheets']));
+      expect(tool.destructive?.check?.({ action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ })).toBe('format');
+    });
+
+    it('fail-safe blocks format when no interactive prompt is available', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
+      const tool = createSheetsTool(auth);
+      const result = await tool.handler({
+        action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
+      }, createMockAgent()); // no promptUser → autonomous/background
+      expect(result).toContain('requires user confirmation');
+      expect(mockFetch).not.toHaveBeenCalled(); // never reached the batchUpdate
+    });
+
+    it('cancels format on user decline', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
+      const tool = createSheetsTool(auth);
+      const result = await tool.handler({
+        action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
+      }, createMockAgent('No'));
+      expect(result).toBe('Action cancelled by user.');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('proceeds with format after explicit confirmation', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
+      const tool = createSheetsTool(auth);
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
+      const result = await tool.handler({
+        action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
+      }, createMockAgent('Yes'));
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(result).not.toContain('cancelled');
+    });
+  });
+
   describe('append', () => {
     it('appends rows with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);

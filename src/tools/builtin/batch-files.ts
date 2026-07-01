@@ -92,6 +92,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             const name = basename(file);
             const newName = input.rename_pattern.replace('$1', name.replace(/\.[^.]+$/, ''));
             const newPath = join(dirname(file), newName);
+            // Confine the rename target: `rename_pattern` is agent-controlled and
+            // join() collapses `../`, so an unvalidated newPath escapes the
+            // workspace (`../../etc/…`) — a write-anywhere primitive. `move`
+            // already validates its destination; rename must too.
+            if (isWorkspaceActive()) validatePath(newPath, 'write');
             renameSync(file, newPath);
             results.push(`${name} → ${newName}`);
           } catch (err: unknown) {
