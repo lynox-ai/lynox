@@ -44,7 +44,7 @@ export type {
   TranscribeProvider,
   TranscribeSessionContext,
 } from './types.js';
-export { mistralVoxtralProvider, transcribeMistralVoxtral, VOXTRAL_TRANSCRIBE_MODEL, hasMistralVoxtral } from './mistral-voxtral.js';
+export { mistralVoxtralProvider, transcribeMistralVoxtral, VOXTRAL_TRANSCRIBE_MODEL, VOXTRAL_USD_PER_MIN, hasMistralVoxtral } from './mistral-voxtral.js';
 export { whisperCppProvider, transcribeWhisperCpp, transcribeWhisperCppStream, hasWhisperCpp } from './whisper-cpp.js';
 export { CORE_GLOSSARY } from './glossary/core-terms.js';
 export type { GlossaryTerm } from './glossary/core-terms.js';

@@ -21,6 +21,11 @@ const mockSpeakStream = vi.fn();
 // the gate fires before the provider is touched, and drive a happy path.
 const mockTranscribeWithStream = vi.fn();
 const mockExtractSessionContext = vi.fn(() => ({}));
+// STT debit: the route debits pool-key Voxtral spend only when Voxtral is the
+// active backend AND the audio-duration probe succeeded. Both are made
+// controllable so the debit-fires / debit-skipped branches can be asserted.
+const mockGetActiveTranscribeProvider = vi.fn((): { name: string } | null => ({ name: 'whisper-cpp' }));
+const mockGetAudioDurationSec = vi.fn(async (): Promise<number | null> => null);
 
 const mockSessionRun = vi.fn().mockResolvedValue('Agent response');
 const mockSessionAbort = vi.fn();
@@ -243,6 +248,10 @@ vi.mock('../core/transcribe.js', async (importActual) => ({
   HAS_WHISPER: true,
   transcribeWithStream: mockTranscribeWithStream,
   extractSessionContext: mockExtractSessionContext,
+  getActiveTranscribeProvider: mockGetActiveTranscribeProvider,
+}));
+vi.mock('../core/audio-duration.js', () => ({
+  getAudioDurationSec: mockGetAudioDurationSec,
 }));
 
 // === Import after mocks ===
@@ -347,6 +356,10 @@ beforeEach(() => {
   mockExtractSessionContext.mockReturnValue({});
   mockTranscribeWithStream.mockReset();
   mockTranscribeWithStream.mockResolvedValue('transcribed text');
+  mockGetActiveTranscribeProvider.mockReset();
+  mockGetActiveTranscribeProvider.mockReturnValue({ name: 'whisper-cpp' });
+  mockGetAudioDurationSec.mockReset();
+  mockGetAudioDurationSec.mockResolvedValue(null);
 });
 
 // === Tests ===
@@ -4243,19 +4256,50 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
-    it('transcribes on the happy path and does NOT debit (STT debit deliberately unwired)', async () => {
+    it('does not debit when the active STT backend is local whisper (free, no pool-key spend)', async () => {
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun, onAfterRun }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'whisper-cpp' });
+      mockGetAudioDurationSec.mockResolvedValue(120);
       const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
       expect(res.status).toBe(200);
       await readSse(res);
-      // Gate passes (no-op when allowed) and STT streams.
       expect(onBeforeRun).toHaveBeenCalledOnce();
       expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
-      // No STT cost rate exists yet, so the debit is intentionally NOT fired —
-      // this pins that deliberate gap so a future debit wiring is a conscious
-      // change, not a silent regression.
+      // Local whisper is free — no pool-key spend, so no debit even with a known duration.
+      expect(onAfterRun).not.toHaveBeenCalled();
+    });
+
+    it('debits Voxtral pool-key STT via onAfterRun ($0.003/min) keyed on the gate run id', async () => {
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun, onAfterRun }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      mockGetAudioDurationSec.mockResolvedValue(60); // 1 minute → $0.003
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect(onAfterRun).toHaveBeenCalledOnce();
+      const debitRunId = onAfterRun.mock.calls[0]?.[0] as string;
+      const costUsd = onAfterRun.mock.calls[0]?.[1] as number;
+      expect(costUsd).toBeCloseTo(0.003, 6);
+      // Same run id as the gate → the CP dedups the debit against the gate.
+      expect(debitRunId).toBe(onBeforeRun.mock.calls[0]?.[0]);
+    });
+
+    it('does not debit Voxtral when the audio-duration probe fails (no per-minute basis)', async () => {
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun, onAfterRun }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      mockGetAudioDurationSec.mockResolvedValue(null); // probe failed → no duration
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      // Transcription still returned to the user; the debit is skipped because the
+      // Voxtral cost is per-minute and there is no duration to price it against.
+      expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
       expect(onAfterRun).not.toHaveBeenCalled();
     });
   });

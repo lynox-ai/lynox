@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier, ThinkingHint, EffortLevel } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
+import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
@@ -304,6 +305,12 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         maxSteps: 10,
         projectContext: input.context?.summary,
       });
+      if (plan) {
+        // The DAG planning call spent the pool key on a separate stream inside
+        // this (already gated) tool run — account it to the local session cap +
+        // the tenant balance. No-op on self-host / BYOK.
+        debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, plan.actualCostUsd, 'fast');
+      }
       if (plan && plan.steps.length > 0) {
         phases = plan.steps.map(s => ({
           name: s.id,

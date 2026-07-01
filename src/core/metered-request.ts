@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
+import { recordSessionCost } from './session-budget.js';
 import type { Engine, RunContext } from './engine.js';
-import type { ModelTier } from '../types/index.js';
+import type { ModelTier, SessionCounters } from '../types/index.js';
+
+/**
+ * Minimal engine surface these helpers need. Lets a non-`Session` caller that
+ * does NOT hold the full Engine (e.g. the KG extractor inside KnowledgeLayer)
+ * still gate + debit through the same lifecycle. `Engine` satisfies this, so
+ * existing callers pass `engine` unchanged.
+ */
+export type HookHost = Pick<Engine, 'getHooks' | 'getContext'>;
 
 /**
  * Gate + debit a metered request that does NOT flow through `Session.run()`.
@@ -44,8 +53,8 @@ export interface MeteredGateResult {
   blockedReason: string | null;
 }
 
-function buildRunContext(engine: Engine, runId: string, modelTier: ModelTier): RunContext {
-  const context = engine.getContext();
+function buildRunContext(host: HookHost, runId: string, modelTier: ModelTier): RunContext {
+  const context = host.getContext();
   return {
     runId,
     contextId: context?.id ?? '',
@@ -62,10 +71,10 @@ function buildRunContext(engine: Engine, runId: string, modelTier: ModelTier): R
  * when `blockedReason` is non-null. Returns the run id to thread into the
  * matching `reportMeteredCost()` on the success path.
  */
-export async function fireBeforeRunGate(engine: Engine, modelTier: ModelTier): Promise<MeteredGateResult> {
+export async function fireBeforeRunGate(host: HookHost, modelTier: ModelTier): Promise<MeteredGateResult> {
   const runId = randomUUID();
-  const runContext = buildRunContext(engine, runId, modelTier);
-  for (const hook of engine.getHooks()) {
+  const runContext = buildRunContext(host, runId, modelTier);
+  for (const hook of host.getHooks()) {
     if (hook.onBeforeRun) {
       try {
         await hook.onBeforeRun(runId, runContext);
@@ -83,14 +92,40 @@ export async function fireBeforeRunGate(engine: Engine, modelTier: ModelTier): P
  * Hook errors are non-fatal — the managed flush retries on the next run — so a
  * billing hiccup never breaks the audio response to the client.
  */
-export function reportMeteredCost(engine: Engine, runId: string, costUsd: number, modelTier: ModelTier): void {
+export function reportMeteredCost(host: HookHost, runId: string, costUsd: number, modelTier: ModelTier): void {
   if (costUsd <= 0) return;
-  const runContext = buildRunContext(engine, runId, modelTier);
-  for (const hook of engine.getHooks()) {
+  const runContext = buildRunContext(host, runId, modelTier);
+  for (const hook of host.getHooks()) {
     if (hook.onAfterRun) {
       try {
         hook.onAfterRun(runId, costUsd, runContext);
       } catch { /* non-fatal — billing flush retries on the next run */ }
     }
   }
+}
+
+/**
+ * Account for a pool-key spend made by an IN-RUN helper on a SEPARATE
+ * `beta.messages.stream` (web-search rerank, plan_task DAG planning, api_setup
+ * docs extraction, retrieval HyDE). Those tokens never flow through the agent's
+ * stream, so the enclosing run's own token accounting — hence both the local
+ * session budget AND the managed CP debit — would otherwise miss them.
+ *
+ * NO gate here: the enclosing run was already admitted by its `onBeforeRun`.
+ * This only makes the marginal spend VISIBLE — to the local `$max_session_cost`
+ * cap (`recordSessionCost`) and to the tenant balance (`reportMeteredCost` with
+ * a fresh run id; the CP dedups on it). `host` is null on self-host / BYOK, so
+ * the CP debit is skipped there while the local cap still tracks the spend.
+ */
+export function debitInRunHelperCost(
+  host: HookHost | null,
+  counters: SessionCounters,
+  costUsd: number,
+  modelTier: ModelTier,
+): void {
+  // `> 0` (not `<= 0`) so undefined/NaN — a helper whose usage was unavailable —
+  // is a clean no-op rather than poisoning the counter with NaN.
+  if (!(costUsd > 0)) return;
+  recordSessionCost(counters, costUsd);
+  if (host) reportMeteredCost(host, randomUUID(), costUsd, modelTier);
 }

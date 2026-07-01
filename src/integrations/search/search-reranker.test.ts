@@ -93,6 +93,24 @@ describe('rerankSearchResults', () => {
     expect(out.meanScore).toBeCloseTo(5.5);
   });
 
+  it('surfaces the pool-key rerank cost (costUsd) from response usage', async () => {
+    mockCreate.mockResolvedValueOnce({
+      ...(makeScoreResponse([9, 1, 10, 2]) as object),
+      usage: { input_tokens: 800, output_tokens: 120 },
+    });
+    const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true });
+    // Priced on the resolved fast model — positive, finite, well under a cent for
+    // a ~920-token call. The call site debits this to the tenant balance.
+    expect(out.costUsd).toBeGreaterThan(0);
+    expect(out.costUsd!).toBeLessThan(0.1);
+  });
+
+  it('leaves costUsd undefined when reranking is skipped (no LLM call)', async () => {
+    const out = await rerankSearchResults('x', makeResults()); // disabled by default → no call
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(out.costUsd).toBeUndefined();
+  });
+
   it('custom threshold respected', async () => {
     mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 10, 2]));
     const out = await rerankSearchResults('x', makeResults(), { enabled: true, threshold: 8 });

@@ -19,6 +19,7 @@
  */
 import type { SearchResult } from './search-provider.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from '../../core/llm-client.js';
+import { calculateCost } from '../../core/pricing.js';
 import { resolveTierModel } from '../../core/tier-resolver.js';
 import type { LLMProvider } from '../../types/index.js';
 import type { ProviderConfigSnapshot } from '../../types/agent.js';
@@ -38,6 +39,9 @@ export interface RerankOutcome {
   meanScore: number | null;
   skipReason?: 'disabled' | 'too-few-results' | 'provider-unsupported' | 'timeout' | 'llm-error' | 'malformed';
   durationMs: number;
+  /** Actual USD cost of the pool-key rerank call (from response.usage), for the
+   *  managed in-run debit. Undefined when no LLM call was made (skip/error). */
+  costUsd?: number | undefined;
 }
 
 const DEFAULT_THRESHOLD = 4;
@@ -182,6 +186,18 @@ export async function rerankSearchResults(
     );
     const response = await Promise.race([callPromise, timeoutPromise]);
 
+    // Actual pool-key spend of this rerank call, for the managed in-run debit at
+    // the call site (web-search-tool). Normalize the SDK's null cache fields.
+    const u = response.usage;
+    const costUsd = u
+      ? calculateCost(fast.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        })
+      : undefined;
+
     let scores: number[] | null = null;
     for (const block of response.content) {
       if (block.type === 'tool_use' && block.name === 'score_results') {
@@ -194,7 +210,7 @@ export async function rerankSearchResults(
     }
 
     if (!scores || scores.length !== results.length) {
-      return base({ skipReason: 'malformed' });
+      return base({ skipReason: 'malformed', ...(costUsd !== undefined ? { costUsd } : {}) });
     }
 
     const kept = results.filter((_, i) => (scores![i] ?? 0) >= threshold);
@@ -214,6 +230,7 @@ export async function rerankSearchResults(
       droppedCount: results.length - withScores.length,
       meanScore: mean,
       durationMs: Date.now() - start,
+      ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } catch (err) {
     const reason = err instanceof Error && err.message === 'rerank-timeout'

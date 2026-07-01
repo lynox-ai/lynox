@@ -22,6 +22,16 @@ import type { TranscribeOpts, TranscribeProvider } from './types.js';
 /** Model ID verified by Phase 0 spike. The docs alias `voxtral-mini-latest` resolves to this on `/audio/transcriptions`. */
 export const VOXTRAL_TRANSCRIBE_MODEL = 'voxtral-mini-2602';
 
+/**
+ * Published Mistral price for `voxtral-mini-2602` on `/audio/transcriptions`:
+ * $0.003 per minute of audio (unified rate, no separate in/out).
+ * Source: docs.mistral.ai/models/voxtral-mini-transcribe-26-02 (2026-07).
+ * Used to debit managed pool-key STT spend to the tenant balance — the STT twin
+ * of TTS's SPEAK_USD_PER_CHAR. Only applies when this provider is the active
+ * STT backend (local whisper.cpp is free → no debit).
+ */
+export const VOXTRAL_USD_PER_MIN = 0.003;
+
 const API_URL = 'https://api.mistral.ai/v1/audio/transcriptions';
 
 /** Extension → MIME mapping for the multipart blob content type. */

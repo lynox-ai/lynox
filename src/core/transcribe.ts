@@ -20,6 +20,7 @@ export {
   whisperCppProvider,
   hasMistralVoxtral,
   hasWhisperCpp,
+  VOXTRAL_USD_PER_MIN,
 } from './transcribe/index.js';
 
 export type {

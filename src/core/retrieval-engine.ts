@@ -9,6 +9,9 @@ import type {
 } from '../types/index.js';
 import { NAMESPACE_HALF_LIFE } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
+import { calculateCost } from './pricing.js';
+import { reportMeteredCost, type HookHost } from './metered-request.js';
+import { randomUUID } from 'node:crypto';
 import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
@@ -94,6 +97,7 @@ class LruCache<V> {
  */
 export class RetrievalEngine {
   private dataStoreBridge: DataStoreBridge | null = null;
+  private meteredHost: HookHost | null = null;
   private readonly _embeddingCache = new LruCache<number[]>(64);
   private readonly _hydeCache = new LruCache<string>(32);
 
@@ -112,6 +116,12 @@ export class RetrievalEngine {
   /** Propagate provider switch from KnowledgeLayer.setAnthropicClient(). */
   setAnthropicClient(client: Anthropic | undefined): void {
     this.anthropicClient = client;
+  }
+
+  /** Managed credit host for debiting the HyDE pool-key call (set by
+   *  KnowledgeLayer.setMeteredHost). Null on self-host / BYOK. */
+  setMeteredHost(host: HookHost | null): void {
+    this.meteredHost = host;
   }
 
   async retrieve(
@@ -373,6 +383,25 @@ export class RetrievalEngine {
         }],
       });
       const response = await stream.finalMessage();
+      // Debit this pool-key HyDE call to the tenant balance (managed). It runs
+      // inside the already-gated retrieval of a run, but its tokens never reach
+      // the run's own accounting, so debit the marginal cost here on a fresh run
+      // id (the CP dedups on it). No local-cap recording — the RetrievalEngine
+      // holds no session counters and a 256-token call is immaterial there.
+      const u = response.usage;
+      if (this.meteredHost && u) {
+        reportMeteredCost(
+          this.meteredHost,
+          randomUUID(),
+          calculateCost(fast.modelId, {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+          }),
+          'fast',
+        );
+      }
       const textBlock = response.content.find(b => b.type === 'text');
       return textBlock?.type === 'text' ? textBlock.text.slice(0, 300) : null;
     } catch {

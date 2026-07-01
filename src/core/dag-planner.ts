@@ -1,12 +1,16 @@
 import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from '../types/index.js';
 import { getBetasForProvider, getModelId, normalizeTier } from '../types/index.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
+import { calculateCost } from './pricing.js';
 import { resolveModel } from '../orchestrator/runtime-adapter.js';
 
 export interface DagPlanResult {
   steps: InlinePipelineStep[];
   reasoning: string;
   estimatedCost: number;
+  /** Actual USD cost of THIS pool-key planning call (from response.usage),
+   *  for the managed in-run debit. 0 when usage was unavailable. */
+  actualCostUsd: number;
 }
 
 const PLANNING_SYSTEM = `You are a DAG pipeline planner. Given a goal, decompose it into discrete steps that can run as independent sub-agents. Each step gets its own agent context — it has access to tools (bash, read_file, write_file, etc.) but not to your conversation.
@@ -149,10 +153,23 @@ export async function planDAG(
       // Enforce max steps limit
       const trimmed = steps.slice(0, maxSteps);
 
+      // Actual pool-key spend of this planning call, for the managed in-run
+      // debit at the call site. Normalize the SDK's null cache fields.
+      const u = response.usage;
+      const actualCostUsd = u
+        ? calculateCost(model, {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+          })
+        : 0;
+
       return {
         steps: trimmed,
         reasoning: typeof input.reasoning === 'string' ? input.reasoning : '',
         estimatedCost: typeof input.estimated_cost_usd === 'number' ? input.estimated_cost_usd : 0,
+        actualCostUsd,
       };
     } finally {
       clearTimeout(timeout);

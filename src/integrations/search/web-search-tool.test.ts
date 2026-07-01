@@ -2,6 +2,24 @@ import { describe, it, expect, vi } from 'vitest';
 import { createWebSearchTool } from './web-search-tool.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import * as reranker from './search-reranker.js';
+import { createToolContext } from '../../core/tool-context.js';
+import type { IAgent, SessionCounters } from '../../types/index.js';
+
+function makeCounters(): SessionCounters {
+  return {
+    httpRequests: 0, writeBytes: 0, costUSD: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
+}
+
+/** A minimal metered agent whose toolContext carries a hook host + counters. */
+function meteredAgent(onAfterRun: () => void): { agent: IAgent; counters: SessionCounters } {
+  const counters = makeCounters();
+  const toolContext = createToolContext({});
+  toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
+  return { agent: { toolContext, sessionCounters: counters } as unknown as IAgent, counters };
+}
 
 function mockProvider(results: SearchResult[] = []): SearchProvider {
   return {
@@ -245,6 +263,41 @@ describe('search edge cases', () => {
     expect(rerankSpy).toHaveBeenCalled();
     expect(result).toContain('A');
     expect(result).toContain('B');
+    rerankSpy.mockRestore();
+  });
+
+  it('debits the rerank pool-key spend to the tenant balance + local cap', async () => {
+    const raw: SearchResult[] = [
+      { title: 'A', url: 'https://a.invalid', snippet: 's1' },
+      { title: 'B', url: 'https://b.invalid', snippet: 's2' },
+    ];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({
+      results: [raw[0]!], droppedCount: 1, meanScore: 7, durationMs: 8, costUsd: 0.0006,
+    });
+    const onAfterRun = vi.fn();
+    const { agent, counters } = meteredAgent(onAfterRun);
+    await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
+
+    expect(counters.costUSD).toBeCloseTo(0.0006, 6);
+    expect(onAfterRun).toHaveBeenCalledOnce();
+    expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0006, 6);
+    rerankSpy.mockRestore();
+  });
+
+  it('does not debit when the reranker was skipped (undefined costUsd)', async () => {
+    const raw: SearchResult[] = [
+      { title: 'A', url: 'https://a.invalid', snippet: 's1' },
+      { title: 'B', url: 'https://b.invalid', snippet: 's2' },
+    ];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({
+      results: raw, droppedCount: 0, meanScore: null, skipReason: 'disabled', durationMs: 1,
+    });
+    const onAfterRun = vi.fn();
+    const { agent, counters } = meteredAgent(onAfterRun);
+    await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
+
+    expect(onAfterRun).not.toHaveBeenCalled();
+    expect(counters.costUSD).toBe(0);
     rerankSpy.mockRestore();
   });
 

@@ -21,6 +21,7 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
 import { fetchWithValidatedRedirects, readBodyLimited } from './http.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
+import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure } from '../../core/llm/endpoint-allowlist.js';
 
@@ -805,6 +806,10 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     });
     extracted = result.data;
     costUsd = result.costUsd;
+    // This pool-key extraction runs on a separate stream inside the (already
+    // gated) tool run — account its spend to the local session cap + the tenant
+    // balance so it isn't invisible to billing. No-op on self-host / BYOK.
+    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
   } catch (err: unknown) {
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;

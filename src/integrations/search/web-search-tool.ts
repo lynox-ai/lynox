@@ -3,6 +3,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import { extractContent } from './content-extractor.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { rerankSearchResults } from './search-reranker.js';
 
 interface WebSearchInput {
@@ -175,6 +176,12 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
             {},
             agent.getProviderConfig?.(),
           );
+          // The rerank ran a separate pool-key call inside this (already gated)
+          // tool run — account its spend to the local session cap + the tenant
+          // balance. No-op when reranking was skipped (no cost) or self-host.
+          if (reranked.costUsd !== undefined) {
+            debitInRunHelperCost(ctx.meteredHost, agent.sessionCounters, reranked.costUsd, 'fast');
+          }
           results = reranked.results;
           results = await enrichResults(results, ctx);
           const formatted = formatSearchResults(results);

@@ -293,6 +293,44 @@ describe('buildInboxRunner — budget circuit-breaker', () => {
   });
 });
 
+describe('buildInboxRunner — managed credit gate', () => {
+  it('blocks the pool-key classify + writes a budget_exceeded item when the CP gate denies', async () => {
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const meteredHost = {
+      getHooks: () => [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }],
+      getContext: () => undefined,
+    };
+    const queue = buildInboxRunner({ state: inbox, llm, meteredHost });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    // A credit-exhausted managed tenant never reaches the pool key.
+    expect(llm).not.toHaveBeenCalled();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.bucket).toBe('requires_user');
+    expect(items[0]?.reasonDe).toContain('Guthaben');
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
+    expect(payloadJson['fail_reason']).toBe('budget_exceeded');
+  });
+
+  it('lets the classify through when the CP gate allows (in-credit tenant)', async () => {
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'k' }),
+    );
+    const onBeforeRun = vi.fn();
+    const meteredHost = { getHooks: () => [{ onBeforeRun }], getContext: () => undefined };
+    const queue = buildInboxRunner({ state: inbox, llm, meteredHost });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(onBeforeRun).toHaveBeenCalledOnce();
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(inbox.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+});
+
 describe('buildInboxRunner — policy passthrough', () => {
   it('forwards maxConcurrency to the underlying queue', () => {
     const llm: LLMCaller = vi.fn(async () => '');

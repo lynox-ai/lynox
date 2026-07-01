@@ -299,6 +299,10 @@ vi.mock('./run-history.js', () => ({
     this.insertPromptSnapshot = mockInsertPromptSnapshot;
     // @ts-expect-error mock constructor
     this.updateRun = vi.fn();
+    // @ts-expect-error mock constructor — per-thread rollup source (session.ts:776).
+    // Without it the first-run rollup throws before the title path, so the
+    // fast-tier title metering never fires.
+    this.getThreadTotals = vi.fn().mockReturnValue({ tokens_in: 0, tokens_out: 0, cost_usd: 0 });
     // @ts-expect-error mock constructor — debug-export Tier 2 compaction events.
     this.insertCompactionEvent = vi.fn();
     // @ts-expect-error mock constructor
@@ -1094,6 +1098,74 @@ describe('Engine + Session (Orchestrator)', () => {
       agentMock.getEstimatedOccupancyTokens = () => 150_000;
       // budget 300K → ceiling 375K → 150K/375K = 40% — below the offer; no trim.
       expect((session as unknown as AutoCompact)._compactionUsagePercent()).toBe(40);
+    });
+  });
+
+  // -- The fast-tier LLM thread-title call spends the managed pool key and must
+  // fire the same gate + debit lifecycle as an interactive run. It runs
+  // fire-and-forget (`void _generateLLMTitle`) off the first turn of a fresh
+  // thread, so the assertions wait for the pending title promise to settle. The
+  // title uses tier `fast`; the main run uses `balanced` — filter hook calls by
+  // tier to separate the two. --
+  describe('managed thread-title metering', () => {
+    type Ctx = { modelTier?: string };
+    const cannedTitleResponse = {
+      content: [{ type: 'text', text: 'Weekly Budget Review' }],
+      usage: { input_tokens: 200, output_tokens: 12, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    };
+    function stubTitleStream(engine: Engine): ReturnType<typeof vi.fn> {
+      // Standard fast tier → clientForTierSnapshot returns the ambient client, so
+      // the title stream flows through engine.client. Return a canned finalMessage.
+      const stream = vi.fn().mockReturnValue({ finalMessage: () => Promise.resolve(cannedTitleResponse) });
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = stream;
+      return stream;
+    }
+
+    it('gates + debits the pool-key title call on a fresh thread, keyed on the gate run id', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const before = vi.fn();
+      const after = vi.fn();
+      engine.registerHooks({ onBeforeRun: before, onAfterRun: after });
+      const stream = stubTitleStream(engine);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('Plan the Q3 budget');
+
+      const fastAfter = (): unknown[] | undefined => after.mock.calls.find(c => (c[2] as Ctx)?.modelTier === 'fast');
+      await vi.waitFor(() => expect(fastAfter()).toBeDefined());
+
+      const fastBefore = before.mock.calls.find(c => (c[1] as Ctx)?.modelTier === 'fast');
+      expect(fastBefore, 'title gate must fire before the pool-key call').toBeDefined();
+      expect(stream).toHaveBeenCalledOnce();
+
+      const afterCall = fastAfter()!;
+      // Real spend (200 in / 12 out on the fast model) → a positive debit...
+      expect(afterCall[1] as number).toBeGreaterThan(0);
+      // ...keyed on the SAME run id as the gate, so the CP dedups it.
+      expect(afterCall[0]).toBe(fastBefore![0]);
+    });
+
+    it('skips the title call entirely when the tenant is credit-exhausted — no pool-key spend', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Block only the fast tier (the title). The main `balanced` run still passes,
+      // so the turn completes normally and the heuristic placeholder title stays.
+      const before = vi.fn(async (_runId: string, ctx: Ctx) => {
+        if (ctx.modelTier === 'fast') throw new Error('AI budget for this period reached.');
+      });
+      const after = vi.fn();
+      engine.registerHooks({ onBeforeRun: before, onAfterRun: after });
+      const stream = stubTitleStream(engine);
+
+      mockSend.mockResolvedValueOnce('response');
+      const result = await session.run('Plan the Q3 budget');
+      expect(result).toBe('response');
+
+      // Wait until the title's gate has fired (and thrown) before asserting the skip.
+      await vi.waitFor(() => expect(before.mock.calls.some(c => (c[1] as Ctx)?.modelTier === 'fast')).toBe(true));
+      await new Promise(r => setImmediate(r));
+
+      expect(stream, 'blocked title must not reach the provider').not.toHaveBeenCalled();
+      expect(after.mock.calls.some(c => (c[2] as Ctx)?.modelTier === 'fast')).toBe(false);
     });
   });
 });

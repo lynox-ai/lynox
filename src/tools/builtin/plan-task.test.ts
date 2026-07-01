@@ -522,6 +522,52 @@ describe('plan_task auto-planning fallback', () => {
     expect(pipeline!.steps[1]!.input_from).toEqual(['research']);
   });
 
+  it('debits the DAG-planning pool-key spend to the local cap + tenant balance', async () => {
+    mockPlanDAG.mockResolvedValueOnce({
+      steps: [{ id: 'research', task: 'Research the topic' }],
+      reasoning: 'r',
+      estimatedCost: 0.02,
+      actualCostUsd: 0.003,
+    });
+    const onAfterRun = vi.fn();
+    const counters = {
+      httpRequests: 0, writeBytes: 0, costUSD: 0,
+      approvedOutboundDomains: new Set<string>(),
+      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+    };
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
+
+    await planTaskTool.handler({ summary: 'Create a research report' }, agent);
+
+    // Local session cap sees the planning spend...
+    expect(counters.costUSD).toBeCloseTo(0.003, 6);
+    // ...and it is debited to the tenant balance.
+    expect(onAfterRun).toHaveBeenCalledOnce();
+    expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.003, 6);
+  });
+
+  it('does not debit when the DAG plan returns a zero actual cost', async () => {
+    mockPlanDAG.mockResolvedValueOnce({
+      steps: [{ id: 'a', task: 'do a' }],
+      reasoning: 'r',
+      estimatedCost: 0.02,
+      actualCostUsd: 0,
+    });
+    const onAfterRun = vi.fn();
+    const counters = {
+      httpRequests: 0, writeBytes: 0, costUSD: 0,
+      approvedOutboundDomains: new Set<string>(),
+      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+    };
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
+
+    await planTaskTool.handler({ summary: 'Create a research report' }, agent);
+    expect(onAfterRun).not.toHaveBeenCalled();
+    expect(counters.costUSD).toBe(0);
+  });
+
   it('should skip auto-plan when planDAG returns null', async () => {
     mockPlanDAG.mockResolvedValueOnce(null);
 

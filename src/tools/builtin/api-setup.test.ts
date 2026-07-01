@@ -774,6 +774,30 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('debits the docs-extraction pool-key spend to the tenant balance + local cap', async () => {
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.0021);
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        // Managed-instance shape: a cost counter + a wired metered host.
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/v1' },
+          agent,
+        );
+        expect(result).toContain('Bootstrapped draft profile');
+        expect((agent.sessionCounters as { costUSD: number }).costUSD).toBeCloseTo(0.0021, 6);
+        expect(onAfterRun).toHaveBeenCalledOnce();
+        expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0021, 6);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('produces parallel_ok=true / output_volume=streaming for an Anthropic-style docs page', async () => {
       const fetchSpy = mockFetchOk('<html>Anthropic docs...</html>');
       stubExtraction({

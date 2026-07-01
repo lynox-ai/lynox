@@ -298,6 +298,10 @@ export class Engine {
     }
 
     this._toolContext = createToolContext(this.userConfig);
+    // The Engine is the managed credit host: in-run tool helpers that spend the
+    // pool key on a separate stream (rerank / plan_task / api_setup) debit their
+    // marginal cost through it. No-op on self-host / BYOK (no hooks registered).
+    this._toolContext.meteredHost = this;
   }
 
   getUserConfig(): LynoxUserConfig {
@@ -578,6 +582,8 @@ export class Engine {
       bootOpts.notificationRouter = this._notificationRouter;
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
+      // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
+      bootOpts.meteredHost = this;
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -960,6 +966,9 @@ export class Engine {
     this.embeddingProvider = initEmbeddingProvider(this.userConfig, this.runHistory);
     this.knowledgeLayer = await initKnowledgeLayer(this.userConfig, this.embeddingProvider, this.client, this.runHistory, this.engineDb);
     this._toolContext.knowledgeLayer = this.knowledgeLayer;
+    // Route pool-key KG-extraction spend through the managed gate + debit (same
+    // onBeforeRun/onAfterRun lifecycle as chat/voice). No-op on self-host.
+    this.knowledgeLayer?.setMeteredHost(this);
 
     // Initialize DataStore ↔ Knowledge Graph Bridge
     if (this.knowledgeLayer && this._dataStore) {
@@ -1322,6 +1331,8 @@ export class Engine {
         // in the dashboard.
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
+        // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
+        bootOpts.meteredHost = this;
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured

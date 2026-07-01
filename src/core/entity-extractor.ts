@@ -3,6 +3,7 @@ import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget } from './kg-stopwords.js';
+import { calculateCost } from './pricing.js';
 
 export interface ExtractedEntity {
   name: string;
@@ -20,6 +21,8 @@ export interface ExtractedRelation {
 export interface ExtractionResult {
   entities: ExtractedEntity[];
   relations: ExtractedRelation[];
+  /** USD cost of the pool-key LLM extraction (absent on the regex-only path). */
+  costUsd?: number | undefined;
 }
 
 // === Tier 1: Regex-based extraction (zero cost, always runs) ===
@@ -265,10 +268,22 @@ export async function extractEntitiesLLM(
     });
     const response = await stream.finalMessage();
 
+    // Cost BEFORE the no-text-block early return so the spend is surfaced (and
+    // debited) even when the response carried no usable text. Best-effort — 0
+    // without usage; SDK null cache fields normalized to undefined.
+    const u = response.usage;
+    const costUsd = u
+      ? calculateCost(fast.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        })
+      : 0;
     const textBlock = response.content.find(b => b.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') return { entities: [], relations: [] };
+    if (!textBlock || textBlock.type !== 'text') return { entities: [], relations: [], costUsd };
 
-    return parseExtractionResponse(textBlock.text);
+    return { ...parseExtractionResponse(textBlock.text), costUsd };
   } catch {
     return { entities: [], relations: [] };
   }
@@ -286,7 +301,8 @@ export async function extractEntities(
 
   if (client && shouldUseLLMExtraction(text, namespace, regexResult.entities)) {
     const llmResult = await extractEntitiesLLM(text, client);
-    return mergeResults(regexResult, llmResult);
+    // Carry the LLM call's pool-key cost through the merge for the managed debit.
+    return { ...mergeResults(regexResult, llmResult), costUsd: llmResult.costUsd ?? 0 };
   }
 
   return regexResult;

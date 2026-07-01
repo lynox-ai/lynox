@@ -9,8 +9,11 @@
 // responsibility is the wiring order and the closure that connects the
 // LLM caller's `onUsage` hook to the budget's `recordUsage`.
 
+import { randomUUID } from 'node:crypto';
+
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CRM } from '../../core/crm.js';
+import { reportMeteredCost, type HookHost } from '../../core/metered-request.js';
 import { getModelId } from '../../types/index.js';
 import type { LLMCaller } from './classifier/index.js';
 import {
@@ -124,6 +127,13 @@ export interface BootstrapInboxOptions {
    */
   requireUsAck?: boolean | undefined;
   privacyAck?: boolean | undefined;
+  /**
+   * Managed credit lifecycle host (the Engine). When wired, classifier spend
+   * fires the same `onBeforeRun` gate (in the runner) + `onAfterRun` debit (in
+   * `onUsage`) as an interactive run, so managed classifier spend is both
+   * credit-gated and debited to the tenant balance. Absent on self-host / BYOK.
+   */
+  meteredHost?: HookHost | undefined;
   /** When wired, the reminder poller is started on bootstrap and stopped
    *  on runtime.shutdown(). Absent in tests + no-notification deployments
    *  — the inbox still works, reminders just don't fire push (mail still
@@ -176,23 +186,31 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
 
   const onUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
     budget.recordUsage(usage.inputTokens, usage.outputTokens);
+    // One cost basis for all three consumers below — the local daily cap, the
+    // RunHistory dashboard bridge, and the managed CP debit — so they never
+    // diverge. Reuses the same constants InboxCostBudget uses.
+    const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? DEFAULT_INPUT_COST_PER_MTOK;
+    const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? DEFAULT_OUTPUT_COST_PER_MTOK;
+    const costUsd =
+      (usage.inputTokens / 1_000_000) * inputCostPerMtok
+      + (usage.outputTokens / 1_000_000) * outputCostPerMtok;
+    // Debit managed pool-key classifier spend to the tenant balance. A fresh run
+    // id per call — the CP dedups on it — since the classifier has no Session
+    // reservation to settle (managed-hook onBeforeRun/onAfterRun are decoupled).
+    // No-op on self-host / BYOK (no hooks registered).
+    if (opts.meteredHost) {
+      reportMeteredCost(opts.meteredHost, randomUUID(), costUsd, 'fast');
+    }
     // Also bridge to RunHistory so the "$X today" status-bar (which reads
     // from /api/history/cost/daily) reflects classifier spend, not just
     // interactive chat. Without this, every classifier call costs real
     // money the user can't see — and that's the bug rafael flagged.
     if (opts.runHistory) {
       try {
-        // Reuse the same constants InboxCostBudget uses so the daily-spend
-        // dashboard matches the per-classifier budget exactly. A future
-        // refactor must NOT also route classifier calls through
+        // A future refactor must NOT also route classifier calls through
         // Session.callLLM (which inserts into RunHistory itself) — that
         // would double-count. The `taskText` prefix 'inbox classifier' is
         // the agreed sentinel for grepping if a dedup gate gets needed.
-        const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? DEFAULT_INPUT_COST_PER_MTOK;
-        const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? DEFAULT_OUTPUT_COST_PER_MTOK;
-        const costUsd =
-          (usage.inputTokens / 1_000_000) * inputCostPerMtok
-          + (usage.outputTokens / 1_000_000) * outputCostPerMtok;
         const id = opts.runHistory.insertRun({
           taskText: 'inbox classifier',
           modelTier: 'haiku',
@@ -264,6 +282,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     llm,
     budget,
     policy: opts.policy,
+    ...(opts.meteredHost ? { meteredHost: opts.meteredHost } : {}),
     ...(notifier ? { notifier } : {}),
   });
 

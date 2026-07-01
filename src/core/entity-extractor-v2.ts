@@ -9,6 +9,7 @@ import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getActiveProvider, isCustomProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget } from './kg-stopwords.js';
+import { calculateCost } from './pricing.js';
 
 /**
  * Entity extracted by the v2 tool-call pipeline.
@@ -32,6 +33,13 @@ export interface ExtractedRelationV2 {
 export interface ExtractionResultV2 {
   entities: ExtractedEntityV2[];
   relations: ExtractedRelationV2[];
+  /**
+   * USD cost of this pool-key extraction call, from the SDK-reported usage.
+   * Present only on a live `extractEntitiesV2` call (absent on the pure
+   * `parseToolInput` path). The managed debit reports this so aux fast-tier
+   * extraction spend converges on the same onAfterRun debit as chat runs.
+   */
+  costUsd?: number | undefined;
 }
 
 /** Fixed predicate vocabulary — forces the model into known categories. */
@@ -293,13 +301,28 @@ export async function extractEntitiesV2(
     });
 
     const response = await stream.finalMessage();
+    // Cost of this pool-key helper call, for the managed debit. Computed BEFORE
+    // the no-tool-use early return so the spend is surfaced (and debited) even
+    // when the model didn't emit the forced tool. calculateCost is priced by the
+    // resolved fast-tier model (Anthropic or Mistral); normalize the SDK's `null`
+    // cache fields to `undefined`. Best-effort — 0 without usage.
+    const u = response.usage;
+    const costUsd = u
+      ? calculateCost(fast.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        })
+      : 0;
     const toolUse = response.content.find(
       (b): b is Extract<typeof b, { type: 'tool_use' }> =>
         b.type === 'tool_use' && b.name === TOOL_NAME,
     );
-    if (!toolUse) return { entities: [], relations: [] };
+    if (!toolUse) return { entities: [], relations: [], costUsd };
 
-    return parseToolInput(toolUse.input);
+    const parsed = parseToolInput(toolUse.input);
+    return { ...parsed, costUsd };
   } catch {
     return { entities: [], relations: [] };
   }
