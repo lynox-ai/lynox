@@ -146,6 +146,10 @@ describe('triggerRecordToRow (legacy → engine.db mapping)', () => {
     expect(row.nextRunAt).toBe('2026-07-02');
     expect(row.enabled).toBe(true);
     expect(row.retryCount).toBe(2);
+    // scope fields relocate verbatim (they carry the customer-scoping axis at S3d;
+    // StoredTrigger omits them, so assert on the mapper output directly).
+    expect(row.scopeType).toBe('project');
+    expect(row.scopeId).toBe('proj-1');
     // condition_json carries both raw legacy columns (round-trippable at S3d)
     expect(JSON.parse(row.conditionJson)).toEqual({ schedule_cron: '0 9 * * *', watch_config: null });
   });

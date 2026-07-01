@@ -173,7 +173,7 @@ describe('RunHistory verb-graph mirror — triggers (Foundation Rework v2 — S3
 
   function trig(over: {
     id?: string; title?: string; taskType?: string; scheduleCron?: string;
-    nextRunAt?: string; pipelineId?: string; pipelineParams?: string;
+    nextRunAt?: string; pipelineId?: string; pipelineParams?: string; watchConfig?: string;
   } = {}) {
     return {
       id: over.id ?? 'tr-1',
@@ -186,6 +186,7 @@ describe('RunHistory verb-graph mirror — triggers (Foundation Rework v2 — S3
       nextRunAt: over.nextRunAt ?? '2026-07-02T09:00:00Z',
       pipelineId: over.pipelineId,
       pipelineParams: over.pipelineParams ?? '{"tone":"brief"}',
+      watchConfig: over.watchConfig,
     };
   }
 
@@ -228,11 +229,17 @@ describe('RunHistory verb-graph mirror — triggers (Foundation Rework v2 — S3
     history.close();
   });
 
-  it('flag ON → updateTrigger re-projects the changed schedule into condition_json', () => {
+  it('flag ON → updateTrigger re-projects the change AND preserves fields it did not touch', () => {
     const { history, engine, reader } = make(true, 'k');
-    history.insertTrigger(trig({ scheduleCron: '0 9 * * *' }));
+    const wc = '{"url":"https://x.test"}';
+    history.insertTrigger(trig({ scheduleCron: '0 9 * * *', watchConfig: wc }));
+    // updateTrigger touches only scheduleCron. Because the mirror RE-PROJECTS the
+    // full legacy row (not a per-field json_set), the untouched watch_config must
+    // survive in condition_json — a regression to per-field patching would drop it.
     history.updateTrigger('tr-1', { scheduleCron: '30 6 * * 1' });
-    expect(JSON.parse(reader.get('tr-1')!.conditionJson).schedule_cron).toBe('30 6 * * 1');
+    const cond = JSON.parse(reader.get('tr-1')!.conditionJson) as { schedule_cron: string; watch_config: string };
+    expect(cond.schedule_cron).toBe('30 6 * * 1'); // changed field re-projected
+    expect(cond.watch_config).toBe(wc);            // untouched field preserved (proves re-project ≠ patch)
     engine.close();
     history.close();
   });
@@ -281,11 +288,24 @@ describe('RunHistory verb-graph mirror — triggers (Foundation Rework v2 — S3
     history.close();
   });
 
-  it('mirror failure is isolated — a closed engine.db never breaks the legacy trigger write', () => {
+  it('mirror failure is isolated — legacy write AND the WorkerLoop money-path read are unperturbed', () => {
     const { history, engine } = make(true);
     engine.close(); // every subsequent TriggerStore op now throws
-    expect(() => history.insertTrigger(trig())).not.toThrow();
-    expect(history.getTrigger('tr-1')).toBeDefined(); // legacy still authoritative
+    // A due trigger (past next_run_at) so getDueTriggers — the WorkerLoop's actual
+    // read on the money-path — would select it.
+    expect(() => history.insertTrigger(trig({ nextRunAt: '2020-01-01T00:00:00Z' }))).not.toThrow();
+    expect(history.getTrigger('tr-1')).toBeDefined();                       // legacy read authoritative
+    expect(history.getDueTriggers().some(t => t.id === 'tr-1')).toBe(true); // money-path read intact
+    history.close();
+  });
+
+  it('flag ON → a write to a non-existent trigger re-projects nothing (raced-delete no-op)', () => {
+    const { history, engine, reader } = make(true);
+    // updateTrigger matches no row → _reprojectTrigger reads back undefined → the
+    // `if (rec)` guard makes it a no-op (no throw, no phantom mirror row).
+    expect(() => history.updateTrigger('ghost', { status: 'completed' })).not.toThrow();
+    expect(reader.get('ghost')).toBeUndefined();
+    engine.close();
     history.close();
   });
 
