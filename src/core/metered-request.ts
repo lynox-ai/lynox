@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
+import { recordSessionCost } from './session-budget.js';
 import type { Engine, RunContext } from './engine.js';
-import type { ModelTier } from '../types/index.js';
+import type { ModelTier, SessionCounters } from '../types/index.js';
 
 /**
  * Minimal engine surface these helpers need. Lets a non-`Session` caller that
@@ -101,4 +102,30 @@ export function reportMeteredCost(host: HookHost, runId: string, costUsd: number
       } catch { /* non-fatal — billing flush retries on the next run */ }
     }
   }
+}
+
+/**
+ * Account for a pool-key spend made by an IN-RUN helper on a SEPARATE
+ * `beta.messages.stream` (web-search rerank, plan_task DAG planning, api_setup
+ * docs extraction, retrieval HyDE). Those tokens never flow through the agent's
+ * stream, so the enclosing run's own token accounting — hence both the local
+ * session budget AND the managed CP debit — would otherwise miss them.
+ *
+ * NO gate here: the enclosing run was already admitted by its `onBeforeRun`.
+ * This only makes the marginal spend VISIBLE — to the local `$max_session_cost`
+ * cap (`recordSessionCost`) and to the tenant balance (`reportMeteredCost` with
+ * a fresh run id; the CP dedups on it). `host` is null on self-host / BYOK, so
+ * the CP debit is skipped there while the local cap still tracks the spend.
+ */
+export function debitInRunHelperCost(
+  host: HookHost | null,
+  counters: SessionCounters,
+  costUsd: number,
+  modelTier: ModelTier,
+): void {
+  // `> 0` (not `<= 0`) so undefined/NaN — a helper whose usage was unavailable —
+  // is a clean no-op rather than poisoning the counter with NaN.
+  if (!(costUsd > 0)) return;
+  recordSessionCost(counters, costUsd);
+  if (host) reportMeteredCost(host, randomUUID(), costUsd, modelTier);
 }

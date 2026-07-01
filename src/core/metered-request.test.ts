@@ -1,7 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import type { Engine, LynoxHooks } from './engine.js';
-import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
+import type { SessionCounters } from '../types/index.js';
+import { fireBeforeRunGate, reportMeteredCost, debitInRunHelperCost } from './metered-request.js';
+
+function makeCounters(): SessionCounters {
+  return {
+    httpRequests: 0,
+    writeBytes: 0,
+    costUSD: 0,
+    approvedOutboundDomains: new Set<string>(),
+    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+  };
+}
 
 /** Minimal Engine stub exposing only what the metered helpers read. */
 function makeEngine(hooks: LynoxHooks[]): Engine {
@@ -85,5 +96,37 @@ describe('reportMeteredCost — post-run debit', () => {
     // not propagate to the caller.
     expect(() => reportMeteredCost(makeEngine([{ onAfterRun }, { onAfterRun: onAfterRun2 }]), 'run-9', 1, 'fast')).not.toThrow();
     expect(onAfterRun2).toHaveBeenCalledOnce();
+  });
+});
+
+describe('debitInRunHelperCost — in-run helper spend accounting', () => {
+  it('records the local session cost AND fires the CP debit on a fresh run id', () => {
+    const onAfterRun = vi.fn();
+    const counters = makeCounters();
+    debitInRunHelperCost(makeEngine([{ onAfterRun }]), counters, 0.002, 'fast');
+    // Local session cap sees it...
+    expect(counters.costUSD).toBeCloseTo(0.002, 6);
+    // ...and the tenant balance is debited on a fresh (uuid) run id.
+    expect(onAfterRun).toHaveBeenCalledOnce();
+    const [runIdArg, costArg, ctxArg] = onAfterRun.mock.calls[0]!;
+    expect(runIdArg).toMatch(/^[0-9a-f-]{36}$/);
+    expect(costArg).toBeCloseTo(0.002, 6);
+    expect((ctxArg as { modelTier: string }).modelTier).toBe('fast');
+  });
+
+  it('still records the local cost but skips the CP debit on self-host (null host)', () => {
+    const counters = makeCounters();
+    expect(() => debitInRunHelperCost(null, counters, 0.5, 'fast')).not.toThrow();
+    expect(counters.costUSD).toBe(0.5);
+  });
+
+  it('is a clean no-op for zero / negative / NaN / undefined cost (no counter poisoning)', () => {
+    const onAfterRun = vi.fn();
+    const counters = makeCounters();
+    for (const bad of [0, -1, NaN, undefined as unknown as number]) {
+      debitInRunHelperCost(makeEngine([{ onAfterRun }]), counters, bad, 'fast');
+    }
+    expect(counters.costUSD).toBe(0);
+    expect(onAfterRun).not.toHaveBeenCalled();
   });
 });

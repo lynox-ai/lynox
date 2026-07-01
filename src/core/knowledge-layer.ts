@@ -128,6 +128,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    */
   setMeteredHost(host: HookHost | null): void {
     this.meteredHost = host;
+    // Also let the retrieval engine debit its own pool-key HyDE call.
+    this.retrievalEngine.setMeteredHost(host);
   }
 
   // === Lifecycle ===

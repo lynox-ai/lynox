@@ -87,6 +87,34 @@ describe('planDAG', () => {
     expect(result!.estimatedCost).toBe(0.12);
   });
 
+  it('computes actualCostUsd from response usage (for the managed in-run debit)', async () => {
+    mockCreate.mockResolvedValueOnce({
+      ...makeToolUseResponse({
+        steps: [{ id: 'a', task: 'do a', model: 'fast' }],
+        reasoning: 'r',
+        estimated_cost_usd: 0.01,
+      }),
+      usage: { input_tokens: 1000, output_tokens: 200 },
+    });
+    const result = await planDAG('build the app');
+    expect(result).not.toBeNull();
+    // Priced on the resolved fast model — a positive, finite, sub-cent-ish cost
+    // (a 1.2k-token call), NOT the model-emitted `estimated_cost_usd` (0.01).
+    expect(Number.isFinite(result!.actualCostUsd)).toBe(true);
+    expect(result!.actualCostUsd).toBeGreaterThan(0);
+    expect(result!.actualCostUsd).toBeLessThan(0.1);
+  });
+
+  it('actualCostUsd is 0 when the response carries no usage', async () => {
+    mockCreate.mockResolvedValueOnce(makeToolUseResponse({
+      steps: [{ id: 'a', task: 'do a' }],
+      reasoning: 'r',
+      estimated_cost_usd: 0.01,
+    }));
+    const result = await planDAG('build the app');
+    expect(result!.actualCostUsd).toBe(0);
+  });
+
   it('filters out invalid step objects', async () => {
     mockCreate.mockResolvedValueOnce(makeToolUseResponse({
       steps: [

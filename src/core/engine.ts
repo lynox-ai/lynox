@@ -298,6 +298,10 @@ export class Engine {
     }
 
     this._toolContext = createToolContext(this.userConfig);
+    // The Engine is the managed credit host: in-run tool helpers that spend the
+    // pool key on a separate stream (rerank / plan_task / api_setup) debit their
+    // marginal cost through it. No-op on self-host / BYOK (no hooks registered).
+    this._toolContext.meteredHost = this;
   }
 
   getUserConfig(): LynoxUserConfig {

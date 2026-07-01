@@ -12,6 +12,7 @@ import type { DataStore } from './data-store.js';
 import type { CRM } from './crm.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunHistory } from './run-history.js';
+import type { HookHost } from './metered-request.js';
 import type {
   IKnowledgeLayer,
   LynoxUserConfig,
@@ -68,6 +69,16 @@ export interface ToolContext {
 
   // ── Step hint from ask_user (applied at next session.run()) ──
   pendingStepHint: StepHint | null;
+
+  /**
+   * Managed credit lifecycle host (the Engine). Lets an in-run tool helper that
+   * spends the pool key on a SEPARATE `beta.messages.stream` (web-search rerank,
+   * plan_task DAG planning, api_setup docs extraction) debit that marginal cost
+   * to the tenant balance — those tokens never flow through the agent's stream,
+   * so the run's own `onAfterRun` debit would otherwise miss them. No gate here:
+   * the enclosing run is already gated. Null on self-host / BYOK (no hooks).
+   */
+  meteredHost: HookHost | null;
 }
 
 /** Create a default (empty) ToolContext. */
@@ -93,6 +104,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     pendingStepHint: null,
+    meteredHost: null,
   };
 }
 
