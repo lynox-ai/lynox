@@ -1557,6 +1557,14 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as tokens_out
       FROM runs
       WHERE session_id = ? AND status != 'running'
+        -- A2: exclude the pipeline_step overlay for consistency with the other 4
+        -- spend aggregates — this was the lone one missing the guard. Defensive,
+        -- not a fix for an observed bug: pipeline_step rows are keyed on the
+        -- pipeline's OWN run UUID (runner.ts: session_id = state.runId), never a
+        -- chat session id, so this getter never matched them in practice. But the
+        -- A2 invariant is "pipeline_step must NEVER move a spend aggregate", so
+        -- align this one too rather than rely on that keying accident.
+        AND run_type != 'pipeline_step'
     `).get(sessionId) as { cost_usd: number; tokens_in: number; tokens_out: number } | undefined;
     return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
   }
@@ -1569,7 +1577,14 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as total_tokens_out,
              COALESCE(SUM(cost_usd), 0) as total_cost_usd,
              COALESCE(AVG(duration_ms), 0) as avg_duration_ms
-      FROM runs WHERE status NOT IN ('running', 'failed')
+      FROM runs WHERE status != 'running'
+        -- Count every TERMINAL run — completed AND failed. A failed/interrupted
+        -- run still burned (provider-billed) tokens, so its cost is real spend;
+        -- excluding it under-reports cost and let the persistent budget cap be
+        -- bypassed by forcing runs to fail after consuming tokens. Only 'running'
+        -- (not-yet-finalized) rows are excluded. This predicate MUST match every
+        -- other spend aggregate below — the old getThreadTotals-includes-failed /
+        -- rest-exclude-failed split was the footer↔dashboard drift.
         -- A2: pipeline_step rows are an observability overlay (live progress +
         -- tool-call attribution); they carry real per-step cost/tokens for the
         -- run-detail view but must NEVER move spend/stats/usage aggregates.
@@ -1584,7 +1599,7 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as tokens_out,
              COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
              COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
-      FROM runs WHERE status NOT IN ('running', 'failed')
+      FROM runs WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
@@ -1605,11 +1620,13 @@ export class RunHistory {
    * UTC behaviour. This is the spine of footer↔dashboard "today" agreement.
    */
   getCostByDay(days: number, opts?: { tzOffsetMin?: number }): Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }> {
-    // Bucket key is tz-shifted (local calendar day); the WINDOW predicate is
-    // left exactly as before (`created_at >= datetime('now','-N days')`) so the
-    // budget-enforcement path (session-budget.ts → checkPersistentBudget) that
-    // also calls this keeps identical row-inclusion semantics. Only the day
-    // GROUPING moves to the user's local day. mod = minutes to add to UTC.
+    // Bucket key is tz-shifted (local calendar day); the WINDOW predicate stays
+    // `created_at >= datetime('now','-N days')`. Row inclusion is `status !=
+    // 'running'` — the SAME as every other spend aggregate — so the budget-
+    // enforcement path (session-budget.ts → checkPersistentBudget) counts the
+    // cost of failed/interrupted runs too. Previously this excluded 'failed',
+    // which let the daily/monthly cap be bypassed by forcing runs to fail after
+    // burning tokens. Only the day GROUPING is tz-local. mod = minutes to add.
     // `user_turns` (chat turns, excl. voice + spawned/batch sub-runs) is the
     // headline "N runs" count; `run_count` stays all-rows for callers that need
     // the full count.
@@ -1620,7 +1637,7 @@ export class RunHistory {
              COUNT(*) as run_count,
              SUM(CASE WHEN COALESCE(kind,'llm') = 'llm' AND spawn_depth = 0 AND run_type != 'batch_item' THEN 1 ELSE 0 END) as user_turns
       FROM runs
-      WHERE created_at >= datetime('now', ?) AND status NOT IN ('running', 'failed')
+      WHERE created_at >= datetime('now', ?) AND status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY date(created_at, ?) ORDER BY day DESC
     `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
@@ -1636,9 +1653,32 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as tokens_out,
              COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
              COALESCE(SUM(tokens_cache_write), 0) as tokens_cache_write
-      FROM runs WHERE run_type != 'pipeline_step' -- A2 overlay, excluded from spend
+      FROM runs WHERE status != 'running' -- exclude in-flight (no finalized cost); failed counts
+        AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
+  }
+
+  /**
+   * Boot-time recovery: any run still marked 'running' when the engine starts
+   * was killed mid-flight by the previous process (crash, OOM, container
+   * restart) and can never finalize itself — lynox is one-engine-per-DB, so on
+   * boot there is no other live writer and every 'running' row is an orphan.
+   * Flip them to 'failed' so (a) they stop reading as perpetually in-flight and
+   * (b) any partial cost recorded before the crash now counts in the spend
+   * aggregates (which include 'failed'). Mirrors run_registry.sweepInterrupted()
+   * — that recovers the live-run nav table; this recovers the cost-history
+   * table. `stop_reason` is stamped only when empty so a boot-swept orphan is
+   * distinguishable from a genuinely errored run without clobbering a real
+   * reason. Returns the number of rows swept.
+   */
+  sweepStuckRuns(): number {
+    return this.db.prepare(
+      `UPDATE runs
+         SET status = 'failed',
+             stop_reason = CASE WHEN stop_reason = '' THEN 'interrupted' ELSE stop_reason END
+       WHERE status = 'running'`,
+    ).run().changes;
   }
 
   /**
@@ -1666,7 +1706,7 @@ export class RunHistory {
              COALESCE(SUM(tokens_out), 0) as tokens_out,
              COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read
       FROM runs
-      WHERE status NOT IN ('running', 'failed')
+      WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
         AND created_at >= ? AND created_at < ?
       GROUP BY model_id
@@ -1694,7 +1734,7 @@ export class RunHistory {
              ), 0) as unit_count,
              COUNT(*) as run_count
       FROM runs
-      WHERE status NOT IN ('running', 'failed')
+      WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
         AND created_at >= ? AND created_at < ?
       GROUP BY COALESCE(kind, 'llm')
@@ -1709,7 +1749,7 @@ export class RunHistory {
     const dailyRaw = this.db.prepare(`
       SELECT date(created_at) as day, COALESCE(SUM(cost_usd), 0) as cost_usd
       FROM runs
-      WHERE status NOT IN ('running', 'failed')
+      WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
         AND created_at >= ? AND created_at < ?
       GROUP BY date(created_at)

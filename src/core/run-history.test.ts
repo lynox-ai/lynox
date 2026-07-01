@@ -459,11 +459,46 @@ describe('RunHistory', () => {
     const h = createHistory();
     const id1 = h.insertRun({ taskText: 'T1', modelTier: 'deep', modelId: 'claude-opus-4-6' });
     const id2 = h.insertRun({ taskText: 'T2', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
-    h.updateRun(id1, { costUsd: 0.10 });
-    h.updateRun(id2, { costUsd: 0.02 });
+    // Terminal status required: getCostByModel excludes in-flight 'running' rows
+    // (no finalized cost), matching every other spend aggregate.
+    h.updateRun(id1, { costUsd: 0.10, status: 'completed' });
+    h.updateRun(id2, { costUsd: 0.02, status: 'completed' });
 
     const models = h.getCostByModel();
     expect(models.length).toBe(2);
+    h.close();
+  });
+
+  it('getCostByModel counts failed (terminal, real spend) but excludes running', () => {
+    const h = createHistory();
+    const done = h.insertRun({ taskText: 'ok', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    const failed = h.insertRun({ taskText: 'boom', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    h.insertRun({ taskText: 'live', modelTier: 'deep', modelId: 'claude-opus-4-6' }); // stays 'running'
+    h.updateRun(done, { costUsd: 0.10, status: 'completed' });
+    h.updateRun(failed, { costUsd: 0.05, status: 'failed' });
+
+    const models = h.getCostByModel();
+    expect(models.length).toBe(1); // one model_id
+    expect(models[0]!.cost_usd).toBeCloseTo(0.15); // completed + failed, running excluded
+    h.close();
+  });
+
+  it('sweepStuckRuns flips orphaned running rows to failed (boot recovery)', () => {
+    const h = createHistory();
+    const orphan = h.insertRun({ taskText: 'crashed', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    const finished = h.insertRun({ taskText: 'ok', modelTier: 'deep', modelId: 'claude-opus-4-6' });
+    h.updateRun(finished, { costUsd: 0.05, status: 'completed' });
+    // orphan stays 'running' (crash before finalize)
+
+    const swept = h.sweepStuckRuns();
+    expect(swept).toBe(1); // only the orphan
+    expect(h.getRun(orphan)!.status).toBe('failed');
+    expect(h.getRun(orphan)!.stop_reason).toBe('interrupted');
+    expect(h.getRun(finished)!.status).toBe('completed'); // untouched
+    expect(h.getRun(finished)!.stop_reason).not.toBe('interrupted');
+
+    // Idempotent: a second sweep finds nothing.
+    expect(h.sweepStuckRuns()).toBe(0);
     h.close();
   });
 
@@ -1735,17 +1770,19 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('skips running + failed rows from aggregates', () => {
+    it('counts failed (real spend) but excludes only running rows', () => {
       const h = createHistory();
       // completed — counts
       insertAt(h, '2026-04-10T12:00:00.000Z', {
         taskText: 'ok', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.10, status: 'completed' });
-      // running — excluded
+      // running — excluded (cost not yet finalized)
       insertAt(h, '2026-04-11T12:00:00.000Z', {
         taskText: 'live', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.99 });
-      // failed — excluded
+      // failed — COUNTS: the provider billed these tokens, so the customer's
+      // balance is debited for them (session onAfterRun fires on failure too),
+      // and this dashboard must match that balance.
       insertAt(h, '2026-04-12T12:00:00.000Z', {
         taskText: 'bad', modelTier: 'balanced', modelId: 'claude-sonnet-4-6',
       }, { costUsd: 0.99, status: 'failed' });
@@ -1757,8 +1794,60 @@ describe('RunHistory', () => {
         label: 'Apr',
       });
 
-      expect(s.used_cents).toBe(10);
-      expect(s.by_kind.reduce((n, k) => n + k.run_count, 0)).toBe(1);
+      expect(s.used_cents).toBe(109); // completed 10c + failed 99c; running (99c) excluded
+      expect(s.by_kind.reduce((n, k) => n + k.run_count, 0)).toBe(2); // completed + failed
+      h.close();
+    });
+
+    it('failed-run cost converges across ALL spend aggregates (anti-drift guard)', () => {
+      // One failed run + one completed run + one running run. The failed run
+      // MUST appear in every spend aggregate and the running run in NONE — the
+      // exact invariant whose violation (getThreadTotals counted failed, the
+      // rest excluded it) split the footer from the dashboard and let the budget
+      // cap be bypassed. If a future edit re-diverges one aggregate, this breaks.
+      const h = createHistory();
+      const sid = 'thread-converge';
+      const done = h.insertRun({ sessionId: sid, taskText: 'ok', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+      const failed = h.insertRun({ sessionId: sid, taskText: 'bad', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+      h.insertRun({ sessionId: sid, taskText: 'live', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' }); // running
+      h.updateRun(done, { costUsd: 0.10, status: 'completed' });
+      h.updateRun(failed, { costUsd: 0.07, status: 'failed' });
+
+      const expected = 0.17; // completed + failed, running excluded
+
+      // getThreadTotals
+      expect(h.getThreadTotals(sid).cost_usd).toBeCloseTo(expected);
+      // getStats.total_cost_usd
+      expect(h.getStats().total_cost_usd).toBeCloseTo(expected);
+      // getCostByDay (the budget-cap source)
+      const byDay = h.getCostByDay(3650);
+      expect(byDay.reduce((n, d) => n + d.cost_usd, 0)).toBeCloseTo(expected);
+      // getUsageSummary.used_cents
+      const summary = h.getUsageSummary({
+        startIso: new Date(Date.now() - 86_400_000).toISOString(),
+        endIso: new Date(Date.now() + 86_400_000).toISOString(),
+        source: 'rolling', label: '2d',
+      });
+      expect(summary.used_cents).toBe(17);
+      h.close();
+    });
+
+    it('getThreadTotals excludes the pipeline_step overlay (A2 predicate guard)', () => {
+      // Predicate guard, not a production scenario: in prod pipeline_step rows are
+      // keyed on the pipeline's own run UUID (runner.ts session_id = state.runId),
+      // so getThreadTotals(chatSessionId) never matches them. This constructs the
+      // synthetic shape (a pipeline_step sharing the chat sessionId) purely to pin
+      // the A2 invariant into the SQL — if a future path ever inserts such a row,
+      // it must not move the thread's spend total.
+      const h = createHistory();
+      const sid = 'thread-pipeline';
+      const parent = h.insertRun({ sessionId: sid, taskText: 'run pipeline', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+      h.updateRun(parent, { costUsd: 0.20, status: 'completed' });
+      const step = h.insertRun({ sessionId: sid, taskText: 'step', modelTier: 'balanced', modelId: 'claude-sonnet-4-6', runType: 'pipeline_step' });
+      h.updateRun(step, { costUsd: 0.05, status: 'completed' });
+
+      // Only the parent's cost — the step overlay must not add on top.
+      expect(h.getThreadTotals(sid).cost_usd).toBeCloseTo(0.20);
       h.close();
     });
 

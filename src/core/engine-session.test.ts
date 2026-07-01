@@ -327,6 +327,8 @@ vi.mock('./run-history.js', () => ({
     this.close = vi.fn();
     // @ts-expect-error mock constructor — S3a verb-graph mirror wiring (engine.ts).
     this.setVerbGraph = vi.fn();
+    // @ts-expect-error mock constructor — boot orphan-run sweep (engine.ts init).
+    this.sweepStuckRuns = vi.fn().mockReturnValue(0);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
       prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
@@ -424,6 +426,31 @@ describe('Engine + Session (Orchestrator)', () => {
         expect.any(String),
         expect.objectContaining({ status: 'failed', errorText: expect.stringContaining('rate_limit_error') }),
       );
+    });
+
+    it('H2: a failed run still fires onAfterRun with the partial spend (managed debit)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      // Simulate a run that consumed tokens, then errored mid-turn: grow the
+      // session usage before throwing so the catch path computes a real cost.
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        throw Object.assign(new Error('mid-turn boom'), { status: 500, type: 'api_error' });
+      });
+
+      await expect(session.run('go')).rejects.toThrow('mid-turn boom');
+
+      // Before this fix the catch path skipped onAfterRun entirely, so managed
+      // tenants were never debited for tokens burned by a failed/interrupted run.
+      // It now fires on the failure path with the partial cost > 0, keyed on the
+      // run id (so the CP dedups it just like the success path).
+      const failedCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failedCall, 'onAfterRun must fire on the failure path').toBeDefined();
+      expect(failedCall![1] as number).toBeGreaterThan(0); // partial cost debited
+      expect(typeof failedCall![0]).toBe('string'); // the failed run's id
     });
 
     it('Tier 2: a manual compaction records a compaction event (trigger=manual)', async () => {

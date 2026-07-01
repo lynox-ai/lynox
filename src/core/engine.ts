@@ -905,6 +905,16 @@ export class Engine {
         process.stderr.write(`[lynox] RunRegistry init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._runRegistry = null;
       }
+      // Cost-history counterpart to the run-registry sweep above: flip any
+      // orphaned 'running' rows in the runs table to 'failed' so their partial
+      // spend counts and they stop showing as perpetually in-flight. Separate
+      // try — a failure here must not blank out the registry sweep or boot.
+      try {
+        const sweptRuns = this.runHistory.sweepStuckRuns();
+        if (sweptRuns > 0) process.stderr.write(`[lynox] run-history: swept ${sweptRuns} orphaned running run(s) to failed\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] run-history sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     // Initialize the resumable run-event buffer manager (pure in-memory, no DB).

@@ -84,3 +84,65 @@ describe('managed-hook credit heartbeat', () => {
     await hook.onShutdown?.();
   });
 });
+
+/**
+ * M1 — a dropped usage report is un-debited spend (money owed to lynox that the
+ * tenant used but was never billed for). The in-memory queue is best-effort, so
+ * when a drop is unavoidable it must be LOUD (stderr marker + Bugsink capture +
+ * a cumulative counter), not silently erode margin. These prove the drop paths
+ * surface the loss instead of swallowing it.
+ */
+describe('managed-hook usage-drop is loud (M1)', () => {
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  function dropLogs(spy: ReturnType<typeof vi.spyOn>, reason: string): string[] {
+    return spy.mock.calls.map(c => String(c[0])).filter(s => s.includes('DROP') && s.includes(reason));
+  }
+
+  it('logs overflow evictions instead of silently dropping them', () => {
+    // fetch hangs → the auto-flush at batch size gets stuck (flushing stays
+    // true), so the queue can only grow and eventually evict past MAX_PENDING.
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => { /* never resolves */ })));
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    const hook = createManagedHook(); // no onInit → no timers
+    for (let i = 0; i < 600; i++) hook.onAfterRun?.(`run-${i}`, 0.01, CTX); // 1c each, > MAX_PENDING (500)
+
+    const logs = dropLogs(stderrSpy, 'overflow-evict');
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs[0]).toContain('un-debited');
+    stderrSpy.mockRestore();
+  });
+
+  it('reports spend lost at shutdown after all retries fail', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('cp down')));
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    const hook = createManagedHook();
+    hook.onAfterRun?.('run-lost', 0.25, CTX); // 25c queued, never flushable
+
+    // Shutdown retries flush 3× (1s apart) then gives up — drive the timers.
+    const shutdown = hook.onShutdown?.();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await shutdown;
+
+    const logs = dropLogs(stderrSpy, 'shutdown-unflushed');
+    expect(logs.length).toBe(1);
+    expect(logs[0]).toContain('25c'); // the exact un-debited amount surfaced
+    stderrSpy.mockRestore();
+  });
+});
