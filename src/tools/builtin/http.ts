@@ -482,6 +482,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
+    // Egress secret scan over the URL itself (path + query), all methods. A
+    // credential smuggled into the query — `…?token=sk-ant-…` — exfiltrates just
+    // like one in a header or body, and unlike the body scan the URL rides EVERY
+    // method incl. GET. detectGetExfiltration's heuristics (long/base64 query)
+    // don't catch a bare key that its own `-`/`_` chars break out of a base64
+    // run, so scan for the explicit secret patterns here too. detectSecretInContent
+    // matches only specific credential prefixes (no generic long-string rule), so
+    // this won't false-trip on ordinary long paths/IDs.
+    const urlSecretMatch = detectSecretInContent(input.url);
+    if (urlSecretMatch) {
+      return `Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`;
+    }
+
     // Engine-managed OAuth2 Authorization for matched api_profile.
     // Profile drives — the agent should NOT have to remember which vault key
     // holds the current access_token. Two failure modes this prevents:

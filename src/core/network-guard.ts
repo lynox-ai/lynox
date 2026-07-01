@@ -12,6 +12,39 @@ import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
  *
  * IPv4 + IPv6 + IPv4-mapped-IPv6 (`::ffff:7f00:1` style) all covered.
  */
+
+/**
+ * Parse a textual IPv6 address into its 16 bytes, or null if it isn't a plain
+ * hextet IPv6 we can canonicalise (embedded IPv4 / malformed → null → caller
+ * falls back to string checks). Handles `::` zero-compression and a zone id, so
+ * every representation of the same address yields the same bytes — an
+ * exact-string `=== '::1'` misses `0::1` / `0:0:0:0:0:0:0:1`, byte-form does not.
+ */
+function ipv6ToBytes(addr: string): number[] | null {
+  const s = (addr.split('%')[0] ?? addr); // strip zone id (fe80::1%eth0)
+  if (!s.includes(':') || s.includes('.')) return null; // embedded IPv4 handled by the caller's v4 path
+  const halves = s.split('::');
+  if (halves.length > 2) return null; // at most one '::'
+  const parseGroups = (part: string): number[] | null => {
+    if (part === '') return [];
+    const out: number[] = [];
+    for (const g of part.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      const n = parseInt(g, 16);
+      out.push((n >> 8) & 0xff, n & 0xff);
+    }
+    return out;
+  };
+  const head = parseGroups(halves[0] ?? '');
+  if (head === null) return null;
+  if (halves.length === 1) return head.length === 16 ? head : null; // no '::' → must be all 8 groups
+  const tail = parseGroups(halves[1] ?? '');
+  if (tail === null) return null;
+  const fill = 16 - head.length - tail.length;
+  if (fill < 0) return null;
+  return [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
 export function isPrivateIP(ip: string): boolean {
   // IPv4-mapped IPv6 — strip the prefix and run the v4 checks.
   // Accepts both dotted (`::ffff:127.0.0.1`) and hex (`::ffff:7f00:1`) forms;
@@ -49,10 +82,26 @@ export function isPrivateIP(ip: string): boolean {
   }
   const normalized = ip.toLowerCase();
   if (normalized.includes(':')) {
-    if (normalized === '::1' || normalized === '::') return true;
-    if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true;   // link-local
-    if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true;   // unique local
-    if (/^ff[0-9a-f]{2}:/.test(normalized)) return true;      // multicast
+    const bytes = ipv6ToBytes(normalized);
+    if (bytes) {
+      // Byte-form checks catch EVERY textual representation (canonical or not —
+      // `::1`, `0::1`, `0:0:0:0:0:0:0:1` all map to the same bytes), closing the
+      // exact-string `=== '::1'` bypass that let `0::1` reach loopback.
+      const b0 = bytes[0] ?? 0;
+      const b1 = bytes[1] ?? 0;
+      const b15 = bytes[15] ?? 0;
+      if (bytes.every(b => b === 0)) return true;                              // :: unspecified
+      if (bytes.slice(0, 15).every(b => b === 0) && b15 === 1) return true;    // ::1 loopback
+      if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true;                    // fe80::/10 link-local
+      if ((b0 & 0xfe) === 0xfc) return true;                                   // fc00::/7 unique-local
+      if (b0 === 0xff) return true;                                            // ff00::/8 multicast
+    } else {
+      // Unparseable (embedded IPv4, malformed) — conservative string fallback.
+      if (normalized === '::1' || normalized === '::') return true;
+      if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true;   // link-local
+      if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true;   // unique local
+      if (/^ff[0-9a-f]{2}:/.test(normalized)) return true;      // multicast
+    }
   }
   return false;
 }

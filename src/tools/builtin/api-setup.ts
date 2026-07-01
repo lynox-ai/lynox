@@ -32,6 +32,9 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
+// OAuth token responses are small JSON; cap the read so a malicious token_url
+// can't stream an unbounded body into memory during fetch_token.
+const TOKEN_BODY_MAX_BYTES = 64 * 1024;
 /**
  * Hard $ budget per extraction call. The helper's default model is now
  * Sonnet 4.6 (matches the engine-wide LLM default) — Haiku was the legacy
@@ -1259,16 +1262,32 @@ Next steps before calling create:
         body = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
       }
       let response: Response;
+      const ac = new AbortController();
+      const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
       try {
+        // Pass agent.toolContext so the SAME egress controls the docs/http paths
+        // enforce apply here too: network_policy (deny-all / allow-list) + HTTPS
+        // enforcement. Without it the client_secret in `body` would POST to an
+        // arbitrary attacker-supplied token_url regardless of the tenant's
+        // network policy — a credential-exfil channel. Bounded by an
+        // AbortController timeout (no hang on a slow/malicious endpoint).
         response = await fetchWithValidatedRedirects(oauth.token_url, {
           method: 'POST',
           headers,
           body,
-        });
+          signal: ac.signal,
+        }, agent.toolContext);
+        // Charge the token exchange against the session HTTP budget so
+        // fetch_token is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
+        agent.sessionCounters.httpRequests++;
       } catch (err) {
         return `Error: token exchange to ${oauth.token_url} failed: ${err instanceof Error ? err.message : String(err)}.`;
+      } finally {
+        clearTimeout(timer);
       }
-      const respText = await response.text();
+      // Bounded read — a malicious token_url can't stream an unbounded body into
+      // memory (the response is small JSON; we only need the access_token).
+      const { text: respText } = await readBodyLimited(response, TOKEN_BODY_MAX_BYTES);
       if (!response.ok) {
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
