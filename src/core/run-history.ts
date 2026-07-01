@@ -10,6 +10,8 @@ import type { TaskRecord, TriggerRecord, InlinePipelineStep, CapabilityContract 
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
+import type { EngineDb } from './engine-db.js';
+import { WorkflowStore } from './workflow-store.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
@@ -1043,6 +1045,17 @@ export class RunHistory {
   private readonly _encKey: Buffer | null;
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
+  /**
+   * Foundation Rework v2 (S3a): the engine.db verb-layer mirror. Non-null only
+   * when `verb_graph_enabled` is ON and an EngineDb opened — set post-construction
+   * by {@link setVerbGraph} (engine.db is built AFTER RunHistory, so it cannot be
+   * a ctor arg; the setter mirrors RetrievalEngine.setMeteredHost). When set,
+   * every workflow-DEFINITION write dual-writes here additively; the legacy
+   * history.db `pipeline_runs` row stays authoritative + is written first. A
+   * mirror failure is swallowed — it must never break the legacy write.
+   */
+  private _workflowStore: WorkflowStore | null = null;
+  private _verbGraphWarned = false;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
     const path = dbPath ?? getDefaultDbPath();
@@ -1056,6 +1069,34 @@ export class RunHistory {
       this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
+    }
+  }
+
+  /**
+   * Foundation Rework v2 (S3a): wire the engine.db verb-layer mirror. Called once
+   * during engine boot, after both RunHistory and EngineDb exist. When `enabled`,
+   * builds a {@link WorkflowStore} on the engine.db connection; the workflow-def
+   * write methods then dual-write to it. Idempotent + reversible (enabled=false
+   * clears the store → back to legacy-only). Additive: never touches the legacy
+   * history.db path.
+   */
+  setVerbGraph(engineDb: EngineDb, enabled: boolean): void {
+    this._workflowStore = enabled ? new WorkflowStore(engineDb) : null;
+  }
+
+  /** Swallow a mirror failure: the legacy write already succeeded, so a broken
+   *  engine.db mirror must degrade to legacy-only, never surface to the caller. */
+  private _verbMirror(op: () => void): void {
+    if (!this._workflowStore) return;
+    try {
+      op();
+    } catch (err) {
+      if (!this._verbGraphWarned) {
+        this._verbGraphWarned = true;
+        process.stderr.write(
+          `[lynox] verb-graph mirror write failed (degrading to legacy-only): ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
     }
   }
 
@@ -2053,7 +2094,7 @@ export class RunHistory {
     return persistence.getPipelineStepResults(this.db, pipelineRunId);
   }
 
-  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; capabilityContract?: CapabilityContract | undefined }): void {
+  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
     // through here, so a contract-governed workflow with an unconstrained
@@ -2062,6 +2103,20 @@ export class RunHistory {
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     persistence.insertPlannedPipeline(this.db, planned);
+    // S3a mirror: dual-write the definition into engine.db. Same object → same
+    // serialization the legacy row stored (JSON.stringify(planned)); is_template
+    // becomes a real column. source_run_id stays null (PlannedPipeline carries the
+    // capture run only inside `reasoning`, unstructured).
+    this._verbMirror(() => {
+      this._workflowStore!.upsert({
+        id: planned.id,
+        name: planned.name,
+        description: planned.goal,
+        definitionJson: JSON.stringify(planned),
+        isTemplate: planned.template === true,
+        sourceRunId: null,
+      });
+    });
   }
 
   getPlannedPipeline(id: string): { id: string; manifest_json: string } | undefined {
@@ -2081,12 +2136,16 @@ export class RunHistory {
 
   /** Rename a planned pipeline's display name. Returns false if no row matched. */
   renamePlannedPipeline(id: string, name: string): boolean {
-    return persistence.renamePlannedPipeline(this.db, id, name);
+    const ok = persistence.renamePlannedPipeline(this.db, id, name);
+    this._verbMirror(() => { this._workflowStore!.rename(id, name); });
+    return ok;
   }
 
   /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
   setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
-    return persistence.setWorkflowConfirmedAt(this.db, id, confirmedAt);
+    const ok = persistence.setWorkflowConfirmedAt(this.db, id, confirmedAt);
+    this._verbMirror(() => { this._workflowStore!.setConfirmedAt(id, confirmedAt); });
+    return ok;
   }
 
   /** Slice B2: flip a scheduled trigger's cron kill-switch. */
@@ -2096,11 +2155,17 @@ export class RunHistory {
 
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {
-    return persistence.deletePlannedPipeline(this.db, id);
+    const ok = persistence.deletePlannedPipeline(this.db, id);
+    this._verbMirror(() => { this._workflowStore!.remove(id); });
+    return ok;
   }
 
   markPipelineExecuted(id: string): void {
     persistence.markPipelineExecuted(this.db, id);
+    // A one-shot that executed leaves the DEFINITION set (only non-templates reach
+    // markPipelineExecuted). Drop its engine.db def row so the mirror stays == the
+    // legacy `status='planned'` set. The Run itself stays in history.db (D6).
+    this._verbMirror(() => { this._workflowStore!.dropExecuted(id); });
   }
 
   insertTask(params: {

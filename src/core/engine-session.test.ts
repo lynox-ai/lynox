@@ -325,6 +325,8 @@ vi.mock('./run-history.js', () => ({
     this.listScopes = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.close = vi.fn();
+    // @ts-expect-error mock constructor — S3a verb-graph mirror wiring (engine.ts).
+    this.setVerbGraph = vi.fn();
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
       prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
