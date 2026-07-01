@@ -30,6 +30,7 @@ import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
+import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import { channels } from './observability.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -1334,6 +1335,12 @@ export class Session {
       // (byte-identical). Betas come from the snapshot (none for the openai wire).
       const fastSnap = resolveTierModel('fast', provider);
       const titleClient = clientForTierSnapshot(fastSnap, this.engine.client, provider);
+      // Gate this pool-key call through the managed credit lifecycle: on a
+      // credit-exhausted (or fail-closed) managed tenant, skip the LLM title and
+      // keep the heuristic placeholder — the title is best-effort enrichment, not
+      // worth spending against an empty balance. No-op on self-host/BYOK.
+      const titleGate = await fireBeforeRunGate(this.engine, 'fast');
+      if (titleGate.blockedReason !== null) return;
       const prompt =
         'Write a concise 3-6 word title in Title Case for a conversation that begins ' +
         'with the message below. No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
@@ -1344,6 +1351,23 @@ export class Session {
         messages: [{ role: 'user', content: prompt + firstMessage.slice(0, 2000) }],
       });
       const response = await stream.finalMessage();
+      // Debit the actual spend to the tenant balance, keyed on the gate run id
+      // (the CP dedups on it). Priced by the resolved fast-tier model; normalize
+      // the SDK's `null` cache fields to `undefined`.
+      const u = response.usage;
+      if (u) {
+        reportMeteredCost(
+          this.engine,
+          titleGate.runId,
+          calculateCost(fastSnap.modelId, {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+          }),
+          'fast',
+        );
+      }
       const textBlock = response.content.find(b => b.type === 'text');
       if (!textBlock || textBlock.type !== 'text') return;
       const title = sanitizeLLMTitle(textBlock.text);
