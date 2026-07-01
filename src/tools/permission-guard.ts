@@ -430,6 +430,10 @@ export function normalizeCommand(cmd: string): string {
       .replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r')
       .replace(/\\\\/g, '\\').replace(/\\'/g, "'");
   });
+  // Expand $IFS / ${IFS} to a space — a common way to smuggle field separators
+  // into a command without a literal space, so `rm$IFS-rf$IFS/` executes as
+  // `rm -rf /` yet the literal-token danger patterns (which expect `\s`) miss it.
+  normalized = normalized.replace(/\$\{IFS\}|\$IFS/g, ' ');
   // Collapse multiple spaces/tabs into single space (preserve newlines for chaining detection)
   normalized = normalized.replace(/[ \t]+/g, ' ');
   return normalized;

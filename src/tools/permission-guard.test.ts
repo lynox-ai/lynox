@@ -393,6 +393,15 @@ describe('isDangerous', () => {
       expect(result).toContain('remove files');
     });
 
+    it.each([
+      'rm$IFS-rf$IFS/',
+      'rm${IFS}-rf${IFS}/',
+    ])('BLOCKS $IFS whitespace-smuggling in autonomous mode: %s', (command) => {
+      const result = isDangerous('bash', { command }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED — this action needs to be run manually for safety]');
+    });
+
     it('does NOT over-block a genuinely safe quoted command', () => {
       // Quote-removal yields `echo hello world` — nothing dangerous.
       expect(isDangerous('bash', { command: 'echo "hello world"' })).toBeNull();

@@ -3,25 +3,34 @@ import { detectInjectionAttempt } from './data-boundary.js';
 
 // === Write content scanning ===
 
-/** Patterns that indicate malicious content being written to files. */
+/**
+ * Patterns that indicate malicious content being written to files.
+ *
+ * ReDoS discipline: gaps between anchors use BOUNDED `[^\n]{0,N}` rather than
+ * chained `.*`. A single-line payload's parts are within a few hundred chars of
+ * each other, and chained unbounded `.*` (e.g. `.*x.*y.*z`) backtracks
+ * super-linearly on crafted input — a ~400-byte file froze the scanner for 18s
+ * in review. Bounded quantifiers keep every match linear so a full-content scan
+ * is safe.
+ */
 const MALICIOUS_WRITE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   // Reverse shells
   { pattern: /bash\s+-i\s+>&\s*\/dev\/tcp\//i, label: 'bash reverse shell' },
-  { pattern: /python[23]?\s.*socket\b.*\.connect\s*\(/i, label: 'python reverse shell' },
+  { pattern: /python[23]?\s[^\n]{0,300}socket\b[^\n]{0,300}\.connect\s*\(/i, label: 'python reverse shell' },
   { pattern: /\bnc\s+(-e|--exec)\s+\/bin\/(sh|bash)\b/i, label: 'netcat reverse shell' },
-  { pattern: /\bperl\s+-e\b.*\bsocket\b/i, label: 'perl reverse shell' },
+  { pattern: /\bperl\s+-e\b[^\n]{0,300}\bsocket\b/i, label: 'perl reverse shell' },
   { pattern: /\bruby\s+-rsocket\b/i, label: 'ruby reverse shell' },
-  { pattern: /\bsocat\b.*EXEC:.*\/bin\/(sh|bash)/i, label: 'socat reverse shell' },
-  { pattern: /\bphp\s+-r\b.*\bfsockopen\b/i, label: 'php reverse shell' },
+  { pattern: /\bsocat\b[^\n]{0,300}EXEC:[^\n]{0,300}\/bin\/(sh|bash)/i, label: 'socat reverse shell' },
+  { pattern: /\bphp\s+-r\b[^\n]{0,300}\bfsockopen\b/i, label: 'php reverse shell' },
 
   // Crypto miners
   { pattern: /stratum\+tcp:\/\//i, label: 'crypto miner stratum URL' },
   { pattern: /\bxmrig\b/i, label: 'XMRig crypto miner' },
   { pattern: /\bcoinhive\b/i, label: 'Coinhive crypto miner' },
 
-  // Persistence mechanisms
-  { pattern: /\*\/\d+.*\*.*\*.*\*.*\*.*\b(curl|wget|bash|sh)\b/i, label: 'cron-based persistence' },
-  { pattern: /ssh-(?:rsa|ed25519|ecdsa)\s+\S+.*>>\s*.*authorized_keys/i, label: 'SSH key injection' },
+  // Persistence mechanisms — cron schedule (6-field) launching a fetch/shell.
+  { pattern: /\*\/\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+[^\n]{0,300}\b(curl|wget|bash|sh)\b/i, label: 'cron-based persistence' },
+  { pattern: /ssh-(?:rsa|ed25519|ecdsa)\s+\S+[^\n]{0,500}>>[^\n]{0,300}authorized_keys/i, label: 'SSH key injection' },
 
   // Keyloggers / credential stealers
   { pattern: /\bkeylog(?:ger|ging)\b/i, label: 'keylogger' },

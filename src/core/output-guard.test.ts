@@ -70,6 +70,16 @@ describe('checkWriteContent', () => {
       const result = checkWriteContent('const x = 1;\n'.repeat(200_000), '/project/big.ts');
       expect(result.safe).toBe(true);
     });
+
+    it('does not catastrophically backtrack on crafted cron-like input (ReDoS)', () => {
+      // This ~400-byte input froze the pre-hardening cron pattern for ~18s
+      // (five chained `.*` over a run of `*`). Bounded quantifiers keep it linear.
+      const evil = '*/0' + '* '.repeat(2000);
+      const start = performance.now();
+      const result = checkWriteContent(evil, '/tmp/x.sh');
+      expect(performance.now() - start).toBeLessThan(2000); // and the 5s test timeout is the hard backstop
+      expect(result.safe).toBe(true); // no fetch/shell command → not flagged
+    });
   });
 });
 

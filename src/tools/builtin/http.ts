@@ -490,9 +490,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // run, so scan for the explicit secret patterns here too. detectSecretInContent
     // matches only specific credential prefixes (no generic long-string rule), so
     // this won't false-trip on ordinary long paths/IDs.
-    const urlSecretMatch = detectSecretInContent(input.url);
-    if (urlSecretMatch) {
-      return `Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`;
+    //
+    // EXCEPTION: a configured api_profile using `query`-param key auth (Google
+    // Maps/YouTube `?key=…`) legitimately carries the key in the URL — that's the
+    // user's declared, intended mechanism, not exfil. Skip the scan only for such
+    // profiled hosts; an unprofiled attacker host is still scanned.
+    let urlAuthType: string | undefined;
+    try {
+      urlAuthType = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname)?.auth?.type;
+    } catch { /* invalid URL — applyHostPolicy reports it below */ }
+    if (urlAuthType !== 'query') {
+      const urlSecretMatch = detectSecretInContent(input.url);
+      if (urlSecretMatch) {
+        return `Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`;
+      }
     }
 
     // Engine-managed OAuth2 Authorization for matched api_profile.
