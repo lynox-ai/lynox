@@ -24,10 +24,15 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v1', () => {
+  it('creates the database and stamps schema_version v2', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(1);
+    expect(row.v).toBe(2); // v1 baseline + v2 (S3e idx_triggers_next_run)
+    // v2's DDL ran in the same txn as its version stamp: the money-path index exists.
+    const idx = e.getDb().prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_triggers_next_run'",
+    ).get() as { name: string } | undefined;
+    expect(idx?.name).toBe('idx_triggers_next_run');
     e.close();
   });
 
@@ -139,7 +144,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(1);
+    expect(row.v).toBe(2); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -268,8 +273,8 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       const { c } = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get() as { c: number };
       expect(c, `table ${t} should be empty after wipe`).toBe(0);
     }
-    // The schema itself survives — version stays v1, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(1);
+    // The schema itself survives — version stays at the latest, no re-migration on next open.
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(2);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -280,7 +285,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(1);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(2);
     e.close();
   });
 
@@ -294,8 +299,8 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(path, '');           // must not throw
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
-    // The fresh DB is usable and stamped v1.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(1);
+    // The fresh DB is usable and stamped at the latest schema version.
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(2);
     e.close();
   });
 });

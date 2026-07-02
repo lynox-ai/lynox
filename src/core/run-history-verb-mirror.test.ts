@@ -685,12 +685,100 @@ describe('RunHistory verb-graph READ-cutover (Foundation Rework v2 — S3e)', ()
 
   it('known benign gap: a trigger with no task_type reverse-maps to "manual" (never null)', () => {
     // The forward map upsamples an absent task_type → source='manual'; the reverse
-    // map can't recover the legacy null. Benign: WorkerLoop-fired triggers always
-    // carry an explicit task_type, and a 'manual' trigger has no schedule → is
-    // never due. Documented, not an equivalence failure.
+    // map can't recover the legacy null. Benign: every WorkerLoop-fired trigger is
+    // created via createScheduled / createPipeline / createWatch, which always set
+    // an explicit task_type — a task_type-less row is not a real fired trigger.
+    // Documented, not an equivalence failure.
     const { history } = make(true);
     history.insertTrigger({ id: 'tr-m', title: 'm', status: 'open', scopeType: 'project', scopeId: '', nextRunAt: '2020-01-01T00:00:00Z' });
     expect(history.getDueTriggers().find(x => x.id === 'tr-m')!.task_type).toBe('manual');
+  });
+
+  it('getDue: engine (ON) EXCLUDES the same non-due triggers as legacy (money-path exclusions)', () => {
+    const { history, engine } = make(false);
+    seedMirroredWorkflow(history, 'wf-9');
+    const past = '2020-01-01T00:00:00Z';
+    // due:
+    history.insertTrigger(trig({ id: 'due-cron', taskType: 'cron', scheduleCron: '0 9 * * *', nextRunAt: past }));
+    history.insertTrigger({ id: 'due-oneshot', title: 'o', status: 'open', scopeType: 'project', scopeId: 'proj-1', taskType: 'pipeline', nextRunAt: '2020-02-01T00:00:00Z', pipelineId: 'wf-9', pipelineParams: '{"x":1}' });
+    // failed BUT cron → survives a failure (kept in queue):
+    history.insertTrigger(trig({ id: 'failed-cron', status: 'failed', taskType: 'cron', scheduleCron: '0 9 * * *', nextRunAt: past }));
+    // excluded — disabled kill-switch:
+    history.insertTrigger(trig({ id: 'x-disabled', nextRunAt: past }));
+    history.setTriggerEnabled('x-disabled', false);
+    // excluded — completed:
+    history.insertTrigger(trig({ id: 'x-completed', status: 'completed', nextRunAt: past }));
+    // excluded — failed one-shot (no schedule_cron):
+    history.insertTrigger({ id: 'x-failed-oneshot', title: 'f', status: 'failed', scopeType: 'project', scopeId: 'proj-1', taskType: 'pipeline', nextRunAt: past, pipelineId: 'wf-9' });
+    // excluded — future next_run_at:
+    history.insertTrigger(trig({ id: 'x-future', nextRunAt: '2099-01-01T00:00:00Z' }));
+
+    const legacy = history.getDueTriggers();
+    history.setVerbGraph(engine, true, true);
+    const eng = history.getDueTriggers();
+    expect(eng.map(t => t.id)).toEqual(legacy.map(t => t.id)); // identical selection + order
+    expect(eng.map(canonTrigger)).toEqual(legacy.map(canonTrigger));
+    const ids = eng.map(t => t.id);
+    expect(ids).toEqual(expect.arrayContaining(['due-cron', 'due-oneshot', 'failed-cron']));
+    for (const excluded of ['x-disabled', 'x-completed', 'x-failed-oneshot', 'x-future']) {
+      expect(ids).not.toContain(excluded);
+    }
+  });
+
+  it('getDue: a paramless pipeline trigger reads pipeline_params as legacy-null, NOT "{}" (requireAll parity)', () => {
+    const { history, engine } = make(false);
+    seedMirroredWorkflow(history, 'wf-9');
+    // A pipeline trigger with NO bound params → legacy stores pipeline_params = NULL.
+    history.insertTrigger({ id: 'tr-noparam', title: 'n', status: 'open', scopeType: 'project', scopeId: 'proj-1', taskType: 'pipeline', nextRunAt: '2020-01-01T00:00:00Z', pipelineId: 'wf-9' });
+    const legacy = history.getDueTriggers().find(t => t.id === 'tr-noparam')!;
+    history.setVerbGraph(engine, true, true);
+    const eng = history.getDueTriggers().find(t => t.id === 'tr-noparam')!;
+    // Both falsy: the forward map collapsed null→'{}', the reverse map restores it
+    // to undefined, so worker-loop's `if (task.pipeline_params)` stays false ⇒
+    // runSavedWorkflow requireAll=false ⇒ no spurious "Missing required parameter".
+    expect(legacy.pipeline_params ?? null).toBeNull();
+    expect(eng.pipeline_params ?? null).toBeNull();
+    expect(Boolean(eng.pipeline_params)).toBe(false);
+    // (a trigger WITH real params still round-trips verbatim — covered by the
+    // money-path shape-fidelity test above, which asserts pipeline_params '{"tone":"brief"}'.)
+  });
+
+  it('listFiltered (scopeType / taskType→source / limit): engine (ON) == legacy (OFF), per clause', () => {
+    const { history, engine } = make(false);
+    history.insertTrigger(trig({ id: 'p-cron', taskType: 'cron' }));
+    history.insertTrigger(trig({ id: 'p-watch', taskType: 'watch' }));
+    history.insertTrigger({ id: 'g-cron', title: 't', status: 'open', scopeType: 'global', scopeId: 'g', taskType: 'cron', scheduleCron: '0 9 * * *', nextRunAt: '2026-07-02T09:00:00Z' });
+    const cases = [{ scopeType: 'project' }, { taskType: 'watch' }, { limit: 1 }, { scopeType: 'global', taskType: 'cron' }];
+    const legacy = cases.map(c => history.getTriggers(c));
+    history.setVerbGraph(engine, true, true);
+    cases.forEach((c, i) => {
+      const eng = history.getTriggers(c);
+      expect(eng.map(t => t.id)).toEqual(legacy[i]!.map(t => t.id));
+      expect(eng.map(canonTrigger)).toEqual(legacy[i]!.map(canonTrigger));
+    });
+  });
+
+  it('getById with scopeFilter: engine (ON) == legacy (OFF), including the scope miss', () => {
+    const { history, engine } = make(false);
+    history.insertTrigger(trig({ id: 'scoped' })); // scope_type project / scope_id proj-1
+    const hit = { scopeFilter: [{ type: 'project', id: 'proj-1' }] };
+    const miss = { scopeFilter: [{ type: 'global', id: 'g' }] };
+    const legacyHit = history.getTrigger('scoped', hit);
+    history.setVerbGraph(engine, true, true);
+    expect(canonTrigger(history.getTrigger('scoped', hit)!)).toEqual(canonTrigger(legacyHit!));
+    expect(history.getTrigger('scoped', miss)).toBeUndefined(); // scope guard excludes it on both paths
+  });
+
+  it('getByWorkflowId EXCLUDES a completed ref (engine (ON) == legacy (OFF))', () => {
+    const { history, engine } = make(false);
+    seedMirroredWorkflow(history, 'wf-c');
+    history.insertTrigger(trig({ id: 'active-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
+    history.insertTrigger(trig({ id: 'done-ref', taskType: 'pipeline', pipelineId: 'wf-c', status: 'completed' }));
+    const legacy = history.getTriggersByPipelineId('wf-c');
+    history.setVerbGraph(engine, true, true);
+    const eng = history.getTriggersByPipelineId('wf-c');
+    expect(eng.map(t => t.id)).toEqual(legacy.map(t => t.id)); // only active-ref, on both
+    expect(eng.map(t => t.id)).not.toContain('done-ref');
   });
 
   // ── workflows ──

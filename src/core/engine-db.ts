@@ -406,6 +406,15 @@ const MIGRATIONS: string[] = [
    -- FK children: memory-delete CASCADE would otherwise full-scan conflicts.
    CREATE INDEX idx_conflicts_new_memory ON conflicts(new_memory_id);
    CREATE INDEX idx_conflicts_old_memory ON conflicts(old_memory_id);`,
+
+  // v2 (S3e): the money-path `getDueTriggers` read cuts over to engine.db. The
+  // only trigger index is `idx_triggers_enabled(enabled, next_run_at)`, but the
+  // due query's leading `enabled != 0` is a non-seekable inequality, so that index
+  // serves neither the `next_run_at <= ?` range nor the `ORDER BY next_run_at`.
+  // Restore the dedicated `next_run_at` index the legacy history.db had, so the
+  // ~60s scheduler poll seeks instead of full-scanning + sorting every tick.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+   CREATE INDEX IF NOT EXISTS idx_triggers_next_run ON triggers(next_run_at);`,
 ];
 
 /**

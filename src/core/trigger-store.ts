@@ -215,7 +215,15 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     retry_count: row.retry_count,
     notification_channel: row.notification_channel ?? undefined,
     pipeline_id: row.target_workflow_id ?? undefined,
-    pipeline_params: row.params_json,
+    // The forward map collapses an absent pipeline_params to '{}' (params_json is
+    // NOT NULL DEFAULT '{}'), but legacy returned NULL. Restore that: '{}' →
+    // undefined, so the money-path `if (task.pipeline_params)` (worker-loop) stays
+    // falsy → runSavedWorkflow's `requireAll = params !== undefined` stays false,
+    // matching a legacy paramless trigger. A stored '{}' only ever means "no bound
+    // params" (a real binding carries its keys; requireAll is a no-op with zero
+    // required params), so this is behaviour-lossless. The byte-faithful root fix
+    // (nullable params_json in the forward map) rides the S3f write-cutover.
+    pipeline_params: row.params_json === '{}' ? undefined : row.params_json,
     enabled: row.enabled,
   };
 }
