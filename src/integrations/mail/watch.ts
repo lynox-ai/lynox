@@ -131,30 +131,46 @@ export class MailWatcher {
 
         // 2. Optional prefilter — deterministic noise rejection
         const survivors: MailEnvelope[] = [];
+        const noise: MailEnvelope[] = [];
         if (applyPrefilter) {
           for (const env of fresh) {
             const decision = prefilter(env);
-            if (decision.category === 'noise') continue;
+            if (decision.category === 'noise') {
+              noise.push(env);
+              continue;
+            }
             survivors.push(env);
           }
         } else {
           survivors.push(...fresh);
         }
 
-        // 3. Mark ALL fresh envelopes as seen — even prefiltered ones —
-        //    so we don't re-evaluate them on every tick. Marking before the
-        //    handler runs avoids double-processing if the handler is slow
-        //    and another tick fires concurrently.
-        this.state.markSeenBatch(accountId, fresh);
+        // 3. Mark intentional drops (prefiltered noise) seen immediately — we
+        //    never want to re-evaluate them. Survivors are marked seen only
+        //    AFTER the handler returns (step 4). The provider poll loop
+        //    serializes ticks (it awaits this handler inside its `ticking`
+        //    guard), so the old "mark all fresh before the handler" bought no
+        //    concurrency protection — it only opened a window where a process
+        //    crash (or a throw that propagates out of the handler, e.g. during
+        //    follow-up resolution) left the mail marked seen yet unprocessed.
+        //    (A throw inside the classifier hook itself is swallowed upstream
+        //    in MailContext's wrapper, so it does not reach here — the hook
+        //    dead-letters instead of throwing on backpressure.) The hook is
+        //    thread-idempotent (findItemByThread short-circuit) so a next-tick
+        //    retry cannot double-insert.
+        if (noise.length > 0) this.state.markSeenBatch(accountId, noise);
 
         if (survivors.length === 0) return;
 
-        // 4. Hand off to the user handler. Errors here are swallowed so a
-        //    crash in one tick doesn't take down the watcher.
+        // 4. Hand off to the user handler, then mark the handed-off envelopes
+        //    seen. Errors are swallowed so a crash in one tick doesn't take
+        //    down the watcher — but on error we deliberately do NOT mark the
+        //    survivors seen, leaving them for the next tick to retry.
         try {
           await this.handler(accountId, survivors);
+          this.state.markSeenBatch(accountId, survivors);
         } catch {
-          /* swallow — Phase 1 routes to observability */
+          /* swallow — survivors stay unseen for next-tick retry */
         }
       },
     );

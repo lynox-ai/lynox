@@ -82,7 +82,21 @@ export interface InboxClassifierHookOptions {
   disabledAccounts?: ReadonlySet<string> | undefined;
 }
 
-export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promise<void>;
+/**
+ * Outcome of processing one inbound mail through the hook. Lets callers
+ * (the cold-start backfill) count real LLM-queue enqueues vs. dead-lettered
+ * overflow vs. no-LLM short-circuits, instead of assuming every envelope was
+ * enqueued (which mis-reported the backfill cost + hid queue rejections).
+ */
+export type InboxHookOutcome =
+  | 'enqueued' // handed to the classifier queue (incurs an LLM call)
+  | 'dead_lettered' // queue full/draining → surfaced as a requires_user item
+  | 'rule_applied' // a user rule short-circuited the LLM
+  | 'sensitive_skipped' // sensitive-content prefilter blocked the LLM
+  | 'duplicate' // already-classified thread (possibly auto-unsnoozed)
+  | 'ignored'; // disabled account / folder blacklist / no sender / unknown account
+
+export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promise<InboxHookOutcome>;
 
 /**
  * Build the per-mail hook. Pure factory — no global state, safe to call
@@ -94,15 +108,15 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     ? new Set([...opts.folderBlacklist].map((f) => f.toLowerCase()))
     : undefined;
   const disabledAccounts = opts.disabledAccounts;
-  return async (accountId, env) => {
-    if (disabledAccounts?.has(accountId)) return;
-    if (folderBlacklistLower?.has(env.folder.toLowerCase())) return;
+  return async (accountId, env): Promise<InboxHookOutcome> => {
+    if (disabledAccounts?.has(accountId)) return 'ignored';
+    if (folderBlacklistLower?.has(env.folder.toLowerCase())) return 'ignored';
 
     const account = opts.accounts.resolve(accountId);
-    if (!account) return; // unknown account — nothing to do
+    if (!account) return 'ignored'; // unknown account — nothing to do
 
     const fromAddress = env.from[0]?.address ?? '';
-    if (!fromAddress) return; // no sender, no classification
+    if (!fromAddress) return 'ignored'; // no sender, no classification
 
     const channel = channelFromAccountId(accountId);
 
@@ -135,7 +149,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           });
         });
       }
-      return;
+      return 'duplicate';
     }
 
     // 2. User-confirmed rule short-circuits the LLM.
@@ -189,7 +203,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         const inserted = opts.state.getItem(itemId);
         if (inserted) void opts.notifier.notifyNewItem(inserted);
       }
-      return;
+      return 'rule_applied';
     }
 
     // 3. Sensitive-content pre-filter. Mode decides what happens:
@@ -236,14 +250,17 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         const inserted = opts.state.getItem(itemId);
         if (inserted) void opts.notifier.notifyNewItem(inserted);
       }
-      return;
+      return 'sensitive_skipped';
     }
 
-    // 4. Enqueue for the classifier — backpressure (queue full) drops the
-    //    mail back to the unclassified pool; the watcher's next tick retries.
-    //    For mode=mask we substitute the masked subject/body; for mode=allow
-    //    we send the raw envelope but tag the payload so audit records the
-    //    detected categories alongside the verdict.
+    // 4. Enqueue for the classifier. Backpressure (queue full / draining) must
+    //    NOT silently drop the mail — the watcher already marked it seen, so a
+    //    dropped enqueue is a permanent loss with no trace. On rejection we
+    //    dead-letter it as a requires_user item (like runner.onDeadLetter, but
+    //    keeping the body it would have classified) so an inbound always
+    //    surfaces. For mode=mask we substitute the masked
+    //    subject/body; for mode=allow we send the raw envelope but tag the
+    //    payload so audit records the detected categories alongside the verdict.
     const useMasked = sensitive.isSensitive && sensitiveMode === 'mask';
     const promptSubject = useMasked ? sensitive.masked.subject : subject;
     const promptBody = useMasked ? sensitive.masked.body : env.snippet;
@@ -278,7 +295,49 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         redactionCount: useMasked ? sensitive.masked.redactionCount : 0,
       };
     }
-    opts.queue.enqueue(payload);
+    const accepted = opts.queue.enqueue(payload);
+    if (accepted) return 'enqueued';
+
+    // Queue full or draining — dead-letter instead of dropping. The mail was
+    // already marked seen upstream, so without this it would vanish on a burst
+    // (the classifier queue is in-memory; there is no unclassified pool to
+    // retry from). Surface it as a requires_user item so the user still sees it.
+    const deadLetterId = opts.state.insertItemWithAudit(
+      {
+        tenantId: opts.tenantId,
+        accountId,
+        channel,
+        threadKey,
+        bucket: 'requires_user',
+        confidence: 0,
+        reasonDe: 'Klassifizierungs-Warteschlange voll — manuell prüfen.',
+        classifiedAt: new Date(),
+        classifierVersion: 'queue-overflow',
+        ...envelopeFields,
+      },
+      {
+        tenantId: opts.tenantId,
+        action: 'classified',
+        actor: 'system',
+        payloadJson: JSON.stringify({ dead_letter: true, reason: 'queue_overflow' }),
+      },
+    );
+    // Store the body the classifier would have seen (masked variant under
+    // mode=mask) so the user has context on the surfaced item.
+    writeThreadMessageFromEnvelope(opts.state, {
+      tenantId: opts.tenantId,
+      accountId,
+      threadKey,
+      env,
+      envelopeFields,
+      bodyMd: promptBody,
+      inboxItemId: deadLetterId,
+    });
+    if (opts.notifier) {
+      const inserted = opts.state.getItem(deadLetterId);
+      if (inserted) void opts.notifier.notifyNewItem(inserted);
+    }
+    return 'dead_lettered';
   };
 }
 

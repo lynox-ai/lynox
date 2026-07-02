@@ -270,3 +270,56 @@ describe('MailWatcher — error resilience', () => {
     expect(handler).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('MailWatcher — ack ordering (mark seen after handoff)', () => {
+  it('does NOT mark survivors seen when the handler throws — they retry next tick', async () => {
+    handler.mockImplementationOnce(() => { throw new Error('handler crash'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+
+    await provider.emit({
+      type: 'new',
+      envelopes: [envelope(1, { messageId: '<m-1@x>' })],
+    });
+    // Handler threw → the survivor must stay unseen (old code marked it seen
+    // before the handler, so a throw lost it permanently).
+    expect(state.countForAccount('acct-a')).toBe(0);
+
+    // Re-emit the same envelope: still fresh → handler runs again (retry).
+    await provider.emit({
+      type: 'new',
+      envelopes: [envelope(1, { messageId: '<m-1@x>' })],
+    });
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(received.at(-1)?.uids).toEqual([1]);
+    // Retry succeeded → now marked seen.
+    expect(state.countForAccount('acct-a')).toBe(1);
+  });
+
+  it('marks prefiltered noise seen immediately even while survivors await the handler', async () => {
+    handler.mockImplementationOnce(() => { throw new Error('handler crash'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider); // prefilter on
+
+    await provider.emit({
+      type: 'new',
+      envelopes: [
+        envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }), // noise
+        envelope(2, { messageId: '<m-2@x>', from: 'alice@example.com' }), // survivor
+      ],
+    });
+    // Noise marked seen (intentional drop); survivor NOT (handler threw).
+    expect(state.countForAccount('acct-a')).toBe(1);
+
+    // Re-emit: noise deduped away, only the survivor reaches the handler.
+    await provider.emit({
+      type: 'new',
+      envelopes: [
+        envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }),
+        envelope(2, { messageId: '<m-2@x>', from: 'alice@example.com' }),
+      ],
+    });
+    expect(received.at(-1)?.uids).toEqual([2]);
+    expect(state.countForAccount('acct-a')).toBe(2);
+  });
+});

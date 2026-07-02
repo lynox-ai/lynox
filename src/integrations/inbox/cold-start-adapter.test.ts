@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runColdStartForAccount } from './cold-start-adapter.js';
+import { estimateCost } from './cold-start.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
@@ -66,7 +67,7 @@ beforeEach(() => {
 
 describe('runColdStartForAccount', () => {
   it('iterates envelopes through the hook and reports completion via the tracker', async () => {
-    const hook = vi.fn(async () => {});
+    const hook = vi.fn(async () => 'enqueued' as const);
     const provider = fakeProvider([envelope(1, 't-a'), envelope(2, 't-b'), envelope(3, 't-c')]);
     await runColdStartForAccount({ provider, hook, tracker, state });
     expect(hook).toHaveBeenCalledTimes(3);
@@ -77,7 +78,27 @@ describe('runColdStartForAccount', () => {
     expect(snap.recent[0]?.status).toBe('completed');
     expect(snap.recent[0]?.report?.uniqueThreads).toBe(3);
     expect(snap.recent[0]?.report?.enqueued).toBe(3);
+    expect(snap.recent[0]?.report?.rejectedByQueue).toBe(0);
     expect(snap.recent[0]?.report?.cappedAt).toBeNull();
+  });
+
+  it('counts only enqueued outcomes and reports queue rejections (dead-lettered)', async () => {
+    // The hook enqueues t-a, dead-letters t-b (queue full), and applies a rule
+    // to t-c (no LLM). Only the enqueue must count toward `enqueued` (the cost
+    // basis); the dead-letter must surface as `rejectedByQueue`; the rule short-
+    // circuit counts as neither. The old code counted all three as enqueued and
+    // hardcoded rejectedByQueue: 0.
+    const outcomes = ['enqueued', 'dead_lettered', 'rule_applied'] as const;
+    let i = 0;
+    const hook = vi.fn(async () => outcomes[i++]!);
+    const provider = fakeProvider([envelope(1, 't-a'), envelope(2, 't-b'), envelope(3, 't-c')]);
+    await runColdStartForAccount({ provider, hook, tracker, state });
+    const report = tracker.getSnapshot().recent[0]?.report;
+    expect(report?.uniqueThreads).toBe(3);
+    expect(report?.enqueued).toBe(1);
+    expect(report?.rejectedByQueue).toBe(1);
+    // Cost estimate is driven by real LLM enqueues only.
+    expect(report?.estimatedCostUSD).toBe(estimateCost(1));
   });
 
   it('dedupes by threadKey so two envelopes on the same thread only invoke the hook once', async () => {

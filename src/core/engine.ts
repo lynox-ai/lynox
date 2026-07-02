@@ -613,7 +613,9 @@ export class Engine {
         // `Promise<void>` return type the MailContext awaits.
         this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
           if (this._inboxClassifierSuspended) return;
-          return runtime.hook(accountId, envelope);
+          // Discard the hook's outcome — the MailContext contract is
+          // Promise<void>; only the inbox-internal cold-start path reads it.
+          await runtime.hook(accountId, envelope);
         };
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
@@ -1397,7 +1399,9 @@ export class Engine {
           // wrapper is a zero-cost passthrough until the first switch.
           this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
             if (this._inboxClassifierSuspended) return;
-            return runtime.hook(accountId, envelope);
+            // Discard the hook's outcome — the MailContext contract is
+            // Promise<void>; only the inbox-internal cold-start path reads it.
+            await runtime.hook(accountId, envelope);
           };
           // Auto-trigger backfill on account-connect. The adapter gates
           // re-runs via `state.hasAnyItemForAccount`, so a re-credential

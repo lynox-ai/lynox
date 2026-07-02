@@ -125,6 +125,37 @@ describe('mail-scheduled-poller', () => {
     poller.stop();
   });
 
+  it('coalesces overlapping ticks so a slow tick is not run twice (no double-send)', async () => {
+    queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'slow' });
+
+    // Gate the send so the first tick stays in-flight while we fire a second.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    sendImpl = async (input: MailSendInput): Promise<MailSendResult> => {
+      sendCalls.push(input);
+      await gate;
+      return { messageId: '<sent@x>', accepted: input.to.map((a) => a.address), rejected: [] };
+    };
+
+    // Spy the due-query: the reentrancy guard must keep it to ONE call even
+    // though two ticks overlap (without the guard the second tick re-queries
+    // the still-unsent row and re-delivers it).
+    const dueSpy = vi.spyOn(db, 'listDueScheduledSends');
+
+    const poller = startScheduledSendPoller({ state: db, registry });
+    const first = poller.tickNow(); // starts, blocks inside the gated send
+    const second = poller.tickNow(); // must coalesce onto the in-flight tick
+    expect(first).toBe(second); // same promise → no second concurrent tick
+    release();
+    const [r1, r2] = await Promise.all([first, second]);
+    poller.stop();
+
+    expect(dueSpy).toHaveBeenCalledTimes(1);
+    expect(sendCalls).toHaveLength(1);
+    expect(r1).toEqual(r2);
+    expect(r1.fired).toBe(1);
+  });
+
   it('cancelScheduledSend deletes a not-yet-sent row', async () => {
     const id = queue({ scheduledAt: new Date(Date.now() + 60_000) });
     expect(db.cancelScheduledSend(id)).toBe(true);

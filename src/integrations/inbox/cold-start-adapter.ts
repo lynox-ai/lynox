@@ -73,6 +73,7 @@ export async function runColdStartForAccount(
   const listLimit = opts.listLimit ?? DEFAULT_BACKFILL_LIMIT;
   const seenThreads = new Set<string>();
   let enqueued = 0;
+  let rejectedByQueue = 0;
   let capped = false;
 
   opts.tracker.start(accountId);
@@ -87,12 +88,15 @@ export async function runColdStartForAccount(
         break;
       }
       seenThreads.add(threadKey);
-      // Errors inside the hook are already swallowed at the watcher
-      // layer (audit-log records the dead-letter); we await so the
-      // tracker progress reflects real per-envelope completion rather
-      // than just enqueue order.
-      await opts.hook(accountId, env);
-      enqueued += 1;
+      // Await the hook and read its outcome so the report reflects reality:
+      // `enqueued` counts only envelopes handed to the LLM classifier (which
+      // drives the cost estimate), and `rejectedByQueue` counts overflow
+      // dead-letters. The old code incremented `enqueued` unconditionally and
+      // hardcoded `rejectedByQueue: 0`, so a backfill that overran the queue
+      // over-reported cost and silently hid the rejections.
+      const outcome = await opts.hook(accountId, env);
+      if (outcome === 'enqueued') enqueued += 1;
+      else if (outcome === 'dead_lettered') rejectedByQueue += 1;
       opts.tracker.progress({
         accountId,
         uniqueThreads: seenThreads.size,
@@ -106,7 +110,7 @@ export async function runColdStartForAccount(
       uniqueThreads: seenThreads.size,
       enqueued,
       cappedAt: capped ? cap : null,
-      rejectedByQueue: 0,
+      rejectedByQueue,
       estimatedCostUSD: estimateCost(enqueued),
     });
   } catch (err) {
