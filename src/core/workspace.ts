@@ -37,7 +37,13 @@ export function getWorkspaceCwd(): string {
   return getWorkspaceDir() ?? process.cwd();
 }
 
-function isPathWithin(child: string, parent: string): boolean {
+/**
+ * True iff `child` resolves to `parent` itself or a path nested under it.
+ * Relative-path based so a `..` that climbs out of `parent` fails. Exported so
+ * the non-isolation write path in the fs tools can reuse the exact same
+ * containment predicate the isolation path (`validatePath`) enforces.
+ */
+export function isPathWithin(child: string, parent: string): boolean {
   const rel = relative(parent, child);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
