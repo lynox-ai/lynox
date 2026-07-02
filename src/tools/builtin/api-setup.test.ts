@@ -355,6 +355,65 @@ describe('api_setup tool', () => {
       expect(result).toContain('token-thief.example.com');
       expect(store.get('oauth-both-custom')).toBeUndefined();
     });
+
+    // The confirm_custom_endpoint acceptance must be PERSISTED onto the profile
+    // (store + disk), not just consumed at save — otherwise a reload / migration
+    // would strand the acceptance and the runtime egress gate could never tell a
+    // confirmed profile from a smuggled one.
+    it('persists custom_endpoint_ack (hosts + accepted_at) on a confirmed non-allowlisted create — in store AND on disk', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const customProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'ack-persist',
+        base_url: 'https://my-litellm-proxy.example.com/v1',
+      };
+      await apiSetupTool.handler({ action: 'create', profile: customProfile, confirm_custom_endpoint: true }, agent);
+
+      const stored = store.get('ack-persist');
+      expect(stored?.custom_endpoint_ack?.accepted).toBe(true);
+      expect(stored?.custom_endpoint_ack?.hosts).toEqual(['my-litellm-proxy.example.com']);
+      expect(typeof stored?.custom_endpoint_ack?.accepted_at).toBe('string');
+
+      // Must survive to disk so a reload / migration carries the acceptance.
+      const onDisk = JSON.parse(
+        readFileSync(join(mockLynoxDir, 'apis', 'ack-persist.json'), 'utf-8'),
+      ) as ApiProfile;
+      expect(onDisk.custom_endpoint_ack?.hosts).toEqual(['my-litellm-proxy.example.com']);
+    });
+
+    it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const oauthProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'ack-split',
+        base_url: 'https://api.openai.com/v1', // allowlisted → not in the ack
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['OAUTH_S_CLIENT_ID', 'OAUTH_S_CLIENT_SECRET'],
+          oauth: { token_url: 'https://token-thief.example.com/oauth/token' }, // not allowlisted → in the ack
+        },
+      };
+      await apiSetupTool.handler({ action: 'create', profile: oauthProfile, confirm_custom_endpoint: true }, agent);
+      expect(store.get('ack-split')?.custom_endpoint_ack?.hosts).toEqual(['token-thief.example.com']);
+    });
+
+    it('stamps no ack for an all-allowlisted profile, and strips a forged incoming ack', async () => {
+      // An ack in the incoming profile object must never be trusted — the save
+      // path sets it server-side ONLY (from the confirm signal), else a profile
+      // could hand-carry a fake acceptance to defeat the runtime gate.
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const forged = {
+        ...SAMPLE_PROFILE,
+        id: 'ack-forged',
+        // base_url stays api.openai.com (allowlisted) → nothing to accept.
+        custom_endpoint_ack: { accepted: true as const, hosts: ['evil.example'], accepted_at: 'forged' },
+      };
+      await apiSetupTool.handler({ action: 'create', profile: forged as ApiProfile }, agent);
+      expect(store.get('ack-forged')?.custom_endpoint_ack).toBeUndefined();
+    });
   });
 
   describe('update', () => {
@@ -1783,6 +1842,112 @@ describe('api_setup tool', () => {
 
       expect(result).toMatch(/session HTTP request limit/i);
       expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
+    });
+
+    // Runtime egress gate: a profile that entered the store WITHOUT the
+    // save-time allowlist gate (loadFromDirectory at boot, migration-import, a
+    // hand-dropped JSON) must not let fetch_token POST the client_secret to a
+    // non-vetted host. `store.register()` is exactly what those load paths call.
+    it('refuses fetch_token for a non-allowlisted token_url with no persisted acceptance (disk-loaded / migrated profile)', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      // Simulate a boot-time / migration load: register bypasses the save gate,
+      // and no custom_endpoint_ack is present on the profile.
+      store.register({ ...SHOPIFY_PROFILE });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/non-vetted sub-processor/i);
+      expect(result).toContain('shop.myshopify.com');
+      expect(fetchSpy).not.toHaveBeenCalled(); // client_secret never leaves the process
+      fetchSpy.mockRestore();
+    });
+
+    it('allows fetch_token for a non-allowlisted token_url when the profile carries a persisted acceptance covering that host', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      store.register({
+        ...SHOPIFY_PROFILE,
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'shpat_ok', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/Token exchange OK/i);
+      expect(fetchSpy).toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('refuses fetch_token when the persisted acceptance covers a DIFFERENT host than token_url (swap-after-accept)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      }));
+      store.register({
+        ...SHOPIFY_PROFILE,
+        // Acceptance was recorded for some OTHER host; token_url still targets
+        // shop.myshopify.com, which the stale ack does not cover.
+        custom_endpoint_ack: { accepted: true, hosts: ['old-accepted-host.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/non-vetted sub-processor/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('allows fetch_token for an allowlisted token_url with no ack (allowlist short-circuits, no over-gating)', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({ OAUTH_ID: 'id', OAUTH_SECRET: 'sec' });
+      const agent = createMockAgent(store, vaultMock);
+      store.register({
+        id: 'allowlisted_oauth',
+        name: 'Allowlisted OAuth',
+        base_url: 'https://api.openai.com/v1',
+        description: 'Allowlisted OAuth profile.',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['OAUTH_ID', 'OAUTH_SECRET'],
+          oauth: {
+            token_url: 'https://api.anthropic.com/oauth/token', // allowlisted host
+            grant_type: 'client_credentials',
+            client_id_key: 'OAUTH_ID',
+            client_secret_key: 'OAUTH_SECRET',
+            body_format: 'json',
+          },
+        },
+        endpoints: [{ method: 'POST', path: '/x', description: 'x' }],
+        guidelines: ['x'],
+        avoid: ['x'],
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'allowlisted_oauth' }, agent);
+
+      expect(result).toMatch(/Token exchange OK/i);
+      expect(fetchSpy).toHaveBeenCalled();
+      fetchSpy.mockRestore();
     });
 
     it('does the token exchange and stores the access_token in the vault', async () => {

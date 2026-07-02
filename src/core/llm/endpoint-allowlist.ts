@@ -97,6 +97,61 @@ export function isAllowlistedEndpoint(url: string): boolean {
 }
 
 /**
+ * Persisted record that a user accepted controller-responsibility for the
+ * non-allowlisted egress hosts a profile can drive a credentialed request to.
+ *
+ * The save-time gate (`api_setup` create/update) captures acceptance via the
+ * transient `confirm_custom_endpoint` tool input, but that signal is consumed
+ * at save and is NOT otherwise durable. A profile can re-enter the store WITHOUT
+ * passing that gate — `ApiStore.loadFromDirectory` at boot, or a JSON written
+ * into the apis dir — at which point nothing distinguishes "user accepted this
+ * endpoint" from "this endpoint was never accepted". Persisting acceptance onto
+ * the profile lets the runtime egress paths (`fetch_token`, `http_request`
+ * OAuth2 attach) refuse fail-closed on an un-accepted profile without
+ * re-prompting a legit user.
+ *
+ * `hosts` is bound to the SPECIFIC accepted hostnames (not a blanket boolean),
+ * so swapping a profile's `token_url`/`base_url` to a DIFFERENT non-allowlisted
+ * host after acceptance does not inherit the old ack — the swap re-gates.
+ *
+ * Trust boundary: the ack is trusted as loaded from disk. It closes the
+ * un-accepted-profile re-entry case; it does NOT defend against an adversary who
+ * can already WRITE the apis dir — such a writer could forge a matching ack.
+ * That write boundary is the filesystem: workspace isolation keeps the agent out
+ * of the apis dir, and self-hosted single-user mode relies on OS permissions.
+ * (Migration transfer does NOT carry api profiles — only whitelisted DBs +
+ * config + artifacts + vault — so it is not a re-entry vector here.)
+ */
+export interface CustomEndpointAck {
+  /** Always `true` when present; absence means "no acceptance recorded". */
+  accepted: true;
+  /** Non-allowlisted hostnames the user accepted controller-responsibility for. */
+  hosts: string[];
+  /** ISO-8601 timestamp of acceptance. */
+  accepted_at: string;
+}
+
+/**
+ * True iff `ack` records acceptance covering the host of `url`. Fail-closed:
+ * a missing/incomplete ack, a host not in the accepted set, or a malformed URL
+ * all return false. Callers gate a credentialed egress on
+ * `isAllowlistedEndpoint(url) || isEndpointAcked(ack, url)`.
+ *
+ * Structural in its input (takes the ack object, not the whole ApiProfile) so
+ * this module stays free of an `api-store` import — no dependency cycle.
+ */
+export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
+  if (!ack || ack.accepted !== true) return false;
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  return ack.hosts.includes(host);
+}
+
+/**
  * Build the disclosure text shown to the user / agent when a non-allowlisted
  * endpoint is configured. Single source of truth — Settings UI, `api_setup`
  * tool, and engine boot all read the same wording so the customer sees a

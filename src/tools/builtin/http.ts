@@ -6,6 +6,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, isPrivateIP, flattenHeaders, redirectHopHeaders, isCrossOriginHop } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
+import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -521,6 +522,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const reqHostnameForAuth = new URL(input.url).hostname;
         const oauthProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
         if (oauthProfile?.auth?.type === 'oauth2') {
+          // Wave 5d runtime egress gate (base_url parity with fetch_token). The
+          // engine force-attaches the managed access_token below, so a profile
+          // that entered the store WITHOUT passing the save-time allowlist gate
+          // (loadFromDirectory at boot, or a JSON written into the apis dir)
+          // could hand the vault token to a non-vetted host. Fail-closed: refuse
+          // the attach unless the target host is allowlisted OR the profile
+          // carries a persisted acceptance covering it.
+          if (
+            !isAllowlistedEndpoint(input.url) &&
+            !isEndpointAcked(oauthProfile.custom_endpoint_ack, input.url)
+          ) {
+            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility (confirm_custom_endpoint: true) to unblock.`;
+          }
           const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
           const resolvedToken = agent.secretStore.resolve(tokenKey);
           if (resolvedToken) {

@@ -6,7 +6,7 @@
  * (Wave-5c convention).
  */
 import { describe, it, expect } from 'vitest';
-import { isAllowlistedEndpoint, describeDisclosure } from './endpoint-allowlist.js';
+import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, type CustomEndpointAck } from './endpoint-allowlist.js';
 
 describe('isAllowlistedEndpoint — exact-match hosts', () => {
   it('allows api.mistral.ai (https)', () => {
@@ -155,5 +155,34 @@ describe('describeDisclosure', () => {
     const msg = describeDisclosure('not-a-url');
     expect(msg).toContain('malformed');
     expect(msg).toContain('not-a-url');
+  });
+});
+
+describe('isEndpointAcked — persisted acceptance for runtime egress', () => {
+  const ack: CustomEndpointAck = {
+    accepted: true,
+    hosts: ['token-thief.example.com', 'shop.myshopify.com'],
+    accepted_at: '2026-07-02T10:00:00.000Z',
+  };
+
+  it('returns true when the url host is in the accepted set', () => {
+    expect(isEndpointAcked(ack, 'https://token-thief.example.com/oauth/token')).toBe(true);
+    expect(isEndpointAcked(ack, 'https://shop.myshopify.com/admin/oauth/access_token')).toBe(true);
+  });
+  it('is host-bound — a DIFFERENT non-vetted host is not covered (swap-after-accept re-gates)', () => {
+    expect(isEndpointAcked(ack, 'https://other-host.example/oauth/token')).toBe(false);
+  });
+  it('fail-closed on a missing ack (pre-fix / disk-loaded profile)', () => {
+    expect(isEndpointAcked(undefined, 'https://token-thief.example.com/oauth/token')).toBe(false);
+  });
+  it('fail-closed on an empty accepted-host set', () => {
+    const empty: CustomEndpointAck = { accepted: true, hosts: [], accepted_at: '2026-07-02T10:00:00.000Z' };
+    expect(isEndpointAcked(empty, 'https://token-thief.example.com/oauth/token')).toBe(false);
+  });
+  it('fail-closed on a malformed url', () => {
+    expect(isEndpointAcked(ack, 'not-a-url')).toBe(false);
+  });
+  it('matches on hostname only — port/path/query do not defeat the match', () => {
+    expect(isEndpointAcked(ack, 'https://token-thief.example.com:8443/oauth/token?x=1')).toBe(true);
   });
 });

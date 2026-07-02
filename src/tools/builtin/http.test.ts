@@ -1623,6 +1623,77 @@ describe('httpRequestTool', () => {
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2 401/i);
     });
+
+    // Runtime egress gate — base_url parity with fetch_token. The engine
+    // force-attaches the managed access_token for a matched oauth2 profile, so
+    // a profile that entered the store WITHOUT the save-time allowlist gate
+    // (loadFromDirectory / migration / hand-dropped JSON) must not hand the
+    // vault token to a non-vetted host absent a persisted acceptance.
+    it('refuses to attach the managed access_token to a non-vetted host with no persisted acceptance', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
+          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+        },
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const agent = {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => (k === 'SHOPIFY_SEO_ACCESS_TOKEN' ? 'shpat_managed_token' : undefined) },
+        sessionCounters: testCounters,
+      } as never;
+
+      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+
+      expect(result).toMatch(/non-vetted sub-processor/i);
+      expect(result).toContain('shop.myshopify.com');
+      expect(fetchMock).not.toHaveBeenCalled();      // token never reaches the wire
+      expect(lastPinnedInputs.length).toBe(0);
+    });
+
+    it('attaches the managed access_token to a non-vetted host when the profile carries a persisted acceptance', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shopify_seo',
+        name: 'Shopify',
+        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        description: 'Shopify Admin',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
+          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+        },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const agent = {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => (k === 'SHOPIFY_SEO_ACCESS_TOKEN' ? 'shpat_managed_token' : undefined) },
+        sessionCounters: testCounters,
+      } as never;
+
+      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+
+      expect(result).not.toMatch(/non-vetted sub-processor/i);
+      expect(fetchMock).toHaveBeenCalled();
+      // The managed access_token was attached as Bearer (gate passed).
+      const sentHeaders = Object.fromEntries(
+        Object.entries(lastPinnedInputs[0]!.headers).map(([k, v]) => [k.toLowerCase(), v]),
+      );
+      expect(sentHeaders['authorization']).toBe('Bearer shpat_managed_token');
+    });
   });
 
   // Staging 2026-05-18 (lynox-chat-2026-05-18 (2).md):
@@ -1663,6 +1734,9 @@ describe('httpRequestTool', () => {
           vault_keys: ['SHOPIFY_SEO_ACCESS_TOKEN'],
           oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
+        // Accepted custom endpoint — these tests exercise the attach mechanics,
+        // not the Wave-5d allowlist gate (that has its own coverage below).
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -1689,6 +1763,7 @@ describe('httpRequestTool', () => {
           type: 'oauth2',
           oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -1720,6 +1795,7 @@ describe('httpRequestTool', () => {
           type: 'oauth2',
           oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -1751,6 +1827,7 @@ describe('httpRequestTool', () => {
           type: 'oauth2',
           oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
