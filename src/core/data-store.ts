@@ -281,6 +281,7 @@ export class DataStore {
     // Count rows before insert for accurate insert/update tracking
     const countBefore = (this.db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as { cnt: number }).cnt;
 
+    let succeeded = 0;
     const transaction = this.db.transaction(() => {
       for (let i = 0; i < records.length; i++) {
         const record = records[i]!;
@@ -305,6 +306,7 @@ export class DataStore {
           }
 
           stmt.run(...values);
+          succeeded++;
         } catch (err) {
           errors.push(`Record ${i}: ${getErrorMessage(err)}`);
         }
@@ -313,9 +315,12 @@ export class DataStore {
       // Update record count + timestamp in meta
       const countAfter = (this.db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as { cnt: number }).cnt;
       inserted = countAfter - countBefore;
-      // For upsert: successful ops minus new rows = updates
-      const totalOps = records.length - errors.length;
-      updated = uniqueKey ? totalOps - inserted : 0;
+      // For upsert: successfully-run rows minus new rows = updates. Count only
+      // rows whose stmt.run() actually succeeded — NOT `records.length -
+      // errors.length`, because `errors` also holds NON-fatal "unknown field
+      // ignored" warnings, so a successful upsert carrying an unknown field was
+      // miscounted as a failure and `updated` could go NEGATIVE.
+      updated = uniqueKey ? succeeded - inserted : 0;
 
       this.db.prepare(
         'UPDATE ds_collections SET record_count = ?, updated_at = ? WHERE name = ?'
@@ -801,11 +806,16 @@ export class DataStore {
       ? ` GROUP BY ${groupBy.map(c => `"${c}"`).join(', ')}`
       : '';
 
-    // For aggregation, count total groups
-    const countSql = groupBy.length > 0
-      ? `SELECT COUNT(*) as cnt FROM (SELECT 1 FROM "${tableName}"${whereClause}${groupClause})`
-      : `SELECT 1 as cnt`;
-    const countResult = this.db.prepare(countSql).get(...whereParams) as { cnt: number };
+    // For aggregation, count total groups. A NON-grouped aggregate always
+    // collapses to exactly one row, so skip the count query: running the
+    // paramless `SELECT 1 as cnt` with the WHERE-clause bind params (which it
+    // has no placeholders for) throws `RangeError: Too many parameter values`.
+    // Only the grouped case needs a real count-of-groups query.
+    const total = groupBy.length > 0
+      ? (this.db.prepare(
+          `SELECT COUNT(*) as cnt FROM (SELECT 1 FROM "${tableName}"${whereClause}${groupClause})`,
+        ).get(...whereParams) as { cnt: number }).cnt
+      : 1;
 
     // Build valid columns for sort (includes aliases)
     const aggValidCols = new Set(validColumns);
@@ -818,6 +828,6 @@ export class DataStore {
     const sql = `SELECT ${selectParts.join(', ')} FROM "${tableName}"${whereClause}${groupClause}${orderClause} LIMIT ? OFFSET ?`;
     const rows = this.db.prepare(sql).all(...whereParams, limit, offset) as Record<string, unknown>[];
 
-    return { rows, total: countResult.cnt };
+    return { rows, total };
   }
 }

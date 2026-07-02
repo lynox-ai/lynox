@@ -35,6 +35,9 @@ import {
   getPipeline,
   runSavedWorkflow,
   forgetPipeline,
+  getPipelineStore,
+  recordExecutedState,
+  getExecutedResult,
   _resetPipelineStore,
   _summarizeStepOutput,
 } from './pipeline.js';
@@ -764,6 +767,43 @@ describe('getPipeline — legacy mode backfill', () => {
     getPipeline(pipelineId, fakeRunHistory as never);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
+  });
+
+  it('read-through SQLite cache respects the store cap (no unbounded growth)', () => {
+    // Reading many distinct pipelines from SQLite must not grow the in-memory
+    // store past MAX_PLANS — pre-fix the fallback did a raw `pipelineStore.set`,
+    // bypassing the cap and leaking one entry per distinct id read.
+    const fakeRunHistory = {
+      getPlannedPipeline: (id: string) => ({
+        id,
+        manifest_json: JSON.stringify({
+          id, name: 'p', goal: 'g', steps: [{ id: 'a', task: 'compute' }],
+          reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(), executed: false,
+        }),
+      }),
+    };
+    // Zero-padded, equal-length ids so none is a prefix of another (the prefix
+    // match in getPipeline would otherwise short-circuit the SQLite fallback).
+    for (let i = 0; i < 15; i++) {
+      getPipeline(`bulk-${String(i).padStart(2, '0')}`, fakeRunHistory as never);
+    }
+    expect(getPipelineStore().size).toBeLessThanOrEqual(10); // MAX_PLANS
+  });
+
+  it('executedStates uses LRU eviction — a re-recorded hot id survives eviction pressure', () => {
+    _resetPipelineStore();
+    const val = () => ({ manifest: {}, state: {} }) as unknown as Parameters<typeof recordExecutedState>[1];
+    // Fill the retry buffer to its cap (MAX_EXECUTED_STATES = 50).
+    for (let i = 0; i < 50; i++) recordExecutedState(`wf-${String(i).padStart(3, '0')}`, val());
+    // Re-record the genuine-oldest id → LRU touch moves it to most-recent.
+    recordExecutedState('wf-000', val());
+    // One new id → evicts the true oldest (wf-001), NOT the re-touched wf-000.
+    recordExecutedState('wf-new', val());
+    // Pre-fix (plain Map.set + FIFO) wf-000 kept its original slot and would be
+    // evicted here; LRU delete-then-set keeps it.
+    expect(getExecutedResult('wf-000')).toBeDefined();
+    expect(getExecutedResult('wf-001')).toBeUndefined();
+    expect(getExecutedResult('wf-new')).toBeDefined();
   });
 });
 

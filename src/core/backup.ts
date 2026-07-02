@@ -238,6 +238,50 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
 
+    // Refuse to restore an encrypted backup with no key: the decrypt branch
+    // below would be skipped and the raw ciphertext copied OVER the live
+    // plaintext DBs, silently corrupting them. Fail before touching anything.
+    if (manifest.encrypted && !this.vaultKey) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Backup is encrypted but no vault key is available — refusing to restore (would overwrite live data with ciphertext).' };
+    }
+
+    // Verify the backup's own integrity (size + checksum + SQLite integrity)
+    // BEFORE overwriting any live file — a truncated/corrupt archive must never
+    // be promoted over good data. Mirror createBackup's verify: skip the SQLite
+    // integrity check for encrypted files (they are ciphertext on disk).
+    const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
+    const verifyFiles = manifest.encrypted
+      ? verifiableFiles.map(f => (f.type === 'sqlite' ? { ...f, type: 'file' as const } : f))
+      : verifiableFiles;
+    const preVerify = verifyBackup(backupPath, verifyFiles);
+    if (!preVerify.valid) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup verification failed — refusing to restore: ${preVerify.errors.slice(0, 3).join('; ')}` };
+    }
+
+    // Validate the decryption key BEFORE the destructive loop. All files share
+    // one derived key, so a WRONG/rotated key (present, but not matching) fails
+    // AES-GCM auth on the first decrypt — but only MID-loop, after earlier files
+    // were already written over live DBs. Pre-flight one decrypt to a throwaway
+    // temp path and refuse on failure, so a wrong key can't partially corrupt
+    // live data. (checksum verify above can't detect this — the ciphertext is
+    // intact; only the key is wrong.)
+    if (manifest.encrypted && this.vaultKey) {
+      const probe = manifest.files.find(
+        e => e.type !== 'directory' && existsSync(join(backupPath, e.path)) && isEncryptedBackupFile(join(backupPath, e.path)),
+      );
+      if (probe) {
+        const probeTmp = join(backupPath, '.keycheck.tmp');
+        try {
+          rmSync(probeTmp, { force: true });
+          decryptFile(join(backupPath, probe.path), probeTmp, deriveBackupKey(this.vaultKey));
+        } catch {
+          return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Backup decryption failed — the vault key does not match this backup; refusing to restore (avoids partially overwriting live data).' };
+        } finally {
+          try { rmSync(probeTmp, { force: true }); } catch { /* best-effort cleanup */ }
+        }
+      }
+    }
+
     // Safety: attempt backup of current state before restore (best-effort, don't block restore on failure)
     let safetyPath = '';
     try {

@@ -14,6 +14,9 @@ import type { IMemory } from '../../types/memory.js';
 
 const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
+/** Retry-state buffer cap — larger than the plan cache so a burst of distinct
+ *  workflows keeps each other's executed state retriable; bounds the leak. */
+const MAX_EXECUTED_STATES = 50;
 
 // Pipeline config accessed via agent.toolContext (userConfig, tools, streamHandler, runHistory)
 
@@ -86,7 +89,7 @@ export function getPipeline(id: string, runHistory?: RunHistory | null): Planned
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
         backfillPlannedPipelineDefaults(planned);
-        pipelineStore.set(planned.id, planned); // cache in memory
+        storePipeline(planned.id, planned); // cache in memory (cap-enforced)
         return planned;
       } catch { /* ignore parse errors */ }
     }
@@ -104,6 +107,23 @@ export function storePipeline(id: string, pipeline: PlannedPipeline): void {
     }
   }
   pipelineStore.set(id, pipeline);
+}
+
+/** Record an executed pipeline's retry state with a bounded, TRUE-LRU map — the
+ *  `executedStates` map otherwise grows one entry per distinct executed pipeline
+ *  id for the life of the process (unbounded leak). delete-then-set moves a
+ *  re-recorded (retried) id to the most-recent slot, so a hot pipeline is NOT
+ *  evicted as "oldest" while it is still being retried (a plain `Map.set` keeps
+ *  the original insertion position → FIFO, which would drop a hot entry after N
+ *  other executions). Uses its OWN cap, larger than the plan cache, so a burst
+ *  of distinct workflows doesn't evict each other's still-retriable state. */
+export function recordExecutedState(id: string, value: { manifest: Manifest; state: RunState }): void {
+  executedStates.delete(id);
+  if (executedStates.size >= MAX_EXECUTED_STATES) {
+    const oldest = executedStates.keys().next().value;
+    if (oldest !== undefined) executedStates.delete(oldest);
+  }
+  executedStates.set(id, value);
 }
 
 /** Get the pipeline store for listing */
@@ -652,7 +672,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         parentMemory: deps.memory ?? null,
       }));
 
-      executedStates.set(planned.id, { manifest: prev.manifest, state });
+      recordExecutedState(planned.id, { manifest: prev.manifest, state });
       persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit, planned.id);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
@@ -728,7 +748,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentMemory: deps.memory ?? null,
     }));
 
-    executedStates.set(planned.id, { manifest, state });
+    recordExecutedState(planned.id, { manifest, state });
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit, planned.id);
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }

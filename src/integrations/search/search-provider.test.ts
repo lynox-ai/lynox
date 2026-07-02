@@ -38,6 +38,16 @@ describe('SearXNGProvider', () => {
     expect(url).toContain('time_range=week');
   });
 
+  it('bounds the request with an abort signal (no hang on a stalled SearXNG socket)', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+    const provider = new SearXNGProvider('http://localhost:8888');
+    await provider.search('test');
+    // Pre-fix the fetch had no `signal`, so a hung socket stalled the run
+    // indefinitely (Node fetch has no default timeout).
+    const opts = mockFetch.mock.calls[0]![1] as { signal?: unknown };
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('strips trailing slash from base URL', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

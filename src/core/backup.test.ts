@@ -318,3 +318,77 @@ describe('BackupManager (encrypted)', () => {
     expect(config['api_key']).toBe('secret');
   });
 });
+
+describe('restoreBackup safety guards', () => {
+  let lynoxDir: string;
+  let backupDir: string;
+
+  beforeEach(() => {
+    lynoxDir = createTmpDir();
+    backupDir = join(lynoxDir, 'backups');
+    createTestSqlite(join(lynoxDir, 'history.db'));
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+  });
+
+  afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
+
+  function liveRowCount(): number {
+    const db = new Database(join(lynoxDir, 'history.db'), { readonly: true });
+    try {
+      return (db.prepare('SELECT COUNT(*) as cnt FROM test').get() as { cnt: number }).cnt;
+    } finally {
+      db.close();
+    }
+  }
+
+  it('refuses to restore an encrypted backup when the vault key is missing (no ciphertext over live DBs)', async () => {
+    // Make an ENCRYPTED backup with a key.
+    const encManager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: true }, 'vault-key-xyz');
+    const created = await encManager.createBackup();
+    expect(created.success).toBe(true);
+    expect(created.manifest.encrypted).toBe(true);
+
+    // A fresh manager with NO key attempts the restore.
+    const keyless = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null);
+    const result = await keyless.restoreBackup(created.path);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/encrypted|key/i);
+    // Live DB untouched — still valid SQLite with its 2 rows, NOT overwritten
+    // with raw ciphertext (the pre-fix `copyFileSync` branch).
+    expect(verifySqliteIntegrity(join(lynoxDir, 'history.db'))).toBe(true);
+    expect(liveRowCount()).toBe(2);
+  });
+
+  it('refuses to restore an encrypted backup with the WRONG key before any live write', async () => {
+    // Encrypted backup made with key A.
+    const encManager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: true }, 'vault-key-A');
+    const created = await encManager.createBackup();
+    expect(created.success).toBe(true);
+
+    // A manager holding a DIFFERENT key attempts the restore — checksum verify
+    // passes (ciphertext intact) but decrypt would AES-GCM-fail mid-loop.
+    const wrongKey = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: true }, 'vault-key-B-different');
+    const result = await wrongKey.restoreBackup(created.path);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/does not match this backup/i); // the key pre-flight message
+    // Live DB untouched — the wrong key is caught BEFORE the destructive loop.
+    expect(verifySqliteIntegrity(join(lynoxDir, 'history.db'))).toBe(true);
+    expect(liveRowCount()).toBe(2);
+  });
+
+  it('refuses to restore a corrupt/truncated backup (verify-before-restore)', async () => {
+    const manager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null);
+    const created = await manager.createBackup();
+    expect(created.success).toBe(true);
+
+    // Corrupt a backup file so its checksum no longer matches the manifest.
+    writeFileSync(join(created.path, 'history.db'), 'CORRUPTED');
+
+    const result = await manager.restoreBackup(created.path);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/verification failed/i);
+    expect(liveRowCount()).toBe(2); // live DB never overwritten from a bad archive
+  });
+});
