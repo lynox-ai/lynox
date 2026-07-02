@@ -413,6 +413,19 @@ export interface LynoxUserConfig {
    * must be gated by its own backfill, not piggyback the already-ON noun flag.
    */
   verb_graph_enabled?: boolean | undefined;
+  /**
+   * Foundation Rework v2 (S3e): cut the verb-layer DEFINITION READS (triggers +
+   * workflows) over to the engine.db verb-graph. Default: false — reads stay on
+   * legacy history.db until this flips. SEPARATE from `verb_graph_enabled` (the
+   * write-mirror) on purpose: engine.db must first be a live, backfilled mirror
+   * (mirror ON + S3d backfill run) before reads flip, so a prod tenant can soak
+   * the equivalence before the money-path read-cutover. Inert unless the mirror
+   * is also on — the stores exist only when `verb_graph_enabled` built them, so
+   * reads-ON-mirror-OFF safely falls back to legacy. Tasks are NOT included (their
+   * free-text assignee has no engine.db home until the S4 subject resolution);
+   * only triggers + workflows read from engine.db under this flag.
+   */
+  verb_graph_reads?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

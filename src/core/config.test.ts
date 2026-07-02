@@ -38,6 +38,7 @@ describe('Config', () => {
     delete process.env['LYNOX_LLM_PROVIDER'];
     delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
     delete process.env['LYNOX_VERB_GRAPH_ENABLED'];
+    delete process.env['LYNOX_VERB_GRAPH_READS'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
@@ -368,6 +369,40 @@ describe('Config', () => {
       process.env['LYNOX_VERB_GRAPH_ENABLED'] = bogus;
       const { loadConfig } = await import('./config.js');
       expect(loadConfig().verb_graph_enabled).toBeUndefined();
+    }
+  });
+
+  // ── Foundation Rework v2 (S3e): verb-graph READ-cutover flag (deploy wiring) ──
+
+  it('LYNOX_VERB_GRAPH_READS env flips verb_graph_reads (all four: true/1 → true, false/0 → false)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_VERB_GRAPH_READS'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().verb_graph_reads).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_VERB_GRAPH_READS'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().verb_graph_reads).toBe(false);
+    }
+  });
+
+  it('verb_graph_reads survives the .strict() config.json schema (not stripped)', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ verb_graph_reads: true }));
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().verb_graph_reads).toBe(true);
+  });
+
+  it('LYNOX_VERB_GRAPH_READS ignores unrecognized values, leaving the flag unset', async () => {
+    for (const bogus of ['yes', 'on', 'True', '2', '']) {
+      vi.resetModules();
+      process.env['LYNOX_VERB_GRAPH_READS'] = bogus;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().verb_graph_reads).toBeUndefined();
     }
   });
 

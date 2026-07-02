@@ -165,6 +165,16 @@ export function loadConfig(): LynoxUserConfig {
   } else if (verbGraph === 'false' || verbGraph === '0') {
     merged.verb_graph_enabled = false;
   }
+  // Foundation Rework v2 (S3e): the engine.db verb-layer READ-cutover flag
+  // (triggers + workflows). The CP sets this env per-tenant to flip reads over
+  // AFTER the mirror is live + backfilled. Explicit 'true'/'1' vs 'false'/'0'
+  // parse (no z.coerce, which would treat any non-empty string as true).
+  const verbReads = process.env['LYNOX_VERB_GRAPH_READS'];
+  if (verbReads === 'true' || verbReads === '1') {
+    merged.verb_graph_reads = true;
+  } else if (verbReads === 'false' || verbReads === '0') {
+    merged.verb_graph_reads = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default

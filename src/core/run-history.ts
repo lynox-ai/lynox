@@ -1065,6 +1065,12 @@ export class RunHistory {
   private _triggerStore: TriggerStore | null = null;
   private _taskStore: TaskStore | null = null;
   private _verbGraphWarned = false;
+  /** S3e: gate the verb-def READ-cutover (triggers + workflows) onto engine.db.
+   *  Separate from the write-mirror: reads flip only after the mirror is live +
+   *  backfilled. The stores exist only when the mirror is on, so reads-ON-mirror-OFF
+   *  falls back to legacy (you can't read a non-live-mirrored engine.db). */
+  private _verbGraphReads = false;
+  private _verbReadWarned = false;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
     const path = dbPath ?? getDefaultDbPath();
@@ -1091,10 +1097,26 @@ export class RunHistory {
    * lockstep. Idempotent + reversible (enabled=false clears all → back to
    * legacy-only). Additive: never touches the legacy history.db path.
    */
-  setVerbGraph(engineDb: EngineDb, enabled: boolean): void {
+  setVerbGraph(engineDb: EngineDb, enabled: boolean, readsEnabled = false): void {
     this._workflowStore = enabled ? new WorkflowStore(engineDb) : null;
     this._triggerStore = enabled ? new TriggerStore(engineDb) : null;
     this._taskStore = enabled ? new TaskStore(engineDb) : null;
+    // S3e: reads honour engine.db ONLY when the mirror built the stores above
+    // (`enabled`). readsEnabled without the mirror leaves the stores null → the
+    // read methods fall back to legacy, so a stale/absent mirror never serves reads.
+    this._verbGraphReads = readsEnabled;
+  }
+
+  /** Swallow a verb-def READ failure (closed/corrupt engine.db): fall back to the
+   *  legacy history.db read, warn once. Mirrors knowledge-layer `_logReadFallback`
+   *  — a by-id miss is NOT a failure (it returns not-found from inside the try). */
+  private _logVerbReadFallback(method: string, err: unknown): void {
+    if (!this._verbReadWarned) {
+      this._verbReadWarned = true;
+      process.stderr.write(
+        `[lynox] verb-graph read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   /** Swallow a mirror failure: the legacy write already succeeded, so a broken
@@ -2197,6 +2219,10 @@ export class RunHistory {
   }
 
   getPlannedPipeline(id: string): { id: string; manifest_json: string } | undefined {
+    if (this._verbGraphReads && this._workflowStore) {
+      try { return this._workflowStore.getPlanned(id); }
+      catch (err) { this._logVerbReadFallback('getPlannedPipeline', err); }
+    }
     return persistence.getPlannedPipeline(this.db, id);
   }
 
@@ -2208,6 +2234,10 @@ export class RunHistory {
   getPlannedPipelines(limit = 100): Array<{
     id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
   }> {
+    if (this._verbGraphReads && this._workflowStore) {
+      try { return this._workflowStore.listPlanned(limit); }
+      catch (err) { this._logVerbReadFallback('getPlannedPipelines', err); }
+    }
     return persistence.getPlannedPipelines(this.db, limit);
   }
 
@@ -2326,6 +2356,10 @@ export class RunHistory {
   }
 
   getTrigger(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TriggerRecord | undefined {
+    if (this._verbGraphReads && this._triggerStore) {
+      try { return this._triggerStore.getById(id, opts); }
+      catch (err) { this._logVerbReadFallback('getTrigger', err); }
+    }
     return persistence.getTrigger(this.db, id, opts);
   }
 
@@ -2372,18 +2406,30 @@ export class RunHistory {
     taskType?: string | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
+    if (this._verbGraphReads && this._triggerStore) {
+      try { return this._triggerStore.listFiltered(opts); }
+      catch (err) { this._logVerbReadFallback('getTriggers', err); }
+    }
     return persistence.getTriggers(this.db, opts);
   }
 
   /** Triggers due for execution (next_run_at <= now, not terminal). Fired by
    *  the WorkerLoop. */
   getDueTriggers(): TriggerRecord[] {
+    if (this._verbGraphReads && this._triggerStore) {
+      try { return this._triggerStore.getDue(); }
+      catch (err) { this._logVerbReadFallback('getDueTriggers', err); }
+    }
     return persistence.getDueTriggers(this.db);
   }
 
   /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
   getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
+    if (this._verbGraphReads && this._triggerStore) {
+      try { return this._triggerStore.getByWorkflowId(pipelineId); }
+      catch (err) { this._logVerbReadFallback('getTriggersByPipelineId', err); }
+    }
     return persistence.getTriggersByPipelineId(this.db, pipelineId);
   }
 
