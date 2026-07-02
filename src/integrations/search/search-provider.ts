@@ -127,8 +127,12 @@ export class SearXNGProvider implements SearchProvider {
 
     const url = `${this.baseUrl.replace(/\/+$/, '')}/search?${params.toString()}`;
     assertEgressAllowed(url, ctx);
+    // Bound the request — a hung SearXNG socket would otherwise stall the run
+    // indefinitely (Node fetch has no default timeout). Matches the DDG fallback
+    // and health-check paths, which already set a signal.
     const response = await fetch(url, {
       headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
     });
 
     if (!response.ok) {

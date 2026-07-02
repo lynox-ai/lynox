@@ -199,6 +199,32 @@ describe('DataStore', () => {
       expect(info?.recordCount).toBe(2);
     });
 
+    it('counts upserts correctly when records carry unknown fields (no negative/under-count)', () => {
+      ds.createCollection({
+        name: 'up',
+        scope,
+        columns: [
+          { name: 'email', type: 'string' },
+          { name: 'name', type: 'string' },
+        ],
+        uniqueKey: ['email'], // enables ON CONFLICT DO UPDATE (upsert)
+      });
+      ds.insertRecords({ collection: 'up', records: [{ email: 'a@b.com', name: 'A' }] });
+      // Update the existing row + insert a new one; BOTH carry an unknown field,
+      // which pushes a NON-fatal "unknown field ignored" warning into `errors`.
+      const result = ds.insertRecords({
+        collection: 'up',
+        records: [
+          { email: 'a@b.com', name: 'A2', bogus: 1 }, // update
+          { email: 'c@d.com', name: 'C', bogus: 2 },  // insert
+        ],
+      });
+      expect(result.inserted).toBe(1);
+      // Pre-fix `updated` used `records.length - errors.length`, so the two
+      // warnings were counted as failures and `updated` went NEGATIVE (-1).
+      expect(result.updated).toBe(1);
+    });
+
     it('handles empty records', () => {
       const result = ds.insertRecords({ collection: 'ads', records: [] });
       expect(result.inserted).toBe(0);
@@ -527,6 +553,22 @@ describe('DataStore', () => {
       const us = rows.find(r => r['region'] === 'US') as Record<string, unknown>;
       expect(eu['total_revenue']).toBe(350);
       expect(us['total_revenue']).toBe(450);
+    });
+
+    it('aggregates with a filter but NO groupBy without throwing (single-row result)', () => {
+      // Pre-fix this threw `RangeError: Too many parameter values` — the
+      // non-grouped branch built the paramless `SELECT 1 as cnt` yet still bound
+      // the filter's WHERE params to it.
+      const { rows, total } = ds.queryRecords({
+        collection: 'sales',
+        filter: { region: 'EU' },
+        aggregate: {
+          metrics: [{ field: 'revenue', fn: 'sum', alias: 'total' }],
+        },
+      });
+      expect(rows).toHaveLength(1);
+      expect((rows[0] as Record<string, unknown>)['total']).toBe(350); // EU: 100+200+50
+      expect(total).toBe(1);
     });
 
     it('aggregates with avg', () => {
