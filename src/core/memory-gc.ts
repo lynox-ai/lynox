@@ -182,7 +182,15 @@ export async function runMemoryGc(
           .map(idx => allLines[idx]!)
           .filter(line => line.length > 0);
 
-        await Promise.all(linesToRemove.map(line => memory.deleteScoped(ns, line, scope, { exact: true })));
+        // Remove stale lines via deleteScoped SEQUENTIALLY — never Promise.all.
+        // deleteScoped is a read-modify-write on the same scope file + cache, so
+        // concurrent calls all load the same pre-write snapshot and the LAST
+        // write wins, clobbering every removal but one (GC would prune 1 of N
+        // stale lines). Exact match removes ALL lines equal to the text, so a
+        // Set collapses duplicates into a single pass.
+        for (const line of new Set(linesToRemove)) {
+          await memory.deleteScoped(ns, line, scope, { exact: true });
+        }
       }
 
       if (removeIndices.size > 0 || staleTexts.size > 0) {

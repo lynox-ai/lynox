@@ -108,7 +108,14 @@ export class EntityResolver {
       }
     }
 
-    // Delete source entity (cascades mentions, relations, cooccurrences)
+    // Re-point the source's mentions, relations and cooccurrences onto the
+    // target BEFORE deleting it — `deleteEntity` hard-DELETEs those rows, so
+    // without this the merge would silently destroy the source's graph edges
+    // instead of preserving them under the surviving entity.
+    this.db.repointEntityReferences(sourceId, targetId);
+
+    // Delete source entity (its references are now re-pointed; deleteEntity
+    // clears any leftover rows that collided with an existing target row).
     this.db.deleteEntity(sourceId);
 
     if (channels.knowledgeEntity.hasSubscribers) {

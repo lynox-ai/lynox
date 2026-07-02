@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KnowledgeLayer } from './knowledge-layer.js';
-import { LocalProvider } from './embedding.js';
+import { LocalProvider, blobToEmbed, cosineSimilarity } from './embedding.js';
+import type { AgentMemoryDb } from './agent-memory-db.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 /**
@@ -418,5 +419,28 @@ describe('KnowledgeLayer', () => {
       await isolated.close();
       await rm(isolatedDir, { recursive: true, force: true }).catch(() => {});
     }
+  });
+
+  it('re-embeds the memory on updateMemoryText so the stored vector matches the new text', async () => {
+    const s: MemoryScopeRef = { type: 'context', id: 're-embed-scope' };
+    const r = await layer.store('The capital of France is Paris.', 'knowledge', s);
+    expect(r.memoryId).toBeTruthy();
+
+    await layer.updateMemoryText(
+      'The capital of France is Paris.',
+      'The capital of Japan is Tokyo.',
+      'knowledge', s,
+    );
+
+    // The persisted vector must now match embed(newText) — pre-fix the text was
+    // updated but the embedding stayed embed(oldText), poisoning similarity search.
+    const provider = (layer as unknown as { embeddingProvider: LocalProvider }).embeddingProvider;
+    const db = (layer as unknown as { db: AgentMemoryDb }).db;
+    const mem = db.getMemory(r.memoryId!)!;
+    const stored = blobToEmbed(mem.embedding!, provider.dimensions);
+    const embNew = await provider.embed('The capital of Japan is Tokyo.');
+    const embOld = await provider.embed('The capital of France is Paris.');
+    expect(cosineSimilarity(stored, embNew)).toBeGreaterThan(0.99);
+    expect(cosineSimilarity(stored, embNew)).toBeGreaterThan(cosineSimilarity(stored, embOld));
   });
 });

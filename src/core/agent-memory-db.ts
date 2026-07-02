@@ -15,6 +15,13 @@ import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 
+/** Row cap for an `exhaustive` similarity scan (dedup). 50× the old dedup floor
+ *  of 100 so an older duplicate past the newest window is caught, but still a
+ *  hard ceiling: an uncapped SELECT would do an O(N) blob-decode + cosine on
+ *  every store() for a large, ceiling-less scope (e.g. `global`). A single scope
+ *  realistically stays well under this because dedup + GC keep it bounded. */
+const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
+
 // ── Row Types (internal, not exported) ──────────────────────────
 
 export interface MemoryRow {
@@ -406,6 +413,37 @@ export class AgentMemoryDb {
   }
 
   /**
+   * Re-point every graph reference from `sourceId` onto `targetId` — used by an
+   * entity MERGE so the merge does not silently DROP the source's mentions,
+   * relations and cooccurrences (a `deleteEntity` alone hard-deletes them). Run
+   * this BEFORE `deleteEntity(sourceId)`: the OR IGNORE updates move whatever the
+   * target doesn't already have, and `deleteEntity` then removes the leftovers
+   * that collided with an existing target row. Atomic (all-or-nothing).
+   */
+  repointEntityReferences(sourceId: string, targetId: string): void {
+    if (sourceId === targetId) return;
+    this.transaction((): void => {
+      // mentions PK (memory_id, entity_id): OR IGNORE skips a memory the target
+      // already mentions; the leftover source rows are cleaned by deleteEntity.
+      this.db.prepare('UPDATE OR IGNORE mentions SET entity_id = ? WHERE entity_id = ?').run(targetId, sourceId);
+      // relations keyed by a surrogate id (no unique on the triple): re-point
+      // both endpoints, then drop the self-loop the merge collapsed into (a
+      // former source→target edge becomes target→target — meaningless). Scope
+      // the delete to the TARGET's own self-loop — an unscoped `from = to` would
+      // wipe every unrelated reflexive edge (`Z→Z`) in the whole table.
+      this.db.prepare('UPDATE relations SET from_entity_id = ? WHERE from_entity_id = ?').run(targetId, sourceId);
+      this.db.prepare('UPDATE relations SET to_entity_id = ? WHERE to_entity_id = ?').run(targetId, sourceId);
+      this.db.prepare('DELETE FROM relations WHERE from_entity_id = ? AND to_entity_id = ?').run(targetId, targetId);
+      // cooccurrences PK (entity_a_id, entity_b_id): OR IGNORE on collision, then
+      // drop the self-cooccurrence a merged source↔target pair produced — again
+      // scoped to the target so unrelated self-cooccurrences are untouched.
+      this.db.prepare('UPDATE OR IGNORE cooccurrences SET entity_a_id = ? WHERE entity_a_id = ?').run(targetId, sourceId);
+      this.db.prepare('UPDATE OR IGNORE cooccurrences SET entity_b_id = ? WHERE entity_b_id = ?').run(targetId, sourceId);
+      this.db.prepare('DELETE FROM cooccurrences WHERE entity_a_id = ? AND entity_b_id = ?').run(targetId, targetId);
+    });
+  }
+
+  /**
    * Purge all knowledge extracted from a specific thread.
    * Uses subqueries instead of IN-list placeholders to avoid SQLite's 999-param limit.
    * Deletes memories, orphaned entities (reference-counted), and their relations.
@@ -603,7 +641,12 @@ export class AgentMemoryDb {
     return result.changes;
   }
 
-  updateMemoryText(oldText: string, newText: string, namespace?: string | undefined): string | null {
+  updateMemoryText(
+    oldText: string,
+    newText: string,
+    namespace?: string | undefined,
+    embedding?: number[] | undefined,
+  ): string | null {
     const row = namespace
       ? this.db.prepare(`
           SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? AND namespace = ? LIMIT 1
@@ -613,8 +656,16 @@ export class AgentMemoryDb {
         `).get(`%${oldText}%`) as { id: string } | undefined;
 
     if (!row) return null;
-    this.db.prepare('UPDATE memories SET text = ?, updated_at = ? WHERE id = ?')
-      .run(newText, new Date().toISOString(), row.id);
+    // Update the embedding in the SAME statement when the caller supplies one,
+    // so the stored vector can never drift from the text (a text-only update
+    // leaves embed(oldText) behind, silently poisoning similarity search).
+    if (embedding) {
+      this.db.prepare('UPDATE memories SET text = ?, embedding = ?, updated_at = ? WHERE id = ?')
+        .run(newText, embedToBlob(embedding), new Date().toISOString(), row.id);
+    } else {
+      this.db.prepare('UPDATE memories SET text = ?, updated_at = ? WHERE id = ?')
+        .run(newText, new Date().toISOString(), row.id);
+    }
     return row.id;
   }
 
@@ -633,6 +684,12 @@ export class AgentMemoryDb {
       scopeTypes?: string[] | undefined;
       scopeIds?: string[] | undefined;
       activeOnly?: boolean | undefined;
+      /** Raise the row cap to `DEDUP_EXHAUSTIVE_SCAN_LIMIT` (dedup) instead of the
+       *  retrieval window. Dedup must consider prior memories deep in the
+       *  (scope-narrowed) set — a `created_at DESC LIMIT 100` window silently
+       *  misses an older duplicate, so a re-stated fact is saved twice. Still
+       *  capped (not unbounded) to bound per-store cost on a large scope. */
+      exhaustive?: boolean | undefined;
     },
   ): ScoredMemoryRow[] {
     const clauses: string[] = [];
@@ -655,7 +712,13 @@ export class AgentMemoryDb {
     }
 
     const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    const sqlLimit = Math.min(Math.max(topK * 10, 100), 500);
+    // Exhaustive scans (dedup) raise the row cap far above the retrieval window
+    // so an older near-duplicate past the newest 100 is still caught, but keep a
+    // high safety ceiling (an uncapped SELECT would be O(N) blob-decode + cosine
+    // on every store() for a ceiling-less scope like `global`).
+    const sqlLimit = filters?.exhaustive === true
+      ? DEDUP_EXHAUSTIVE_SCAN_LIMIT
+      : Math.min(Math.max(topK * 10, 100), 500);
     params.push(sqlLimit);
     const rows = this.db.prepare(
       `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,

@@ -41,6 +41,11 @@ export async function detectContradictions(
     {
       namespace,
       scopeTypes: [scope.type],
+      // Filter by scope ID too — without it a memory in one scope (e.g.
+      // `context:acme`) can supersede a contradicting memory in a DIFFERENT
+      // scope of the same type (`context:beta`), a cross-project data leak. The
+      // sibling dedup path in knowledge-layer already scopes this way.
+      scopeIds: [scope.id],
       activeOnly: true,
     },
   );

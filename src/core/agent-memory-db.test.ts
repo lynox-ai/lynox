@@ -302,6 +302,74 @@ describe('AgentMemoryDb', () => {
     });
   });
 
+  // ── Entity reference re-pointing + exhaustive dedup ──────────
+
+  describe('repointEntityReferences', () => {
+    it('moves mentions and relations from source to target instead of dropping them', () => {
+      const source = db.createEntity({ canonicalName: 'Acme Inc', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+      const target = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+      const bob = db.createEntity({ canonicalName: 'Bob', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+      const mem = db.createMemory({ text: 'Acme Inc hired Bob', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      db.createMention(mem, source);
+      db.createRelation(source, bob, 'employs', 'Acme employs Bob', '');
+
+      db.repointEntityReferences(source, target);
+
+      expect(db.getMemoriesMentioningEntity(target).map(m => m.id)).toContain(mem);
+      expect(db.getMemoriesMentioningEntity(source)).toHaveLength(0);
+      const rels = db.getEntityRelations(target);
+      expect(rels).toHaveLength(1);
+      expect(rels[0]!.relation_type).toBe('employs');
+      expect(db.getEntityRelations(source)).toHaveLength(0);
+    });
+
+    it('drops a self-loop when a source→target edge collapses on merge', () => {
+      const source = db.createEntity({ canonicalName: 'S', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      const target = db.createEntity({ canonicalName: 'T', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      db.createRelation(source, target, 'related_to', '', ''); // becomes target→target
+      db.repointEntityReferences(source, target);
+      expect(db.getEntityRelations(target)).toHaveLength(0);
+      expect(db.getRelationCount()).toBe(0);
+    });
+
+    it('leaves an unrelated entity self-loop intact when merging others', () => {
+      const source = db.createEntity({ canonicalName: 'S', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      const target = db.createEntity({ canonicalName: 'T', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      const z = db.createEntity({ canonicalName: 'Z', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      db.createRelation(z, z, 'refers_to_self', 'a legit reflexive edge', ''); // unrelated Z→Z
+      db.createRelation(source, target, 'related_to', '', '');                  // collapses to target→target
+
+      db.repointEntityReferences(source, target);
+
+      // The merge's own self-loop is dropped, but the UNRELATED reflexive edge
+      // survives — an unscoped `from = to` DELETE would have wiped every self-loop.
+      expect(db.getEntityRelations(target)).toHaveLength(0);
+      expect(db.getEntityRelations(z).map(r => r.relation_type)).toContain('refers_to_self');
+    });
+  });
+
+  describe('findSimilarMemories exhaustive scan', () => {
+    it('finds a duplicate older than the newest-100 window when exhaustive', () => {
+      const oldestEmb = [1, 0, 0];
+      const oldest = db.createMemory({ text: 'the original fact', namespace: 'knowledge', scopeType: 'context', scopeId: 'proj', embedding: oldestEmb });
+      // Force the oldest to the far past so it is deterministically last in the
+      // `created_at DESC` order (i.e. beyond a LIMIT 100 window).
+      const raw = (db as unknown as { db: InstanceType<typeof Database> }).db;
+      raw.prepare('UPDATE memories SET created_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', oldest);
+      for (let i = 0; i < 100; i++) {
+        db.createMemory({ text: `filler ${i}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'proj', embedding: [0, 1, 0] });
+      }
+      const filters = { namespace: 'knowledge', scopeTypes: ['context'], scopeIds: ['proj'], activeOnly: true };
+
+      // Capped (default) scan misses the oldest — it sits past the newest 100.
+      const capped = db.findSimilarMemories(oldestEmb, 1, 0.9, filters);
+      expect(capped.map(m => m.id)).not.toContain(oldest);
+      // Exhaustive scan considers every row in the scope and catches it.
+      const exhaustive = db.findSimilarMemories(oldestEmb, 1, 0.9, { ...filters, exhaustive: true });
+      expect(exhaustive.map(m => m.id)).toContain(oldest);
+    });
+  });
+
   // ── Graph Traversal ──────────────────────────────────────────
 
   describe('graph traversal', () => {

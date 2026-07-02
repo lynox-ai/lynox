@@ -183,6 +183,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // against a `context:beta` memory with similar text (cross-project bleed).
     const similar = this.db.findSimilarMemories(embedding, 1, DEDUP_THRESHOLD, {
       namespace, scopeTypes: [scope.type], scopeIds: [scope.id], activeOnly: true,
+      // Scan the whole scope, not just the newest 100 — else an older duplicate
+      // past that window is missed and the fact is stored twice.
+      exhaustive: true,
     });
 
     if (similar.length > 0) {
@@ -754,7 +757,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   async updateMemoryText(
     oldText: string, newText: string, namespace: MemoryNamespace, scope: MemoryScopeRef,
   ): Promise<boolean> {
-    const id = this.db.updateMemoryText(oldText, newText, namespace);
+    // Re-embed the new text so the persisted vector matches it. Without this the
+    // memory keeps embed(oldText) while its text is new, so `findSimilarMemories`
+    // scores the changed memory against a stale vector (recall silently wrong).
+    const embedding = await this.embeddingProvider.embed(newText);
+    const id = this.db.updateMemoryText(oldText, newText, namespace, embedding);
     if (!id) return false;
 
     // Re-extract entities for the updated text
