@@ -621,7 +621,14 @@ export class Agent implements IAgent {
         // Keep the user message so the next turn carries its context.
         // Drop only partial assistant content (e.g. tool_use without a
         // matching tool_result) which would cause a 400 on the next call.
-        this.messages.length = snapshot + 1;
+        // Clamp to the CURRENT length: `_truncateHistory` may have reassigned
+        // `this.messages` to a SHORTER array mid-run (front-drop + placeholder),
+        // in which case `snapshot` is a stale, larger index — assigning it as
+        // `.length` would EXTEND the array with `undefined` holes that brick the
+        // next turn (JSON.stringify → nulls / `.role` throws). `Math.min` keeps
+        // the assignment a truncation; `sanitizeToolPairs` (before the next send)
+        // then drops any tool pair the earlier truncation split.
+        this.messages.length = Math.min(snapshot + 1, this.messages.length);
         this._persistedMark = Math.min(this._persistedMark, this.messages.length);
         return '';
       }
@@ -634,11 +641,19 @@ export class Agent implements IAgent {
       // This is B-full. B-light kept the user message + a synthetic English
       // assistant note IN this.messages so the failed turn survived persistence,
       // but that array is ALSO the model's API context, so the note (and the
-      // failed user turn) lingered in the prompt on the next call. Now the API
-      // context is clean — the failed turn lives only in display history
-      // (display_only=1 rows) — and role-alternation is trivially valid because
-      // nothing partial remains.
-      this.messages.length = snapshot;
+      // failed user turn) lingered in the prompt on the next call. In the common
+      // (no mid-run truncation) case the API context is now clean — the failed
+      // turn lives only in display history (display_only=1 rows) — and role-
+      // alternation is trivially valid because nothing partial remains.
+      // Clamp for the same reason as the abort path above: a mid-run
+      // `_truncateHistory` reassignment can leave `snapshot` larger than the
+      // current length, so a bare `.length = snapshot` would pad with undefined
+      // holes instead of rolling back. `Math.min` keeps it a truncation. (In that
+      // rare shrink case the clamp is a no-op that KEEPS the failed turn in
+      // context — benign: consecutive user turns are API-valid and
+      // `sanitizeToolPairs` cleans any split pair next send. Far better than the
+      // undefined-hole brick it replaces.)
+      this.messages.length = Math.min(snapshot, this.messages.length);
       this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
     } finally {
@@ -1262,6 +1277,23 @@ export class Agent implements IAgent {
   // returned summary). The wrap is the primary defence; this scan is
   // defence-in-depth.
 
+  /** Per-tool wall-clock cap. An async tool handler that never settles (a hung
+   *  socket, a promise that never resolves) would otherwise hang the WHOLE run
+   *  — the 10-min guard in `_callAPI` bounds only the API stream, not tools.
+   *  15 min sits comfortably above that 10-min stream timeout so a tool making
+   *  a single legitimate API call is bounded by ITS OWN stream timeout first;
+   *  this cap only ever fires for a genuinely stuck handler. (`bash` is
+   *  self-bounded by execSync's own `timeout` and blocks the event loop anyway,
+   *  so the race timer can't help it — it is not the target here.) */
+  private static readonly TOOL_TIMEOUT_MS = 900_000;
+  /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret` block on
+   *  user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
+   *  run nested work bounded by their own budget/depth/step guards — a
+   *  wall-clock cap would abort legitimate long-running delegations. */
+  private static readonly TOOL_TIMEOUT_EXEMPT = new Set([
+    'ask_user', 'ask_secret', 'spawn_agent', 'run_workflow',
+  ]);
+
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
     const toolCalls = content.filter(
       (b): b is BetaToolUseBlock => b.type === 'tool_use',
@@ -1457,10 +1489,28 @@ export class Agent implements IAgent {
     const timer = measureTool(tc.name);
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
+    let toolTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const result = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
-        ? await this.workerPool.execute(tc.name, processedInput)
-        : await tool.handler(processedInput, this);
+      const rawResult = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
+        ? this.workerPool.execute(tc.name, processedInput)
+        : tool.handler(processedInput, this);
+      // Per-tool timeout: race an async handler against a wall-clock cap so a
+      // handler that never settles can't hang the run. A rejection here is
+      // caught below and rendered as an `is_error` tool_result with the matching
+      // tool_use_id, keeping the tool_use/tool_result pair valid so the loop
+      // self-recovers instead of hanging. Exempt tools (see TOOL_TIMEOUT_EXEMPT)
+      // block or delegate legitimately and are awaited unbounded.
+      const result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
+        ? await rawResult
+        : await Promise.race([
+            rawResult,
+            new Promise<never>((_, reject) => {
+              toolTimer = setTimeout(
+                () => reject(new Error(`Tool "${tc.name}" timed out after ${Math.round(Agent.TOOL_TIMEOUT_MS / 1000)}s`)),
+                Agent.TOOL_TIMEOUT_MS,
+              );
+            }),
+          ]);
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
       // Extra guard: if ask_user response looks like a secret, mask it pattern-based
@@ -1539,6 +1589,11 @@ export class Agent implements IAgent {
         content: message,
         is_error: true,
       };
+    } finally {
+      // Clear the per-tool timeout timer so a fast tool doesn't leave a dangling
+      // 15-min timer (which would keep the event loop alive). Harmless no-op for
+      // exempt tools (timer never armed) and after a timeout rejection.
+      if (toolTimer !== undefined) clearTimeout(toolTimer);
     }
   }
 
