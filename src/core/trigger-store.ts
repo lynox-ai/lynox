@@ -135,6 +135,108 @@ interface TriggerDbRow {
   created_at: string;
 }
 
+/**
+ * The FULL engine.db `triggers` read shape (S3e read-cutover). Superset of
+ * {@link TriggerDbRow}: adds the columns the S3b write-only reads didn't select
+ * (`scope_type`/`scope_id`/`notification_channel`/`max_retries`/`updated_at`),
+ * needed to reconstruct a legacy {@link TriggerRecord} faithfully.
+ */
+interface TriggerFullDbRow {
+  id: string;
+  title: string;
+  description: string;
+  source: string;
+  condition_json: string;
+  target_workflow_id: string | null;
+  params_json: string;
+  scope_type: string | null;
+  scope_id: string | null;
+  status: string;
+  enabled: number;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_run_result: string | null;
+  last_run_status: string | null;
+  notification_channel: string | null;
+  max_retries: number | null;
+  retry_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
+const TRIGGER_READ_COLS =
+  `id, title, description, source, condition_json, target_workflow_id, params_json,
+   scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
+   last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at`;
+
+/**
+ * Pure INVERSE of {@link triggerRecordToRow} (S3e read-cutover): reconstruct a
+ * legacy {@link TriggerRecord} from an engine.db `triggers` row so every consumer
+ * that reads legacy field names (`task_type`/`pipeline_id`/`pipeline_params`/
+ * `schedule_cron`/`watch_config`) sees an identical shape regardless of source.
+ * - `task_type` ← `source`, `pipeline_id` ← `target_workflow_id`,
+ *   `pipeline_params` ← `params_json`.
+ * - `schedule_cron` / `watch_config` are parsed back out of `condition_json`
+ *   (guarded — a malformed blob leaves them unset, never throws).
+ * - `assignee` is the constant `'lynox'` (every fired trigger is agent-owned;
+ *   the forward map drops it — this synthesize is lossless, `trigger-store.ts`
+ *   doc + `task-manager.ts` set it everywhere).
+ * - `enabled` stays the raw 0/1 number (legacy `TriggerRecord.enabled` is 0/1).
+ * Optional columns map `null → undefined` (the legacy cast types them
+ * `string | undefined`; both mean "absent" and every consumer treats them so).
+ */
+export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
+  let scheduleCron: string | undefined;
+  let watchConfig: string | undefined;
+  try {
+    const cond = JSON.parse(row.condition_json) as { schedule_cron?: string | null; watch_config?: string | null };
+    scheduleCron = cond.schedule_cron ?? undefined;
+    watchConfig = cond.watch_config ?? undefined;
+  } catch { /* malformed condition_json → schedule_cron / watch_config stay unset */ }
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    status: row.status as TriggerRecord['status'],
+    assignee: 'lynox',
+    scope_type: row.scope_type ?? '',
+    scope_id: row.scope_id ?? '',
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    schedule_cron: scheduleCron,
+    next_run_at: row.next_run_at ?? undefined,
+    last_run_at: row.last_run_at ?? undefined,
+    last_run_result: row.last_run_result ?? undefined,
+    last_run_status: row.last_run_status ?? undefined,
+    task_type: row.source,
+    watch_config: watchConfig,
+    max_retries: row.max_retries ?? undefined,
+    retry_count: row.retry_count,
+    notification_channel: row.notification_channel ?? undefined,
+    pipeline_id: row.target_workflow_id ?? undefined,
+    // The forward map collapses an absent pipeline_params to '{}' (params_json is
+    // NOT NULL DEFAULT '{}'), but legacy returned NULL. Restore that: '{}' →
+    // undefined, so the money-path `if (task.pipeline_params)` (worker-loop) stays
+    // falsy → runSavedWorkflow's `requireAll = params !== undefined` stays false,
+    // matching a legacy paramless trigger. A stored '{}' only ever means "no bound
+    // params" (a real binding carries its keys; requireAll is a no-op with zero
+    // required params), so this is behaviour-lossless. The byte-faithful root fix
+    // (nullable params_json in the forward map) rides the S3f write-cutover.
+    pipeline_params: row.params_json === '{}' ? undefined : row.params_json,
+    enabled: row.enabled,
+  };
+}
+
+/**
+ * Escape LIKE metacharacters so a `%`/`_` in an id cannot widen the prefix match.
+ * Mirrors {@link WorkflowStore}'s `likePrefix` — the engine.db reads are written
+ * correctly rather than replicating the legacy bare-`LIKE '${id}%'` footgun.
+ */
+function likePrefix(id: string): string {
+  return `${id.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
 export class TriggerStore {
   private readonly db: Database.Database;
 
@@ -249,6 +351,93 @@ export class TriggerStore {
        FROM triggers ORDER BY updated_at DESC LIMIT ?`,
     ).all(limit) as TriggerDbRow[];
     return rows.map(r => this._map(r));
+  }
+
+  /**
+   * S3e read-cutover (MONEY-PATH): triggers due to fire, as legacy
+   * {@link TriggerRecord}s. SQL is the exact predicate of the legacy
+   * `getDueTriggers` — `next_run_at <= now AND enabled != 0 AND status !=
+   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with
+   * `schedule_cron` read out of `condition_json` via `json_extract`. The
+   * `idx_triggers_enabled(enabled, next_run_at)` index supports it. `now` is a
+   * param (default `new Date().toISOString()`, matching legacy) purely for test
+   * determinism.
+   */
+  getDue(now: string = new Date().toISOString()): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS}
+       FROM triggers
+       WHERE next_run_at IS NOT NULL
+         AND next_run_at <= ?
+         AND enabled != 0
+         AND status != 'completed'
+         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+       ORDER BY next_run_at ASC`,
+    ).all(now) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * S3e read-cutover: a single trigger by id (prefix-matched, escaped), as a
+   * legacy {@link TriggerRecord}. Optional `scopeFilter` mirrors the legacy
+   * `getTrigger` OR-of-scope-pairs guard. A miss returns undefined (degrades to
+   * not-found — never a wrong row).
+   */
+  getById(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TriggerRecord | undefined {
+    if (id === '') return undefined;
+    const params: unknown[] = [id, likePrefix(id)];
+    let scopeClause = '';
+    const scopes = opts?.scopeFilter;
+    if (scopes && scopes.length > 0) {
+      scopeClause = ` AND (${scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ')})`;
+      for (const s of scopes) { params.push(s.type, s.id); }
+    }
+    const row = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers WHERE (id = ? OR id LIKE ? ESCAPE '\\')${scopeClause} LIMIT 1`,
+    ).get(...params) as TriggerFullDbRow | undefined;
+    return row ? triggerDbRowToRecord(row) : undefined;
+  }
+
+  /**
+   * S3e read-cutover: filtered trigger list, as legacy {@link TriggerRecord}s.
+   * Mirrors the legacy `getTriggers` — truthy-gated `scope_type`/`scope_id`/
+   * `status`/`task_type`(→`source`) clauses, `ORDER BY next_run_at ASC NULLS
+   * LAST, created_at DESC`, `limit` default 100.
+   */
+  listFiltered(opts?: {
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    status?: string | undefined;
+    taskType?: string | undefined;
+    limit?: number | undefined;
+  }): TriggerRecord[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.scopeType) { clauses.push('scope_type = ?'); params.push(opts.scopeType); }
+    if (opts?.scopeId) { clauses.push('scope_id = ?'); params.push(opts.scopeId); }
+    if (opts?.status) { clauses.push('status = ?'); params.push(opts.status); }
+    if (opts?.taskType) { clauses.push('source = ?'); params.push(opts.taskType); }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    params.push(opts?.limit ?? 100);
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers ${where}
+       ORDER BY next_run_at ASC NULLS LAST, created_at DESC LIMIT ?`,
+    ).all(...params) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * S3e read-cutover: triggers actively referencing a workflow (legacy
+   * `getTriggersByPipelineId` — the destructive-edit guard). `target_workflow_id =
+   * ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`.
+   */
+  getByWorkflowId(workflowId: string): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers
+       WHERE target_workflow_id = ? AND enabled != 0 AND status != 'completed'
+       ORDER BY created_at DESC`,
+    ).all(workflowId) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
   }
 
   private _map(row: TriggerDbRow): StoredTrigger {

@@ -182,6 +182,50 @@ export class WorkflowStore {
     return rows.map(r => this._map(r));
   }
 
+  /**
+   * S3e read-cutover: the by-id workflow-def read that backs the legacy
+   * `getPlannedPipeline` (`{id, manifest_json}`). `definition_json` IS the legacy
+   * `manifest_json` (relocated verbatim in S3a), so a consumer parses it
+   * identically. Prefix-matched (escaped) like {@link get}; empty id → undefined.
+   * No `status='planned'` filter: the engine.db `workflows` table holds ONLY
+   * definitions (executed one-shots are dropped via {@link dropExecuted}), so it
+   * IS the legacy planned set.
+   */
+  getPlanned(id: string): { id: string; manifest_json: string } | undefined {
+    if (id === '') return undefined;
+    const row = this.db.prepare(
+      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
+    ).get(id, likePrefix(id)) as { id: string; definition_json: string } | undefined;
+    if (!row) return undefined;
+    return { id: row.id, manifest_json: row.definition_json };
+  }
+
+  /**
+   * S3e read-cutover: the library-list read backing the legacy
+   * `getPlannedPipelines` (`{id, manifest_name, manifest_json, step_count,
+   * started_at}`). Returns ALL definitions (templates AND non-template plans) —
+   * the `template === true` filter is the caller's app-layer step (http-api
+   * `/api/workflows/library`), matching legacy exactly. `started_at ← updated_at`
+   * (legacy `pipeline_runs.started_at` is reset on each INSERT-OR-REPLACE re-save,
+   * which the mirror tracks via `updated_at`), so `ORDER BY updated_at DESC` ==
+   * legacy `ORDER BY started_at DESC`. `step_count` is derived from the blob (the
+   * http-api mapper prefers `parsed.steps.length` anyway).
+   */
+  listPlanned(limit = 100): Array<{
+    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+  }> {
+    return this.db.prepare(
+      `SELECT id,
+              name AS manifest_name,
+              definition_json AS manifest_json,
+              COALESCE(json_array_length(definition_json, '$.steps'), 0) AS step_count,
+              updated_at AS started_at
+       FROM workflows ORDER BY updated_at DESC LIMIT ?`,
+    ).all(limit) as Array<{
+      id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+    }>;
+  }
+
   private _map(row: {
     id: string; name: string; description: string; definition_json: string;
     is_template: number; created_at: string;
