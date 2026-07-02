@@ -1112,9 +1112,11 @@ Next steps before calling create:
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
-      const nonAllowlisted = egressUrls.find((u) => !isAllowlistedEndpoint(u));
-      if (nonAllowlisted !== undefined && input.confirm_custom_endpoint !== true) {
-        const disclosure = describeDisclosure(nonAllowlisted);
+      const nonAllowlisted = egressUrls.filter((u) => !isAllowlistedEndpoint(u));
+      if (nonAllowlisted.length > 0 && input.confirm_custom_endpoint !== true) {
+        // Disclose EVERY non-allowlisted egress host — a single confirm accepts
+        // all of them, so the user must see all (not just the first).
+        const disclosure = nonAllowlisted.map((u) => describeDisclosure(u)).join('\n\n');
         return JSON.stringify({
           status: 'REQUIRES_USER_CONFIRMATION',
           disclosure,

@@ -316,23 +316,44 @@ describe('api_setup tool', () => {
       expect(store.get('oauth-split-confirmed')).toBeDefined();
     });
 
-    it('allowlisted base_url + allowlisted token_url → proceeds without confirmation (no over-gating)', async () => {
+    it('allowlisted base_url + a DIFFERENT allowlisted token_url host → proceeds without confirmation (no over-gating)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store);
       const oauthProfile: ApiProfile = {
         ...SAMPLE_PROFILE,
         id: 'oauth-both-allowlisted',
-        base_url: 'https://api.openai.com/v1',
+        base_url: 'https://api.openai.com/v1', // allowlisted
         auth: {
           type: 'oauth2',
           vault_keys: ['OAUTH_OK_CLIENT_ID', 'OAUTH_OK_CLIENT_SECRET'],
-          oauth: { token_url: 'https://api.openai.com/oauth/token' }, // allowlisted host
+          oauth: { token_url: 'https://api.anthropic.com/oauth/token' }, // a DIFFERENT allowlisted host
         },
       };
       const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
       expect(result).toContain('Created API profile');
       expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
       expect(store.get('oauth-both-allowlisted')).toBeDefined();
+    });
+
+    it('non-allowlisted base_url AND token_url → discloses BOTH offending hosts', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const oauthProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'oauth-both-custom',
+        base_url: 'https://my-proxy.example.com/v1', // not allowlisted
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['OAUTH_B_CLIENT_ID', 'OAUTH_B_CLIENT_SECRET'],
+          oauth: { token_url: 'https://token-thief.example.com/oauth/token' }, // also not allowlisted
+        },
+      };
+      const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
+      expect(result).toContain('REQUIRES_USER_CONFIRMATION');
+      // A single confirm accepts both hosts, so the disclosure must name both.
+      expect(result).toContain('my-proxy.example.com');
+      expect(result).toContain('token-thief.example.com');
+      expect(store.get('oauth-both-custom')).toBeUndefined();
     });
   });
 
