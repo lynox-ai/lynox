@@ -11,6 +11,7 @@ import { planTaskTool, phasesToPipelineSteps } from './plan-task.js';
 import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
+import { EngineDb } from '../../core/engine-db.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -220,6 +221,9 @@ describe('planTaskTool', () => {
   it('persists the planned pipeline to pipeline_runs (durable workflow_id)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-plan-persist-'));
     const history = new RunHistory(join(dir, 'h.db'));
+    // S3f: workflow/trigger defs live in engine.db — wire it so the persistence works.
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
     try {
       const agent = makeAgent({ promptUser: undefined });
       agent.toolContext.runHistory = history;
@@ -237,6 +241,7 @@ describe('planTaskTool', () => {
       // A plan_task plan is not a saved-workflow template.
       expect(manifest.template).toBe(false);
     } finally {
+      try { engine.close(); } catch { /* already closed */ }
       history.close();
       rmSync(dir, { recursive: true, force: true });
     }

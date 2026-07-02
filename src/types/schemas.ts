@@ -166,14 +166,13 @@ export const LynoxUserConfigSchema = z.object({
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
   // would otherwise reject this key from config.json (silently disabling the flag).
   subject_graph_enabled:   z.boolean().optional(),
-  // Foundation Rework v2 (S3a): additively mirror verb-layer definitions into
-  // the engine.db `workflows` table. Default off; flipped on per-tenant, reads
-  // cut over after the S3d backfill. The .strict() schema would otherwise reject
-  // this key from config.json (silently disabling the flag).
+  // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
+  // engine.db unconditionally, so these rollout flags were removed from the
+  // interface + env-loaders. Kept as tolerated-ignored config.json keys for one
+  // release window — a mid-rollout tenant's config.json may still carry them, and
+  // under `.strict()` an unknown key nulls the WHOLE config (dropping every
+  // setting, not just these). Same discipline as `llm_mode` below.
   verb_graph_enabled:      z.boolean().optional(),
-  // Foundation Rework v2 (S3e): cut trigger + workflow definition READS over to
-  // engine.db. Default off; flipped on per-tenant after the mirror is backfilled.
-  // The .strict() schema would otherwise reject this key from config.json.
   verb_graph_reads:        z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),

@@ -3,21 +3,26 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
+import { EngineDb } from './engine-db.js';
 import { TaskManager, setPipelineModeLookup } from './task-manager.js';
 import type { TriggerRecord } from '../types/index.js';
 
 describe('TaskManager', () => {
   let dir: string;
   let history: RunHistory;
+  let engine: EngineDb;
   let tm: TaskManager;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-task-test-'));
     history = new RunHistory(join(dir, 'test.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
     tm = new TaskManager(history);
   });
 
   afterEach(() => {
+    try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -638,6 +643,13 @@ describe('TaskManager', () => {
     afterEach(() => setPipelineModeLookup(undefined));
 
     it('createPipelineTask round-trips the stored param values', () => {
+      // The referenced workflow must exist in engine.db so the trigger's FK
+      // (target_workflow_id → workflows) resolves — a pipeline trigger always
+      // points at a saved workflow (created before it is scheduled).
+      history.insertPlannedPipeline({
+        id: 'wf-1', name: 'Monthly report', goal: 'report', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      });
       const task = tm.createPipelineTask({
         title: 'Monthly report',
         pipelineId: 'wf-1',

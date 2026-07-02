@@ -6,6 +6,7 @@ import { saveWorkflowTool, processToSteps } from './process.js';
 import { _resetPipelineStore, getPipeline, storePipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
+import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
@@ -306,6 +307,9 @@ describe('save_workflow — workflow_id source', () => {
   it('persists the saved workflow so getPlannedPipelines (the library) finds it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-save-wf-'));
     const history = new RunHistory(join(dir, 'h.db'));
+    // S3f: workflow/trigger defs live in engine.db — wire it so the persistence works.
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
     try {
       storePipeline('plan-src', makePlan({ id: 'plan-src', template: false }));
       const agent = makeAgent({}, history);
@@ -321,6 +325,7 @@ describe('save_workflow — workflow_id source', () => {
       // The library filters on manifest_json.template === true.
       expect((JSON.parse(saved!.manifest_json) as { template: boolean }).template).toBe(true);
     } finally {
+      try { engine.close(); } catch { /* already closed */ }
       history.close();
       rmSync(dir, { recursive: true, force: true });
     }

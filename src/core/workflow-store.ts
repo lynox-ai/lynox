@@ -20,11 +20,13 @@ function likePrefix(id: string): string {
  * flag (history.db) — to a first-class engine.db table with a real `is_template`
  * column and FK-able `id` (referenced by `triggers.target_workflow_id`).
  *
- * S3a wires it as the target of an ADDITIVE mirror behind the `RunHistory`
- * facade: every `insertPlannedPipeline`/`rename`/`delete`/`setWorkflowConfirmedAt`/
- * `markPipelineExecuted` dual-writes here when `verb_graph_enabled` is ON, while
- * the legacy history.db `pipeline_runs` row stays AUTHORITATIVE (the read path is
- * unchanged in S3a). Reads cut over to this store only after the backfill (S3d).
+ * S3f write-cutover makes this the SOLE authority for workflow definitions: every
+ * `insertPlannedPipeline`/`rename`/`delete`/`setWorkflowConfirmedAt`/
+ * `markPipelineExecuted` writes here directly, and every read comes from here.
+ * The legacy history.db `pipeline_runs status='planned'/'executed'` def rows are
+ * retired (purged in mig v44); `pipeline_runs` stays the run SPINE only. This
+ * began as an additive dual-write mirror (S3a, gated on a now-removed flag) with
+ * legacy authoritative; S3d backfilled, S3e cut reads over, S3f cut writes over.
  *
  * `definition_json` is stored PLAINTEXT — a faithful 1:1 relocation of the legacy
  * `pipeline_runs.manifest_json`, which is also plaintext. This lets the patch ops

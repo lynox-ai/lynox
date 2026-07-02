@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * Foundation Rework v2 — S3d verb-layer backfill CLI.
+ * Foundation Rework v2 — verb-layer TASK backfill CLI.
  *
  * One-shot command, run INSIDE a quiesced tenant container, that replays the
- * legacy history.db verb DEFINITIONS (planned-pipeline workflows + agent-triggers
- * + user-tasks) into the engine.db verb-graph so the tenant's full history is
- * present BEFORE reads cut over to engine.db (S3e). NOT a boot migration (an
- * operator runs it while the tenant is quiesced, verifies, and can abort).
+ * legacy history.db user-TASK rows into the engine.db verb-graph. Tasks are the one
+ * verb primitive still legacy-authoritative + mirrored after the S3f write-cutover
+ * (S4 will cut them over); workflows + triggers already cut over and their legacy
+ * storage is dropped in mig v44, so this backfill covers TASKS only. Because it
+ * reads solely the legacy `tasks` table (which v44 never touches) it is safe to run
+ * on the S3f image. NOT a boot migration (an operator runs it while quiesced,
+ * verifies, and can abort). The PRE-S3f full three-type backfill lives in the
+ * v1.22.0 image, which the deploy playbook runs before cutting workflows/triggers.
  *
  * Usage (in-container, e.g. via prod-rafael-exec.sh / staging-tenant-exec.sh):
  *   node dist/scripts/s3-backfill.js              # dry-run: report what WOULD backfill
@@ -18,11 +22,10 @@
  * is an ON CONFLICT DO UPDATE upsert; preserved legacy timestamps make a re-run
  * land byte-identical rows).
  *
- * No PII gate: unlike the S2 subject backfill (which writes people.email/phone via
- * engine.db `enc()`), every verb column relocated here — definition_json /
- * condition_json / params_json / title / description — is PLAINTEXT in both the
- * legacy and engine.db schema, so there is no at-rest downgrade to guard against.
- * The vault key is still resolved so engine.db opens EXACTLY as the engine does.
+ * No PII gate: every task column relocated here — title / description / tags — is
+ * PLAINTEXT in both the legacy and engine.db schema, so there is no at-rest
+ * downgrade to guard against. The vault key is still resolved so engine.db opens
+ * EXACTLY as the engine does.
  */
 
 import { join } from 'node:path';
@@ -31,7 +34,7 @@ import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { RunHistory } from '../core/run-history.js';
-import { getAllPlannedPipelines, getAllTasks, getAllTriggers } from '../core/run-history-persistence.js';
+import { getAllTasks } from '../core/run-history-persistence.js';
 import { VerbGraphBackfill } from '../core/verb-graph-backfill.js';
 
 export interface Args { apply: boolean; json: boolean; dataDir: string | null }
@@ -50,7 +53,7 @@ export function parseArgs(argv: string[]): Args {
 
 function printHelp(): void {
   process.stdout.write(
-    'S3d backfill — relocate legacy history.db verb definitions into the engine.db verb-graph.\n' +
+    'verb-layer TASK backfill — relocate legacy history.db tasks into the engine.db verb-graph.\n' +
     '  (no flag)        dry-run: report counts that WOULD backfill\n' +
     '  --apply          run the backfill (idempotent, safe to re-run)\n' +
     '  --json           emit machine-readable counts\n' +
@@ -73,12 +76,10 @@ function main(): void {
   if (!args.apply) {
     // Dry-run is side-effect-free: it reads only legacy history.db and never
     // constructs EngineDb (whose ctor would migrate/materialize engine.db).
-    const wf = getAllPlannedPipelines(historyDb).length;
-    const tr = getAllTriggers(historyDb).length;
     const tk = getAllTasks(historyDb).length;
-    const out = { mode: 'dry-run', legacy: { workflows: wf, triggers: tr, tasks: tk } };
+    const out = { mode: 'dry-run', legacy: { tasks: tk } };
     process.stdout.write(args.json ? JSON.stringify(out) + '\n'
-      : `[s3-backfill] DRY-RUN — would backfill ${wf} workflows, ${tr} triggers, ${tk} tasks. Re-run with --apply.\n`);
+      : `[s3-backfill] DRY-RUN — would backfill ${tk} tasks. Re-run with --apply.\n`);
     closeAll(null, runHistory);
     return;
   }
@@ -88,15 +89,12 @@ function main(): void {
 
   const edb = engineDb.getDb();
   const post = {
-    workflows: (edb.prepare('SELECT COUNT(*) n FROM workflows').get() as { n: number }).n,
-    triggers: (edb.prepare('SELECT COUNT(*) n FROM triggers').get() as { n: number }).n,
     tasks: (edb.prepare('SELECT COUNT(*) n FROM tasks').get() as { n: number }).n,
   };
   const out = { mode: 'apply', applied, post };
   process.stdout.write(args.json ? JSON.stringify(out) + '\n'
-    : `[s3-backfill] APPLIED — workflows ${applied.workflows}, triggers ${applied.triggers}, ` +
-      `tasks ${applied.tasks} (${applied.taskParentLinks} parent-links). ` +
-      `engine.db now has ${post.workflows} workflows, ${post.triggers} triggers, ${post.tasks} tasks.\n`);
+    : `[s3-backfill] APPLIED — tasks ${applied.tasks} (${applied.taskParentLinks} parent-links). ` +
+      `engine.db now has ${post.tasks} tasks.\n`);
   closeAll(engineDb, runHistory);
 }
 

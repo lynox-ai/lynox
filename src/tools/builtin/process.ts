@@ -162,12 +162,12 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
 
   // Save-time gate — same as plan_task.
   assertPlannedPipelineIsValid(reusable);
-  // Commit the durable pipeline_runs row (status='planned') FIRST — it runs the
+  // Commit the durable engine.db workflow definition FIRST — it runs the
   // fail-closed contract validator and throws on a bad contract, so the volatile
   // in-memory store is only populated once the durable write succeeded (no
   // cache holding a workflow the DB rejected). storePipeline alone is volatile
-  // (LRU, lost on restart); the SQLite row is what the Saved Workflows library
-  // reads.
+  // (LRU, lost on restart); the engine.db workflows row is what the Saved
+  // Workflows library reads.
   runHistory.insertPlannedPipeline(reusable);
   storePipeline(reusableId, reusable);
 
@@ -284,7 +284,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // Save-time gate — same as plan_task.
     assertPlannedPipelineIsValid(planned);
 
-    // Commit the durable pipeline_runs row (status='planned') FIRST — it runs
+    // Commit the durable engine.db workflow definition FIRST — it runs
     // the fail-closed contract validator and throws on a bad contract, so the
     // volatile in-memory store is only populated after the durable write
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,

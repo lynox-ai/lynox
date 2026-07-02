@@ -12,7 +12,7 @@ import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
 import { WorkflowStore } from './workflow-store.js';
-import { TriggerStore, triggerRecordToRow } from './trigger-store.js';
+import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
@@ -1040,6 +1040,31 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_pending_prompts_session ON pending_prompts(session_id, status);
    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_prompts_session_unique
      ON pending_prompts(session_id) WHERE status = 'pending';`,
+
+  // v44 (Foundation Rework v2, S3f verb write-cutover): retire the legacy verb-def
+  // storage now that engine.db is the SOLE authority for triggers + workflow defs.
+  //   - DROP the legacy history.db `triggers` table (created in v42). Trigger reads
+  //     AND writes now go to the engine.db `triggers` table (TriggerStore). ONE-WAY:
+  //     the per-tenant deploy playbook runs the s3-backfill CLI on the PRE-S3f image
+  //     FIRST (populating engine.db) and cold-snapshots history.db BEFORE this
+  //     migration boots — the rollback net. No FK references `triggers`, so the DROP
+  //     is clean and its indexes go with it; IF EXISTS tolerates a minimal-seed DB
+  //     that never created the table.
+  //   - PURGE the orphaned workflow-DEFINITION rows from `pipeline_runs`
+  //     (status='planned' saved workflows + status='executed' one-shots): workflow
+  //     defs now live in the engine.db `workflows` table (WorkflowStore) and the
+  //     write-cutover stopped emitting these rows. `pipeline_runs` STAYS as the run
+  //     SPINE (running/completed/failed/rejected) — those statuses are untouched,
+  //     and nothing reads 'executed'. Idempotent (both are no-ops on re-run).
+  //   Precondition: `pipeline_runs` exists (created back in v7), so the DELETE is
+  //   safe on any real migrated tenant — same "the table I touch exists" assumption
+  //   the v42 tasks→triggers move makes (v43's DROP-IF-EXISTS defensiveness is
+  //   specific to the ephemeral pending_prompts table).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (44);
+
+   DROP TABLE IF EXISTS triggers;
+
+   DELETE FROM pipeline_runs WHERE status IN ('planned', 'executed');`,
 ];
 
 export class RunHistory {
@@ -1048,29 +1073,26 @@ export class RunHistory {
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
   /**
-   * Foundation Rework v2: the engine.db verb-layer mirror. Non-null only when
-   * `verb_graph_enabled` is ON and an EngineDb opened — set post-construction by
-   * {@link setVerbGraph} (engine.db is built AFTER RunHistory, so it cannot be a
-   * ctor arg; the setter mirrors RetrievalEngine.setMeteredHost). When set, every
-   * workflow-DEFINITION write (S3a) and every TRIGGER write (S3b) dual-writes here
-   * additively; the legacy history.db row stays authoritative + is written first.
-   * A mirror failure is swallowed — it must never break the legacy write.
+   * Foundation Rework v2: the engine.db verb-layer stores. Non-null only when an
+   * EngineDb opened — set post-construction by {@link setVerbGraph} (engine.db is
+   * built AFTER RunHistory, so it cannot be a ctor arg; the setter mirrors
+   * RetrievalEngine.setMeteredHost).
    *
-   * The three stores are set/cleared ATOMICALLY by {@link setVerbGraph}, so
-   * `_workflowStore` set ⟺ `_triggerStore` set ⟺ `_taskStore` set —
-   * {@link _verbMirror} gates on the first and the trigger/task closures assert
-   * the others safely.
+   * S3f write-cutover: `_workflowStore` + `_triggerStore` are now the SOLE
+   * authority for workflow-DEFINITION + TRIGGER reads AND writes — no legacy
+   * history.db path (it is dropped in mig v44). `_taskStore` is still an ADDITIVE
+   * mirror: TASK writes go to legacy FIRST then re-project here via
+   * {@link _reprojectTask} inside the swallowing {@link _verbMirror}, and task
+   * reads stay on legacy until the S4 subject resolution.
+   *
+   * All three stores are set/cleared ATOMICALLY by {@link setVerbGraph}. On a null
+   * store (EngineDb failed to open — a degraded tenant), the verb accessors guard
+   * with `?.` and degrade to empty/undefined rather than throw.
    */
   private _workflowStore: WorkflowStore | null = null;
   private _triggerStore: TriggerStore | null = null;
   private _taskStore: TaskStore | null = null;
   private _verbGraphWarned = false;
-  /** S3e: gate the verb-def READ-cutover (triggers + workflows) onto engine.db.
-   *  Separate from the write-mirror: reads flip only after the mirror is live +
-   *  backfilled. The stores exist only when the mirror is on, so reads-ON-mirror-OFF
-   *  falls back to legacy (you can't read a non-live-mirrored engine.db). */
-  private _verbGraphReads = false;
-  private _verbReadWarned = false;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
     const path = dbPath ?? getDefaultDbPath();
@@ -1088,41 +1110,26 @@ export class RunHistory {
   }
 
   /**
-   * Foundation Rework v2 (S3a + S3b + S3c): wire the engine.db verb-layer mirror.
-   * Called once during engine boot, after both RunHistory and EngineDb exist. When
-   * `enabled`, builds a {@link WorkflowStore} (workflow defs), a
-   * {@link TriggerStore} (triggers) AND a {@link TaskStore} (human TODOs) on the
-   * shared engine.db connection; the corresponding write methods then dual-write to
-   * them. All three stores are set (or cleared) together so their presence stays in
-   * lockstep. Idempotent + reversible (enabled=false clears all → back to
-   * legacy-only). Additive: never touches the legacy history.db path.
+   * Foundation Rework v2 (S3f): wire the engine.db verb-layer stores. Called once
+   * during engine boot, after both RunHistory and EngineDb exist. Builds the
+   * {@link WorkflowStore} + {@link TriggerStore} — the SOLE authority for
+   * workflow-DEFINITION + TRIGGER reads AND writes after the write-cutover — plus
+   * the {@link TaskStore} (still an additive mirror; tasks stay legacy-authoritative
+   * until S4). Idempotent.
    */
-  setVerbGraph(engineDb: EngineDb, enabled: boolean, readsEnabled = false): void {
-    this._workflowStore = enabled ? new WorkflowStore(engineDb) : null;
-    this._triggerStore = enabled ? new TriggerStore(engineDb) : null;
-    this._taskStore = enabled ? new TaskStore(engineDb) : null;
-    // S3e: reads honour engine.db ONLY when the mirror built the stores above
-    // (`enabled`). readsEnabled without the mirror leaves the stores null → the
-    // read methods fall back to legacy, so a stale/absent mirror never serves reads.
-    this._verbGraphReads = readsEnabled;
+  setVerbGraph(engineDb: EngineDb): void {
+    this._workflowStore = new WorkflowStore(engineDb);
+    this._triggerStore = new TriggerStore(engineDb);
+    this._taskStore = new TaskStore(engineDb);
   }
 
-  /** Swallow a verb-def READ failure (closed/corrupt engine.db): fall back to the
-   *  legacy history.db read, warn once. Mirrors knowledge-layer `_logReadFallback`
-   *  — a by-id miss is NOT a failure (it returns not-found from inside the try). */
-  private _logVerbReadFallback(method: string, err: unknown): void {
-    if (!this._verbReadWarned) {
-      this._verbReadWarned = true;
-      process.stderr.write(
-        `[lynox] verb-graph read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    }
-  }
-
-  /** Swallow a mirror failure: the legacy write already succeeded, so a broken
-   *  engine.db mirror must degrade to legacy-only, never surface to the caller. */
+  /** Swallow a TASK-mirror failure: the legacy task write already succeeded, so a
+   *  broken engine.db mirror must degrade to legacy-only, never surface to the
+   *  caller. Triggers + workflows no longer route through here — they write
+   *  engine.db directly (their errors propagate; there is no legacy to fall back
+   *  to). */
   private _verbMirror(op: () => void): void {
-    if (!this._workflowStore) return;
+    if (!this._taskStore) return;
     try {
       op();
     } catch (err) {
@@ -1136,23 +1143,12 @@ export class RunHistory {
   }
 
   /**
-   * S3b: re-project the CURRENT legacy trigger row onto the engine.db mirror. The
-   * engine.db `triggers` table is a REDESIGN (not a 1:1 of the legacy table), so
-   * rather than patching mapped columns per-write, every trigger write reads the
-   * post-write legacy row back and upserts the full mapped projection — one path
-   * for insert/update/setEnabled/runResult/watchConfig, always faithful. A missing
-   * row (raced delete) is a no-op. Runs inside {@link _verbMirror} (swallowed).
-   */
-  private _reprojectTrigger(id: string): void {
-    const rec = persistence.getTrigger(this.db, id);
-    if (rec) this._triggerStore!.upsert(triggerRecordToRow(rec));
-  }
-
-  /**
-   * S3c: re-project the CURRENT legacy task row onto the engine.db mirror. Same
-   * read-back-and-upsert shape as {@link _reprojectTrigger} — insert/update both
-   * route here so the mirror always reflects the full current row. A missing row
-   * (raced delete) is a no-op. Runs inside {@link _verbMirror} (swallowed).
+   * S3c: re-project the CURRENT legacy task row onto the engine.db mirror. Reads
+   * the post-write legacy task row back and upserts the full mapped projection —
+   * insert/update both route here so the mirror always reflects the full current
+   * row. A missing row (raced delete) is a no-op. Runs inside {@link _verbMirror}
+   * (swallowed). Tasks stay legacy-authoritative + mirrored until the S4 subject
+   * resolution (unlike triggers/workflows, which S3f cut over to engine.db-direct).
    */
   private _reprojectTask(id: string): void {
     const rec = persistence.getTask(this.db, id);
@@ -2193,6 +2189,29 @@ export class RunHistory {
     return persistence.getPipelineStepResults(this.db, pipelineRunId);
   }
 
+  /**
+   * Verb-store accessor for WRITES. Post-S3f engine.db is the SOLE authority for
+   * trigger + workflow definitions, so a write has nowhere to land when the store
+   * is null (engine.db failed to open at boot — engine.ts degrades to a null store).
+   * Throw rather than silently no-op: a swallowed write is FALSE success — the
+   * caller is told "saved" while nothing persisted. Reads stay `?? []`/`undefined`
+   * (a degraded read under-fires the money-path, the safe direction). Honest over
+   * silent, and symmetric with an open-but-failing engine.db, which already throws.
+   */
+  private _requireTriggerStore(): TriggerStore {
+    if (!this._triggerStore) {
+      throw new Error('engine.db verb store unavailable — trigger writes require engine.db, which failed to open at boot');
+    }
+    return this._triggerStore;
+  }
+
+  private _requireWorkflowStore(): WorkflowStore {
+    if (!this._workflowStore) {
+      throw new Error('engine.db verb store unavailable — workflow writes require engine.db, which failed to open at boot');
+    }
+    return this._workflowStore;
+  }
+
   insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
@@ -2201,80 +2220,62 @@ export class RunHistory {
     // No contract → no-op, so existing playbooks are unaffected.
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
-    persistence.insertPlannedPipeline(this.db, planned);
-    // S3a mirror: dual-write the definition into engine.db. Same object → same
-    // serialization the legacy row stored (JSON.stringify(planned)); is_template
-    // becomes a real column. source_run_id stays null (PlannedPipeline carries the
-    // capture run only inside `reasoning`, unstructured).
-    this._verbMirror(() => {
-      this._workflowStore!.upsert({
-        id: planned.id,
-        name: planned.name,
-        description: planned.goal,
-        definitionJson: JSON.stringify(planned),
-        isTemplate: planned.template === true,
-        sourceRunId: null,
-      });
+    // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
+    // legacy history.db `pipeline_runs status='planned'` def row is retired
+    // (pipeline_runs stays the run SPINE only; mig v44 purges the orphaned
+    // planned/executed rows). Same serialization the legacy row stored
+    // (JSON.stringify(planned)); is_template is a real column. source_run_id stays
+    // null (PlannedPipeline carries the capture run only inside `reasoning`).
+    this._requireWorkflowStore().upsert({
+      id: planned.id,
+      name: planned.name,
+      description: planned.goal,
+      definitionJson: JSON.stringify(planned),
+      isTemplate: planned.template === true,
+      sourceRunId: null,
     });
   }
 
   getPlannedPipeline(id: string): { id: string; manifest_json: string } | undefined {
-    if (this._verbGraphReads && this._workflowStore) {
-      try { return this._workflowStore.getPlanned(id); }
-      catch (err) { this._logVerbReadFallback('getPlannedPipeline', err); }
-    }
-    return persistence.getPlannedPipeline(this.db, id);
+    return this._workflowStore?.getPlanned(id);
   }
 
   /**
-   * List planned pipelines (`status='planned'`), newest first. Backs the
-   * Saved-Workflows library (PRD §6.8 / D13) — the caller filters on the
+   * List planned pipelines (engine.db workflow definitions), newest first. Backs
+   * the Saved-Workflows library (PRD §6.8 / D13) — the caller filters on the
    * deserialized `manifest_json.template === true`.
    */
   getPlannedPipelines(limit = 100): Array<{
     id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
   }> {
-    if (this._verbGraphReads && this._workflowStore) {
-      try { return this._workflowStore.listPlanned(limit); }
-      catch (err) { this._logVerbReadFallback('getPlannedPipelines', err); }
-    }
-    return persistence.getPlannedPipelines(this.db, limit);
+    return this._workflowStore?.listPlanned(limit) ?? [];
   }
 
   /** Rename a planned pipeline's display name. Returns false if no row matched. */
   renamePlannedPipeline(id: string, name: string): boolean {
-    const ok = persistence.renamePlannedPipeline(this.db, id, name);
-    this._verbMirror(() => { this._workflowStore!.rename(id, name); });
-    return ok;
+    return this._requireWorkflowStore().rename(id, name);
   }
 
   /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
   setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
-    const ok = persistence.setWorkflowConfirmedAt(this.db, id, confirmedAt);
-    this._verbMirror(() => { this._workflowStore!.setConfirmedAt(id, confirmedAt); });
-    return ok;
+    return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
   }
 
   /** Slice B2: flip a scheduled trigger's cron kill-switch. */
   setTriggerEnabled(id: string, enabled: boolean): boolean {
-    const ok = persistence.setTriggerEnabled(this.db, id, enabled);
-    this._verbMirror(() => { this._reprojectTrigger(id); });
-    return ok;
+    return this._requireTriggerStore().setEnabled(id, enabled);
   }
 
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {
-    const ok = persistence.deletePlannedPipeline(this.db, id);
-    this._verbMirror(() => { this._workflowStore!.remove(id); });
-    return ok;
+    return this._requireWorkflowStore().remove(id);
   }
 
   markPipelineExecuted(id: string): void {
-    persistence.markPipelineExecuted(this.db, id);
     // A one-shot that executed leaves the DEFINITION set (only non-templates reach
-    // markPipelineExecuted). Drop its engine.db def row so the mirror stays == the
-    // legacy `status='planned'` set. The Run itself stays in history.db (D6).
-    this._verbMirror(() => { this._workflowStore!.dropExecuted(id); });
+    // markPipelineExecuted). Drop its engine.db def row so the library no longer
+    // lists it. The Run itself is a separate pipeline_runs SPINE row (D6).
+    this._requireWorkflowStore().dropExecuted(id);
   }
 
   insertTask(params: {
@@ -2312,8 +2313,7 @@ export class RunHistory {
     pipelineId?: string | undefined;
     pipelineParams?: string | undefined;
   }): void {
-    persistence.insertTrigger(this.db, params);
-    this._verbMirror(() => { this._reprojectTrigger(params.id); });
+    this._requireTriggerStore().insert(params);
   }
 
   /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */
@@ -2346,9 +2346,7 @@ export class RunHistory {
     nextRunAt?: string | null | undefined;
     scheduleCron?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
-    const ok = persistence.updateTrigger(this.db, id, params, opts);
-    this._verbMirror(() => { this._reprojectTrigger(id); });
-    return ok;
+    return this._requireTriggerStore().updateFields(id, params, opts);
   }
 
   getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
@@ -2356,11 +2354,7 @@ export class RunHistory {
   }
 
   getTrigger(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TriggerRecord | undefined {
-    if (this._verbGraphReads && this._triggerStore) {
-      try { return this._triggerStore.getById(id, opts); }
-      catch (err) { this._logVerbReadFallback('getTrigger', err); }
-    }
-    return persistence.getTrigger(this.db, id, opts);
+    return this._triggerStore?.getById(id, opts);
   }
 
   deleteTask(id: string): boolean {
@@ -2374,9 +2368,7 @@ export class RunHistory {
   }
 
   deleteTrigger(id: string): boolean {
-    const ok = persistence.deleteTrigger(this.db, id);
-    this._verbMirror(() => { this._triggerStore!.remove(id); });
-    return ok;
+    return this._requireTriggerStore().remove(id);
   }
 
   getTasks(opts?: {
@@ -2406,31 +2398,19 @@ export class RunHistory {
     taskType?: string | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
-    if (this._verbGraphReads && this._triggerStore) {
-      try { return this._triggerStore.listFiltered(opts); }
-      catch (err) { this._logVerbReadFallback('getTriggers', err); }
-    }
-    return persistence.getTriggers(this.db, opts);
+    return this._triggerStore?.listFiltered(opts) ?? [];
   }
 
   /** Triggers due for execution (next_run_at <= now, not terminal). Fired by
    *  the WorkerLoop. */
   getDueTriggers(): TriggerRecord[] {
-    if (this._verbGraphReads && this._triggerStore) {
-      try { return this._triggerStore.getDue(); }
-      catch (err) { this._logVerbReadFallback('getDueTriggers', err); }
-    }
-    return persistence.getDueTriggers(this.db);
+    return this._triggerStore?.getDue() ?? [];
   }
 
   /** Triggers that actively reference a saved workflow (Slice C destructive-edit
    *  guard): enabled + not-completed rows whose `pipeline_id` matches. */
   getTriggersByPipelineId(pipelineId: string): TriggerRecord[] {
-    if (this._verbGraphReads && this._triggerStore) {
-      try { return this._triggerStore.getByWorkflowId(pipelineId); }
-      catch (err) { this._logVerbReadFallback('getTriggersByPipelineId', err); }
-    }
-    return persistence.getTriggersByPipelineId(this.db, pipelineId);
+    return this._triggerStore?.getByWorkflowId(pipelineId) ?? [];
   }
 
   updateTriggerRunResult(id: string, update: {
@@ -2443,14 +2423,12 @@ export class RunHistory {
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    persistence.updateTriggerRunResult(this.db, id, update);
-    this._verbMirror(() => { this._reprojectTrigger(id); });
+    this._requireTriggerStore().updateRunResult(id, update);
   }
 
   /** Update the watch_config JSON for a watch trigger. */
   updateTriggerWatchConfig(id: string, watchConfig: string): void {
-    persistence.updateTriggerWatchConfig(this.db, id, watchConfig);
-    this._verbMirror(() => { this._reprojectTrigger(id); });
+    this._requireTriggerStore().updateWatchConfig(id, watchConfig);
   }
 
   /**

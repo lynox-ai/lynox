@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from '../../core/run-history.js';
+import { EngineDb } from '../../core/engine-db.js';
 import { TaskManager } from '../../core/task-manager.js';
 import { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
@@ -27,17 +28,21 @@ function makeAgent(scopes?: MemoryScopeRef[]): IAgent {
 describe('Task Tools', () => {
   let dir: string;
   let history: RunHistory;
+  let engine: EngineDb;
   let tm: TaskManager;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-task-tool-test-'));
     history = new RunHistory(join(dir, 'test.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
     tm = new TaskManager(history);
     sharedTaskManager = tm;
   });
 
   afterEach(() => {
     sharedTaskManager = null;
+    try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -267,6 +272,13 @@ describe('Task Tools', () => {
     // DB column `tasks.pipeline_id` stays (no migration — PRD §6.6). Pin that
     // the handler maps the new param onto the existing column.
     it('maps workflow_id onto the pipeline_id column via createPipelineTask', async () => {
+      // The referenced workflow must exist in engine.db so the trigger's FK
+      // (target_workflow_id → workflows) resolves — a pipeline trigger always
+      // points at a saved workflow (created before it is scheduled).
+      history.insertPlannedPipeline({
+        id: 'wf-abc123', name: 'Weekly report', goal: 'report', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      });
       const result = await taskCreateTool.handler(
         { title: 'Weekly report', assignee: 'lynox', workflow_id: 'wf-abc123', schedule: '0 9 * * 1' },
         makeAgent(),

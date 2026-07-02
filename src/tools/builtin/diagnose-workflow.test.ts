@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { diagnoseWorkflowTool } from './diagnose-workflow.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
+import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, LynoxUserConfig } from '../../types/index.js';
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
@@ -31,12 +32,17 @@ function seedFailedRun(history: RunHistory): void {
 describe('diagnose_workflow_run (Slice C2)', () => {
   let dir: string;
   let history: RunHistory;
+  let engine: EngineDb;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'diag-'));
     history = new RunHistory(join(dir, 'h.db'));
+    // S3f: workflow/trigger defs live in engine.db — wire it so the persistence works.
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
   });
   afterEach(() => {
+    try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
   });

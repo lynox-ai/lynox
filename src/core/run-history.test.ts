@@ -4,17 +4,26 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory, hashTask } from './run-history.js';
+import { EngineDb } from './engine-db.js';
 
 describe('RunHistory', () => {
   const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
 
   function createHistory(): RunHistory {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-'));
     tmpDirs.push(dir);
-    return new RunHistory(join(dir, 'test.db'));
+    const history = new RunHistory(join(dir, 'test.db'));
+    // S3f: workflow/trigger defs live in engine.db — wire it so their persistence works.
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    engines.push(engine);
+    history.setVerbGraph(engine);
+    return history;
   }
 
   afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
     for (const dir of tmpDirs) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1957,15 +1966,16 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('preserves indexes — post-v42 the tasks table keeps only TODO indexes; firing indexes moved to triggers', () => {
+    it('index sets — tasks keeps its TODO indexes; the legacy triggers table + indexes are gone post-v44', () => {
       const h = createHistory();
       // Direct sqlite_master assertion — a botched migration that dropped
       // an index would still let a query return the row on tiny data
       // (full-scan), so we pin the index sets per table.
       //
-      // Post-v42 split: the `tasks` table holds USER-TODOs only, so the
-      // schedule/firing indexes (next_run, type, pipeline_enabled) moved to
-      // the `triggers` table. `tasks` keeps the TODO-only indexes.
+      // The `tasks` table holds USER-TODOs only (v42 split) and keeps its
+      // TODO-only indexes. The legacy history.db `triggers` table (+ its
+      // idx_triggers_* indexes) was DROPPED in mig v44 (S3f write-cutover) —
+      // triggers now live in engine.db — so history.db carries none anymore.
       const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
       const taskIdx = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name LIKE 'idx_tasks_%'`,
@@ -1978,19 +1988,14 @@ describe('RunHistory', () => {
         'idx_tasks_status',
       ]);
 
-      // The firing indexes now live on `triggers` (idx_triggers_*).
+      // The legacy history.db `triggers` table was dropped in v44 → no indexes.
       const triggerIdx = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='triggers' AND name LIKE 'idx_triggers_%'`,
       ).all().map(r => r.name).sort();
-      expect(triggerIdx).toEqual([
-        'idx_triggers_next_run',
-        'idx_triggers_pipeline_enabled',
-        'idx_triggers_scope',
-        'idx_triggers_type',
-      ]);
+      expect(triggerIdx).toEqual([]);
 
-      // Plus the existing functional smoke that getDueTriggers works — a due
-      // trigger row lands in the worker queue.
+      // Plus the existing functional smoke that getDueTriggers works (engine.db) —
+      // a due trigger row lands in the worker queue.
       h.insertTrigger({
         id: 'tdue',
         title: 'Due',
@@ -2057,13 +2062,16 @@ describe('RunHistory', () => {
   // right table, are returned by the right queries, the two tables are disjoint,
   // and per-table column integrity survives.
   describe('v42 migration — tasks/triggers split', () => {
-    // Helper: raw row counts straight from each table, to prove disjointness
-    // independent of the higher-level queries.
+    // Helper: row counts per primitive. `tasks` are raw from legacy history.db;
+    // `triggers` now live in engine.db (the legacy history.db `triggers` table is
+    // dropped in v44), so they are counted via the store-backed read. The two
+    // primitives live in SEPARATE databases now, which is disjointness by
+    // construction.
     function rawCounts(h: RunHistory): { tasks: number; triggers: number } {
       const db = (h as unknown as { db: { prepare(sql: string): { get(): { c: number } } } }).db;
       return {
         tasks: db.prepare('SELECT COUNT(*) AS c FROM tasks').get().c,
-        triggers: db.prepare('SELECT COUNT(*) AS c FROM triggers').get().c,
+        triggers: h.getTriggers({ limit: 100000 }).length,
       };
     }
 
@@ -2123,6 +2131,12 @@ describe('RunHistory', () => {
 
     it('(d) a pipeline trigger lands in triggers, NOT in tasks — and its pipeline_id survives', () => {
       const h = createHistory();
+      // The referenced workflow must exist so the engine.db FK
+      // (target_workflow_id → workflows) resolves rather than nulling.
+      h.insertPlannedPipeline({
+        id: 'wf-xyz', name: 'Monthly report', goal: 'report', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      });
       h.insertTrigger({
         id: 'pipe-1', title: 'Monthly report', taskType: 'pipeline',
         pipelineId: 'wf-xyz', scheduleCron: '0 9 1 * *',
@@ -2170,12 +2184,14 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('(g) MOVES pre-existing mixed rows into the right table on the v42 boot migration', () => {
+    it('(g) v42 MOVE + v44 DROP on a pre-v42 db: TODOs survive; legacy triggers are dropped (recover via pre-deploy backfill)', () => {
       // Build a db at the PRE-v42 schema (one `tasks` table holding everything,
-      // schema_version=41) with REAL mixed rows, then open a RunHistory on it so
-      // the v42 boot migration runs the actual INSERT…SELECT move. This is the
-      // data-critical path that runs on existing prod tenants — the predicate
-      // tests above use the post-split API; this proves the MOVE itself.
+      // schema_version=41) with REAL mixed rows, then open a RunHistory so the FULL
+      // migration chain runs: v42 splits tasks→tasks+triggers (history.db), then v44
+      // (S3f) DROPs the legacy `triggers` table. Without a pre-deploy backfill the
+      // moved trigger rows are GONE — exactly the data-loss the per-tenant
+      // Ops-Playbook prevents (backfill legacy→engine.db BEFORE deploying S3f). The
+      // TODOs never leave `tasks`, so they survive regardless.
       const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-v42-'));
       tmpDirs.push(dir);
       const dbPath = join(dir, 'premig.db');
@@ -2203,25 +2219,39 @@ describe('RunHistory', () => {
         INSERT INTO tasks (id, title, assignee, task_type, watch_config, next_run_at) VALUES ('m-watch','Watch','lynox','watch','{"url":"https://x.test","interval_minutes":60}','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, assignee, task_type, pipeline_id, schedule_cron, next_run_at) VALUES ('m-pipe','Report','lynox','pipeline','wf-1','0 9 1 * *','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, status, task_type, last_run_at, last_run_status) VALUES ('m-done','Ran once','completed','manual','2026-06-01T00:00:00.000Z','completed');
+        -- A real v41 db also has pipeline_runs (created back in v7). Seed it with a
+        -- workflow-def row (status='planned') + a run-spine row (status='running')
+        -- so v44's orphan-purge (DELETE planned/executed) is exercised end-to-end.
+        CREATE TABLE pipeline_runs (
+          id TEXT PRIMARY KEY, manifest_name TEXT, status TEXT,
+          manifest_json TEXT, step_count INTEGER,
+          started_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO pipeline_runs (id, status) VALUES ('pr-planned','planned'), ('pr-run','running');
       `);
       raw.close();
 
-      // Boot RunHistory → runs the v42 migration (currentVersion 41 → 42).
+      // Boot RunHistory → runs the FULL chain: v42 split, then v44 drops legacy triggers.
       const h = new RunHistory(dbPath);
-      // TODOs (2): the user-TODO + the bare NULL-assignee note (NULL-safe predicate).
+      // TODOs (2) survive: the user-TODO + the bare NULL-assignee note (NULL-safe predicate).
+      // They never left `tasks`, so v42/v44 don't touch them.
       expect(new Set(h.getTasks().map(t => t.id))).toEqual(new Set(['m-todo', 'm-todo-null']));
-      // Triggers (4): cron, watch, pipeline, and the completed one-shot moved by
-      // the last_run_at clause (no schedule/assignee left, but it HAS fired).
-      expect(new Set(h.getTriggers().map(t => t.id))).toEqual(new Set(['m-cron', 'm-watch', 'm-pipe', 'm-done']));
-      expect(rawCounts(h)).toEqual({ tasks: 2, triggers: 4 });
-      // Column integrity across the move.
+      // The legacy history.db `triggers` table is dropped by v44.
+      const db = (h as unknown as { db: { prepare(sql: string): { get(): unknown; all(): Array<{ id: string }> } } }).db;
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get()).toBeUndefined();
+      // The 4 moved trigger rows (cron/watch/pipeline/completed-one-shot) are GONE:
+      // v42 moved them into legacy `triggers`, v44 dropped it, and no backfill ran
+      // to relocate them into engine.db → getTriggers is empty (no engine.db store).
+      expect(h.getTriggers()).toEqual([]);
+      expect(rawCounts(h)).toEqual({ tasks: 2, triggers: 0 });
+      // v44 purged the orphaned workflow-def row (status='planned') but kept the
+      // run SPINE (status='running').
+      const prIds = (db.prepare("SELECT id FROM pipeline_runs ORDER BY id").all()).map(r => r.id);
+      expect(prIds).toEqual(['pr-run']);
+      // Column integrity for the surviving TODOs.
       const todo = h.getTask('m-todo')!;
       expect(todo.due_date).toBe('2026-07-01');
       expect(todo.priority).toBe('high');
-      expect(h.getTrigger('m-cron')!.schedule_cron).toBe('0 9 * * *');
-      expect(h.getTrigger('m-pipe')!.pipeline_id).toBe('wf-1');
-      expect(h.getTriggersByPipelineId('wf-1').some(t => t.id === 'm-pipe')).toBe(true);
-      expect(h.getTrigger('m-done')!.last_run_at).toBe('2026-06-01T00:00:00.000Z');
       h.close();
     });
 
@@ -2258,15 +2288,26 @@ describe('RunHistory', () => {
         -- a TODO parent + a TODO child (same-table link must be PRESERVED)
         INSERT INTO tasks (id, title, assignee) VALUES ('par-todo','Project','user');
         INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-todo','Step','user','par-todo');
+        -- a real v41 db also has pipeline_runs (v7); v44's orphan-purge needs it present.
+        CREATE TABLE pipeline_runs (
+          id TEXT PRIMARY KEY, manifest_name TEXT, status TEXT,
+          manifest_json TEXT, step_count INTEGER,
+          started_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
       `);
       raw.close();
 
       // Must NOT throw / nuke. If the FK aborts the migration, _openOrRecreate
-      // renames the db and starts fresh → all four rows would vanish.
+      // renames the db and starts fresh → all four rows would vanish. This is the
+      // core FK-safety regression the test guards, still fully relevant post-S3f.
       const h = new RunHistory(dbPath);
-      // No data loss: the trigger parent + 3 TODOs all survived.
+      // No TASK data loss: the 3 TODO rows all survived the full migration chain.
       expect(new Set(h.getTasks().map(t => t.id))).toEqual(new Set(['child-of-trig', 'par-todo', 'child-of-todo']));
-      expect(h.getTriggers().some(t => t.id === 'par-trig')).toBe(true);
+      // par-trig moved to legacy `triggers` in v42, then v44 dropped that table
+      // (no backfill here) → it is gone from history.db; engine.db has no store.
+      const db = (h as unknown as { db: { prepare(sql: string): { get(): unknown } } }).db;
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get()).toBeUndefined();
+      expect(h.getTriggers()).toEqual([]);
       // Cross-table parent ref nulled (the trigger parent is gone from `tasks`).
       expect(h.getTask('child-of-trig')!.parent_task_id).toBeNull();
       // Same-table TODO↔TODO link preserved.
