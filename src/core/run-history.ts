@@ -6,7 +6,7 @@ import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import type { TaskRecord, TriggerRecord, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
@@ -2295,7 +2295,9 @@ export class RunHistory {
     this._verbMirror(() => { this._reprojectTask(params.id); });
   }
 
-  /** Insert an AGENT-TRIGGER row (cron/watch/pipeline/reminder/backup). */
+  /** Insert an AGENT-TRIGGER row. `source` (what fires it) + `effect` (what it
+   *  does) are the clean axes the caller derives from intent; the store defaults
+   *  them (manual / run_agent) if absent. */
   insertTrigger(params: {
     id: string;
     title: string;
@@ -2306,7 +2308,8 @@ export class RunHistory {
     scopeId?: string | undefined;
     scheduleCron?: string | undefined;
     nextRunAt?: string | undefined;
-    taskType?: string | undefined;
+    source?: TriggerSource | undefined;
+    effect?: TriggerEffect | undefined;
     watchConfig?: string | undefined;
     maxRetries?: number | undefined;
     notificationChannel?: string | undefined;
@@ -2390,7 +2393,7 @@ export class RunHistory {
     return persistence.getOverdueTasks(this.db, scopes);
   }
 
-  /** List AGENT-TRIGGERs (cron/watch/pipeline/reminder/backup). */
+  /** List AGENT-TRIGGERs (the WorkerLoop-fired rows across every source·effect). */
   getTriggers(opts?: {
     scopeType?: string | undefined;
     scopeId?: string | undefined;

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import type { TriggerRecord } from '../types/pipeline.js';
+import type { TriggerRecord, TriggerSource, TriggerEffect } from '../types/pipeline.js';
 
 /**
  * TriggerStore — the write/read layer over the engine.db `triggers` table
@@ -21,14 +21,15 @@ import type { TriggerRecord } from '../types/pipeline.js';
  * over and dropped legacy.
  *
  * The engine.db `triggers` table is a REDESIGN, not a 1:1 of the legacy table —
- * so the write methods map the legacy field names onto the engine.db shape
- * (source ← task_type, condition_json ← {schedule_cron, watch_config},
- * target_workflow_id ← pipeline_id, params_json ← pipeline_params).
- * {@link triggerRecordToRow} is the pure legacy `TriggerRecord`→row mapping,
- * kept as the canonical documented form + its test coverage (the inverse of the
- * read adapter {@link triggerDbRowToRecord}); the live write methods build the
- * row (via {@link insert}/{@link upsert}) or patch columns directly from their
- * params, so nothing on the write path calls it after the S3f cutover.
+ * so the write methods map the record fields onto the engine.db shape. Post
+ * S3-behaviour-a the record carries the clean axes directly (source·effect 1:1);
+ * the remaining renames are condition_json ← {schedule_cron, watch_config},
+ * target_workflow_id ← pipeline_id, params_json ← pipeline_params.
+ * {@link triggerRecordToRow} is the pure `TriggerRecord`→row mapping, kept as the
+ * canonical documented form + its test coverage (the inverse of the read adapter
+ * {@link triggerDbRowToRecord}); the live write methods build the row (via
+ * {@link insert}/{@link upsert}) or patch columns directly from their params, so
+ * nothing on the write path calls it after the S3f cutover.
  *
  * `condition_json` / `params_json` / `description` are stored PLAINTEXT — a
  * faithful relocation of the legacy plaintext columns. At-rest encryption of verb
@@ -39,12 +40,12 @@ export interface TriggerRow {
   id: string;
   title: string;
   description: string;
-  /** cron|watch|webhook|inbox_event|manual|pipeline|reminder|backup — the legacy
-   *  `task_type` preserved VERBATIM (the engine.db column has no CHECK). The clean
-   *  source/action decomposition is S3d/S4 behaviour, NOT the mirror. */
-  source: string;
-  /** JSON `{schedule_cron, watch_config}` — both raw, so the round-trip back to
-   *  the exact legacy columns at S3d is byte-identical. */
+  /** What FIRES it (S3-behaviour-a clean axis): cron|watch|webhook|inbox_event|manual. */
+  source: TriggerSource;
+  /** What it DOES when fired: run_workflow|run_agent (mint a Run) | backup|notify
+   *  (deterministic, no Run). The WorkerLoop dispatches on this. */
+  effect: TriggerEffect;
+  /** JSON `{schedule_cron, watch_config}` — both raw. */
   conditionJson: string;
   /** Candidate FK → workflows(id) (legacy `pipeline_id`). {@link TriggerStore.upsert}
    *  nulls it when no such workflow row exists (the FK is enforced), so a pre-flag
@@ -69,6 +70,7 @@ export interface StoredTrigger {
   title: string;
   description: string;
   source: string;
+  effect: string;
   conditionJson: string;
   targetWorkflowId: string | null;
   paramsJson: string;
@@ -83,20 +85,20 @@ export interface StoredTrigger {
 }
 
 /**
- * Pure map of a legacy {@link TriggerRecord} (history.db row shape) onto the
- * engine.db `triggers` shape. Faithful + round-trippable: `source` keeps
- * `task_type` verbatim; `condition_json` carries both legacy `schedule_cron` and
- * the raw `watch_config` string. `assignee` is dropped (constant 'lynox' for
- * fired rows). engine.db columns with no legacy source (`source_connection_id`,
- * `subject_id`, `last_run_id`) are left for S4/S3d. `targetWorkflowId` is the raw
- * candidate; the FK-guard lives in {@link TriggerStore.upsert}.
+ * Pure map of a {@link TriggerRecord} onto the engine.db `triggers` row shape.
+ * `source`/`effect` are the clean typed axes carried through 1:1; `condition_json`
+ * carries `schedule_cron` + the raw `watch_config`. `assignee` is dropped (constant
+ * 'lynox' for fired rows). engine.db columns with no record source
+ * (`source_connection_id`, `subject_id`, `last_run_id`) are left for S4.
+ * `targetWorkflowId` is the raw candidate; the FK-guard lives in {@link TriggerStore.upsert}.
  */
 export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
   return {
     id: rec.id,
     title: rec.title,
     description: rec.description,
-    source: rec.task_type ?? 'manual',
+    source: rec.source,
+    effect: rec.effect,
     conditionJson: JSON.stringify({
       schedule_cron: rec.schedule_cron ?? null,
       watch_config: rec.watch_config ?? null,
@@ -123,6 +125,7 @@ interface TriggerDbRow {
   title: string;
   description: string;
   source: string;
+  effect: string;
   condition_json: string;
   target_workflow_id: string | null;
   params_json: string;
@@ -147,6 +150,7 @@ interface TriggerFullDbRow {
   title: string;
   description: string;
   source: string;
+  effect: string;
   condition_json: string;
   target_workflow_id: string | null;
   params_json: string;
@@ -167,17 +171,16 @@ interface TriggerFullDbRow {
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
-  `id, title, description, source, condition_json, target_workflow_id, params_json,
+  `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at`;
 
 /**
- * Pure INVERSE of {@link triggerRecordToRow} (S3e read-cutover): reconstruct a
- * legacy {@link TriggerRecord} from an engine.db `triggers` row so every consumer
- * that reads legacy field names (`task_type`/`pipeline_id`/`pipeline_params`/
- * `schedule_cron`/`watch_config`) sees an identical shape regardless of source.
- * - `task_type` ← `source`, `pipeline_id` ← `target_workflow_id`,
- *   `pipeline_params` ← `params_json`.
+ * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
+ * a {@link TriggerRecord}. Clean row-mapper (NOT a legacy reconstruction post
+ * S3-behaviour-a): `source`/`effect` are the row's own typed axes carried 1:1;
+ * `pipeline_id` ← `target_workflow_id`, `pipeline_params` ← `params_json` (record
+ * field names reshaped in the S4 task-cutover).
  * - `schedule_cron` / `watch_config` are parsed back out of `condition_json`
  *   (guarded — a malformed blob leaves them unset, never throws).
  * - `assignee` is the constant `'lynox'` (every fired trigger is agent-owned;
@@ -210,7 +213,8 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_at: row.last_run_at ?? undefined,
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
-    task_type: row.source,
+    source: row.source as TriggerSource,
+    effect: row.effect as TriggerEffect,
     watch_config: watchConfig,
     max_retries: row.max_retries ?? undefined,
     retry_count: row.retry_count,
@@ -266,16 +270,17 @@ export class TriggerStore {
     const targetWorkflowId = this._resolveTargetWorkflowId(row.targetWorkflowId ?? null);
     this.db.prepare(`
       INSERT INTO triggers (
-        id, title, description, source, condition_json, target_workflow_id,
+        id, title, description, source, effect, condition_json, target_workflow_id,
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
         max_retries, retry_count, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
         source = excluded.source,
+        effect = excluded.effect,
         condition_json = excluded.condition_json,
         target_workflow_id = excluded.target_workflow_id,
         params_json = excluded.params_json,
@@ -296,6 +301,7 @@ export class TriggerStore {
       row.title,
       row.description,
       row.source,
+      row.effect,
       row.conditionJson,
       targetWorkflowId,
       row.paramsJson,
@@ -349,10 +355,11 @@ export class TriggerStore {
    * history.db `triggers` is dropped in mig v44). Accepts the legacy-shaped params
    * of the old `run-history-persistence.insertTrigger` and maps them onto the
    * engine.db shape via {@link upsert} (a fresh id never conflicts, so the upsert
-   * is a plain insert). Legacy defaults are reproduced explicitly: status 'open',
-   * `task_type`→`source` 'manual', scope 'project'/'', max_retries 0, retry_count
-   * 0, enabled 1, params_json '{}'. `assignee` is NOT stored (every trigger is
-   * agent-owned — const 'lynox', which the read synthesizes).
+   * is a plain insert). Defaults reproduced explicitly: status 'open', `source`
+   * 'manual' + `effect` 'run_agent' (a bare unclassified trigger), scope
+   * 'project'/'', max_retries 0, retry_count 0, enabled 1, params_json '{}'. Callers
+   * set `source`/`effect` from user intent. `assignee` is NOT stored (every trigger
+   * is agent-owned — const 'lynox', which the read synthesizes).
    */
   insert(params: {
     id: string;
@@ -363,7 +370,8 @@ export class TriggerStore {
     scopeId?: string | undefined;
     scheduleCron?: string | undefined;
     nextRunAt?: string | undefined;
-    taskType?: string | undefined;
+    source?: TriggerSource | undefined;
+    effect?: TriggerEffect | undefined;
     watchConfig?: string | undefined;
     maxRetries?: number | undefined;
     notificationChannel?: string | undefined;
@@ -374,7 +382,12 @@ export class TriggerStore {
       id: params.id,
       title: params.title,
       description: params.description ?? '',
-      source: params.taskType ?? 'manual',
+      source: params.source ?? 'manual',
+      // The sole funnel (TaskManager.create → deriveSourceEffect) ALWAYS supplies
+      // effect, so this default is an unreached backstop. It is a money-direction
+      // value (run_agent) only because an unclassified bare trigger IS an agent run;
+      // a backup/reminder always arrives with its explicit effect, never here.
+      effect: params.effect ?? 'run_agent',
       conditionJson: JSON.stringify({
         schedule_cron: params.scheduleCron ?? null,
         watch_config: params.watchConfig ?? null,
@@ -478,7 +491,7 @@ export class TriggerStore {
   /** Read a single trigger by exact id (test-only helper). */
   get(id: string): StoredTrigger | undefined {
     const row = this.db.prepare(
-      `SELECT id, title, description, source, condition_json, target_workflow_id,
+      `SELECT id, title, description, source, effect, condition_json, target_workflow_id,
               params_json, status, enabled, next_run_at, last_run_at,
               last_run_result, last_run_status, retry_count, created_at
        FROM triggers WHERE id = ?`,
@@ -492,7 +505,7 @@ export class TriggerStore {
    *  `idx_workflows_updated_at`. */
   list(limit = 100): StoredTrigger[] {
     const rows = this.db.prepare(
-      `SELECT id, title, description, source, condition_json, target_workflow_id,
+      `SELECT id, title, description, source, effect, condition_json, target_workflow_id,
               params_json, status, enabled, next_run_at, last_run_at,
               last_run_result, last_run_status, retry_count, created_at
        FROM triggers ORDER BY updated_at DESC LIMIT ?`,
@@ -546,10 +559,14 @@ export class TriggerStore {
   }
 
   /**
-   * S3e read-cutover: filtered trigger list, as legacy {@link TriggerRecord}s.
-   * Mirrors the legacy `getTriggers` — truthy-gated `scope_type`/`scope_id`/
-   * `status`/`task_type`(→`source`) clauses, `ORDER BY next_run_at ASC NULLS
-   * LAST, created_at DESC`, `limit` default 100.
+   * Filtered trigger list. Truthy-gated `scope_type`/`scope_id`/`status`/`taskType`
+   * clauses, `ORDER BY next_run_at ASC NULLS LAST, created_at DESC`, `limit` default
+   * 100. Post S3-behaviour-a the legacy conflated `task_type` no longer exists as a
+   * column, so the `taskType` filter matches EITHER clean axis — a source value
+   * (cron|watch|manual) OR an effect value (run_workflow|run_agent|backup|notify) —
+   * so a caller can filter by whichever axis its value belongs to. (A stale legacy
+   * value like 'pipeline'/'scheduled'/'reminder' matches neither, which is correct —
+   * those values were split away.)
    */
   listFiltered(opts?: {
     scopeType?: string | undefined;
@@ -563,7 +580,7 @@ export class TriggerStore {
     if (opts?.scopeType) { clauses.push('scope_type = ?'); params.push(opts.scopeType); }
     if (opts?.scopeId) { clauses.push('scope_id = ?'); params.push(opts.scopeId); }
     if (opts?.status) { clauses.push('status = ?'); params.push(opts.status); }
-    if (opts?.taskType) { clauses.push('source = ?'); params.push(opts.taskType); }
+    if (opts?.taskType) { clauses.push('(source = ? OR effect = ?)'); params.push(opts.taskType, opts.taskType); }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     params.push(opts?.limit ?? 100);
     const rows = this.db.prepare(
@@ -593,6 +610,7 @@ export class TriggerStore {
       title: row.title,
       description: row.description,
       source: row.source,
+      effect: row.effect,
       conditionJson: row.condition_json,
       targetWorkflowId: row.target_workflow_id,
       paramsJson: row.params_json,

@@ -19,7 +19,6 @@
 		last_run_status?: string;
 		priority?: string;
 		assignee?: string;
-		task_type?: string;
 	}
 
 	let tasks = $state<TaskRecord[]>([]);

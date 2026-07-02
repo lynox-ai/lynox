@@ -21,14 +21,15 @@
 	const counts = $derived(getInboxCounts());
 	const snoozedCount = $derived(getSnoozedCount());
 
-	// Reminders due today (task_type='reminder' + next_run_at in today's
-	// local-day window). Reminders are AGENT-TRIGGERS (post-v42 split they
-	// live in the `triggers` table), so this reads /api/triggers — /api/tasks
-	// only returns user-TODOs and would never surface a reminder. Fetched once
-	// on mount — the typical reminder volume is too low to warrant a stream.
-	// Failure is silent: a missing "due today" card is preferable to a noisy
-	// error toast on this passive landing surface.
-	interface ReminderRow { id: string; title: string; next_run_at?: string; task_type?: string }
+	// Reminders due today (effect='notify' + next_run_at in today's local-day
+	// window). Reminders are AGENT-TRIGGERS (post-v42 split they live in the
+	// `triggers` table), so this reads /api/triggers — /api/tasks only returns
+	// user-TODOs and would never surface a reminder. The S3-behaviour-a slice
+	// de-conflated the legacy `task_type` into source·effect, so a reminder is now
+	// `effect='notify'`. Fetched once on mount — the typical reminder volume is too
+	// low to warrant a stream. Failure is silent: a missing "due today" card is
+	// preferable to a noisy error toast on this passive landing surface.
+	interface ReminderRow { id: string; title: string; next_run_at?: string; effect?: string }
 	let remindersDueToday = $state<ReminderRow[]>([]);
 	onMount(async () => {
 		try {
@@ -44,7 +45,7 @@
 					&& d.getMonth() === today.getMonth()
 					&& d.getDate() === today.getDate();
 			};
-			remindersDueToday = data.triggers.filter((r) => r.task_type === 'reminder' && isToday(r.next_run_at));
+			remindersDueToday = data.triggers.filter((r) => r.effect === 'notify' && isToday(r.next_run_at));
 		} catch { /* silent — passive card, optional */ }
 	});
 

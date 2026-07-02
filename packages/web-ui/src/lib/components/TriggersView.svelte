@@ -20,7 +20,8 @@
 		next_run_at?: string;
 		last_run_at?: string;
 		last_run_status?: string;
-		task_type?: string;
+		source?: string;
+		effect?: string;
 		watch_config?: string;
 		pipeline_id?: string;
 		// SQLite kill-switch: 1/undefined = enabled, 0 = paused (schedule skipped).
@@ -153,11 +154,14 @@
 	}
 
 	function typeLabel(trigger: Trigger): string {
-		if (trigger.pipeline_id) return t('triggers.type_workflow');
-		switch (trigger.task_type) {
-			case 'watch': return t('triggers.type_watch');
-			case 'reminder': return t('triggers.type_reminder');
+		// Label from the clean effect·source axes (S3-behaviour-a). effect='run_workflow'
+		// covers an FK-nulled workflow trigger too (pipeline_id undefined but effect kept),
+		// which the old pipeline_id check mislabeled.
+		switch (trigger.effect) {
+			case 'run_workflow': return t('triggers.type_workflow');
 			case 'backup': return t('triggers.type_backup');
+			case 'notify': return t('triggers.type_reminder');
+			case 'run_agent': return trigger.source === 'watch' ? t('triggers.type_watch') : t('triggers.type_scheduled');
 			default: return t('triggers.type_scheduled');
 		}
 	}

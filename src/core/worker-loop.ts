@@ -251,33 +251,51 @@ export class WorkerLoop {
     const taskCtx: WorkerTaskContext = {
       taskId: task.id,
       taskTitle: task.title,
-      taskType: task.task_type ?? 'manual',
+      taskType: task.effect,
       startedAt: Date.now(),
     };
 
     try {
       await workerTaskStorage.run(taskCtx, async () => {
-        if (task.task_type === 'backup') {
-          await this.executeBackup(task);
-        } else if (task.task_type === 'reminder') {
-          // Standalone reminder — fire notification only, no agent run.
-          // The mail-anchored variant lives in inbox-reminder-poller.ts;
-          // this branch handles user-created reminders (chat /reminder
-          // slash, AutomationHub-create) that may or may not link to
-          // an inbox item.
-          await this.executeReminder(task);
-        } else if (task.task_type === 'pipeline' || task.pipeline_id) {
-          // Route on task_type, NOT pipeline_id presence: engine.db's
-          // triggers.target_workflow_id has an FK ON DELETE SET NULL, so a
-          // pipeline trigger whose workflow was deleted (or not exact-resolved)
-          // arrives with pipeline_id=undefined. Routing on presence alone would
-          // drop it to executeStandard (an autonomous LLM run of the title, every
-          // tick) — executePipeline handles the null target as a benign skip.
-          await this.executePipeline(task);
-        } else if (task.task_type === 'watch') {
-          await this.executeWatch(task);
-        } else {
-          await this.executeStandard(task);
+        // Dispatch on the EFFECT axis (S3-behaviour-a). This switch IS the
+        // money-vs-deterministic boundary: run_workflow/run_agent may mint a Run
+        // (→ managed onBeforeRun gate / onAfterRun debit); backup/notify never do.
+        // `effect` is read as a plain string (the store casts it from a TEXT column,
+        // so a value the union doesn't know — a newer schema, a synced/corrupt row —
+        // is possible at runtime) → the default fails CLOSED, never a money run.
+        const effect: string = task.effect;
+        switch (effect) {
+          case 'backup':
+            await this.executeBackup(task);
+            break;
+          case 'notify':
+            // Standalone reminder — notification only, no agent run. The
+            // mail-anchored variant lives in inbox-reminder-poller.ts; this handles
+            // user-created reminders (chat /reminder, AutomationHub) that may or may
+            // not link to an inbox item.
+            await this.executeReminder(task);
+            break;
+          case 'run_workflow':
+            // executePipeline handles a null target_workflow_id (FK ON DELETE SET
+            // NULL nulls a deleted workflow's link) as a benign skip — never a
+            // fall-through to an autonomous run of the title.
+            await this.executePipeline(task);
+            break;
+          case 'run_agent':
+            // Source-gated executor choice — NOT a money boundary (both branches are
+            // the run_agent effect = may mint a Run). A `watch` source runs its
+            // change-detection gate first (executeWatch: no change → no spend); any
+            // other source runs the agent turn directly (executeStandard).
+            if (task.source === 'watch') {
+              await this.executeWatch(task);
+            } else {
+              await this.executeStandard(task);
+            }
+            break;
+          default:
+            // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
+            // money-spending run. Record + stop, so it stops re-firing every tick.
+            this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
         }
       });
     } catch (err: unknown) {
@@ -286,7 +304,8 @@ export class WorkerLoop {
         import('@sentry/node').then((Sentry) => {
           Sentry.withScope((scope) => {
             scope.setTag('task.id', task.id);
-            scope.setTag('task.type', task.task_type ?? 'manual');
+            scope.setTag('task.source', task.source);
+            scope.setTag('task.effect', task.effect);
             scope.setTag('source', 'worker-loop');
             captureError(err);
           });
@@ -450,9 +469,9 @@ export class WorkerLoop {
     if (!task.pipeline_id) {
       // The target workflow was deleted (engine.db FK ON DELETE SET NULL nulled
       // target_workflow_id) or was never exact-resolved at insert. Routed here by
-      // task_type, so a null target lands here rather than at executeStandard.
-      // Same benign skip as a workflow deleted mid-flight (below): record it and
-      // stop — NEVER run the trigger title as an autonomous task.
+      // effect=run_workflow, so a null target lands here rather than at
+      // executeStandard. Same benign skip as a workflow deleted mid-flight (below):
+      // record it and stop — NEVER run the trigger title as an autonomous task.
       this.recordAndNotify(task, 'Pipeline target workflow no longer exists (skipped)', false);
       return;
     }

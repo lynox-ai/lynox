@@ -325,8 +325,13 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX idx_workflows_template ON workflows(is_template);
 
-   -- FIRE: dormant source·condition·target·params → mints a Run. 'source' stays a
-   -- field (cron/watch/webhook/inbox_event), NOT collapsed into one typed thing.
+   -- FIRE: dormant source·condition·target·effect. 'source' = what FIRES it
+   -- (cron/watch/webhook/inbox_event/manual), a field NOT collapsed into one typed
+   -- thing. 'effect' (added in v3) = what it DOES: run_workflow/run_agent MINT a Run
+   -- (→ managed money gate/debit); backup/notify are deterministic side-effects that
+   -- mint NO Run. Money-vs-deterministic boundary = the effect axis, in the schema.
+   -- INVARIANT (enforced from P3, when webhook/inbox_event are wired): an inbound
+   -- source (webhook/inbox_event) ⟺ source_connection_id IS NOT NULL.
    CREATE TABLE triggers (
      id TEXT PRIMARY KEY,
      title TEXT NOT NULL,
@@ -415,6 +420,53 @@ const MIGRATIONS: string[] = [
   // ~60s scheduler poll seeks instead of full-scanning + sorting every tick.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (2);
    CREATE INDEX IF NOT EXISTS idx_triggers_next_run ON triggers(next_run_at);`,
+
+  // v3 (S3-behaviour-a): split the conflated legacy `task_type` (which S3 stored
+  // VERBATIM in `source` — the real values written were scheduled|pipeline|watch|
+  // reminder|backup|manual) into the clean two-axis primitive — `source` = what
+  // FIRES it, NEW `effect` = what it DOES. `effect` is a REAL column (not derivable):
+  // backup/notify/run_agent are all cron+target-null → indistinguishable without an
+  // explicit discriminator, and it makes the money-vs-deterministic boundary legible
+  // in the schema (run_* mint a Run; backup/notify never do). The remap is EXHAUSTIVE
+  // + explicit — every row gets an effect via a matching UPDATE, so no row leans on
+  // the `DEFAULT 'run_agent'` backstop (a missed backup/reminder stranding at the
+  // money-spending default is the hazard we design out). `effect` is derived FIRST
+  // (keyed off the OLD source + target presence), THEN `source` is cleaned onto the
+  // new axis (order matters — the source rewrite would otherwise erase the
+  // discriminator the effect derivation reads).
+  //
+  // effect mirrors the LEGACY WorkerLoop dispatch, which routed to executePipeline on
+  // `task_type='pipeline' OR pipeline_id` — so a target-bound row (target_workflow_id
+  // NOT NULL) becomes run_workflow even if its source wasn't 'pipeline' (a legacy raw
+  // create() could bind a workflow without task_type='pipeline'); dropping that half
+  // would send it to run_agent → an autonomous money run of the title.
+  //
+  // source is recovered from the CONDITION SHAPE, not the legacy label, for every
+  // value that isn't already clean — so 'scheduled'/'pipeline'/'standard'/unknown all
+  // map to their real firing mechanism (json_valid guards a corrupt blob → 'manual').
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (3);
+   ALTER TABLE triggers ADD COLUMN effect TEXT NOT NULL DEFAULT 'run_agent';
+
+   -- 1. effect ← OLD source + target presence (exhaustive + explicit; no default reliance)
+   UPDATE triggers SET effect = 'backup' WHERE source = 'backup';
+   UPDATE triggers SET effect = 'notify' WHERE source = 'reminder';
+   UPDATE triggers SET effect = 'run_workflow'
+     WHERE source = 'pipeline'
+        OR (target_workflow_id IS NOT NULL AND source NOT IN ('backup', 'reminder'));
+   UPDATE triggers SET effect = 'run_agent'
+     WHERE source NOT IN ('backup', 'reminder', 'pipeline') AND target_workflow_id IS NULL;
+
+   -- 2. source ← cleaned onto the {cron,watch,webhook,inbox_event,manual} axis.
+   --    backup/reminder are cron-scheduled built-ins; everything not already clean
+   --    (legacy 'pipeline'/'scheduled'/'standard'/unknown) is derived from the
+   --    condition shape so the real firing mechanism is recovered from any label.
+   --    'watch'/'manual'/'cron'/'webhook'/'inbox_event' are already clean and skipped.
+   UPDATE triggers SET source = 'cron' WHERE source IN ('backup', 'reminder');
+   UPDATE triggers SET source = CASE
+       WHEN json_valid(condition_json) AND json_extract(condition_json, '$.schedule_cron') IS NOT NULL THEN 'cron'
+       WHEN json_valid(condition_json) AND json_extract(condition_json, '$.watch_config')  IS NOT NULL THEN 'watch'
+       ELSE 'manual' END
+     WHERE source NOT IN ('cron', 'watch', 'webhook', 'inbox_event', 'manual');`,
 ];
 
 /**

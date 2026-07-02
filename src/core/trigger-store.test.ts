@@ -31,6 +31,7 @@ describe('TriggerStore (Foundation Rework v2 — S3b)', () => {
       title: 'Daily report',
       description: 'send it',
       source: 'cron',
+      effect: 'run_agent',
       conditionJson: JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }),
       paramsJson: '{"tone":"brief"}',
       status: 'open',
@@ -55,6 +56,7 @@ describe('TriggerStore (Foundation Rework v2 — S3b)', () => {
     const got = store.get('t1');
     expect(got?.title).toBe('Daily report');
     expect(got?.source).toBe('cron');
+    expect(got?.effect).toBe('run_agent');
     expect(got?.conditionJson).toBe(JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }));
     expect(got?.paramsJson).toBe('{"tone":"brief"}');
     expect(got?.enabled).toBe(true);
@@ -147,45 +149,49 @@ describe('TriggerStore (Foundation Rework v2 — S3b)', () => {
   });
 });
 
-describe('triggerRecordToRow (legacy → engine.db mapping)', () => {
+describe('triggerRecordToRow (record → engine.db row mapping)', () => {
   function rec(over: Partial<TriggerRecord> = {}): TriggerRecord {
     return {
       id: 't1', title: 'T', description: 'd', status: 'open', assignee: 'lynox',
       scope_type: 'project', scope_id: 'proj-1', created_at: 'now', updated_at: 'now',
+      source: 'manual', effect: 'run_agent',
       ...over,
     };
   }
 
-  it('maps a scheduled pipeline trigger faithfully', () => {
+  it('maps a scheduled workflow trigger faithfully (source/effect carried 1:1)', () => {
     const row = triggerRecordToRow(rec({
-      task_type: 'pipeline', schedule_cron: '0 9 * * *',
+      source: 'cron', effect: 'run_workflow', schedule_cron: '0 9 * * *',
       pipeline_id: 'wf-9', pipeline_params: '{"x":1}', next_run_at: '2026-07-02',
       enabled: 1, retry_count: 2,
     }));
-    expect(row.source).toBe('pipeline');       // task_type preserved VERBATIM
+    expect(row.source).toBe('cron');            // clean source axis, carried through
+    expect(row.effect).toBe('run_workflow');    // clean effect axis, carried through
     expect(row.targetWorkflowId).toBe('wf-9');  // pipeline_id → target_workflow_id (candidate)
     expect(row.paramsJson).toBe('{"x":1}');     // pipeline_params → params_json
     expect(row.nextRunAt).toBe('2026-07-02');
     expect(row.enabled).toBe(true);
     expect(row.retryCount).toBe(2);
-    // scope fields relocate verbatim (they carry the customer-scoping axis at S3d;
+    // scope fields relocate verbatim (they carry the customer-scoping axis;
     // StoredTrigger omits them, so assert on the mapper output directly).
     expect(row.scopeType).toBe('project');
     expect(row.scopeId).toBe('proj-1');
-    // condition_json carries both raw legacy columns (round-trippable at S3d)
+    // condition_json carries both raw condition columns
     expect(JSON.parse(row.conditionJson)).toEqual({ schedule_cron: '0 9 * * *', watch_config: null });
   });
 
-  it('round-trips watch_config as a RAW string (byte-identical at S3d, no re-encode)', () => {
+  it('round-trips watch_config as a RAW string (no re-encode)', () => {
     const wc = '{"url":"https://x.test","selector":".price"}';
-    const row = triggerRecordToRow(rec({ task_type: 'watch', watch_config: wc }));
+    const row = triggerRecordToRow(rec({ source: 'watch', effect: 'run_agent', watch_config: wc }));
     expect(row.source).toBe('watch');
+    expect(row.effect).toBe('run_agent');
     expect(JSON.parse(row.conditionJson).watch_config).toBe(wc);
   });
 
-  it('absent task_type → manual; absent enabled → enabled; absent params → {}; absent pipeline_id → null', () => {
+  it('defaults: manual/run_agent; absent enabled → enabled; absent params → {}; absent pipeline_id → null', () => {
     const row = triggerRecordToRow(rec({}));
     expect(row.source).toBe('manual');
+    expect(row.effect).toBe('run_agent');
     expect(row.enabled).toBe(true);       // undefined !== 0
     expect(row.paramsJson).toBe('{}');
     expect(row.targetWorkflowId).toBeNull();

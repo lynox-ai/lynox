@@ -1410,6 +1410,24 @@ export class Engine {
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
           // Mark an inbox item `replied` when the user answers it in chat.
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+          // Notify the user when a tracked mail follow-up's reminder falls due.
+          // The hook is DECLARED (MailContext.checkDueFollowups fires it every
+          // watcher tick, after marking the row reminded) but was never ASSIGNED —
+          // the MailContext is built with `{}` hooks — so due follow-ups advanced
+          // pending→reminded silently and the user was never told. This hook is
+          // independent of the inbox runtime (it notifies directly), so it is set
+          // ONCE here and survives a cross-region rebootstrap, which only re-wires
+          // the runtime-bound hooks. checkDueFollowups marks-reminded BEFORE the
+          // hook, so a slow/failed notify can't double-remind on the next tick.
+          this._mailContext.hooks.onFollowupDue = async (followup) => {
+            await this._notificationRouter.notify({
+              title: 'Follow-up fällig',
+              body: followup.reason
+                ? `${followup.reason} (an ${followup.recipient})`
+                : `Antwort ausstehend von ${followup.recipient}`,
+              priority: 'normal',
+            });
+          };
         }
         this._inboxRuntime = runtime;
       } catch (err) {

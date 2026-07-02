@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 
 describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
@@ -24,15 +25,90 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v2', () => {
+  it('creates the database and stamps schema_version v3', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(2); // v1 baseline + v2 (S3e idx_triggers_next_run)
+    expect(row.v).toBe(3); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect column)
     // v2's DDL ran in the same txn as its version stamp: the money-path index exists.
     const idx = e.getDb().prepare(
       "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_triggers_next_run'",
     ).get() as { name: string } | undefined;
     expect(idx?.name).toBe('idx_triggers_next_run');
+    // v3 added the `effect` column (fresh install gets it via the migration loop).
+    const cols = e.getDb().prepare("SELECT name FROM pragma_table_info('triggers')").all() as Array<{ name: string }>;
+    expect(cols.map(c => c.name)).toContain('effect');
+    e.close();
+  });
+
+  it('v3 migration remaps legacy verbatim task_type → clean (source, effect), EXHAUSTIVELY', () => {
+    // The money-critical remap (RU1): every pre-v3 row (which held the legacy
+    // task_type VERBATIM in `source`, no `effect` column) must land on an explicit
+    // (source, effect) — never lean on the DEFAULT so a missed backup/reminder can't
+    // strand at the money-spending default. Build a v2 DB with legacy rows, then let
+    // EngineDb apply v3 and assert row-by-row (the unit twin of the staging walk).
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig3-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'engine.db');
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (2);
+      CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', target_workflow_id TEXT);
+    `);
+    const seed = raw.prepare('INSERT INTO triggers (id, source, condition_json, target_workflow_id) VALUES (?, ?, ?, ?)');
+    seed.run('r-backup', 'backup', '{}', null);
+    seed.run('r-reminder', 'reminder', '{}', null);
+    seed.run('r-pipe-cron', 'pipeline', JSON.stringify({ schedule_cron: '0 9 * * *' }), 'wf-a');
+    seed.run('r-pipe-watch', 'pipeline', JSON.stringify({ watch_config: '{"url":"x"}' }), 'wf-b');
+    seed.run('r-pipe-bare', 'pipeline', '{}', 'wf-c');
+    seed.run('r-watch', 'watch', JSON.stringify({ watch_config: '{"url":"y"}' }), null);
+    // The REAL legacy value written by createScheduled is 'scheduled' (NOT 'standard'
+    // — that was a phantom the first cut mis-seeded, letting a wrong constant pass CI):
+    seed.run('r-sched-cron', 'scheduled', JSON.stringify({ schedule_cron: '0 8 * * *' }), null);
+    seed.run('r-sched-bare', 'scheduled', '{}', null);
+    seed.run('r-manual', 'manual', '{}', null);
+    // A legacy row that bound a workflow WITHOUT source='pipeline' (a raw create) — the
+    // migration must still route it to run_workflow (the legacy `|| pipeline_id` guard),
+    // NOT run_agent (which would be an autonomous money run of the title):
+    seed.run('r-bound-manual', 'manual', '{}', 'wf-d');
+    seed.run('r-bound-sched', 'scheduled', JSON.stringify({ schedule_cron: '0 7 * * *' }), 'wf-e');
+    // A backup/reminder with a stray target must NOT be flipped to run_workflow by
+    // the guard (`AND source NOT IN ('backup','reminder')` on the target-bound UPDATE):
+    seed.run('r-backup-bound', 'backup', '{}', 'wf-f');
+    seed.run('r-reminder-bound', 'reminder', '{}', 'wf-g');
+    seed.run('r-weird', 'zzz-unexpected', '{}', null);   // an unknown value must fail safe
+    seed.run('r-corrupt', 'scheduled', 'not-json', null); // malformed condition_json → json_valid guard
+    raw.close();
+
+    const e = new EngineDb(dbPath, '');
+    const rows = e.getDb().prepare('SELECT id, source, effect FROM triggers').all() as Array<{ id: string; source: string; effect: string }>;
+    const byId = Object.fromEntries(rows.map(r => [r.id, { source: r.source, effect: r.effect }]));
+    // Money-boundary rows (deterministic — must NEVER become a run_* effect):
+    expect(byId['r-backup']).toEqual({ source: 'cron', effect: 'backup' });
+    expect(byId['r-reminder']).toEqual({ source: 'cron', effect: 'notify' });
+    expect(byId['r-backup-bound']).toEqual({ source: 'cron', effect: 'backup' }); // stray target ignored
+    expect(byId['r-reminder-bound']).toEqual({ source: 'cron', effect: 'notify' }); // stray target ignored
+    // Workflow rows (run_workflow) — source derived from the condition:
+    expect(byId['r-pipe-cron']).toEqual({ source: 'cron', effect: 'run_workflow' });
+    expect(byId['r-pipe-watch']).toEqual({ source: 'watch', effect: 'run_workflow' });
+    expect(byId['r-pipe-bare']).toEqual({ source: 'manual', effect: 'run_workflow' });
+    // Target-bound-but-not-pipeline rows → run_workflow (the `|| pipeline_id` guard):
+    expect(byId['r-bound-manual']).toEqual({ source: 'manual', effect: 'run_workflow' });
+    expect(byId['r-bound-sched']).toEqual({ source: 'cron', effect: 'run_workflow' });
+    // Agent rows (run_agent):
+    expect(byId['r-watch']).toEqual({ source: 'watch', effect: 'run_agent' });
+    expect(byId['r-sched-cron']).toEqual({ source: 'cron', effect: 'run_agent' });  // 'scheduled' → cron
+    expect(byId['r-sched-bare']).toEqual({ source: 'manual', effect: 'run_agent' });
+    expect(byId['r-manual']).toEqual({ source: 'manual', effect: 'run_agent' });
+    // Unknown source → manual (fires nothing until edited); effect run_agent.
+    expect(byId['r-weird']).toEqual({ source: 'manual', effect: 'run_agent' });
+    // Malformed condition_json is tolerated by the json_valid guard → manual.
+    expect(byId['r-corrupt']).toEqual({ source: 'manual', effect: 'run_agent' });
+    // NO row is left on a non-clean source or an empty effect.
+    for (const r of rows) {
+      expect(['cron', 'watch', 'webhook', 'inbox_event', 'manual']).toContain(r.source);
+      expect(['run_workflow', 'run_agent', 'backup', 'notify']).toContain(r.effect);
+    }
     e.close();
   });
 
@@ -144,7 +220,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(2); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(3); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -274,7 +350,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       expect(c, `table ${t} should be empty after wipe`).toBe(0);
     }
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(2);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(3);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -285,7 +361,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(2);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(3);
     e.close();
   });
 
@@ -300,7 +376,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(2);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(3);
     e.close();
   });
 });
