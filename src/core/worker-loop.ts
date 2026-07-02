@@ -266,7 +266,13 @@ export class WorkerLoop {
           // slash, AutomationHub-create) that may or may not link to
           // an inbox item.
           await this.executeReminder(task);
-        } else if (task.pipeline_id) {
+        } else if (task.task_type === 'pipeline' || task.pipeline_id) {
+          // Route on task_type, NOT pipeline_id presence: engine.db's
+          // triggers.target_workflow_id has an FK ON DELETE SET NULL, so a
+          // pipeline trigger whose workflow was deleted (or not exact-resolved)
+          // arrives with pipeline_id=undefined. Routing on presence alone would
+          // drop it to executeStandard (an autonomous LLM run of the title, every
+          // tick) — executePipeline handles the null target as a benign skip.
           await this.executePipeline(task);
         } else if (task.task_type === 'watch') {
           await this.executeWatch(task);
@@ -440,7 +446,16 @@ export class WorkerLoop {
   /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
   private async executePipeline(task: TriggerRecord): Promise<void> {
     const runHistory = this.engine.getRunHistory();
-    if (!runHistory || !task.pipeline_id) return;
+    if (!runHistory) return;
+    if (!task.pipeline_id) {
+      // The target workflow was deleted (engine.db FK ON DELETE SET NULL nulled
+      // target_workflow_id) or was never exact-resolved at insert. Routed here by
+      // task_type, so a null target lands here rather than at executeStandard.
+      // Same benign skip as a workflow deleted mid-flight (below): record it and
+      // stop — NEVER run the trigger title as an autonomous task.
+      this.recordAndNotify(task, 'Pipeline target workflow no longer exists (skipped)', false);
+      return;
+    }
 
     // Load the PlannedPipeline (if any) to enforce the autonomous-only gate.
     const { getPipeline } = await import('../tools/builtin/pipeline.js');

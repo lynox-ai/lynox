@@ -836,10 +836,12 @@ export class Engine {
       this.runHistory = null;
     }
 
-    // Foundation Rework v2 (S0): provision the consolidated subject-graph store
-    // (engine.db) EMPTY, alongside the legacy DBs. Open + migrate only — no store
-    // is re-pointed to it yet (S1). Additive + optional: a failure here must not
-    // break the engine, since nothing depends on it during S0/S1.
+    // Foundation Rework v2: open the consolidated engine.db store alongside the
+    // legacy DBs. A failure here must not break engine BOOT (chat/browse still
+    // run) — but post-S3f engine.db is the SOLE authority for the verb layer
+    // (trigger + workflow definitions), so on failure that automation surface is
+    // unavailable (verb reads degrade to empty, writes throw — see setVerbGraph
+    // wiring below). The subject-graph reads it also backs stay flag-gated.
     try {
       this.engineDb = new EngineDb();
     } catch (err) {
@@ -847,24 +849,23 @@ export class Engine {
       this.engineDb = null;
     }
 
-    // Foundation Rework v2 (S3a + S3e): wire the engine.db verb-layer mirror onto
+    // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
-    // Flag OFF (prod default) → inert; engine.db failed to open → inert (graceful
-    // degrade). When `verb_graph_enabled`, verb-def writes dual-write into engine.db;
-    // when `verb_graph_reads` (S3e), trigger + workflow reads flip to engine.db too.
+    // engine.db is now the SOLE authority for trigger + workflow definitions (the
+    // legacy history.db path was dropped in mig v44). If engine.db failed to open,
+    // the stores stay null: verb READS degrade to empty/undefined (a read
+    // under-fires the money-path, the safe direction) while verb WRITES throw a
+    // clear "engine.db unavailable" error rather than silently no-op'ing into
+    // false success. The automation surface is honestly unavailable, not a silent
+    // black hole. Tasks still mirror additively (legacy-authoritative until S4).
     if (this.runHistory && this.engineDb) {
       // Wrap the wiring like the EngineDb/RunHistory inits above: a throw while
-      // constructing the mirror store must not break engine boot — the whole
-      // point of S3a is additive isolation. On failure the mirror stays inert
-      // (setVerbGraph never reassigns _workflowStore, so it remains null).
+      // constructing the stores must not break engine boot. On failure the stores
+      // stay inert (setVerbGraph never reassigns _workflowStore, so it stays null).
       try {
-        this.runHistory.setVerbGraph(
-          this.engineDb,
-          this.userConfig.verb_graph_enabled === true,
-          this.userConfig.verb_graph_reads === true,
-        );
+        this.runHistory.setVerbGraph(this.engineDb);
       } catch (err) {
-        process.stderr.write(`[lynox] verb-graph mirror wiring failed: ${err instanceof Error ? err.message : String(err)} — mirror inert\n`);
+        process.stderr.write(`[lynox] verb-graph wiring failed: ${err instanceof Error ? err.message : String(err)} — verb stores inert\n`);
       }
     }
 

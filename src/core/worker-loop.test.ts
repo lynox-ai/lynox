@@ -634,6 +634,37 @@ describe('WorkerLoop', () => {
     );
   });
 
+  it('CORR-1: a pipeline trigger with a NULLED pipeline_id is routed to the safe skip, NOT an autonomous run', async () => {
+    vi.useRealTimers();
+    // engine.db's triggers.target_workflow_id has an FK ON DELETE SET NULL, so
+    // deleting a saved workflow leaves getDueTriggers handing the loop a
+    // task_type='pipeline' trigger with pipeline_id=undefined. Routing on pipeline_id
+    // presence alone would drop it to executeStandard = an autonomous LLM run of the
+    // title, spending on every cron tick. Routing on task_type sends it to
+    // executePipeline's benign skip.
+    const task = makeTask({ id: 'pt-nulled', task_type: 'pipeline', pipeline_id: undefined });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('MUST NOT RUN');
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      createSession: vi.fn(() => session),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({})), // truthy → executePipeline reaches the null-target skip
+    } as unknown as Engine;
+    const router = makeNotificationRouter(false);
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    await loop.tick();
+    await new Promise((r) => setTimeout(r, 20)); // let the fire-and-forget executeTask settle
+
+    // The money-critical invariant: NO autonomous session run for a de-targeted pipeline.
+    expect(session.run).not.toHaveBeenCalled();
+    expect((engine as unknown as { createSession: ReturnType<typeof vi.fn> }).createSession).not.toHaveBeenCalled();
+    // The benign skip is recorded (recordAndNotify maps success=false → 'failed'), not
+    // silently dropped and not run.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('pt-nulled', 'Pipeline target workflow no longer exists (skipped)', 'failed');
+  });
+
   it('executePipeline surfaces a non-template pipeline as a typed error', async () => {
     vi.useRealTimers();
     const task = makeTask({

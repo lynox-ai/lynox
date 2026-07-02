@@ -3933,9 +3933,9 @@ export class LynoxHTTPApi {
     }));
 
     // ── Saved Workflows library (PRD §6.8 / D13) ──
-    // A "saved workflow" = a planned pipeline (status='planned') whose
-    // deserialized manifest_json.template === true. There is no `template`
-    // column — the filter is app-layer, no migration.
+    // A "saved workflow" = an engine.db workflow definition whose deserialized
+    // manifest_json.template === true. The library filter is app-layer (on the
+    // deserialized blob), no migration.
     this.addStatic('user', 'GET /api/workflows/library', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;

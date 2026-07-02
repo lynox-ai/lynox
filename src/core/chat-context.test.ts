@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveChatContext, type ChatInboxReader } from './chat-context.js';
 import { RunHistory } from './run-history.js';
+import { EngineDb } from './engine-db.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -20,12 +21,17 @@ function makePlanned(overrides: Partial<PlannedPipeline> = {}): PlannedPipeline 
 describe('resolveChatContext (Slice C context-injection seam)', () => {
   let dir: string;
   let history: RunHistory;
+  let engine: EngineDb;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'chat-ctx-'));
     history = new RunHistory(join(dir, 'h.db'));
+    // S3f: workflow/trigger defs live in engine.db — wire it so the persistence works.
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
   });
   afterEach(() => {
+    try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
   });

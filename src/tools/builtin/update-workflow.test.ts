@@ -6,6 +6,7 @@ import { updateWorkflowTool } from './update-workflow.js';
 import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
+import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, LynoxUserConfig, PlannedPipeline, InlinePipelineStep } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
 
@@ -37,14 +38,18 @@ function makePlanned(overrides: Partial<PlannedPipeline> = {}): PlannedPipeline 
 describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   let dir: string;
   let history: RunHistory;
+  let engine: EngineDb;
 
   beforeEach(() => {
     _resetPipelineStore();
     dir = mkdtempSync(join(tmpdir(), 'wf-edit-'));
     history = new RunHistory(join(dir, 'h.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
   });
 
   afterEach(() => {
+    try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
   });

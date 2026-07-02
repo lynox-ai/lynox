@@ -166,15 +166,6 @@ export const LynoxUserConfigSchema = z.object({
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
   // would otherwise reject this key from config.json (silently disabling the flag).
   subject_graph_enabled:   z.boolean().optional(),
-  // Foundation Rework v2 (S3a): additively mirror verb-layer definitions into
-  // the engine.db `workflows` table. Default off; flipped on per-tenant, reads
-  // cut over after the S3d backfill. The .strict() schema would otherwise reject
-  // this key from config.json (silently disabling the flag).
-  verb_graph_enabled:      z.boolean().optional(),
-  // Foundation Rework v2 (S3e): cut trigger + workflow definition READS over to
-  // engine.db. Default off; flipped on per-tenant after the mirror is backfilled.
-  // The .strict() schema would otherwise reject this key from config.json.
-  verb_graph_reads:        z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
   transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),

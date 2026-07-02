@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { TaskRecord, TriggerRecord } from '../types/index.js';
+import type { TaskRecord } from '../types/index.js';
 import type { ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
 import { randomUUID } from 'node:crypto';
 
@@ -476,85 +476,12 @@ export function getPipelineStepResults(db: Database.Database, pipelineRunId: str
   }>;
 }
 
-// === Planned pipeline persistence ===
-
-export function insertPlannedPipeline(db: Database.Database, planned: { id: string; name: string; goal: string; steps: unknown[]; reasoning: string; estimatedCost: number; createdAt: string }): void {
-  db.prepare(`
-    INSERT OR REPLACE INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count)
-    VALUES (?, ?, 'planned', ?, ?)
-  `).run(planned.id, planned.name, JSON.stringify(planned), planned.steps.length);
-}
-
-export function getPlannedPipeline(db: Database.Database, id: string): { id: string; manifest_json: string } | undefined {
-  return db.prepare(
-    "SELECT id, manifest_json FROM pipeline_runs WHERE (id = ? OR id LIKE ?) AND status = 'planned' LIMIT 1"
-  ).get(id, `${id}%`) as { id: string; manifest_json: string } | undefined;
-}
-
-/**
- * List every planned pipeline row (`status='planned'`), newest first. The
- * "saved workflow" library filter — `manifest_json.template === true` — is an
- * app-layer concern (there is no `template` column, PRD §6.8 / D13), so this
- * query stays a plain status filter and the caller deserializes + filters.
- */
-export function getPlannedPipelines(db: Database.Database, limit = 100): Array<{
-  id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
-}> {
-  return db.prepare(
-    "SELECT id, manifest_name, manifest_json, step_count, started_at FROM pipeline_runs WHERE status = 'planned' ORDER BY started_at DESC LIMIT ?"
-  ).all(limit) as Array<{
-    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
-  }>;
-}
-
-/**
- * UNBOUNDED full-scan of every planned-pipeline (workflow) definition — the S3d
- * backfill source. Deliberately NO `LIMIT`: the clamped {@link getPlannedPipelines}
- * (default 100) would silently drop rows past the first page, undercounting the
- * backfill. Verb-def volume is human-bounded (dozens, not the KG's thousands), so
- * an unbounded scan is correct-by-construction, never a memory risk. Ordered by
- * `started_at` so the backfill upserts in the legacy library-read order. Mirrors
- * the S2 backfill's `listAllEntities` (unclamped) vs the clamped `listEntities`.
- */
-export function getAllPlannedPipelines(db: Database.Database): Array<{
-  id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
-}> {
-  return db.prepare(
-    "SELECT id, manifest_name, manifest_json, step_count, started_at FROM pipeline_runs WHERE status = 'planned' ORDER BY started_at DESC"
-  ).all() as Array<{
-    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
-  }>;
-}
-
-/**
- * Rename a planned pipeline's display name. The name lives in TWO places — the
- * `manifest_name` column AND the serialized `PlannedPipeline.name` inside
- * `manifest_json` (which the library list and `getPipeline`'s SQLite fallback
- * both prefer). Both are patched together so a rename actually propagates.
- */
-export function renamePlannedPipeline(db: Database.Database, id: string, name: string): boolean {
-  const res = db.prepare(
-    "UPDATE pipeline_runs SET manifest_name = ?, manifest_json = json_set(manifest_json, '$.name', ?) WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
-  ).run(name, name, id, `${id}%`);
-  return res.changes > 0;
-}
-
-/** Delete a planned pipeline row. Only `status='planned'` rows are removable. */
-export function deletePlannedPipeline(db: Database.Database, id: string): boolean {
-  const res = db.prepare(
-    "DELETE FROM pipeline_runs WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
-  ).run(id, `${id}%`);
-  return res.changes > 0;
-}
-
-export function markPipelineExecuted(db: Database.Database, id: string): void {
-  db.prepare("UPDATE pipeline_runs SET status = 'executed', completed_at = datetime('now') WHERE id = ?").run(id);
-}
-
 // ============================================================
-// Tasks (USER-TODOs — `tasks` table) + Triggers (AGENT-TRIGGERs — `triggers`
-// table). Split in migration v42: Tasks track user work (perceive/track side,
-// never fired by the WorkerLoop); Triggers fire workflows (act side).
+// Tasks (USER-TODOs — `tasks` table). Workflow DEFINITIONS + agent TRIGGERS moved
+// to the engine.db verb-graph (WorkflowStore/TriggerStore) in the S3f write-cutover;
+// their legacy `pipeline_runs status='planned'/'executed'` rows + `triggers` table
+// are dropped in mig v44, so only the task persistence remains here. Tasks stay
+// legacy-authoritative + mirrored until the S4 subject resolution.
 // ============================================================
 
 export function insertTask(db: Database.Database, params: {
@@ -580,57 +507,6 @@ export function insertTask(db: Database.Database, params: {
     params.scopeType ?? 'project', params.scopeId ?? '',
     params.dueDate ?? null, params.tags ?? null, params.parentTaskId ?? null,
   );
-}
-
-/** Insert an AGENT-TRIGGER row (cron/watch/pipeline/reminder/backup). Mirrors
- *  the old `insertTask` trigger half. `assignee` defaults to 'lynox' (all
- *  triggers are fired by lynox), `taskType` to 'manual'. */
-export function insertTrigger(db: Database.Database, params: {
-  id: string;
-  title: string;
-  description?: string | undefined;
-  status?: string | undefined;
-  assignee?: string | undefined;
-  scopeType?: string | undefined;
-  scopeId?: string | undefined;
-  scheduleCron?: string | undefined;
-  nextRunAt?: string | undefined;
-  taskType?: string | undefined;
-  watchConfig?: string | undefined;
-  maxRetries?: number | undefined;
-  notificationChannel?: string | undefined;
-  pipelineId?: string | undefined;
-  pipelineParams?: string | undefined;
-}): void {
-  db.prepare(`
-    INSERT INTO triggers (id, title, description, status, assignee, scope_type, scope_id, schedule_cron, next_run_at, task_type, watch_config, max_retries, notification_channel, pipeline_id, pipeline_params)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    params.id, params.title, params.description ?? '',
-    params.status ?? 'open', params.assignee ?? 'lynox',
-    params.scopeType ?? 'project', params.scopeId ?? '',
-    params.scheduleCron ?? null, params.nextRunAt ?? null,
-    params.taskType ?? 'manual', params.watchConfig ?? null,
-    params.maxRetries ?? 0, params.notificationChannel ?? null,
-    params.pipelineId ?? null, params.pipelineParams ?? null,
-  );
-}
-
-/** Slice B2: stamp `confirmedAt` onto a saved workflow's manifest blob (the
- *  human's first-run-confirm at promote-to-cron). Mirrors renamePlannedPipeline. */
-export function setWorkflowConfirmedAt(db: Database.Database, id: string, confirmedAt: string): boolean {
-  const res = db.prepare(
-    "UPDATE pipeline_runs SET manifest_json = json_set(manifest_json, '$.confirmedAt', ?) WHERE (id = ? OR id LIKE ?) AND status = 'planned'"
-  ).run(confirmedAt, id, `${id}%`);
-  return res.changes > 0;
-}
-
-/** Slice B2: flip a scheduled trigger's cron kill-switch. */
-export function setTriggerEnabled(db: Database.Database, id: string, enabled: boolean): boolean {
-  const res = db.prepare(
-    "UPDATE triggers SET enabled = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(enabled ? 1 : 0, id);
-  return res.changes > 0;
 }
 
 export function updateTask(db: Database.Database, id: string, params: {
@@ -672,45 +548,6 @@ export function updateTask(db: Database.Database, id: string, params: {
   return db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
 }
 
-/** Update an AGENT-TRIGGER row. `nextRunAt`/`scheduleCron`: `undefined` leaves
- *  the column unchanged; empty-string/null clears it (mirrors the old
- *  `updateTask` schedule half — lets the agent un-schedule a trigger without
- *  deleting it). */
-export function updateTrigger(db: Database.Database, id: string, params: {
-  title?: string | undefined;
-  description?: string | undefined;
-  status?: string | undefined;
-  assignee?: string | undefined;
-  nextRunAt?: string | null | undefined;
-  scheduleCron?: string | null | undefined;
-}, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
-  const sets: string[] = [];
-  const values: unknown[] = [];
-  if (params.title !== undefined) { sets.push('title = ?'); values.push(params.title); }
-  if (params.description !== undefined) { sets.push('description = ?'); values.push(params.description); }
-  if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
-  if (params.assignee !== undefined) { sets.push('assignee = ?'); values.push(params.assignee || null); }
-  // Empty string / null clears the column. Lets the agent un-schedule a
-  // one-shot trigger without deleting it (e.g. cancel a reminder).
-  if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
-  if (params.scheduleCron !== undefined) { sets.push('schedule_cron = ?'); values.push(params.scheduleCron || null); }
-  if (sets.length === 0) return false;
-  sets.push("updated_at = datetime('now')");
-
-  // Optional scope guard — same atomic check-and-write as updateTask: fold the
-  // (scope_type, scope_id) check INTO the UPDATE's WHERE so the row is never
-  // written if its scope falls outside the caller's active set, even under a
-  // hostile re-scope race between resolve and write (no TOCTOU window).
-  const where: string[] = ['id = ?'];
-  values.push(id);
-  if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
-    const ors = opts.scopeFilter.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
-    where.push(`(${ors})`);
-    for (const s of opts.scopeFilter) { values.push(s.type, s.id); }
-  }
-  return db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
-}
-
 export function getTask(db: Database.Database, id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
   const where: string[] = ['(id = ? OR id LIKE ?)'];
   const params: unknown[] = [id, `${id}%`];
@@ -722,21 +559,6 @@ export function getTask(db: Database.Database, id: string, opts?: { scopeFilter?
   return db.prepare(
     `SELECT * FROM tasks WHERE ${where.join(' AND ')}`
   ).get(...params) as TaskRecord | undefined;
-}
-
-/** Look up an AGENT-TRIGGER by id (or id-prefix). Mirrors `getTask` incl. the
- *  optional scope guard. */
-export function getTrigger(db: Database.Database, id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TriggerRecord | undefined {
-  const where: string[] = ['(id = ? OR id LIKE ?)'];
-  const params: unknown[] = [id, `${id}%`];
-  if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
-    const ors = opts.scopeFilter.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
-    where.push(`(${ors})`);
-    for (const s of opts.scopeFilter) { params.push(s.type, s.id); }
-  }
-  return db.prepare(
-    `SELECT * FROM triggers WHERE ${where.join(' AND ')}`
-  ).get(...params) as TriggerRecord | undefined;
 }
 
 export function deleteTask(db: Database.Database, id: string): boolean {
@@ -753,12 +575,6 @@ export function deleteTask(db: Database.Database, id: string): boolean {
 export function getTaskChildIds(db: Database.Database, id: string): string[] {
   return (db.prepare('SELECT id FROM tasks WHERE parent_task_id = ?').all(id) as Array<{ id: string }>)
     .map(r => r.id);
-}
-
-/** Delete an AGENT-TRIGGER. Triggers have no parent_task_id, so no subtask
- *  cascade. */
-export function deleteTrigger(db: Database.Database, id: string): boolean {
-  return db.prepare('DELETE FROM triggers WHERE id = ?').run(id).changes > 0;
 }
 
 export function getTasks(db: Database.Database, opts?: {
@@ -790,45 +606,15 @@ export function getTasks(db: Database.Database, opts?: {
   ).all(...params) as TaskRecord[];
 }
 
-/** List AGENT-TRIGGERs. Ordered by next_run_at ASC (NULLS LAST), then
- *  created_at DESC. */
-export function getTriggers(db: Database.Database, opts?: {
-  scopeType?: string | undefined;
-  scopeId?: string | undefined;
-  status?: string | undefined;
-  taskType?: string | undefined;
-  limit?: number | undefined;
-}): TriggerRecord[] {
-  const where: string[] = [];
-  const params: unknown[] = [];
-  if (opts?.scopeType) { where.push('scope_type = ?'); params.push(opts.scopeType); }
-  if (opts?.scopeId) { where.push('scope_id = ?'); params.push(opts.scopeId); }
-  if (opts?.status) { where.push('status = ?'); params.push(opts.status); }
-  if (opts?.taskType) { where.push('task_type = ?'); params.push(opts.taskType); }
-  const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-  const limit = opts?.limit ?? 100;
-  params.push(limit);
-  return db.prepare(
-    `SELECT * FROM triggers ${whereClause} ORDER BY next_run_at ASC NULLS LAST, created_at DESC LIMIT ?`
-  ).all(...params) as TriggerRecord[];
-}
-
 /**
  * UNBOUNDED full-scan of every USER-TODO (`tasks`) row — the S3d backfill source.
  * NO `LIMIT` (the clamped {@link getTasks} default-100 would undercount). Ordered
  * `created_at ASC` so a PARENT task is upserted before its children whenever the
  * parent was created first (the common case) — the backfill's pass-2 re-link then
- * only has to fix genuinely out-of-order parent/child pairs. See {@link getAllPlannedPipelines}.
+ * only has to fix genuinely out-of-order parent/child pairs.
  */
 export function getAllTasks(db: Database.Database): TaskRecord[] {
   return db.prepare('SELECT * FROM tasks ORDER BY created_at ASC').all() as TaskRecord[];
-}
-
-/** UNBOUNDED full-scan of every AGENT-TRIGGER (`triggers`) row — the S3d backfill
- *  source. NO `LIMIT` (see {@link getAllTasks}). Ordered `created_at ASC` for a
- *  stable, deterministic backfill order. */
-export function getAllTriggers(db: Database.Database): TriggerRecord[] {
-  return db.prepare('SELECT * FROM triggers ORDER BY created_at ASC').all() as TriggerRecord[];
 }
 
 export function getTasksDueInRange(db: Database.Database, start: string, end: string, scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
@@ -856,99 +642,6 @@ export function getOverdueTasks(db: Database.Database, scopes?: Array<{ type: st
   return db.prepare(
     `SELECT * FROM tasks WHERE due_date < ? AND status != 'completed' ORDER BY due_date ASC`
   ).all(now) as TaskRecord[];
-}
-
-/** Get triggers that are due for execution (next_run_at <= now, not in a
- * terminal status). Terminal = 'completed', or 'failed' for ONE-SHOT
- * triggers only. Cron triggers (`schedule_cron IS NOT NULL`) are kept in the
- * queue even when status='failed' so a single transient failure doesn't
- * permanently disable a recurring schedule — `recordTaskRun` derives the
- * cron trigger's status from the latest run (failed/open) and the cron
- * schedule itself determines re-fires. See task-manager.ts `recordTaskRun`
- * cron branch.
- *
- * We also clear next_run_at when a ONE-SHOT trigger reaches a terminal
- * state, so each guard is redundant with the other for one-shots — but
- * keeping both prevents a failed trigger with a stale `next_run_at` (e.g.
- * a row that pre-dates the v31 fix) from re-firing after migration.
- */
-export function getDueTriggers(db: Database.Database): TriggerRecord[] {
-  const now = new Date().toISOString();
-  // Slice B2 — kill-switch: a disabled trigger (enabled=0) is simply NOT due, so
-  // it is never processed and never has its status / next_run_at mutated. This
-  // pauses it reversibly (re-enabling makes it due again with its schedule
-  // intact) — unlike skipping it AFTER selection, which would route a one-shot
-  // trigger through recordTaskRun and permanently complete it. The column is
-  // NOT NULL DEFAULT 1, so legacy/absent rows count as enabled.
-  return db.prepare(
-    `SELECT * FROM triggers
-     WHERE next_run_at IS NOT NULL
-       AND next_run_at <= ?
-       AND enabled != 0
-       AND status != 'completed'
-       AND (status != 'failed' OR schedule_cron IS NOT NULL)
-     ORDER BY next_run_at ASC`
-  ).all(now) as TriggerRecord[];
-}
-
-/**
- * Triggers that ACTIVELY reference a saved workflow — the destructive-edit guard
- * (Slice C, §4.6 U5). "Active" = enabled (not paused via the kill-switch) and
- * not a completed one-shot. A non-empty result means editing the workflow's
- * steps changes what an already-scheduled / still-pending run will do, so the
- * edit tool requires explicit confirmation. Disabled (`enabled=0`) and
- * `completed` rows are excluded — they cannot fire, so they don't make the
- * workflow "scheduled" for the purpose of the warning.
- */
-export function getTriggersByPipelineId(db: Database.Database, pipelineId: string): TriggerRecord[] {
-  return db.prepare(
-    `SELECT * FROM triggers WHERE pipeline_id = ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`
-  ).all(pipelineId) as TriggerRecord[];
-}
-
-/** Update a trigger after a run execution. */
-export function updateTriggerRunResult(
-  db: Database.Database,
-  id: string,
-  update: {
-    lastRunAt: string;
-    lastRunResult: string;
-    lastRunStatus: string;
-    // `undefined` leaves next_run_at unchanged; `null` clears it
-    // (used when a one-shot trigger reaches a terminal state — without
-    // this, getDueTriggers would keep re-selecting the failed trigger).
-    nextRunAt?: string | null | undefined;
-    retryCount?: number | undefined;
-  },
-): void {
-  const sets: string[] = [
-    'last_run_at = ?',
-    'last_run_result = ?',
-    'last_run_status = ?',
-  ];
-  const values: unknown[] = [
-    update.lastRunAt,
-    update.lastRunResult,
-    update.lastRunStatus,
-  ];
-  if (update.nextRunAt !== undefined) {
-    sets.push('next_run_at = ?');
-    values.push(update.nextRunAt);
-  }
-  if (update.retryCount !== undefined) {
-    sets.push('retry_count = ?');
-    values.push(update.retryCount);
-  }
-  sets.push("updated_at = datetime('now')");
-  values.push(id);
-  db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-}
-
-/** Update the watch_config JSON for a watch trigger (e.g. to store last_hash). */
-export function updateTriggerWatchConfig(db: Database.Database, id: string, watchConfig: string): void {
-  db.prepare(
-    "UPDATE triggers SET watch_config = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(watchConfig, id);
 }
 
 // ============================================================

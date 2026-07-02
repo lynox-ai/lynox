@@ -401,31 +401,6 @@ export interface LynoxUserConfig {
    * KG-disabled tenant, or one with no embedding provider, this flag is inert.
    */
   subject_graph_enabled?: boolean | undefined;
-  /**
-   * Foundation Rework v2 (S3a): additively mirror the verb-layer DEFINITIONS
-   * (saved workflows / planned pipelines — S3b/S3c extend to triggers + tasks)
-   * from the legacy history.db `pipeline_runs` representation into the
-   * first-class engine.db `workflows` table (real `is_template` column, FK-able
-   * id), alongside the legacy write. Default: false — prod stays legacy-only.
-   * The legacy history.db store remains the read authority through S3a-c; reads
-   * cut over to engine.db only after the S3d backfill. Separate from
-   * `subject_graph_enabled` (the noun mirror) on purpose: the verb read-cutover
-   * must be gated by its own backfill, not piggyback the already-ON noun flag.
-   */
-  verb_graph_enabled?: boolean | undefined;
-  /**
-   * Foundation Rework v2 (S3e): cut the verb-layer DEFINITION READS (triggers +
-   * workflows) over to the engine.db verb-graph. Default: false — reads stay on
-   * legacy history.db until this flips. SEPARATE from `verb_graph_enabled` (the
-   * write-mirror) on purpose: engine.db must first be a live, backfilled mirror
-   * (mirror ON + S3d backfill run) before reads flip, so a prod tenant can soak
-   * the equivalence before the money-path read-cutover. Inert unless the mirror
-   * is also on — the stores exist only when `verb_graph_enabled` built them, so
-   * reads-ON-mirror-OFF safely falls back to legacy. Tasks are NOT included (their
-   * free-text assignee has no engine.db home until the S4 subject resolution);
-   * only triggers + workflows read from engine.db under this flag.
-   */
-  verb_graph_reads?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

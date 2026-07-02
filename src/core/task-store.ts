@@ -10,12 +10,14 @@ import type { TaskRecord } from '../types/pipeline.js';
  * (`parent_task_id` → tasks(id); `subject_id`/`assignee_subject_id` → subjects(id);
  * `due_trigger_id` → triggers(id)).
  *
- * S3c wires it as the target of an ADDITIVE mirror behind the `RunHistory` facade:
- * every insert/update/delete of a legacy task dual-writes here when
- * `verb_graph_enabled` is ON, while the legacy history.db `tasks` row stays
- * AUTHORITATIVE (the read path stays on legacy in S3c). Reads cut over to this
- * store only after the backfill (S3d). Unlike triggers, tasks fire nothing, so
- * there is no money-path — the mirror is pure bookkeeping.
+ * TaskStore is still an ADDITIVE mirror behind the `RunHistory` facade: every
+ * insert/update/delete of a legacy task dual-writes here (via `_reprojectTask`
+ * inside the swallowing `_verbMirror`), while the legacy history.db `tasks` row
+ * stays AUTHORITATIVE and task reads stay on legacy — UNTIL the S4 subject
+ * resolution cuts tasks over the way S3f cut triggers + workflows. (Triggers +
+ * workflows are already engine.db-direct; tasks lag because the legacy free-text
+ * `assignee` has no engine.db home until subjects exist.) Unlike triggers, tasks
+ * fire nothing, so there is no money-path — the mirror is pure bookkeeping.
  *
  * The engine.db `tasks` table is a REDESIGN of the legacy table, so
  * {@link taskRecordToRow} maps the legacy columns onto the engine.db shape. Most

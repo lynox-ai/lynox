@@ -3,7 +3,7 @@ import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord } from '../types/pipeline.js';
 
 /**
- * TriggerStore — the S3b write/read layer over the engine.db `triggers` table
+ * TriggerStore — the write/read layer over the engine.db `triggers` table
  * (Foundation Rework v2, verb layer). It relocates the legacy history.db
  * `triggers` row (mig v42, run-history.ts) — the agent-fired
  * cron/watch/pipeline/reminder/backup row — onto the purpose-built engine.db
@@ -11,23 +11,22 @@ import type { TriggerRecord } from '../types/pipeline.js';
  * shape and FK-able links (`target_workflow_id` → workflows(id);
  * `tasks.due_trigger_id` → triggers(id)).
  *
- * S3b wires it as the target of an ADDITIVE mirror behind the `RunHistory`
- * facade: every insert/update/setEnabled/runResult/watchConfig/delete of a
- * legacy trigger dual-writes here when `verb_graph_enabled` is ON, while the
- * legacy history.db `triggers` row stays AUTHORITATIVE (the read path AND the
- * WorkerLoop stay on legacy in S3b — the money-path is untouched). Reads cut
- * over to this store only after the backfill (S3d).
+ * S3f write-cutover makes this the SOLE authority for triggers: every
+ * insert/update/setEnabled/runResult/watchConfig/delete writes here directly
+ * (legacy history.db `triggers` is dropped in mig v44), and every read — incl.
+ * the WorkerLoop money-path {@link getDue} — comes from here. There is no legacy
+ * fallback left (it no longer exists). The S3a-e history: this began as an
+ * additive dual-write mirror (gated on a now-removed flag) with legacy
+ * authoritative; S3d backfilled pre-flag rows; S3e cut reads over; S3f cut writes
+ * over and dropped legacy.
  *
- * Unlike the S3a WorkflowStore (which relocated `manifest_json` VERBATIM), the
- * engine.db `triggers` table is a REDESIGN, not a 1:1 of the legacy table — so
- * {@link triggerRecordToRow} re-maps the legacy columns onto the engine.db shape
+ * The engine.db `triggers` table is a REDESIGN, not a 1:1 of the legacy table —
+ * so the write methods map the legacy field names onto the engine.db shape
  * (source ← task_type, condition_json ← {schedule_cron, watch_config},
- * target_workflow_id ← pipeline_id, params_json ← pipeline_params). The mirror
- * re-projects the FULL current legacy row on each write (RunHistory reads it back
- * post-write and upserts here) rather than patching in place — a partial
- * condition_json update (a cron-only change must preserve watch_config) would
- * otherwise need a read-modify-write anyway, so a full re-project is both simpler
- * and strictly more faithful.
+ * target_workflow_id ← pipeline_id, params_json ← pipeline_params).
+ * {@link triggerRecordToRow} is the pure record→row form the S3d backfill still
+ * uses (legacy TriggerRecord → row); the live write methods build the row (via
+ * {@link insert}/{@link upsert}) or patch columns directly from their params.
  *
  * `condition_json` / `params_json` / `description` are stored PLAINTEXT — a
  * faithful relocation of the legacy plaintext columns. At-rest encryption of verb
@@ -314,12 +313,20 @@ export class TriggerStore {
     );
   }
 
-  /** Keep `target_workflow_id` only if the referenced workflow row exists
-   *  (engine.db enforces the FK), else NULL — so a pre-flag orphan never throws. */
+  /** Resolve `target_workflow_id` to a concrete `workflows.id` if the referenced
+   *  workflow row exists (engine.db enforces the FK), else NULL — so a pre-flag
+   *  orphan never throws. Prefix-tolerant + exact-preferring, mirroring
+   *  {@link WorkflowStore}'s `id = ? OR id LIKE ?` read/delete semantics: a caller
+   *  may pass a short/prefix workflow id, and an exact-match resolve would null it
+   *  even though the workflow exists — which then misroutes the trigger to an
+   *  autonomous run and blinds the destructive-edit guard ({@link getByWorkflowId}).
+   *  Stores the ACTUAL matched id so the FK holds. */
   private _resolveTargetWorkflowId(candidate: string | null): string | null {
     if (candidate === null || candidate === '') return null;
-    const hit = this.db.prepare('SELECT 1 FROM workflows WHERE id = ? LIMIT 1').get(candidate);
-    return hit ? candidate : null;
+    const hit = this.db.prepare(
+      "SELECT id FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY (id = ?) DESC LIMIT 1",
+    ).get(candidate, likePrefix(candidate), candidate) as { id: string } | undefined;
+    return hit ? hit.id : null;
   }
 
   /** Exact-id delete (mirrors legacy `deleteTrigger`, which is exact-id). */
@@ -328,7 +335,138 @@ export class TriggerStore {
     return this.db.prepare('DELETE FROM triggers WHERE id = ?').run(id).changes > 0;
   }
 
-  /** Read a single trigger by exact id (test-only in S3b — reads stay on legacy). */
+  /**
+   * S3f write-cutover: INSERT a fresh trigger DIRECTLY into engine.db (legacy
+   * history.db `triggers` is dropped in mig v44). Accepts the legacy-shaped params
+   * of the old `run-history-persistence.insertTrigger` and maps them onto the
+   * engine.db shape via {@link upsert} (a fresh id never conflicts, so the upsert
+   * is a plain insert). Legacy defaults are reproduced explicitly: status 'open',
+   * `task_type`→`source` 'manual', scope 'project'/'', max_retries 0, retry_count
+   * 0, enabled 1, params_json '{}'. `assignee` is NOT stored (every trigger is
+   * agent-owned — const 'lynox', which the read synthesizes).
+   */
+  insert(params: {
+    id: string;
+    title: string;
+    description?: string | undefined;
+    status?: string | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    scheduleCron?: string | undefined;
+    nextRunAt?: string | undefined;
+    taskType?: string | undefined;
+    watchConfig?: string | undefined;
+    maxRetries?: number | undefined;
+    notificationChannel?: string | undefined;
+    pipelineId?: string | undefined;
+    pipelineParams?: string | undefined;
+  }): void {
+    this.upsert({
+      id: params.id,
+      title: params.title,
+      description: params.description ?? '',
+      source: params.taskType ?? 'manual',
+      conditionJson: JSON.stringify({
+        schedule_cron: params.scheduleCron ?? null,
+        watch_config: params.watchConfig ?? null,
+      }),
+      targetWorkflowId: params.pipelineId ?? null,
+      paramsJson: params.pipelineParams ?? '{}',
+      scopeType: params.scopeType ?? 'project',
+      scopeId: params.scopeId ?? '',
+      status: params.status ?? 'open',
+      enabled: true,
+      nextRunAt: params.nextRunAt ?? null,
+      lastRunAt: null,
+      lastRunResult: null,
+      lastRunStatus: null,
+      notificationChannel: params.notificationChannel ?? null,
+      maxRetries: params.maxRetries ?? 0,
+      retryCount: 0,
+    });
+  }
+
+  /** S3f write-cutover: flip the cron kill-switch DIRECTLY on engine.db, mirroring
+   *  the legacy `setTriggerEnabled` (exact-id). Returns false if no row matched. */
+  setEnabled(id: string, enabled: boolean): boolean {
+    return this.db.prepare(
+      "UPDATE triggers SET enabled = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(enabled ? 1 : 0, id).changes > 0;
+  }
+
+  /**
+   * S3f write-cutover: partial field update DIRECTLY on engine.db, mirroring the
+   * legacy `updateTrigger`. `title`/`description`/`status` map to columns;
+   * `nextRunAt` → `next_run_at` (empty-string/null clears); `scheduleCron` →
+   * `condition_json.$.schedule_cron` via `json_set` (empty-string/null clears to
+   * JSON null, round-tripping to `undefined` on read). `assignee` has NO engine.db
+   * column (const 'lynox') so it is not stored, but a lone assignee update still
+   * counts as a touch so the `changes>0` return matches legacy. The optional
+   * scope-guard is folded INTO the WHERE (atomic check-and-write, no TOCTOU window,
+   * exactly as legacy). Returns false if nothing to set or no row matched.
+   */
+  updateFields(id: string, params: {
+    title?: string | undefined;
+    description?: string | undefined;
+    status?: string | undefined;
+    assignee?: string | undefined;
+    nextRunAt?: string | null | undefined;
+    scheduleCron?: string | null | undefined;
+  }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    if (params.title !== undefined) { sets.push('title = ?'); values.push(params.title); }
+    if (params.description !== undefined) { sets.push('description = ?'); values.push(params.description); }
+    if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
+    if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
+    if (params.scheduleCron !== undefined) {
+      sets.push("condition_json = json_set(condition_json, '$.schedule_cron', ?)");
+      values.push(params.scheduleCron || null);
+    }
+    // `assignee` has no engine.db column (const 'lynox' for every trigger) — a
+    // legacy assignee update was a no-op-in-effect. Count it as a touch so the
+    // changes>0 return still matches legacy when it is the only field.
+    if (sets.length === 0 && params.assignee === undefined) return false;
+    sets.push("updated_at = datetime('now')");
+    const where: string[] = ['id = ?'];
+    values.push(id);
+    const scopes = opts?.scopeFilter;
+    if (scopes && scopes.length > 0) {
+      where.push(`(${scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ')})`);
+      for (const s of scopes) { values.push(s.type, s.id); }
+    }
+    return this.db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
+  }
+
+  /** S3f write-cutover: record a run result DIRECTLY on engine.db, mirroring the
+   *  legacy `updateTriggerRunResult`. `nextRunAt` undefined leaves it unchanged;
+   *  null clears it (a one-shot reaching a terminal state). Exact-id. */
+  updateRunResult(id: string, update: {
+    lastRunAt: string;
+    lastRunResult: string;
+    lastRunStatus: string;
+    nextRunAt?: string | null | undefined;
+    retryCount?: number | undefined;
+  }): void {
+    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?'];
+    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus];
+    if (update.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(update.nextRunAt); }
+    if (update.retryCount !== undefined) { sets.push('retry_count = ?'); values.push(update.retryCount); }
+    sets.push("updated_at = datetime('now')");
+    values.push(id);
+    this.db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  /** S3f write-cutover: update a watch trigger's config DIRECTLY on engine.db
+   *  (stored as `condition_json.$.watch_config`), mirroring the legacy
+   *  `updateTriggerWatchConfig`. Exact-id. */
+  updateWatchConfig(id: string, watchConfig: string): void {
+    this.db.prepare(
+      "UPDATE triggers SET condition_json = json_set(condition_json, '$.watch_config', ?), updated_at = datetime('now') WHERE id = ?",
+    ).run(watchConfig, id);
+  }
+
+  /** Read a single trigger by exact id (test-only helper). */
   get(id: string): StoredTrigger | undefined {
     const row = this.db.prepare(
       `SELECT id, title, description, source, condition_json, target_workflow_id,
