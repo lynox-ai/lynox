@@ -1,7 +1,40 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
-import type { TaskRecord, TriggerRecord, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
+
+/**
+ * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
+ * {@link TriggerEffect} (what it DOES) from the create-path intent. This is the
+ * WRITE-side twin of the engine.db v3 migration remap — the two MUST agree so a
+ * trigger created post-slice matches the same trigger migrated from a legacy
+ * `task_type` row. Keep them in lockstep if either changes.
+ *
+ * - effect: `backup`→backup, `reminder`→notify, a bound workflow→run_workflow,
+ *   everything else→run_agent (a bare autonomous turn).
+ * - source: backup/reminder are cron-scheduled built-ins → cron; else a cron
+ *   schedule → cron, a watch config → watch, otherwise manual (an immediately-fired
+ *   or directly-invoked trigger). Precedence (schedule_cron before watch_config)
+ *   MATCHES the migration's condition-derived CASE so the two never disagree.
+ */
+export function deriveSourceEffect(intent: {
+  taskType?: string | undefined;
+  scheduleCron?: string | undefined;
+  watchConfig?: string | undefined;
+  pipelineId?: string | undefined;
+}): { source: TriggerSource; effect: TriggerEffect } {
+  const effect: TriggerEffect =
+    intent.taskType === 'backup' ? 'backup'
+    : intent.taskType === 'reminder' ? 'notify'
+    : intent.pipelineId ? 'run_workflow'
+    : 'run_agent';
+  const source: TriggerSource =
+    (intent.taskType === 'backup' || intent.taskType === 'reminder') ? 'cron'
+    : intent.scheduleCron ? 'cron'
+    : intent.watchConfig ? 'watch'
+    : 'manual';
+  return { source, effect };
+}
 
 /**
  * Optional injection point: returns the PipelineMode for a saved pipeline ID,
@@ -141,6 +174,15 @@ export class TaskManager {
         }
       }
 
+      // Derive the clean source/effect axes from the create-path intent (mirrors
+      // the engine.db v3 migration remap — see {@link deriveSourceEffect}).
+      const { source, effect } = deriveSourceEffect({
+        taskType: resolvedTaskType,
+        scheduleCron: params.scheduleCron,
+        watchConfig: params.watchConfig,
+        pipelineId: params.pipelineId,
+      });
+
       this.history.insertTrigger({
         id,
         title: params.title,
@@ -150,7 +192,8 @@ export class TaskManager {
         scopeId: params.scopeId ?? '',
         scheduleCron: params.scheduleCron,
         nextRunAt: resolvedNextRunAt,
-        taskType: resolvedTaskType,
+        source,
+        effect,
         watchConfig: params.watchConfig,
         maxRetries: params.maxRetries,
         notificationChannel: params.notificationChannel,
@@ -474,7 +517,7 @@ export class TaskManager {
   // Scheduling CRUD
   // ---------------------------------------------------------------------------
 
-  /** Create a scheduled recurring AGENT-TRIGGER. Sets task_type='scheduled', assignee='lynox', computes next_run_at. */
+  /** Create a scheduled recurring AGENT-TRIGGER → source='cron', effect='run_agent', assignee='lynox', computes next_run_at. */
   createScheduled(params: TaskCreateParams & {
     scheduleCron: string;
     maxRetries?: number | undefined;
@@ -498,7 +541,7 @@ export class TaskManager {
     }) as TriggerRecord;
   }
 
-  /** Create a pipeline AGENT-TRIGGER. Sets task_type='pipeline', assignee='lynox'. Optionally recurring via scheduleCron. */
+  /** Create a workflow AGENT-TRIGGER → effect='run_workflow' (source cron if scheduled, else manual), assignee='lynox'. Optionally recurring via scheduleCron. */
   createPipelineTask(params: TaskCreateParams & {
     pipelineId: string;
     scheduleCron?: string | undefined;
@@ -536,7 +579,7 @@ export class TaskManager {
     return this.history.setTriggerEnabled(id, enabled);
   }
 
-  /** Create a watch/monitor AGENT-TRIGGER. Sets task_type='watch', assignee='lynox', computes next_run_at from interval. */
+  /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;
     watchIntervalMinutes?: number | undefined;

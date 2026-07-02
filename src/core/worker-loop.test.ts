@@ -40,7 +40,7 @@ import { WorkerLoop, extractWatchSignal } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
-import type { TriggerRecord, PlannedPipeline } from '../types/index.js';
+import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
@@ -78,7 +78,8 @@ function makeTask(overrides?: Partial<TriggerRecord>): TriggerRecord {
     updated_at: '2026-01-01T00:00:00.000Z',
     schedule_cron: '0 9 * * *',
     next_run_at: '2026-01-01T09:00:00.000Z',
-    task_type: 'scheduled',
+    source: 'cron',
+    effect: 'run_agent',
     ...overrides,
   };
 }
@@ -595,7 +596,7 @@ describe('WorkerLoop', () => {
     const task = makeTask({
       id: 'pipe-task-missing',
       pipeline_id: 'pipeline-missing',
-      task_type: 'pipeline',
+      effect: 'run_workflow',
     });
     const tm = makeTaskManager();
     const engine = {
@@ -642,7 +643,7 @@ describe('WorkerLoop', () => {
     // presence alone would drop it to executeStandard = an autonomous LLM run of the
     // title, spending on every cron tick. Routing on task_type sends it to
     // executePipeline's benign skip.
-    const task = makeTask({ id: 'pt-nulled', task_type: 'pipeline', pipeline_id: undefined });
+    const task = makeTask({ id: 'pt-nulled', effect: 'run_workflow', pipeline_id: undefined });
     const tm = makeTaskManager([task]);
     const session = makeSession('MUST NOT RUN');
     const engine = {
@@ -670,7 +671,7 @@ describe('WorkerLoop', () => {
     const task = makeTask({
       id: 'pipe-task-not-template',
       pipeline_id: 'pipeline-not-template',
-      task_type: 'pipeline',
+      effect: 'run_workflow',
     });
     // A `plan_task`-style row (template:false) cannot be re-fired on a
     // schedule by definition — runSavedWorkflow refuses it cleanly instead
@@ -774,7 +775,7 @@ describe('WorkerLoop', () => {
     const task = makeTask({
       id: 'scheduled-monthly',
       pipeline_id: 'saved-monthly-report',
-      task_type: 'pipeline',
+      effect: 'run_workflow',
       schedule_cron: '0 9 1 * *',
     });
 
@@ -853,7 +854,7 @@ describe('WorkerLoop', () => {
     const task = makeTask({
       id: 'recurring-task',
       pipeline_id: 'recurring-wf',
-      task_type: 'pipeline',
+      effect: 'run_workflow',
       schedule_cron: '* * * * *',
     });
 
@@ -919,7 +920,7 @@ describe('WorkerLoop', () => {
     const task = makeTask({
       id: 'partial-task',
       pipeline_id: 'partial-wf',
-      task_type: 'pipeline',
+      effect: 'run_workflow',
       schedule_cron: '0 9 * * *',
     });
 
@@ -962,7 +963,7 @@ describe('WorkerLoop', () => {
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
     _resetPipelineStore();
     storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
-    const task = makeTask({ pipeline_id: template['id'] as string, task_type: 'pipeline', ...taskOverrides });
+    const task = makeTask({ pipeline_id: template['id'] as string, effect: 'run_workflow', ...taskOverrides });
     await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
     return taskManager;
   }
@@ -1036,7 +1037,7 @@ describe('WorkerLoop', () => {
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
     _resetPipelineStore();
     storePipeline('b2-wf', JSON.parse(templateJson) as PlannedPipeline);
-    const task = makeTask({ id: 't-failrun', pipeline_id: 'b2-wf', task_type: 'pipeline' });
+    const task = makeTask({ id: 't-failrun', pipeline_id: 'b2-wf', effect: 'run_workflow' });
 
     await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
 
@@ -1066,12 +1067,12 @@ describe('WorkerLoop', () => {
 
     // First run (no last_hash) = baseline → records + stores hash, NO escalation.
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
-    await fire(makeTask({ id: 't-watch', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    await fire(makeTask({ id: 't-watch', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
     expect(escalateSpy).not.toHaveBeenCalled();
 
     // A later run with a CHANGED page (last_hash present + different) → escalate.
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2 — changed', { status: 200 }));
-    await fire(makeTask({ id: 't-watch', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', last_hash: 'STALE', interval_minutes: 60 }) }));
+    await fire(makeTask({ id: 't-watch', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', last_hash: 'STALE', interval_minutes: 60 }) }));
     expect(escalateSpy).toHaveBeenCalledWith(expect.objectContaining({
       key: 't-watch',
       title: expect.stringContaining('🔍') as string, // 🔍
@@ -1098,7 +1099,7 @@ describe('WorkerLoop', () => {
     // First run = baseline. Page has a nonced <script> in <head> (the churn source).
     const pageV1 = '<html><head><script nonce="abc123">var t=1;</script></head><body><main>Headline One</main></body></html>';
     mockFetchPinned.mockResolvedValueOnce(new Response(pageV1, { status: 200 }));
-    await fire(makeTask({ id: 't-cost', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    await fire(makeTask({ id: 't-cost', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
 
     // (a) the analysis session runs on the FAST tier (was inheriting the default).
     expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'fast' }));
@@ -1117,7 +1118,7 @@ describe('WorkerLoop', () => {
     //     the signal hash is stable → NO second analysis session is created.
     const pageChurn = '<html><head><script nonce="zzz999">var t=2;</script></head><body><main>Headline One</main></body></html>';
     mockFetchPinned.mockResolvedValueOnce(new Response(pageChurn, { status: 200 }));
-    await fire(makeTask({ id: 't-cost', task_type: 'watch', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: baselineHash }) }));
+    await fire(makeTask({ id: 't-cost', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: baselineHash }) }));
     expect(createSession).toHaveBeenCalledTimes(1); // still just the baseline run
     expect(recordTaskRun).toHaveBeenCalledWith('t-cost', 'No changes detected', 'success');
   });
@@ -1131,7 +1132,7 @@ describe('WorkerLoop', () => {
     const task = makeTask({
       id: 'pipe-interactive',
       pipeline_id: 'pipeline-interactive',
-      task_type: 'pipeline',
+      effect: 'run_workflow',
     });
     const interactivePlanned = JSON.stringify({
       id: 'pipeline-interactive',
@@ -1168,10 +1169,10 @@ describe('WorkerLoop', () => {
     ).rejects.toThrow(/only runs 'autonomous' pipelines/);
   });
 
-  // ---- task_type: 'reminder' branch (Phase-4 standalone reminders) ----
+  // ---- effect: 'notify' branch (Phase-4 standalone reminders) ----
 
   it('executes a reminder by firing notify + recordTaskRun, no agent run', async () => {
-    const task = makeTask({ task_type: 'reminder', title: 'Roland anrufen' });
+    const task = makeTask({ effect: 'notify', title: 'Roland anrufen' });
     const tm = makeTaskManager([task]);
     const session = makeSession();
     const engine = makeEngine({ taskManager: tm, session });
@@ -1188,11 +1189,79 @@ describe('WorkerLoop', () => {
     expect(session.run).not.toHaveBeenCalled();
   });
 
+  // ---- fail-closed dispatch (RU2): an unknown effect must NOT reach a money run ----
+
+  it('an unknown effect is recorded + stopped (fail-closed), never an autonomous run', async () => {
+    // The store casts `effect` from a TEXT column, so a value the union doesn't know
+    // (a newer schema, a synced/corrupt row) is possible at runtime. Dispatch must
+    // fail CLOSED — record + stop — not fall through to executeStandard (money).
+    const task = makeTask({ id: 'fx-unknown', effect: 'bogus' as unknown as TriggerEffect });
+    const tm = makeTaskManager([task]);
+    const session = makeSession();
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await (loop as unknown as { executeTask: (t: TriggerRecord) => Promise<void> }).executeTask(task);
+    // No money: the autonomous session.run is never reached.
+    expect(session.run).not.toHaveBeenCalled();
+    // Recorded as a failed skip so it stops re-firing every tick.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(
+      'fx-unknown',
+      expect.stringContaining("Unknown trigger effect 'bogus'"),
+      'failed',
+    );
+  });
+
+  // ---- dispatch routing on the effect axis (the source-gated run_agent fork +
+  //      the deterministic backup arm — each asserted END-TO-END through executeTask,
+  //      not by calling the executor directly, so a routing regression is caught) ----
+
+  it('dispatch: effect=run_agent + source=watch → executeWatch, NOT executeStandard (money guard)', async () => {
+    // A `watch` source runs its change-detection gate (executeWatch) first — only
+    // spending on an actual change. A regression routing it to executeStandard would
+    // spend an autonomous run EVERY tick. Assert the routing, not the executor body.
+    const task = makeTask({ id: 'd-watch', effect: 'run_agent', source: 'watch' });
+    const session = makeSession();
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    const asExec = loop as unknown as {
+      executeTask: (t: TriggerRecord) => Promise<void>;
+      executeWatch: (t: TriggerRecord) => Promise<void>;
+      executeStandard: (t: TriggerRecord) => Promise<void>;
+    };
+    const watchSpy = vi.spyOn(asExec, 'executeWatch').mockResolvedValue(undefined);
+    const stdSpy = vi.spyOn(asExec, 'executeStandard').mockResolvedValue(undefined);
+    await asExec.executeTask(task);
+    expect(watchSpy).toHaveBeenCalledTimes(1);
+    expect(stdSpy).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+  });
+
+  it('dispatch: effect=backup → executeBackup, never a money run (session.run)', async () => {
+    // backup is a deterministic side-effect on the NO-money side of the boundary —
+    // a routing regression to executeStandard would turn a free backup into a spend.
+    const task = makeTask({ id: 'd-backup', effect: 'backup' });
+    const session = makeSession();
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    const asExec = loop as unknown as {
+      executeTask: (t: TriggerRecord) => Promise<void>;
+      executeBackup: (t: TriggerRecord) => Promise<void>;
+      executeStandard: (t: TriggerRecord) => Promise<void>;
+    };
+    const backupSpy = vi.spyOn(asExec, 'executeBackup').mockResolvedValue(undefined);
+    const stdSpy = vi.spyOn(asExec, 'executeStandard').mockResolvedValue(undefined);
+    await asExec.executeTask(task);
+    expect(backupSpy).toHaveBeenCalledTimes(1);
+    expect(stdSpy).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+  });
+
   // ---- run-now (manual off-schedule dispatch, the Triggers-home control) ----
 
   it('runTriggerNow dispatches a trigger via the same execute path', async () => {
     // A standard trigger (no pipeline/watch/backup) → executeStandard → session.
-    const task = makeTask({ id: 'rn-ok', task_type: 'standard', schedule_cron: undefined, next_run_at: undefined });
+    const task = makeTask({ id: 'rn-ok', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
     const tm = makeTaskManager([task]);
     const session = makeSession('Ran on demand.');
     const engine = makeEngine({ taskManager: tm, session });
@@ -1222,7 +1291,7 @@ describe('WorkerLoop', () => {
       run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
       _recreateAgent: vi.fn(),
     } as unknown as Session;
-    const task = makeTask({ id: 'rn-busy', task_type: 'standard', schedule_cron: undefined, next_run_at: undefined });
+    const task = makeTask({ id: 'rn-busy', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
     const tm = makeTaskManager([task]);
     const engine = makeEngine({ taskManager: tm, session: neverResolve });
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
@@ -1262,7 +1331,7 @@ describe('WorkerLoop', () => {
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
     _resetPipelineStore();
     storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
-    const trigger = makeTask({ id: 't-rn-unconfirmed', pipeline_id: template['id'] as string, task_type: 'pipeline', schedule_cron: undefined, next_run_at: undefined });
+    const trigger = makeTask({ id: 't-rn-unconfirmed', pipeline_id: template['id'] as string, effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined });
 
     await (loop as unknown as { executeTask: (t: TriggerRecord) => Promise<void> }).executeTask(trigger);
 

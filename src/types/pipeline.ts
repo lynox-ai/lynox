@@ -213,11 +213,28 @@ export interface TaskRecord {
   completed_at: string | null;
 }
 
-/** An AGENT-TRIGGER — a rule the WorkerLoop fires (cron / watch / pipeline /
- *  reminder / backup) to DO work for the user (the "act" side of the agent
- *  loop). Lives in the `triggers` table. Split out from user-TODOs in migration
- *  v42. Scope of that split was TODO⟂trigger only — the trigger sub-types
- *  (`task_type`) stay as-is; the universal "Trigger primitive" is deferred. */
+/** What FIRES a trigger (the condition provider) — the clean `source` axis
+ *  (Foundation Rework v2, S3-behaviour-a). `webhook`/`inbox_event` are RESERVED,
+ *  UNWIRED until P3 wires the receivers. */
+export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manual';
+
+/** What a trigger DOES when it fires — the clean `effect` axis. `run_workflow` /
+ *  `run_agent` mint a money-spending Run (→ managed gate/debit); `backup` /
+ *  `notify` are deterministic side-effects that mint NO Run. This axis IS the
+ *  money-vs-deterministic boundary, made legible in the schema. `backup`/`notify`
+ *  are BUILT-IN effects (fixed capabilities, not user-formable) — distinct in kind
+ *  from the user-formable `run_*`, but co-located here as the single dispatch axis. */
+export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify';
+
+/** An AGENT-TRIGGER — a rule the WorkerLoop fires to DO work for the user (the
+ *  "act" side of the agent loop). Lives in the `triggers` table. Split from
+ *  user-TODOs in migration v42. S3-behaviour-a de-conflated the legacy `task_type`
+ *  into the two orthogonal typed axes {@link TriggerSource} (what fires it) +
+ *  {@link TriggerEffect} (what it does); the WorkerLoop dispatches on `effect`. The
+ *  remaining legacy-shaped fields (`schedule_cron`/`watch_config` flattened from
+ *  condition_json, `pipeline_id`←target_workflow_id, `assignee`) are TriggerRecord
+ *  consumer-projection fields reshaped in the S4 task-cutover — the STORED primitive
+ *  (source·effect·condition·target) is already clean. */
 export interface TriggerRecord {
   id: string;
   title: string;
@@ -228,12 +245,15 @@ export interface TriggerRecord {
   scope_id: string;
   created_at: string;
   updated_at: string;
+  /** What fires it — the clean source axis (was the conflated `task_type`). */
+  source: TriggerSource;
+  /** What it does when fired — the dispatch axis; run_* spend, backup/notify don't. */
+  effect: TriggerEffect;
   schedule_cron?: string | undefined;
   next_run_at?: string | undefined;
   last_run_at?: string | undefined;
   last_run_result?: string | undefined;
   last_run_status?: string | undefined;
-  task_type?: string | undefined;
   watch_config?: string | undefined;
   max_retries?: number | undefined;
   retry_count?: number | undefined;

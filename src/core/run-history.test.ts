@@ -2098,7 +2098,7 @@ describe('RunHistory', () => {
     it('(b) a cron trigger lands in triggers (getTriggers + getDueTriggers), NOT in tasks', () => {
       const h = createHistory();
       h.insertTrigger({
-        id: 'cron-1', title: 'Daily digest', taskType: 'scheduled',
+        id: 'cron-1', title: 'Daily digest', source: 'cron', effect: 'run_agent',
         scheduleCron: '0 9 * * *', nextRunAt: '2020-01-01T00:00:00.000Z',
       });
       expect(h.getTriggers().some(t => t.id === 'cron-1')).toBe(true);
@@ -2110,21 +2110,22 @@ describe('RunHistory', () => {
       // Column integrity: the cron schedule survives.
       const trig = h.getTrigger('cron-1')!;
       expect(trig.schedule_cron).toBe('0 9 * * *');
-      expect(trig.task_type).toBe('scheduled');
+      expect(trig.source).toBe('cron');
+      expect(trig.effect).toBe('run_agent');
       h.close();
     });
 
     it('(c) a watch trigger lands in triggers, NOT in tasks', () => {
       const h = createHistory();
       h.insertTrigger({
-        id: 'watch-1', title: 'Watch price', taskType: 'watch',
+        id: 'watch-1', title: 'Watch price', source: 'watch', effect: 'run_agent',
         watchConfig: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }),
         nextRunAt: '2020-01-01T00:00:00.000Z',
       });
       expect(h.getTriggers().some(t => t.id === 'watch-1')).toBe(true);
       expect(h.getTasks().some(t => t.id === 'watch-1')).toBe(false);
       const trig = h.getTrigger('watch-1')!;
-      expect(trig.task_type).toBe('watch');
+      expect(trig.source).toBe('watch');
       expect(JSON.parse(trig.watch_config!).url).toBe('https://x.test');
       h.close();
     });
@@ -2138,7 +2139,7 @@ describe('RunHistory', () => {
         reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
       });
       h.insertTrigger({
-        id: 'pipe-1', title: 'Monthly report', taskType: 'pipeline',
+        id: 'pipe-1', title: 'Monthly report', source: 'cron', effect: 'run_workflow',
         pipelineId: 'wf-xyz', scheduleCron: '0 9 1 * *',
         nextRunAt: '2020-01-01T00:00:00.000Z',
       });

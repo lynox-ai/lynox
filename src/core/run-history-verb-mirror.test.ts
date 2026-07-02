@@ -8,6 +8,7 @@ import { EngineDb } from './engine-db.js';
 import { WorkflowStore } from './workflow-store.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore } from './task-store.js';
+import { deriveSourceEffect } from './task-manager.js';
 
 /**
  * S3f — the verb write-cutover. engine.db is now the SOLE authority for
@@ -191,14 +192,28 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     nextRunAt?: string; pipelineId?: string; pipelineParams?: string; watchConfig?: string;
     status?: string; scopeId?: string; notificationChannel?: string; maxRetries?: number;
   } = {}) {
+    // A watch trigger has NO schedule_cron (createWatch never sets one); only default
+    // a cron for non-watch fixtures, else deriveSourceEffect's schedule-cron-first
+    // precedence would mislabel a watch fixture as source='cron'.
+    const scheduleCron = over.scheduleCron ?? (over.watchConfig ? undefined : '0 9 * * *');
+    // Derive the clean source/effect axes from the (legacy-shaped) test intent via
+    // the SAME production helper the create-path uses — so the test also proves
+    // the write-path parity, not a re-implemented mapping.
+    const { source, effect } = deriveSourceEffect({
+      taskType: over.taskType ?? 'cron',
+      scheduleCron,
+      watchConfig: over.watchConfig,
+      pipelineId: over.pipelineId,
+    });
     return {
       id: over.id ?? 'tr-1',
       title: over.title ?? 'Daily report',
       status: over.status ?? 'open',
       scopeType: 'project',
       scopeId: over.scopeId ?? 'proj-1',
-      taskType: over.taskType ?? 'cron',
-      scheduleCron: over.scheduleCron ?? '0 9 * * *',
+      source,
+      effect,
+      scheduleCron,
       nextRunAt: over.nextRunAt ?? '2026-07-02T09:00:00Z',
       pipelineId: over.pipelineId,
       pipelineParams: over.pipelineParams ?? '{"tone":"brief"}',
@@ -342,7 +357,8 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
       scheduleCron: '0 9 * * *', nextRunAt: '2020-01-01T00:00:00Z', pipelineParams: '{"tone":"brief"}',
     }));
     const t = history.getDueTriggers().find(x => x.id === 'tr-due')!;
-    expect(t.task_type).toBe('pipeline');               // source → task_type
+    expect(t.effect).toBe('run_workflow');              // clean effect axis (money-path dispatch key)
+    expect(t.source).toBe('cron');                      // clean source axis (scheduled)
     expect(t.pipeline_id).toBe('wf-9');                 // target_workflow_id → pipeline_id
     expect(t.pipeline_params).toBe('{"tone":"brief"}'); // params_json → pipeline_params
     expect(t.schedule_cron).toBe('0 9 * * *');          // parsed back out of condition_json
@@ -359,7 +375,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     const past = '2020-01-01T00:00:00Z';
     // due:
     history.insertTrigger(trig({ id: 'due-cron', taskType: 'cron', scheduleCron: '0 9 * * *', nextRunAt: '2020-06-01T00:00:00Z' }));
-    history.insertTrigger({ id: 'due-oneshot', title: 'o', status: 'open', scopeType: 'project', scopeId: 'proj-1', taskType: 'pipeline', nextRunAt: '2019-01-01T00:00:00Z', pipelineId: 'wf-9', pipelineParams: '{"x":1}' });
+    history.insertTrigger({ id: 'due-oneshot', title: 'o', status: 'open', scopeType: 'project', scopeId: 'proj-1', source: 'manual', effect: 'run_workflow', nextRunAt: '2019-01-01T00:00:00Z', pipelineId: 'wf-9', pipelineParams: '{"x":1}' });
     // failed BUT cron → survives a failure (kept in queue):
     history.insertTrigger(trig({ id: 'failed-cron', status: 'failed', taskType: 'cron', scheduleCron: '0 9 * * *', nextRunAt: past }));
     // excluded — disabled kill-switch:
@@ -368,7 +384,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     // excluded — completed:
     history.insertTrigger(trig({ id: 'x-completed', status: 'completed', nextRunAt: past }));
     // excluded — failed one-shot (no schedule_cron):
-    history.insertTrigger({ id: 'x-failed-oneshot', title: 'f', status: 'failed', scopeType: 'project', scopeId: 'proj-1', taskType: 'pipeline', nextRunAt: past, pipelineId: 'wf-9' });
+    history.insertTrigger({ id: 'x-failed-oneshot', title: 'f', status: 'failed', scopeType: 'project', scopeId: 'proj-1', source: 'manual', effect: 'run_workflow', nextRunAt: past, pipelineId: 'wf-9' });
     // excluded — future next_run_at:
     history.insertTrigger(trig({ id: 'x-future', nextRunAt: '2099-01-01T00:00:00Z' }));
 
@@ -386,7 +402,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     const { history, engine } = make();
     seedWorkflow(history, 'wf-9');
     // A pipeline trigger with NO bound params.
-    history.insertTrigger({ id: 'tr-noparam', title: 'n', status: 'open', scopeType: 'project', scopeId: 'proj-1', taskType: 'pipeline', nextRunAt: '2020-01-01T00:00:00Z', pipelineId: 'wf-9' });
+    history.insertTrigger({ id: 'tr-noparam', title: 'n', status: 'open', scopeType: 'project', scopeId: 'proj-1', source: 'manual', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00Z', pipelineId: 'wf-9' });
     const t = history.getDueTriggers().find(x => x.id === 'tr-noparam')!;
     // The forward map stored '{}' (params_json NOT NULL); the reverse map restores it
     // to undefined so worker-loop's `if (task.pipeline_params)` stays false ⇒
@@ -437,7 +453,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     const wc = '{"url":"https://x.test","selector":".price"}';
     history.insertTrigger(trig({ id: 'tr-watch-due', taskType: 'watch', watchConfig: wc, nextRunAt: '2020-01-01T00:00:00Z' }));
     const t = history.getDueTriggers().find(x => x.id === 'tr-watch-due')!;
-    expect(t.task_type).toBe('watch');
+    expect(t.source).toBe('watch');
     expect(t.watch_config).toBe(wc); // parsed back out of condition_json by the reverse-adapter
     engine.close();
     history.close();
@@ -455,10 +471,10 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.close();
   });
 
-  it('CORR-1: deleting a pipeline trigger\'s workflow nulls pipeline_id but KEEPS task_type=pipeline', () => {
+  it('CORR-1: deleting a workflow trigger\'s workflow nulls pipeline_id but KEEPS effect=run_workflow', () => {
     // engine.db triggers.target_workflow_id has an FK ON DELETE SET NULL. Deleting the
     // saved workflow nulls the trigger's target — but the routing discriminator
-    // (task_type='pipeline') must survive, so the WorkerLoop still routes to
+    // (effect='run_workflow') must survive, so the WorkerLoop still routes to
     // executePipeline's safe skip, NOT executeStandard (an autonomous run of the title
     // that spends on every cron tick). This is the store-side half of the CORR-1 fix.
     const { history, engine } = make();
@@ -468,7 +484,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     expect(history.deletePlannedPipeline('wf-9')).toBe(true); // FK nulls target_workflow_id
     const due = history.getDueTriggers().find(x => x.id === 'pt-1')!;
     expect(due.pipeline_id ?? null).toBeNull(); // FK-nulled
-    expect(due.task_type).toBe('pipeline');     // discriminator survives → safe routing
+    expect(due.effect).toBe('run_workflow');    // discriminator survives → safe routing
     engine.close();
     history.close();
   });

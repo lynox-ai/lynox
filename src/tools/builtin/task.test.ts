@@ -287,7 +287,8 @@ describe('Task Tools', () => {
       // A workflow (pipeline) row is an AGENT-TRIGGER → `triggers` table.
       const created = tm.listTriggers().find((t) => t.title === 'Weekly report');
       expect(created?.pipeline_id).toBe('wf-abc123');
-      expect(created?.task_type).toBe('pipeline');
+      expect(created?.effect).toBe('run_workflow'); // scheduled workflow → run_workflow
+      expect(created?.source).toBe('cron');
       expect(created?.schedule_cron).toBe('0 9 * * 1');
     });
   });

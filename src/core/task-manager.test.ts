@@ -4,8 +4,33 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect } from './task-manager.js';
 import type { TriggerRecord } from '../types/index.js';
+
+describe('deriveSourceEffect (create-path → clean axes; migration-remap twin)', () => {
+  // MUST agree with the engine.db v3 migration remap so a trigger CREATED post-slice
+  // matches the same trigger MIGRATED from a legacy task_type row.
+  it('backup → (cron, backup); reminder → (cron, notify) — the deterministic money-boundary', () => {
+    expect(deriveSourceEffect({ taskType: 'backup', scheduleCron: '0 3 * * *' })).toEqual({ source: 'cron', effect: 'backup' });
+    // even without a schedule string, backup/reminder are cron-scheduled built-ins:
+    expect(deriveSourceEffect({ taskType: 'backup' })).toEqual({ source: 'cron', effect: 'backup' });
+    expect(deriveSourceEffect({ taskType: 'reminder', nextRunAt: '2026-07-02T09:00:00Z' })).toEqual({ source: 'cron', effect: 'notify' });
+  });
+
+  it('a bound workflow → run_workflow; source from the condition', () => {
+    expect(deriveSourceEffect({ taskType: 'pipeline', pipelineId: 'wf-1', scheduleCron: '0 9 * * *' })).toEqual({ source: 'cron', effect: 'run_workflow' });
+    expect(deriveSourceEffect({ taskType: 'pipeline', pipelineId: 'wf-1', watchConfig: '{"url":"x"}' })).toEqual({ source: 'watch', effect: 'run_workflow' });
+    expect(deriveSourceEffect({ taskType: 'pipeline', pipelineId: 'wf-1' })).toEqual({ source: 'manual', effect: 'run_workflow' });
+  });
+
+  it('watch → (watch, run_agent); scheduled agent → (cron, run_agent); bare → (manual, run_agent)', () => {
+    expect(deriveSourceEffect({ taskType: 'watch', watchConfig: '{"url":"y"}' })).toEqual({ source: 'watch', effect: 'run_agent' });
+    expect(deriveSourceEffect({ taskType: 'scheduled', scheduleCron: '0 8 * * *' })).toEqual({ source: 'cron', effect: 'run_agent' });
+    expect(deriveSourceEffect({})).toEqual({ source: 'manual', effect: 'run_agent' });
+    // an unknown taskType is a plain agent run, source from its firing shape:
+    expect(deriveSourceEffect({ taskType: 'zzz' })).toEqual({ source: 'manual', effect: 'run_agent' });
+  });
+});
 
 describe('TaskManager', () => {
   let dir: string;
