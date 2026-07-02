@@ -24,9 +24,11 @@ import type { TriggerRecord } from '../types/pipeline.js';
  * so the write methods map the legacy field names onto the engine.db shape
  * (source ← task_type, condition_json ← {schedule_cron, watch_config},
  * target_workflow_id ← pipeline_id, params_json ← pipeline_params).
- * {@link triggerRecordToRow} is the pure record→row form the S3d backfill still
- * uses (legacy TriggerRecord → row); the live write methods build the row (via
- * {@link insert}/{@link upsert}) or patch columns directly from their params.
+ * {@link triggerRecordToRow} is the pure legacy `TriggerRecord`→row mapping,
+ * kept as the canonical documented form + its test coverage (the inverse of the
+ * read adapter {@link triggerDbRowToRecord}); the live write methods build the
+ * row (via {@link insert}/{@link upsert}) or patch columns directly from their
+ * params, so nothing on the write path calls it after the S3f cutover.
  *
  * `condition_json` / `params_json` / `description` are stored PLAINTEXT — a
  * faithful relocation of the legacy plaintext columns. At-rest encryption of verb
@@ -315,18 +317,25 @@ export class TriggerStore {
 
   /** Resolve `target_workflow_id` to a concrete `workflows.id` if the referenced
    *  workflow row exists (engine.db enforces the FK), else NULL — so a pre-flag
-   *  orphan never throws. Prefix-tolerant + exact-preferring, mirroring
-   *  {@link WorkflowStore}'s `id = ? OR id LIKE ?` read/delete semantics: a caller
-   *  may pass a short/prefix workflow id, and an exact-match resolve would null it
-   *  even though the workflow exists — which then misroutes the trigger to an
-   *  autonomous run and blinds the destructive-edit guard ({@link getByWorkflowId}).
-   *  Stores the ACTUAL matched id so the FK holds. */
+   *  orphan never throws (a FK-null then safe-skips in the worker-loop, no spend).
+   *  Exact-preferring; a prefix (mirroring {@link WorkflowStore}'s short-id
+   *  read/delete UX) is accepted ONLY when it is UNAMBIGUOUS. An ambiguous prefix
+   *  must NOT bind the trigger to an arbitrary workflow — the money-path would then
+   *  spend on the wrong one — so 0-or-many prefix matches resolve to NULL (→
+   *  safe-skip) instead. Stores the ACTUAL matched id so the FK + the
+   *  destructive-edit guard ({@link getByWorkflowId}, exact-match) stay consistent. */
   private _resolveTargetWorkflowId(candidate: string | null): string | null {
     if (candidate === null || candidate === '') return null;
-    const hit = this.db.prepare(
-      "SELECT id FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY (id = ?) DESC LIMIT 1",
-    ).get(candidate, likePrefix(candidate), candidate) as { id: string } | undefined;
-    return hit ? hit.id : null;
+    // Exact id wins outright (the common case: a system-generated full id) and is
+    // a sargable PK lookup.
+    const exact = this.db.prepare('SELECT id FROM workflows WHERE id = ? LIMIT 1')
+      .get(candidate) as { id: string } | undefined;
+    if (exact) return exact.id;
+    // No exact row: accept a prefix ONLY if it matches exactly one workflow.
+    // 0 or >1 matches → NULL (safe-skip) rather than an arbitrary wrong-spend.
+    const hits = this.db.prepare("SELECT id FROM workflows WHERE id LIKE ? ESCAPE '\\' LIMIT 2")
+      .all(likePrefix(candidate)) as Array<{ id: string }>;
+    return hits.length === 1 ? hits[0]!.id : null;
   }
 
   /** Exact-id delete (mirrors legacy `deleteTrigger`, which is exact-id). */

@@ -114,6 +114,23 @@ describe('Config', () => {
     expect(config.network_allowed_hosts).toEqual(['api.example.com', '*.internal.example.com']);
   });
 
+  it('tolerates retired verb_graph_* keys in config.json (not nulled by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    // A mid-rollout tenant's config.json may still carry the S3f-retired verb-layer
+    // rollout flags. They must be tolerated-and-ignored, NOT reject the WHOLE config
+    // under .strict() (which would silently drop default_tier + every other setting).
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      verb_graph_enabled: true,
+      verb_graph_reads: false,
+    }));
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.default_tier).toBe('balanced'); // survived → config was not nulled
+  });
+
   it('rejects an invalid network_policy enum (whole config nulled by .strict())', async () => {
     const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });

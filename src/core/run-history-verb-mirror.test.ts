@@ -473,16 +473,37 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.close();
   });
 
-  it('_resolveTargetWorkflowId is prefix-tolerant: a prefix pipelineId resolves (not nulled) + guard finds it', () => {
-    // Workflow reads/deletes are prefix-tolerant (WorkflowStore `id = ? OR id LIKE ?`).
-    // An exact-match resolve would null a trigger created with a prefix/lagged id, then
-    // misroute it AND blind the destructive-edit guard. Resolve mirrors the read and
-    // stores the concrete workflows.id so the FK holds.
+  it('_resolveTargetWorkflowId resolves a UNIQUE prefix pipelineId (not nulled) + guard finds it', () => {
+    // Workflow reads/deletes are prefix-tolerant (WorkflowStore short-id UX). A UNIQUE
+    // prefix must still resolve — else a valid agent-supplied short id would null the
+    // target and the pipeline would safe-skip. Resolve stores the concrete workflows.id
+    // so the FK + the exact-match destructive-edit guard stay consistent. (Ambiguity is
+    // handled in the next test.)
     const { history, engine } = make();
     seedWorkflow(history, 'wf-abc123');
     history.insertTrigger(trig({ id: 'pt-prefix', taskType: 'pipeline', pipelineId: 'wf-abc' })); // prefix, not exact
     expect(history.getTrigger('pt-prefix')!.pipeline_id).toBe('wf-abc123');
     expect(history.getTriggersByPipelineId('wf-abc123').map(t => t.id)).toContain('pt-prefix');
+    engine.close();
+    history.close();
+  });
+
+  it('_resolveTargetWorkflowId rejects an AMBIGUOUS prefix (→ null / safe-skip, no wrong-spend) but an exact id always wins', () => {
+    // A prefix matching >1 workflow must NOT bind the trigger to an arbitrary one — the
+    // money-path would then spend on the WRONG workflow. It resolves to NULL instead (the
+    // FK-null safe-skips in the WorkerLoop, no spend). And an exact id must win even when a
+    // longer row merely shares the prefix.
+    const { history, engine } = make();
+    seedWorkflow(history, 'wf-dup1');
+    seedWorkflow(history, 'wf-dup2');
+    // 'wf-dup' matches both → ambiguous → target nulled (safe-skip, not a wrong-spend)
+    history.insertTrigger(trig({ id: 'pt-ambig', taskType: 'pipeline', pipelineId: 'wf-dup' }));
+    expect(history.getTrigger('pt-ambig')!.pipeline_id ?? null).toBeNull();
+    // exact preference: candidate equals an existing id even though 'wf-x-long' shares the prefix
+    seedWorkflow(history, 'wf-x');
+    seedWorkflow(history, 'wf-x-long');
+    history.insertTrigger(trig({ id: 'pt-exact', taskType: 'pipeline', pipelineId: 'wf-x' }));
+    expect(history.getTrigger('pt-exact')!.pipeline_id).toBe('wf-x');
     engine.close();
     history.close();
   });

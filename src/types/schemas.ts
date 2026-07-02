@@ -166,6 +166,14 @@ export const LynoxUserConfigSchema = z.object({
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
   // would otherwise reject this key from config.json (silently disabling the flag).
   subject_graph_enabled:   z.boolean().optional(),
+  // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
+  // engine.db unconditionally, so these rollout flags were removed from the
+  // interface + env-loaders. Kept as tolerated-ignored config.json keys for one
+  // release window — a mid-rollout tenant's config.json may still carry them, and
+  // under `.strict()` an unknown key nulls the WHOLE config (dropping every
+  // setting, not just these). Same discipline as `llm_mode` below.
+  verb_graph_enabled:      z.boolean().optional(),
+  verb_graph_reads:        z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
   transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),
