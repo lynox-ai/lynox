@@ -57,10 +57,25 @@ export function startScheduledSendPoller(opts: ScheduledSendPollerOptions): Sche
     return { fired, failed };
   };
 
-  const handle = setInterval(() => { void tick(); }, interval);
+  // Reentrancy guard: a tick can outlive the interval (e.g. 25 slow/timing-out
+  // SMTP sends at a 60s SMTP socket timeout easily exceed a 60s cadence).
+  // Without this, the next interval — or a concurrent `tickNow()` — runs a
+  // second tick against the SAME due rows: listDueScheduledSends does no
+  // row-claim and `sent_at` is only stamped AFTER sendMail returns, so both
+  // ticks deliver every row before either marks it sent → double-send. Coalesce
+  // so that while a tick is in flight, callers share its promise and no second
+  // concurrent tick starts (mirrors the provider watch loop's `ticking` guard).
+  let inFlight: Promise<{ fired: number; failed: number }> | null = null;
+  const runTick = (): Promise<{ fired: number; failed: number }> => {
+    if (inFlight) return inFlight;
+    inFlight = tick().finally(() => { inFlight = null; });
+    return inFlight;
+  };
+
+  const handle = setInterval(() => { void runTick(); }, interval);
   return {
     stop: () => clearInterval(handle),
-    tickNow: tick,
+    tickNow: runTick,
   };
 }
 

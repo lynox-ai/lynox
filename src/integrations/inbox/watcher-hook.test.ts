@@ -461,3 +461,44 @@ describe('createInboxClassifierHook — push notifier wire', () => {
     expect(notifyNewItem).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('createInboxClassifierHook — queue overflow dead-letter', () => {
+  it('returns "enqueued" and inserts no item when the queue accepts', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const outcome = await hook(ACCOUNT.id, envelope());
+    expect(outcome).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('dead-letters as a requires_user item when the queue rejects the enqueue', async () => {
+    // A full/draining queue returns false. The mail was already marked seen by
+    // the watcher, so a silent drop would lose it permanently — instead it must
+    // surface as a requires_user item the user can act on.
+    const fullQueue: HookQueue = { enqueue: vi.fn(() => false) };
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue: fullQueue, accounts });
+    const outcome = await hook(ACCOUNT.id, envelope());
+    expect(outcome).toBe('dead_lettered');
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      bucket: 'requires_user',
+      confidence: 0,
+      classifierVersion: 'queue-overflow',
+    });
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    const payload = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
+    expect(payload['dead_letter']).toBe(true);
+    expect(payload['reason']).toBe('queue_overflow');
+  });
+
+  it('fires the notifier for the dead-lettered item so it surfaces', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const fullQueue: HookQueue = { enqueue: vi.fn(() => false) };
+    const hook = createInboxClassifierHook({
+      state: inbox, rules, queue: fullQueue, accounts, notifier: { notifyNewItem },
+    });
+    await hook(ACCOUNT.id, envelope());
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
+  });
+});
