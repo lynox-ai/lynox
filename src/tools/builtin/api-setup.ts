@@ -23,7 +23,7 @@ import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION 
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { isAllowlistedEndpoint, describeDisclosure } from '../../core/llm/endpoint-allowlist.js';
+import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1092,7 +1092,12 @@ Next steps before calling create:
         return 'Error: "profile" object is required for create/update action.';
       }
 
-      const profile = input.profile;
+      // Shallow-copy the input: the ack-stamping below assigns/strips the
+      // top-level `custom_endpoint_ack` field, and mutating the caller's object
+      // in place is a surprising side effect (it also leaks a stamped ack back
+      // onto a reused profile reference). A shallow copy suffices — we only ever
+      // replace the whole top-level field, never mutate a nested value.
+      const profile = { ...input.profile };
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;
@@ -1122,6 +1127,31 @@ Next steps before calling create:
           disclosure,
           hint: 'Surface the `disclosure` text to the user via `ask_user`. Once they accept, re-call `api_setup` with the same `profile` plus `confirm_custom_endpoint: true` to record acceptance and persist the profile.',
         }, null, 2);
+      }
+
+      // Persist the acceptance onto the profile so the RUNTIME egress paths
+      // (fetch_token, http_request OAuth2 attach) can re-verify it fail-closed
+      // after a reload/migration — where the transient `confirm_custom_endpoint`
+      // tool signal is long gone. Set server-side ONLY; an ack carried in the
+      // incoming `profile` object is never trusted (that would forge the gate),
+      // so we overwrite it unconditionally here. Bound to the specific hosts so
+      // a later `token_url`/`base_url` swap to a different non-vetted host does
+      // not inherit this ack — it re-gates.
+      if (nonAllowlisted.length > 0) {
+        // Reachable only with confirm_custom_endpoint === true (else returned above).
+        const ackHosts = Array.from(new Set(
+          nonAllowlisted
+            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+            .filter((h): h is string => h !== null),
+        ));
+        profile.custom_endpoint_ack = {
+          accepted: true,
+          hosts: ackHosts,
+          accepted_at: new Date().toISOString(),
+        };
+      } else {
+        // Every egress host is vetted — no ack should ride along; strip a forged one.
+        delete profile.custom_endpoint_ack;
       }
 
       // Enforce research: warn if profile is too thin
@@ -1219,6 +1249,18 @@ Next steps before calling create:
       if (!oauth?.token_url) {
         return `Error: profile "${input.id}" auth.oauth is missing token_url. Update the profile with the OAuth token endpoint (e.g. https://<shop>.myshopify.com/admin/oauth/access_token).`;
       }
+      // Wave 5d runtime egress gate. fetch_token POSTs the vault client_secret
+      // to token_url. The save-time allowlist gate covers profiles created via
+      // this tool, but a profile can re-enter the store WITHOUT passing it —
+      // loadFromDirectory at boot, migration-import, or a hand-dropped JSON — so
+      // re-verify here fail-closed: a non-allowlisted token_url is refused unless
+      // the profile carries a persisted acceptance covering that exact host.
+      // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
+      if (!isAllowlistedEndpoint(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
+        let host = oauth.token_url;
+        try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
+        return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility (re-call with confirm_custom_endpoint: true), which records the acceptance and unblocks fetch_token.`;
+      }
       const grantType = oauth.grant_type ?? 'client_credentials';
       const bodyFormat = oauth.body_format ?? 'form';
       const clientIdKey = oauth.client_id_key;
@@ -1259,6 +1301,17 @@ Next steps before calling create:
       // the limit rather than being bounded by it.
       if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
         return `Error: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) reached — fetch_token cannot run. Start a new session or reduce request volume.`;
+      }
+      // Honour the per-API rate buckets too (http_request enforces these via
+      // checkRateLimit). Without this a fetch_token loop against a profiled token
+      // host bypasses the profile's own declared hourly/daily ceiling. Creds are
+      // already validated above, so consuming a token here maps 1:1 to the POST.
+      // checkRateLimit both checks AND consumes; a token host with no registered
+      // rate_limit has no buckets, so this is a no-op for such hosts.
+      const tokenHost = (() => { try { return new URL(oauth.token_url).hostname; } catch { return null; } })();
+      if (tokenHost) {
+        const rlBlock = apiStore?.checkRateLimit(tokenHost);
+        if (rlBlock) return `Error: ${rlBlock}`;
       }
       const params: Record<string, string> = {
         grant_type: grantType,
