@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
-import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileTool, writeFileTool, editFileTool } from './fs.js';
@@ -448,5 +448,83 @@ describe('editFileTool', () => {
       if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
       else process.env['LYNOX_DATA_DIR'] = prevDataDir;
     }
+  });
+});
+
+// CLI/headless (no active workspace): the documented policy is "ALL paths →
+// ~/.lynox/workspace/". A relative `..` used to be taken verbatim and escaped
+// that root (→ ~/.lynox/apis, config, DBs, or beyond) — an arbitrary-write
+// primitive. These pin that a `..` escape is refused while legitimate
+// workspace-relative and absolute-basename writes keep working.
+describe('non-isolation write confinement (CLI/headless)', () => {
+  let prevDataDir: string | undefined;
+  let root: string; // the LYNOX_DATA_DIR temp root
+  let ws: string;   // <root>/workspace
+
+  beforeEach(async () => {
+    root = realpathSync(await mkdtemp(join(tmpdir(), 'lynox-confine-')));
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = root;
+    clearTenantWorkspace(); // isWorkspaceActive() === false
+    ws = join(root, 'workspace');
+    mkdirSync(ws, { recursive: true });
+  });
+
+  afterEach(async () => {
+    if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('write_file refuses a relative `..` that escapes the workspace (no file written outside)', async () => {
+    await expect(
+      writeFileTool.handler({ path: '../apis/evil.json', content: '{"pwned":true}' }, makeAgent()),
+    ).rejects.toThrow(/escapes the workspace/i);
+    // The sibling ~/.lynox/apis dir must NOT have been created/written.
+    expect(existsSync(join(root, 'apis', 'evil.json'))).toBe(false);
+    expect(existsSync(join(root, 'apis'))).toBe(false);
+  });
+
+  it('write_file refuses a deep `..` escape beyond ~/.lynox', async () => {
+    await expect(
+      writeFileTool.handler({ path: '../../../../tmp/lynox-escape-test.txt', content: 'x' }, makeAgent()),
+    ).rejects.toThrow(/escapes the workspace/i);
+  });
+
+  it('write_file allows a legitimate workspace-relative nested path', async () => {
+    const res = await writeFileTool.handler({ path: 'sub/dir/ok.txt', content: 'fine' }, makeAgent());
+    expect(res).toContain('Written to');
+    expect(await readFile(join(ws, 'sub', 'dir', 'ok.txt'), 'utf-8')).toBe('fine');
+  });
+
+  it('write_file allows an in-bounds `..` that stays inside the workspace', async () => {
+    const res = await writeFileTool.handler({ path: 'a/../ok2.txt', content: 'still-in' }, makeAgent());
+    expect(res).toContain('Written to');
+    expect(await readFile(join(ws, 'ok2.txt'), 'utf-8')).toBe('still-in');
+    expect(existsSync(join(ws, 'a'))).toBe(false); // the `a/` segment collapsed away
+  });
+
+  it('write_file folds an ABSOLUTE path to its basename inside the workspace (unchanged behaviour)', async () => {
+    const res = await writeFileTool.handler({ path: '/etc/passwd', content: 'relocated' }, makeAgent());
+    expect(res).toContain('Written to');
+    // Landed at <workspace>/passwd, NOT the real /etc/passwd.
+    expect(await readFile(join(ws, 'passwd'), 'utf-8')).toBe('relocated');
+    expect(res).toContain(join(ws, 'passwd'));
+  });
+
+  it('edit_file refuses a relative `..` escape and leaves the outside file untouched', async () => {
+    // A pre-existing file OUTSIDE the workspace (sibling apis dir).
+    const outsideDir = join(root, 'apis');
+    mkdirSync(outsideDir, { recursive: true });
+    const outside = join(outsideDir, 'target.json');
+    writeFileSync(outside, '{"accepted":false}', 'utf-8');
+
+    await expect(
+      editFileTool.handler(
+        { path: '../apis/target.json', old_string: 'false', new_string: 'true' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/escapes the workspace/i);
+    expect(await readFile(outside, 'utf-8')).toBe('{"accepted":false}'); // unchanged
   });
 });

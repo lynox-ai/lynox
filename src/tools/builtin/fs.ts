@@ -1,7 +1,7 @@
 import { openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute, relative } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { isWorkspaceActive, validatePath } from '../../core/workspace.js';
+import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
@@ -38,6 +38,29 @@ interface EditFileInput {
   replace_all?: boolean | undefined;
 }
 
+/**
+ * Non-isolation (CLI/headless) confinement for a writable path. The documented
+ * policy is "ALL paths → ~/.lynox/workspace/": an ABSOLUTE path is reduced to
+ * its basename ("strip leading /"), and a relative path is workspace-relative.
+ * But a relative path was previously taken verbatim, so `../apis/x` resolved to
+ * ~/.lynox/apis/x and enough `../` escaped ~/.lynox entirely — an arbitrary
+ * write primitive (config, DBs, api profiles). Fold the path into the workspace
+ * root and reject anything that still escapes, using the SAME containment
+ * predicate `validatePath` enforces on the isolation path. Absolute paths are
+ * basenamed first, so the escape check only ever bites a relative `..`.
+ */
+function confineToWorkspace(rawPath: string): string {
+  const workspaceRoot = resolve(join(getLynoxDir(), 'workspace'));
+  const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
+  const resolved = resolve(workspaceRoot, name);
+  if (!isPathWithin(resolved, workspaceRoot)) {
+    throw new Error(
+      `Blocked: path '${rawPath}' escapes the workspace directory. Use a path inside the workspace.`,
+    );
+  }
+  return resolved;
+}
+
 /** Resolve + boundary-validate a writable path with the same rules as
  *  write_file: validatePath when workspace isolation is active, else
  *  workspace-relative + escape-symlink rejection. */
@@ -65,8 +88,7 @@ function resolveWritablePath(rawPath: string): string {
   if (relToArt !== '' && !relToArt.startsWith('..') && !isAbsolute(relToArt)) {
     return realAbs;
   }
-  const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
-  const resolved = resolve(join(getLynoxDir(), 'workspace'), name);
+  const resolved = confineToWorkspace(rawPath);
   if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
     const realTarget = realpathSync(resolved);
     const parentDir = realpathSync(dirname(resolved));
@@ -184,14 +206,15 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       // persistence) — e.g. content laundered in from an untrusted tool result.
       const writeCheck = checkWriteContent(input.content, input.path);
       if (!writeCheck.safe) throw new Error(writeCheck.warning);
-      // Without active workspace: ALL paths → ~/.lynox/workspace/ (strip leading /)
+      // Without active workspace: ALL paths → ~/.lynox/workspace/ (absolute →
+      // basename; relative → workspace-relative but confined — a `..` must NOT
+      // escape, see confineToWorkspace).
       // With active workspace: resolve normally (validatePath enforces boundaries)
       let resolved: string;
       if (isWorkspaceActive()) {
         resolved = resolve(input.path);
       } else {
-        const name = isAbsolute(input.path) ? basename(input.path) : input.path;
-        resolved = resolve(join(getLynoxDir(), 'workspace'), name);
+        resolved = confineToWorkspace(input.path);
       }
       let realPath: string;
       if (isWorkspaceActive()) {
