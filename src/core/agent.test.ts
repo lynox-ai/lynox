@@ -528,6 +528,101 @@ describe('Agent', () => {
     });
   });
 
+  // -- run-loop robustness (rollback clamp, per-tool timeout) --
+
+  describe('run-loop robustness', () => {
+    // `_truncateHistory` can REASSIGN `this.messages` to a SHORTER array
+    // mid-run (front-drop + placeholder when the window is full). The abort/error
+    // rollback then set `this.messages.length = snapshot(+1)` with `snapshot`
+    // captured BEFORE the run — larger than the now-shorter array — which EXTENDS
+    // it with `undefined` holes instead of truncating. Those holes brick the next
+    // turn (JSON.stringify → nulls / `.role` throws). Here we simulate the
+    // mid-run shrink directly (deterministic, no token-threshold dependency).
+    function seedMessages(agent: Agent, n: number): void {
+      const arr: unknown[] = [];
+      for (let i = 0; i < n; i++) arr.push({ role: 'user', content: `seed ${i}` });
+      (agent as unknown as { messages: unknown[] }).messages = arr;
+    }
+    function rawMessages(agent: Agent): unknown[] {
+      return (agent as unknown as { messages: unknown[] }).messages;
+    }
+    function hasSparseHoles(arr: unknown[]): boolean {
+      // A hole is an index that is NOT an own-enumerable key.
+      return Object.keys(arr).length !== arr.length || arr.some(m => m === undefined);
+    }
+
+    it('error rollback after a mid-run shrink does NOT pad the buffer with undefined holes', async () => {
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      seedMessages(agent, 600); // snapshot will be 600 (before the send push)
+      // On the first API call, shrink the history (as _truncateHistory would),
+      // then throw a NON-abort error → the error-rollback path runs.
+      mockProcess.mockImplementationOnce(async () => {
+        (agent as unknown as { messages: unknown[] }).messages =
+          rawMessages(agent).slice(-3); // now length 3, far below snapshot 600
+        throw Object.assign(new Error('provider down'), { status: 500, type: 'api_error' });
+      });
+
+      await expect(agent.send('do a thing')).rejects.toThrow('provider down');
+
+      const msgs = rawMessages(agent);
+      expect(hasSparseHoles(msgs)).toBe(false);       // pre-fix: 597 undefined holes
+      expect(msgs.length).toBeLessThanOrEqual(3);      // clamped to current, not extended to 600
+
+      // The buffer is valid for a subsequent turn (no 400 from undefined entries).
+      mockProcess.mockResolvedValueOnce(endTurnResponse('next turn ok'));
+      await expect(agent.send('again')).resolves.toBe('next turn ok');
+    });
+
+    it('abort rollback after a mid-run shrink keeps a dense buffer', async () => {
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      seedMessages(agent, 600);
+      mockProcess.mockImplementationOnce(async () => {
+        (agent as unknown as { messages: unknown[] }).messages = rawMessages(agent).slice(-2);
+        // Abort mid-run: send()'s catch sees signal.aborted → the abort-rollback path.
+        (agent as unknown as { abortController: AbortController }).abortController.abort();
+        throw new Error('aborted');
+      });
+
+      const result = await agent.send('start');
+      expect(result).toBe(''); // abort returns '' (keeps context for the next turn)
+      expect(hasSparseHoles(rawMessages(agent))).toBe(false);
+    });
+
+    it('a tool whose handler never resolves is bounded by the per-tool timeout, not hung', async () => {
+      vi.useFakeTimers();
+      try {
+        const hangTool = makeTool('hang_tool', () => new Promise<string>(() => { /* never resolves */ }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_hang', name: 'hang_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('recovered'));
+
+        const events: StreamEvent[] = [];
+        const agent = new Agent({
+          name: 'test',
+          model: 'claude-sonnet-4-6',
+          tools: [hangTool],
+          onStream: (e) => { events.push(e); },
+        });
+
+        const p = agent.send('use the hang tool');
+        // Advance past the 15-min per-tool cap: the timeout rejects the stuck
+        // handler → is_error tool_result → the loop continues to the next call.
+        await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
+        await expect(p).resolves.toBe('recovered');
+
+        expect(mockProcess).toHaveBeenCalledTimes(2); // loop resumed after the timeout
+        const timedOut = events.find(
+          (e): e is Extract<StreamEvent, { type: 'tool_result' }> =>
+            e.type === 'tool_result' && (e as { isError?: boolean }).isError === true,
+        );
+        expect(timedOut, 'a timed-out tool must surface an is_error tool_result').toBeDefined();
+        expect((timedOut as { result: string }).result).toContain('timed out');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   // -- _dispatchTools() via tool_use response --
 
   describe('_dispatchTools()', () => {

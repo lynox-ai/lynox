@@ -339,10 +339,11 @@ vi.mock('./run-history.js', () => ({
 }));
 
 import { Engine } from './engine.js';
-import { Session } from './session.js';
+import { Session, InternalRunBlockedError } from './session.js';
 import { Agent } from './agent.js';
 import { Memory } from './memory.js';
 import { channels } from './observability.js';
+import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -912,6 +913,67 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(loaded[0]!.role).toBe('user');
       expect(loaded[0]!.content).toContain('FAITHFUL, AUTHORITATIVE record');
       expect(loaded[0]!.content).toContain('Open task');
+    });
+
+    it('does NOT wipe the thread when the summary run is BLOCKED by a budget guard (compact-wipe regression)', async () => {
+      const { session } = await createEngineAndSession();
+      mockReset.mockClear();
+      mockLoadMessages.mockClear();
+      // Trip the persistent daily budget so the INTERNAL compaction summary run
+      // is blocked before it executes. Pre-fix, run() RETURNED "Daily spending
+      // cap …" as the summary; compact() then reset() the thread and injected
+      // that guard string as the AUTHORITATIVE record — a full-thread wipe.
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 1.50, run_count: 10 }] },
+        dailyCapUSD: 1.00,
+      });
+      try {
+        const result = await session.compact();
+        expect(result.success).toBe(false);
+        expect(result.summary).toBe('');
+        expect(mockReset).not.toHaveBeenCalled();        // thread NOT wiped
+        expect(mockLoadMessages).not.toHaveBeenCalled();  // guard string NOT injected as summary
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
+    it('run(): a budget-blocked INTERNAL run throws InternalRunBlockedError; a user run returns the block string', async () => {
+      const { session } = await createEngineAndSession();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 1.50, run_count: 10 }] },
+        dailyCapUSD: 1.00,
+      });
+      try {
+        // Internal run (compaction): must THROW so compact() can tell a guard
+        // block apart from a real summary and keep the history intact.
+        await expect(session.run('summarize', { noTools: true, internal: true }))
+          .rejects.toBeInstanceOf(InternalRunBlockedError);
+        // User-initiated run: unchanged contract — returns the human-readable
+        // block string (CLI + done.result inline render depend on it).
+        const userResult = await session.run('hello');
+        expect(userResult).toContain('Daily spending cap');
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
+    it('does NOT reset the thread when the summary run fails genuinely (provider error)', async () => {
+      const { session } = await createEngineAndSession();
+      mockReset.mockClear();
+      mockLoadMessages.mockClear();
+      // The internal summarization run hits a genuine provider error (NOT a guard
+      // block). Compaction must keep the history — reset() without a replacement
+      // summary would wipe the live thread's working context on a transient blip
+      // (_truncateHistory bounds context per API call, so nothing wedges).
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('provider 503'), { status: 503, type: 'api_error' }));
+      const result = await session.compact();
+      expect(result.success).toBe(false);
+      expect(result.summary).toBe('');
+      expect(mockReset).not.toHaveBeenCalled();        // thread NOT wiped on failure
+      expect(mockLoadMessages).not.toHaveBeenCalled();
     });
 
     it('recall_tool_result round-trips the evicted payload by id', async () => {

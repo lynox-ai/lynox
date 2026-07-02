@@ -95,6 +95,21 @@ const COMPACT_PREPARE_PERCENT = 80;
  *  far below it, so they are untouched). CP-tunable via `compaction_token_budget`. */
 const DEFAULT_COMPACTION_TOKEN_BUDGET = 150_000;
 
+/** Thrown by `run()` when an `internal: true` run (only compaction, today) is
+ *  stopped by a pre-run GUARD (persistent budget, a tenant/budget `onBeforeRun`
+ *  hook, or content policy) rather than genuinely executing. For a user run
+ *  those guards RETURN a human-readable block string as the result; for an
+ *  internal run that string is indistinguishable from a real answer, so
+ *  `compact()` would inject "Budget exceeded." as the AUTHORITATIVE summary and
+ *  wipe the thread (data corruption). Throwing lets `compact()` tell a block
+ *  apart from a real summary and keep the history intact. */
+export class InternalRunBlockedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'InternalRunBlockedError';
+  }
+}
+
 /** Per-run overrides — applied via agent setters, never mutate session state. */
 export interface RunOptions {
   effort?: EffortLevel | undefined;
@@ -450,7 +465,11 @@ export class Session {
     // Check persistent daily/monthly budget before running
     const budgetCheck = checkPersistentBudget();
     if (!budgetCheck.allowed) {
-      return budgetCheck.reason ?? 'Budget exceeded.';
+      const reason = budgetCheck.reason ?? 'Budget exceeded.';
+      // An internal (compaction) run must NOT return the block string — it would
+      // be injected as the thread's authoritative summary. Throw instead.
+      if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      return reason;
     }
 
     // Fire onBeforeRun hooks (e.g. tenant budget enforcement in Pro)
@@ -469,6 +488,12 @@ export class Session {
           await hook.onBeforeRun(preRunContext.runId, preRunContext);
         } catch (err: unknown) {
           const reason = err instanceof Error ? err.message : String(err);
+          // An internal (compaction) run blocked by a tenant/budget hook: do NOT
+          // emit a user-facing `run_blocked` warning (no user turn was blocked)
+          // and do NOT return the block string (compaction would inject it as an
+          // authoritative summary and wipe the thread). Throw so compact() keeps
+          // the history and simply retries next turn.
+          if (runOptions?.internal === true) throw new InternalRunBlockedError(`Run blocked: ${reason}`);
           // Surface the block as a `warning` SSE event so the web-UI shows a
           // distinct, localized banner/toast instead of letting the reason
           // string slip through as a `done.result` that the chat used to
@@ -489,7 +514,9 @@ export class Session {
       const { checkInput } = await import('./input-guard.js');
       const inputCheck = checkInput(task, this.agentOverrides.autonomy);
       if (inputCheck.action === 'block') {
-        return `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
+        const msg = `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
+        if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+        return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
         const answer = await this.agent.promptUser(
@@ -497,7 +524,9 @@ export class Session {
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+          if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          return msg;
         }
       }
     }
@@ -1087,7 +1116,23 @@ export class Session {
       // the open task and continuity broke (observed live 2026-06-03).
       summary = await this.run(prompt, { noTools: true, internal: true });
     } catch {
-      // Compaction prompt failed — reset anyway to free context
+      // The summary run was blocked by a pre-run guard (InternalRunBlockedError
+      // is THROWN so a guard's block string can't masquerade as a summary) OR it
+      // hit a genuine provider failure. Either way leave `summary` empty and let
+      // the guard below keep the thread intact.
+    }
+
+    // Nothing to compact into — a guard block, a provider failure, or an empty
+    // reply all land here with `summary === ''`. Do NOT proceed to reset(): a
+    // reset WITHOUT a replacement summary wipes the live thread (its whole
+    // working context — decisions, open tasks — gone). `_truncateHistory`
+    // already bounds context per API call, so a skipped compaction can't wedge
+    // the thread; keep the full history and let compaction retry next turn.
+    // (Before this guard the failed/blocked case reset anyway, discarding
+    // context on a transient blip — and a returned block string was even injected
+    // as the authoritative summary, corrupting the thread.)
+    if (!summary) {
+      return { success: false, summary: '' };
     }
 
     // Evict large tool results into the blob store BEFORE the reset, so the
