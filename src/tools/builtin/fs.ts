@@ -45,20 +45,42 @@ interface EditFileInput {
  * But a relative path was previously taken verbatim, so `../apis/x` resolved to
  * ~/.lynox/apis/x and enough `../` escaped ~/.lynox entirely — an arbitrary
  * write primitive (config, DBs, api profiles). Fold the path into the workspace
- * root and reject anything that still escapes, using the SAME containment
- * predicate `validatePath` enforces on the isolation path. Absolute paths are
- * basenamed first, so the escape check only ever bites a relative `..`.
+ * root and reject anything that still escapes.
+ *
+ * The containment check runs on the REAL path (symlinks resolved), mirroring
+ * `validatePath` (workspace.ts): resolve the path, or — when the leaf doesn't
+ * exist yet — realpath its closest existing ancestor and re-attach the tail.
+ * A purely-logical check would miss a symlinked INTERMEDIATE dir inside the
+ * workspace (`sub` → /outside): `sub/x` reads as in-workspace logically, but the
+ * write follows the symlink out. Absolute paths are basenamed first, so the
+ * escape check only ever bites a relative `..` or a symlinked component.
  */
 function confineToWorkspace(rawPath: string): string {
-  const workspaceRoot = resolve(join(getLynoxDir(), 'workspace'));
+  const workspaceRootRaw = resolve(join(getLynoxDir(), 'workspace'));
+  const workspaceRoot = existsSync(workspaceRootRaw) ? realpathSync(workspaceRootRaw) : workspaceRootRaw;
   const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
   const resolved = resolve(workspaceRoot, name);
-  if (!isPathWithin(resolved, workspaceRoot)) {
+  // Resolve symlinks BEFORE the containment check (parity with validatePath).
+  let real: string;
+  if (existsSync(resolved)) {
+    real = realpathSync(resolved);
+  } else if (existsSync(dirname(resolved))) {
+    real = join(realpathSync(dirname(resolved)), basename(resolved));
+  } else {
+    let ancestor = dirname(resolved);
+    let tail = basename(resolved);
+    while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) {
+      tail = join(basename(ancestor), tail);
+      ancestor = dirname(ancestor);
+    }
+    real = existsSync(ancestor) ? join(realpathSync(ancestor), tail) : resolved;
+  }
+  if (!isPathWithin(real, workspaceRoot)) {
     throw new Error(
       `Blocked: path '${rawPath}' escapes the workspace directory. Use a path inside the workspace.`,
     );
   }
-  return resolved;
+  return real;
 }
 
 /** Resolve + boundary-validate a writable path with the same rules as

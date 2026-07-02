@@ -527,4 +527,32 @@ describe('non-isolation write confinement (CLI/headless)', () => {
     ).rejects.toThrow(/escapes the workspace/i);
     expect(await readFile(outside, 'utf-8')).toBe('{"accepted":false}'); // unchanged
   });
+
+  it('write_file refuses a write through a symlinked INTERMEDIATE dir that escapes the workspace', async () => {
+    // ws/sub → an out-of-workspace dir. `sub/pwned.txt` reads as in-workspace
+    // logically, but the real write would follow the symlink out. The check
+    // must resolve symlinks first (parity with validatePath).
+    const target = join(root, 'symlink-target');
+    mkdirSync(target, { recursive: true });
+    await symlink(target, join(ws, 'sub')); // ws/sub → <root>/symlink-target
+    await expect(
+      writeFileTool.handler({ path: 'sub/pwned.txt', content: 'via-symlink' }, makeAgent()),
+    ).rejects.toThrow(/escapes the workspace/i);
+    expect(existsSync(join(target, 'pwned.txt'))).toBe(false); // nothing written outside
+  });
+
+  it('edit_file refuses an edit through a symlinked INTERMEDIATE dir (existing leaf) that escapes', async () => {
+    const target = join(root, 'symlink-target-2');
+    mkdirSync(target, { recursive: true });
+    const leaf = join(target, 'secret.txt');
+    writeFileSync(leaf, 'SENSITIVE', 'utf-8');
+    await symlink(target, join(ws, 'sub2')); // ws/sub2 → <root>/symlink-target-2
+    await expect(
+      editFileTool.handler(
+        { path: 'sub2/secret.txt', old_string: 'SENSITIVE', new_string: 'PWNED' },
+        makeAgent(),
+      ),
+    ).rejects.toThrow(/escapes the workspace/i);
+    expect(await readFile(leaf, 'utf-8')).toBe('SENSITIVE'); // untouched
+  });
 });
