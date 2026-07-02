@@ -1252,7 +1252,7 @@ Next steps before calling create:
       // Wave 5d runtime egress gate. fetch_token POSTs the vault client_secret
       // to token_url. The save-time allowlist gate covers profiles created via
       // this tool, but a profile can re-enter the store WITHOUT passing it —
-      // loadFromDirectory at boot, migration-import, or a hand-dropped JSON — so
+      // loadFromDirectory at boot, or a JSON written into the apis dir — so
       // re-verify here fail-closed: a non-allowlisted token_url is refused unless
       // the profile carries a persisted acceptance covering that exact host.
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.

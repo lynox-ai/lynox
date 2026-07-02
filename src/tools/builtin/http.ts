@@ -525,7 +525,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           // Wave 5d runtime egress gate (base_url parity with fetch_token). The
           // engine force-attaches the managed access_token below, so a profile
           // that entered the store WITHOUT passing the save-time allowlist gate
-          // (loadFromDirectory at boot, migration-import, hand-dropped JSON)
+          // (loadFromDirectory at boot, or a JSON written into the apis dir)
           // could hand the vault token to a non-vetted host. Fail-closed: refuse
           // the attach unless the target host is allowlisted OR the profile
           // carries a persisted acceptance covering it.

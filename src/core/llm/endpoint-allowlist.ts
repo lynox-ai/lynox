@@ -102,16 +102,25 @@ export function isAllowlistedEndpoint(url: string): boolean {
  *
  * The save-time gate (`api_setup` create/update) captures acceptance via the
  * transient `confirm_custom_endpoint` tool input, but that signal is consumed
- * at save and is NOT otherwise durable. Profiles can re-enter the store WITHOUT
- * passing that gate — `ApiStore.loadFromDirectory` at boot, migration-import,
- * or a hand-dropped JSON — at which point nothing distinguishes "user accepted
- * this endpoint" from "this endpoint was smuggled in". Persisting acceptance
- * onto the profile lets the runtime egress paths (`fetch_token`, `http_request`
- * OAuth2 attach) re-verify it fail-closed without re-prompting a legit user.
+ * at save and is NOT otherwise durable. A profile can re-enter the store WITHOUT
+ * passing that gate — `ApiStore.loadFromDirectory` at boot, or a JSON written
+ * into the apis dir — at which point nothing distinguishes "user accepted this
+ * endpoint" from "this endpoint was never accepted". Persisting acceptance onto
+ * the profile lets the runtime egress paths (`fetch_token`, `http_request`
+ * OAuth2 attach) refuse fail-closed on an un-accepted profile without
+ * re-prompting a legit user.
  *
  * `hosts` is bound to the SPECIFIC accepted hostnames (not a blanket boolean),
  * so swapping a profile's `token_url`/`base_url` to a DIFFERENT non-allowlisted
  * host after acceptance does not inherit the old ack — the swap re-gates.
+ *
+ * Trust boundary: the ack is trusted as loaded from disk. It closes the
+ * un-accepted-profile re-entry case; it does NOT defend against an adversary who
+ * can already WRITE the apis dir — such a writer could forge a matching ack.
+ * That write boundary is the filesystem: workspace isolation keeps the agent out
+ * of the apis dir, and self-hosted single-user mode relies on OS permissions.
+ * (Migration transfer does NOT carry api profiles — only whitelisted DBs +
+ * config + artifacts + vault — so it is not a re-entry vector here.)
  */
 export interface CustomEndpointAck {
   /** Always `true` when present; absence means "no acceptance recorded". */
