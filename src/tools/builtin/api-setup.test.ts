@@ -18,6 +18,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { apiSetupTool, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
+import { MAX_REQUESTS_PER_SESSION } from './http.js';
 import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
 import * as llmHelper from '../../core/llm-helper.js';
@@ -268,6 +269,70 @@ describe('api_setup tool', () => {
       }, agent);
       expect(result).toContain('Invalid base_url');
       expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+    });
+
+    it('allowlisted base_url but non-allowlisted OAuth token_url + no confirm → REQUIRES_USER_CONFIRMATION disclosing the token host', async () => {
+      // fetch_token POSTs the vault client_secret to token_url, so token_url is
+      // an egress host and must clear the same allowlist as base_url — an
+      // allowlisted base_url must not smuggle an arbitrary token_url past it.
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const oauthProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'oauth-split-host',
+        base_url: 'https://api.openai.com/v1', // allowlisted
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['OAUTH_SPLIT_CLIENT_ID', 'OAUTH_SPLIT_CLIENT_SECRET'],
+          oauth: { token_url: 'https://token-thief.example.com/oauth/token' }, // NOT allowlisted
+        },
+      };
+      const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
+      expect(result).toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).toContain('token-thief.example.com'); // disclosure names the offending egress host
+      expect(store.get('oauth-split-host')).toBeUndefined(); // not persisted on the gated path
+    });
+
+    it('allowlisted base_url + non-allowlisted token_url + confirm_custom_endpoint=true → proceeds', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const oauthProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'oauth-split-confirmed',
+        base_url: 'https://api.openai.com/v1',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['OAUTH_C_CLIENT_ID', 'OAUTH_C_CLIENT_SECRET'],
+          oauth: { token_url: 'https://token-thief.example.com/oauth/token' },
+        },
+      };
+      const result = await apiSetupTool.handler({
+        action: 'create',
+        profile: oauthProfile,
+        confirm_custom_endpoint: true,
+      }, agent);
+      expect(result).toContain('Created API profile');
+      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(store.get('oauth-split-confirmed')).toBeDefined();
+    });
+
+    it('allowlisted base_url + allowlisted token_url → proceeds without confirmation (no over-gating)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const oauthProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'oauth-both-allowlisted',
+        base_url: 'https://api.openai.com/v1',
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['OAUTH_OK_CLIENT_ID', 'OAUTH_OK_CLIENT_SECRET'],
+          oauth: { token_url: 'https://api.openai.com/oauth/token' }, // allowlisted host
+        },
+      };
+      const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
+      expect(result).toContain('Created API profile');
+      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(store.get('oauth-both-allowlisted')).toBeDefined();
     });
   });
 
@@ -1679,6 +1744,24 @@ describe('api_setup tool', () => {
       expect(result).toMatch(/missing the OAuth credentials/i);
       expect(result).toContain('SHOPIFY_CLIENT_ID');
       expect(result).toContain('SHOPIFY_CLIENT_SECRET');
+    });
+
+    it('refuses fetch_token once the per-session HTTP ceiling is reached (no outbound POST)', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Simulate a session that has already spent its HTTP budget.
+      (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/session HTTP request limit/i);
+      expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
     });
 
     it('does the token exchange and stores the access_token in the vault', async () => {

@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
-import { fetchWithValidatedRedirects, readBodyLimited } from './http.js';
+import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
@@ -1100,11 +1100,21 @@ Next steps before calling create:
 
       // Wave 5d BYOK liability gate: a profile pointed at a host outside
       // lynox's vetted sub-processor list cannot be saved without explicit
-      // user acceptance. validateProfile() has already verified base_url
-      // parses as a URL, so isAllowlistedEndpoint() will only return false
-      // here for genuinely non-allowlisted hosts (not malformed input).
-      if (!isAllowlistedEndpoint(profile.base_url) && input.confirm_custom_endpoint !== true) {
-        const disclosure = describeDisclosure(profile.base_url);
+      // user acceptance. This must cover EVERY host the profile can drive a
+      // credentialed request to — not just base_url (http_request) but also the
+      // OAuth token_url, because fetch_token POSTs the vault client_secret
+      // there. Gating base_url alone let a profile pair an allowlisted base_url
+      // with an arbitrary token_url and egress the client_secret past the
+      // allowlist. validateProfile() has already verified base_url and (for
+      // oauth2 profiles) token_url parse as URLs, so isAllowlistedEndpoint()
+      // returns false here only for genuinely non-allowlisted hosts.
+      const egressUrls: string[] = [profile.base_url];
+      if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
+        egressUrls.push(profile.auth.oauth.token_url);
+      }
+      const nonAllowlisted = egressUrls.find((u) => !isAllowlistedEndpoint(u));
+      if (nonAllowlisted !== undefined && input.confirm_custom_endpoint !== true) {
+        const disclosure = describeDisclosure(nonAllowlisted);
         return JSON.stringify({
           status: 'REQUIRES_USER_CONFIRMATION',
           disclosure,
@@ -1240,6 +1250,13 @@ Next steps before calling create:
       }
       if (missing.length > 0) {
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${n}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+      }
+      // fetch_token drives a real outbound POST; honour the same per-session HTTP
+      // ceiling http_request enforces. It already increments httpRequests after a
+      // successful fetch (below), so without this pre-check it could charge past
+      // the limit rather than being bounded by it.
+      if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
+        return `Error: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) reached — fetch_token cannot run. Start a new session or reduce request volume.`;
       }
       const params: Record<string, string> = {
         grant_type: grantType,
