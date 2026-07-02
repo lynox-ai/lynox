@@ -231,4 +231,27 @@ describe('EntityResolver', () => {
       expect(typeof record.lastSeenAt).toBe('string');
     });
   });
+
+  // ── merge() ─────────────────────────────────────────────────
+
+  describe('merge', () => {
+    it('preserves the source entity mentions and relations under the target instead of deleting them', async () => {
+      const source = db.createEntity({ canonicalName: 'Acme Inc', entityType: 'organization', scopeType: 'context', scopeId: 'proj1' });
+      const target = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'context', scopeId: 'proj1' });
+      const bob = db.createEntity({ canonicalName: 'Bob', entityType: 'person', scopeType: 'context', scopeId: 'proj1' });
+      const mem = db.createMemory({ text: 'Acme Inc hired Bob', namespace: 'knowledge', scopeType: 'context', scopeId: 'proj1', embedding: [1, 0, 0] });
+      db.createMention(mem, source);
+      db.createRelation(source, bob, 'employs', 'Acme employs Bob', '');
+
+      await resolver.merge(source, target);
+
+      // Source is gone, but its mention + relation now hang off the target — a
+      // pre-fix merge() deleted them along with the source entity (data loss).
+      expect(db.getEntity(source)).toBeNull();
+      expect(db.getMemoriesMentioningEntity(target).map(m => m.id)).toContain(mem);
+      const rels = db.getEntityRelations(target);
+      expect(rels).toHaveLength(1);
+      expect(rels[0]!.relation_type).toBe('employs');
+    });
+  });
 });

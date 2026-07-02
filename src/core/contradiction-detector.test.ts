@@ -118,4 +118,19 @@ describe('detectContradictions', () => {
     );
     expect(result).toHaveLength(1);
   });
+
+  it('scopes the similarity query by scope ID so a memory cannot supersede across projects', async () => {
+    const db = createMockDb([]);
+    await detectContradictions(
+      'PostgreSQL is required', 'knowledge', { type: 'context', id: 'acme' }, db, mockProvider,
+    );
+    // Without scopeIds a `context:acme` memory could supersede a contradicting
+    // `context:beta` memory of the same type (cross-project data leak).
+    expect(db.findSimilarMemories).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Number),
+      expect.any(Number),
+      expect.objectContaining({ scopeIds: ['acme'] }),
+    );
+  });
 });

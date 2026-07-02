@@ -435,4 +435,42 @@ describe('runMemoryGc', () => {
     expect(history.getEmbeddingsByScope).toHaveBeenCalledTimes(1);
     expect(history.getEmbeddingsByScope).toHaveBeenCalledWith('context', 'proj-1');
   });
+
+  it('removes EVERY stale line in a scope, not just one (sequential deleteScoped, no clobber)', async () => {
+    // deleteScoped is a real read-modify-write on the shared scope file. A
+    // concurrent Promise.all would have all three calls read the SAME pre-write
+    // snapshot and the last write win, so only one removal would survive. GC must
+    // remove them sequentially so every stale line goes.
+    const key = 'context:proj-1:knowledge';
+    const data = new Map<string, string>([[key, 'fact alpha value\nfact bravo value\nfact charlie value']]);
+    const mem = createMockMemory(data);
+    mem.deleteScoped = vi.fn().mockImplementation(
+      async (ns: MemoryNamespace, pattern: string, sc: MemoryScopeRef, opts?: { exact?: boolean }) => {
+        const k = `${sc.type}:${sc.id}:${ns}`;
+        const before = data.get(k) ?? '';
+        await Promise.resolve(); // yield → a concurrent caller would read the same `before`
+        const lines = before.split('\n');
+        const kept = opts?.exact ? lines.filter(l => l !== pattern) : lines.filter(l => !l.includes(pattern));
+        data.set(k, kept.join('\n'));
+        return lines.length - kept.length;
+      },
+    );
+    // Three DISTINCT stale lines; orthogonal embeddings so the dedup pass leaves
+    // them and the PRUNE pass marks all three.
+    const hist = createMockHistory();
+    (hist.getStaleEmbeddings as ReturnType<typeof vi.fn>).mockReturnValue([
+      { id: 'e1', text: 'fact alpha value', namespace: 'knowledge', created_at: '2025-01-01', last_retrieved_at: null },
+      { id: 'e2', text: 'fact bravo value', namespace: 'knowledge', created_at: '2025-01-01', last_retrieved_at: null },
+      { id: 'e3', text: 'fact charlie value', namespace: 'knowledge', created_at: '2025-01-01', last_retrieved_at: null },
+    ]);
+    provider.embed = vi.fn()
+      .mockResolvedValueOnce([1, 0, 0, 0])
+      .mockResolvedValueOnce([0, 1, 0, 0])
+      .mockResolvedValueOnce([0, 0, 1, 0]);
+
+    const result = await runMemoryGc(mem, [projectScope], provider, hist);
+
+    expect(result.pruned).toBe(3);
+    expect(data.get(key)).toBe(''); // pre-fix (Promise.all) leaves 2 of 3 lines behind
+  });
 });
