@@ -31,7 +31,7 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
-import { getLynoxDir, setDataDir } from '../core/config.js';
+import { getLynoxDir, setDataDir, loadConfig } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { RunHistory } from '../core/run-history.js';
 import { getAllTasks } from '../core/run-history-persistence.js';
@@ -85,7 +85,10 @@ function main(): void {
   }
 
   const engineDb = new EngineDb(join(dir, 'engine.db'));
-  const applied = new VerbGraphBackfill(engineDb, historyDb).run();
+  // S4a: resolve each task's assignee → subject only when the tenant is flag-ON
+  // (a flag-OFF backfill mints no subjects, keeping engine.db subject-free).
+  const resolveAssignee = loadConfig().subject_graph_enabled === true;
+  const applied = new VerbGraphBackfill(engineDb, historyDb).run({ resolveAssignee });
 
   const edb = engineDb.getDb();
   const post = {

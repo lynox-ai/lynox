@@ -206,9 +206,9 @@ describe('taskRecordToRow (legacy → engine.db mapping)', () => {
     expect(row.completedAt).toBe('2026-08-02');
   });
 
-  it('drops the free-text assignee (no engine.db string column)', () => {
-    const row = taskRecordToRow(rec({ assignee: 'someone' }));
-    expect('assignee' in row).toBe(false);
+  it('carries the free-text assignee (S4a: resolved by upsert when managed)', () => {
+    expect(taskRecordToRow(rec({ assignee: 'someone' })).assignee).toBe('someone');
+    expect(taskRecordToRow(rec({ assignee: null })).assignee).toBeNull();
   });
 
   it('absent optionals map to null (tags/due_date/parent/completed)', () => {
@@ -217,5 +217,146 @@ describe('taskRecordToRow (legacy → engine.db mapping)', () => {
     expect(row.dueDate).toBeNull();
     expect(row.parentTaskId).toBeNull();
     expect(row.completedAt).toBeNull();
+  });
+});
+
+/**
+ * S4a — the task read-cutover + assignee↔subject resolution. Verifies the write-side
+ * (`manageAssignee`) resolution, the reverse `taskDbRowToRecord` synthesis, and that
+ * the record-returning query methods match the legacy `persistence.*` semantics.
+ */
+describe('TaskStore S4a — assignee↔subject resolution + record reads', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+
+  function make(): { store: TaskStore; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-tsk4-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    return { store: new TaskStore(engine), engine };
+  }
+
+  function row(over: Partial<TaskRow> = {}): TaskRow {
+    return {
+      id: 't1', title: 'Task', description: '', status: 'open', priority: 'medium',
+      scopeType: 'project', scopeId: 'p1', dueDate: '2026-07-10', ...over,
+    };
+  }
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it("manageAssignee resolves 'user' → the reserved self-person; read synthesizes 'user' back", () => {
+    const { store, engine } = make();
+    store.upsert(row({ id: 't1', assignee: 'user' }), undefined, { manageAssignee: true });
+    const selves = engine.getDb().prepare(
+      "SELECT id, name FROM subjects WHERE is_self = 1 AND kind = 'person'",
+    ).all() as Array<{ id: string; name: string }>;
+    expect(selves).toHaveLength(1);
+    expect(store.getRecord('t1')?.assignee).toBe('user');
+  });
+
+  it('manageAssignee resolves a named assignee → a person subject; read synthesizes the name', () => {
+    const { store, engine } = make();
+    store.upsert(row({ id: 't1', assignee: 'Sarah' }), undefined, { manageAssignee: true });
+    const people = engine.getDb().prepare(
+      "SELECT name FROM subjects WHERE kind = 'person' AND is_self = 0",
+    ).all() as Array<{ name: string }>;
+    expect(people.map(p => p.name)).toEqual(['Sarah']);
+    expect(store.getRecord('t1')?.assignee).toBe('Sarah');
+  });
+
+  it('the self-person is a singleton across many user-assigned tasks', () => {
+    const { store, engine } = make();
+    for (const id of ['a', 'b', 'c']) store.upsert(row({ id, assignee: 'user' }), undefined, { manageAssignee: true });
+    const n = engine.getDb().prepare("SELECT COUNT(*) n FROM subjects WHERE is_self = 1").get() as { n: number };
+    expect(n.n).toBe(1);
+  });
+
+  it('two tasks for the same named person dedupe to one subject', () => {
+    const { store, engine } = make();
+    store.upsert(row({ id: 'a', assignee: 'Bob' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'b', assignee: 'Bob' }), undefined, { manageAssignee: true });
+    const n = engine.getDb().prepare("SELECT COUNT(*) n FROM subjects WHERE kind='person' AND is_self=0").get() as { n: number };
+    expect(n.n).toBe(1);
+  });
+
+  it('flag-OFF upsert (no manageAssignee) mints no subject + leaves assignee_subject_id NULL', () => {
+    const { store, engine } = make();
+    store.upsert(row({ id: 't1', assignee: 'user' }));
+    const subjects = engine.getDb().prepare('SELECT COUNT(*) n FROM subjects').get() as { n: number };
+    expect(subjects.n).toBe(0);
+    const raw = engine.getDb().prepare("SELECT assignee_subject_id FROM tasks WHERE id='t1'").get() as { assignee_subject_id: string | null };
+    expect(raw.assignee_subject_id).toBeNull();
+    expect(store.getRecord('t1')?.assignee).toBeNull();
+  });
+
+  it('clearing an assignee (managed) propagates: re-upsert with null nulls the FK', () => {
+    const { store, engine } = make();
+    store.upsert(row({ id: 't1', assignee: 'Sarah' }), undefined, { manageAssignee: true });
+    expect(store.getRecord('t1')?.assignee).toBe('Sarah');
+    store.upsert(row({ id: 't1', assignee: null }), undefined, { manageAssignee: true });
+    const raw = engine.getDb().prepare("SELECT assignee_subject_id FROM tasks WHERE id='t1'").get() as { assignee_subject_id: string | null };
+    expect(raw.assignee_subject_id).toBeNull();
+    expect(store.getRecord('t1')?.assignee).toBeNull();
+  });
+
+  it('a flag-OFF re-upsert PRESERVES a previously-resolved assignee link (no clobber)', () => {
+    const { store, engine } = make();
+    store.upsert(row({ id: 't1', assignee: 'Sarah', status: 'open' }), undefined, { manageAssignee: true });
+    const resolvedId = (engine.getDb().prepare("SELECT assignee_subject_id sid FROM tasks WHERE id='t1'").get() as { sid: string }).sid;
+    expect(resolvedId).not.toBeNull();
+    // A later write with the flag OFF (manageAssignee absent) must NOT wipe the link.
+    store.upsert(row({ id: 't1', assignee: 'Sarah', status: 'in_progress' }));
+    const after = engine.getDb().prepare("SELECT assignee_subject_id sid, status FROM tasks WHERE id='t1'").get() as { sid: string; status: string };
+    expect(after.sid).toBe(resolvedId);
+    expect(after.status).toBe('in_progress');
+  });
+
+  it('listRecords assignee filter resolves the name → only that person\'s tasks', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'a', assignee: 'Sarah' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'b', assignee: 'Bob' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'c', assignee: 'user' }), undefined, { manageAssignee: true });
+    expect(store.listRecords({ assignee: 'Sarah' }).map(t => t.id)).toEqual(['a']);
+    expect(store.listRecords({ assignee: 'user' }).map(t => t.id)).toEqual(['c']);
+  });
+
+  it('listRecords assignee filter for a non-existent assignee → no rows (legacy string-miss)', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'a', assignee: 'Sarah' }), undefined, { manageAssignee: true });
+    expect(store.listRecords({ assignee: 'Nobody' })).toEqual([]);
+    expect(store.listRecords({ assignee: 'user' })).toEqual([]); // self-person never seeded
+  });
+
+  it('listRecords orders by priority then due_date NULLS LAST then created_at DESC', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'lo', priority: 'low', dueDate: '2026-07-01' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'urg', priority: 'urgent', dueDate: '2026-07-20' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'hi', priority: 'high', dueDate: null }), undefined, { manageAssignee: true });
+    expect(store.listRecords().map(t => t.id)).toEqual(['urg', 'hi', 'lo']);
+  });
+
+  it('dueInRange excludes completed + honors the window; overdue is < today, not completed', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'in', dueDate: '2026-07-15', status: 'open' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'out', dueDate: '2026-09-01', status: 'open' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'done', dueDate: '2026-07-16', status: 'completed' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'past', dueDate: '2000-01-01', status: 'open' }), undefined, { manageAssignee: true });
+    expect(store.dueInRange('2026-07-01', '2026-07-31').map(t => t.id)).toEqual(['in']);
+    expect(store.overdue().map(t => t.id)).toEqual(['past']);
+  });
+
+  it('getRecord matches by exact id or prefix, honoring a scope filter', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'task-abc', scopeType: 'project', scopeId: 'p1' }), undefined, { manageAssignee: true });
+    expect(store.getRecord('task-abc')?.id).toBe('task-abc');
+    expect(store.getRecord('task-')?.id).toBe('task-abc'); // prefix
+    expect(store.getRecord('task-abc', { scopeFilter: [{ type: 'project', id: 'other' }] })).toBeUndefined();
   });
 });

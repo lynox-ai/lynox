@@ -865,7 +865,9 @@ export class Engine {
       // constructing the stores must not break engine boot. On failure the stores
       // stay inert (setVerbGraph never reassigns _workflowStore, so it stays null).
       try {
-        this.runHistory.setVerbGraph(this.engineDb);
+        // S4a: pass the subject-graph flag so the task read-cutover + the mirror's
+        // assignee→subject resolution activate only when the tenant is flag-ON.
+        this.runHistory.setVerbGraph(this.engineDb, this.userConfig.subject_graph_enabled === true);
       } catch (err) {
         process.stderr.write(`[lynox] verb-graph wiring failed: ${err instanceof Error ? err.message : String(err)} — verb stores inert\n`);
       }

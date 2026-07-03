@@ -64,7 +64,7 @@ const MIGRATIONS: string[] = [
      kind          TEXT NOT NULL,              -- person|organization|engagement|product|service|other
      name          TEXT NOT NULL,
      aliases       TEXT NOT NULL DEFAULT '[]', -- JSON array
-     is_self       INTEGER NOT NULL DEFAULT 0, -- 1 = one of the operator's OWN firms (MULTIPLE allowed)
+     is_self       INTEGER NOT NULL DEFAULT 0, -- 1 = the operator's OWN side: an OWN firm (organization, MULTIPLE allowed) OR the operator themselves (the reserved self-PERSON, singleton — S4a task assignee='user')
      parent_id     TEXT REFERENCES subjects(id) ON DELETE SET NULL,
      status        TEXT,
      owner_user_id TEXT NOT NULL DEFAULT 'system',

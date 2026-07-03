@@ -24,6 +24,12 @@ import { getAllTasks } from './run-history-persistence.js';
  * DIRECTLY via its own store, NOT through the `RunHistory._verbMirror` swallow-
  * wrapper, so a backfill failure surfaces (the CLI aborts) rather than degrading.
  *
+ * S4a cutover: {@link run} takes `resolveAssignee` — when set (a flag-ON tenant),
+ * every backfilled task's legacy `assignee` is resolved to `assignee_subject_id`
+ * (lazily minting the reserved self-person for 'user'), so EXISTING engine.db task
+ * rows (dual-written with a NULL assignee link before S4a) read back their assignee
+ * correctly the moment reads cut over. Left OFF, the backfill mints no subjects.
+ *
  * Two-pass parent re-link (`parent_task_id` → tasks): pass-1 upserts every row (a
  * child ordered before its parent gets its link NULLed by the FK-guard); pass-2
  * re-upserts every row now that ALL exist, so every legacy parent resolves at any
@@ -53,20 +59,21 @@ export class VerbGraphBackfill {
     this.tasks = new TaskStore(engineDb);
   }
 
-  run(): VerbBackfillCounts {
+  run(opts?: { resolveAssignee?: boolean | undefined }): VerbBackfillCounts {
     const counts: VerbBackfillCounts = { tasks: 0, taskParentLinks: 0 };
     const db = this.engineDb.getDb();
+    const upsertOpts = { manageAssignee: opts?.resolveAssignee === true };
 
     db.transaction(() => {
       const taskRows = getAllTasks(this.historyDb);
       // pass-1 (parent_task_id may NULL for a child ordered before its parent).
       for (const rec of taskRows) {
-        this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at });
+        this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at }, upsertOpts);
         counts.tasks++;
       }
       // pass-2: re-upsert so every existing legacy parent re-links.
       for (const rec of taskRows) {
-        this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at });
+        this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at }, upsertOpts);
       }
     })();
 

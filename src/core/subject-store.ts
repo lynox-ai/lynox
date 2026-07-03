@@ -118,6 +118,26 @@ export interface OrganizationDetail {
 
 const DEFAULT_OWNER = 'system';
 
+/**
+ * Display name of the reserved self-person subject (the operator themselves).
+ * The self-IDENTITY is the `is_self` flag on a `kind='person'` row — NOT this name
+ * — so the reverse read (`taskDbRowToRecord`) maps any `is_self` assignee back to
+ * the legacy sentinel `'user'` regardless of what this reads. The name only ever
+ * shows in a subject listing; it is deliberately generic. See {@link SubjectStore.findSelfPerson}.
+ */
+export const SELF_PERSON_NAME = 'Me';
+
+/**
+ * Reserved owner scope for the singleton self-person, DISTINCT from {@link DEFAULT_OWNER}.
+ * The canonical-dedup index keys on `(LOWER(name), kind, owner_user_id)` and ignores
+ * `is_self`, so a self-person sharing an owner with the user's people would (a) collide
+ * on the UNIQUE index against a same-named person and (b) let a named assignee merge into
+ * the operator. Isolating the self node in its own owner scope structurally prevents both:
+ * a person the user names 'Me' (DEFAULT_OWNER) and the operator-self (`SELF_OWNER`) are
+ * separate rows, and a task assigned to that named 'Me' reads back as its name, not 'user'.
+ */
+const SELF_OWNER = '__self__';
+
 export class SubjectStore {
   private readonly db: Database.Database;
 
@@ -220,6 +240,74 @@ export class SubjectStore {
       if (list.some(a => a.toLowerCase() === lower)) return r;
     }
     return null;
+  }
+
+  // ── Self-person + assignee resolution (S4a task-cutover) ──────
+
+  /**
+   * The operator's reserved self-person subject (`is_self=1`, `kind='person'`), in
+   * the {@link SELF_OWNER} scope. The person-level analog of an `is_self` FIRM: both
+   * flag "the operator's OWN side of the graph" vs an external counterparty. A global
+   * singleton — {@link findOrCreateSelfPerson} enforces it. Oldest-first so a
+   * duplicate (never expected) resolves deterministically.
+   */
+  findSelfPerson(): SubjectRow | null {
+    return this.db.prepare(`
+      SELECT * FROM subjects
+      WHERE is_self = 1 AND kind = 'person' AND owner_user_id = ? AND archived_at IS NULL
+      ORDER BY created_at ASC LIMIT 1
+    `).get(SELF_OWNER) as SubjectRow | undefined ?? null;
+  }
+
+  /**
+   * Find-or-seed the reserved self-person (idempotent singleton, {@link SELF_OWNER}
+   * scope). Created via {@link createSubject} — NOT {@link findOrCreate} — and in its
+   * OWN owner scope, so the seed can neither collide on the canonical UNIQUE index
+   * nor merge into a same-named user person (self-identity is the flag + the reserved
+   * scope, not the name). This lazy seed IS the S4a self-subject bootstrap — the first
+   * 'user'-assigned task (live write or backfill) mints it, and nothing mints it
+   * otherwise (anti-manie: no self-person until a task needs one).
+   */
+  findOrCreateSelfPerson(): string {
+    const existing = this.findSelfPerson();
+    if (existing) return existing.id;
+    return this.createSubject({ kind: 'person', name: SELF_PERSON_NAME, isSelf: true, ownerUserId: SELF_OWNER });
+  }
+
+  /**
+   * WRITE-path resolution of a task's free-text `assignee` to an `assignee_subject_id`:
+   *   null/'' → null · 'user' → the reserved self-person · else → a person subject
+   *   (canonical-deduped via {@link findOrCreate}).
+   * ('lynox' never reaches here — an assignee='lynox' row is a TRIGGER, not a task,
+   * split off at `task-manager.ts` `willBeTrigger`.) MAY create subjects (self-person
+   * / a named person) — the caller gates this on `subject_graph_enabled` so a flag-OFF
+   * engine.db stays subject-free.
+   */
+  resolveAssigneeToSubjectId(assignee: string | null | undefined, ownerUserId = DEFAULT_OWNER): string | null {
+    const a = assignee?.trim();
+    if (!a) return null;
+    if (a === 'user') return this.findOrCreateSelfPerson();
+    return this.findOrCreate({ kind: 'person', name: a, ownerUserId }).id;
+  }
+
+  /**
+   * READ-FILTER resolution of an assignee value to a subject id WITHOUT creating
+   * (a read must never write): 'user' → the existing self-person (null if unseeded),
+   * else → the canonical/alias person match (null if none). A null result means the
+   * caller returns NO rows — faithful to the legacy string-exact filter, which also
+   * matched nothing for an assignee no task carries.
+   *
+   * DELIBERATE divergence from the legacy string-exact filter: because names dedupe to
+   * ONE subject case-/alias-insensitively on write, a filter on any surface form of a
+   * person (`'Bob'`/`'bob'`/an alias) resolves to that one subject and returns ALL of
+   * their tasks — identity-based, not string-literal. This is the intended, more
+   * correct behaviour (they are the same person); it never crosses the scope filter.
+   */
+  resolveAssigneeFilter(assignee: string, ownerUserId = DEFAULT_OWNER): string | null {
+    const a = assignee.trim();
+    if (!a) return null;
+    if (a === 'user') return this.findSelfPerson()?.id ?? null;
+    return (this.findCanonical(a, 'person', ownerUserId) ?? this.findByAlias(a, 'person', ownerUserId))?.id ?? null;
   }
 
   // ── Reads ─────────────────────────────────────────────────────

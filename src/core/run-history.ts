@@ -1082,16 +1082,26 @@ export class RunHistory {
    * authority for workflow-DEFINITION + TRIGGER reads AND writes — no legacy
    * history.db path (it is dropped in mig v44). `_taskStore` is still an ADDITIVE
    * mirror: TASK writes go to legacy FIRST then re-project here via
-   * {@link _reprojectTask} inside the swallowing {@link _verbMirror}, and task
-   * reads stay on legacy until the S4 subject resolution.
+   * {@link _reprojectTask} inside the swallowing {@link _verbMirror}.
    *
-   * All three stores are set/cleared ATOMICALLY by {@link setVerbGraph}. On a null
-   * store (EngineDb failed to open — a degraded tenant), the verb accessors guard
-   * with `?.` and degrade to empty/undefined rather than throw.
+   * S4a task read-cutover: task READS flip to `_taskStore` ONLY when
+   * `_subjectGraphEnabled` (tasks are coupled to the subject-graph flag — a task's
+   * `assignee` is synthesized from an `assignee_subject_id → subjects` join, which is
+   * only populated when the flag is ON; unlike triggers, which are flag-free). When
+   * the flag is OFF, task reads stay on legacy AND the mirror leaves `assignee_subject_id`
+   * NULL (a flag-OFF engine.db mints no subjects). Legacy stays authoritative until the
+   * global flag-removal drops it.
+   *
+   * All stores are set/cleared ATOMICALLY by {@link setVerbGraph}. On a null store
+   * (EngineDb failed to open — a degraded tenant), the verb accessors guard with `?.`
+   * and degrade to empty/undefined rather than throw.
    */
   private _workflowStore: WorkflowStore | null = null;
   private _triggerStore: TriggerStore | null = null;
   private _taskStore: TaskStore | null = null;
+  /** S4a: gates the task READ-cutover + the mirror's assignee→subject resolution.
+   *  Default OFF → legacy reads, no subject writes (unchanged pre-S4a behaviour). */
+  private _subjectGraphEnabled = false;
   private _verbGraphWarned = false;
 
   constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
@@ -1114,13 +1124,16 @@ export class RunHistory {
    * during engine boot, after both RunHistory and EngineDb exist. Builds the
    * {@link WorkflowStore} + {@link TriggerStore} — the SOLE authority for
    * workflow-DEFINITION + TRIGGER reads AND writes after the write-cutover — plus
-   * the {@link TaskStore} (still an additive mirror; tasks stay legacy-authoritative
-   * until S4). Idempotent.
+   * the {@link TaskStore}. `subjectGraphEnabled` (S4a) gates the task read-cutover +
+   * the mirror's assignee→subject resolution: ON → tasks read engine.db + resolve
+   * `assignee` to a subject FK; OFF (default) → legacy reads, no subject writes.
+   * Idempotent.
    */
-  setVerbGraph(engineDb: EngineDb): void {
+  setVerbGraph(engineDb: EngineDb, subjectGraphEnabled = false): void {
     this._workflowStore = new WorkflowStore(engineDb);
     this._triggerStore = new TriggerStore(engineDb);
     this._taskStore = new TaskStore(engineDb);
+    this._subjectGraphEnabled = subjectGraphEnabled;
   }
 
   /** Swallow a TASK-mirror failure: the legacy task write already succeeded, so a
@@ -1152,7 +1165,7 @@ export class RunHistory {
    */
   private _reprojectTask(id: string): void {
     const rec = persistence.getTask(this.db, id);
-    if (rec) this._taskStore!.upsert(taskRecordToRow(rec));
+    if (rec) this._taskStore!.upsert(taskRecordToRow(rec), undefined, { manageAssignee: this._subjectGraphEnabled });
   }
 
   /**
@@ -2353,6 +2366,7 @@ export class RunHistory {
   }
 
   getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
+    if (this._subjectGraphEnabled && this._taskStore) return this._taskStore.getRecord(id, opts);
     return persistence.getTask(this.db, id, opts);
   }
 
@@ -2382,14 +2396,17 @@ export class RunHistory {
     parentTaskId?: string | undefined;
     limit?: number | undefined;
   }): TaskRecord[] {
+    if (this._subjectGraphEnabled && this._taskStore) return this._taskStore.listRecords(opts);
     return persistence.getTasks(this.db, opts);
   }
 
   getTasksDueInRange(start: string, end: string, scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
+    if (this._subjectGraphEnabled && this._taskStore) return this._taskStore.dueInRange(start, end, scopes);
     return persistence.getTasksDueInRange(this.db, start, end, scopes);
   }
 
   getOverdueTasks(scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
+    if (this._subjectGraphEnabled && this._taskStore) return this._taskStore.overdue(scopes);
     return persistence.getOverdueTasks(this.db, scopes);
   }
 

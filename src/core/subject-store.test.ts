@@ -192,3 +192,72 @@ describe('SubjectStore (Foundation Rework v2 — S1a)', () => {
     engine.close();
   });
 });
+
+describe('SubjectStore S4a — self-person + assignee resolution', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+
+  function makeStore(): { store: SubjectStore; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj4-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    return { store: new SubjectStore(engine), engine };
+  }
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('findOrCreateSelfPerson is an idempotent singleton (one is_self person)', () => {
+    const { store } = makeStore();
+    const a = store.findOrCreateSelfPerson();
+    const b = store.findOrCreateSelfPerson();
+    expect(b).toBe(a);
+    expect(store.listSubjects({ kind: 'person' })).toHaveLength(1);
+    expect(store.findSelfPerson()?.id).toBe(a);
+    expect(store.findSelfPerson()?.is_self).toBe(1);
+  });
+
+  it("the self-person seed does NOT merge into a same-named person subject", () => {
+    const { store } = makeStore();
+    // a real person happens to carry the display sentinel name
+    const other = store.findOrCreate({ kind: 'person', name: 'Me' });
+    const self = store.findOrCreateSelfPerson();
+    expect(self).not.toBe(other.id);        // distinct rows (seed bypasses name-dedup)
+    expect(store.findSelfPerson()?.id).toBe(self);
+  });
+
+  it('resolveAssigneeToSubjectId: user→self, name→person, null/empty→null', () => {
+    const { store } = makeStore();
+    const self = store.resolveAssigneeToSubjectId('user');
+    expect(self).toBe(store.findSelfPerson()?.id);
+    const person = store.resolveAssigneeToSubjectId('Sarah');
+    expect(store.getSubject(person!)?.name).toBe('Sarah');
+    expect(store.resolveAssigneeToSubjectId(null)).toBeNull();
+    expect(store.resolveAssigneeToSubjectId('')).toBeNull();
+    expect(store.resolveAssigneeToSubjectId('  ')).toBeNull();
+  });
+
+  it('resolveAssigneeToSubjectId dedups a repeated named assignee', () => {
+    const { store } = makeStore();
+    const a = store.resolveAssigneeToSubjectId('Bob');
+    const b = store.resolveAssigneeToSubjectId('bob'); // case-insensitive canonical
+    expect(b).toBe(a);
+  });
+
+  it('resolveAssigneeFilter never creates: unseeded → null, else the existing match', () => {
+    const { store } = makeStore();
+    expect(store.resolveAssigneeFilter('user')).toBeNull();   // no self-person yet
+    expect(store.resolveAssigneeFilter('Ghost')).toBeNull();  // no such person
+    expect(store.listSubjects()).toHaveLength(0);             // filter minted nothing
+    // once they exist, the filter resolves to them
+    const self = store.findOrCreateSelfPerson();
+    const sarah = store.resolveAssigneeToSubjectId('Sarah');
+    expect(store.resolveAssigneeFilter('user')).toBe(self);
+    expect(store.resolveAssigneeFilter('Sarah')).toBe(sarah);
+  });
+});
