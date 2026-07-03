@@ -16,15 +16,35 @@ const FALLBACK_PRICING: ModelPricing = {
 
 let overridePricing: Record<string, ModelPricing> | null = null;
 
+/** A usable override entry has four finite, non-negative per-Mtok rates. */
+function isValidPricing(v: unknown): v is ModelPricing {
+  if (typeof v !== 'object' || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return (['input', 'output', 'cacheWrite', 'cacheRead'] as const).every((k) => {
+    const n = p[k];
+    return typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  });
+}
+
 function loadPricingOverride(): Record<string, ModelPricing> | null {
   try {
     const raw = readFileSync(join(getLynoxDir(), 'pricing.json'), 'utf-8');
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return null;
-    // Trusted-source cast: only an operator with write access to ~/.lynox can
-    // place this file. A malformed entry produces NaN in calculateCost, which
-    // fails cost-guard comparisons closed (fail-safe) rather than under-billing.
-    return parsed as Record<string, ModelPricing>;
+    // Validate every entry before trusting it. A malformed entry (missing,
+    // NaN, or negative field) would poison calculateCost with NaN — and since
+    // `NaN >= cap` is false, EVERY budget layer (cost-guard, session budget,
+    // managed debit) then fails OPEN, not closed. Drop bad entries (warn) so a
+    // single typo in an operator's pricing.json can't disable billing.
+    const validated: Record<string, ModelPricing> = {};
+    for (const [model, pricing] of Object.entries(parsed as Record<string, unknown>)) {
+      if (isValidPricing(pricing)) {
+        validated[model] = pricing;
+      } else {
+        process.stderr.write(`[pricing] ignoring malformed pricing.json override for "${model}"\n`);
+      }
+    }
+    return validated;
   } catch {
     return null;
   }

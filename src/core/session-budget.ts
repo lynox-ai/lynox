@@ -31,6 +31,12 @@ let _maxSessionCostUSD = DEFAULT_SESSION_COST_USD;
  * the second check sees the first reservation.
  */
 export function checkSessionBudget(counters: SessionCounters, estimatedCostUSD: number): void {
+  // A non-finite estimate (NaN from a malformed pricing override) must fail
+  // CLOSED: `NaN > cap` is false, so it would otherwise skip the ceiling AND
+  // poison the shared counter (`costUSD += NaN`) for the rest of the session.
+  if (!Number.isFinite(estimatedCostUSD)) {
+    throw new Error('Session cost check received a non-finite estimate — refusing to run (check pricing.json).');
+  }
   if (counters.costUSD + estimatedCostUSD > _maxSessionCostUSD) {
     throw new Error(
       `Session cost ceiling ($${String(_maxSessionCostUSD)}) would be exceeded. ` +
