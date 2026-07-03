@@ -444,7 +444,9 @@ describe('api_setup tool', () => {
     });
 
     it('reports missing profile', async () => {
-      const agent = createMockAgent();
+      // A present-but-empty store is the realistic path (in the engine the store
+      // is always wired); deleting an unknown id reports "not found".
+      const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler({ action: 'delete', id: 'nope' }, agent);
       expect(result).toContain('not found');
     });

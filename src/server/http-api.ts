@@ -5816,7 +5816,7 @@ export class LynoxHTTPApi {
       const { ApiProfileUnlinkError } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
       try {
-        const removed = store.unregister(params['id']!, apisDir);
+        const removed = store.remove(params['id']!, apisDir);
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
       } catch (err) {
         if (err instanceof ApiProfileUnlinkError) {
