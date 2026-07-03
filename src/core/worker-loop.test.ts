@@ -44,7 +44,7 @@ import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/ind
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
-import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+import { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } from './session-budget.js';
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
   return {
@@ -234,6 +234,61 @@ describe('WorkerLoop', () => {
     expect(engine.createSession).not.toHaveBeenCalled();
     expect(session.run).not.toHaveBeenCalled();
     expect(tm.recordTaskRun).not.toHaveBeenCalled();
+  });
+
+  // ---- 2d. a workflow reserves the session ceiling, not the $15 agent cap ----
+
+  it('reserves the full session ceiling for a workflow task', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    configurePersistentBudget({
+      // $60 recorded, cap $100. A $15 agent reservation (75) would pass; a
+      // workflow has no per-run dollar cap of its own, so it reserves the $50
+      // session ceiling → 110 > 100 → deferred. This binds the test to the
+      // workflow-specific (higher) estimate, not any generic block.
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 60, run_count: 5 }] },
+      dailyCapUSD: 100,
+    });
+    const wfTask = makeTask({ effect: 'run_workflow', pipeline_id: 'wf-1' });
+    const tmWf = makeTaskManager([wfTask]);
+    const engineWf = makeEngine({ taskManager: tmWf, session: makeSession('Done.') });
+    const loopWf = new WorkerLoop(engineWf, makeNotificationRouter(), 60_000);
+    await loopWf.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(engineWf.createSession).not.toHaveBeenCalled();
+
+    // Contrast: a standard run_agent at the SAME $60 recorded is admitted (its
+    // $15 reservation → 75 <= 100), proving the deferral above is the estimate
+    // difference, not the recorded level.
+    vi.mocked(engineWf.createSession).mockClear();
+    const agentTask = makeTask({ id: 'agent-1', effect: 'run_agent', source: 'cron' });
+    const tmAgent = makeTaskManager([agentTask]);
+    const engineAgent = makeEngine({ taskManager: tmAgent, session: makeSession('Done.') });
+    const loopAgent = new WorkerLoop(engineAgent, makeNotificationRouter(), 60_000);
+    await loopAgent.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(engineAgent.createSession).toHaveBeenCalled();
+  });
+
+  // ---- 2e. the reservation is released once the task settles ----
+
+  it('releases the reservation after a task completes so headroom is restored', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    configurePersistentBudget({
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 10, run_count: 1 }] },
+      dailyCapUSD: 100,
+    });
+    const task = makeTask(); // run_agent → reserves $15
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession('Done.') });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The task was admitted (reservation held during the run) and released on
+    // completion — so nothing lingers in the in-flight accumulator.
+    expect(engine.createSession).toHaveBeenCalled();
+    expect(getReservedInFlight()).toBe(0);
   });
 
   // ---- 3. skip if already executing ----

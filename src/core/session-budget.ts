@@ -200,6 +200,17 @@ export function getReservedInFlight(): number {
   return _reservedInFlightUSD;
 }
 
+/**
+ * The per-session cost ceiling ($50 default, configurable). It is the worst-case
+ * a run with no tighter per-run costGuard can spend before it records — used by
+ * the WorkerLoop as the admission reservation for effects that lack their own
+ * dollar cap (e.g. a scheduled workflow, bounded only by this ceiling via the
+ * orchestrator's per-step checkSessionBudget).
+ */
+export function getSessionCostCeiling(): number {
+  return _maxSessionCostUSD;
+}
+
 /** Reset persistent budget config (for testing). */
 export function resetPersistentBudget(): void {
   _costProvider = null;

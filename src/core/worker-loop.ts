@@ -16,7 +16,7 @@ import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { reservePersistentBudget, releasePersistentBudget } from './session-budget.js';
+import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
@@ -250,8 +250,11 @@ export class WorkerLoop {
           // frees or the daily window resets. No status write → no churn.
           continue;
         }
-        // Fire and forget — don't await, execute in parallel
-        void this.executeTask(task, reservation.reservedUSD);
+        // Fire and forget — don't await, execute in parallel. Release the
+        // reservation once the task settles, via .finally so it runs even if
+        // executeTask's synchronous prologue throws — a leaked reservation would
+        // otherwise shrink the tenant's daily headroom for the process lifetime.
+        void this.executeTask(task).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
     } catch {
       // Best-effort — don't crash the loop
@@ -260,7 +263,7 @@ export class WorkerLoop {
     }
   }
 
-  private async executeTask(task: TriggerRecord, reservedUSD = 0): Promise<void> {
+  private async executeTask(task: TriggerRecord): Promise<void> {
     const controller = new AbortController();
     this.activeTasks.set(task.id, { controller });
 
@@ -373,24 +376,27 @@ export class WorkerLoop {
       }
     } finally {
       this.activeTasks.delete(task.id);
-      // Release the admission reservation now that the run's actual cost has
-      // landed in run-history (recordTaskRun above), so recorded spend — not the
-      // worst-case estimate — is what the next tick's checks see. A no-op for the
-      // manual run-now path (reservedUSD = 0, never reserved).
-      releasePersistentBudget(reservedUSD);
     }
   }
 
   /**
-   * Worst-case per-run cost used as the admission reservation. Only money-minting
-   * effects reserve; backup/notify/reminder spend no LLM budget and must never be
+   * Worst-case per-run cost used as the admission reservation — it must be an
+   * UPPER BOUND on what the run can add to recorded spend, or the reservation
+   * under-covers and parallel fire can still overshoot the cap. Each effect
+   * reserves the ceiling its own enforcement actually guarantees:
+   *  - run_agent (watch): the $0.50 analysis costGuard.
+   *  - run_agent (standard): the $15 per-run costGuard (executeStandard).
+   *  - run_workflow: NO per-run dollar cap of its own — a saved workflow is
+   *    bounded only by the per-session ceiling (orchestrator per-step
+   *    checkSessionBudget), so reserve that ceiling, not $15.
+   * Non-money effects (backup/notify/reminder) reserve nothing and must never be
    * blocked by (or consume headroom from) the cap.
    */
   private reservationEstimate(task: TriggerRecord): number {
     if (task.effect === 'run_agent') {
       return task.source === 'watch' ? WATCH_ANALYSIS_MAX_USD : WORKER_MAX_COST_USD;
     }
-    if (task.effect === 'run_workflow') return WORKER_MAX_COST_USD;
+    if (task.effect === 'run_workflow') return getSessionCostCeiling();
     return 0;
   }
 
