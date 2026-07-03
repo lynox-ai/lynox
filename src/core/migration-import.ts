@@ -19,6 +19,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkS
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
+import { readEnvAlias } from './env.js';
+import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
@@ -337,6 +339,18 @@ export class MigrationImporter {
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
       verification.secretsImported = this.restoreSecrets(data);
+    }
+
+    // 5. Re-gate (MANAGED destination only): a migrated api connection's
+    // custom_endpoint_ack is a per-instance BYOK-endpoint acceptance that must
+    // NOT be inherited — strip it so any custom endpoint re-triggers the
+    // disclosure gate before reuse (the engine.db analog of restoreConfig's
+    // SAFE_CONFIG_FIELDS strip). A self-hosted import keeps the ack (same data
+    // owner). Runs LAST, after data + secrets are in, so a strip failure fails
+    // the import closed (the operator retries; regate is idempotent) rather than
+    // dropping the secret restore. No-op unless engine.db was in the set.
+    if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
+      ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
     }
 
     onProgress?.({ phase: 'done', currentChunk: manifest.totalChunks, totalChunks: manifest.totalChunks, currentName: '' });
