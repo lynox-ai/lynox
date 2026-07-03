@@ -608,6 +608,29 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  describe('_recreateAgent() — costGuard survives recreation', () => {
+    it('preserves a per-run costGuard set at createSession across agent recreation', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ costGuard: { maxBudgetUSD: 15 } });
+
+      // The session is born cost-bounded (createSession → initial _createAgent).
+      const bornConfig = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(bornConfig.costGuard).toEqual({ maxBudgetUSD: 15 });
+
+      // executeStandard immediately recreates the agent (iterations / autonomy /
+      // profile) WITHOUT re-passing costGuard. _recreateAgent replaces
+      // agentOverrides wholesale — before the preservation fix this DROPPED the
+      // guard, so the background per-run ceiling silently vanished.
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent({ maxIterations: 30, autonomy: 'autonomous' });
+
+      expect(Agent).toHaveBeenCalledTimes(1);
+      const rebuiltConfig = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuiltConfig.costGuard).toEqual({ maxBudgetUSD: 15 });
+    });
+  });
+
   describe('setEffort()', () => {
     it('preserves messages and recreates agent', async () => {
       const savedMessages = [{ role: 'user', content: 'keep' }];
