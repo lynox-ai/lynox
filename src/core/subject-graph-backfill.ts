@@ -197,10 +197,13 @@ export class SubjectGraphBackfill {
     }
 
     // Supersession provenance — replayed AFTER every stub exists so both FK
-    // endpoints resolve (recordSupersedes skips a pair a GC removed a memory from).
+    // endpoints resolve. Count only edges actually inserted (recordSupersedes
+    // returns 0 when a GC'd endpoint is missing), matching the "…Mapped = applied,
+    // not merely processed" meaning of the entity/relation counters above.
     for (const s of this.memoryDb.listAllSupersedes()) {
-      this.memoryGraph.recordSupersedes(s.new_memory_id, s.old_memory_id, s.reason);
-      counts.supersedesMapped++;
+      if (this.memoryGraph.recordSupersedes(s.new_memory_id, s.old_memory_id, s.reason) > 0) {
+        counts.supersedesMapped++;
+      }
     }
 
     // subject_cooccurrences is a DERIVED materialization — rebuild it deterministically

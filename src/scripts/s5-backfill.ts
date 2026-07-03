@@ -61,6 +61,16 @@ function printHelp(): void {
   );
 }
 
+/**
+ * The PII at-rest safety gate (extracted so it is unit-testable): refuse to write
+ * memory text unencrypted when a vault.db exists (so the tenant HAS a key the engine
+ * uses) but engine.db opened without a resolved key — unless --allow-plaintext is the
+ * deliberate override for a genuinely keyless (self-host browse-mode) tenant.
+ */
+export function shouldRefusePlaintextPii(dir: string, isEncrypted: boolean, allowPlaintext: boolean): boolean {
+  return existsSync(join(dir, 'vault.db')) && !isEncrypted && !allowPlaintext;
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   if (args.dataDir) setDataDir(args.dataDir);
@@ -88,15 +98,19 @@ function main(): void {
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
 
-  const engineDb = new EngineDb(join(dir, 'engine.db'));
-  const memoryDb = new AgentMemoryDb(join(dir, 'agent-memory.db'));
+  // Constructed INSIDE the try so a throw from the second ctor still closes the
+  // first handle (EngineDb open succeeding then AgentMemoryDb open throwing would
+  // otherwise leak the engine.db handle + its WAL).
+  let engineDb: EngineDb | undefined;
+  let memoryDb: AgentMemoryDb | undefined;
   try {
-    // Safety gate (same as s2-backfill): a tenant with a vault.db has a key the engine
-    // uses for engine.db. If we could NOT resolve it, engine.db.enc() would write memory
-    // TEXT (PII — customer data flows through memory) PLAINTEXT: a silent at-rest
-    // downgrade the engine can't undo. Refuse rather than corrupt; --allow-plaintext is
-    // the deliberate override for a genuinely keyless (self-host browse-mode) tenant.
-    if (existsSync(join(dir, 'vault.db')) && !engineDb.isEncrypted && !args.allowPlaintext) {
+    engineDb = new EngineDb(join(dir, 'engine.db'));
+    memoryDb = new AgentMemoryDb(join(dir, 'agent-memory.db'));
+
+    // Safety gate (same as s2-backfill): refuse to write memory TEXT (PII) plaintext
+    // when a vault.db exists but no key resolved — a silent at-rest downgrade the
+    // engine can't undo. See shouldRefusePlaintextPii.
+    if (shouldRefusePlaintextPii(dir, engineDb.isEncrypted, args.allowPlaintext)) {
       process.stderr.write(
         '✗ vault.db present but no vault key resolved — refusing to write PII unencrypted. ' +
         'Set LYNOX_VAULT_KEY in the exec env or ~/.lynox/.env, or pass --allow-plaintext to override.\n');
@@ -112,13 +126,9 @@ function main(): void {
       : `[s5-backfill] APPLIED — memories ${applied.memoriesMapped} (${applied.memoriesSubjectless} subject-less) · ` +
         `supersedes ${applied.supersedesMapped}. engine.db now has ${post.memories} memories.\n`);
   } finally {
-    closeAll(engineDb, memoryDb);
+    if (engineDb) { try { engineDb.close(); } catch { /* best-effort */ } }
+    if (memoryDb) { try { memoryDb.close(); } catch { /* best-effort */ } }
   }
-}
-
-function closeAll(engineDb: EngineDb, memoryDb: AgentMemoryDb): void {
-  try { engineDb.close(); } catch { /* best-effort */ }
-  try { memoryDb.close(); } catch { /* best-effort */ }
 }
 
 // Run only when invoked directly (`node dist/scripts/s5-backfill.js`), not when a

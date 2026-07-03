@@ -161,15 +161,17 @@ export class MemoryGraphStore {
    * successor to legacy `supersedes`). Idempotent on the (new, old) pair. Both
    * memory stubs must exist — the guarded INSERT skips a pair whose endpoints are
    * missing rather than tripping the FK (a legacy junction row can outlive a GC'd
-   * memory). Used by the S5a backfill AFTER every stub is written.
+   * memory). Used by the S5a backfill AFTER every stub is written. Returns the
+   * rows actually inserted (0 when an endpoint is missing or the pair already
+   * exists), so the caller counts only genuinely-replayed edges.
    */
-  recordSupersedes(newMemoryId: string, oldMemoryId: string, reason: string): void {
-    this.db.prepare(`
+  recordSupersedes(newMemoryId: string, oldMemoryId: string, reason: string): number {
+    return this.db.prepare(`
       INSERT OR IGNORE INTO supersedes (new_memory_id, old_memory_id, reason)
       SELECT ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)
         AND EXISTS (SELECT 1 FROM memories WHERE id = ?)
-    `).run(newMemoryId, oldMemoryId, reason, newMemoryId, oldMemoryId);
+    `).run(newMemoryId, oldMemoryId, reason, newMemoryId, oldMemoryId).changes;
   }
 
   /**

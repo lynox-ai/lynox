@@ -175,6 +175,65 @@ describe('SubjectGraphBackfill — S5a memory pass (includeMemories)', () => {
     engineDb.close(); memoryDb.close();
   });
 
+  it('re-run is convergent for embedding bytes AND the supersedes junction (not just counts)', () => {
+    const { engineDb, memoryDb } = setup();
+    const alice = entity(memoryDb, 'Alice', 'person');
+    const emb = [0.7, -0.1, 0.25];
+    const older = memoryDb.createMemory({ text: 'Alice uses Slack.', namespace: 'business', scopeType: 'global', scopeId: 'g', embedding: emb });
+    const newer = memoryDb.createMemory({ text: 'Alice uses Teams now.', namespace: 'business', scopeType: 'global', scopeId: 'g', embedding: [0.2] });
+    memoryDb.createMention(older, alice);
+    memoryDb.createMention(newer, alice);
+    memoryDb.supersedMemory(older, newer);
+    memoryDb.createSupersedes(newer, older, 'contradiction');
+
+    const backfill = new SubjectGraphBackfill(engineDb, memoryDb);
+    const first = backfill.run({ includeMemories: true });
+    const supCount = (): number => (engineDb.getDb().prepare('SELECT COUNT(*) n FROM supersedes').get() as { n: number }).n;
+    expect(first.supersedesMapped).toBe(1);
+    expect(supCount()).toBe(1);
+
+    const second = backfill.run({ includeMemories: true });
+    // embedding still byte-identical after the 2nd run …
+    expect(memRow(engineDb, older).embedding!.equals(memoryDb.getMemory(older)!.embedding!)).toBe(true);
+    // … the supersedes junction not doubled …
+    expect(supCount()).toBe(1);
+    // … supersedesMapped now 0 (nothing NEW replayed — the pair already exists) …
+    expect(second.supersedesMapped).toBe(0);
+    // … and the memory set not doubled.
+    expect(second.memoriesMapped).toBe(first.memoriesMapped);
+    expect((engineDb.getDb().prepare('SELECT COUNT(*) n FROM memories').get() as { n: number }).n).toBe(2);
+    engineDb.close(); memoryDb.close();
+  });
+
+  it('replays a supersedes pair whose BOTH memories are subject-less (the exact S5a regression)', () => {
+    const { engineDb, memoryDb } = setup();
+    // Neither memory mentions a subject-bearing entity → both are subject-less.
+    const gdpr = entity(memoryDb, 'GDPR', 'concept');
+    const older = memoryDb.createMemory({ text: 'GDPR needs a DPA.', namespace: 'business', scopeType: 'global', scopeId: 'g', embedding: [0.1] });
+    const newer = memoryDb.createMemory({ text: 'GDPR needs a DPA and a SCC.', namespace: 'business', scopeType: 'global', scopeId: 'g', embedding: [0.2] });
+    memoryDb.createMention(older, gdpr);
+    memoryDb.createMention(newer, gdpr);
+    memoryDb.supersedMemory(older, newer);
+    memoryDb.createSupersedes(newer, older, 'contradiction');
+
+    const counts = new SubjectGraphBackfill(engineDb, memoryDb).run({ includeMemories: true });
+
+    // Both subject-less memories are STILL stored (the old mirror early-return dropped them) …
+    expect(counts.memoriesMapped).toBe(2);
+    expect(counts.memoriesSubjectless).toBe(2);
+    expect(memRow(engineDb, older).subject_id).toBeNull();
+    expect(memRow(engineDb, newer).subject_id).toBeNull();
+    // … the supersedes junction lands (both stubs exist → FK guard passes) …
+    expect(counts.supersedesMapped).toBe(1);
+    const sup = engineDb.getDb().prepare('SELECT reason FROM supersedes WHERE new_memory_id = ? AND old_memory_id = ?')
+      .get(newer, older) as { reason: string } | undefined;
+    expect(sup?.reason).toBe('contradiction');
+    // … and the lifecycle carried.
+    expect(memRow(engineDb, older).is_active).toBe(0);
+    expect(memRow(engineDb, older).superseded_by).toBe(newer);
+    engineDb.close(); memoryDb.close();
+  });
+
   it('backfills MORE than one page of memories (page-boundary regression)', () => {
     const { engineDb, memoryDb } = setup();
     for (let i = 0; i < 7; i++) {

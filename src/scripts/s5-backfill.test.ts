@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseArgs } from './s5-backfill.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { parseArgs, shouldRefusePlaintextPii } from './s5-backfill.js';
 
 describe('s5-backfill parseArgs', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -31,5 +34,29 @@ describe('s5-backfill parseArgs', () => {
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     parseArgs(['--help']);
     expect(exit).toHaveBeenCalledWith(0);
+  });
+});
+
+describe('s5-backfill shouldRefusePlaintextPii (PII at-rest gate)', () => {
+  const dirs: string[] = [];
+  function tmp(withVault: boolean): string {
+    const d = mkdtempSync(join(tmpdir(), 'lynox-s5gate-'));
+    dirs.push(d);
+    if (withVault) writeFileSync(join(d, 'vault.db'), '');
+    return d;
+  }
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('REFUSES when vault.db exists but engine.db is unencrypted (would write PII plaintext)', () => {
+    expect(shouldRefusePlaintextPii(tmp(true), false, false)).toBe(true);
+  });
+  it('allows when the tenant is genuinely keyless (no vault.db)', () => {
+    expect(shouldRefusePlaintextPii(tmp(false), false, false)).toBe(false);
+  });
+  it('allows when engine.db IS encrypted (key resolved)', () => {
+    expect(shouldRefusePlaintextPii(tmp(true), true, false)).toBe(false);
+  });
+  it('allows when --allow-plaintext overrides the refusal', () => {
+    expect(shouldRefusePlaintextPii(tmp(true), false, true)).toBe(false);
   });
 });
