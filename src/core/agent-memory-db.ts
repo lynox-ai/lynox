@@ -87,6 +87,13 @@ export interface CooccurrenceRow {
   last_seen_at: string;
 }
 
+export interface SupersedesRow {
+  new_memory_id: string;
+  old_memory_id: string;
+  reason: string;
+  created_at: string;
+}
+
 export interface MetricRow {
   id: string;
   metric_name: string;
@@ -402,6 +409,11 @@ export class AgentMemoryDb {
 
   getEntityCount(): number {
     const row = this.db.prepare('SELECT COUNT(*) as cnt FROM entities').get() as { cnt: number };
+    return row.cnt;
+  }
+
+  getMemoryCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM memories').get() as { cnt: number };
     return row.cnt;
   }
 
@@ -894,6 +906,41 @@ export class AgentMemoryDb {
     const limit = Math.max(1, opts?.limit ?? 500);
     const offset = Math.max(0, opts?.offset ?? 0);
     return this.db.prepare('SELECT * FROM entities ORDER BY id LIMIT ? OFFSET ?').all(limit, offset) as EntityRow[];
+  }
+
+  /**
+   * Offset-paged scan over the ENTIRE memories table (Foundation Rework v2 S5a
+   * memory-statement backfill). Distinct from {@link listActiveMemories}, which is
+   * scope-filtered + active-only + capped — wrong for a full re-map (it would drop
+   * every superseded/inactive row and every row outside the requested scope). This
+   * is unclamped, PK-ordered (stable + sort-free pagination) and returns EVERY row
+   * incl. its embedding BLOB so the backfill can carry the vector byte-for-byte.
+   */
+  listAllMemories(opts?: { limit?: number | undefined; offset?: number | undefined }): MemoryRow[] {
+    const limit = Math.max(1, opts?.limit ?? 500);
+    const offset = Math.max(0, opts?.offset ?? 0);
+    return this.db.prepare('SELECT * FROM memories ORDER BY id LIMIT ? OFFSET ?').all(limit, offset) as MemoryRow[];
+  }
+
+  /**
+   * Offset-paged scan over the ENTIRE mentions table (memory↔entity links, the S5a
+   * backfill's input for memory→subject linking). PK-ordered for stable pagination.
+   */
+  listAllMentions(opts?: { limit?: number | undefined; offset?: number | undefined }): MentionRow[] {
+    const limit = Math.max(1, opts?.limit ?? 500);
+    const offset = Math.max(0, opts?.offset ?? 0);
+    return this.db.prepare('SELECT * FROM mentions ORDER BY memory_id, entity_id LIMIT ? OFFSET ?')
+      .all(limit, offset) as MentionRow[];
+  }
+
+  /**
+   * The full `supersedes` provenance junction (new_memory ⟶ replaces ⟶ old_memory).
+   * Unpaged: this junction is small (one row per contradiction-supersession). The
+   * S5a backfill replays it into engine.db AFTER every memory stub exists, so both
+   * FK endpoints resolve.
+   */
+  listAllSupersedes(): SupersedesRow[] {
+    return this.db.prepare('SELECT * FROM supersedes ORDER BY new_memory_id, old_memory_id').all() as SupersedesRow[];
   }
 
   getMemoriesMentioningEntity(entityId: string, activeOnly = true, limit = 10): MemoryRow[] {

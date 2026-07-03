@@ -114,6 +114,86 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
+  it('carries embedding/is_active/superseded_by/confidence, and PRESERVES them on a bare re-upsert (S5a)', () => {
+    const { engine, mem } = make();
+    const emb = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
+    mem.upsertStub({
+      id: 'm1', text: 't', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1',
+      embedding: emb, isActive: 0, supersededBy: 'm2', confidence: 0.42,
+    });
+    let raw = engine.getDb().prepare('SELECT embedding, is_active, superseded_by, confidence FROM memories WHERE id = ?')
+      .get('m1') as { embedding: Buffer; is_active: number; superseded_by: string; confidence: number };
+    expect(raw.embedding.equals(emb)).toBe(true);
+    expect(raw.is_active).toBe(0);
+    expect(raw.superseded_by).toBe('m2');
+    expect(raw.confidence).toBeCloseTo(0.42, 6);
+
+    // A bare re-upsert (S1b-style, none of the four fields given) must NOT reset them.
+    mem.upsertStub({ id: 'm1', text: 't v2', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    raw = engine.getDb().prepare('SELECT embedding, is_active, superseded_by, confidence FROM memories WHERE id = ?')
+      .get('m1') as { embedding: Buffer; is_active: number; superseded_by: string; confidence: number };
+    expect(raw.embedding.equals(emb)).toBe(true);   // vector preserved
+    expect(raw.is_active).toBe(0);                   // supersession NOT revived
+    expect(raw.superseded_by).toBe('m2');
+    expect(raw.confidence).toBeCloseTo(0.42, 6);
+    engine.close();
+  });
+
+  it('fresh insert with the four fields omitted takes the column defaults', () => {
+    const { engine, mem } = make();
+    mem.upsertStub({ id: 'm1', text: 't', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    const raw = engine.getDb().prepare('SELECT embedding, is_active, confidence FROM memories WHERE id = ?')
+      .get('m1') as { embedding: Buffer | null; is_active: number; confidence: number };
+    expect(raw.embedding).toBeNull();
+    expect(raw.is_active).toBe(1);
+    expect(raw.confidence).toBeCloseTo(0.75, 6);
+    engine.close();
+  });
+
+  it('recordSupersedes inserts the junction only when both stubs exist (guarded, idempotent)', () => {
+    const { engine, mem } = make();
+    mem.upsertStub({ id: 'new', text: 't', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'old', text: 't', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    const count = (): number => (engine.getDb().prepare('SELECT COUNT(*) c FROM supersedes').get() as { c: number }).c;
+
+    mem.recordSupersedes('new', 'old', 'contradiction');
+    expect(count()).toBe(1);
+    mem.recordSupersedes('new', 'old', 'contradiction');   // idempotent (INSERT OR IGNORE)
+    expect(count()).toBe(1);
+    // A pair with a missing endpoint is skipped (no FK throw, no row).
+    expect(() => mem.recordSupersedes('new', 'ghost', 'contradiction')).not.toThrow();
+    expect(count()).toBe(1);
+    engine.close();
+  });
+
+  it('rebuildCooccurrences derives counts from the junction and is idempotent (no doubling)', () => {
+    const { engine, mem, subs } = make();
+    const a = subs.findOrCreate({ kind: 'organization', name: 'Acme' }).id;
+    const b = subs.findOrCreate({ kind: 'person', name: 'Alice' }).id;
+    const c = subs.findOrCreate({ kind: 'person', name: 'Bob' }).id;
+    for (const id of ['m1', 'm2']) {
+      mem.upsertStub({ id, text: 't', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+      mem.linkSubjects(id, [a, b]);         // m1,m2 both co-mention (Acme, Alice)
+    }
+    mem.upsertStub({ id: 'm3', text: 't', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.linkSubjects('m3', [a, c]);          // m3 co-mentions (Acme, Bob)
+
+    mem.rebuildCooccurrences();
+    const pair = (x: string, y: string): number => {
+      const [lo, hi] = x < y ? [x, y] : [y, x];
+      return (engine.getDb().prepare('SELECT count FROM subject_cooccurrences WHERE subject_a_id = ? AND subject_b_id = ?')
+        .get(lo, hi) as { count: number } | undefined)?.count ?? 0;
+    };
+    expect(pair(a, b)).toBe(2);   // Acme–Alice in m1,m2
+    expect(pair(a, c)).toBe(1);   // Acme–Bob in m3
+    expect(pair(b, c)).toBe(0);   // never co-mentioned
+
+    mem.rebuildCooccurrences();   // re-run: full DELETE+re-aggregate, no doubling
+    expect(pair(a, b)).toBe(2);
+    expect(engine.getDb().prepare('SELECT COUNT(*) c FROM subject_cooccurrences').get()).toMatchObject({ c: 2 });
+    engine.close();
+  });
+
   it('CASCADE/SET NULL on subject hard-delete (links + cooccurrences drop, stub.subject_id nulls)', () => {
     const { engine, mem, subs } = make();
     const a = subs.findOrCreate({ kind: 'organization', name: 'Acme' }).id;

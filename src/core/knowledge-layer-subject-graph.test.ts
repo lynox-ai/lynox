@@ -170,7 +170,7 @@ describe('KnowledgeLayer → engine.db subject-graph mirror (S1b)', () => {
     await layer.close();
   });
 
-  it('no subject-bearing entities: no stub written (engine.db memories stays empty)', async () => {
+  it('no subject-bearing entities: stub STILL written with a NULL subject + embedding (S5a mirror-harden)', async () => {
     mock.extraction = {
       entities: [
         { name: 'Shopify', type: 'concept', confidence: 0.6 },
@@ -182,8 +182,24 @@ describe('KnowledgeLayer → engine.db subject-graph mirror (S1b)', () => {
     await layer.init();
     const res = await layer.store('Shopify is popular in Berlin.', 'knowledge', scope);
     expect(res.stored).toBe(true);
+
+    // No subject resolved, so no subjects / edges / junction rows …
     expect(new SubjectStore(engine!).listSubjects()).toHaveLength(0);
-    expect(engine!.getDb().prepare('SELECT COUNT(*) c FROM memories').get()).toMatchObject({ c: 0 });
+    const mg = new MemoryGraphStore(engine!);
+    expect(mg.getLinkedSubjectIds(res.memoryId)).toHaveLength(0);
+    expect(engine!.getDb().prepare('SELECT COUNT(*) c FROM subject_cooccurrences').get()).toMatchObject({ c: 0 });
+
+    // … but the memory itself IS mirrored (S5a harden: the old early-return dropped
+    // it, making engine.db recall lossy vs. legacy). Stub present, subject_id NULL,
+    // embedding carried so the S5b vector cutover can retrieve it.
+    const stub = mg.getStub(res.memoryId)!;
+    expect(stub).toBeTruthy();
+    expect(stub.subject_id).toBeNull();
+    const row = engine!.getDb().prepare('SELECT embedding FROM memories WHERE id = ?')
+      .get(res.memoryId) as { embedding: Buffer | null };
+    expect(row.embedding).not.toBeNull();
+    expect(row.embedding!.length).toBeGreaterThan(0);
+
     engine!.close();
     await layer.close();
   });
