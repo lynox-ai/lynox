@@ -66,14 +66,18 @@ export class VerbGraphBackfill {
 
     db.transaction(() => {
       const taskRows = getAllTasks(this.historyDb);
-      // pass-1 (parent_task_id may NULL for a child ordered before its parent).
+      // pass-1 resolves the assignee (when enabled) + upserts (parent_task_id may NULL
+      // for a child ordered before its parent).
       for (const rec of taskRows) {
         this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at }, upsertOpts);
         counts.tasks++;
       }
-      // pass-2: re-upsert so every existing legacy parent re-links.
+      // pass-2: re-upsert ONLY to re-link every now-present legacy parent. Assignee
+      // stays unmanaged here — the pass-1 `assignee_subject_id` is preserved by the
+      // ON CONFLICT (which omits the column when manageAssignee is false), so pass-2
+      // skips a redundant per-row resolution.
       for (const rec of taskRows) {
-        this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at }, upsertOpts);
+        this.tasks.upsert(taskRecordToRow(rec), { createdAt: rec.created_at, updatedAt: rec.updated_at });
       }
     })();
 

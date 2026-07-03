@@ -69,13 +69,13 @@ describe('RunHistory S4a — task read-cutover', () => {
 
   it('flag-ON: getTasks / getOverdueTasks / getTasksDueInRange are engine.db-backed', () => {
     const { history } = make(true);
-    history.insertTask(task({ id: 'due', assignee: 'user', dueDate: '2026-07-15' }));
+    history.insertTask(task({ id: 'due', assignee: 'user', dueDate: '2099-07-15' })); // far-future: never drifts overdue
     history.insertTask(task({ id: 'over', assignee: 'Sarah', dueDate: '2000-01-01' }));
 
     expect(history.getTasks({ assignee: 'user' }).map(t => t.id)).toEqual(['due']);
     expect(history.getTasks({ assignee: 'Sarah' }).map(t => t.id)).toEqual(['over']);
     expect(history.getOverdueTasks().map(t => t.id)).toEqual(['over']);
-    expect(history.getTasksDueInRange('2026-07-01', '2026-07-31').map(t => t.id)).toEqual(['due']);
+    expect(history.getTasksDueInRange('2099-07-01', '2099-07-31').map(t => t.id)).toEqual(['due']);
   });
 
   it('flag-ON: updateTask re-resolves a changed assignee', () => {

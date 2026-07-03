@@ -334,21 +334,32 @@ describe('TaskStore S4a — assignee↔subject resolution + record reads', () =>
     expect(store.listRecords({ assignee: 'user' })).toEqual([]); // self-person never seeded
   });
 
-  it('listRecords orders by priority then due_date NULLS LAST then created_at DESC', () => {
+  it('listRecords parentTaskId=null returns roots only (the IS NULL branch)', () => {
     const { store } = make();
-    store.upsert(row({ id: 'lo', priority: 'low', dueDate: '2026-07-01' }), undefined, { manageAssignee: true });
-    store.upsert(row({ id: 'urg', priority: 'urgent', dueDate: '2026-07-20' }), undefined, { manageAssignee: true });
-    store.upsert(row({ id: 'hi', priority: 'high', dueDate: null }), undefined, { manageAssignee: true });
-    expect(store.listRecords().map(t => t.id)).toEqual(['urg', 'hi', 'lo']);
+    store.upsert(row({ id: 'parent' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'child', parentTaskId: 'parent' }), undefined, { manageAssignee: true });
+    expect(store.listRecords({ parentTaskId: null }).map(t => t.id)).toEqual(['parent']);
+    expect(store.listRecords({ parentTaskId: 'parent' }).map(t => t.id)).toEqual(['child']);
+  });
+
+  it('listRecords orders by priority, then due_date NULLS LAST (within a priority), then created_at DESC', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'lo', priority: 'low', dueDate: '2099-07-01' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'urg', priority: 'urgent', dueDate: '2099-07-20' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'hi-null', priority: 'high', dueDate: null }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'hi-dated', priority: 'high', dueDate: '2099-07-05' }), undefined, { manageAssignee: true });
+    // urgent first; within high, the dated row precedes the null-due one (NULLS LAST); low last.
+    expect(store.listRecords().map(t => t.id)).toEqual(['urg', 'hi-dated', 'hi-null', 'lo']);
   });
 
   it('dueInRange excludes completed + honors the window; overdue is < today, not completed', () => {
+    // Far-future dates so the "not overdue" rows never drift into overdue() as time passes.
     const { store } = make();
-    store.upsert(row({ id: 'in', dueDate: '2026-07-15', status: 'open' }), undefined, { manageAssignee: true });
-    store.upsert(row({ id: 'out', dueDate: '2026-09-01', status: 'open' }), undefined, { manageAssignee: true });
-    store.upsert(row({ id: 'done', dueDate: '2026-07-16', status: 'completed' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'in', dueDate: '2099-07-15', status: 'open' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'out', dueDate: '2099-09-01', status: 'open' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'done', dueDate: '2099-07-16', status: 'completed' }), undefined, { manageAssignee: true });
     store.upsert(row({ id: 'past', dueDate: '2000-01-01', status: 'open' }), undefined, { manageAssignee: true });
-    expect(store.dueInRange('2026-07-01', '2026-07-31').map(t => t.id)).toEqual(['in']);
+    expect(store.dueInRange('2099-07-01', '2099-07-31').map(t => t.id)).toEqual(['in']);
     expect(store.overdue().map(t => t.id)).toEqual(['past']);
   });
 

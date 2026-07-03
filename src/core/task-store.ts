@@ -150,6 +150,10 @@ interface TaskRecordDbRow {
 export function taskDbRowToRecord(row: TaskRecordDbRow): TaskRecord {
   let assignee: string | null = null;
   if (row.assignee_subject_id !== null) {
+    // `assignee_name ?? null` is a safe degradation for a dangling FK (id set, JOIN
+    // misses) — but that is unreachable: the FK is `ON DELETE SET NULL` (a deleted
+    // subject nulls assignee_subject_id, so it wouldn't be non-null here) and
+    // `subjects.name` is NOT NULL (a live subject always joins a name).
     assignee = row.assignee_is_self === 1 ? 'user' : (row.assignee_name ?? null);
   }
   return {
