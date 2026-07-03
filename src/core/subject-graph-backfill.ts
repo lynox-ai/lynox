@@ -188,6 +188,12 @@ export class SubjectGraphBackfill {
           isActive: mem.is_active,
           supersededBy: mem.superseded_by,
           confidence: mem.confidence,
+          // S5b recall-parity: carry the TRUE creation time + confirmation count so
+          // recall time-decay + confirm-boost match legacy. Without these the backfill
+          // would reset every historical memory to backfill-time with zero confirms,
+          // re-ranking recall the moment the read flag flips.
+          createdAt: mem.created_at,
+          confirmationCount: mem.confirmation_count,
         });
         if (subjectIds.length > 0) this.memoryGraph.linkSubjects(mem.id, subjectIds);
         counts.memoriesMapped++;

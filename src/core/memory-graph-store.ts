@@ -1,5 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
+import { blobToEmbed, cosineSimilarity } from './embedding.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -7,6 +9,51 @@ export interface MemoryStubRow {
   subject_id: string | null;
   is_active: number;
   superseded_by: string | null;
+}
+
+/**
+ * The at-rest ciphertext marker — mirrors `ENCRYPTED_PREFIX` in engine-db.ts.
+ * `EngineDb.dec()` returns its input UNCHANGED when it can't decrypt (keyless /
+ * browse-mode, or wrong key / corrupt), so a row whose decrypted text is
+ * byte-identical to a still-prefixed ciphertext was NOT decryptable and must be
+ * skipped on recall — never surface an `enc:` blob into agent context (S5b §6).
+ */
+const ENC_PREFIX = 'enc:';
+
+/**
+ * The engine.db `memories` columns the S5b recall reads project — every field a
+ * downstream {@link MemoryRow} carries EXCEPT the legacy-only `source_episode_id`
+ * (engine.db tracks `source_thread_id`, not episodes; recall never reads it). Kept
+ * as one list so the four recall SELECTs stay column-consistent.
+ */
+const RECALL_COLS =
+  'id, text, namespace, scope_type, scope_id, source_run_id, provider, embedding, ' +
+  'confidence, is_active, superseded_by, retrieval_count, confirmation_count, ' +
+  'last_retrieved_at, created_at, updated_at, source_type, source_tool_name';
+
+/** Same column list, `m.`-qualified for the graph-expand JOINs. */
+const RECALL_COLS_M = RECALL_COLS.split(', ').map(c => `m.${c}`).join(', ');
+
+/** Raw engine.db memory row (text still enc'd) — decrypted by {@link MemoryGraphStore._decRow}. */
+interface EngineMemoryRaw {
+  id: string;
+  text: string;
+  namespace: string;
+  scope_type: string;
+  scope_id: string;
+  source_run_id: string | null;
+  provider: string | null;
+  embedding: Buffer | null;
+  confidence: number;
+  is_active: number;
+  superseded_by: string | null;
+  retrieval_count: number;
+  confirmation_count: number;
+  last_retrieved_at: string | null;
+  created_at: string;
+  updated_at: string;
+  source_type: string;
+  source_tool_name: string | null;
 }
 
 /**
@@ -69,6 +116,16 @@ export class MemoryGraphStore {
     isActive?: number | undefined;
     supersededBy?: string | null | undefined;
     confidence?: number | undefined;
+    // S5b recall-parity additions. RECALL scoring reads `created_at` (time-decay)
+    // and `confirmation_count` (confirmed memories score higher), so a stub that
+    // took the write-time default for these would re-rank recall — badly for the
+    // BACKFILL, which would otherwise reset every historical memory to backfill-time
+    // + zero confirmations. `createdAt` is IMMUTABLE (creation time, never rewritten
+    // on a re-upsert); `confirmationCount` preserves-on-omit like confidence. On a
+    // fresh insert an omitted `createdAt` takes datetime('now') and an omitted
+    // `confirmationCount` takes 0.
+    createdAt?: string | undefined;
+    confirmationCount?: number | undefined;
   }): void {
     // Preserve-on-omit for all four S5a fields (an omitted field keeps the stored
     // value on a re-upsert; a fresh insert takes the column default). `embedding`
@@ -77,11 +134,16 @@ export class MemoryGraphStore {
     // `is_active`/`confidence` COALESCE to their default in VALUES (so a fresh NULL
     // still satisfies NOT NULL), which makes `excluded.*` non-NULL — so those two,
     // and only those two, are re-bound raw in the ON CONFLICT to preserve on omit.
+    // `created_at` is intentionally ABSENT from the ON CONFLICT SET list — creation
+    // time is immutable, so a re-upsert preserves it without a re-bind. The other
+    // COALESCE'd-in-VALUES columns (is_active/confidence/confirmation_count) re-bind
+    // raw in ON CONFLICT to preserve-on-omit.
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, subject_id, scope_type, scope_id,
         source_run_id, source_type, source_tool_name, provider,
-        embedding, is_active, superseded_by, confidence)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1), ?, COALESCE(?, 0.75))
+        embedding, is_active, superseded_by, confidence, confirmation_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1), ?, COALESCE(?, 0.75),
+        COALESCE(?, 0), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         text = excluded.text,
         subject_id = COALESCE(excluded.subject_id, subject_id),
@@ -89,6 +151,7 @@ export class MemoryGraphStore {
         is_active = COALESCE(?, is_active),
         superseded_by = COALESCE(excluded.superseded_by, superseded_by),
         confidence = COALESCE(?, confidence),
+        confirmation_count = COALESCE(?, confirmation_count),
         updated_at = datetime('now')
     `).run(
       params.id, this.engine.enc(params.text), params.namespace, params.subjectId ?? null,
@@ -101,9 +164,12 @@ export class MemoryGraphStore {
       params.isActive ?? null,
       params.supersededBy ?? null,
       params.confidence ?? null,
-      // ON CONFLICT re-binds — only the two COALESCE'd-in-VALUES columns need it:
+      params.confirmationCount ?? null,
+      params.createdAt ?? null,
+      // ON CONFLICT re-binds — only the COALESCE'd-in-VALUES columns need it:
       params.isActive ?? null,
       params.confidence ?? null,
+      params.confirmationCount ?? null,
     );
   }
 
@@ -157,6 +223,39 @@ export class MemoryGraphStore {
   }
 
   /**
+   * Mirror a dedup/feedback CONFIRMATION — bumps confirmation_count + confidence
+   * exactly like legacy {@link AgentMemoryDb.confirmMemory} (+1 / +0.05 capped at 1).
+   * A plain UPDATE that no-ops when the memory has no stub (created before the mirror
+   * was on, or not yet backfilled). RECALL scores by both fields, so without this
+   * mirror a re-confirmed memory would rank LOWER on the engine.db path than on legacy
+   * — breaking S5b recall equivalence. Fires on the MIRROR gate (dual-write), so the
+   * confirmation history is present by the time reads flip on.
+   */
+  bumpConfirmation(memoryId: string): void {
+    this.db.prepare(`
+      UPDATE memories
+      SET confirmation_count = confirmation_count + 1,
+          confidence = MIN(confidence + 0.05, 1.0),
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(memoryId);
+  }
+
+  /**
+   * Mirror a negative-feedback PENALTY — drops confidence like legacy
+   * {@link AgentMemoryDb.penalizeMemory} (−0.1, floored at 0.1). Same recall-parity
+   * rationale + no-op-on-missing-stub behaviour as {@link bumpConfirmation}.
+   */
+  penalizeConfidence(memoryId: string): void {
+    this.db.prepare(`
+      UPDATE memories
+      SET confidence = MAX(confidence - 0.1, 0.1),
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(memoryId);
+  }
+
+  /**
    * Record a supersession provenance edge (the `supersedes` junction, the S2/S5
    * successor to legacy `supersedes`). Idempotent on the (new, old) pair. Both
    * memory stubs must exist — the guarded INSERT skips a pair whose endpoints are
@@ -193,6 +292,191 @@ export class MemoryGraphStore {
         ON ms1.memory_id = ms2.memory_id AND ms1.subject_id < ms2.subject_id
       GROUP BY ms1.subject_id, ms2.subject_id
     `).run();
+  }
+
+  // ── S5b recall reads (engine.db) ──────────────────────────────
+  // The READ side of the memory cutover: these mirror the legacy AgentMemoryDb
+  // recall queries (findSimilarMemories / listActiveMemories / graph-expand) over
+  // engine.db `memories` + `memory_subjects` + `relationships`, returning the SAME
+  // MemoryRow / ScoredMemoryRow shapes so RetrievalEngine's scoring/MMR pipeline is
+  // unchanged. Gated behind `memory_graph_reads` at the call site; the WRITE path
+  // (dual-write) stays legacy through S5b'. `text` is decrypted per row; `embedding`
+  // is a raw BLOB (never enc'd), passed through untouched for the caller's
+  // blobToEmbed. Legacy `getMemoriesMentioningEntity`/`getRelatedMemoriesViaEntities`
+  // become `...Subject`/`...Subjects` (memory↔entity → memory↔subject).
+
+  /**
+   * Decrypt a raw row's text and shape it into a legacy {@link MemoryRow}. Returns
+   * null when the ciphertext could NOT be decrypted (keyless store or wrong key) so
+   * the caller drops it — recall must never surface an `enc:` blob into agent context.
+   * On a KEYED store a successfully decrypted plaintext differs from its ciphertext
+   * even when it also starts with `enc:`, so a legitimate memory is never dropped.
+   * Trade-off: on a KEYLESS store, a plaintext literally starting with `enc:` (which,
+   * keyless, was stored verbatim) is indistinguishable from orphaned ciphertext and is
+   * dropped — a security-first choice (never leak ciphertext) over recalling one
+   * pathological browse-mode string. In a real keyed deployment this case cannot arise.
+   */
+  private _decRow(raw: EngineMemoryRaw): MemoryRow | null {
+    const text = this.engine.dec(raw.text);
+    if (raw.text.startsWith(ENC_PREFIX) && text === raw.text) return null;
+    return {
+      id: raw.id, text, namespace: raw.namespace,
+      scope_type: raw.scope_type, scope_id: raw.scope_id,
+      source_run_id: raw.source_run_id,
+      source_episode_id: null,
+      provider: raw.provider, embedding: raw.embedding,
+      confidence: raw.confidence, is_active: raw.is_active,
+      superseded_by: raw.superseded_by, retrieval_count: raw.retrieval_count,
+      confirmation_count: raw.confirmation_count,
+      last_retrieved_at: raw.last_retrieved_at,
+      created_at: raw.created_at, updated_at: raw.updated_at,
+      source_type: raw.source_type, source_tool_name: raw.source_tool_name,
+    };
+  }
+
+  /**
+   * Cosine-similarity recall over engine.db memory embeddings — the port of
+   * {@link AgentMemoryDb.findSimilarMemories} (non-exhaustive retrieval path). SAME
+   * scan-cap (`min(max(topK*10,100),500)` newest-by-created_at), SAME filters, SAME
+   * min-heap top-K prune. Embeddings are scored FIRST (no decrypt); only the top-K
+   * survivors are decrypted, and any undecryptable survivor is dropped.
+   */
+  findSimilarRecall(
+    embedding: number[],
+    dim: number,
+    topK: number,
+    threshold: number,
+    filters?: {
+      namespace?: string | undefined;
+      scopeTypes?: string[] | undefined;
+      scopeIds?: string[] | undefined;
+      activeOnly?: boolean | undefined;
+    },
+  ): ScoredMemoryRow[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filters?.activeOnly !== false) clauses.push('is_active = 1');
+    if (filters?.namespace) {
+      clauses.push('namespace = ?');
+      params.push(filters.namespace);
+    }
+    if (filters?.scopeTypes && filters.scopeTypes.length > 0) {
+      clauses.push(`scope_type IN (${filters.scopeTypes.map(() => '?').join(',')})`);
+      params.push(...filters.scopeTypes);
+    }
+    if (filters?.scopeIds && filters.scopeIds.length > 0) {
+      clauses.push(`scope_id IN (${filters.scopeIds.map(() => '?').join(',')})`);
+      params.push(...filters.scopeIds);
+    }
+    const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    // Scan-cap PARITY with the legacy non-exhaustive path — a `created_at DESC`
+    // window so recall can't diverge on a large scope. The exhaustive dedup cap is
+    // a WRITE concern (not re-pointed in S5b).
+    const sqlLimit = Math.min(Math.max(topK * 10, 100), 500);
+    params.push(sqlLimit);
+    const rows = this.db.prepare(
+      `SELECT ${RECALL_COLS} FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params) as EngineMemoryRaw[];
+
+    const expectedBlobLen = dim * 8;
+    const scoredRaw: Array<{ raw: EngineMemoryRaw; sim: number }> = [];
+    let minScore = threshold;
+    for (const raw of rows) {
+      if (!raw.embedding || raw.embedding.length !== expectedBlobLen) continue;
+      const memEmb = blobToEmbed(raw.embedding, dim);
+      const sim = cosineSimilarity(embedding, memEmb);
+      if (sim < minScore) continue;
+      scoredRaw.push({ raw, sim });
+      if (scoredRaw.length > topK * 2) {
+        scoredRaw.sort((a, b) => b.sim - a.sim);
+        scoredRaw.length = topK;
+        minScore = scoredRaw[scoredRaw.length - 1]!.sim;
+      }
+    }
+    scoredRaw.sort((a, b) => b.sim - a.sim);
+
+    const out: ScoredMemoryRow[] = [];
+    for (const { raw, sim } of scoredRaw.slice(0, topK)) {
+      const row = this._decRow(raw);
+      if (!row) continue;
+      (row as ScoredMemoryRow)._similarity = sim;
+      out.push(row as ScoredMemoryRow);
+    }
+    return out;
+  }
+
+  /**
+   * The no-query recency list — port of {@link AgentMemoryDb.listActiveMemories}
+   * (is_active=1, namespace, scope-pair OR, newest-first, bounded limit).
+   */
+  listRecentActiveRecall(
+    namespace: string,
+    scopes: Array<{ type: string; id: string }>,
+    limit = 50,
+  ): MemoryRow[] {
+    if (scopes.length === 0) return [];
+    const safeLimit = Number.isFinite(limit)
+      ? Math.min(Math.max(Math.floor(limit), 1), 500)
+      : 50;
+    const scopeClauses = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');
+    const params: unknown[] = [namespace];
+    for (const s of scopes) { params.push(s.type, s.id); }
+    params.push(safeLimit);
+    const rows = this.db.prepare(
+      `SELECT ${RECALL_COLS} FROM memories
+       WHERE is_active = 1 AND namespace = ? AND (${scopeClauses})
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params) as EngineMemoryRaw[];
+    return this._decRows(rows);
+  }
+
+  /**
+   * Memories directly mentioning a subject — port of
+   * {@link AgentMemoryDb.getMemoriesMentioningEntity} over the `memory_subjects`
+   * junction (idx_memory_subjects_subject).
+   */
+  memoriesMentioningSubject(subjectId: string, activeOnly = true, limit = 10): MemoryRow[] {
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    const activeClause = activeOnly ? 'AND m.is_active = 1' : '';
+    const rows = this.db.prepare(`
+      SELECT ${RECALL_COLS_M} FROM memories m
+      JOIN memory_subjects ms ON m.id = ms.memory_id
+      WHERE ms.subject_id = ? ${activeClause}
+      ORDER BY m.created_at DESC LIMIT ?
+    `).all(subjectId, safeLimit) as EngineMemoryRaw[];
+    return this._decRows(rows);
+  }
+
+  /**
+   * Memories related to a subject via ONE relationship hop — port of
+   * {@link AgentMemoryDb.getRelatedMemoriesViaEntities} (2-hop) over `relationships`
+   * (idx_rel_from/idx_rel_to). Subject-dedup (two legacy entities collapsed to one
+   * subject) may surface a strict superset of the legacy per-entity expand — more
+   * complete, not a regression.
+   */
+  relatedMemoriesViaSubjects(subjectId: string, activeOnly = true, limit = 5): MemoryRow[] {
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    const activeClause = activeOnly ? 'AND m.is_active = 1' : '';
+    const rows = this.db.prepare(`
+      SELECT DISTINCT ${RECALL_COLS_M} FROM memories m
+      JOIN memory_subjects ms ON m.id = ms.memory_id
+      JOIN relationships r ON (ms.subject_id = r.from_subject_id OR ms.subject_id = r.to_subject_id)
+      WHERE (r.from_subject_id = ? OR r.to_subject_id = ?)
+        AND ms.subject_id != ?
+        ${activeClause}
+      ORDER BY m.created_at DESC LIMIT ?
+    `).all(subjectId, subjectId, subjectId, safeLimit) as EngineMemoryRaw[];
+    return this._decRows(rows);
+  }
+
+  /** Decrypt a batch, dropping undecryptable rows (see {@link _decRow}). */
+  private _decRows(rows: EngineMemoryRaw[]): MemoryRow[] {
+    const out: MemoryRow[] = [];
+    for (const raw of rows) {
+      const row = this._decRow(raw);
+      if (row) out.push(row);
+    }
+    return out;
   }
 
   /** Read a stub (test/inspection helper). */

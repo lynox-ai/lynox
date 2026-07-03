@@ -673,9 +673,13 @@ export async function initKnowledgeLayer(
     // Foundation Rework v2 (S1b): pass the engine.db handle + flag so the layer
     // additively mirrors extraction into the subject-graph when enabled.
     const subjectGraphEnabled = userConfig.subject_graph_enabled === true;
+    // Foundation Rework v2 (S5b): memory recall re-points onto engine.db when this
+    // flag is on. Co-gated on subjectGraphEnabled inside the layer (the store is
+    // only populated when the mirror is on).
+    const memoryGraphReads = userConfig.memory_graph_reads === true;
     const layer = new KnowledgeLayer(
       dbPath, embeddingProvider, client, runHistory ?? undefined,
-      engineDb ?? undefined, subjectGraphEnabled,
+      engineDb ?? undefined, subjectGraphEnabled, memoryGraphReads,
     );
     await layer.init();
     return layer;

@@ -166,6 +166,11 @@ export const LynoxUserConfigSchema = z.object({
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
   // would otherwise reject this key from config.json (silently disabling the flag).
   subject_graph_enabled:   z.boolean().optional(),
+  // Foundation Rework v2 (S5b): re-point memory recall onto engine.db. Default
+  // off; flipped per-tenant after the s5-backfill. Co-gated on subject_graph_enabled
+  // at the read path. The .strict() schema would otherwise reject this key from
+  // config.json (silently disabling the flag).
+  memory_graph_reads:      z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one

@@ -37,6 +37,7 @@ describe('Config', () => {
     delete process.env['MISTRAL_API_KEY'];
     delete process.env['LYNOX_LLM_PROVIDER'];
     delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
+    delete process.env['LYNOX_MEMORY_GRAPH_READS'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
@@ -155,6 +156,41 @@ describe('Config', () => {
     expect(config.network_policy).toBe('deny-all');
     // trimmed, empty segments dropped
     expect(config.network_allowed_hosts).toEqual(['api.example.com', '*.cdn.example.com']);
+  });
+
+  it('keeps memory_graph_reads from config.json (S5b — not stripped by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      subject_graph_enabled: true,
+      memory_graph_reads: true,
+    }));
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.memory_graph_reads).toBe(true);
+    expect(config.default_tier).toBe('balanced'); // config not nulled
+  });
+
+  it('reads memory_graph_reads from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_GRAPH_READS'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_graph_reads).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_GRAPH_READS'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_graph_reads).toBe(false);
+    }
+    // a non-enum value is ignored (never coerced to true)
+    vi.resetModules();
+    process.env['LYNOX_MEMORY_GRAPH_READS'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().memory_graph_reads).toBeUndefined();
   });
 
   it('ignores an unrecognised LYNOX_NETWORK_POLICY value', async () => {

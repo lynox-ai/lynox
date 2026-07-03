@@ -467,6 +467,16 @@ const MIGRATIONS: string[] = [
        WHEN json_valid(condition_json) AND json_extract(condition_json, '$.watch_config')  IS NOT NULL THEN 'watch'
        ELSE 'manual' END
      WHERE source NOT IN ('cron', 'watch', 'webhook', 'inbox_event', 'manual');`,
+
+  // v4 (S5b): the memory RECALL reads cut over to engine.db. Both hot-path reads
+  // (findSimilarRecall / listRecentActiveRecall) end in `ORDER BY created_at DESC
+  // LIMIT`, but the baseline schema indexed only subject/scope/active/thread — the
+  // created_at sort would filesort the whole matching set every chat turn. Restore
+  // the `created_at` index the legacy agent-memory.db had (idx_memories_created),
+  // so recall seeks the newest-N instead of scan+sort. Same fix class as v2
+  // (idx_triggers_next_run) — a read cutover exposing a missing legacy index.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (4);
+   CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);`,
 ];
 
 /**

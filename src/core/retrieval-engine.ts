@@ -14,11 +14,15 @@ import { reportMeteredCost, type HookHost } from './metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
-import type { AgentMemoryDb, MemoryRow } from './agent-memory-db.js';
+import type { AgentMemoryDb, MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { cosineSimilarity, blobToEmbed } from './embedding.js';
 import { extractEntitiesRegex } from './entity-extractor.js';
+import type { ExtractedEntity } from './entity-extractor.js';
 import type { EntityResolver } from './entity-resolver.js';
+import type { MemoryGraphStore } from './memory-graph-store.js';
+import { entityTypeToSubjectKind } from './subject-store.js';
+import type { SubjectStore, SubjectRow } from './subject-store.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import type { RunHistory } from './run-history.js';
 import { escapeXml, renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
@@ -100,6 +104,16 @@ export class RetrievalEngine {
   private meteredHost: HookHost | null = null;
   private readonly _embeddingCache = new LruCache<number[]>(64);
   private readonly _hydeCache = new LruCache<string>(32);
+  /**
+   * S5b memory read-cutover: the engine.db recall store + subject resolver, wired
+   * by KnowledgeLayer.setMemoryGraphReads. `memoryGraphReads` is the co-gated flag
+   * (memory_graph_reads AND subject_graph_enabled AND a store present). When on,
+   * `retrieve` reads memories from engine.db; a per-read throw falls back to legacy.
+   * The query-ENTITY resolution for the display graph stays legacy either way.
+   */
+  private memoryRecall: MemoryGraphStore | null = null;
+  private subjectStore: SubjectStore | null = null;
+  private memoryGraphReads = false;
 
   constructor(
     private readonly db: AgentMemoryDb,
@@ -122,6 +136,18 @@ export class RetrievalEngine {
    *  KnowledgeLayer.setMeteredHost). Null on self-host / BYOK. */
   setMeteredHost(host: HookHost | null): void {
     this.meteredHost = host;
+  }
+
+  /**
+   * Wire the S5b engine.db recall path. `enabled` is the fully co-gated flag
+   * (memory_graph_reads AND subject_graph_enabled) resolved by KnowledgeLayer;
+   * when true, `retrieve` reads memories from engine.db with a per-read legacy
+   * fallback. Idempotent — safe to call once at construction.
+   */
+  setMemoryGraphReads(recallStore: MemoryGraphStore, subjectStore: SubjectStore, enabled: boolean): void {
+    this.memoryRecall = recallStore;
+    this.subjectStore = subjectStore;
+    this.memoryGraphReads = enabled;
   }
 
   async retrieve(
@@ -156,21 +182,50 @@ export class RetrievalEngine {
 
     // === Step 3: Multi-signal search ===
     const scopeTypes = scopes.map(s => s.type);
-    const queryEntities = await this._resolveQueryEntities(query, scopes);
+    // Extract query terms ONCE — both the legacy display resolver and the S5b
+    // subject resolver consume them (avoids a second regex pass on the hot path).
+    const queryTerms = extractEntitiesRegex(query).entities;
+    // Display / DataStore-hint entities stay on the legacy KG resolver regardless
+    // of the memory-read flag — the `<knowledge_graph>` block + DataStore bridge
+    // are keyed on legacy entity ids (a separate concern from which memories to
+    // recall). Only the MEMORY reads (vector + graph-expand) re-point in S5b.
+    const queryEntities = await this._resolveQueryEntities(queryTerms, scopes);
+    const dim = this.embeddingProvider.dimensions;
 
-    const vectorResults = this.db.findSimilarMemories(queryEmbedding, 50, threshold * 0.8, {
-      namespace: options?.namespace,
-      scopeTypes,
-      activeOnly: true,
-    });
-
-    const graphExpanded = options?.useGraphExpansion !== false
-      ? this._graphExpand(queryEntities)
-      : [];
+    let vectorResults: ScoredMemoryRow[] | undefined;
+    let graphExpanded: MemoryRow[] = [];
+    // S5b: engine.db memory recall when memory_graph_reads is on (co-gated on the
+    // subject-graph mirror + a populated store). Both reads share one try — a throw
+    // in either falls the WHOLE recall back to legacy, so the flip can never fail a
+    // recall and the two signals never straddle the two stores.
+    if (this.memoryGraphReads && this.memoryRecall) {
+      try {
+        vectorResults = this.memoryRecall.findSimilarRecall(queryEmbedding, dim, 50, threshold * 0.8, {
+          namespace: options?.namespace,
+          scopeTypes,
+          activeOnly: true,
+        });
+        graphExpanded = options?.useGraphExpansion !== false
+          ? this._graphExpandSubjects(this._resolveQuerySubjects(queryTerms))
+          : [];
+      } catch (err: unknown) {
+        this._logReadFallback('retrieve', err);
+        vectorResults = undefined;
+      }
+    }
+    if (vectorResults === undefined) {
+      vectorResults = this.db.findSimilarMemories(queryEmbedding, 50, threshold * 0.8, {
+        namespace: options?.namespace,
+        scopeTypes,
+        activeOnly: true,
+      });
+      graphExpanded = options?.useGraphExpansion !== false
+        ? this._graphExpand(queryEntities)
+        : [];
+    }
 
     // === Step 4: Merge candidates ===
     const candidateMap = new Map<string, ScoredCandidate>();
-    const dim = this.embeddingProvider.dimensions;
 
     for (const row of vectorResults) {
       const emb = row.embedding ? blobToEmbed(row.embedding, dim) : [];
@@ -410,10 +465,9 @@ export class RetrievalEngine {
   }
 
   private async _resolveQueryEntities(
-    query: string,
+    entities: ExtractedEntity[],
     scopes: MemoryScopeRef[],
   ): Promise<EntityRecord[]> {
-    const { entities } = extractEntitiesRegex(query);
     const resolved: EntityRecord[] = [];
 
     for (const entity of entities.slice(0, 5)) {
@@ -445,6 +499,67 @@ export class RetrievalEngine {
     }
 
     return results;
+  }
+
+  /**
+   * S5b: resolve the (already-extracted) query terms to engine.db SUBJECT ids for
+   * graph-expand. Takes the SAME pre-extracted terms as {@link _resolveQueryEntities}
+   * (slice(0,5)) but resolves to subjects via canonical/alias lookup instead of the
+   * legacy entity resolver. `engagement`-kind terms (project) miss the canonical index
+   * — which covers person/organization/product/service — but resolve via findByAlias
+   * (a subject's name is in its aliases). Subjects are owner-scoped (the mirror writes
+   * them under the default owner), NOT memory-scoped, so no scope arg. A term whose
+   * entity type has no subject kind (concept/location) is skipped, matching the mirror.
+   */
+  private _resolveQuerySubjects(entities: ExtractedEntity[]): SubjectRow[] {
+    if (!this.subjectStore) return [];
+    const resolved: SubjectRow[] = [];
+    const seen = new Set<string>();
+    for (const entity of entities.slice(0, 5)) {
+      const kind = entityTypeToSubjectKind(entity.type);
+      if (!kind) continue;
+      const row = this.subjectStore.findCanonical(entity.name, kind)
+        ?? this.subjectStore.findByAlias(entity.name, kind);
+      if (row && !seen.has(row.id)) { seen.add(row.id); resolved.push(row); }
+    }
+    return resolved;
+  }
+
+  /**
+   * S5b engine.db graph-expand — the subject-keyed twin of {@link _graphExpand}
+   * (direct mentions + 1-relationship-hop related, same per-subject limits 5/3,
+   * same de-dup by id).
+   */
+  private _graphExpandSubjects(subjects: SubjectRow[]): MemoryRow[] {
+    if (subjects.length === 0 || !this.memoryRecall) return [];
+
+    const results: MemoryRow[] = [];
+    const seenIds = new Set<string>();
+
+    for (const subject of subjects) {
+      const direct = this.memoryRecall.memoriesMentioningSubject(subject.id, true, 5);
+      for (const row of direct) {
+        if (!seenIds.has(row.id)) { seenIds.add(row.id); results.push(row); }
+      }
+
+      const related = this.memoryRecall.relatedMemoriesViaSubjects(subject.id, true, 3);
+      for (const row of related) {
+        if (!seenIds.has(row.id)) { seenIds.add(row.id); results.push(row); }
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * A subject-graph recall read that throws (closed/corrupt engine.db) must never
+   * crash retrieval — it falls back to the legacy store (the write authority through
+   * S5b') and logs for observability, mirroring the S1b/S1d read-fallback isolation.
+   */
+  private _logReadFallback(method: string, err: unknown): void {
+    process.stderr.write(
+      `[lynox:subject-graph] recall ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
   }
 
   private _namespacedDecay(createdAt: string, namespace: MemoryNamespace): number {

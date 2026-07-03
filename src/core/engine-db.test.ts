@@ -25,10 +25,10 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v3', () => {
+  it('creates the database and stamps schema_version v4', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(3); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect column)
+    expect(row.v).toBe(4); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created)
     // v2's DDL ran in the same txn as its version stamp: the money-path index exists.
     const idx = e.getDb().prepare(
       "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_triggers_next_run'",
@@ -37,6 +37,11 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // v3 added the `effect` column (fresh install gets it via the migration loop).
     const cols = e.getDb().prepare("SELECT name FROM pragma_table_info('triggers')").all() as Array<{ name: string }>;
     expect(cols.map(c => c.name)).toContain('effect');
+    // v4 (S5b): the memory-recall created_at index for the ORDER BY DESC hot path.
+    const memIdx = e.getDb().prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memories_created'",
+    ).get() as { name: string } | undefined;
+    expect(memIdx?.name).toBe('idx_memories_created');
     e.close();
   });
 
@@ -54,6 +59,9 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
       INSERT INTO schema_version (version) VALUES (2);
       CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', target_workflow_id TEXT);
+      -- A real pre-v4 engine.db has the memories table (v1 baseline); the v4 migration
+      -- indexes memories(created_at), so the fixture must carry it or v4 fails the open.
+      CREATE TABLE memories (id TEXT PRIMARY KEY, created_at TEXT);
     `);
     const seed = raw.prepare('INSERT INTO triggers (id, source, condition_json, target_workflow_id) VALUES (?, ?, ?, ?)');
     seed.run('r-backup', 'backup', '{}', null);
@@ -220,7 +228,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(3); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(4); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -350,7 +358,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       expect(c, `table ${t} should be empty after wipe`).toBe(0);
     }
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(3);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(4);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -361,7 +369,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(3);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(4);
     e.close();
   });
 
@@ -376,7 +384,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(3);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(4);
     e.close();
   });
 });
