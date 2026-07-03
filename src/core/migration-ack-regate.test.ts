@@ -195,4 +195,43 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
     expect(ApiStore.regateMigratedApiConnections(join(dir, 'engine.db'), SRC_VAULT_KEY)).toBe(1);
     expect(readProfile(dir, SRC_VAULT_KEY, 'customapi')?.custom_endpoint_ack).toBeUndefined();
   });
+
+  it('re-gates only the acked rows in a mixed batch, leaving the rest untouched', () => {
+    const dir = tmp();
+    seedEngineDb(dir, ackedProfile()); // 'customapi' — acked
+    seedEngineDb(dir, ackedProfile({   // 'plainapi' — allowlisted host, no ack
+      id: 'plainapi',
+      base_url: 'https://api.anthropic.com',
+      custom_endpoint_ack: undefined,
+    }));
+
+    // Only the acked row counts + is stripped.
+    expect(ApiStore.regateMigratedApiConnections(join(dir, 'engine.db'), SRC_VAULT_KEY)).toBe(1);
+    expect(readProfile(dir, SRC_VAULT_KEY, 'customapi')?.custom_endpoint_ack).toBeUndefined();
+    // The non-acked sibling is untouched (still present, still no ack, base_url intact).
+    const plain = readProfile(dir, SRC_VAULT_KEY, 'plainapi');
+    expect(plain?.custom_endpoint_ack).toBeUndefined();
+    expect(plain?.base_url).toBe('https://api.anthropic.com');
+  });
+
+  it('leaves a non-api connection carrying an ack-like field untouched (kind-filter guard)', () => {
+    const dir = tmp();
+    seedEngineDb(dir, ackedProfile()); // one valid acked api row
+    // A non-api connection whose config_json happens to hold a custom_endpoint_ack.
+    const engine = new EngineDb(join(dir, 'engine.db'), SRC_VAULT_KEY);
+    engine.getDb().prepare(
+      "INSERT INTO connections (id, kind, name, config_json) VALUES ('mailconn','mail','Mail','{\"custom_endpoint_ack\":{\"accepted\":true}}')",
+    ).run();
+    engine.close();
+
+    // Only the kind='api' row is re-gated (count 1); the mail row is left exactly as-is —
+    // getByKind('api') is the over-strip guard on the kind dimension.
+    expect(ApiStore.regateMigratedApiConnections(join(dir, 'engine.db'), SRC_VAULT_KEY)).toBe(1);
+    const check = new EngineDb(join(dir, 'engine.db'), SRC_VAULT_KEY);
+    const mailRow = check.getDb()
+      .prepare("SELECT config_json FROM connections WHERE id='mailconn'")
+      .get() as { config_json: string };
+    check.close();
+    expect(JSON.parse(mailRow.config_json).custom_endpoint_ack).toEqual({ accepted: true });
+  });
 });

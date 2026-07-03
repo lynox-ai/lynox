@@ -329,16 +329,6 @@ export class MigrationImporter {
       }
     }
 
-    // On a MANAGED destination, a migrated api connection's custom_endpoint_ack
-    // is a per-instance BYOK-endpoint acceptance that must NOT be inherited —
-    // strip it so any custom endpoint re-triggers the disclosure gate before
-    // reuse (the engine.db analog of restoreConfig's SAFE_CONFIG_FIELDS strip).
-    // A self-hosted import keeps the ack (same data owner). No-op unless the
-    // just-restored set actually included engine.db.
-    if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
-      ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
-    }
-
     // 3. Artifacts
     for (const { meta, data } of chunksByType.artifacts) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'artifacts' });
@@ -349,6 +339,18 @@ export class MigrationImporter {
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
       verification.secretsImported = this.restoreSecrets(data);
+    }
+
+    // 5. Re-gate (MANAGED destination only): a migrated api connection's
+    // custom_endpoint_ack is a per-instance BYOK-endpoint acceptance that must
+    // NOT be inherited — strip it so any custom endpoint re-triggers the
+    // disclosure gate before reuse (the engine.db analog of restoreConfig's
+    // SAFE_CONFIG_FIELDS strip). A self-hosted import keeps the ack (same data
+    // owner). Runs LAST, after data + secrets are in, so a strip failure fails
+    // the import closed (the operator retries; regate is idempotent) rather than
+    // dropping the secret restore. No-op unless engine.db was in the set.
+    if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
+      ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
     }
 
     onProgress?.({ phase: 'done', currentChunk: manifest.totalChunks, totalChunks: manifest.totalChunks, currentName: '' });
