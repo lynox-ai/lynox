@@ -241,4 +241,49 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     // the import still completes + marks done (the corrupt file is a permanent skip).
     expect(existsSync(join(dir, '.imported-to-connections'))).toBe(true);
   });
+
+  it('importFromDirectoryIfNeeded skips a file missing required fields and imports the rest', () => {
+    const { cs } = makeCs();
+    const dir = apisDir();
+    writeFileSync(join(dir, 'good.json'), JSON.stringify(richProfile({ id: 'good' })), { mode: 0o600 });
+    writeFileSync(join(dir, 'thin.json'), JSON.stringify({ id: 'thin', name: 'Thin' }), { mode: 0o600 }); // no base_url/description
+    const w = new ApiStore();
+    expect(w.importFromDirectoryIfNeeded(dir, cs)).toBe(1);
+    expect(cs.get('thin')).toBeUndefined();
+    expect(cs.get('good')).toBeDefined();
+  });
+
+  it('importFromDirectoryIfNeeded aborts WITHOUT a sentinel when the atomic write fails (retries next boot)', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'stripe.json'), JSON.stringify(richProfile()), { mode: 0o600 });
+    // A store whose atomic write throws (e.g. a transient DB lock).
+    const failing = {
+      count: () => 0,
+      upsertMany: () => { throw new Error('database is locked'); },
+    } as unknown as ConnectionStore;
+    const w = new ApiStore();
+    expect(w.importFromDirectoryIfNeeded(dir, failing)).toBe(0);
+    // sentinel UNwritten → the import will retry on the next boot (no silent loss).
+    expect(existsSync(join(dir, '.imported-to-connections'))).toBe(false);
+  });
+
+  it('loadFromConnections skips a row whose config_json is malformed (parse throws)', () => {
+    const { cs, engine } = makeCs();
+    engine.getDb().prepare(
+      "INSERT INTO connections (id, kind, name, config_json) VALUES ('badcfg','api','Bad','not-json')",
+    ).run();
+    const r = new ApiStore();
+    expect(r.loadFromConnections(cs)).toBe(0);
+    expect(r.get('badcfg')).toBeUndefined();
+  });
+
+  it('save refuses a malformed id and does not persist it', () => {
+    const { cs } = makeCs();
+    const w = new ApiStore();
+    w.setConnectionStore(cs);
+    // register refuses the id (fails PROFILE_ID_PATTERN) → save must not persist a bad row.
+    w.save(richProfile({ id: 'Bad ID!' }));
+    expect(cs.count('api')).toBe(0);
+    expect(cs.get('Bad ID!')).toBeUndefined();
+  });
 });

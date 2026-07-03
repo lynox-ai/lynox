@@ -157,6 +157,14 @@ describe('ConnectionStore (Foundation Rework v2 — S4b)', () => {
     expect(store.get('obj')?.vaultKeys).toEqual([]);
   });
 
+  it('parseVaultKeys keeps only the string elements of a mixed array', () => {
+    const { store, engine } = make();
+    engine.getDb().prepare(
+      "INSERT INTO connections (id, kind, name, config_json, vault_keys) VALUES ('mix','api','Z','{}', '[\"ok\", 123, null, \"two\"]')",
+    ).run();
+    expect(store.get('mix')?.vaultKeys).toEqual(['ok', 'two']);
+  });
+
   it('subject_id FK nulls out when the referenced subject is deleted (ON DELETE SET NULL)', () => {
     const { store, engine } = make();
     engine.getDb().prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','organization','Acme')").run();

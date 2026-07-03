@@ -478,8 +478,18 @@ export class ApiStore {
     // atomic write.
     const rows: ConnectionRow[] = [];
     for (const file of files) {
+      let raw: string;
       try {
-        const raw = readFileSync(join(dir, file), 'utf-8');
+        raw = readFileSync(join(dir, file), 'utf-8');
+      } catch (err: unknown) {
+        // A file READ failure (EACCES/EBUSY/EMFILE) is likely transient — abort
+        // the whole import so it retries next boot, rather than permanently
+        // dropping this profile (the flat file is no longer read post-cutover).
+        // Same retry-safe stance as the upsert-transaction failure below.
+        process.stderr.write(`[lynox:api-store] Import aborted — could not read ${file}, will retry next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+        return 0; // sentinel unwritten
+      }
+      try {
         const profile = JSON.parse(raw) as ApiProfile;
         if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
           process.stderr.write(`[lynox:api-store] Skipping ${file} on import: missing required fields\n`);
@@ -491,7 +501,8 @@ export class ApiStore {
         }
         rows.push(profileToConnectionRow(migrateV1Profile(profile)));
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Failed to parse ${file} on import: ${err instanceof Error ? err.message : String(err)}\n`);
+        // Malformed content (bad JSON) is a permanent skip — retrying won't help.
+        process.stderr.write(`[lynox:api-store] Skipping ${file} on import: malformed JSON: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
     try {
