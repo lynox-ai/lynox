@@ -14,7 +14,6 @@
  * Profiles are written to ~/.lynox/apis/<id>.json and hot-reloaded into ApiStore.
  */
 
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
@@ -1072,10 +1071,8 @@ Next steps before calling create:
       const err = validateProfile(merged);
       if (err) return `Validation error after refine: ${err}`;
 
-      mkdirSync(apisDir, { recursive: true, mode: 0o700 });
-      const filePath = join(apisDir, `${merged.id}.json`);
-      writeFileSync(filePath, JSON.stringify(merged, null, 2), { mode: 0o600 });
-      apiStore.register(merged);
+      // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
+      apiStore.save(merged, apisDir);
 
       const changed: string[] = [];
       if (input.refine.addGuidelines?.length) changed.push(`+${String(input.refine.addGuidelines.length)} guidelines`);
@@ -1084,7 +1081,7 @@ Next steps before calling create:
       if (input.refine.addEndpoints?.length) changed.push(`+${String(input.refine.addEndpoints.length)} endpoints`);
       if (input.refine.response_shape) changed.push('response_shape updated');
       if (input.refine.rate_limit) changed.push('rate_limit updated');
-      return `Refined profile "${merged.id}": ${changed.length > 0 ? changed.join(', ') : 'no changes'}. Saved to ${filePath}.`;
+      return `Refined profile "${merged.id}": ${changed.length > 0 ? changed.join(', ') : 'no changes'}. Saved.`;
     }
 
     if (input.action === 'create' || input.action === 'update') {
@@ -1172,17 +1169,12 @@ Next steps before calling create:
         return `Profile is incomplete — research the API docs before creating:\n\n${warnings.map(w => `- ${w}`).join('\n')}\n\nTip: use action="bootstrap" with an OpenAPI URL to auto-derive endpoints + auth.`;
       }
 
-      // Write to disk
-      mkdirSync(apisDir, { recursive: true, mode: 0o700 });
-      const filePath = join(apisDir, `${profile.id}.json`);
-      const isUpdate = existsSync(filePath);
-      writeFileSync(filePath, JSON.stringify(profile, null, 2), { mode: 0o600 });
-
-      // Hot-reload into ApiStore
+      // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
       const apiStore = agent.toolContext?.apiStore;
-      if (apiStore) {
-        apiStore.register(profile);
+      if (!apiStore) {
+        return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
+      const isUpdate = !apiStore.save(profile, apisDir);
 
       const verb = isUpdate ? 'Updated' : 'Created';
       const parts: string[] = [
@@ -1204,7 +1196,7 @@ Next steps before calling create:
       if (profile.response_shape && profile.response_shape.kind !== 'passthrough') {
         parts.push('Response shape: active');
       }
-      parts.push(`Profile saved to ${filePath} and activated immediately.`);
+      parts.push('Profile saved and activated immediately.');
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
     }
@@ -1215,26 +1207,22 @@ Next steps before calling create:
         return 'Error: "id" is required for delete action.';
       }
       const apiStore = agent.toolContext?.apiStore;
-      // Prefer the in-memory + on-disk path so the agent sees the deletion
-      // immediately. Fall through to disk-only when the in-memory store
-      // has no record — that covers profiles dropped into apisDir after
-      // engine boot, plus the standalone-CLI paths where no store is bound.
+      if (!apiStore) {
+        return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
+      }
+      // Delete from the backing store + memory (S4b: engine.db `connections` when
+      // wired, else the flat-JSON directory). The agent sees the deletion
+      // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       try {
-        if (apiStore?.unregister(id, apisDir)) {
-          return `Deleted API profile "${id}".`;
-        }
+        return apiStore.remove(id, apisDir)
+          ? `Deleted API profile "${id}".`
+          : `API profile "${id}" not found.`;
       } catch (err) {
-        // unregister() throws ApiProfileUnlinkError on non-ENOENT unlink
-        // failure. Surface as a tool error so the agent doesn't retry
-        // blindly — the profile is already gone from memory.
+        // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
+        // when a non-ENOENT unlink fails — the profile is already gone from
+        // memory. Surface it so the agent doesn't retry blindly.
         return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
-      const filePath = join(apisDir, `${id}.json`);
-      if (!existsSync(filePath)) {
-        return `API profile "${id}" not found.`;
-      }
-      unlinkSync(filePath);
-      return `Deleted API profile "${id}". Changes take effect on next restart.`;
     }
 
     if (input.action === 'fetch_token') {

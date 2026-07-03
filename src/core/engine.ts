@@ -1065,12 +1065,28 @@ export class Engine {
       const { ApiStore } = await import('./api-store.js');
       this._apiStore = new ApiStore();
       const apisDir = join(getLynoxDir(), 'apis');
-      const loaded = this._apiStore.loadFromDirectory(apisDir);
+      let loaded: number;
+      if (this.engineDb) {
+        // S4b single-authority: engine.db `connections` is the source of truth
+        // for api profiles. Import the legacy flat-JSON profiles once (idempotent,
+        // sentinel-guarded), project them into the in-memory store, and wire the
+        // ConnectionStore so future save/remove persist to engine.db (the flat
+        // JSON files remain on disk as a rollback backup).
+        const { ConnectionStore } = await import('./connection-store.js');
+        const connStore = new ConnectionStore(this.engineDb);
+        this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
+        loaded = this._apiStore.loadFromConnections(connStore);
+        this._apiStore.setConnectionStore(connStore);
+      } else {
+        // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
+        // exactly as before S4b.
+        loaded = this._apiStore.loadFromDirectory(apisDir);
+      }
       // Wire the in-memory store into tool context unconditionally — otherwise
-      // a fresh install (zero profiles on disk) leaves toolContext.apiStore
-      // undefined, so api_setup `create` writes the new profile to disk but
-      // can't register it in memory, and GET /api/api-profiles keeps returning
-      // [] until the next engine restart loads it via loadFromDirectory.
+      // a fresh install (zero profiles) leaves toolContext.apiStore undefined, so
+      // api_setup `create` persists the new profile but can't register it in
+      // memory, and GET /api/api-profiles keeps returning [] until the next
+      // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
       if (loaded > 0) {
         const apiContext = this._apiStore.formatForSystemPrompt();

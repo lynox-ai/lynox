@@ -9,11 +9,12 @@
  * Also provides per-API rate limiting via hostname matching.
  */
 
-import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wrapUntrustedData } from './data-boundary.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
+import type { ConnectionRow, ConnectionStore } from './connection-store.js';
 
 // ── Errors ──
 
@@ -249,6 +250,57 @@ function migrateV1Profile(profile: ApiProfile): ApiProfile {
   return out;
 }
 
+// ── Connection projection (S4b) ──
+//
+// An api profile is a `kind='api'` Connection row. The full typed `ApiProfile`
+// serializes into the opaque `config_json` blob (minus `id`/`name`, promoted to
+// columns) so the ConnectionStore stays type-agnostic and no `any` leaks there;
+// the typed shape is reconstructed on read HERE, at the api layer.
+
+/** Filename sentinel marking that the one-shot flat-JSON → connections import ran. */
+const IMPORT_SENTINEL = '.imported-to-connections';
+
+/**
+ * Collect the vault secret NAMES a profile references, for the `vault_keys`
+ * name-array column. Denormalized on write so a delete/GDPR path can later purge
+ * the referenced secrets without re-parsing `config_json`. Never holds secret
+ * material — only names.
+ */
+function collectVaultKeys(profile: ApiProfile): string[] {
+  const keys = new Set<string>();
+  for (const k of profile.auth?.vault_keys ?? []) keys.add(k);
+  const oauth = profile.auth?.oauth;
+  if (oauth) {
+    for (const k of [oauth.client_id_key, oauth.client_secret_key, oauth.refresh_token_key]) {
+      if (k) keys.add(k);
+    }
+  }
+  return [...keys];
+}
+
+/** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). */
+function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
+  const { id, name, ...rest } = profile;
+  return {
+    id,
+    kind: 'api',
+    name,
+    subjectId: null,
+    direction: 'outbound',
+    configJson: JSON.stringify(rest),
+    vaultKeys: collectVaultKeys(profile),
+    status: 'active',
+  };
+}
+
+/** Reconstruct the typed `ApiProfile` from a connection row (inverse of
+ *  {@link profileToConnectionRow}). `config_json` is a serialized profile minus
+ *  the promoted `id`/`name` columns. */
+function connectionRowToProfile(row: ConnectionRow): ApiProfile {
+  const rest = JSON.parse(row.configJson) as Omit<ApiProfile, 'id' | 'name'>;
+  return { ...rest, id: row.id, name: row.name };
+}
+
 // ── Rate Limiter (per-API, in-memory) ──
 
 interface ApiRateBucket {
@@ -325,6 +377,20 @@ export class ApiStore {
   private readonly hostToProfile = new Map<string, string>(); // hostname → profile id
   readonly rateLimiter = new PerApiRateLimiter();
 
+  /**
+   * The engine.db backing store (S4b). When wired, `connections` is the single
+   * source of truth for api profiles and this in-memory store is a projection
+   * of it — `save`/`remove` persist through here, `loadFromConnections`
+   * rebuilds the Maps from it. Null only in the degraded no-engine.db path,
+   * where persistence falls back to the flat-JSON directory (legacy behaviour).
+   */
+  private connStore: ConnectionStore | null = null;
+
+  /** Wire the engine.db backing store so future `save`/`remove` persist there. */
+  setConnectionStore(store: ConnectionStore): void {
+    this.connStore = store;
+  }
+
   /** Load all profiles from a directory. Files must be *.json. */
   loadFromDirectory(dir: string): number {
     if (!existsSync(dir)) return 0;
@@ -348,6 +414,105 @@ export class ApiStore {
       }
     }
     return loaded;
+  }
+
+  /**
+   * Load all `kind='api'` profiles from the engine.db `connections` table (S4b).
+   * The projection read: each row is reconstructed into a typed `ApiProfile` and
+   * registered in-memory. Does NOT persist (the rows are already the source of
+   * truth) — mirrors {@link loadFromDirectory}'s validate-then-register loop.
+   */
+  loadFromConnections(store: ConnectionStore): number {
+    let loaded = 0;
+    for (const row of store.getByKind('api')) {
+      try {
+        const profile = connectionRowToProfile(row);
+        if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
+          process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
+          continue;
+        }
+        this.register(migrateV1Profile(profile));
+        loaded++;
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+    return loaded;
+  }
+
+  /**
+   * One-shot migration of the legacy flat-JSON profiles into `connections` (S4b
+   * single-authority cutover). Idempotent, guarded three ways so it never
+   * double-imports or clobbers post-cutover data:
+   * - a `.imported-to-connections` sentinel in the dir (durable "already ran"),
+   * - a skip when `connections` already holds api rows (re-provision / racy boot),
+   * - files are left in place (never deleted here).
+   *
+   * The write is ATOMIC (one `upsertMany` transaction): a transient DB failure
+   * rolls the whole batch back and leaves the sentinel unwritten, so the import
+   * retries cleanly next boot rather than silently dropping the un-imported
+   * profiles. Malformed/invalid files are permanent skips (logged), decided
+   * BEFORE the transaction.
+   *
+   * Returns the number of profiles imported (0 if nothing to do). The retained
+   * flat files are a PRE-CUTOVER snapshot (a pre-S4b image reboot re-reads them):
+   * they are frozen at the cutover instant — post-cutover creates/edits/deletes
+   * live only in `connections`, so a revert restores the pre-cutover state, not
+   * the latest. They are no longer an edit surface (hand-edits are ignored;
+   * author via `api_setup`).
+   */
+  importFromDirectoryIfNeeded(dir: string, store: ConnectionStore): number {
+    const sentinel = join(dir, IMPORT_SENTINEL);
+    if (existsSync(sentinel)) return 0;
+    if (!existsSync(dir)) return 0; // fresh install — no legacy profiles ever existed
+    const files = readdirSync(dir).filter(f => f.endsWith('.json'));
+    if (files.length === 0) return 0; // nothing to import; re-checked cheaply next boot
+    // Files exist but connections already has api rows → those are authoritative;
+    // mark imported (stop re-scanning) without clobbering them.
+    if (store.count('api') > 0) {
+      this._writeImportSentinel(sentinel);
+      return 0;
+    }
+    // Parse + validate every file FIRST — a malformed or bad-id file is a
+    // permanent skip (logged, never retried); only well-formed rows enter the
+    // atomic write.
+    const rows: ConnectionRow[] = [];
+    for (const file of files) {
+      try {
+        const raw = readFileSync(join(dir, file), 'utf-8');
+        const profile = JSON.parse(raw) as ApiProfile;
+        if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
+          process.stderr.write(`[lynox:api-store] Skipping ${file} on import: missing required fields\n`);
+          continue;
+        }
+        if (!PROFILE_ID_PATTERN.test(profile.id)) {
+          process.stderr.write(`[lynox:api-store] Skipping ${file} on import: invalid id ${JSON.stringify(profile.id)}\n`);
+          continue;
+        }
+        rows.push(profileToConnectionRow(migrateV1Profile(profile)));
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:api-store] Failed to parse ${file} on import: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+    try {
+      store.upsertMany(rows); // atomic — all-or-nothing
+    } catch (err: unknown) {
+      // Transient failure: nothing committed, sentinel unwritten → retry next boot.
+      process.stderr.write(`[lynox:api-store] Import transaction failed, will retry next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 0;
+    }
+    this._writeImportSentinel(sentinel);
+    process.stderr.write(`[lynox:api-store] Imported ${String(rows.length)} api profile(s) into connections (flat JSON retained as a pre-cutover backup)\n`);
+    return rows.length;
+  }
+
+  private _writeImportSentinel(path: string): void {
+    try {
+      writeFileSync(path, `${new Date().toISOString()}\n`, { mode: 0o600 });
+    } catch {
+      // A missing sentinel only costs a re-scan next boot (guarded by the
+      // connections-count check) — never fatal.
+    }
   }
 
   /** Register a single profile. Skips silently if the id is malformed. */
@@ -427,6 +592,67 @@ export class ApiStore {
     }
 
     return true;
+  }
+
+  /**
+   * Persist a profile: register it in-memory AND write it to the backing store.
+   * Routes to engine.db `connections` when a ConnectionStore is wired (S4b
+   * single-authority); otherwise falls back to the flat-JSON directory (the
+   * degraded no-engine.db path — behaviour-identical to the pre-S4b writes).
+   *
+   * Returns `true` when this created a NEW profile, `false` when it updated an
+   * existing one — the caller uses it for the "Created/Updated" verb, replacing
+   * the old `existsSync(file)` probe.
+   */
+  save(profile: ApiProfile, apisDir?: string): boolean {
+    const isNew = !this.profiles.has(profile.id);
+    this.register(profile); // in-memory (guards the id — a malformed id is refused)
+    if (!this.profiles.has(profile.id)) {
+      // register() refused the id; do not persist a bad row.
+      return isNew;
+    }
+    if (this.connStore) {
+      this.connStore.upsert(profileToConnectionRow(profile));
+    } else if (apisDir) {
+      mkdirSync(apisDir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
+    }
+    return isNew;
+  }
+
+  /**
+   * Remove a profile from memory AND the backing store. Routes to engine.db
+   * `connections` when wired (in-memory unregister — no file); otherwise the
+   * flat-JSON path. Returns whether the profile existed (in memory or the store).
+   * May throw {@link ApiProfileUnlinkError} on the flat-JSON path if a non-ENOENT
+   * unlink fails.
+   */
+  remove(id: string, apisDir?: string): boolean {
+    if (this.connStore) {
+      const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
+      // Kind-scoped so a cross-kind id collision (once mail/google/push land)
+      // can never delete a neighbour's connection.
+      const inStore = this.connStore.remove(id, 'api');
+      return inMemory || inStore;
+    }
+    // Degraded (flat-JSON) path: unregister removes a registered profile + its
+    // file. If the id wasn't registered, fall through to a disk-only unlink so an
+    // orphan file dropped into apisDir after boot stays deletable (pre-S4b behaviour).
+    if (this.unregister(id, apisDir)) return true;
+    if (apisDir && PROFILE_ID_PATTERN.test(id)) {
+      const filePath = join(apisDir, `${id}.json`);
+      if (existsSync(filePath)) {
+        try {
+          unlinkSync(filePath);
+          return true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw new ApiProfileUnlinkError(filePath, err);
+          }
+        }
+      }
+    }
+    return false;
   }
 
   /** Get all registered profiles. */

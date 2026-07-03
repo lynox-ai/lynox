@@ -114,13 +114,18 @@ export function isAllowlistedEndpoint(url: string): boolean {
  * so swapping a profile's `token_url`/`base_url` to a DIFFERENT non-allowlisted
  * host after acceptance does not inherit the old ack — the swap re-gates.
  *
- * Trust boundary: the ack is trusted as loaded from disk. It closes the
+ * Trust boundary: the ack is trusted as loaded from storage. It closes the
  * un-accepted-profile re-entry case; it does NOT defend against an adversary who
- * can already WRITE the apis dir — such a writer could forge a matching ack.
- * That write boundary is the filesystem: workspace isolation keeps the agent out
- * of the apis dir, and self-hosted single-user mode relies on OS permissions.
- * (Migration transfer does NOT carry api profiles — only whitelisted DBs +
- * config + artifacts + vault — so it is not a re-entry vector here.)
+ * can already WRITE the profile store — such a writer could forge a matching ack.
+ * That write boundary is the filesystem / engine.db: workspace isolation keeps
+ * the agent out of the apis dir, and self-hosted single-user mode relies on OS
+ * permissions.
+ * (Since S4b, api profiles live in engine.db `connections` — a migration-
+ * whitelisted DB — so the ack now travels with a self→managed migration. That
+ * transfer stays within a single data owner moving their own accepted config +
+ * their own vault secret, so it is not an external re-entry vector; whether a
+ * managed destination should re-record acceptance against the managed account is
+ * a liability decision, not a security gate.)
  */
 export interface CustomEndpointAck {
   /** Always `true` when present; absence means "no acceptance recorded". */
