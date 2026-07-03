@@ -629,6 +629,20 @@ describe('Engine + Session (Orchestrator)', () => {
       const rebuiltConfig = vi.mocked(Agent).mock.calls[0]![0];
       expect(rebuiltConfig.costGuard).toEqual({ maxBudgetUSD: 15 });
     });
+
+    it('survives a no-arg _recreateAgent (the changeset / vault-reload rebuild path)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ costGuard: { maxBudgetUSD: 15 } });
+
+      // run() rebuilds the agent with NO overrides for the changeset branch
+      // (session.ts) and on a vault/config reload — the budget must persist there too.
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent();
+
+      const rebuiltConfig = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuiltConfig.costGuard).toEqual({ maxBudgetUSD: 15 });
+    });
   });
 
   describe('setEffort()', () => {
