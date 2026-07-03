@@ -124,6 +124,27 @@ describe('MemoryGraphStore recall reads (Foundation Rework v2 — S5b)', () => {
     engine.close();
   });
 
+  it('exhaustive dedup scan finds an old match past the retrieval window (S5b\'-a parity)', () => {
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    const ins = db.prepare(
+      `INSERT INTO memories (id, text, namespace, scope_type, scope_id, embedding, created_at)
+       VALUES (?, ?, 'knowledge', 'context', 'c1', ?, ?)`,
+    );
+    // Oldest row is the only match; 600 newer non-matches bury it PAST the 500
+    // retrieval cap but WITHIN the 5000 exhaustive cap.
+    ins.run('m-old-dup', 'old duplicate', embedToBlob([1, 0, 0, 0]), '2020-01-01T00:00:00.000Z');
+    for (let i = 1; i <= 600; i++) {
+      const ts = `2020-01-01T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.${String(i).padStart(3, '0')}Z`;
+      ins.run(`m-noise-${i}`, `noise ${i}`, embedToBlob([0, 1, 0, 0]), ts);
+    }
+    // Non-exhaustive (500 cap) misses it; exhaustive (5000 cap) finds it — the
+    // dedup-vs-duplicate decision must not silently store a re-stated fact twice.
+    expect(mem.findSimilarRecall([1, 0, 0, 0], DIM, 1, 0.9).map(r => r.id)).not.toContain('m-old-dup');
+    expect(mem.findSimilarRecall([1, 0, 0, 0], DIM, 1, 0.9, { exhaustive: true }).map(r => r.id)).toContain('m-old-dup');
+    engine.close();
+  });
+
   it('recall NEVER surfaces an enc: blob — a keyless reopen skips the undecryptable row', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-recall-keyless-'));
     tmpDirs.push(dir);

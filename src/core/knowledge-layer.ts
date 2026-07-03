@@ -15,7 +15,7 @@ import type {
   ProvenanceKind,
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
-import type { MemoryRow } from './agent-memory-db.js';
+import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { embedToBlob } from './embedding.js';
 import { EntityResolver, toEntityRecord } from './entity-resolver.js';
@@ -70,6 +70,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * legacy through S5b'; a failed engine.db read falls back to legacy per-read.
    */
   private readonly memoryGraphReads: boolean;
+  /**
+   * The effective read-cutover co-gate (`memoryGraphReads && subjectGraphEnabled`),
+   * resolved once. When true the engine.db store is the populated authoritative
+   * recall source, so the WRITE-path dedup + contradiction scan (S5b'-a) consults it
+   * too — keeping a store()'s confirm-vs-create / supersede decision consistent with
+   * what RECALL surfaces. False → both stay on legacy. Also gates `setMemoryGraphReads`.
+   */
+  private readonly memoryReadsActive: boolean;
   private readonly subjectStore: SubjectStore | null;
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
@@ -107,16 +115,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.engineDb = engineDb ?? null;
     this.subjectGraphEnabled = subjectGraphEnabled ?? false;
     this.memoryGraphReads = memoryGraphReads ?? false;
+    // The engine.db store is only populated (dual-write) when the mirror
+    // (subject_graph_enabled) is on, so a memory_graph_reads flip without the mirror
+    // would recall over an empty store — co-gate on BOTH. Resolved once for both the
+    // read cutover (setMemoryGraphReads) and the S5b'-a write-path recall routing.
+    this.memoryReadsActive = this.memoryGraphReads && this.subjectGraphEnabled && this.engineDb !== null;
     if (this.engineDb) {
       this.subjectStore = new SubjectStore(this.engineDb);
       this.relationshipStore = new RelationshipStore(this.engineDb);
       this.memoryGraphStore = new MemoryGraphStore(this.engineDb);
-      // S5b: co-gate the engine.db recall path on BOTH flags — the store is only
-      // populated (dual-write) when the mirror (subject_graph_enabled) is on, so a
-      // memory_graph_reads flip without the mirror would recall over an empty store.
       this.retrievalEngine.setMemoryGraphReads(
-        this.memoryGraphStore, this.subjectStore,
-        this.memoryGraphReads && this.subjectGraphEnabled,
+        this.memoryGraphStore, this.subjectStore, this.memoryReadsActive,
       );
     } else {
       this.subjectStore = null;
@@ -174,6 +183,38 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.retrievalEngine.setDataStoreBridge(bridge);
   }
 
+  /**
+   * Write-path memory recall (S5b'-a) — routes the store()-time dedup + contradiction
+   * candidate scan to the SAME store the read cutover reads from. When
+   * {@link memoryReadsActive}, engine.db `MemoryGraphStore.findSimilarRecall` (which
+   * S5b re-pointed RECALL onto); else legacy `AgentMemoryDb.findSimilarMemories`.
+   * Both return `ScoredMemoryRow` (decrypted text, `_similarity`) so the dedup /
+   * contradiction logic is store-agnostic. The memory ROW itself stays dual-written
+   * through S5b'-a (the legacy row anchors the still-legacy entity/mention FK); the
+   * dual-write end + entity cutover is the FK-coupled S5b'-b bundle. Ids are parity
+   * across the stores (the mirror shares the legacy id), so a candidate found on
+   * engine.db is confirm/supersede-addressable on legacy unchanged.
+   */
+  private _dedupRecall(
+    embedding: number[],
+    topK: number,
+    threshold: number,
+    filters: {
+      namespace?: string | undefined;
+      scopeTypes?: string[] | undefined;
+      scopeIds?: string[] | undefined;
+      activeOnly?: boolean | undefined;
+      exhaustive?: boolean | undefined;
+    },
+  ): ScoredMemoryRow[] {
+    if (this.memoryReadsActive && this.memoryGraphStore) {
+      return this.memoryGraphStore.findSimilarRecall(
+        embedding, this.embeddingProvider.dimensions, topK, threshold, filters,
+      );
+    }
+    return this.db.findSimilarMemories(embedding, topK, threshold, filters);
+  }
+
   // === Store ===
 
   async store(
@@ -200,7 +241,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // 2. Dedup check — but bypass dedup when contradiction signals are present.
     // Filter by `scopeIds:[scope.id]` so a `context:acme` memory cannot dedup
     // against a `context:beta` memory with similar text (cross-project bleed).
-    const similar = this.db.findSimilarMemories(embedding, 1, DEDUP_THRESHOLD, {
+    // Routed through _dedupRecall (S5b'-a): consults engine.db when the read cutover
+    // is active, so the dedup decision matches what recall surfaces.
+    const similar = this._dedupRecall(embedding, 1, DEDUP_THRESHOLD, {
       namespace, scopeTypes: [scope.type], scopeIds: [scope.id], activeOnly: true,
       // Scan the whole scope, not just the newest 100 — else an older duplicate
       // past that window is missed and the fact is stored twice.
@@ -228,7 +271,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     let contradictions: ContradictionInfo[] = [];
     if (!options?.skipContradictionCheck) {
       contradictions = await detectContradictions(
-        trimmedText, namespace, scope, this.db, this.embeddingProvider, embedding,
+        trimmedText, namespace, scope,
+        (emb, topK, thr, f) => this._dedupRecall(emb, topK, thr, f),
+        this.embeddingProvider, embedding,
       );
     }
 
@@ -795,7 +840,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Update/Delete ===
 
   async checkContradictions(text: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<ContradictionInfo[]> {
-    return detectContradictions(text, namespace, scope, this.db, this.embeddingProvider);
+    return detectContradictions(
+      text, namespace, scope,
+      (emb, topK, thr, f) => this._dedupRecall(emb, topK, thr, f),
+      this.embeddingProvider,
+    );
   }
 
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {

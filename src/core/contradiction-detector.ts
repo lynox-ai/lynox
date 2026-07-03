@@ -1,6 +1,26 @@
 import type { MemoryNamespace, MemoryScopeRef, ContradictionInfo } from '../types/index.js';
-import type { AgentMemoryDb } from './agent-memory-db.js';
+import type { ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
+
+/**
+ * A cosine-recall over active memories — either legacy `AgentMemoryDb.findSimilarMemories`
+ * or the engine.db `MemoryGraphStore.findSimilarRecall` (S5b'-a). Parametrizing the
+ * detector on the recall SOURCE (rather than binding it to `AgentMemoryDb`) lets the
+ * write-path consult the SAME store the S5b read cutover reads from, so a store()'s
+ * contradiction decision stays consistent with what recall surfaces. Returns the
+ * caller's `ScoredMemoryRow` shape unchanged.
+ */
+export type MemoryRecall = (
+  embedding: number[],
+  topK: number,
+  threshold: number,
+  filters: {
+    namespace?: string | undefined;
+    scopeTypes?: string[] | undefined;
+    scopeIds?: string[] | undefined;
+    activeOnly?: boolean | undefined;
+  },
+) => ScoredMemoryRow[];
 
 /** Namespaces where contradiction detection applies (factual content). */
 const FACTUAL_NAMESPACES: ReadonlySet<MemoryNamespace> = new Set(['knowledge', 'learnings']);
@@ -26,7 +46,7 @@ export async function detectContradictions(
   newText: string,
   namespace: MemoryNamespace,
   scope: MemoryScopeRef,
-  db: AgentMemoryDb,
+  recall: MemoryRecall,
   embeddingProvider: EmbeddingProvider,
   reuseEmbedding?: number[] | undefined,
 ): Promise<ContradictionInfo[]> {
@@ -34,7 +54,7 @@ export async function detectContradictions(
 
   const embedding = reuseEmbedding ?? await embeddingProvider.embed(newText);
 
-  const similar = db.findSimilarMemories(
+  const similar = recall(
     embedding,
     MAX_CANDIDATES,
     CONTRADICTION_SIMILARITY_THRESHOLD,

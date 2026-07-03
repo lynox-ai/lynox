@@ -21,6 +21,15 @@ export interface MemoryStubRow {
 const ENC_PREFIX = 'enc:';
 
 /**
+ * The exhaustive dedup scan cap — parity with `DEDUP_EXHAUSTIVE_SCAN_LIMIT` in
+ * agent-memory-db.ts. The S5b'-a write-cutover's dedup read raises the pre-cosine
+ * scan to this (vs the retrieval window) so an older near-duplicate deep in a
+ * scope is still caught — else a re-stated fact is stored twice. Still capped (not
+ * unbounded) to bound per-store() cost on a ceiling-less scope like `global`.
+ */
+const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
+
+/**
  * The engine.db `memories` columns the S5b recall reads project — every field a
  * downstream {@link MemoryRow} carries EXCEPT the legacy-only `source_episode_id`
  * (engine.db tracks `source_thread_id`, not episodes; recall never reads it). Kept
@@ -336,10 +345,12 @@ export class MemoryGraphStore {
 
   /**
    * Cosine-similarity recall over engine.db memory embeddings — the port of
-   * {@link AgentMemoryDb.findSimilarMemories} (non-exhaustive retrieval path). SAME
-   * scan-cap (`min(max(topK*10,100),500)` newest-by-created_at), SAME filters, SAME
+   * {@link AgentMemoryDb.findSimilarMemories}. SAME scan-cap, SAME filters, SAME
    * min-heap top-K prune. Embeddings are scored FIRST (no decrypt); only the top-K
-   * survivors are decrypted, and any undecryptable survivor is dropped.
+   * survivors are decrypted, and any undecryptable survivor is dropped. With
+   * `exhaustive: true` (the S5b'-a dedup path) the pre-cosine scan cap rises to
+   * {@link DEDUP_EXHAUSTIVE_SCAN_LIMIT} — parity with legacy dedup — so an older
+   * near-duplicate past the retrieval window is still found.
    */
   findSimilarRecall(
     embedding: number[],
@@ -351,6 +362,7 @@ export class MemoryGraphStore {
       scopeTypes?: string[] | undefined;
       scopeIds?: string[] | undefined;
       activeOnly?: boolean | undefined;
+      exhaustive?: boolean | undefined;
     },
   ): ScoredMemoryRow[] {
     const clauses: string[] = [];
@@ -369,10 +381,12 @@ export class MemoryGraphStore {
       params.push(...filters.scopeIds);
     }
     const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    // Scan-cap PARITY with the legacy non-exhaustive path — a `created_at DESC`
-    // window so recall can't diverge on a large scope. The exhaustive dedup cap is
-    // a WRITE concern (not re-pointed in S5b).
-    const sqlLimit = Math.min(Math.max(topK * 10, 100), 500);
+    // Scan-cap PARITY with legacy: the retrieval window `min(max(topK*10,100),500)`
+    // newest-by-created_at, OR the raised dedup ceiling when exhaustive (so an older
+    // near-duplicate deep in the scope is still caught on the write path).
+    const sqlLimit = filters?.exhaustive === true
+      ? DEDUP_EXHAUSTIVE_SCAN_LIMIT
+      : Math.min(Math.max(topK * 10, 100), 500);
     params.push(sqlLimit);
     const rows = this.db.prepare(
       `SELECT ${RECALL_COLS} FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,

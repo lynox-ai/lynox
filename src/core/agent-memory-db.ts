@@ -795,10 +795,19 @@ export class AgentMemoryDb {
 
   createSupersedes(newMemoryId: string, oldMemoryId: string, reason: string): void {
     const now = new Date().toISOString();
+    // Guarded INSERT (skip when either endpoint has no legacy `memories` row) —
+    // mirrors MemoryGraphStore.recordSupersedes. Since the S5b'-a write cutover, the
+    // contradicted `oldMemoryId` is sourced from engine.db recall, whose set can
+    // outlive legacy rows purged/GC'd by a still-legacy-only path (purgeByThread /
+    // consolidate). A bare FK insert would then throw and fail the whole store()
+    // transaction — losing the NEW memory. The provenance edge for an orphaned old
+    // memory is simply skipped (engine reads never depend on the legacy junction).
     this.db.prepare(`
       INSERT OR IGNORE INTO supersedes (new_memory_id, old_memory_id, reason, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(newMemoryId, oldMemoryId, reason, now);
+      SELECT ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)
+        AND EXISTS (SELECT 1 FROM memories WHERE id = ?)
+    `).run(newMemoryId, oldMemoryId, reason, now, newMemoryId, oldMemoryId);
   }
 
   updateCooccurrence(entityAId: string, entityBId: string): void {
