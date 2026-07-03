@@ -146,3 +146,97 @@ describe('managed-hook usage-drop is loud (M1)', () => {
     stderrSpy.mockRestore();
   });
 });
+
+/**
+ * L-LE-3 — bill exact whole cents with a carried sub-cent remainder. The old
+ * `Math.max(1, Math.round(costUsd * 100))` floored every run to >= 1 cent, so a
+ * $0.001 run was billed 1c (10x) and per-helper debits multiplied the overcharge.
+ */
+describe('managed-hook sub-cent billing (L-LE-3)', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+    fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  // Every cost_cents actually reported to the CP across all flush POSTs.
+  function flushedRuns(): Array<{ run_id: string; cost_cents: number }> {
+    const runs: Array<{ run_id: string; cost_cents: number }> = [];
+    for (const [url, opts] of fetchSpy.mock.calls) {
+      const u = String(url);
+      const body = (opts as { body?: string } | undefined)?.body;
+      if (u.includes('/internal/usage/') && !u.endsWith('/status') && body) {
+        const parsed = JSON.parse(body) as { runs?: Array<{ run_id: string; cost_cents: number }> };
+        if (Array.isArray(parsed.runs)) runs.push(...parsed.runs);
+      }
+    }
+    return runs;
+  }
+
+  it('does not bill a lone sub-cent run — it carries to the next', async () => {
+    const hook = createManagedHook();
+    hook.onAfterRun?.('r1', 0.001, CTX); // 0.1c — the old floor billed this as 1c
+    await hook.onShutdown?.();
+    expect(flushedRuns()).toHaveLength(0);
+  });
+
+  it('accumulates sub-cent runs into one exact cent (no per-helper amplification)', async () => {
+    const hook = createManagedHook();
+    // Ten $0.001 runs = $0.01 of real spend. The old floor billed 10 x 1c = 10c.
+    for (let i = 0; i < 10; i++) hook.onAfterRun?.(`r${i}`, 0.001, CTX);
+    await hook.onShutdown?.();
+    const total = flushedRuns().reduce((n, r) => n + r.cost_cents, 0);
+    expect(total).toBe(1);
+  });
+
+  it('carries the fractional remainder across runs', async () => {
+    const hook = createManagedHook();
+    hook.onAfterRun?.('a', 0.006, CTX); // 0.6c → carried, no report
+    hook.onAfterRun?.('b', 0.006, CTX); // 1.2c → 1c reported, 0.2c carried
+    await hook.onShutdown?.();
+    const runs = flushedRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.cost_cents).toBe(1);
+  });
+
+  it('bills a whole-cent run exactly (normal case unchanged)', async () => {
+    const hook = createManagedHook();
+    hook.onAfterRun?.('x', 0.03, CTX); // 3c exactly
+    await hook.onShutdown?.();
+    const runs = flushedRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.cost_cents).toBe(3);
+  });
+
+  it('never over-bills a large batch of sub-cent runs vs the real spend', async () => {
+    const hook = createManagedHook();
+    // 250 runs at $0.004 = $1.00 real. Old floor: 250c. Exact: 100c.
+    for (let i = 0; i < 250; i++) hook.onAfterRun?.(`r${i}`, 0.004, CTX);
+    await hook.onShutdown?.();
+    const total = flushedRuns().reduce((n, r) => n + r.cost_cents, 0);
+    expect(total).toBe(100);
+  });
+
+  it('ignores non-finite costs (NaN / Infinity) without polluting the carry', async () => {
+    const hook = createManagedHook();
+    hook.onAfterRun?.('nan', Number.NaN, CTX);
+    hook.onAfterRun?.('inf', Number.POSITIVE_INFINITY, CTX);
+    hook.onAfterRun?.('ok', 0.02, CTX); // a real 2c run still bills correctly
+    await hook.onShutdown?.();
+    const runs = flushedRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.cost_cents).toBe(2);
+  });
+});

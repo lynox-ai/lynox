@@ -106,6 +106,11 @@ export function createManagedHook(): LynoxHooks {
   // Cumulative un-debited spend the hook has had to drop this process lifetime.
   let droppedReports = 0;
   let droppedCents = 0;
+  // Sub-cent billing carry, in integer micro-cents (1 cent = 1000 micro-cents).
+  // The CP debits whole cents, so each run's exact cost accumulates here and only
+  // whole cents are reported — the sub-cent fraction carries to the next run.
+  // Integer units, not a float, so millions of tiny runs can't drift the total.
+  let microCentsCarry = 0;
 
   /**
    * A usage report is money owed to lynox — every drop is spend the tenant used
@@ -255,9 +260,18 @@ export function createManagedHook(): LynoxHooks {
     },
 
     onAfterRun(runId: string, costUsd: number, context: RunContext) {
-      if (costUsd <= 0) return; // Skip zero-cost or erroneous runs
+      if (!Number.isFinite(costUsd) || costUsd <= 0) return; // Skip zero/negative/NaN
 
-      const costCents = Math.max(1, Math.round(costUsd * 100));
+      // Exact whole-cent billing with a carried sub-cent remainder. The old
+      // `Math.max(1, Math.round(costUsd * 100))` floored EVERY run to at least
+      // 1 cent, so a $0.001 run was billed 1c (a 10x overcharge) — and per-helper
+      // debits multiplied it (five $0.002 helper runs → 5c billed for $0.01 of
+      // real spend). Accumulate this run's cost in micro-cents, debit only the
+      // whole cents that have built up, and carry the fraction forward.
+      microCentsCarry += Math.round(costUsd * 100_000);
+      const costCents = Math.floor(microCentsCarry / 1000);
+      if (costCents <= 0) return; // Still sub-cent — carry it to the next run.
+      microCentsCarry -= costCents * 1000;
 
       pending.push({
         run_id: runId,
