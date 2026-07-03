@@ -543,6 +543,35 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('danger scan covers the whole command (no head/tail gap)', () => {
+    // The old head(10K)+tail(2K) sampling left the middle of a long command
+    // unscanned while the executor ran it in full. A payload buried at ~offset
+    // 14K of an ~18K command sits in the old gap [10K, len-2K) and must now be
+    // caught by the overlapping-window scan.
+    const head = 'echo benign; '.repeat(1100); // ~14.3K chars of benign prefix
+    const tail = 'echo benign; '.repeat(300); //  ~3.9K chars of benign suffix
+
+    it('catches rm -rf / buried in the middle of a long command', () => {
+      const cmd = `${head}rm -rf / ; ${tail}`;
+      expect(cmd.length).toBeGreaterThan(10_000 + 2_000); // in the old blind gap
+      const result = isDangerous('bash', { command: cmd });
+      expect(result).not.toBeNull();
+    });
+
+    it('BLOCKS a mid-command rm -rf / in autonomous mode', () => {
+      const cmd = `${head}rm -rf / ; ${tail}`;
+      const result = isDangerous('bash', { command: cmd }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED — this action needs to be run manually for safety]');
+    });
+
+    it('still catches a payload at the very end of a long command', () => {
+      const cmd = `${head}${tail}rm -rf /`;
+      const result = isDangerous('bash', { command: cmd });
+      expect(result).not.toBeNull();
+    });
+  });
+
   describe('BUG 2 fix — force push main uses lookahead', () => {
     it('catches git push origin main --force (flag after branch)', () => {
       const result = isDangerous('bash', { command: 'git push origin main --force' });

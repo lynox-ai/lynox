@@ -539,25 +539,47 @@ function _checkPatterns(segments: string[], patterns: Array<{ pattern: RegExp; l
   return null;
 }
 
+// Build the per-chunk scan surface: the normalized form, the quote-removed
+// form the shell actually executes (`r''m -rf /` → `rm -rf /`), and both split
+// into segments so cross- and intra-segment patterns are all covered.
+function _bashScanSegments(chunk: string): string[] {
+  const normalized = normalizeCommand(chunk);
+  const stripped = stripShellQuotes(normalized);
+  const segments = splitCommandSegments(normalized);
+  // Only re-split the stripped form when stripping changed something (no extra
+  // work for the common unquoted command).
+  const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
+  return [normalized, stripped, ...segments, ...strippedSegments];
+}
+
+// Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
+// so a single full-length pass is O(n²) on crafted input — hence the window
+// bound. But the previous head(10K)+tail(2K) sampling left the MIDDLE of a long
+// command unscanned while the executor ran it in full, so an `rm -rf /` at
+// offset ~15K evaded the guard entirely. Scan the WHOLE command in bounded
+// overlapping windows instead (mirrors output-guard's checkWriteContent). The
+// overlap exceeds any realistic dangerous one-liner, so a command straddling a
+// window boundary is still caught intact in an adjacent window.
+const BASH_SCAN_WINDOW = MAX_CMD_CHECK_LEN;
+const BASH_SCAN_OVERLAP = 2_000;
+
+function _scanBashDanger(
+  rawCmd: string,
+  patterns: Array<{ pattern: RegExp; label: string }>,
+): { label: string } | null {
+  if (rawCmd.length <= BASH_SCAN_WINDOW) {
+    return _checkPatterns(_bashScanSegments(rawCmd), patterns);
+  }
+  for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
+    const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW)), patterns);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry): string | null {
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
-    // Truncate for regex matching to prevent ReDoS; the actual command still executes in full.
-    // Also check the last 2K chars of long commands to catch payloads appended at the end.
-    const truncated = rawCmd.length > MAX_CMD_CHECK_LEN
-      ? rawCmd.slice(0, MAX_CMD_CHECK_LEN) + rawCmd.slice(-2000)
-      : rawCmd;
-    // Normalize to defeat encoding bypasses, then split into segments for per-segment checking
-    const normalized = normalizeCommand(truncated);
-    const stripped = stripShellQuotes(normalized);
-    const segments = splitCommandSegments(normalized);
-    // Also scan the quote-removed form the shell actually executes + its
-    // segments — intra-word quotes/backslashes (`r''m -rf /`) otherwise slip a
-    // dangerous command past the literal-token patterns. Only when stripping
-    // changed something (no extra work for the common unquoted command).
-    const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
-    // Also check the full normalized string (catches cross-segment patterns like pipes)
-    const allSegments = [normalized, stripped, ...segments, ...strippedSegments];
 
     // Short preview for user display (first line, max 80 chars)
     const firstLine = rawCmd.split('\n')[0]!;
@@ -565,14 +587,14 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
 
     // In autonomous mode, only block truly critical operations
     if (autonomy === 'autonomous') {
-      const hit = _checkPatterns(allSegments, CRITICAL_BASH);
+      const hit = _scanBashDanger(rawCmd, CRITICAL_BASH);
       if (hit) {
         return `⚠ ${toolName}: ${hit.label} — "${preview}" [BLOCKED — this action needs to be run manually for safety]`;
       }
       return null;
     }
 
-    const hit = _checkPatterns(allSegments, DANGEROUS_BASH);
+    const hit = _scanBashDanger(rawCmd, DANGEROUS_BASH);
     if (hit) {
       return `⚠ ${toolName}: ${hit.label} — "${preview}"`;
     }
