@@ -244,6 +244,23 @@ describe('bootstrapInbox — wiring', () => {
     fetchSpy.mockRestore();
   });
 
+  it('prices classifier spend per region — Mistral for EU, Haiku for US', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const us = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true });
+    const eu = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, llmRegion: 'eu', mistralApiKey: 'eu-key' });
+    try {
+      // Same 1M-in + 1M-out usage priced at each region's provider rate. The EU
+      // path used to bill Mistral spend at the Haiku constants (~7.5× here).
+      us.budget.recordUsage(1_000_000, 1_000_000);
+      eu.budget.recordUsage(1_000_000, 1_000_000);
+      expect(us.budget.snapshot().spentUSD).toBeCloseTo(6.0, 6); // Haiku $1 + $5
+      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.8, 6); // Mistral $0.20 + $0.60
+    } finally {
+      await us.shutdown();
+      await eu.shutdown();
+    }
+  });
+
   it('LLM rejection cascades through retry to a fail-closed dead-letter item', async () => {
     const create = vi.fn(async () => {
       throw new Error('rate_limited');

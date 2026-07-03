@@ -16,6 +16,16 @@
 export const DEFAULT_INPUT_COST_PER_MTOK = 1.0;
 export const DEFAULT_OUTPUT_COST_PER_MTOK = 5.0;
 
+/**
+ * Mistral-small pricing per million tokens (USD). The EU classifier path routes
+ * to mistral-small-latest (see classifier/llm-mistral.ts); rates mirror the
+ * registry `mistral-small-2603` entry in types/models.ts. Pricing Mistral spend
+ * with the Haiku constants above over-charged EU tenants ~5-8× and tripped the
+ * daily cap after only ~$0.50 of real spend.
+ */
+export const MISTRAL_INPUT_COST_PER_MTOK = 0.20;
+export const MISTRAL_OUTPUT_COST_PER_MTOK = 0.60;
+
 /** Default daily classifier spend cap. */
 export const DEFAULT_DAILY_BUDGET_USD = 5.0;
 

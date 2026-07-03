@@ -30,6 +30,8 @@ import { InboxContactResolver } from './contact-resolver.js';
 import {
   DEFAULT_INPUT_COST_PER_MTOK,
   DEFAULT_OUTPUT_COST_PER_MTOK,
+  MISTRAL_INPUT_COST_PER_MTOK,
+  MISTRAL_OUTPUT_COST_PER_MTOK,
   InboxCostBudget,
   type InboxCostBudgetOptions,
 } from './cost-budget.js';
@@ -181,16 +183,24 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const state = new InboxStateDb(opts.mailStateDb.getConnection());
   const rules = new InboxRulesLoader(state);
   const contactResolver = opts.crm ? new InboxContactResolver(opts.crm) : null;
-  const budget = new InboxCostBudget(opts.budget ?? {});
+  // Provider-keyed classifier pricing: the EU region routes to Mistral
+  // (mistral-small), the US region to Anthropic (Haiku). Debiting Mistral spend
+  // at the higher Haiku rates over-charged EU tenants ~5-8× and tripped the
+  // daily cap early. An explicit opts.budget override still wins.
+  const providerPricing = region === 'eu'
+    ? { inputCostPerMtok: MISTRAL_INPUT_COST_PER_MTOK, outputCostPerMtok: MISTRAL_OUTPUT_COST_PER_MTOK }
+    : { inputCostPerMtok: DEFAULT_INPUT_COST_PER_MTOK, outputCostPerMtok: DEFAULT_OUTPUT_COST_PER_MTOK };
+  const budget = new InboxCostBudget({ ...providerPricing, ...(opts.budget ?? {}) });
   const coldStartTracker = new ColdStartTracker();
 
   const onUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
     budget.recordUsage(usage.inputTokens, usage.outputTokens);
     // One cost basis for all three consumers below — the local daily cap, the
     // RunHistory dashboard bridge, and the managed CP debit — so they never
-    // diverge. Reuses the same constants InboxCostBudget uses.
-    const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? DEFAULT_INPUT_COST_PER_MTOK;
-    const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? DEFAULT_OUTPUT_COST_PER_MTOK;
+    // diverge. Uses the same provider-keyed pricing the InboxCostBudget was
+    // built with (Mistral rates for EU, Haiku for US).
+    const inputCostPerMtok = opts.budget?.inputCostPerMtok ?? providerPricing.inputCostPerMtok;
+    const outputCostPerMtok = opts.budget?.outputCostPerMtok ?? providerPricing.outputCostPerMtok;
     const costUsd =
       (usage.inputTokens / 1_000_000) * inputCostPerMtok
       + (usage.outputTokens / 1_000_000) * outputCostPerMtok;
@@ -213,8 +223,8 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
         // the agreed sentinel for grepping if a dedup gate gets needed.
         const id = opts.runHistory.insertRun({
           taskText: 'inbox classifier',
-          modelTier: 'haiku',
-          modelId: opts.modelIdOverride ?? 'haiku-default',
+          modelTier: region === 'eu' ? 'fast' : 'haiku',
+          modelId: opts.modelIdOverride ?? (region === 'eu' ? 'mistral-small-latest' : 'haiku-default'),
           runType: 'single',
           tenantId: opts.tenantId,
           kind: 'llm',
