@@ -1,19 +1,18 @@
 /**
  * KPI Engine — computes agent performance metrics from run history.
  *
- * Reads per-run data from RunHistory (runs + tool_calls).
- * Writes metrics to AgentMemoryDb.
+ * Reads per-run data from RunHistory (runs + tool_calls) AND writes the computed
+ * metrics back to RunHistory (history.db). S5b'-c collapsed the former cross-file
+ * write to AgentMemoryDb — inputs and output now share one DB.
  *
  * Computes:
  * - Agent performance metrics (success rate, avg duration, cost, tool usage)
  */
-import type { AgentMemoryDb } from './agent-memory-db.js';
 import type { RunHistory } from './run-history.js';
 
 export class KpiEngine {
   constructor(
     private readonly runHistory: RunHistory,
-    private readonly db: AgentMemoryDb,
   ) {}
 
   // ── KPI Computation ───────────────────────────────────────────
@@ -27,7 +26,7 @@ export class KpiEngine {
 
     // Success rate
     const successes = runs.filter(r => r.status === 'completed').length;
-    this.db.upsertMetric({
+    this.runHistory.upsertMetric({
       metricName: 'success_rate',
       value: total > 0 ? successes / total : 0,
       sampleCount: total,
@@ -36,7 +35,7 @@ export class KpiEngine {
     // Average duration
     const durations = runs.filter(r => r.durationMs > 0).map(r => r.durationMs);
     if (durations.length > 0) {
-      this.db.upsertMetric({
+      this.runHistory.upsertMetric({
         metricName: 'avg_duration_ms',
         value: durations.reduce((a, b) => a + b, 0) / durations.length,
         sampleCount: durations.length,
@@ -46,7 +45,7 @@ export class KpiEngine {
     // Total cost
     const totalCost = runs.reduce((sum, r) => sum + r.costUsd, 0);
     if (totalCost > 0) {
-      this.db.upsertMetric({
+      this.runHistory.upsertMetric({
         metricName: 'total_cost_usd',
         value: totalCost,
         sampleCount: total,
@@ -61,7 +60,7 @@ export class KpiEngine {
       }
     }
     for (const [tool, count] of toolCounts) {
-      this.db.upsertMetric({
+      this.runHistory.upsertMetric({
         metricName: `tool_usage.${tool}`,
         value: count,
         sampleCount: total,
@@ -69,7 +68,7 @@ export class KpiEngine {
     }
 
     // Run count
-    this.db.upsertMetric({
+    this.runHistory.upsertMetric({
       metricName: 'total_runs',
       value: total,
       sampleCount: total,
@@ -83,7 +82,7 @@ export class KpiEngine {
       }
     }
     if (sessionCounts.size > 0) {
-      this.db.upsertMetric({
+      this.runHistory.upsertMetric({
         metricName: 'avg_runs_per_thread',
         value: total / sessionCounts.size,
         sampleCount: sessionCounts.size,

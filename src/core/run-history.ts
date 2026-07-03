@@ -183,6 +183,22 @@ export interface ThreadAggregate {
   lastRunAt: string;
 }
 
+/**
+ * A computed KPI metric row — the metrics table's read shape. Defined here (the
+ * surviving home after the S5b'-c relocation) rather than imported from the legacy
+ * agent-memory.db module it moved off, so it doesn't orphan at the S5b'-d DROP.
+ */
+export interface MetricRow {
+  id: string;
+  metric_name: string;
+  scope_type: string | null;
+  scope_id: string | null;
+  value: number;
+  sample_count: number;
+  window: string;
+  computed_at: string;
+}
+
 export interface PromptSnapshotRecord {
   hash: string;
   profile_name: string;
@@ -1065,6 +1081,31 @@ const MIGRATIONS: string[] = [
    DROP TABLE IF EXISTS triggers;
 
    DELETE FROM pipeline_runs WHERE status IN ('planned', 'executed');`,
+
+  // v45 (Foundation Rework v2, S5b'-c metrics relocation): the KPI `metrics` table
+  // moves agent-memory.db → history.db. KpiEngine already READS its inputs from
+  // history.db `runs`/`tool_calls` and only WROTE the computed metrics to the legacy
+  // DB — a cross-file seam. Collapsing it here (writer + reader both on history.db)
+  // removes the KpiEngine→AgentMemoryDb dependency and de-legacies the metrics layer
+  // ahead of the S5b'-d agent-memory.db DROP. Same shape as the legacy table
+  // (agent-memory-db.ts v1). Pure telemetry — no PII, no encryption, flag-independent
+  // (unlike the flag-gated subject-graph lifecycle). Mirrors the v2 episodes move
+  // ("data now lives in RunHistory"). The legacy `metrics` table stays dormant (no
+  // writer) until the S5b'-d DROP.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (45);
+
+   CREATE TABLE IF NOT EXISTS metrics (
+     id TEXT PRIMARY KEY,
+     metric_name TEXT NOT NULL,
+     scope_type TEXT,
+     scope_id TEXT,
+     value REAL NOT NULL,
+     sample_count INTEGER NOT NULL DEFAULT 1,
+     window TEXT NOT NULL DEFAULT 'all_time',
+     computed_at TEXT NOT NULL
+   );
+
+   CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(metric_name, window);`,
 ];
 
 export class RunHistory {
@@ -1605,6 +1646,63 @@ export class RunHistory {
         lastRunAt: r.last_run_at,
       };
     });
+  }
+
+  // ── Metrics (S5b'-c: relocated from agent-memory.db) ──────────────
+
+  /**
+   * Upsert a computed KPI metric — {@link KpiEngine}'s output. Relocated from
+   * AgentMemoryDb in S5b'-c: the writer and its inputs (`runs`/`run_tool_calls`)
+   * both live on history.db, so the metric lands here too, collapsing the old
+   * cross-file KpiEngine→AgentMemoryDb write. Upsert key = (metric_name, window,
+   * scope) with a NULL scope collapsed to '' so a global metric keeps one row.
+   * Pure telemetry — no PII, no encryption. Byte-identical logic to the retired
+   * `AgentMemoryDb.upsertMetric`.
+   */
+  upsertMetric(props: {
+    metricName: string;
+    value: number;
+    sampleCount?: number | undefined;
+    window?: string | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+  }): void {
+    const now = new Date().toISOString();
+    const window = props.window ?? 'all_time';
+    const existing = this.db.prepare(`
+      SELECT id FROM metrics WHERE metric_name = ? AND window = ?
+        AND COALESCE(scope_type, '') = COALESCE(?, '')
+        AND COALESCE(scope_id, '') = COALESCE(?, '')
+    `).get(props.metricName, window, props.scopeType ?? '', props.scopeId ?? '') as { id: string } | undefined;
+
+    if (existing) {
+      this.db.prepare(`
+        UPDATE metrics SET value = ?, sample_count = ?, computed_at = ? WHERE id = ?
+      `).run(props.value, props.sampleCount ?? 1, now, existing.id);
+    } else {
+      this.db.prepare(`
+        INSERT INTO metrics (id, metric_name, scope_type, scope_id, value, sample_count, window, computed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(randomUUID(), props.metricName, props.scopeType ?? null, props.scopeId ?? null,
+        props.value, props.sampleCount ?? 1, window, now);
+    }
+  }
+
+  /**
+   * Read computed KPI metrics, newest first; optional name/window filter. A NULL
+   * param disables that filter (fully parameterized — no SQL interpolation), so an
+   * empty-string arg is treated as "no filter" like the retired legacy getter.
+   */
+  getMetrics(metricName?: string | undefined, window?: string | undefined): MetricRow[] {
+    return this.db.prepare(`
+      SELECT * FROM metrics
+      WHERE (? IS NULL OR metric_name = ?)
+        AND (? IS NULL OR window = ?)
+      ORDER BY computed_at DESC
+    `).all(
+      metricName || null, metricName || null,
+      window || null, window || null,
+    ) as MetricRow[];
   }
 
   /**

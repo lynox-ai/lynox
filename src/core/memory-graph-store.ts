@@ -303,6 +303,51 @@ export class MemoryGraphStore {
     `).run();
   }
 
+  // ── S5b'-c lifecycle (engine.db) ──────────────────────────────
+  // The DELETE side of the memory cutover. Under the mirror flag the engine.db stub
+  // store is the authoritative RECALL source, so a thread-purge (privacy) and a
+  // dead-stub GC must reap it too — else purged/superseded content lingers in the
+  // recall store. Both delete `memories` rows ONLY; the schema's ON DELETE CASCADE
+  // reaps memory_subjects + supersedes + conflicts, and relationships.source_memory_id
+  // SET-NULLs — a cross-thread SUBJECT is never touched (the cascade runs
+  // memory→junction, not junction→subject), so durable subjects survive. A subject
+  // left with no memory is NOT reaped here: subjects are durable substrate referenced
+  // across the verb layer (tasks/triggers/connections/threads/artifacts), so an
+  // orphan-subject sweep is a deferred slice gated on the subject-lifecycle design,
+  // not a mechanical port of the legacy orphan-entity delete.
+
+  /**
+   * Delete memory stubs by id — the S5b'-c thread-purge via id-parity (a stub shares
+   * the legacy memory id). The caller passes the thread's ids read from the legacy
+   * store (which owns `source_thread_id`; engine.db's column is NULL-by-design until
+   * the S5b'-d thread-spine cutover). Chunked under SQLite's 999-variable limit; one
+   * transaction (atomic per purge). Returns the number of stubs deleted.
+   */
+  purgeMemories(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    return this.db.transaction(() => {
+      let deleted = 0;
+      const CHUNK = 500;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const placeholders = chunk.map(() => '?').join(',');
+        deleted += this.db.prepare(
+          `DELETE FROM memories WHERE id IN (${placeholders})`,
+        ).run(...chunk).changes;
+      }
+      return deleted;
+    })();
+  }
+
+  /**
+   * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
+   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children.
+   * Returns the number of stubs deleted.
+   */
+  gcInactiveStubs(): number {
+    return this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
+  }
+
   // ── S5b recall reads (engine.db) ──────────────────────────────
   // The READ side of the memory cutover: these mirror the legacy AgentMemoryDb
   // recall queries (findSimilarMemories / listActiveMemories / graph-expand) over

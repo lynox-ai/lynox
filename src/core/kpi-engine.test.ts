@@ -2,25 +2,22 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { AgentMemoryDb } from './agent-memory-db.js';
 import { RunHistory } from './run-history.js';
 import { KpiEngine } from './kpi-engine.js';
 
 describe('KpiEngine', () => {
   let tempDir: string;
-  let db: AgentMemoryDb;
   let rh: RunHistory;
   let engine: KpiEngine;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'lynox-kpi-test-'));
-    db = new AgentMemoryDb(join(tempDir, 'memory.db'));
+    // S5b'-c: KpiEngine reads runs from history.db AND writes its metrics there too.
     rh = new RunHistory(join(tempDir, 'history.db'));
-    engine = new KpiEngine(rh, db);
+    engine = new KpiEngine(rh);
   });
 
   afterEach(async () => {
-    db.close();
     rh.close();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -53,7 +50,7 @@ describe('KpiEngine', () => {
 
   it('no-ops with no runs', () => {
     engine.computeKPIs();
-    expect(db.getMetrics()).toHaveLength(0);
+    expect(rh.getMetrics()).toHaveLength(0);
   });
 
   it('computes success_rate, total_runs, cost and tool-usage metrics', () => {
@@ -63,17 +60,17 @@ describe('KpiEngine', () => {
 
     engine.computeKPIs();
 
-    const successRate = db.getMetrics('success_rate');
+    const successRate = rh.getMetrics('success_rate');
     expect(successRate).toHaveLength(1);
     expect(successRate[0]!.value).toBeCloseTo(2 / 3, 5);
 
-    const totalRuns = db.getMetrics('total_runs');
+    const totalRuns = rh.getMetrics('total_runs');
     expect(totalRuns[0]!.value).toBe(3);
 
-    const cost = db.getMetrics('total_cost_usd');
+    const cost = rh.getMetrics('total_cost_usd');
     expect(cost[0]!.value).toBeCloseTo(0.06, 5);
 
-    const httpUsage = db.getMetrics('tool_usage.http_request');
+    const httpUsage = rh.getMetrics('tool_usage.http_request');
     expect(httpUsage[0]!.value).toBe(2);
   });
 });

@@ -111,7 +111,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
-    this.kpiEngine = runHistory ? new KpiEngine(runHistory, this.db) : null;
+    this.kpiEngine = runHistory ? new KpiEngine(runHistory) : null;
     this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] !== 'v1';
     this.engineDb = engineDb ?? null;
     this.subjectGraphEnabled = subjectGraphEnabled ?? false;
@@ -783,6 +783,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * Deletes memories and orphaned entities (reference-counted).
    */
   purgeThread(threadId: string): number {
+    // S5b'-c: under the MIRROR flag, ALSO reap the thread's engine.db stubs — the
+    // authoritative recall store — else the purged (privacy) statement text lingers
+    // there. id-parity bridge: read the thread's ids from legacy (which owns
+    // source_thread_id) BEFORE the legacy purge deletes them, then delete the same
+    // stub ids from engine.db (cascades reap the junction; durable subjects survive).
+    // Gated on `subjectGraphEnabled`, NOT reads — the mirror WRITES stubs whenever it's
+    // on, so a purge must reap them whenever it's on (matching _mirrorConfidence).
+    // Isolated: an engine.db failure is logged + swallowed so the legacy purge below
+    // still runs. Residual gap (tracked for the reads-flip reconcile, NOT this slice):
+    // once `memoryGraphReads` is on, a swallowed reap leaves the stub recallable AND
+    // unrecoverable (the legacy ids vanish once the legacy purge runs). Surfacing that
+    // end-to-end is a route change — the caller (http-api private-mode purge) already
+    // treats purge as best-effort-logged — so hardening it here alone wouldn't reach
+    // the user. No live tenant has reads on yet.
+    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        const ids = this.db.getMemoryIdsByThread(threadId);
+        this.memoryGraphStore.purgeMemories(ids);
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] purge mirror failed for thread ${threadId}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
     return this.db.purgeByThread(threadId);
   }
 
@@ -1074,7 +1098,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Maintenance ===
 
   async gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult> {
-    return this.db.gc(options?.dryRun ?? false);
+    const result = this.db.gc(options?.dryRun ?? false);
+    // S5b'-c: under the MIRROR flag, also GC the engine.db stub store (the recall
+    // authority) so superseded/dead stubs don't linger in recall. Real GC only
+    // (dry-run touches nothing). Isolated — a mirror failure never fails legacy GC.
+    if (!options?.dryRun && this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.gcInactiveStubs();
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] gc mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    return result;
   }
 
   async stats(): Promise<KnowledgeGraphStats> {
@@ -1105,7 +1142,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   // === Metrics ===
 
   getMetrics(metricName?: string | undefined, window?: MetricWindow | undefined): MetricRecord[] {
-    return this.db.getMetrics(metricName, window).map(r => ({
+    // S5b'-c: KPI metrics now live on history.db (RunHistory), moved off the legacy
+    // agent-memory.db. A null runHistory (no-history KnowledgeLayer / older tests)
+    // means no KPI engine ran, so there are no metrics to read.
+    if (!this.runHistory) return [];
+    return this.runHistory.getMetrics(metricName, window).map(r => ({
       id: r.id, metricName: r.metric_name,
       scopeType: r.scope_type, scopeId: r.scope_id,
       value: r.value, sampleCount: r.sample_count,
