@@ -16,6 +16,7 @@ import type {
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
+import { embedToBlob } from './embedding.js';
 import { EntityResolver, toEntityRecord } from './entity-resolver.js';
 import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
@@ -258,7 +259,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       try {
         this._mirrorToSubjectGraph(
           memoryId, trimmedText, namespace, scope, options,
-          resolvedEntities, resolvedRelations, contradictions,
+          resolvedEntities, resolvedRelations, contradictions, embedding,
         );
       } catch (err: unknown) {
         process.stderr.write(
@@ -432,6 +433,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     entities: EntityRecord[],
     relations: RelationRecord[],
     contradictions: ContradictionInfo[],
+    embedding: number[],
   ): void {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
@@ -440,11 +442,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST. It only flips OLD memories' stubs and is
       //    independent of whether THIS memory resolves any subjects, so it must
-      //    run even when the subject-less guard below returns early — else a
-      //    subject-less superseding memory would leave the old stub is_active=1,
-      //    diverging from the legacy store. markSuperseded no-ops when the old
-      //    memory has no stub; superseded_by is a soft column (no FK), so it may
-      //    point at this memory even if it gets no stub of its own.
+      //    run even when the subject-less branch below skips the graph links —
+      //    else a subject-less superseding memory would leave the old stub
+      //    is_active=1, diverging from the legacy store. markSuperseded no-ops
+      //    when the old memory has no stub; superseded_by is a soft column (no
+      //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
         if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
       }
@@ -471,13 +473,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         }
       }
 
-      // A memory that resolved no subjects contributes nothing to the graph —
-      // skip the stub entirely (keeps engine.db memories meaningful). The
-      // supersession above has already run.
-      if (subjectIds.length === 0) return;
-
-      // 3. memory provenance stub — must exist before the relationship /
-      //    memory_subjects FKs reference it.
+      // 3. memory provenance stub — written UNCONDITIONALLY (S5a mirror-harden).
+      //    A subject-less memory (subject_id nullable) is still a real memory that
+      //    must land in engine.db so the S5b vector-recall cutover sees it; the old
+      //    early-return dropped it, leaving engine.db recall lossy vs. the legacy
+      //    store. Carries the embedding so recall has the vector. Must exist before
+      //    the relationship / memory_subjects FKs (step 4-6) reference it.
       memoryGraph.upsertStub({
         id: memoryId, text, namespace, scopeType: scope.type, scopeId: scope.id,
         subjectId: primarySubjectId,
@@ -485,7 +486,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
         provider: this.embeddingProvider.name,
+        embedding: embedToBlob(embedding),
       });
+
+      // Steps 4-6 are the subject-graph links — meaningful only when the memory
+      // resolved at least one subject. A subject-less memory keeps its stub (above)
+      // but contributes no edges / junction rows / co-occurrences.
+      if (subjectIds.length === 0) return;
 
       // 4. relations → typed subject↔subject edges. Skip any endpoint that
       //    mapped to no subject (a concept/location), and any self-loop — two

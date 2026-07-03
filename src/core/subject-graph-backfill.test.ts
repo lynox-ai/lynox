@@ -180,8 +180,26 @@ describe('SubjectGraphBackfill (Foundation Rework v2 — S2 Template A)', () => 
 
   it('handles an empty legacy DB without crashing (all-zero counts)', () => {
     const { engineDb, memoryDb } = setup();
-    expect(new SubjectGraphBackfill(engineDb, memoryDb).run())
-      .toEqual({ entitiesMapped: 0, entitiesDropped: 0, relationsMapped: 0, relationsDropped: 0 });
+    expect(new SubjectGraphBackfill(engineDb, memoryDb).run({ includeMemories: true }))
+      .toEqual({
+        entitiesMapped: 0, entitiesDropped: 0, relationsMapped: 0, relationsDropped: 0,
+        memoriesMapped: 0, memoriesSubjectless: 0, supersedesMapped: 0,
+      });
+    engineDb.close(); memoryDb.close();
+  });
+
+  it('does NOT touch memories unless includeMemories is set (S2 callers unchanged)', () => {
+    const { engineDb, memoryDb } = setup();
+    const mem = memoryDb.createMemory({
+      text: 'Alice leads the Website Redesign engagement.',
+      namespace: 'business', scopeType: 'global', scopeId: 'g', embedding: [0.1, 0.2, 0.3],
+    });
+    memoryDb.createMention(mem, entity(memoryDb, 'Alice', 'person'));
+
+    // Default run (S2 contract) leaves engine.db memories empty …
+    const s2 = new SubjectGraphBackfill(engineDb, memoryDb).run();
+    expect(s2.memoriesMapped).toBe(0);
+    expect((engineDb.getDb().prepare('SELECT COUNT(*) n FROM memories').get() as { n: number }).n).toBe(0);
     engineDb.close(); memoryDb.close();
   });
 });
