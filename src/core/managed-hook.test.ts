@@ -239,4 +239,20 @@ describe('managed-hook sub-cent billing (L-LE-3)', () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]!.cost_cents).toBe(2);
   });
+
+  it('does not double-count a run fired twice with the same id (failed-run double-fire)', async () => {
+    const hook = createManagedHook();
+    // The failed-run path can re-fire onAfterRun with the SAME run_id after the
+    // success path already fired it. The CP dedups whole-cent reports by run_id,
+    // but a sub-cent fire emits no report — so without the accumulator's own
+    // dedup the re-fire would add this run's 0.6c into the carry a second time.
+    hook.onAfterRun?.('run-x', 0.006, CTX);
+    hook.onAfterRun?.('run-x', 0.006, CTX); // duplicate — must be ignored
+    // Three more distinct 0.6c runs. Deduped: 0.6 x 4 = 2.4c → 2c billed.
+    // WITHOUT the dedup the duplicate adds 0.6c → 3.0c → 3c (an over-bill).
+    for (const id of ['a', 'b', 'c']) hook.onAfterRun?.(id, 0.006, CTX);
+    await hook.onShutdown?.();
+    const total = flushedRuns().reduce((n, r) => n + r.cost_cents, 0);
+    expect(total).toBe(2);
+  });
 });

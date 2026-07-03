@@ -959,10 +959,12 @@ export class Session {
       // original `err`. onAfterRun only QUEUES here (no network), and the managed
       // hook skips costUsd<=0, so a crashed-before-any-token run is a no-op.
       // No double-debit: this fires with `this.currentRunId`, the SAME id the
-      // success path would use, and the control plane's debitUsage is idempotent
-      // per run_id (ledger unique index) — so even the narrow window where the
-      // success path fired onAfterRun and then threw before returning is deduped
-      // CP-side to a single debit.
+      // success path would use. Whole-cent reports are deduped CP-side (debitUsage
+      // is idempotent per run_id via the ledger unique index); sub-cent spend that
+      // emits no report is deduped engine-side by the managed hook's accumulator
+      // (it skips a run_id already accumulated) — so even the narrow window where
+      // the success path fired onAfterRun and then threw before returning bills a
+      // single debit either way.
       if (this.currentRunId) {
         const failedRunContext: RunContext = {
           runId: this.currentRunId,
