@@ -732,8 +732,13 @@ export class AgentMemoryDb {
       ? DEDUP_EXHAUSTIVE_SCAN_LIMIT
       : Math.min(Math.max(topK * 10, 100), 500);
     params.push(sqlLimit);
+    // Secondary `id DESC` tie-break so the LIMIT window boundary is deterministic
+    // among same-`created_at` rows (else rowid/insert order decides). Must match the
+    // engine.db MemoryGraphStore.findSimilarRecall ordering: since the S5b'-a write
+    // cutover both stores answer the SAME dedup/contradiction scan and must window an
+    // identical candidate set when in sync (ids are parity across the two stores).
     const rows = this.db.prepare(
-      `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,
+      `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(...params) as MemoryRow[];
 
     const dim = this._embeddingDimensions ?? (embedding.length || 384);

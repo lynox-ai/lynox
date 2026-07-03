@@ -388,8 +388,14 @@ export class MemoryGraphStore {
       ? DEDUP_EXHAUSTIVE_SCAN_LIMIT
       : Math.min(Math.max(topK * 10, 100), 500);
     params.push(sqlLimit);
+    // Secondary `id DESC` tie-break: among same-`created_at` rows the LIMIT window
+    // boundary would otherwise resolve by each DB's differing rowid/insert order, so
+    // a scope with timestamp collisions at the cap could window a DIFFERENT candidate
+    // set on engine.db vs legacy — breaking dedup/contradiction equivalence. ids are
+    // parity across the two stores, so ordering by id makes the boundary deterministic
+    // and identical (must match legacy findSimilarMemories, which tie-breaks the same).
     const rows = this.db.prepare(
-      `SELECT ${RECALL_COLS} FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,
+      `SELECT ${RECALL_COLS} FROM memories ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(...params) as EngineMemoryRaw[];
 
     const expectedBlobLen = dim * 8;
