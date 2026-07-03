@@ -401,6 +401,19 @@ export interface LynoxUserConfig {
    * KG-disabled tenant, or one with no embedding provider, this flag is inert.
    */
   subject_graph_enabled?: boolean | undefined;
+  /**
+   * Foundation Rework v2 (S5b): re-point the memory RECALL reads (vector search +
+   * graph-expand + the no-query recency list) from the legacy agent-memory.db onto
+   * the engine.db subject-graph `memories`. Default: false — recall stays on the
+   * legacy store until a per-tenant cutover. CO-GATED on `subject_graph_enabled`:
+   * engine.db `memories` is only populated (dual-write + the s5-backfill) when the
+   * mirror is on, so recall over an unpopulated store would under-return — the read
+   * path treats this flag as inert unless `subject_graph_enabled` is also true. The
+   * legacy store stays the WRITE authority (dual-write) through S5b'; a failed
+   * engine.db read falls back to legacy per-read, so flipping this can never fail a
+   * recall. Requires the s5-backfill to have run on the tenant first.
+   */
+  memory_graph_reads?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

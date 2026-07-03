@@ -15,6 +15,7 @@ import type {
   ProvenanceKind,
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
+import type { MemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { embedToBlob } from './embedding.js';
 import { EntityResolver, toEntityRecord } from './entity-resolver.js';
@@ -61,6 +62,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * legacy agent-memory.db writes above stay authoritative regardless.
    */
   private readonly subjectGraphEnabled: boolean;
+  /**
+   * Foundation Rework v2 (S5b): when `memoryGraphReads` AND `subjectGraphEnabled`,
+   * memory RECALL reads (vector + graph-expand via RetrievalEngine, and the no-query
+   * `listRecentActive`) re-point onto engine.db `memories`. Co-gated: the store is
+   * only populated when the mirror is on + the s5-backfill ran. Dual-write stays
+   * legacy through S5b'; a failed engine.db read falls back to legacy per-read.
+   */
+  private readonly memoryGraphReads: boolean;
   private readonly subjectStore: SubjectStore | null;
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
@@ -82,6 +91,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     runHistory?: RunHistory | undefined,
     engineDb?: EngineDb | undefined,
     subjectGraphEnabled?: boolean | undefined,
+    memoryGraphReads?: boolean | undefined,
   ) {
     this.db = new AgentMemoryDb(dbPath);
     this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
@@ -96,10 +106,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.useV2Extractor = process.env['LYNOX_KG_EXTRACTOR'] !== 'v1';
     this.engineDb = engineDb ?? null;
     this.subjectGraphEnabled = subjectGraphEnabled ?? false;
+    this.memoryGraphReads = memoryGraphReads ?? false;
     if (this.engineDb) {
       this.subjectStore = new SubjectStore(this.engineDb);
       this.relationshipStore = new RelationshipStore(this.engineDb);
       this.memoryGraphStore = new MemoryGraphStore(this.engineDb);
+      // S5b: co-gate the engine.db recall path on BOTH flags — the store is only
+      // populated (dual-write) when the mirror (subject_graph_enabled) is on, so a
+      // memory_graph_reads flip without the mirror would recall over an empty store.
+      this.retrievalEngine.setMemoryGraphReads(
+        this.memoryGraphStore, this.subjectStore,
+        this.memoryGraphReads && this.subjectGraphEnabled,
+      );
     } else {
       this.subjectStore = null;
       this.relationshipStore = null;
@@ -196,6 +214,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // the contradiction detector handle it.
       if (!hasHeuristicContradiction(trimmedText, candidate.text)) {
         this.db.confirmMemory(candidate.id);
+        // S5b recall parity: mirror the confirmation onto the engine.db stub so its
+        // confirmation_count/confidence don't go stale under the read cutover. Dual-
+        // write gate (subject_graph_enabled), isolated — a mirror failure never
+        // affects the authoritative legacy confirm above.
+        this._mirrorConfidence(candidate.id, 'confirm');
         return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
       }
       // Fall through to contradiction detection
@@ -257,9 +280,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // agent's memory/retrieval path is never affected.
     if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       try {
+        // Carry the legacy memory's created_at so engine.db recall (S5b) time-decays
+        // by true creation time, not mirror-write time. Read-back (PK lookup) rather
+        // than re-deriving so the two stores agree byte-for-byte on the timestamp.
+        const createdAt = this.db.getMemory(memoryId)?.created_at;
         this._mirrorToSubjectGraph(
           memoryId, trimmedText, namespace, scope, options,
-          resolvedEntities, resolvedRelations, contradictions, embedding,
+          resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
         );
       } catch (err: unknown) {
         process.stderr.write(
@@ -434,6 +461,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     relations: RelationRecord[],
     contradictions: ContradictionInfo[],
     embedding: number[],
+    createdAt: string | undefined,
   ): void {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
@@ -487,6 +515,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         sourceToolName: options?.sourceToolName ?? null,
         provider: this.embeddingProvider.name,
         embedding: embedToBlob(embedding),
+        createdAt,
       });
 
       // Steps 4-6 are the subject-graph links — meaningful only when the memory
@@ -546,7 +575,19 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     limit = 20,
   ): KnowledgeRetrievalResult['memories'] {
     const scopeFilters = scopes.map(s => ({ type: s.type, id: s.id }));
-    const rows = this.db.listActiveMemories(namespace, scopeFilters, limit);
+    // S5b: the no-query recency path re-points onto engine.db when both flags are
+    // on; a read throw falls back to legacy (the write authority through S5b').
+    let rows: MemoryRow[];
+    if (this.memoryGraphReads && this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        rows = this.memoryGraphStore.listRecentActiveRecall(namespace, scopeFilters, limit);
+      } catch (err: unknown) {
+        this._logReadFallback('listRecentActive', err);
+        rows = this.db.listActiveMemories(namespace, scopeFilters, limit);
+      }
+    } else {
+      rows = this.db.listActiveMemories(namespace, scopeFilters, limit);
+    }
     return rows.map(r => ({
       id: r.id,
       text: r.text,
@@ -838,6 +879,28 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     for (const id of memoryIds) {
       if (signal === 'useful') this.db.confirmMemory(id);
       else this.db.penalizeMemory(id);
+      // S5b recall parity: mirror the confidence delta onto the engine.db stub.
+      this._mirrorConfidence(id, signal === 'useful' ? 'confirm' : 'penalize');
+    }
+  }
+
+  /**
+   * Mirror a confidence-affecting mutation (dedup confirm / retrieval feedback) onto
+   * the engine.db memory stub so recall (S5b) scores the SAME confirmation_count /
+   * confidence as legacy. Gated on the dual-write mirror flag (subject_graph_enabled)
+   * — NOT the read flag — so the history is present when reads flip on. Fully
+   * isolated: a mirror failure is swallowed (legacy stays authoritative). Heavy
+   * dedup/consolidation/gc write-porting stays legacy through S5b'.
+   */
+  private _mirrorConfidence(memoryId: string, kind: 'confirm' | 'penalize'): void {
+    if (!this.subjectGraphEnabled || !this.memoryGraphStore) return;
+    try {
+      if (kind === 'confirm') this.memoryGraphStore.bumpConfirmation(memoryId);
+      else this.memoryGraphStore.penalizeConfidence(memoryId);
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:subject-graph] confidence mirror (${kind}) failed for ${memoryId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     }
   }
 

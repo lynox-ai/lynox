@@ -155,6 +155,17 @@ export function loadConfig(): LynoxUserConfig {
   } else if (subjectGraph === 'false' || subjectGraph === '0') {
     merged.subject_graph_enabled = false;
   }
+  // Foundation Rework v2 (S5b): the engine.db memory-recall read flag. Like the
+  // mirror flag above, the CP flips this per-tenant via env (after running the
+  // s5-backfill) without editing config.json. Explicit 'true'/'1' vs 'false'/'0'
+  // (no z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not redirect
+  // the user's memory reads.
+  const memoryReads = process.env['LYNOX_MEMORY_GRAPH_READS'];
+  if (memoryReads === 'true' || memoryReads === '1') {
+    merged.memory_graph_reads = true;
+  } else if (memoryReads === 'false' || memoryReads === '0') {
+    merged.memory_graph_reads = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default
