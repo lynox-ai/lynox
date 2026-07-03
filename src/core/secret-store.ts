@@ -300,6 +300,14 @@ export class SecretStore implements SecretStoreLike {
       ttlMs: ttlMs ?? 0,
     });
     channels.secretAccess.publish({ name, action: 'store' });
+    // A secret written through set() is one the caller already holds in
+    // plaintext and just minted (e.g. fetch_token → store → resolve). Without
+    // recording consent, resolve() returns null until the next process
+    // restart re-loads the vault as consented — so the very next
+    // engine-managed auth resolve fails ("mint one first") and the flow loops,
+    // burning the OAuth grant. Consent-on-store keeps freshly stored secrets
+    // resolvable in the same process.
+    this.recordConsent(name);
   }
 
   /**
