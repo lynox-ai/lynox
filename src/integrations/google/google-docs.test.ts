@@ -224,4 +224,19 @@ describe('google_docs tool', () => {
       expect(tool.definition.input_schema.required).toEqual(['action']);
     });
   });
+
+  describe('destructive guard', () => {
+    it('gates every write action (append included) but not read', () => {
+      const auth = createMockAuth();
+      const tool = createDocsTool(auth);
+      const check = tool.destructive?.check;
+      expect(check).toBeDefined();
+      // append mutates the doc — it must fire the "modifies external data"
+      // prompt / autonomous block, same as create/replace.
+      expect(check?.({ action: 'append' })).toBe('append');
+      expect(check?.({ action: 'create' })).toBe('create');
+      expect(check?.({ action: 'replace' })).toBe('replace');
+      expect(check?.({ action: 'read' })).toBeNull();
+    });
+  });
 });

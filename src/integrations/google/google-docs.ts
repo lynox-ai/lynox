@@ -46,11 +46,13 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
 
 // === Tool Creation ===
 
-// NOTE: keeps strict parity with the legacy enumerated guard list (create, replace).
-// `append` is also a write but is NOT gated here today — an audit follow-up
-// will broaden coverage. Do not silently expand this set: changing it
-// changes user-visible permission prompts.
-const DOCS_WRITE_ACTIONS = new Set<DocsInput['action']>(['create', 'replace']);
+// Docs actions that mutate an external document — each fires the guard's
+// "modifies external data" Allow/Deny prompt and is blocked in autonomous mode.
+// `append` mutates the target doc (a prompt-injected autonomous run could append
+// attacker text to any user document), so it belongs here alongside create/replace.
+// Sheets already gates its own append. Changing this set changes user-visible
+// permission prompts — keep it aligned with the enumerated write actions.
+const DOCS_WRITE_ACTIONS = new Set<DocsInput['action']>(['create', 'append', 'replace']);
 
 export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
   return {
