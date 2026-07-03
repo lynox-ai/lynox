@@ -36,7 +36,7 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -236,37 +236,24 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).not.toHaveBeenCalled();
   });
 
-  // ---- 2d. a workflow reserves the session ceiling, not the $15 agent cap ----
+  // ---- 2d. per-effect reservation estimate = each run's true worst case ----
 
-  it('reserves the full session ceiling for a workflow task', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+  it('reservationEstimate reserves each effect its true worst-case ceiling', () => {
+    // Set a distinctive session ceiling so the workflow case is unambiguous vs
+    // the $15 agent cap (a mutation returning $15 for run_workflow fails here).
     configurePersistentBudget({
-      // $60 recorded, cap $100. A $15 agent reservation (75) would pass; a
-      // workflow has no per-run dollar cap of its own, so it reserves the $50
-      // session ceiling → 110 > 100 → deferred. This binds the test to the
-      // workflow-specific (higher) estimate, not any generic block.
-      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 60, run_count: 5 }] },
-      dailyCapUSD: 100,
+      costProvider: { getCostByDay: () => [] },
+      sessionCapUSD: 50,
     });
-    const wfTask = makeTask({ effect: 'run_workflow', pipeline_id: 'wf-1' });
-    const tmWf = makeTaskManager([wfTask]);
-    const engineWf = makeEngine({ taskManager: tmWf, session: makeSession('Done.') });
-    const loopWf = new WorkerLoop(engineWf, makeNotificationRouter(), 60_000);
-    await loopWf.tick();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(engineWf.createSession).not.toHaveBeenCalled();
-
-    // Contrast: a standard run_agent at the SAME $60 recorded is admitted (its
-    // $15 reservation → 75 <= 100), proving the deferral above is the estimate
-    // difference, not the recorded level.
-    vi.mocked(engineWf.createSession).mockClear();
-    const agentTask = makeTask({ id: 'agent-1', effect: 'run_agent', source: 'cron' });
-    const tmAgent = makeTaskManager([agentTask]);
-    const engineAgent = makeEngine({ taskManager: tmAgent, session: makeSession('Done.') });
-    const loopAgent = new WorkerLoop(engineAgent, makeNotificationRouter(), 60_000);
-    await loopAgent.tick();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(engineAgent.createSession).toHaveBeenCalled();
+    // run_workflow: no per-run dollar cap → reserves the session ceiling.
+    expect(reservationEstimate(makeTask({ effect: 'run_workflow' }))).toBe(50);
+    // run_agent (standard): the $15 executeStandard costGuard.
+    expect(reservationEstimate(makeTask({ effect: 'run_agent', source: 'cron' }))).toBe(15);
+    // run_agent (watch): the $0.50 analysis costGuard.
+    expect(reservationEstimate(makeTask({ effect: 'run_agent', source: 'watch' }))).toBe(0.5);
+    // Non-money effects reserve nothing.
+    expect(reservationEstimate(makeTask({ effect: 'backup' }))).toBe(0);
+    expect(reservationEstimate(makeTask({ effect: 'notify' }))).toBe(0);
   });
 
   // ---- 2e. the reservation is released once the task settles ----

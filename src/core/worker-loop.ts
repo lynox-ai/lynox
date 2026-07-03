@@ -117,6 +117,27 @@ export interface ActiveTask {
 /** Access the current worker task context from anywhere in the async call chain. */
 export const workerTaskStorage = new AsyncLocalStorage<WorkerTaskContext>();
 
+/**
+ * Worst-case per-run cost used as the admission reservation — it must be an
+ * UPPER BOUND on what the run can add to recorded spend, or the reservation
+ * under-covers and parallel fire can still overshoot the cap. Each effect
+ * reserves the ceiling its own enforcement actually guarantees:
+ *  - run_agent (watch): the $0.50 analysis costGuard.
+ *  - run_agent (standard): the $15 per-run costGuard (executeStandard).
+ *  - run_workflow: NO per-run dollar cap of its own — a saved workflow is
+ *    bounded only by the per-session ceiling (orchestrator per-step
+ *    checkSessionBudget), so reserve that ceiling, not $15.
+ * Non-money effects (backup/notify/reminder) reserve nothing and must never be
+ * blocked by (or consume headroom from) the cap. Exported for direct testing.
+ */
+export function reservationEstimate(task: TriggerRecord): number {
+  if (task.effect === 'run_agent') {
+    return task.source === 'watch' ? WATCH_ANALYSIS_MAX_USD : WORKER_MAX_COST_USD;
+  }
+  if (task.effect === 'run_workflow') return getSessionCostCeiling();
+  return 0;
+}
+
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
@@ -242,7 +263,7 @@ export class WorkerLoop {
         // due-task's reservation lands before any executeTask body runs — that
         // atomicity is what closes the parallel-fire race (each task sees the
         // prior reservations instead of the same stale pre-run total).
-        const estimate = this.reservationEstimate(task);
+        const estimate = reservationEstimate(task);
         const reservation = reservePersistentBudget(estimate);
         if (!reservation.allowed) {
           // Cap would be exceeded by in-flight work — defer to a later tick.
@@ -377,27 +398,6 @@ export class WorkerLoop {
     } finally {
       this.activeTasks.delete(task.id);
     }
-  }
-
-  /**
-   * Worst-case per-run cost used as the admission reservation — it must be an
-   * UPPER BOUND on what the run can add to recorded spend, or the reservation
-   * under-covers and parallel fire can still overshoot the cap. Each effect
-   * reserves the ceiling its own enforcement actually guarantees:
-   *  - run_agent (watch): the $0.50 analysis costGuard.
-   *  - run_agent (standard): the $15 per-run costGuard (executeStandard).
-   *  - run_workflow: NO per-run dollar cap of its own — a saved workflow is
-   *    bounded only by the per-session ceiling (orchestrator per-step
-   *    checkSessionBudget), so reserve that ceiling, not $15.
-   * Non-money effects (backup/notify/reminder) reserve nothing and must never be
-   * blocked by (or consume headroom from) the cap.
-   */
-  private reservationEstimate(task: TriggerRecord): number {
-    if (task.effect === 'run_agent') {
-      return task.source === 'watch' ? WATCH_ANALYSIS_MAX_USD : WORKER_MAX_COST_USD;
-    }
-    if (task.effect === 'run_workflow') return getSessionCostCeiling();
-    return 0;
   }
 
   /** Execute a backup task — no LLM needed, direct BackupManager call. */
