@@ -171,4 +171,33 @@ describe('VerbGraphBackfill — tasks (Foundation Rework v2)', () => {
     const res = new VerbGraphBackfill(engine, history.getDb()).run();
     expect(res).toEqual({ tasks: 0, taskParentLinks: 0 });
   });
+
+  it('resolveAssignee (cutover) resolves every backfilled task + seeds the self-person', () => {
+    const { history, engine } = make();
+    history.insertTask(task({ id: 'a', assignee: 'user' }));
+    history.insertTask(task({ id: 'b', assignee: 'Sarah' }));
+    history.insertTask(task({ id: 'c', assignee: 'user' }));
+
+    new VerbGraphBackfill(engine, history.getDb()).run({ resolveAssignee: true });
+
+    const store = new TaskStore(engine);
+    expect(store.getRecord('a')?.assignee).toBe('user');
+    expect(store.getRecord('b')?.assignee).toBe('Sarah');
+    expect(store.getRecord('c')?.assignee).toBe('user');
+    // one self-person (shared by a + c) + one 'Sarah'
+    const self = engine.getDb().prepare("SELECT COUNT(*) n FROM subjects WHERE is_self=1").get() as { n: number };
+    const people = engine.getDb().prepare("SELECT COUNT(*) n FROM subjects WHERE kind='person'").get() as { n: number };
+    expect(self.n).toBe(1);
+    expect(people.n).toBe(2);
+  });
+
+  it('WITHOUT resolveAssignee the backfill mints no subjects (flag-OFF stays subject-free)', () => {
+    const { history, engine } = make();
+    history.insertTask(task({ id: 'a', assignee: 'user' }));
+    new VerbGraphBackfill(engine, history.getDb()).run();
+    const n = engine.getDb().prepare('SELECT COUNT(*) n FROM subjects').get() as { n: number };
+    expect(n.n).toBe(0);
+    const raw = engine.getDb().prepare("SELECT assignee_subject_id sid FROM tasks WHERE id='a'").get() as { sid: string | null };
+    expect(raw.sid).toBeNull();
+  });
 });
