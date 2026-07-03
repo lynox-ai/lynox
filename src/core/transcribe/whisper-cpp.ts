@@ -15,7 +15,7 @@
 
 import { execFile as nodeExecFile, spawn } from 'node:child_process';
 import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getErrorMessage } from '../utils.js';
 import type { SegmentCallback, TranscribeOpts, TranscribeProvider } from './types.js';
@@ -77,7 +77,13 @@ function safeLang(language: string | undefined): string {
 function tmpPaths(filename: string, tenantId?: string): { input: string; wav: string; cleanup: () => void } {
   const id = randomUUID().slice(0, 8);
   const ns = tenantId ? `${tenantId.slice(0, 16)}-` : '';
-  const input = join('/tmp', `whisper-in-${ns}${id}-${filename}`);
+  // The POST filename is attacker-controlled. Interpolating it raw let
+  // `filename='../../../../etc/cron.d/pwn'` escape /tmp and have writeFileSync
+  // clobber an arbitrary path. Reduce to the basename, then strip anything but
+  // a safe filename charset (same approach as the STT duration-probe temp file)
+  // so no separators or traversal segments survive.
+  const safeName = basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const input = join('/tmp', `whisper-in-${ns}${id}-${safeName}`);
   const wav = join('/tmp', `whisper-${ns}${id}.wav`);
   const cleanup = () => {
     try { unlinkSync(input); } catch { /* ok */ }
