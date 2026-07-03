@@ -19,6 +19,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkS
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
+import { readEnvAlias } from './env.js';
+import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
@@ -325,6 +327,16 @@ export class MigrationImporter {
       if (dbName && !verification.databasesRestored.includes(dbName)) {
         verification.databasesRestored.push(dbName);
       }
+    }
+
+    // On a MANAGED destination, a migrated api connection's custom_endpoint_ack
+    // is a per-instance BYOK-endpoint acceptance that must NOT be inherited —
+    // strip it so any custom endpoint re-triggers the disclosure gate before
+    // reuse (the engine.db analog of restoreConfig's SAFE_CONFIG_FIELDS strip).
+    // A self-hosted import keeps the ack (same data owner). No-op unless the
+    // just-restored set actually included engine.db.
+    if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
+      ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
     }
 
     // 3. Artifacts

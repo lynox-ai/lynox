@@ -121,11 +121,12 @@ export function isAllowlistedEndpoint(url: string): boolean {
  * the agent out of the apis dir, and self-hosted single-user mode relies on OS
  * permissions.
  * (Since S4b, api profiles live in engine.db `connections` — a migration-
- * whitelisted DB — so the ack now travels with a self→managed migration. That
- * transfer stays within a single data owner moving their own accepted config +
- * their own vault secret, so it is not an external re-entry vector; whether a
- * managed destination should re-record acceptance against the managed account is
- * a liability decision, not a security gate.)
+ * whitelisted DB — so the ack rides a self→managed migration. On a MANAGED
+ * destination the importer STRIPS it (`MigrationImporter.restore` →
+ * `ApiStore.regateMigratedApiConnections`), forcing the managed account to
+ * re-disclose any custom endpoint before reuse; a self-hosted import keeps it
+ * (same data owner). A managed destination therefore never inherits an
+ * un-disclosed acceptance.)
  */
 export interface CustomEndpointAck {
   /** Always `true` when present; absence means "no acceptance recorded". */

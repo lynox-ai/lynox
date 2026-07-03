@@ -14,7 +14,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wrapUntrustedData } from './data-boundary.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
-import type { ConnectionRow, ConnectionStore } from './connection-store.js';
+import { ConnectionStore, type ConnectionRow } from './connection-store.js';
+import { EngineDb } from './engine-db.js';
 
 // ── Errors ──
 
@@ -438,6 +439,45 @@ export class ApiStore {
       }
     }
     return loaded;
+  }
+
+  /**
+   * Strip the per-instance `custom_endpoint_ack` from every `kind='api'`
+   * connection in the engine.db at `engineDbPath`. Invoked on a MANAGED
+   * self→managed migration import: the ack records a per-instance acceptance of
+   * a BYOK custom (non-allowlisted) egress endpoint and is NOT portable — a
+   * managed destination must re-disclose (re-ack) before it can reuse the
+   * endpoint. Removing the ack IS the re-gate: `endpoint-allowlist.ts` then
+   * fail-closes the un-acked endpoint until it is re-accepted. The engine.db
+   * analog of the importer's `SAFE_CONFIG_FIELDS` config.json strip, one layer
+   * down.
+   *
+   * Idempotent — a connection with no ack is left untouched (and its
+   * `updated_at` is not bumped). A row whose `config_json` fails to parse is
+   * skipped rather than aborting the pass. Opens and closes its own EngineDb
+   * handle. Returns how many connections were re-gated.
+   */
+  static regateMigratedApiConnections(engineDbPath: string, vaultKey: string): number {
+    const engine = new EngineDb(engineDbPath, vaultKey);
+    try {
+      const store = new ConnectionStore(engine);
+      let regated = 0;
+      for (const row of store.getByKind('api')) {
+        let profile: ApiProfile;
+        try {
+          profile = connectionRowToProfile(row);
+        } catch {
+          continue; // malformed config_json — leave the row as-is
+        }
+        if (profile.custom_endpoint_ack === undefined) continue;
+        delete profile.custom_endpoint_ack;
+        store.upsert(profileToConnectionRow(profile));
+        regated++;
+      }
+      return regated;
+    } finally {
+      engine.close();
+    }
   }
 
   /**
