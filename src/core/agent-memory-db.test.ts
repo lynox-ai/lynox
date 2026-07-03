@@ -287,6 +287,21 @@ describe('AgentMemoryDb', () => {
       // No crash = success (supersedes table doesn't have a query method yet)
     });
 
+    it('createSupersedes guards a missing endpoint (no FK throw — the edge is skipped)', () => {
+      // Since the S5b'-a write cutover the contradicted OLD id is sourced from engine.db
+      // recall and may lack a legacy twin (a still-legacy-only purge/consolidate deleted
+      // it). With foreign_keys=ON a bare insert of a dangling pair THROWS and would abort
+      // the whole store() transaction — losing the new memory. The guarded insert must
+      // instead skip the orphaned edge. `.not.toThrow()` is a valid guard proof: without
+      // the WHERE EXISTS gate the FK would reject each missing-endpoint case here.
+      const m1 = db.createMemory({ text: 'present-old', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const m2 = db.createMemory({ text: 'present-new', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      expect(() => db.createSupersedes(m2, 'ghost-old', 'contradiction')).not.toThrow();  // WHERE EXISTS(old) fails
+      expect(() => db.createSupersedes('ghost-new', m1, 'contradiction')).not.toThrow();  // WHERE EXISTS(new) fails
+      expect(() => db.createSupersedes(m2, m1, 'contradiction')).not.toThrow();           // both present → edge written
+      expect(() => db.createSupersedes(m2, m1, 'contradiction')).not.toThrow();           // idempotent re-insert
+    });
+
     it('listAllRelations enumerates the GLOBAL edge set across pages (S2 backfill scan)', () => {
       const ids: string[] = [];
       for (let i = 0; i < 5; i++) ids.push(db.createEntity({ canonicalName: `E${i}`, entityType: 'person', scopeType: 'global', scopeId: 'g' }));

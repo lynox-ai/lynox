@@ -732,8 +732,13 @@ export class AgentMemoryDb {
       ? DEDUP_EXHAUSTIVE_SCAN_LIMIT
       : Math.min(Math.max(topK * 10, 100), 500);
     params.push(sqlLimit);
+    // Secondary `id DESC` tie-break so the LIMIT window boundary is deterministic
+    // among same-`created_at` rows (else rowid/insert order decides). Must match the
+    // engine.db MemoryGraphStore.findSimilarRecall ordering: since the S5b'-a write
+    // cutover both stores answer the SAME dedup/contradiction scan and must window an
+    // identical candidate set when in sync (ids are parity across the two stores).
     const rows = this.db.prepare(
-      `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC LIMIT ?`,
+      `SELECT * FROM memories ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(...params) as MemoryRow[];
 
     const dim = this._embeddingDimensions ?? (embedding.length || 384);
@@ -795,10 +800,19 @@ export class AgentMemoryDb {
 
   createSupersedes(newMemoryId: string, oldMemoryId: string, reason: string): void {
     const now = new Date().toISOString();
+    // Guarded INSERT (skip when either endpoint has no legacy `memories` row) —
+    // mirrors MemoryGraphStore.recordSupersedes. Since the S5b'-a write cutover, the
+    // contradicted `oldMemoryId` is sourced from engine.db recall, whose set can
+    // outlive legacy rows purged/GC'd by a still-legacy-only path (purgeByThread /
+    // consolidate). A bare FK insert would then throw and fail the whole store()
+    // transaction — losing the NEW memory. The provenance edge for an orphaned old
+    // memory is simply skipped (engine reads never depend on the legacy junction).
     this.db.prepare(`
       INSERT OR IGNORE INTO supersedes (new_memory_id, old_memory_id, reason, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(newMemoryId, oldMemoryId, reason, now);
+      SELECT ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)
+        AND EXISTS (SELECT 1 FROM memories WHERE id = ?)
+    `).run(newMemoryId, oldMemoryId, reason, now, newMemoryId, oldMemoryId);
   }
 
   updateCooccurrence(entityAId: string, entityBId: string): void {
