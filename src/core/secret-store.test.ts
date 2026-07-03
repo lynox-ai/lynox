@@ -191,6 +191,16 @@ describe('SecretStore', () => {
       expect(store.resolve('API')).toBeNull();
     });
 
+    it('set() records consent so a just-stored secret resolves in the same process', () => {
+      // Pins the fetch_token -> store -> resolve path: without consent-on-store
+      // resolve() returns null and the OAuth mint-loop bug returns.
+      const vault = { getAll: () => new Map(), set: vi.fn() } as unknown as SecretVault;
+      const store = new SecretStore(undefined, vault);
+      store.set('OAUTH_TOKEN', 'tok-abc');
+      expect(store.hasConsent('OAUTH_TOKEN')).toBe(true);
+      expect(store.resolve('OAUTH_TOKEN')).toBe('tok-abc'); // no explicit recordConsent needed
+    });
+
     it('resolve returns null for unknown secret', () => {
       const store = new SecretStore();
       store.recordConsent('NONEXISTENT');
