@@ -3,7 +3,8 @@
  *
  * Supports:
  * - 5-field standard cron: minute hour day-of-month month day-of-week
- * - Shorthand intervals: 30s, 5m, 1h, 6h, 1d
+ * - Shorthand intervals: 30s, 5m, 1h, 6h, 1d (sub-minute values are floored to
+ *   1 minute — the worker tick granularity)
  * - Wildcards (*), ranges (1-5), lists (1,3,5), steps (* /5)
  */
 
@@ -30,6 +31,16 @@ type ParsedExpression = CronFields | ShorthandInterval;
 // ---------------------------------------------------------------------------
 
 const SHORTHAND_RE = /^(\d+)\s*(s|m|h|d)$/i;
+
+/**
+ * Floor for shorthand intervals. The WorkerLoop ticks once per minute, so any
+ * sub-minute interval (e.g. `30s`, `1s`) can never actually fire faster than
+ * 60s — but the raw value would still be stored as the next-run delta,
+ * misrepresenting the real cadence and letting a caller request a meaningless
+ * hammer rate. Sub-minute shorthands are floored to 1 minute (the tick
+ * granularity). Values >= 1 minute pass through unchanged.
+ */
+const MIN_INTERVAL_MS = 60_000;
 
 const FIELD_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0, 59],   // minute
@@ -110,7 +121,9 @@ function parse(expression: string): ParsedExpression {
     if (value <= 0) throw new Error(`Interval must be > 0: ${trimmed}`);
     const unit = shorthand[2]!.toLowerCase();
     const multipliers: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-    return { ms: value * multipliers[unit]! };
+    // Floor at the tick granularity: a sub-minute interval can't fire faster
+    // than the 60s worker tick, so store it honestly as 1 minute.
+    return { ms: Math.max(MIN_INTERVAL_MS, value * multipliers[unit]!) };
   }
 
   // Standard 5-field cron

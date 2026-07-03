@@ -74,9 +74,24 @@ describe('cron-parser', () => {
       expect(next.getTime()).toBe(base.getTime() + 86_400_000);
     });
 
-    it('30s adds 30 seconds', () => {
+    it('30s is floored to 1 minute (sub-tick intervals are meaningless)', () => {
       const next = nextOccurrence('30s', base);
-      expect(next.getTime()).toBe(base.getTime() + 30_000);
+      expect(next.getTime()).toBe(base.getTime() + 60_000);
+    });
+
+    it('1s is floored to 1 minute', () => {
+      const next = nextOccurrence('1s', base);
+      expect(next.getTime()).toBe(base.getTime() + 60_000);
+    });
+
+    it('90s (above the floor) passes through unchanged', () => {
+      const next = nextOccurrence('90s', base);
+      expect(next.getTime()).toBe(base.getTime() + 90_000);
+    });
+
+    it('sub-minute shorthand is still a VALID expression (floored, not rejected)', () => {
+      expect(isValidCron('30s')).toBe(true);
+      expect(isValidCron('1s')).toBe(true);
     });
   });
 

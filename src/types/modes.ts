@@ -52,6 +52,19 @@ export interface PersistentBudgetCheck {
   reason?: string | undefined;
 }
 
+/**
+ * Result of an admission-control reservation against the persistent (daily/
+ * monthly) cap. Unlike {@link PersistentBudgetCheck} — which reads only
+ * RECORDED spend — a reservation projects an in-flight estimate so parallel
+ * background dispatch can't collectively overshoot the cap.
+ */
+export interface PersistentBudgetReservation {
+  allowed: boolean;
+  /** Amount actually held (0 when blocked or when no enforcement is active). */
+  reservedUSD: number;
+  reason?: string | undefined;
+}
+
 export interface CostSnapshot {
   inputTokens: number;
   outputTokens: number;

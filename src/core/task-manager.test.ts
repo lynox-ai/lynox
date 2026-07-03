@@ -120,6 +120,31 @@ describe('TaskManager', () => {
     });
   });
 
+  describe('createWatch — interval floor', () => {
+    it('floors a sub-minute interval to 1 minute (tick granularity)', () => {
+      const task = tm.createWatch({
+        title: 'Hammer watch',
+        watchUrl: 'https://example.com',
+        watchIntervalMinutes: 0.1, // ~6s — a direct caller bypassing the tool's 5min floor
+      });
+      const cfg = JSON.parse(task.watch_config!) as { interval_minutes: number };
+      expect(cfg.interval_minutes).toBe(1);
+      // next_run_at must be at least a full minute out, never sub-tick.
+      const delta = new Date(task.next_run_at!).getTime() - Date.now();
+      expect(delta).toBeGreaterThanOrEqual(59_000);
+    });
+
+    it('leaves a normal interval unchanged', () => {
+      const task = tm.createWatch({
+        title: 'Hourly watch',
+        watchUrl: 'https://example.com',
+        watchIntervalMinutes: 60,
+      });
+      const cfg = JSON.parse(task.watch_config!) as { interval_minutes: number };
+      expect(cfg.interval_minutes).toBe(60);
+    });
+  });
+
   describe('complete', () => {
     it('should complete a task', () => {
       const task = tm.create({ title: 'To complete' });

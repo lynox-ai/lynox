@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
+  reservePersistentBudget, releasePersistentBudget, getReservedInFlight,
   type CostQueryProvider,
 } from './session-budget.js';
 import type { SessionCounters } from '../types/index.js';
@@ -186,5 +187,126 @@ describe('persistent budget', () => {
     expect(checkPersistentBudget().allowed).toBe(false);
     resetPersistentBudget();
     expect(checkPersistentBudget().allowed).toBe(true);
+  });
+});
+
+describe('persistent budget — in-flight reservation (parallel-fire admission control)', () => {
+  const today = new Date().toISOString().slice(0, 10);
+
+  function mockProvider(rows: Array<{ day: string; cost_usd: number; run_count: number }>): CostQueryProvider {
+    return { getCostByDay: () => rows };
+  }
+
+  beforeEach(() => {
+    resetPersistentBudget();
+  });
+
+  it('no-op when no provider configured (self-hosted, caps off)', () => {
+    const r = reservePersistentBudget(15);
+    expect(r.allowed).toBe(true);
+    expect(r.reservedUSD).toBe(0);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('nothing is held for a zero/negative estimate (non-money tasks)', () => {
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 10, run_count: 5 }]),
+      dailyCapUSD: 100,
+    });
+    const r = reservePersistentBudget(0);
+    expect(r.allowed).toBe(true);
+    expect(r.reservedUSD).toBe(0);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('admits and HOLDS the estimate when the projection stays within the cap', () => {
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 70, run_count: 5 }]),
+      dailyCapUSD: 100,
+    });
+    const r = reservePersistentBudget(15);
+    expect(r.allowed).toBe(true);
+    expect(r.reservedUSD).toBe(15);
+    expect(getReservedInFlight()).toBe(15);
+  });
+
+  it('closes the parallel-fire race: sequential reservations accumulate and the cap holds', () => {
+    // Recorded $70, cap $100 — the exact race SEC-LC-2 describes: three $15
+    // tasks firing in ONE synchronous tick. Without reservation all three read
+    // $70 < $100 and run → up to $115 recorded. With reservation the third is
+    // refused because 70 + 30 (held) + 15 > 100.
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 70, run_count: 5 }]),
+      dailyCapUSD: 100,
+    });
+    const a = reservePersistentBudget(15); // 70 + 0 + 15 = 85 <= 100
+    const b = reservePersistentBudget(15); // 70 + 15 + 15 = 100 <= 100 (reaching the ceiling is allowed)
+    const c = reservePersistentBudget(15); // 70 + 30 + 15 = 115 > 100 → BLOCKED
+    expect(a.allowed).toBe(true);
+    expect(b.allowed).toBe(true);
+    expect(c.allowed).toBe(false);
+    expect(c.reason).toContain('Daily spending cap');
+    expect(getReservedInFlight()).toBe(30); // only the two admitted are held
+  });
+
+  it('blocks against the monthly cap too', () => {
+    const monthStart = today.slice(0, 7) + '-01';
+    configurePersistentBudget({
+      costProvider: mockProvider([
+        { day: today, cost_usd: 1, run_count: 1 },
+        { day: monthStart, cost_usd: 495, run_count: 100 },
+      ]),
+      monthlyCapUSD: 500,
+    });
+    const r = reservePersistentBudget(15); // month 496 + 15 = 511 > 500
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toContain('Monthly spending cap');
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('release frees the accumulator so recorded spend (not the estimate) governs next', () => {
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 70, run_count: 5 }]),
+      dailyCapUSD: 100,
+    });
+    const a = reservePersistentBudget(15);
+    const b = reservePersistentBudget(15);
+    expect(getReservedInFlight()).toBe(30);
+    releasePersistentBudget(a.reservedUSD);
+    releasePersistentBudget(b.reservedUSD);
+    expect(getReservedInFlight()).toBe(0);
+    // Headroom restored → a fresh task admits again.
+    expect(reservePersistentBudget(15).allowed).toBe(true);
+  });
+
+  it('release never drives the accumulator below zero', () => {
+    releasePersistentBudget(999);
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('reservations do NOT affect checkPersistentBudget — it reads recorded spend only (no self-block)', () => {
+    // A worker task reserves its estimate, then session-entry checkPersistentBudget
+    // runs for that same task. It must see recorded spend ($70) — NOT the $15
+    // reservation — or the task would block itself at its own entry gate.
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 70, run_count: 5 }]),
+      dailyCapUSD: 100,
+    });
+    reservePersistentBudget(15);
+    expect(getReservedInFlight()).toBe(15);
+    const check = checkPersistentBudget();
+    expect(check.allowed).toBe(true);
+    expect(check.todayCostUSD).toBe(70);
+  });
+
+  it('resetPersistentBudget clears the in-flight accumulator', () => {
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 10, run_count: 1 }]),
+      dailyCapUSD: 100,
+    });
+    reservePersistentBudget(15);
+    expect(getReservedInFlight()).toBe(15);
+    resetPersistentBudget();
+    expect(getReservedInFlight()).toBe(0);
   });
 });
