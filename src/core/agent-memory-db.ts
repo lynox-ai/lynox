@@ -550,6 +550,17 @@ export class AgentMemoryDb {
     return this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined ?? null;
   }
 
+  /**
+   * Read just a memory's `created_at` — the subject-graph mirror/cutover carries it onto
+   * the engine.db stub so recall time-decays by true creation time. A dedicated projection
+   * so the ingest hot path doesn't `SELECT *` (materializing the embedding BLOB + text)
+   * only to read one timestamp.
+   */
+  getMemoryCreatedAt(id: string): string | undefined {
+    const row = this.db.prepare('SELECT created_at FROM memories WHERE id = ?').get(id) as { created_at: string } | undefined;
+    return row?.created_at;
+  }
+
   supersedMemory(memoryId: string, supersededById: string): void {
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = ? WHERE id = ?

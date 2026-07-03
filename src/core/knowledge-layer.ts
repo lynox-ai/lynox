@@ -13,6 +13,7 @@ import type {
   MetricWindow,
   MetricRecord,
   ProvenanceKind,
+  EntityType,
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
@@ -301,43 +302,73 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // cost. The gate fires only when a host is wired AND a client exists (an LLM
     // call is possible); a null gate (self-host / no client) runs extraction
     // unchanged + never debits.
+    //
+    // The extraction SPEND is what the gate blocks — NOT the engine.db memory STUB.
+    // The stub (subject-graph mirror / authoritative write) must land on every stored
+    // memory so recall (which reads engine.db under the cutover) never loses it, even
+    // for a blocked/exhausted tenant. So `extractionAllowed` gates only the extractor
+    // call; the stub/subject persistence always runs.
     let resolvedEntities: EntityRecord[] = [];
     let resolvedRelations: RelationRecord[] = [];
     const extractGate = this.meteredHost && this.anthropicClient
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
-    if (!extractGate || extractGate.blockedReason === null) {
-      const extracted = this.useV2Extractor
-        && this.anthropicClient
-        && shouldExtractV2(trimmedText, namespace)
-        ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
-        : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
-      resolvedEntities = extracted.resolvedEntities;
-      resolvedRelations = extracted.resolvedRelations;
-      if (extractGate && this.meteredHost && extracted.costUsd) {
-        reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
-      }
-    }
+    const extractionAllowed = !extractGate || extractGate.blockedReason === null;
 
-    // 9. Foundation Rework v2 (S1b): additively mirror the extraction into the
-    // engine.db subject-graph behind the flag. Fully isolated — the legacy writes
-    // above are authoritative; a mirror failure is logged and swallowed so the
-    // agent's memory/retrieval path is never affected.
-    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
-      try {
-        // Carry the legacy memory's created_at so engine.db recall (S5b) time-decays
-        // by true creation time, not mirror-write time. Read-back (PK lookup) rather
-        // than re-deriving so the two stores agree byte-for-byte on the timestamp.
-        const createdAt = this.db.getMemory(memoryId)?.created_at;
-        this._mirrorToSubjectGraph(
-          memoryId, trimmedText, namespace, scope, options,
-          resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
-        );
-      } catch (err: unknown) {
-        process.stderr.write(
-          `[lynox:subject-graph] mirror failed for ${memoryId}: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+    let extracted: { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined };
+    if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
+      // S5b'-b entity write-cutover: the extraction persists to the subject graph as the
+      // AUTHORITATIVE entity store — the legacy entities/mentions/relations writes are
+      // dropped (their only readers — graph-expand recall, listEntities — already read
+      // engine.db under the flag). The legacy MEMORY row stays dual-written (created
+      // above) as the rollback anchor for vector recall; it ends at the S5b'-d legacy
+      // DROP. The stub always lands (even when the extractor is gated); createdAt carries
+      // the legacy row's creation time so the stub time-decays correctly.
+      const createdAt = this.db.getMemoryCreatedAt(memoryId);
+      extracted = await this._extractAndPersistToSubjects(
+        trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
+      );
+    } else {
+      // Pre-cutover (every current tenant): legacy persist is authoritative (gated), and
+      // the engine.db mirror below is an additive dual-write that runs REGARDLESS of the
+      // gate so a blocked store still lands its (subject-less) stub.
+      resolvedEntities = [];
+      resolvedRelations = [];
+      let costUsd: number | undefined;
+      if (extractionAllowed) {
+        const legacy = this.useV2Extractor
+          && this.anthropicClient
+          && shouldExtractV2(trimmedText, namespace)
+          ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
+          : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
+        resolvedEntities = legacy.resolvedEntities;
+        resolvedRelations = legacy.resolvedRelations;
+        costUsd = legacy.costUsd;
       }
+
+      // 9. Foundation Rework v2 (S1b): additively mirror the extraction into the
+      // engine.db subject-graph behind the flag. Fully isolated — the legacy writes
+      // above are authoritative; a mirror failure is logged and swallowed so the
+      // agent's memory/retrieval path is never affected.
+      if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
+        try {
+          const createdAt = this.db.getMemoryCreatedAt(memoryId);
+          this._mirrorToSubjectGraph(
+            memoryId, trimmedText, namespace, scope, options,
+            resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
+          );
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:subject-graph] mirror failed for ${memoryId}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+      extracted = { resolvedEntities, resolvedRelations, ...(costUsd === undefined ? {} : { costUsd }) };
+    }
+    resolvedEntities = extracted.resolvedEntities;
+    resolvedRelations = extracted.resolvedRelations;
+    if (extractGate && this.meteredHost && extracted.costUsd) {
+      reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
     }
 
     // 10. Publish event
@@ -586,6 +617,165 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+  }
+
+  /**
+   * S5b'-b entity write-cutover: the AUTHORITATIVE subject-graph persistence. Runs the
+   * SAME extractor dispatch as the legacy path (only the persistence target differs),
+   * then writes the extraction straight onto engine.db subjects — no legacy
+   * entities/mentions/relations. Returns subject-sourced records for the `store()`
+   * result (nothing consumes the ids; both callers discard the result). Used when
+   * {@link memoryReadsActive}; the legacy `_extractAndPersistV1/V2` + `_mirrorToSubjectGraph`
+   * pair stays for the pre-cutover path and is deleted at the S5b'-d legacy DROP.
+   */
+  private async _extractAndPersistToSubjects(
+    trimmedText: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    memoryId: string,
+    embedding: number[],
+    options: {
+      sourceRunId?: string | undefined;
+      sourceType?: ProvenanceKind | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+    contradictions: ContradictionInfo[],
+    createdAt: string | undefined,
+    extractionAllowed: boolean,
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
+    // Normalize both extractor shapes to one name-keyed form. The aliases carried
+    // MATCH what the mirror passed to findOrCreate — V1: [name]; V2: [canonical, ...aliases].
+    // When the extractor is gated off (exhausted tenant) we skip it entirely and still
+    // write the (subject-less) stub below, so recall never loses the memory.
+    let entities: Array<{ name: string; type: EntityType; aliases: string[] }> = [];
+    let relations: Array<{ from: string; to: string; kind: string; description: string; confidence: number }> = [];
+    let costUsd: number | undefined;
+    if (extractionAllowed) {
+      if (this.useV2Extractor && this.anthropicClient && shouldExtractV2(trimmedText, namespace)) {
+        const ex = await extractEntitiesV2(trimmedText, this.anthropicClient);
+        entities = ex.entities.map(e => ({ name: e.canonicalName, type: e.type, aliases: [e.canonicalName, ...e.aliases] }));
+        relations = ex.relations.map(r => ({ from: r.subject, to: r.object, kind: r.predicate, description: '', confidence: r.confidence }));
+        costUsd = ex.costUsd;
+      } else {
+        const ex = await extractEntities(trimmedText, namespace, this.anthropicClient);
+        entities = ex.entities.map(e => ({ name: e.name, type: e.type, aliases: [e.name] }));
+        relations = ex.relations.map(r => ({ from: r.from, to: r.to, kind: r.relationType, description: r.description, confidence: 1.0 }));
+        costUsd = ex.costUsd;
+      }
+    }
+
+    const { resolvedEntities, resolvedRelations } = this._writeSubjectsFromExtraction(
+      memoryId, trimmedText, namespace, scope, options, entities, relations, contradictions, embedding, createdAt,
+    );
+    return { resolvedEntities, resolvedRelations, ...(costUsd === undefined ? {} : { costUsd }) };
+  }
+
+  /**
+   * Write a normalized extraction directly onto the engine.db subject graph (one
+   * atomic transaction) and return subject-sourced `EntityRecord`/`RelationRecord`s.
+   * The name-keyed twin of {@link _mirrorToSubjectGraph}: identical steps
+   * (supersession → subjects via findOrCreate → provenance stub → relationship edges →
+   * mention junction → co-occurrences) but resolving relations by extraction NAME
+   * (the authoritative path has no legacy entity ids). The two consolidate into one
+   * when the legacy/mirror branch is removed at S5b'-d.
+   *
+   * Equivalence to the mirror is exact for a FRESH mention. On a RE-mention whose legacy
+   * entity type had drifted, the mirror mapped the subject kind from the legacy STORED
+   * type (via `toEntityRecord`) while this path uses the FRESH extraction type — a
+   * deliberate, more-correct divergence (the latest extraction wins), not a regression.
+   */
+  private _writeSubjectsFromExtraction(
+    memoryId: string,
+    text: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    options: {
+      sourceRunId?: string | undefined;
+      sourceType?: ProvenanceKind | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+    entities: Array<{ name: string; type: EntityType; aliases: string[] }>,
+    relations: Array<{ from: string; to: string; kind: string; description: string; confidence: number }>,
+    contradictions: ContradictionInfo[],
+    embedding: number[],
+    createdAt: string | undefined,
+  ): { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] } {
+    const subjects = this.subjectStore!;
+    const relationships = this.relationshipStore!;
+    const memoryGraph = this.memoryGraphStore!;
+    const resolvedEntities: EntityRecord[] = [];
+    const resolvedRelations: RelationRecord[] = [];
+    const stamp = createdAt ?? new Date().toISOString();
+
+    this.engineDb!.getDb().transaction(() => {
+      // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
+      for (const c of contradictions) {
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+      }
+
+      // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
+      //    relations re-point without a legacy id hop.
+      const nameToSubject = new Map<string, string>();
+      const subjectIds: string[] = [];
+      let primarySubjectId: string | null = null;
+      let primaryIsPersonOrg = false;
+
+      for (const e of entities) {
+        const kind = entityTypeToSubjectKind(e.type);
+        if (!kind) continue;
+        const { id: subjectId } = subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
+        nameToSubject.set(e.name.toLowerCase(), subjectId);
+        subjectIds.push(subjectId);
+        resolvedEntities.push({
+          id: subjectId, canonicalName: e.name, entityType: e.type, aliases: e.aliases,
+          description: '', scopeType: scope.type, scopeId: scope.id,
+          mentionCount: 1, firstSeenAt: stamp, lastSeenAt: stamp,
+        });
+        const isPersonOrg = kind === 'person' || kind === 'organization';
+        if (primarySubjectId === null || (isPersonOrg && !primaryIsPersonOrg)) {
+          primarySubjectId = subjectId;
+          primaryIsPersonOrg = isPersonOrg;
+        }
+      }
+
+      // 3. memory provenance stub — written UNCONDITIONALLY (subject-less memories still
+      //    land so vector recall sees them). Refreshes text/embedding on a re-store.
+      memoryGraph.upsertStub({
+        id: memoryId, text, namespace, scopeType: scope.type, scopeId: scope.id,
+        subjectId: primarySubjectId,
+        sourceRunId: options?.sourceRunId ?? null,
+        sourceType: options?.sourceType,
+        sourceToolName: options?.sourceToolName ?? null,
+        provider: this.embeddingProvider.name,
+        embedding: embedToBlob(embedding),
+        createdAt,
+      });
+
+      if (subjectIds.length === 0) return;
+
+      // 4. relations → typed subject↔subject edges (skip unmapped endpoints + self-loops).
+      for (const r of relations) {
+        const fromSid = nameToSubject.get(r.from.toLowerCase());
+        const toSid = nameToSubject.get(r.to.toLowerCase());
+        if (!fromSid || !toSid || fromSid === toSid) continue;
+        relationships.createRelationship({
+          fromSubjectId: fromSid, toSubjectId: toSid,
+          kind: r.kind, description: r.description,
+          sourceMemoryId: memoryId, confidence: r.confidence,
+        });
+        resolvedRelations.push({
+          fromEntityId: fromSid, toEntityId: toSid, relationType: r.kind,
+          description: r.description, confidence: r.confidence,
+          sourceMemoryId: memoryId, createdAt: stamp,
+        });
+      }
+
+      // 5. mention junction + 6. co-occurrence counts.
+      memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
+      memoryGraph.bumpCooccurrences(subjectIds);
+    })();
+
+    return { resolvedEntities, resolvedRelations };
   }
 
   /**
@@ -861,11 +1051,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const id = this.db.updateMemoryText(oldText, newText, namespace, embedding);
     if (!id) return false;
 
-    // Re-extract entities for the updated text
-    const extraction = await extractEntities(newText, namespace, this.anthropicClient);
-    for (const ext of extraction.entities) {
-      const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true });
-      if (entity) this.db.createMention(id, entity.id);
+    // Re-extract for the corrected text. Under the read cutover (S5b'-b) the
+    // re-extraction persists onto the subject graph — and refreshes the engine.db
+    // stub's text + embedding via upsertStub, so recall (which reads engine.db) sees
+    // the corrected text instead of the stale original. Pre-cutover: the legacy
+    // mention path, unchanged.
+    if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
+      // A text correction is not credit-gated (the legacy path re-extracts unconditionally).
+      const createdAt = this.db.getMemoryCreatedAt(id);
+      await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, true);
+    } else {
+      const extraction = await extractEntities(newText, namespace, this.anthropicClient);
+      for (const ext of extraction.entities) {
+        const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true });
+        if (entity) this.db.createMention(id, entity.id);
+      }
     }
 
     return true;
