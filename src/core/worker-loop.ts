@@ -16,6 +16,7 @@ import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
+import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
@@ -25,6 +26,13 @@ const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
 // watch (e.g. a page that changes every tick) without affecting normal use.
 const WATCH_ANALYSIS_MAX_USD = 0.5;
 const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost control)
+// Per-run cost ceiling on a standard/scheduled background task. executeWatch
+// already caps its analysis turn at WATCH_ANALYSIS_MAX_USD; executeStandard runs
+// a full autonomous task (up to WORKER_MAX_ITERATIONS loops) and previously had
+// NO cost guard, so a runaway loop could burn unbounded LLM spend on a single
+// unattended run. $15 is generous for a legitimate multi-step task yet well under
+// the $50 interactive session ceiling. Doubles as the reservation estimate below.
+const WORKER_MAX_COST_USD = 15;
 // Hard ceiling on a watch target's response body. The 30s fetch timeout bounds
 // TIME, not BYTES — a hostile/misconfigured watch URL streaming multi-GB within
 // the window would buffer the whole body into memory and OOM the worker. 10 MB
@@ -108,6 +116,27 @@ export interface ActiveTask {
 
 /** Access the current worker task context from anywhere in the async call chain. */
 export const workerTaskStorage = new AsyncLocalStorage<WorkerTaskContext>();
+
+/**
+ * Worst-case per-run cost used as the admission reservation — it must be an
+ * UPPER BOUND on what the run can add to recorded spend, or the reservation
+ * under-covers and parallel fire can still overshoot the cap. Each effect
+ * reserves the ceiling its own enforcement actually guarantees:
+ *  - run_agent (watch): the $0.50 analysis costGuard.
+ *  - run_agent (standard): the $15 per-run costGuard (executeStandard).
+ *  - run_workflow: NO per-run dollar cap of its own — a saved workflow is
+ *    bounded only by the per-session ceiling (orchestrator per-step
+ *    checkSessionBudget), so reserve that ceiling, not $15.
+ * Non-money effects (backup/notify/reminder) reserve nothing and must never be
+ * blocked by (or consume headroom from) the cap. Exported for direct testing.
+ */
+export function reservationEstimate(task: TriggerRecord): number {
+  if (task.effect === 'run_agent') {
+    return task.source === 'watch' ? WATCH_ANALYSIS_MAX_USD : WORKER_MAX_COST_USD;
+  }
+  if (task.effect === 'run_workflow') return getSessionCostCeiling();
+  return 0;
+}
 
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -229,8 +258,24 @@ export class WorkerLoop {
       for (const task of dueTasks) {
         // Skip if already executing
         if (this.activeTasks.has(task.id)) continue;
-        // Fire and forget — don't await, execute in parallel
-        void this.executeTask(task);
+        // Admission control against the daily/monthly cap. This loop is fully
+        // synchronous and reservePersistentBudget is synchronous, so every
+        // due-task's reservation lands before any executeTask body runs — that
+        // atomicity is what closes the parallel-fire race (each task sees the
+        // prior reservations instead of the same stale pre-run total).
+        const estimate = reservationEstimate(task);
+        const reservation = reservePersistentBudget(estimate);
+        if (!reservation.allowed) {
+          // Cap would be exceeded by in-flight work — defer to a later tick.
+          // The task stays due (next_run_at untouched) and retries once budget
+          // frees or the daily window resets. No status write → no churn.
+          continue;
+        }
+        // Fire and forget — don't await, execute in parallel. Release the
+        // reservation once the task settles, via .finally so it runs even if
+        // executeTask's synchronous prologue throws — a leaked reservation would
+        // otherwise shrink the tenant's daily headroom for the process lifetime.
+        void this.executeTask(task).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
     } catch {
       // Best-effort — don't crash the loop
@@ -411,6 +456,10 @@ export class WorkerLoop {
     const session = this.engine.createSession({
       autonomy: 'autonomous',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
+      // Per-run cost ceiling: without this an autonomous background task could
+      // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
+      // stops the agent loop once estimated spend crosses the cap.
+      costGuard: { maxBudgetUSD: WORKER_MAX_COST_USD },
     });
     // Cost control: cap agent loop iterations for background tasks
     // Worker profile: route background tasks to cheaper provider (e.g. Mistral)

@@ -1475,7 +1475,16 @@ export class Session {
     /** Named model profile — overrides provider to OpenAI-compatible for this session. */
     profile?: string | undefined;
   }): void {
+    // costGuard is a session-lifetime budget, NOT a per-recreation setting. A
+    // model/profile swap (setModel / setEffort / this call) rebuilds the Agent,
+    // and this line replaces agentOverrides wholesale — so a per-run cost ceiling
+    // set at createSession (e.g. a background WorkerLoop task) would silently
+    // vanish on the very next _recreateAgent, which executeStandard/executeWatch
+    // always call right after createSession. Preserve it across the rebuild
+    // unless a caller explicitly supplies a new one.
+    const preservedCostGuard = this.agentOverrides.costGuard;
     this.agentOverrides = overrides ?? {};
+    this.agentOverrides.costGuard ??= preservedCostGuard;
     // Resolve model profile override if specified
     if (overrides?.profile) {
       const profiles = this.engine.getUserConfig().model_profiles;

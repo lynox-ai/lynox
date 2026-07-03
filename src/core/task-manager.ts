@@ -586,7 +586,10 @@ export class TaskManager {
     watchSelector?: string | undefined;
     notificationChannel?: string | undefined;
   }): TriggerRecord {
-    const intervalMinutes = params.watchIntervalMinutes ?? 60;
+    // Floor at 1 minute (the worker tick granularity) so a direct caller can't
+    // create a sub-tick watch that bypasses the tool layer's stricter 5-minute
+    // product floor. A sub-minute interval can't fire faster than the tick anyway.
+    const intervalMinutes = Math.max(1, params.watchIntervalMinutes ?? 60);
 
     const watchConfig = JSON.stringify({
       url: params.watchUrl,

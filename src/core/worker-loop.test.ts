@@ -36,7 +36,7 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -44,6 +44,7 @@ import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/ind
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
+import { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } from './session-budget.js';
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
   return {
@@ -134,6 +135,9 @@ describe('WorkerLoop', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    // The persistent-budget module is process-global; clear any provider a
+    // reservation test configured so later tests see the no-enforcement default.
+    resetPersistentBudget();
   });
 
   // ---- 1. start/stop lifecycle ----
@@ -187,6 +191,91 @@ describe('WorkerLoop', () => {
     expect(session.run).toHaveBeenCalledWith(
       'Task: Daily Report\n\nGenerate the daily report',
     );
+  });
+
+  // ---- 2b. executeStandard wires a per-run cost guard (SEC-LC-1) ----
+
+  it('executeStandard caps a standard task with a per-run cost guard', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Done.');
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(engine.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ costGuard: { maxBudgetUSD: 15 } }),
+    );
+  });
+
+  // ---- 2c. daily-cap admission control defers a task (SEC-LC-2) ----
+
+  it('defers a due task when its reservation would breach the daily cap', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    configurePersistentBudget({
+      // $99 recorded, cap $100 → a $15 run_agent reservation projects $114 > $100.
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 99, run_count: 10 }] },
+      dailyCapUSD: 100,
+    });
+    const task = makeTask(); // effect run_agent, source cron → $15 estimate
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Done.');
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Reservation refused → task never dispatched, schedule left intact to retry.
+    expect(engine.createSession).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+    expect(tm.recordTaskRun).not.toHaveBeenCalled();
+  });
+
+  // ---- 2d. per-effect reservation estimate = each run's true worst case ----
+
+  it('reservationEstimate reserves each effect its true worst-case ceiling', () => {
+    // Set a distinctive session ceiling so the workflow case is unambiguous vs
+    // the $15 agent cap (a mutation returning $15 for run_workflow fails here).
+    configurePersistentBudget({
+      costProvider: { getCostByDay: () => [] },
+      sessionCapUSD: 50,
+    });
+    // run_workflow: no per-run dollar cap → reserves the session ceiling.
+    expect(reservationEstimate(makeTask({ effect: 'run_workflow' }))).toBe(50);
+    // run_agent (standard): the $15 executeStandard costGuard.
+    expect(reservationEstimate(makeTask({ effect: 'run_agent', source: 'cron' }))).toBe(15);
+    // run_agent (watch): the $0.50 analysis costGuard.
+    expect(reservationEstimate(makeTask({ effect: 'run_agent', source: 'watch' }))).toBe(0.5);
+    // Non-money effects reserve nothing.
+    expect(reservationEstimate(makeTask({ effect: 'backup' }))).toBe(0);
+    expect(reservationEstimate(makeTask({ effect: 'notify' }))).toBe(0);
+  });
+
+  // ---- 2e. the reservation is released once the task settles ----
+
+  it('releases the reservation after a task completes so headroom is restored', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    configurePersistentBudget({
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 10, run_count: 1 }] },
+      dailyCapUSD: 100,
+    });
+    const task = makeTask(); // run_agent → reserves $15
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession('Done.') });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The task was admitted (reservation held during the run) and released on
+    // completion — so nothing lingers in the in-flight accumulator.
+    expect(engine.createSession).toHaveBeenCalled();
+    expect(getReservedInFlight()).toBe(0);
   });
 
   // ---- 3. skip if already executing ----
