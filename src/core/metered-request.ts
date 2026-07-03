@@ -93,7 +93,10 @@ export async function fireBeforeRunGate(host: HookHost, modelTier: ModelTier): P
  * billing hiccup never breaks the audio response to the client.
  */
 export function reportMeteredCost(host: HookHost, runId: string, costUsd: number, modelTier: ModelTier): void {
-  if (costUsd <= 0) return;
+  // `> 0` (not `<= 0`) so undefined/NaN — e.g. cost derived from a malformed
+  // pricing override — is a clean no-op rather than debiting NaN cents (mirrors
+  // debitInRunHelperCost below).
+  if (!(costUsd > 0)) return;
   const runContext = buildRunContext(host, runId, modelTier);
   for (const hook of host.getHooks()) {
     if (hook.onAfterRun) {

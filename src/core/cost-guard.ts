@@ -42,7 +42,14 @@ export class CostGuard {
   }
 
   isExceeded(): boolean {
-    return this.estimateCost() >= this.maxBudgetUSD || this.iterations >= this.maxIterations;
+    const cost = this.estimateCost();
+    // Fail closed on a non-finite cost (NaN from a malformed pricing override):
+    // `NaN >= cap` is false and would silently disable the dollar ceiling. An
+    // explicitly-disabled budget (Infinity) stays the user's opt-out.
+    const costExceeded = Number.isFinite(cost)
+      ? cost >= this.maxBudgetUSD
+      : this.maxBudgetUSD !== Infinity;
+    return costExceeded || this.iterations >= this.maxIterations;
   }
 
   snapshot(): CostSnapshot {

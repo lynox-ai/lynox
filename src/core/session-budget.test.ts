@@ -51,6 +51,14 @@ describe('session-budget', () => {
     expect(() => checkSessionBudget(counters, 0.01)).toThrow(/Session cost ceiling/);
   });
 
+  it('checkSessionBudget fails closed on a non-finite estimate without poisoning the counter', () => {
+    recordSessionCost(counters, 5);
+    // NaN slipping through would make `NaN > cap` false (ceiling skipped) AND
+    // `costUSD += NaN` poison the counter permanently.
+    expect(() => checkSessionBudget(counters, NaN)).toThrow(/non-finite/);
+    expect(getSessionCost(counters)).toBe(5);
+  });
+
   it('fresh counters object starts at zero (replaces process-wide reset)', () => {
     recordSessionCost(counters, 25);
     counters = makeCounters();

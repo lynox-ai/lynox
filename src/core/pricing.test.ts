@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { calculateCost, getPricing, _resetOverridePricingForTests } from './pricing.js';
 
 describe('Pricing', () => {
@@ -63,6 +66,41 @@ describe('Pricing', () => {
       });
       // Unaffected models still resolve through the registry.
       expect(getPricing('claude-sonnet-4-6').input).toBe(3);
+    });
+  });
+
+  describe('malformed pricing.json validation (fail-closed)', () => {
+    afterEach(() => {
+      _resetOverridePricingForTests({});
+    });
+
+    it('drops a malformed override entry so calculateCost never yields NaN', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-pricing-'));
+      writeFileSync(join(dir, 'pricing.json'), JSON.stringify({
+        'good-model': { input: 1, output: 2, cacheWrite: 3, cacheRead: 0.5 },
+        // Missing cacheWrite/cacheRead — `0 * undefined` is NaN in calculateCost,
+        // and `NaN >= cap` is false, so this one entry used to disable every
+        // budget layer. It must be dropped, not trusted.
+        'bad-model': { input: 1, output: 2 },
+      }));
+      const prev = process.env['LYNOX_DATA_DIR'];
+      process.env['LYNOX_DATA_DIR'] = dir;
+      _resetOverridePricingForTests(null); // force a real reload from disk
+      try {
+        // Valid entry still loads and wins.
+        expect(getPricing('good-model')).toEqual({ input: 1, output: 2, cacheWrite: 3, cacheRead: 0.5 });
+        // Malformed entry dropped -> finite fallback, so calculateCost stays
+        // finite even with cache tokens (the exact NaN trigger).
+        const cost = calculateCost('bad-model', {
+          input_tokens: 1000, output_tokens: 1000,
+          cache_creation_input_tokens: 500, cache_read_input_tokens: 500,
+        });
+        expect(Number.isFinite(cost)).toBe(true);
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_DATA_DIR'];
+        else process.env['LYNOX_DATA_DIR'] = prev;
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 
