@@ -35,6 +35,7 @@ import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
+import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
@@ -92,6 +93,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * every ingest-triggered extraction path) and reports its cost via onAfterRun.
    */
   private meteredHost: HookHost | null = null;
+  /**
+   * Foundation Rework v2 — Context-Hierarchy Scoping (Slice B). Lazily-built
+   * ThreadStore over the SAME history.db handle `this.runHistory` wraps (where the
+   * live `threads.primary_subject_id` anchor lives — engine.db's threads spine is
+   * empty pre-S2). Built only on first anchor read (i.e. only under the flag), so a
+   * flag-off KnowledgeLayer and mock-runHistory tests never touch `getDb()`.
+   * `undefined` = not yet attempted; `null` = unavailable (no runHistory / build failed).
+   */
+  private _anchorThreadStore: ThreadStore | null | undefined;
 
   constructor(
     dbPath: string,
@@ -315,6 +325,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
 
+    // Slice B (Context-Hierarchy Scoping): if this memory's source thread is anchored
+    // to a subject (project/client via set_thread_context), that anchor becomes the
+    // memory's PRIMARY subject, overriding the person/org extraction heuristic below.
+    // Resolved ONCE here and only under the flag (both subject-write branches are
+    // flag-gated) — a flag-off tenant never reads the thread; unanchored → null → heuristic.
+    const threadAnchorSubjectId = this.subjectGraphEnabled
+      ? this._readThreadAnchor(options?.sourceThreadId)
+      : null;
+
     let extracted: { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined };
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       // S5b'-b entity write-cutover: the extraction persists to the subject graph as the
@@ -327,6 +346,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const createdAt = this.db.getMemoryCreatedAt(memoryId);
       extracted = await this._extractAndPersistToSubjects(
         trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
+        threadAnchorSubjectId,
       );
     } else {
       // Pre-cutover (every current tenant): legacy persist is authoritative (gated), and
@@ -356,6 +376,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           this._mirrorToSubjectGraph(
             memoryId, trimmedText, namespace, scope, options,
             resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
+            threadAnchorSubjectId,
           );
         } catch (err: unknown) {
           process.stderr.write(
@@ -514,6 +535,37 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Slice B — resolve the current thread's anchor subject (the project/client the
+   * thread is scoped to via `set_thread_context`). Returns the thread's
+   * `primary_subject_id`, or null when the thread is unanchored / unknown / the
+   * store is unavailable. Reads history.db (where live threads live); memoized.
+   * Only ever called under `subjectGraphEnabled`, so a flag-off layer never builds
+   * a ThreadStore. Never throws — a read failure degrades to the heuristic.
+   */
+  private _readThreadAnchor(threadId: string | undefined): string | null {
+    if (!threadId || !this.runHistory) return null;
+    if (this._anchorThreadStore === undefined) {
+      try {
+        this._anchorThreadStore = new ThreadStore(this.runHistory.getDb());
+      } catch {
+        this._anchorThreadStore = null;
+      }
+    }
+    if (!this._anchorThreadStore) return null;
+    try {
+      const anchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
+      // Validate the cross-DB soft ref: the thread's anchor lives in history.db and points
+      // at an engine.db subject with NO enforceable FK, so a hard-deleted subject leaves a
+      // dangling id. Fall back to the heuristic (null) rather than write a dangling
+      // memories.subject_id — which WOULD FK-throw on the authoritative cutover write.
+      if (anchorId && this.subjectStore?.getSubject(anchorId)) return anchorId;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Foundation Rework v2 (S1b): additively mirror one stored memory's extraction
    * into the engine.db subject-graph. In execution order: a supersession mirror
    * (flips superseded old stubs), then entities → subjects (the converged
@@ -538,6 +590,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     contradictions: ContradictionInfo[],
     embedding: number[],
     createdAt: string | undefined,
+    threadAnchorSubjectId: string | null,
   ): void {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
@@ -583,9 +636,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    early-return dropped it, leaving engine.db recall lossy vs. the legacy
       //    store. Carries the embedding so recall has the vector. Must exist before
       //    the relationship / memory_subjects FKs (step 4-6) reference it.
+      // Slice B: an anchored thread's memories take the thread's project/client as
+      // their PRIMARY subject (anchor > the person/org heuristic). The anchor is
+      // deliberately the primary CONTEXT only — it is NOT linked into memory_subjects
+      // (which stays the set of textually-MENTIONED subjects), so memoriesMentioningSubject
+      // keeps mention-true semantics; the project-scoped recall (Slice C) reads
+      // memories.subject_id, not the junction. NULL anchor → the heuristic pick stands.
       memoryGraph.upsertStub({
         id: memoryId, text, namespace, scopeType: scope.type, scopeId: scope.id,
-        subjectId: primarySubjectId,
+        subjectId: threadAnchorSubjectId ?? primarySubjectId,
         sourceRunId: options?.sourceRunId ?? null,
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
@@ -642,6 +701,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     contradictions: ContradictionInfo[],
     createdAt: string | undefined,
     extractionAllowed: boolean,
+    threadAnchorSubjectId: string | null,
   ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
     // Normalize both extractor shapes to one name-keyed form. The aliases carried
     // MATCH what the mirror passed to findOrCreate — V1: [name]; V2: [canonical, ...aliases].
@@ -666,6 +726,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
     const { resolvedEntities, resolvedRelations } = this._writeSubjectsFromExtraction(
       memoryId, trimmedText, namespace, scope, options, entities, relations, contradictions, embedding, createdAt,
+      threadAnchorSubjectId,
     );
     return { resolvedEntities, resolvedRelations, ...(costUsd === undefined ? {} : { costUsd }) };
   }
@@ -699,6 +760,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     contradictions: ContradictionInfo[],
     embedding: number[],
     createdAt: string | undefined,
+    threadAnchorSubjectId: string | null,
   ): { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] } {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
@@ -740,9 +802,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
       // 3. memory provenance stub — written UNCONDITIONALLY (subject-less memories still
       //    land so vector recall sees them). Refreshes text/embedding on a re-store.
+      //    Slice B: the thread anchor (project/client) wins over the person/org heuristic
+      //    for the PRIMARY subject; NULL anchor → the heuristic pick stands.
       memoryGraph.upsertStub({
         id: memoryId, text, namespace, scopeType: scope.type, scopeId: scope.id,
-        subjectId: primarySubjectId,
+        subjectId: threadAnchorSubjectId ?? primarySubjectId,
         sourceRunId: options?.sourceRunId ?? null,
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
@@ -1083,7 +1147,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       // A text correction is not credit-gated (the legacy path re-extracts unconditionally).
       const createdAt = this.db.getMemoryCreatedAt(id);
-      await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, true);
+      // Slice B: keep the memory's project/client anchor across a text edit — resolve
+      // its SOURCE thread's anchor (not the current thread; this is an edit, not a new
+      // write) so re-extraction doesn't silently revert the primary subject to the heuristic.
+      const threadAnchorSubjectId = this._readThreadAnchor(this.db.getMemorySourceThread(id));
+      await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, true, threadAnchorSubjectId);
     } else {
       const extraction = await extractEntities(newText, namespace, this.anthropicClient);
       for (const ext of extraction.entities) {
