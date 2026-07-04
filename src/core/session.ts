@@ -656,11 +656,20 @@ export class Session {
     const skipShortInputRetrieval = typeof task === 'string' && isShortClarification(task);
     if (knowledgeLayer && !isMultimodal && !skipShortInputRetrieval) {
       try {
+        // Context-Hierarchy Scoping (Slice C): thread the active thread's anchor
+        // subject into retrieval so recall weights the project→customer hierarchy.
+        // Read only when the subject graph is on (an indexed PK lookup on the flag-off
+        // hot path is avoided); a null anchor / stale anchor degrades to flat scoping.
+        const threadAnchorSubjectId =
+          this.engine.getUserConfig().subject_graph_enabled === true
+            ? (threadStore?.getThread(this.sessionId)?.primary_subject_id ?? null)
+            : null;
         const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
           topK: 8,
           threshold: 0.55,
           useHyDE: true,
           useGraphExpansion: true,
+          threadAnchorSubjectId,
         });
         this._retrievedMemoryIds = result.memories.map(m => m.id);
         this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result, undefined, task));
