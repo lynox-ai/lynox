@@ -98,6 +98,20 @@ export class ThreadStore {
     return this.db.prepare(sql).all(limit) as ThreadRecord[];
   }
 
+  /**
+   * Record-on-spine R2b: threads anchored to a subject (`idx_threads_subject`),
+   * most-recent activity first. Reads whatever thread source this store wraps — in
+   * production `this._threadStore` is the LIVE history.db handle the anchor writes
+   * go to (`set_thread_context`), so the footprint stays correct across the S2
+   * cutover with no flip-branching here.
+   */
+  listBySubjectId(subjectId: string, limit = 50): ThreadRecord[] {
+    const safeLimit = Math.max(1, Math.min(limit, 500));
+    return this.db.prepare(
+      'SELECT * FROM threads WHERE primary_subject_id = ? ORDER BY updated_at DESC LIMIT ?',
+    ).all(subjectId, safeLimit) as ThreadRecord[];
+  }
+
   updateThread(id: string, updates: {
     title?: string | undefined;
     summary?: string | undefined;

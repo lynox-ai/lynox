@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { TaskStore, taskRecordToRow, type TaskRow } from './task-store.js';
+import { SubjectStore } from './subject-store.js';
 import type { TaskRecord } from '../types/pipeline.js';
 
 describe('TaskStore (Foundation Rework v2 — S3c)', () => {
@@ -176,6 +177,25 @@ describe('TaskStore (Foundation Rework v2 — S3c)', () => {
       "SELECT assignee_subject_id FROM tasks WHERE id = 'k1'",
     ).get() as { assignee_subject_id: string | null };
     expect(raw.assignee_subject_id).toBeNull(); // assignee dropped; subject-linking is S4
+  });
+
+  it('listBySubjectId returns a subject\'s tasks, newest-updated first; others excluded (R2b)', () => {
+    const { store, engine } = make();
+    const subs = new SubjectStore(engine);
+    const anna = subs.findOrCreate({ kind: 'person', name: 'Anna' }).id;
+    const ben = subs.findOrCreate({ kind: 'person', name: 'Ben' }).id;
+    // Direct seed of the assignee link + explicit updated_at for deterministic order
+    // (the S4a assignee↔subject resolution path is covered by its own suite).
+    const ins = engine.getDb().prepare(
+      'INSERT INTO tasks (id, title, assignee_subject_id, updated_at) VALUES (?, ?, ?, ?)',
+    );
+    ins.run('t-old', 'older', anna, '2026-01-01');
+    ins.run('t-new', 'newer', anna, '2026-03-01');
+    ins.run('t-ben', 'bens', ben, '2026-02-01');
+
+    expect(store.listBySubjectId(anna).map(t => t.id)).toEqual(['t-new', 't-old']);
+    expect(store.listBySubjectId(ben).map(t => t.id)).toEqual(['t-ben']);
+    expect(store.listBySubjectId('subj-nobody')).toEqual([]);
   });
 });
 

@@ -250,6 +250,7 @@ export class Engine {
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
+  private _subjectFootprintReader: import('./subject-footprint-reader.js').SubjectFootprintReader | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -1532,6 +1533,26 @@ export class Engine {
         // subject columns degrade to plain strings (zero new coupling on the
         // legacy path).
         this._dataStore?.setSubjectBridge(makeSubjectColumnBridge(subjectStore));
+
+        // Record-on-spine R2b: the id-keyed on-demand subject-footprint reader.
+        // Composes the stores that each hold a soft-ref to a subject — records
+        // (datastore.db, R2a index + occurred_at), memories/tasks (engine.db), and
+        // the LIVE thread anchor (`this._threadStore` = history.db, so the read stays
+        // S2-flip-correct). Thin per-call wrappers over the shared engine.db handle,
+        // constructed fresh here (same pattern as SubjectStore above). Not folded into
+        // per-turn retrieve() — an on-demand projection only.
+        if (this._dataStore && this.engineDb) {
+          const { SubjectFootprintReader } = await import('./subject-footprint-reader.js');
+          const { MemoryGraphStore } = await import('./memory-graph-store.js');
+          const { TaskStore } = await import('./task-store.js');
+          this._subjectFootprintReader = new SubjectFootprintReader(
+            subjectStore,
+            this._dataStore,
+            new MemoryGraphStore(this.engineDb),
+            this._threadStore,
+            new TaskStore(this.engineDb),
+          );
+        }
       } catch (err) {
         process.stderr.write(`[lynox] context-scoping tool wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
@@ -1677,6 +1698,21 @@ export class Engine {
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
+
+  /**
+   * Record-on-spine R2b: the id-keyed, on-demand subject-footprint read (records +
+   * threads timeline + adjacent memories/tasks). Returns null when the subject-graph
+   * flag is off (reader unwired) OR the id is stale/purged. On-demand only — never on
+   * the per-turn retrieve() hot path. The consuming read-only UI surface lands as the
+   * follow-on sub-slice.
+   */
+  getSubjectFootprint(
+    subjectId: string,
+    opts?: { limit?: number | undefined },
+  ): import('./subject-footprint-reader.js').SubjectFootprint | null {
+    return this._subjectFootprintReader?.getFootprint(subjectId, opts) ?? null;
+  }
+
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
