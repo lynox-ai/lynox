@@ -49,8 +49,10 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
     // Turn the engine.db recall path ON (so candidates carry subject_id).
     engine.setMemoryGraphReads(mem, subjects, true);
 
-    // Hierarchy: Kunde X → { Projekt A, Projekt B } ; Kunde Y → Projekt C.
+    // Hierarchy: Holding → Kunde X → { Projekt A, Projekt B } ; Kunde Y → Projekt C.
+    const holding = subjects.findOrCreate({ kind: 'organization', name: 'Holding AG' }).id;
     kundeX = subjects.findOrCreate({ kind: 'organization', name: 'Kunde X' }).id;
+    subjects.setParent(kundeX, holding); // 3-level chain so ancestor DECAY is testable
     projektA = subjects.createSubject({ kind: 'engagement', name: 'Projekt A', parentId: kundeX });
     projektB = subjects.createSubject({ kind: 'engagement', name: 'Projekt B', parentId: kundeX });
     const kundeY = subjects.findOrCreate({ kind: 'organization', name: 'Kunde Y' }).id;
@@ -66,12 +68,16 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
         createdAt: '2026-07-04T12:00:00Z', confidence: 0.9, confirmationCount: 1, isActive: 1,
       });
     };
-    seed('m-A', projektA);   // in-context (the anchor)
-    seed('m-KX', kundeX);    // up-hierarchy (parent)
-    seed('m-B', projektB);   // sibling (shares Kunde X)
-    seed('m-C', projektC);   // unrelated (different customer)
-    seed('m-null', null);    // subject-less (legacy/back-compat → scope_type weight)
+    seed('m-A', projektA);      // Projekt A
+    seed('m-KX', kundeX);       // Kunde X (Projekt A's parent)
+    seed('m-Holding', holding); // Holding AG (Kunde X's parent — grandparent of Projekt A)
+    seed('m-B', projektB);      // Projekt B (Kunde X's other project)
+    seed('m-B2', projektB);     // a 2nd Projekt B memory (exercises the offChainCache HIT)
+    seed('m-C', projektC);      // Projekt C under an unrelated customer
+    seed('m-null', null);       // subject-less (legacy/back-compat → scope_type weight)
   });
+
+  const ALL_IDS = ['m-A', 'm-KX', 'm-Holding', 'm-B', 'm-B2', 'm-C', 'm-null'];
 
   afterAll(async () => {
     legacyDb.close();
@@ -88,26 +94,43 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
     return new Map(res.memories.map(m => [m.id, m.finalScore]));
   }
 
-  it('anchored to Projekt A: A > Kunde X > (subject-less) > sibling B > unrelated C — all visible', async () => {
+  it('anchored to Projekt A: anchor > subject-less > parent > grandparent > sibling > unrelated — all visible', async () => {
     const s = await scoresFor(projektA);
     // Every memory survived — soft weight, not a hard filter (NONE invisible).
-    for (const id of ['m-A', 'm-KX', 'm-B', 'm-C', 'm-null']) {
-      expect(s.get(id), `${id} present`).toBeGreaterThan(0);
-    }
-    // The hierarchy ordering: in-context > up-hierarchy > sibling > unrelated.
-    expect(s.get('m-A')!).toBeGreaterThan(s.get('m-KX')!);   // anchor beats its customer
-    expect(s.get('m-KX')!).toBeGreaterThan(s.get('m-B')!);   // customer beats a sibling project
-    expect(s.get('m-B')!).toBeGreaterThan(s.get('m-C')!);    // sibling beats an unrelated customer
-    // A subject-less memory keeps its scope_type weight (0.8 context) → it sits
-    // between the anchor (1.0) and the parent (0.7), NOT suppressed to unrelated.
-    expect(s.get('m-null')!).toBeGreaterThan(s.get('m-KX')!);
+    for (const id of ALL_IDS) expect(s.get(id), `${id} present`).toBeGreaterThan(0);
+
+    // Up-hierarchy DECAY: parent (Kunde X, 0.7) > grandparent (Holding, 0.55).
+    expect(s.get('m-A')!).toBeGreaterThan(s.get('m-KX')!);        // anchor beats its customer
+    expect(s.get('m-KX')!).toBeGreaterThan(s.get('m-Holding')!);  // parent beats grandparent (multi-level decay)
+    expect(s.get('m-Holding')!).toBeGreaterThan(s.get('m-B')!);   // grandparent beats a sibling project
+    expect(s.get('m-B')!).toBeGreaterThan(s.get('m-C')!);         // sibling beats an unrelated customer
+    // A subject-less memory keeps its scope_type weight (0.8 context) → below the
+    // anchor (1.0) but above the parent (0.7), NOT suppressed to unrelated.
     expect(s.get('m-A')!).toBeGreaterThan(s.get('m-null')!);
+    expect(s.get('m-null')!).toBeGreaterThan(s.get('m-KX')!);
+    // The offChainCache HIT branch: two memories on the SAME off-chain subject
+    // (Projekt B) resolve to the identical sibling weight.
+    expect(s.get('m-B2')!).toBe(s.get('m-B')!);
+  });
+
+  it('anchored to Kunde X (customer level): its own projects rank as DESCENDANTS, not siblings', async () => {
+    const s = await scoresFor(kundeX);
+    for (const id of ALL_IDS) expect(s.get(id), `${id} present`).toBeGreaterThan(0);
+    // Kunde X itself is the anchor (1.0). Its projects A + B are DESCENDANTS (inside
+    // the anchored context) → they must rank HIGH, not be buried at the sibling floor.
+    expect(s.get('m-KX')!).toBeGreaterThan(s.get('m-A')!);        // the anchor tops
+    expect(s.get('m-A')!).toBe(s.get('m-B')!);                    // both descendants → same tier
+    expect(s.get('m-A')!).toBeGreaterThan(s.get('m-null')!);      // descendant (0.85) > subject-less context (0.8)
+    // Holding (Kunde X's parent) is now an UP-hierarchy ancestor (0.7), below the
+    // subject-less context memory; Projekt C (other customer) stays unrelated.
+    expect(s.get('m-null')!).toBeGreaterThan(s.get('m-Holding')!);
+    expect(s.get('m-Holding')!).toBeGreaterThan(s.get('m-C')!);
   });
 
   it('no anchor: flat scope_type weighting — every candidate scores equally (back-compat)', async () => {
     const s = await scoresFor(null);
     const vals = [...s.values()];
-    expect(vals).toHaveLength(5);
+    expect(vals).toHaveLength(ALL_IDS.length);
     // Same scope (context) + same vector/decay/confidence → identical finalScore.
     for (const v of vals) expect(v).toBeCloseTo(vals[0]!, 6);
   });
@@ -115,7 +138,7 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
   it('a stale anchor (subject no longer exists) degrades to flat scoping — no throw', async () => {
     const s = await scoresFor('ghost-subject-that-was-purged');
     const vals = [...s.values()];
-    expect(vals).toHaveLength(5);
+    expect(vals).toHaveLength(ALL_IDS.length);
     for (const v of vals) expect(v).toBeCloseTo(vals[0]!, 6); // identical → walk-up did not bite
   });
 });

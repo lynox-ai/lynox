@@ -45,14 +45,17 @@ const THREAD_BOOST = 0.10;
  * Context-Hierarchy Scoping (Slice C) — the SOFT walk-up weights that replace the
  * flat `scopeWeight(scope_type)` when the active thread is anchored to a subject.
  * A memory is weighted by how its PRIMARY subject relates to the anchor's hierarchy:
- * in-context (the anchor itself) strongest, each step UP the Projekt→Kunde→… chain
- * weaker, a sibling/cousin (shares an ancestor, off-chain) weakest, and an unrelated
- * subject a visible floor. NONE is hidden — this is a soft re-rank, not a filter, so
- * a strongly-matching cross-project memory still surfaces (Fable CORR-2: no security
- * boundary here, only relevance ordering). Kept within the existing `scopeWeight`
- * range [0.3, 1.0] so the downstream scoring dynamics (decay/MMR/caps) are unchanged.
+ * in-context (the anchor itself) strongest, then a DESCENDANT of the anchor (a memory
+ * INSIDE the anchored context — e.g. a project under an anchored customer) just below;
+ * each step UP the Projekt→Kunde→… chain weaker; a sibling/cousin (shares an ancestor
+ * but neither ancestor nor descendant) weaker still; an unrelated subject a visible
+ * floor. NONE is hidden — a soft re-rank, not a filter, so a strongly-matching
+ * cross-project memory still surfaces (Fable CORR-2: no security boundary here, only
+ * relevance ordering). Kept within the existing `scopeWeight` range [0.3, 1.0] so the
+ * downstream scoring dynamics (decay/MMR/caps) are unchanged.
  */
 const ANCHOR_WEIGHT = 1.0;
+const DESCENDANT_WEIGHT = 0.85;
 const ANCESTOR_PARENT_WEIGHT = 0.7;
 const ANCESTOR_STEP = 0.15;
 const ANCESTOR_FLOOR = 0.4;
@@ -67,13 +70,15 @@ function ancestorWeight(depth: number): number {
 /**
  * The active thread's context hierarchy, resolved ONCE per retrieve() from the
  * thread anchor. `chainWeights` maps the anchor + each ancestor id to its walk-up
- * weight; `ancestorSet` is the same id set (for off-chain sibling detection); the
- * `siblingCache` memoises the per-candidate-subject ancestor walk within one retrieve.
+ * weight (its `.has()` doubles as the on-chain / shared-ancestor test); `anchorId`
+ * identifies the anchor itself so a candidate whose ancestors include it is scored as
+ * a DESCENDANT, not a sibling; `offChainCache` memoises the per-candidate-subject
+ * ancestor walk (→ resolved weight) within one retrieve.
  */
 interface AnchorContext {
+  anchorId: string;
   chainWeights: Map<string, number>;
-  ancestorSet: Set<string>;
-  siblingCache: Map<string, boolean>;
+  offChainCache: Map<string, number>;
 }
 
 export interface RetrievalOptions {
@@ -635,17 +640,20 @@ export class RetrievalEngine {
       // pathological repeat so an ancestor never downgrades an already-mapped id.
       if (!chainWeights.has(a.id)) chainWeights.set(a.id, ancestorWeight(i + 1));
     });
-    return { chainWeights, ancestorSet: new Set(chainWeights.keys()), siblingCache: new Map() };
+    return { anchorId, chainWeights, offChainCache: new Map() };
   }
 
   /**
    * The soft walk-up weight for a candidate given the active anchor context. Tiers:
-   * on-chain (anchor or an ancestor) → its mapped weight; off-chain but sharing an
-   * ancestor with the anchor (sibling/cousin) → {@link SIBLING_WEIGHT}; wholly
-   * unrelated subject → {@link UNRELATED_WEIGHT} (still visible). A memory with NO
-   * subject (legacy / un-anchored) falls back to the flat `scopeWeight(scope_type)`
-   * — this is the subsumption of the degenerate scope_type axis: global/user memories
-   * keep their scope weight, subject-bearing memories get the hierarchy weight.
+   * on-chain (the anchor itself or an ancestor of it) → its mapped weight; off-chain
+   * DESCENDANT of the anchor (the anchor is among the candidate's ancestors — a memory
+   * inside the anchored context, e.g. a project under an anchored customer) →
+   * {@link DESCENDANT_WEIGHT}; off-chain but sharing an ancestor with the anchor
+   * (sibling/cousin) → {@link SIBLING_WEIGHT}; wholly unrelated subject →
+   * {@link UNRELATED_WEIGHT} (still visible). A memory with NO subject (legacy /
+   * un-anchored) falls back to the flat `scopeWeight(scope_type)` — the subsumption of
+   * the degenerate scope_type axis: global/user memories keep their scope weight,
+   * subject-bearing memories get the hierarchy weight.
    */
   private _contextScopeWeight(
     subjectId: string | null,
@@ -655,15 +663,18 @@ export class RetrievalEngine {
     if (!subjectId) return scopeWeight(scopeType as MemoryScopeType);
     const onChain = ctx.chainWeights.get(subjectId);
     if (onChain !== undefined) return onChain;
-    let sibling = ctx.siblingCache.get(subjectId);
-    if (sibling === undefined) {
-      sibling = false;
+    let weight = ctx.offChainCache.get(subjectId);
+    if (weight === undefined) {
+      let descendant = false;
+      let sibling = false;
       for (const a of this.subjectStore!.getAncestors(subjectId)) {
-        if (ctx.ancestorSet.has(a.id)) { sibling = true; break; }
+        if (a.id === ctx.anchorId) { descendant = true; break; } // anchor is an ancestor → inside the context
+        if (ctx.chainWeights.has(a.id)) sibling = true;          // shares an anchor-chain node → sibling/cousin
       }
-      ctx.siblingCache.set(subjectId, sibling);
+      weight = descendant ? DESCENDANT_WEIGHT : sibling ? SIBLING_WEIGHT : UNRELATED_WEIGHT;
+      ctx.offChainCache.set(subjectId, weight);
     }
-    return sibling ? SIBLING_WEIGHT : UNRELATED_WEIGHT;
+    return weight;
   }
 
   private _namespacedDecay(createdAt: string, namespace: MemoryNamespace): number {
