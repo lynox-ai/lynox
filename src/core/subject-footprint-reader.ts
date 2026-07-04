@@ -74,7 +74,11 @@ export interface SubjectFootprint {
 }
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+// Capped at the SMALLEST per-store internal cap (`memoriesMentioningSubject` clamps
+// its own limit to 100; records/tasks/threads clamp to 500). Asking a store for more
+// than it will ever return would make the `length >= limit` truncation signal lie
+// (100 rows back on a limit of 150 reads as "not truncated" while cutting silently).
+const MAX_LIMIT = 100;
 
 /**
  * Composes a subject's footprint from the stores that each hold a soft-ref to it.

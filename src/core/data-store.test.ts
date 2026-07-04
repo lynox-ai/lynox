@@ -1658,5 +1658,54 @@ describe('DataStore', () => {
       expect(truncated).toBe(true);
       expect(occurrences.map(o => o.occurredAt)).toEqual(['2026-01-05', '2026-01-04', '2026-01-03']);
     });
+
+    it('reports truncated when the SUM across collections exceeds limit (global cap, no single collection over)', () => {
+      ds.createCollection({ name: 'ca', scope, columns: [
+        { name: 'org', type: 'subject', subjectKind: 'organization' },
+        { name: 'd', type: 'date', role: 'occurred_at' },
+      ] });
+      ds.createCollection({ name: 'cb', scope, columns: [
+        { name: 'org', type: 'subject', subjectKind: 'organization' },
+        { name: 'd', type: 'date', role: 'occurred_at' },
+      ] });
+      // 2 rows in each collection: neither alone exceeds limit 3, but 4 total does.
+      ds.insertRecords({ collection: 'ca', records: [
+        { org: ACME, d: '2026-01-01' }, { org: ACME, d: '2026-01-03' },
+      ] });
+      ds.insertRecords({ collection: 'cb', records: [
+        { org: ACME, d: '2026-01-02' }, { org: ACME, d: '2026-01-04' },
+      ] });
+      const { occurrences, truncated } = ds.getRecordsForSubject(ACME, { limit: 3 });
+      expect(occurrences).toHaveLength(3);
+      expect(truncated).toBe(true); // the `out.length > limit` branch, not per-collection
+      expect(occurrences.map(o => o.occurredAt)).toEqual(['2026-01-04', '2026-01-03', '2026-01-02']);
+    });
+
+    it('re-times an empty/absent occurred_at value by _created_at (not treated as oldest by SQL or JS)', () => {
+      ds.createCollection({
+        name: 'dated', scope,
+        columns: [
+          { name: 'label', type: 'string' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+          { name: 'happened', type: 'date', role: 'occurred_at' },
+        ],
+      });
+      ds.insertRecords({ collection: 'dated', records: [
+        { label: 'real_old', client: ACME, happened: '2020-01-01' }, // the only true event time
+        { label: 'empty', client: ACME, happened: '' },              // '' → fallback, NOT epoch-old
+        { label: 'absent', client: ACME },                            // null → fallback
+      ] });
+      const { occurrences } = ds.getRecordsForSubject(ACME);
+      expect(occurrences).toHaveLength(3);
+      // the 2020 row is the genuine oldest → sorts LAST; empty/absent get the recent
+      // insert timestamp (the SQL NULLIF + JS guard agree), so they are NOT below it.
+      expect(occurrences[occurrences.length - 1]!.row['label']).toBe('real_old');
+      const byLabel = new Map(occurrences.map(o => [String(o.row['label']), o]));
+      expect(byLabel.get('real_old')!.occurredAtIsEventTime).toBe(true);
+      expect(byLabel.get('empty')!.occurredAtIsEventTime).toBe(false);
+      expect(byLabel.get('absent')!.occurredAtIsEventTime).toBe(false);
+      expect(byLabel.get('empty')!.occurredAt).not.toBe('');
+      expect(byLabel.get('empty')!.occurredAt).not.toBeNull();
+    });
   });
 });

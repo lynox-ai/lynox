@@ -501,9 +501,11 @@ export class DataStore {
       // occurredAtCol / subjectCols / name all come from the stored schema — every
       // one has passed VALID_COLUMN_NAME_RE / COLLECTION_NAME_RE, so interpolating
       // them is SQL-safe (the same invariant the ukey + subject indexes rely on).
-      // The subject id is a bound param.
+      // The subject id is a bound param. NULLIF(…, '') mirrors the JS projection
+      // below (which treats an empty-string date as absent) so the ORDER BY + cap
+      // rank a blank occurred_at by its `_created_at`, not as the oldest row.
       const timeExpr = occurredAtCol
-        ? `COALESCE("${occurredAtCol}", "_created_at")`
+        ? `COALESCE(NULLIF("${occurredAtCol}", ''), "_created_at")`
         : '"_created_at"';
       const whereOr = subjectCols.map(col => `"${col}" = ?`).join(' OR ');
       const tableName = `ds_${c.name}`;

@@ -116,6 +116,32 @@ describe('SubjectFootprintReader (Foundation Rework v2 — R2b)', () => {
     expect(fp!.truncated).toEqual({ records: false, threads: false, memories: false, tasks: false });
   });
 
+  it('sets each truncated flag when a section exceeds the limit', () => {
+    const { engine, subs, ds, reader } = make();
+    const acme = subs.findOrCreate({ kind: 'organization', name: 'Acme GmbH' }).id;
+    seedFootprint(engine, ds, acme, 'acme'); // 2 records, 1 memory, 1 task, 1 thread
+    // Add a 2nd memory / task / thread so every section holds >= 2 rows.
+    const mem = new MemoryGraphStore(engine);
+    mem.upsertStub({
+      id: 'mem-acme2', text: 'second note',
+      namespace: 'knowledge', scopeType: 'context', scopeId: 'p1', createdAt: '2026-02-02',
+    });
+    mem.linkSubjects('mem-acme2', [acme]);
+    engine.getDb().prepare(
+      'INSERT INTO tasks (id, title, assignee_subject_id, updated_at) VALUES (?, ?, ?, ?)',
+    ).run('task-acme2', 'second follow-up', acme, '2026-02-16');
+    engine.getDb().prepare(
+      'INSERT INTO threads (id, primary_subject_id, updated_at) VALUES (?, ?, ?)',
+    ).run('th-acme2', acme, '2026-06-02');
+
+    const fp = reader.getFootprint(acme, { limit: 1 })!;
+    expect(fp.truncated).toEqual({ records: true, threads: true, memories: true, tasks: true });
+    expect(fp.memories).toHaveLength(1);
+    expect(fp.tasks).toHaveLength(1);
+    expect(fp.timeline.filter(e => e.type === 'record')).toHaveLength(1);
+    expect(fp.timeline.filter(e => e.type === 'thread')).toHaveLength(1);
+  });
+
   it('projects memories to a lean shape (no embedding blob leaks into the footprint)', () => {
     const { engine, subs, ds, reader } = make();
     const acme = subs.findOrCreate({ kind: 'organization', name: 'Acme GmbH' }).id;
