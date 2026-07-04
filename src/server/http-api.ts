@@ -3186,6 +3186,38 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { updated });
     }));
 
+    // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
+    // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint
+    // return null otherwise → requireService 503). Single-tenant, user scope; every
+    // read is the tenant's OWN graph. No mutation route here — the surface is read +
+    // one chat handoff; edits route through the agent (`set_thread_context`).
+    this.addStatic('user', 'GET /api/subjects', async (req, res) => {
+      const subjectStore = engine.getSubjectStore();
+      if (!requireService(res, subjectStore, 'Subject graph')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 50, 200));
+      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+      const all = subjectStore.listSubjects();
+      const filtered = q ? all.filter(s => s.name.toLowerCase().includes(q)) : all;
+      const page = filtered.slice(offset, offset + limit);
+      // Project to id/kind/name only — the picker never needs aliases/embedding/detail.
+      jsonResponse(res, 200, {
+        subjects: page.map(s => ({ id: s.id, kind: s.kind, name: s.name })),
+        total: filtered.length,
+      });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/subjects/:id/footprint', async (req, res, params) => {
+      if (!requireService(res, engine.getSubjectStore(), 'Subject graph')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 50, 200));
+      const footprint = engine.getSubjectFootprint(params['id']!, { limit });
+      // null = stale/purged/unknown id (or flag off, already 503'd above) → 404.
+      if (!footprint) { errorResponse(res, 404, 'Subject not found'); return; }
+      jsonResponse(res, 200, footprint);
+    }));
+
     // ── Secrets ──
     // user scope: the name list for the Settings UI — `listNames()` returns key
     // NAMES only, never values. The list is unfiltered (it includes infra/channel
@@ -3491,6 +3523,9 @@ export class LynoxHTTPApi {
         // Dark gates — flip to true when PRD-MCP / PRD-CAL backends land
         has_mcp_support: false,
         has_calendar: false,
+        // R2b subject-graph surface: true iff subject_graph_enabled wired the store
+        // (fleet OFF today) → the Web UI shows/hides the Subjects tab on this probe.
+        has_subject_graph: engine.getSubjectStore() !== null,
         // Hard-limits exposure: full numbers for self-host/BYOK,
         // opaque tier-tag for managed (prevents DoS-knob disclosure).
         hard_limits: isManagedTier

@@ -10,6 +10,7 @@
 #   - MarkdownRenderer.svelte mermaid PNG export  (asset-export decision)
 #   - MarkdownRenderer.svelte html2canvas         (asset-export decision)
 #   - KnowledgeGraphView.svelte typeHues          (categorical mid-tone palette, AA on both themes)
+#   - SubjectsView.svelte kindHues                (categorical subject-kind palette, same rationale as KG)
 #   - MobileAccess.svelte QR cell                 (QR-codes dark-on-white by convention)
 #   - app.css                                     (the token definitions themselves)
 #   - logo-*.svg                                  (brand artwork)
@@ -33,6 +34,7 @@ ALLOWLIST=(
   "packages/web-ui/src/lib/components/MarkdownRenderer.svelte"
   "packages/web-ui/src/lib/utils/artifact-print.ts"
   "packages/web-ui/src/lib/components/KnowledgeGraphView.svelte"
+  "packages/web-ui/src/lib/components/SubjectsView.svelte"
   "packages/web-ui/src/lib/components/MobileAccess.svelte"
 )
 

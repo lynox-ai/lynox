@@ -153,6 +153,10 @@ vi.mock('../core/engine.js', () => ({
       setEnabled: mockTaskSetEnabled,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    // R2b subject-graph surface — null by default (flag off); route tests swap in.
+    // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
+    this.getSubjectStore = vi.fn().mockReturnValue(null);
+    this.getSubjectFootprint = vi.fn().mockReturnValue(null);
     // The saved-workflow run path now flows through the budget/credit
     // lifecycle (runGuardedSavedWorkflow), which reads these off the engine.
     this.getContext = vi.fn().mockReturnValue(null);
@@ -2625,6 +2629,68 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { messages: unknown[]; threadMissing?: boolean };
         expect(body.threadMissing).toBeUndefined();
         expect(body.messages).toEqual([]);
+      });
+    });
+  });
+
+  describe('subjects — R2b footprint surface', () => {
+    function swapEngine(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origs: Record<string, unknown> = {};
+      for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+      return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+    }
+
+    it('GET /api/subjects → 503 when the subject graph is off (store absent)', async () => {
+      const res = await jsonFetch('/api/subjects'); // default mock getSubjectStore() → null
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/subjects lists id/kind/name filtered by q + total, projecting away other fields', async () => {
+      const subjects = [
+        { id: 's1', kind: 'organization', name: 'Acme GmbH', aliases: '[]', embedding: null, owner_user_id: 'u1' },
+        { id: 's2', kind: 'person', name: 'Bob', aliases: '[]', embedding: null, owner_user_id: 'u1' },
+      ];
+      await swapEngine({ getSubjectStore: () => ({ listSubjects: () => subjects }) }, async () => {
+        const res = await jsonFetch('/api/subjects?q=acme');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { subjects: Array<Record<string, unknown>>; total: number };
+        expect(body.subjects).toEqual([{ id: 's1', kind: 'organization', name: 'Acme GmbH' }]);
+        expect(body.total).toBe(1);
+      });
+    });
+
+    it('GET /api/subjects/:id/footprint → 503 when the subject graph is off', async () => {
+      const res = await jsonFetch('/api/subjects/s1/footprint');
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/subjects/:id/footprint → 404 when the id is unknown/stale (reader returns null)', async () => {
+      await swapEngine({
+        getSubjectStore: () => ({ listSubjects: () => [] }),
+        getSubjectFootprint: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/subjects/ghost/footprint');
+        expect(res.status).toBe(404);
+      });
+    });
+
+    it('GET /api/subjects/:id/footprint → 200 returns the footprint + threads the bounded limit', async () => {
+      const footprint = {
+        subject: { id: 's1', kind: 'organization', name: 'Acme GmbH' },
+        timeline: [], memories: [], tasks: [],
+        truncated: { records: false, threads: false, memories: false, tasks: false },
+      };
+      const captured: unknown[][] = [];
+      await swapEngine({
+        getSubjectStore: () => ({ listSubjects: () => [] }),
+        getSubjectFootprint: (...args: unknown[]) => { captured.push(args); return footprint; },
+      }, async () => {
+        const res = await jsonFetch('/api/subjects/s1/footprint?limit=10');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(footprint);
+        expect(captured[0]![0]).toBe('s1');
+        expect(captured[0]![1]).toEqual({ limit: 10 });
       });
     });
   });

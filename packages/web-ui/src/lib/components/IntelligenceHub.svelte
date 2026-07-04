@@ -1,24 +1,42 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import ContactsView from './ContactsView.svelte';
 	import DataStoreView from './DataStoreView.svelte';
 	import KnowledgeGraphView from './KnowledgeGraphView.svelte';
 	import MemoryInsightsView from './MemoryInsightsView.svelte';
 	import MemoryView from './MemoryView.svelte';
+	import SubjectsView from './SubjectsView.svelte';
 	import { scrollFade } from '../utils/scroll-fade.js';
 
 	// PRD-IA-V2 P3-PR-H: IntelligenceHub shrinks 5 → 4 top-tabs.
 	// `insights` is folded as a sub-tab under `graph` (both Beta, both
 	// AgentMemoryDb-aggregate). Legacy `?tab=insights` is 301-redirected to
 	// `?tab=graph&sub=insights` by the route's `+page.ts` for bookmark survival.
-	type Tab = 'wissen' | 'graph' | 'contacts' | 'data';
+	// R2b: a `subjects` tab appears ONLY when the engine reports
+	// capabilities.has_subject_graph (subject_graph_enabled — fleet OFF today).
+	type Tab = 'wissen' | 'graph' | 'contacts' | 'data' | 'subjects';
 	type GraphSub = 'overview' | 'insights';
+
+	let hasSubjectGraph = $state(false);
+
+	$effect(() => {
+		void (async () => {
+			try {
+				const res = await fetch(`${getApiBase()}/config`);
+				if (!res.ok) return;
+				const body = (await res.json()) as { capabilities?: { has_subject_graph?: boolean } };
+				hasSubjectGraph = body.capabilities?.has_subject_graph === true;
+			} catch { /* leave the tab hidden on probe failure */ }
+		})();
+	});
 
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('tab');
 		if (p === 'graph' || p === 'contacts' || p === 'data') return p;
+		if (p === 'subjects' && hasSubjectGraph) return 'subjects';
 		return 'wissen';
 	})());
 
@@ -45,12 +63,13 @@
 		void goto(url.pathname + url.search, { replaceState: true, keepFocus: true, noScroll: true });
 	}
 
-	const tabs: ReadonlyArray<{ id: Tab; labelKey: string }> = [
+	const tabs = $derived<ReadonlyArray<{ id: Tab; labelKey: string }>>([
 		{ id: 'wissen', labelKey: 'hub.intelligence.wissen' },
 		{ id: 'graph', labelKey: 'hub.intelligence.graph' },
 		{ id: 'contacts', labelKey: 'hub.intelligence.contacts' },
 		{ id: 'data', labelKey: 'hub.intelligence.data' },
-	];
+		...(hasSubjectGraph ? [{ id: 'subjects' as const, labelKey: 'hub.intelligence.subjects' }] : []),
+	]);
 
 	const graphSubTabs: ReadonlyArray<{ id: GraphSub; labelKey: string }> = [
 		{ id: 'overview', labelKey: 'hub.intelligence.graph_overview' },
@@ -90,6 +109,8 @@
 			{/if}
 		{:else if tab === 'contacts'}
 			<ContactsView />
+		{:else if tab === 'subjects'}
+			<SubjectsView />
 		{:else}
 			<DataStoreView />
 		{/if}
