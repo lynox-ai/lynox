@@ -12,6 +12,8 @@ import type { DataStore } from './data-store.js';
 import type { CRM } from './crm.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunHistory } from './run-history.js';
+import type { SubjectStore } from './subject-store.js';
+import type { ThreadStore } from './thread-store.js';
 import type { HookHost } from './metered-request.js';
 import type {
   IKnowledgeLayer,
@@ -38,6 +40,11 @@ export interface ToolContext {
   knowledgeLayer: IKnowledgeLayer | null;
   runHistory: RunHistory | null;
   userConfig: LynoxUserConfig;
+  /** Foundation Rework v2 — Context-Hierarchy Scoping (Slice A2). Subject-graph
+   *  read/write + the live thread store, exposed to the `set_thread_context` tool.
+   *  Both null unless `subject_graph_enabled` is on (wired in engine init). */
+  subjectStore: SubjectStore | null;
+  threadStore: ThreadStore | null;
 
   // ── Pipeline / process ──
   tools: ToolEntry[];
@@ -90,6 +97,8 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     knowledgeLayer: null,
     runHistory: null,
     userConfig,
+    subjectStore: null,
+    threadStore: null,
     tools: [],
     streamHandler: null,
     networkPolicy: undefined,

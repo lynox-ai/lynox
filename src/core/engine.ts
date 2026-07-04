@@ -72,6 +72,7 @@ import {
   artifactHistoryTool,
   artifactRestoreTool,
   recallToolResultTool,
+  setThreadContextTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
@@ -1507,6 +1508,23 @@ export class Engine {
           .register(contactsSearchTool);
       } catch {
         this._crm = null;
+      }
+    }
+
+    // Foundation Rework v2 — Context-Hierarchy Scoping (Slice A2). Expose the
+    // subject-graph + live thread stores to tool handlers and register the
+    // `set_thread_context` tool — ONLY when the subject-graph flag is on. Off in
+    // prod today → the tool + stores are absent from the agent surface entirely
+    // (zero new standing attack surface when the flag is off). SubjectStore is a
+    // thin per-call wrapper over engine.db (same pattern as CRM/KnowledgeLayer).
+    if (this.userConfig.subject_graph_enabled === true && this.engineDb && this._threadStore) {
+      try {
+        const { SubjectStore } = await import('./subject-store.js');
+        this._toolContext.subjectStore = new SubjectStore(this.engineDb);
+        this._toolContext.threadStore = this._threadStore;
+        this.registry.register(setThreadContextTool);
+      } catch (err) {
+        process.stderr.write(`[lynox] context-scoping tool wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
 
