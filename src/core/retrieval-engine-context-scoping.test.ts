@@ -109,8 +109,12 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
     expect(s.get('m-A')!).toBeGreaterThan(s.get('m-null')!);
     expect(s.get('m-null')!).toBeGreaterThan(s.get('m-KX')!);
     // The offChainCache HIT branch: two memories on the SAME off-chain subject
-    // (Projekt B) resolve to the identical sibling weight.
-    expect(s.get('m-B2')!).toBe(s.get('m-B')!);
+    // (Projekt B) resolve to the identical sibling weight (a constant 0.35). The
+    // WEIGHT is bit-identical; assert on the composed finalScore with the same
+    // tolerance the flat-scope cases use (toBeCloseTo, 6) — the score threads the
+    // weight through (vector+fts+…)×weight, whose last ULPs are platform/order-
+    // sensitive (a ~1e-11 x64/ARM drift), while the tiers differ by ≫5e-7.
+    expect(s.get('m-B2')!).toBeCloseTo(s.get('m-B')!, 6);
   });
 
   it('anchored to Kunde X (customer level): its own projects rank as DESCENDANTS, not siblings', async () => {
@@ -119,7 +123,7 @@ describe('RetrievalEngine — context-hierarchy walk-up weighting (Slice C)', ()
     // Kunde X itself is the anchor (1.0). Its projects A + B are DESCENDANTS (inside
     // the anchored context) → they must rank HIGH, not be buried at the sibling floor.
     expect(s.get('m-KX')!).toBeGreaterThan(s.get('m-A')!);        // the anchor tops
-    expect(s.get('m-A')!).toBe(s.get('m-B')!);                    // both descendants → same tier
+    expect(s.get('m-A')!).toBeCloseTo(s.get('m-B')!, 6);          // both descendants → same tier (ULP-tolerant, cf. line ~113)
     expect(s.get('m-A')!).toBeGreaterThan(s.get('m-null')!);      // descendant (0.85) > subject-less context (0.8)
     // Holding (Kunde X's parent) is now an UP-hierarchy ancestor (0.7), below the
     // subject-less context memory; Projekt C (other customer) stays unrelated.
