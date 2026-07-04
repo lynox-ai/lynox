@@ -178,8 +178,17 @@ function measureStaticPrefixTokens(): number {
  * conditional CRM_PROMPT_SUFFIX at them. Two whole tool schemas — descriptions
  * trimmed to minimal first (structural lever, −107 from the untrimmed 21892);
  * the residual ~515 is two genuine new capabilities, not accidental growth.
+ *
+ * 2026-07-04: bump to 21975 (measured 21965) — Context-Hierarchy Scoping A2 adds
+ * the `set_thread_context` builtin tool (scope a thread to a project/client so
+ * notes + recall stay within it). Description trimmed to minimal first (structural
+ * lever, −61 from the untrimmed 22026); the residual ~170 is one whole tool schema,
+ * a genuine new capability. NB it is registered ONLY when `subject_graph_enabled`
+ * is on (OFF for the whole fleet today) — so its real every-turn cost is ZERO
+ * until a tenant flips the flag; this guard counts the barrel worst-case, matching
+ * the contacts/update_workflow_steps precedent (conditionally-registered tools count).
  */
-const STATIC_PREFIX_BUDGET = 21795;
+const STATIC_PREFIX_BUDGET = 21975;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
