@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnResolver, NAME_DEDUPED_SUBJECT_KINDS } from './subject-store.js';
+import { DataStore } from './data-store.js';
+import type { DataStoreSubjectKind } from '../types/index.js';
 
 describe('SubjectStore (Foundation Rework v2 — S1a)', () => {
   const tmpDirs: string[] = [];
@@ -341,6 +343,79 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
       engine.getDb().pragma('foreign_keys = OFF');
       engine.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(kunde);
       expect(store.getAncestors(projekt)).toEqual([]); // walk ends, no throw
+    });
+  });
+
+  // The exact resolver the engine injects into DataStore (Record-on-spine R1),
+  // tested end-to-end against a REAL SubjectStore + REAL DataStore — this is the
+  // wiring coverage: a subject column stores a real subject_id, dedups per
+  // identity, and an unknown kind hits the defensive floor.
+  describe('makeSubjectColumnResolver (Record-on-spine R1 wiring)', () => {
+    function makeWired(): { store: SubjectStore; engine: EngineDb; ds: DataStore } {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-ds-'));
+      tmpDirs.push(dir);
+      const engine = new EngineDb(join(dir, 'engine.db'), '');
+      const store = new SubjectStore(engine);
+      const ds = new DataStore(join(dir, 'datastore.db'));
+      ds.setSubjectResolver(makeSubjectColumnResolver(store));
+      return { store, engine, ds };
+    }
+
+    it('stores a real subject_id and dedups the same identity to one subject', () => {
+      const { store, engine, ds } = makeWired();
+      ds.createCollection({
+        name: 'appointments',
+        scope: { type: 'context', id: '' },
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'appointments',
+        records: [
+          { note: 'first', patient: 'Anna Meier' },
+          { note: 'again', patient: 'anna meier' }, // case-variant → same subject
+        ],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'appointments', sort: [{ field: '_id', order: 'asc' }] });
+      const id = rows[0]!['patient'] as string;
+      // Resolved to a real subject row of the declared kind.
+      expect(store.getSubject(id)?.kind).toBe('person');
+      expect(store.getSubject(id)?.name).toBe('Anna Meier');
+      // Dedup: both rows point at the one subject; exactly one person exists.
+      expect(rows[1]!['patient']).toBe(id);
+      expect(store.listSubjects({ kind: 'person' })).toHaveLength(1);
+      ds.close();
+      engine.close();
+    });
+
+    it('floors an unknown kind to person rather than throwing', () => {
+      const { store } = makeWired();
+      const resolver = makeSubjectColumnResolver(store);
+      const id = resolver('Mystery', 'not_a_real_kind');
+      expect(store.getSubject(id)?.kind).toBe('person');
+    });
+  });
+
+  // F8 drift guard: the subject-column kind list is stated in TWO places — the
+  // runtime NAME_DEDUPED_SUBJECT_KINDS (SoT here) and the config-leaf type
+  // DataStoreSubjectKind (can't import core). If they diverge, a subject column
+  // could offer a kind the resolver can't dedup (the exact trap R1 closes).
+  describe('subject-column kind list stays in sync', () => {
+    it('config DataStoreSubjectKind matches the runtime NAME_DEDUPED_SUBJECT_KINDS', () => {
+      // Runtime: exactly the four name-deduped kinds (order-independent).
+      expect([...NAME_DEDUPED_SUBJECT_KINDS].sort()).toEqual(['organization', 'person', 'product', 'service']);
+      // Compile-time: config type and runtime list must be mutually assignable —
+      // this resolves to `true` only if neither side has drifted, else `never`
+      // (and `const _: never = true` fails to typecheck).
+      type BothWays =
+        [DataStoreSubjectKind] extends [(typeof NAME_DEDUPED_SUBJECT_KINDS)[number]]
+          ? ([(typeof NAME_DEDUPED_SUBJECT_KINDS)[number]] extends [DataStoreSubjectKind] ? true : never)
+          : never;
+      const bidirectional: BothWays = true;
+      expect(bidirectional).toBe(true);
     });
   });
 });

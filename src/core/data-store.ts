@@ -45,6 +45,9 @@ const TYPE_MAP: Record<DataStoreSchemaType, string> = {
   date: 'TEXT',
   boolean: 'INTEGER',
   json: 'TEXT',
+  // A `subject` column stores a subject_id (a UUID string) — a cross-DB soft
+  // ref into engine.db, resolved from a name on insert (see `_coerceValue`).
+  subject: 'TEXT',
 };
 
 const VALID_OPERATORS = new Set([
@@ -60,6 +63,15 @@ const VALID_AGG_FNS = new Set<DataStoreAggFn>([
 export class DataStore {
   private db: Database.Database;
 
+  /**
+   * Record-on-spine (R1): resolves a `subject`-typed column's raw name → a real
+   * `subject_id` (a cross-DB soft ref into engine.db). Injected by the engine
+   * ONLY when `subject_graph_enabled` (see `Engine._init`). When null — the
+   * fleet default today — `subject` columns degrade to storing the raw string,
+   * so DataStore stays fully usable without the subject graph.
+   */
+  private _subjectResolver: ((name: string, kind: string) => string | null) | null = null;
+
   constructor(dbPath?: string | undefined) {
     const path = dbPath ?? join(getLynoxDir(), 'datastore.db');
     mkdirSync(dirname(path), { recursive: true });
@@ -67,6 +79,15 @@ export class DataStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this._initMeta();
+  }
+
+  /**
+   * Inject (or clear) the subject resolver. Passing a function turns `subject`
+   * columns into real subject links; passing null reverts them to plain-string
+   * storage. Idempotent — safe to call once at engine init.
+   */
+  setSubjectResolver(fn: ((name: string, kind: string) => string | null) | null): void {
+    this._subjectResolver = fn;
   }
 
   private _initMeta(): void {
@@ -238,7 +259,7 @@ export class DataStore {
 
     const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
     const colNames = new Set(columns.map(c => c.name));
-    const colTypeMap = new Map(columns.map(c => [c.name, c.type]));
+    const colDefMap = new Map(columns.map(c => [c.name, c]));
     const tableName = `ds_${collection}`;
     const uniqueKey = info.unique_key ? info.unique_key.split(',') : null;
 
@@ -294,8 +315,8 @@ export class DataStore {
               values.push(null);
               continue;
             }
-            const colType = colTypeMap.get(col)!;
-            values.push(this._coerceValue(val, colType, col));
+            const colDef = colDefMap.get(col)!;
+            values.push(this._coerceValue(val, colDef));
           }
 
           // Warn about unknown fields (but don't error)
@@ -578,8 +599,9 @@ export class DataStore {
     } | undefined;
   }
 
-  private _coerceValue(val: unknown, type: DataStoreSchemaType, colName: string): unknown {
-    switch (type) {
+  private _coerceValue(val: unknown, col: DataStoreColumnDef): unknown {
+    const colName = col.name;
+    switch (col.type) {
       case 'string':
         return String(val);
       case 'number': {
@@ -600,6 +622,21 @@ export class DataStore {
         throw new Error(`Column "${colName}": cannot convert "${String(val)}" to boolean.`);
       case 'json':
         return typeof val === 'string' ? val : JSON.stringify(val);
+      case 'subject': {
+        // Resolve the row's name → a real subject_id via the injected resolver.
+        // No resolver at all (flag off) → degrade to storing the raw string, so
+        // the column stays human-readable and DataStore works without the graph.
+        // A resolver that's present but returns null (a resolve FAILURE, distinct
+        // from flag-off) → store null (unlinked), NOT the raw name: keep the
+        // column id-pure so it never mixes names and UUIDs. The kind is part of
+        // dedup identity; `?? 'person'` is a defensive internal floor — the tool
+        // contract already REQUIRES a valid subjectKind on any subject column.
+        const raw = String(val).trim();
+        if (raw === '') return null;
+        if (!this._subjectResolver) return raw;
+        const kind = col.subjectKind ?? 'person';
+        return this._subjectResolver(raw, kind) ?? null;
+      }
       default:
         return val;
     }

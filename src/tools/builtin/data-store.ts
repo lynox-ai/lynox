@@ -2,14 +2,19 @@ import type { ToolEntry, DataStoreColumnDef, DataStoreSort, DataStoreMetric } fr
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';
+import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
 // === data_store_create ===
 
+// A `subject` column resolves rows BY NAME, so it may only link to the
+// name-deduped kinds (single runtime source of truth in `core/subject-store`);
+// engagement/other are excluded — they'd mint a new subject per insert.
+
 interface CreateInput {
   name: string;
-  columns: Array<{ name: string; type: string; unique?: boolean | undefined }>;
+  columns: Array<{ name: string; type: string; unique?: boolean | undefined; subjectKind?: string | undefined }>;
   unique_key?: string[] | undefined;
   scope?: string | undefined;
   description?: string | undefined;
@@ -30,8 +35,9 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
             type: 'object',
             properties: {
               name: { type: 'string', description: 'Column name (lowercase, a-z0-9_)' },
-              type: { type: 'string', enum: ['string', 'number', 'date', 'boolean', 'json'], description: 'Column data type' },
+              type: { type: 'string', enum: ['string', 'number', 'date', 'boolean', 'json', 'subject'], description: 'Column data type. Use "subject" to link rows to a real person/company/project in the knowledge graph — requires subjectKind.' },
               unique: { type: 'boolean', description: 'Enforce unique values for this column' },
+              subjectKind: { type: 'string', enum: [...NAME_DEDUPED_SUBJECT_KINDS], description: 'REQUIRED for a "subject" column: which kind to link — person, organization, product, or service (kinds that dedup by name).' },
             },
             required: ['name', 'type'],
           },
@@ -54,10 +60,29 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
 
     try {
       const scope = (input.scope ? parseScopeString(input.scope) : undefined) ?? { type: 'context' as const, id: '' };
+
+      // A `subject` column links rows to a real subject in the knowledge graph.
+      // The kind is part of dedup identity — resolving a company column as
+      // "person" would mint a duplicate that never merges with the org subject —
+      // AND a subject column resolves BY NAME, so only the name-deduped kinds are
+      // valid (engagement/other would mint a fresh subject per insert). Demand a
+      // valid subjectKind up front rather than silently defaulting.
+      for (const c of input.columns) {
+        if (c.type === 'subject') {
+          if (!c.subjectKind) {
+            return `Column "${c.name}" has type "subject" but no subjectKind. Add subjectKind (one of: ${NAME_DEDUPED_SUBJECT_KINDS.join(', ')}) so the linked subject is created with the correct identity.`;
+          }
+          if (!(NAME_DEDUPED_SUBJECT_KINDS as readonly string[]).includes(c.subjectKind)) {
+            return `Column "${c.name}": subjectKind "${c.subjectKind}" is not valid for a subject column. Use one of: ${NAME_DEDUPED_SUBJECT_KINDS.join(', ')} (kinds that dedup by name).`;
+          }
+        }
+      }
+
       const columns: DataStoreColumnDef[] = input.columns.map(c => ({
         name: c.name,
         type: c.type as DataStoreColumnDef['type'],
         unique: c.unique,
+        ...(c.type === 'subject' ? { subjectKind: c.subjectKind as DataStoreColumnDef['subjectKind'] } : {}),
       }));
 
       const info = storeRef.createCollection({
