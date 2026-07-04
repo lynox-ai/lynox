@@ -1423,21 +1423,41 @@ describe('DataStore', () => {
           { name: 'vendor', type: 'subject', subjectKind: 'organization' },
         ],
       });
+      // Assert on the column suffix, not the exact prefix, so the test doesn't
+      // couple to the collision-safe naming scheme (length-prefixed).
       const idx = indexNames(dbPath, 'ds_invoices');
-      expect(idx).toContain('idx_invoices_client_subj');
-      expect(idx).toContain('idx_invoices_vendor_subj');
+      expect(idx.some(n => n.endsWith('_client_subj'))).toBe(true);
+      expect(idx.some(n => n.endsWith('_vendor_subj'))).toBe(true);
     });
 
     it('indexes a subject column added later via alterCollection', () => {
       ds.createCollection({ name: 'leads', scope, columns: [{ name: 'title', type: 'string' }] });
-      expect(indexNames(dbPath, 'ds_leads')).not.toContain('idx_leads_owner_subj');
+      expect(indexNames(dbPath, 'ds_leads').some(n => n.endsWith('_owner_subj'))).toBe(false);
       ds.alterCollection({ collection: 'leads', addColumns: [{ name: 'owner', type: 'subject', subjectKind: 'person' }] });
-      expect(indexNames(dbPath, 'ds_leads')).toContain('idx_leads_owner_subj');
+      expect(indexNames(dbPath, 'ds_leads').some(n => n.endsWith('_owner_subj'))).toBe(true);
     });
 
     it('does not index a non-subject column', () => {
       ds.createCollection({ name: 'plain', scope, columns: [{ name: 'x', type: 'number' }] });
       expect(indexNames(dbPath, 'ds_plain').some(n => n.endsWith('_subj'))).toBe(false);
+    });
+
+    it('two collections whose <name>_<col> concatenations coincide do not collide', () => {
+      // SQLite index names are database-global. A bare `<coll>_<col>` join is
+      // ambiguous: `crm_deals`+`owner` vs `crm`+`deals_owner` both flatten to
+      // "crm_deals_owner". Both subject indexes must still create cleanly.
+      ds.createCollection({
+        name: 'crm_deals',
+        scope,
+        columns: [{ name: 'owner', type: 'subject', subjectKind: 'person' }],
+      });
+      expect(() => ds.createCollection({
+        name: 'crm',
+        scope,
+        columns: [{ name: 'deals_owner', type: 'subject', subjectKind: 'person' }],
+      })).not.toThrow();
+      expect(indexNames(dbPath, 'ds_crm_deals').some(n => n.endsWith('_owner_subj'))).toBe(true);
+      expect(indexNames(dbPath, 'ds_crm').some(n => n.endsWith('_deals_owner_subj'))).toBe(true);
     });
 
     it('persists an occurred_at role on a date column (round-trips through the schema)', () => {
@@ -1482,6 +1502,52 @@ describe('DataStore', () => {
         collection: 'evt_alter',
         addColumns: [{ name: 'b', type: 'date', role: 'occurred_at' }],
       })).toThrow(/at most one "occurred_at"/);
+    });
+
+    it('persists a first occurred_at role added via alterCollection', () => {
+      // The alter path re-serializes the merged schema; prove `role` survives that
+      // write (the create path can't cover it — separate schema_json write).
+      ds.createCollection({ name: 'evt_pos', scope, columns: [{ name: 'label', type: 'string' }] });
+      ds.alterCollection({
+        collection: 'evt_pos',
+        addColumns: [{ name: 'happened_on', type: 'date', role: 'occurred_at' }],
+      });
+      const info = ds.getCollectionInfo('evt_pos');
+      expect(info?.columns.find(c => c.name === 'happened_on')?.role).toBe('occurred_at');
+    });
+
+    it('hydrates only the subject key in a multi-column group-by (plain key passes through)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      ds.createCollection({
+        name: 'appointments',
+        scope,
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'appointments',
+        records: [
+          { note: 'first visit', patient: 'Anna Meier' },
+          { note: 'new patient', patient: 'Ben Roth' },
+          { note: 'follow-up', patient: 'anna meier' }, // case-variant → same subject
+        ],
+      });
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        subjectsByName: true,
+        aggregate: { groupBy: ['patient', 'note'], metrics: [{ field: '*', fn: 'count', alias: 'n' }] },
+      });
+
+      // 3 distinct (patient, note) groups: the subject key hydrates to the display
+      // NAME (not subj-1), the plain `note` key stays the raw string.
+      const keys = rows.map(r => `${String(r['patient'])}|${String(r['note'])}`).sort();
+      expect(keys).toEqual(
+        ['Anna Meier|first visit', 'Anna Meier|follow-up', 'Ben Roth|new patient'].sort(),
+      );
     });
   });
 });

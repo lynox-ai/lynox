@@ -920,9 +920,17 @@ export class DataStore {
    * FILTER (`WHERE "<col>" = <id>`) uses the index instead of scanning the table.
    * The index is on the stored value (a UUID under the flag) — it speeds equality/
    * IN filters, NOT name-ordered sort (the name lives cross-DB in engine.db).
-   * SECURITY: `collectionName`/`tableName` are safe via COLLECTION_NAME_RE and
-   * `col.name` via VALID_COLUMN_NAME_RE — the same invariant as the ukey index. The
-   * `_subj` suffix keeps these names disjoint from `idx_<name>_ukey`.
+   *
+   * SECURITY: `collectionName`/`tableName`/`col.name` are constrained to
+   * `[a-z][a-z0-9_]{0,62}` (COLLECTION_NAME_RE / VALID_COLUMN_NAME_RE) before this
+   * runs — the same SQL-safety invariant as the ukey index.
+   *
+   * NAME UNIQUENESS: SQLite index names are database-GLOBAL, and both the collection
+   * and column parts can contain `_`, so a bare `<coll>_<col>` join is ambiguous —
+   * collection `a_b`+col `c` and collection `a`+col `b_c` would both mint the same
+   * name and the second create/alter would wrongly throw "index already exists".
+   * Length-prefixing the collection makes the encoding injective; the leading digit
+   * also keeps these disjoint from `idx_<coll>_ukey` (which starts with a letter).
    */
   private _createSubjectIndexes(
     collectionName: string,
@@ -932,7 +940,7 @@ export class DataStore {
     for (const col of columns) {
       if (col.type === 'subject') {
         this.db.exec(
-          `CREATE INDEX "idx_${collectionName}_${col.name}_subj" ON "${tableName}" ("${col.name}")`,
+          `CREATE INDEX "idx_${String(collectionName.length)}_${collectionName}_${col.name}_subj" ON "${tableName}" ("${col.name}")`,
         );
       }
     }

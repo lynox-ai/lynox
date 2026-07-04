@@ -217,6 +217,17 @@ describe('DataStore tools', () => {
       expect(result).toContain('Only a "date" column');
       expect(ds.listCollections().find(c => c.name === 'bad_role')).toBeUndefined();
     });
+
+    it('drops an out-of-enum role rather than persisting it (R2a)', async () => {
+      // The handler carries only the 'occurred_at' literal; anything else is a
+      // harmless no-op (the JSON-schema enum already bars it for real clients).
+      const created = await dataStoreCreateTool.handler({
+        name: 'role_drop',
+        columns: [{ name: 'a', type: 'date', role: 'bogus' }],
+      }, mockAgent);
+      expect(created).toContain('Created collection "role_drop"');
+      expect(ds.getCollectionInfo('role_drop')?.columns.find(c => c.name === 'a')?.role).toBeUndefined();
+    });
   });
 
   // === data_store_insert ===
