@@ -10,8 +10,13 @@ import { isValidCron, nextOccurrence } from './cron-parser.js';
  * trigger created post-slice matches the same trigger migrated from a legacy
  * `task_type` row. Keep them in lockstep if either changes.
  *
- * - effect: `backup`→backup, `reminder`→notify, a bound workflow→run_workflow,
- *   everything else→run_agent (a bare autonomous turn).
+ * - effect: `backup`→backup, `reminder`→notify, a bound workflow OR `task_type`
+ *   'pipeline'→run_workflow, everything else→run_agent (a bare autonomous turn). The
+ *   `taskType==='pipeline'` half MATCHES the v3 migration's `source='pipeline'` clause
+ *   (`engine-db.ts`) — without it a legacy `pipeline` row with a null `pipeline_id`
+ *   would derive run_agent (an autonomous money run) where the migration derives the
+ *   safe run_workflow (which no-op-skips a null target). Latent (producers always set
+ *   `pipeline_id`), but kept in lockstep so the twin genuinely agrees.
  * - source: backup/reminder are cron-scheduled built-ins → cron; else a cron
  *   schedule → cron, a watch config → watch, otherwise manual (an immediately-fired
  *   or directly-invoked trigger). Precedence (schedule_cron before watch_config)
@@ -26,7 +31,7 @@ export function deriveSourceEffect(intent: {
   const effect: TriggerEffect =
     intent.taskType === 'backup' ? 'backup'
     : intent.taskType === 'reminder' ? 'notify'
-    : intent.pipelineId ? 'run_workflow'
+    : (intent.pipelineId || intent.taskType === 'pipeline') ? 'run_workflow'
     : 'run_agent';
   const source: TriggerSource =
     (intent.taskType === 'backup' || intent.taskType === 'reminder') ? 'cron'

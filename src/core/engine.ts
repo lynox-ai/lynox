@@ -874,6 +874,32 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] verb-graph wiring failed: ${err instanceof Error ? err.message : String(err)} — verb stores inert\n`);
       }
+
+      // B1 self-heal — copy the legacy history.db verb DEFINITIONS (saved workflows +
+      // triggers + tasks) into engine.db. mig v44 is now non-destructive (the legacy
+      // rows stay dormant), so on a v1.22.0→v2.0.0 upgrade this boot copy is the ONLY
+      // thing that carries the pre-cutover automation surface forward — reads were cut
+      // to engine.db (S3f trigger/workflow, S4a tasks), which is still empty on the
+      // upgrade boot. Gated exactly-once by the engine.db marker so a definition
+      // DELETED after the upgrade is never resurrected from the still-present legacy
+      // rows; it also re-runs after an engine.db recreate (self-heal). A failure must
+      // NOT break boot — the marker stays 0 and the next boot retries.
+      if (!this.engineDb.isVerbBackfillDone()) {
+        try {
+          const { VerbGraphBackfill } = await import('./verb-graph-backfill.js');
+          const counts = new VerbGraphBackfill(this.engineDb, this.runHistory.getDb())
+            .run({ resolveAssignee: this.userConfig.subject_graph_enabled === true });
+          this.engineDb.markVerbBackfillDone();
+          if (counts.workflows + counts.triggers + counts.tasks > 0) {
+            process.stderr.write(
+              `[lynox] verb-graph backfill: migrated ${counts.workflows} workflow(s), ` +
+              `${counts.triggers} trigger(s), ${counts.tasks} task(s) legacy→engine.db\n`,
+            );
+          }
+        } catch (err) {
+          process.stderr.write(`[lynox] verb-graph backfill failed: ${err instanceof Error ? err.message : String(err)} — legacy verb defs NOT migrated; retry next boot\n`);
+        }
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)

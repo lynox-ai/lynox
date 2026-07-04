@@ -5,17 +5,19 @@ import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskStore } from './task-store.js';
+import { TriggerStore } from './trigger-store.js';
+import { WorkflowStore } from './workflow-store.js';
 import { VerbGraphBackfill } from './verb-graph-backfill.js';
+import type Database from 'better-sqlite3';
 
 /**
- * The verb-layer TASK backfill. Tasks are the one verb primitive still
- * legacy-authoritative + mirrored after the S3f write-cutover (S4 cuts them over);
- * workflows + triggers already cut over and their legacy storage was dropped in mig
- * v44, so the backfill covers TASKS only. Seeds legacy history.db tasks with the
- * mirror OFF (no setVerbGraph → legacy-only writes, the real pre-mirror state),
- * then proves the backfill relocates them into engine.db faithfully: mapped rows,
- * FK re-link in dependency order (incl. a child ordered before its parent),
- * preserved timestamps, and idempotent re-runs.
+ * The verb-layer TASK backfill. Seeds legacy history.db tasks with the mirror OFF
+ * (no setVerbGraph → legacy-only writes, the real pre-mirror state), then proves the
+ * backfill relocates them into engine.db faithfully: mapped rows, FK re-link in
+ * dependency order (incl. a child ordered before its parent), preserved timestamps,
+ * and idempotent re-runs. (Workflow + trigger backfill — the B1 self-heal that
+ * carries the pre-cutover automation surface forward — is covered in the sibling
+ * describe below.)
  */
 describe('VerbGraphBackfill — tasks (Foundation Rework v2)', () => {
   const tmpDirs: string[] = [];
@@ -169,7 +171,7 @@ describe('VerbGraphBackfill — tasks (Foundation Rework v2)', () => {
   it('empty legacy → zero counts, no throw', () => {
     const { history, engine } = make();
     const res = new VerbGraphBackfill(engine, history.getDb()).run();
-    expect(res).toEqual({ tasks: 0, taskParentLinks: 0 });
+    expect(res).toEqual({ workflows: 0, triggers: 0, tasks: 0, taskParentLinks: 0 });
   });
 
   it('resolveAssignee (cutover) resolves every backfilled task + seeds the self-person', () => {
@@ -199,5 +201,197 @@ describe('VerbGraphBackfill — tasks (Foundation Rework v2)', () => {
     expect(n.n).toBe(0);
     const raw = engine.getDb().prepare("SELECT assignee_subject_id sid FROM tasks WHERE id='a'").get() as { sid: string | null };
     expect(raw.sid).toBeNull();
+  });
+});
+
+/**
+ * B1 self-heal — the WORKFLOW + TRIGGER backfill. A v1.22.0→v2.0.0 tenant never
+ * mirrored its pre-cutover verb defs into engine.db (the arc landed after v1.22.0),
+ * and reads were cut to engine.db (S3f). mig v44 is now NON-destructive, so the
+ * legacy `triggers` table + planned-pipeline rows survive as the backfill source;
+ * the engine copies them at boot. These tests seed those legacy tables RAW (the real
+ * pre-mirror shape — legacy `triggers` carries the pre-#850 `task_type`) and prove
+ * the backfill relocates them with the source/effect axes correctly derived + the
+ * trigger→workflow FK resolved.
+ */
+describe('VerbGraphBackfill — workflows + triggers (B1 self-heal)', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const histories: RunHistory[] = [];
+
+  function make(): { history: RunHistory; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-vbf-'));
+    tmpDirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'), 'vk');
+    const engine = new EngineDb(join(dir, 'engine.db'), 'vk');
+    histories.push(history);
+    engines.push(engine);
+    return { history, engine };
+  }
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    for (const h of histories) { try { h.close(); } catch { /* already closed */ } }
+    engines.length = 0; histories.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  /** Seed one RAW legacy `triggers` row (v42 schema — carries `task_type`). */
+  function seedLegacyTrigger(db: Database.Database, over: {
+    id: string; title?: string; task_type?: string; schedule_cron?: string | null;
+    watch_config?: string | null; pipeline_id?: string | null; enabled?: number; created_at?: string;
+  }): void {
+    db.prepare(
+      `INSERT INTO triggers (id, title, description, status, assignee, scope_type, scope_id,
+        created_at, updated_at, schedule_cron, task_type, watch_config, pipeline_id, enabled)
+       VALUES (@id, @title, '', 'open', 'lynox', 'project', '', @created_at, @created_at,
+        @schedule_cron, @task_type, @watch_config, @pipeline_id, @enabled)`,
+    ).run({
+      id: over.id,
+      title: over.title ?? 'A trigger',
+      created_at: over.created_at ?? '2026-02-02T02:02:02Z',
+      schedule_cron: over.schedule_cron ?? null,
+      task_type: over.task_type ?? 'manual',
+      watch_config: over.watch_config ?? null,
+      pipeline_id: over.pipeline_id ?? null,
+      enabled: over.enabled ?? 1,
+    });
+  }
+
+  /** Seed one RAW legacy saved-workflow (`pipeline_runs status='planned'`). */
+  function seedLegacyWorkflow(db: Database.Database, id: string, name: string): void {
+    db.prepare(
+      `INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count, started_at)
+       VALUES (?, ?, 'planned', ?, 2, '2026-01-01T00:00:00Z')`,
+    ).run(id, name, JSON.stringify({ name, goal: 'do the thing', steps: [{}, {}] }));
+  }
+
+  it('relocates legacy workflows + triggers into engine.db with counts', () => {
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    seedLegacyWorkflow(hdb, 'wf-1', 'Weekly report');
+    seedLegacyTrigger(hdb, { id: 'tr-1', schedule_cron: '0 9 * * 1', pipeline_id: 'wf-1' });
+
+    expect(new WorkflowStore(engine).get('wf-1')).toBeUndefined(); // engine.db empty pre-backfill
+
+    const res = new VerbGraphBackfill(engine, hdb).run();
+
+    expect(res.workflows).toBe(1);
+    expect(res.triggers).toBe(1);
+    const wf = new WorkflowStore(engine).get('wf-1');
+    expect(wf?.name).toBe('Weekly report');
+    expect(new TriggerStore(engine).get('tr-1')).toBeDefined();
+  });
+
+  it('derives source/effect from the legacy task_type (the #850 remap twin)', () => {
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    seedLegacyWorkflow(hdb, 'wf-x', 'WF');
+    // backup → cron/backup ; reminder → cron/notify ; cron+pipeline → cron/run_workflow ;
+    // watch → watch/run_agent ; bare manual → manual/run_agent
+    seedLegacyTrigger(hdb, { id: 't-backup', task_type: 'backup' });
+    seedLegacyTrigger(hdb, { id: 't-reminder', task_type: 'reminder' });
+    seedLegacyTrigger(hdb, { id: 't-wf', task_type: 'manual', schedule_cron: '0 9 * * *', pipeline_id: 'wf-x' });
+    seedLegacyTrigger(hdb, { id: 't-watch', task_type: 'manual', watch_config: '{"url":"https://x"}' });
+    seedLegacyTrigger(hdb, { id: 't-manual', task_type: 'manual' });
+    // task_type='pipeline' with a NULL pipeline_id — the v3-migration edge: MUST derive
+    // run_workflow (safe skip), NOT run_agent (an autonomous money run of the title).
+    seedLegacyTrigger(hdb, { id: 't-pipe-noid', task_type: 'pipeline' });
+
+    new VerbGraphBackfill(engine, hdb).run();
+
+    const se = (id: string) => engine.getDb()
+      .prepare('SELECT source, effect FROM triggers WHERE id = ?').get(id) as { source: string; effect: string };
+    expect(se('t-backup')).toEqual({ source: 'cron', effect: 'backup' });
+    expect(se('t-reminder')).toEqual({ source: 'cron', effect: 'notify' });
+    expect(se('t-wf')).toEqual({ source: 'cron', effect: 'run_workflow' });
+    expect(se('t-watch')).toEqual({ source: 'watch', effect: 'run_agent' });
+    expect(se('t-manual')).toEqual({ source: 'manual', effect: 'run_agent' });
+    expect(se('t-pipe-noid').effect).toBe('run_workflow'); // NOT run_agent — matches v3 migration
+  });
+
+  it('resolves the trigger→workflow FK when the workflow exists (order: workflows first)', () => {
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    seedLegacyWorkflow(hdb, 'wf-2', 'Target');
+    seedLegacyTrigger(hdb, { id: 'tr-2', pipeline_id: 'wf-2' });
+
+    new VerbGraphBackfill(engine, hdb).run();
+
+    const row = engine.getDb().prepare("SELECT target_workflow_id FROM triggers WHERE id='tr-2'")
+      .get() as { target_workflow_id: string | null };
+    expect(row.target_workflow_id).toBe('wf-2'); // FK resolved, not NULLed
+  });
+
+  it('NULLs an orphan trigger→workflow link (FK-guard) instead of throwing', () => {
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    seedLegacyTrigger(hdb, { id: 'tr-orphan', pipeline_id: 'wf-missing' }); // no such workflow
+
+    expect(() => new VerbGraphBackfill(engine, hdb).run()).not.toThrow();
+
+    const row = engine.getDb().prepare("SELECT target_workflow_id FROM triggers WHERE id='tr-orphan'")
+      .get() as { target_workflow_id: string | null };
+    expect(row.target_workflow_id).toBeNull();
+  });
+
+  it('is idempotent: re-run adds no duplicate workflow/trigger rows', () => {
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    seedLegacyWorkflow(hdb, 'wf-3', 'Once');
+    seedLegacyTrigger(hdb, { id: 'tr-3', schedule_cron: '0 8 * * *' });
+
+    new VerbGraphBackfill(engine, hdb).run();
+    const res2 = new VerbGraphBackfill(engine, hdb).run();
+
+    expect(res2.workflows).toBe(1);
+    expect(res2.triggers).toBe(1);
+    const wfN = engine.getDb().prepare('SELECT COUNT(*) n FROM workflows').get() as { n: number };
+    const trN = engine.getDb().prepare('SELECT COUNT(*) n FROM triggers').get() as { n: number };
+    expect(wfN.n).toBe(1);
+    expect(trN.n).toBe(1);
+  });
+
+  it('mig v44 is NON-destructive: the legacy triggers table survives RunHistory construction (C1-4)', () => {
+    const { history } = make();
+    // The whole B1 fix rests on this: opening RunHistory (which migrates to v44) must
+    // NOT drop the legacy `triggers` table — else the backfill has no source and even
+    // a dry-run would destroy the data it means to preserve.
+    const exists = history.getDb()
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='triggers'").get();
+    expect(exists).toBeDefined();
+  });
+
+  it('the boot marker gates the backfill exactly-once — a post-upgrade DELETE is NOT resurrected', () => {
+    // Mirrors the engine.ts boot gate `if (!engineDb.isVerbBackfillDone())`. The
+    // legacy `triggers` rows stay dormant (v44 non-destructive), so WITHOUT the
+    // exactly-once marker a definition the user deletes after the upgrade would be
+    // re-created from legacy on the very next boot. The marker prevents that.
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    seedLegacyTrigger(hdb, { id: 'tr-keep' });
+    seedLegacyTrigger(hdb, { id: 'tr-del' });
+
+    // First boot: marker unset → backfill runs → mark done.
+    expect(engine.isVerbBackfillDone()).toBe(false);
+    if (!engine.isVerbBackfillDone()) {
+      new VerbGraphBackfill(engine, hdb).run();
+      engine.markVerbBackfillDone();
+    }
+    expect(engine.isVerbBackfillDone()).toBe(true);
+    const store = new TriggerStore(engine);
+    expect(store.get('tr-del')).toBeDefined();
+
+    // User deletes a trigger post-upgrade (engine.db is now authoritative).
+    expect(store.remove('tr-del')).toBe(true);
+
+    // Second boot: marker is SET → the gate skips the backfill → the legacy row is
+    // NOT replayed. Simulate the exact gate.
+    if (!engine.isVerbBackfillDone()) {
+      new VerbGraphBackfill(engine, hdb).run(); // must NOT execute
+    }
+    expect(new TriggerStore(engine).get('tr-del')).toBeUndefined(); // stays deleted
+    expect(new TriggerStore(engine).get('tr-keep')).toBeDefined();  // untouched
   });
 });

@@ -25,10 +25,14 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v4', () => {
+  it('creates the database and stamps schema_version v5', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(4); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created)
+    expect(row.v).toBe(5); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker)
+    // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
+    const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
+    expect(marker?.done).toBe(0);
+    expect(e.isVerbBackfillDone()).toBe(false);
     // v2's DDL ran in the same txn as its version stamp: the money-path index exists.
     const idx = e.getDb().prepare(
       "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_triggers_next_run'",
@@ -228,7 +232,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(4); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(5); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -348,17 +352,21 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     e.deleteAllData();
 
-    // Every user table is empty — no PII left in any of them.
+    // Every user table is empty — no PII left in any of them. schema_version +
+    // verb_backfill_marker are migration bookkeeping (not user data) and are kept.
     const userTables = (db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_version' AND name NOT LIKE 'sqlite_%'")
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker') AND name NOT LIKE 'sqlite_%'")
       .all() as { name: string }[]).map(r => r.name);
     expect(userTables.length).toBeGreaterThan(15);
     for (const t of userTables) {
       const { c } = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get() as { c: number };
       expect(c, `table ${t} should be empty after wipe`).toBe(0);
     }
+    // The backfill marker SURVIVES the wipe (GDPR erasure must NOT be undone by the
+    // boot backfill re-populating from the still-present legacy history.db).
+    expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(4);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(5);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -369,7 +377,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(4);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(5);
     e.close();
   });
 
@@ -384,7 +392,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(4);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(5);
     e.close();
   });
 });
