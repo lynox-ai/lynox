@@ -5,6 +5,7 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
+	import { recordRowSummary } from '../utils/footprint.js';
 	import {
 		listSubjects,
 		fetchSubjectFootprint,
@@ -50,19 +51,6 @@
 		const d = new Date(iso);
 		if (Number.isNaN(d.getTime())) return iso;
 		return d.toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US');
-	}
-
-	// A glanceable one-line summary of a record row: the first few user columns
-	// (system `_id`/`_created_at`/`_updated_at` dropped), `key: value`-joined.
-	function rowSummary(row: Record<string, unknown>): string {
-		return Object.entries(row)
-			.filter(([k]) => !k.startsWith('_'))
-			.slice(0, 4)
-			.map(([k, v]) => {
-				const s = v === null || v === undefined ? '—' : String(v);
-				return `${k}: ${s.length > 40 ? s.slice(0, 39) + '…' : s}`;
-			})
-			.join(' · ');
 	}
 
 	// Escape closes the footprint panel (matches the close button + KG precedent).
@@ -230,7 +218,7 @@
 									{#if entry.type === 'thread'}
 										{entry.thread.title || t('subjects.untitled_thread')}
 									{:else}
-										{rowSummary(entry.row)}
+										{recordRowSummary(entry.row, entry.matchedColumns)}
 									{/if}
 								</p>
 							</div>
