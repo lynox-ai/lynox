@@ -139,7 +139,11 @@ describe('DataStore tools', () => {
     });
 
     it('accepts a subject column with a valid subjectKind and resolves through insert', async () => {
-      ds.setSubjectResolver((name, kind) => `subj:${kind}:${name.toLowerCase()}`);
+      ds.setSubjectBridge({
+        resolve: (name, kind) => `subj:${kind}:${name.toLowerCase()}`,
+        find: () => null,
+        name: () => null,
+      });
 
       const created = await dataStoreCreateTool.handler({
         name: 'appointments',
@@ -175,7 +179,7 @@ describe('DataStore tools', () => {
     });
 
     it('degrades a subject column to raw-string storage when no resolver is wired (flag off)', async () => {
-      // No setSubjectResolver — mirrors subject_graph_enabled === false.
+      // No setSubjectBridge — mirrors subject_graph_enabled === false.
       await dataStoreCreateTool.handler({
         name: 'orders',
         columns: [{ name: 'buyer', type: 'subject', subjectKind: 'person' }],
@@ -322,6 +326,71 @@ describe('DataStore tools', () => {
         collection: 'products',
       }, mockAgent);
       expect(result).toContain('not available');
+    });
+  });
+
+  // === data_store_query — subject columns (R1.5) ===
+  // The agent-facing round-trip: create + insert BY NAME, then query BY NAME and
+  // see the NAME rendered — the whole point of the subject-column query slice.
+  describe('data_store_query subject columns (R1.5)', () => {
+    function wireBridge(): void {
+      const idByKey = new Map<string, string>();
+      const nameById = new Map<string, string>();
+      let n = 0;
+      const key = (name: string, kind: string): string => `${kind}::${name.toLowerCase()}`;
+      ds.setSubjectBridge({
+        resolve(name, kind) {
+          const k = key(name, kind);
+          let id = idByKey.get(k);
+          if (id === undefined) { n += 1; id = `s${String(n)}`; idByKey.set(k, id); nameById.set(id, name); }
+          return id;
+        },
+        find(name, kind) { return idByKey.get(key(name, kind)) ?? null; },
+        name(id) { return nameById.get(id) ?? null; },
+      });
+    }
+
+    it('filters by the linked name and renders the name, not the id', async () => {
+      wireBridge();
+      await dataStoreCreateTool.handler({
+        name: 'appointments',
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      }, mockAgent);
+      await dataStoreInsertTool.handler({
+        collection: 'appointments',
+        records: [{ note: 'x', patient: 'Anna Meier' }, { note: 'y', patient: 'Ben Roth' }],
+      }, mockAgent);
+
+      const result = await dataStoreQueryTool.handler({
+        collection: 'appointments',
+        filter: { patient: 'Anna Meier' },
+      }, mockAgent);
+
+      expect(result).toContain('1 of 1');
+      expect(result).toContain('Anna Meier'); // hydrated display name
+      expect(result).not.toContain('Ben Roth'); // filtered out
+      expect(result).toContain('x');
+    });
+
+    it('an unknown name yields no results (find-only, no mint)', async () => {
+      wireBridge();
+      await dataStoreCreateTool.handler({
+        name: 'appointments',
+        columns: [{ name: 'patient', type: 'subject', subjectKind: 'person' }],
+      }, mockAgent);
+      await dataStoreInsertTool.handler({
+        collection: 'appointments',
+        records: [{ patient: 'Anna Meier' }],
+      }, mockAgent);
+
+      const result = await dataStoreQueryTool.handler({
+        collection: 'appointments',
+        filter: { patient: 'Nobody' },
+      }, mockAgent);
+      expect(result).toContain('No results found');
     });
   });
 

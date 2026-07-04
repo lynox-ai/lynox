@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, makeSubjectColumnResolver, NAME_DEDUPED_SUBJECT_KINDS } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS } from './subject-store.js';
 import { DataStore } from './data-store.js';
 import type { DataStoreSubjectKind } from '../types/index.js';
 
@@ -346,23 +346,22 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
     });
   });
 
-  // The exact resolver the engine injects into DataStore (Record-on-spine R1),
-  // tested end-to-end against a REAL SubjectStore + REAL DataStore — this is the
-  // wiring coverage: a subject column stores a real subject_id, dedups per
-  // identity, and an unknown kind hits the defensive floor.
-  describe('makeSubjectColumnResolver (Record-on-spine R1 wiring)', () => {
+  // The exact bridge the engine injects into DataStore (Record-on-spine), tested
+  // end-to-end against a REAL SubjectStore + REAL DataStore — the wiring coverage:
+  // a subject column stores a real subject_id (write), filters + displays by name
+  // (query), an unknown kind hits the defensive floor, and find is get-ONLY.
+  describe('makeSubjectColumnBridge (Record-on-spine R1/R1.5 wiring)', () => {
     function makeWired(): { store: SubjectStore; engine: EngineDb; ds: DataStore } {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-ds-'));
       tmpDirs.push(dir);
       const engine = new EngineDb(join(dir, 'engine.db'), '');
       const store = new SubjectStore(engine);
       const ds = new DataStore(join(dir, 'datastore.db'));
-      ds.setSubjectResolver(makeSubjectColumnResolver(store));
+      ds.setSubjectBridge(makeSubjectColumnBridge(store));
       return { store, engine, ds };
     }
 
-    it('stores a real subject_id and dedups the same identity to one subject', () => {
-      const { store, engine, ds } = makeWired();
+    function seedAppointments(ds: DataStore): void {
       ds.createCollection({
         name: 'appointments',
         scope: { type: 'context', id: '' },
@@ -378,6 +377,11 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
           { note: 'again', patient: 'anna meier' }, // case-variant → same subject
         ],
       });
+    }
+
+    it('stores a real subject_id and dedups the same identity to one subject', () => {
+      const { store, engine, ds } = makeWired();
+      seedAppointments(ds);
 
       const { rows } = ds.queryRecords({ collection: 'appointments', sort: [{ field: '_id', order: 'asc' }] });
       const id = rows[0]!['patient'] as string;
@@ -391,11 +395,44 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
       engine.close();
     });
 
+    it('filters by name (case-insensitive) and hydrates the canonical name (round-trip)', () => {
+      const { engine, ds } = makeWired();
+      seedAppointments(ds);
+
+      const { rows, total } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'anna meier' }, // lower-case surface form
+        subjectsByName: true,
+        sort: [{ field: '_id', order: 'asc' }],
+      });
+      // Both Anna rows match the one subject; cells show the CANONICAL name.
+      expect(total).toBe(2);
+      expect(rows.every(r => r['patient'] === 'Anna Meier')).toBe(true);
+      ds.close();
+      engine.close();
+    });
+
+    it('filtering an unknown name returns 0 rows and mints NO subject (find is get-only)', () => {
+      const { store, engine, ds } = makeWired();
+      seedAppointments(ds);
+
+      const { total } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'Nobody Here' },
+        subjectsByName: true,
+      });
+      expect(total).toBe(0);
+      // The graph is unchanged — a filter must never create a subject.
+      expect(store.listSubjects({ kind: 'person' })).toHaveLength(1);
+      ds.close();
+      engine.close();
+    });
+
     it('floors an unknown kind to person rather than throwing', () => {
       const { store } = makeWired();
-      const resolver = makeSubjectColumnResolver(store);
-      const id = resolver('Mystery', 'not_a_real_kind');
-      expect(store.getSubject(id)?.kind).toBe('person');
+      const bridge = makeSubjectColumnBridge(store);
+      const id = bridge.resolve('Mystery', 'not_a_real_kind');
+      expect(store.getSubject(id!)?.kind).toBe('person');
     });
   });
 

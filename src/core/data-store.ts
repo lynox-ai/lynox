@@ -12,6 +12,7 @@ import type {
   DataStoreSort,
   MemoryScopeRef,
 } from '../types/index.js';
+import type { SubjectColumnBridge } from './subject-store.js';
 
 // === Constants ===
 
@@ -39,6 +40,14 @@ const MAX_DB_SIZE_BYTES = 500 * 1024 * 1024;
 const VALID_COLUMN_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
 const SYSTEM_COLUMNS = new Set(['_id', '_created_at', '_updated_at']);
 
+/**
+ * Bound in place of an unresolvable subject NAME when filtering a subject column
+ * by name (R1.5). A `subject_id` is a UUID; this sentinel equals no id, so the
+ * parameterized `= ?` / `IN (?)` clause matches 0 rows — a clean "no
+ * such subject" instead of silently dropping the filter or matching everything.
+ */
+const UNRESOLVABLE_SUBJECT = '__lynox_no_such_subject__';
+
 const TYPE_MAP: Record<DataStoreSchemaType, string> = {
   string: 'TEXT',
   number: 'REAL',
@@ -64,13 +73,13 @@ export class DataStore {
   private db: Database.Database;
 
   /**
-   * Record-on-spine (R1): resolves a `subject`-typed column's raw name → a real
-   * `subject_id` (a cross-DB soft ref into engine.db). Injected by the engine
-   * ONLY when `subject_graph_enabled` (see `Engine._init`). When null — the
-   * fleet default today — `subject` columns degrade to storing the raw string,
+   * Record-on-spine: the DataStore ⇄ subject-graph bridge (resolve on write, find
+   * on name-filter, name on display). Injected by the engine ONLY when
+   * `subject_graph_enabled` (see `Engine._init`). When null — the fleet default
+   * today — `subject` columns degrade to storing/filtering/showing the raw string,
    * so DataStore stays fully usable without the subject graph.
    */
-  private _subjectResolver: ((name: string, kind: string) => string | null) | null = null;
+  private _subjectBridge: SubjectColumnBridge | null = null;
 
   constructor(dbPath?: string | undefined) {
     const path = dbPath ?? join(getLynoxDir(), 'datastore.db');
@@ -82,12 +91,13 @@ export class DataStore {
   }
 
   /**
-   * Inject (or clear) the subject resolver. Passing a function turns `subject`
-   * columns into real subject links; passing null reverts them to plain-string
-   * storage. Idempotent — safe to call once at engine init.
+   * Inject (or clear) the subject-column bridge. Passing a bridge turns `subject`
+   * columns into real subject links (name→id on write, name-filter + id→name
+   * display on the agent-facing query path); passing null reverts them to
+   * plain-string storage. Idempotent — safe to call once at engine init.
    */
-  setSubjectResolver(fn: ((name: string, kind: string) => string | null) | null): void {
-    this._subjectResolver = fn;
+  setSubjectBridge(bridge: SubjectColumnBridge | null): void {
+    this._subjectBridge = bridge;
   }
 
   private _initMeta(): void {
@@ -362,6 +372,14 @@ export class DataStore {
     limit?: number | undefined;
     offset?: number | undefined;
     aggregate?: DataStoreAggregation | undefined;
+    /**
+     * The agent-facing path (data_store_query) sets this so `subject` columns are
+     * NAME-facing: a name filter operand resolves name→id, and result cells
+     * hydrate id→name. Default false → raw `subject_id`s (stable for programmatic
+     * callers / joins). No-op when no bridge is wired (flag off — columns already
+     * hold raw names, so plain string filter/display is correct).
+     */
+    subjectsByName?: boolean | undefined;
   }): { rows: Record<string, unknown>[]; total: number } {
     const { collection, filter, sort, aggregate } = params;
     const limit = Math.min(params.limit ?? 50, 500);
@@ -376,10 +394,41 @@ export class DataStore {
     const validColumns = new Set([...columns.map(c => c.name), '_id', '_created_at', '_updated_at']);
     const tableName = `ds_${collection}`;
 
-    // Build WHERE clause
-    const { whereClause, whereParams } = this._buildWhere(filter, validColumns);
+    // Subject columns become name-facing ONLY in the agent path (subjectsByName)
+    // AND only when a bridge is wired. Empty otherwise → the filter/display below
+    // are pure pass-throughs (flag-off raw-name columns already behave correctly).
+    const subjectCols = new Map<string, string>();
+    if (params.subjectsByName && this._subjectBridge) {
+      for (const c of columns) {
+        if (c.type === 'subject') subjectCols.set(c.name, c.subjectKind ?? 'person');
+      }
+    }
+
+    // A subject column stores UUIDs under the flag, so ordering/grouping BY it
+    // would sort/key on the raw id — hydration only fixes displayed row cells, and
+    // re-sorting by name can't respect SQL LIMIT/OFFSET. Reject rather than
+    // silently regress vs the flag-off name-facing path; name-ordered sort +
+    // name-keyed group-by land with R2 (per-subject read + subject-column index).
+    if (subjectCols.size > 0) {
+      const sortedSubject = sort?.find(s => subjectCols.has(s.field));
+      if (sortedSubject) {
+        throw new Error(`Cannot sort by subject column "${sortedSubject.field}" — it would order by the internal id, not the name. Sort by another column, or filter by the subject name instead.`);
+      }
+      const groupedSubject = aggregate?.groupBy?.find(g => subjectCols.has(g));
+      if (groupedSubject) {
+        throw new Error(`Cannot group by subject column "${groupedSubject}" — group keys would be internal ids, not names. Group by another column, or filter by the subject name instead.`);
+      }
+    }
+
+    // Build WHERE clause (resolving subject-column name operands → ids first)
+    const effectiveFilter = filter && subjectCols.size > 0
+      ? this._resolveSubjectFilterValues(filter, subjectCols)
+      : filter;
+    const { whereClause, whereParams } = this._buildWhere(effectiveFilter, validColumns);
 
     if (aggregate) {
+      // Name-filter resolution flows into aggregates too. A subject group_by key
+      // is rejected above; metrics/filters over subject columns still work.
       return this._queryAggregate(tableName, aggregate, whereClause, whereParams, validColumns, sort, limit, offset);
     }
 
@@ -393,6 +442,8 @@ export class DataStore {
     // Select
     const selectSql = `SELECT * FROM "${tableName}"${whereClause}${orderClause} LIMIT ? OFFSET ?`;
     const rows = this.db.prepare(selectSql).all(...whereParams, limit, offset) as Record<string, unknown>[];
+
+    if (subjectCols.size > 0) this._hydrateSubjectNames(rows, subjectCols);
 
     return { rows, total: countResult.cnt };
   }
@@ -633,9 +684,9 @@ export class DataStore {
         // contract already REQUIRES a valid subjectKind on any subject column.
         const raw = String(val).trim();
         if (raw === '') return null;
-        if (!this._subjectResolver) return raw;
+        if (!this._subjectBridge) return raw;
         const kind = col.subjectKind ?? 'person';
-        return this._subjectResolver(raw, kind) ?? null;
+        return this._subjectBridge.resolve(raw, kind) ?? null;
       }
       default:
         return val;
@@ -781,6 +832,105 @@ export class DataStore {
     }
 
     return { clause: clauses.join(' AND '), params };
+  }
+
+  /**
+   * Translate name operands → subject_ids for the subject-typed columns of a
+   * filter, recursively (mirrors `_parseFilter`'s $or/$and recursion). Only the
+   * exact-identity operators make sense on a subject link: $eq / implicit-eq,
+   * $neq, $in/$nin resolve each name via the bridge (an unresolvable name →
+   * {@link UNRESOLVABLE_SUBJECT}, which matches no id → 0 rows, keeping the
+   * parameterized clause). $is_null passes through (linked/unlinked is valid);
+   * $like and the range operators are rejected (a UUID identity is not a
+   * text/range match). Non-subject keys pass through untouched. Returns a NEW
+   * filter object — never mutates the caller's.
+   */
+  private _resolveSubjectFilterValues(
+    filter: Record<string, unknown>,
+    subjectCols: Map<string, string>,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(filter)) {
+      if (key === '$or' || key === '$and') {
+        out[key] = Array.isArray(value)
+          ? value.map(sub =>
+              sub && typeof sub === 'object' && !Array.isArray(sub)
+                ? this._resolveSubjectFilterValues(sub as Record<string, unknown>, subjectCols)
+                : sub)
+          : value; // malformed → let _parseFilter throw the canonical error
+        continue;
+      }
+      const kind = subjectCols.get(key);
+      out[key] = kind === undefined ? value : this._resolveSubjectOperand(key, value, kind);
+    }
+    return out;
+  }
+
+  private _resolveSubjectOperand(colName: string, value: unknown, kind: string): unknown {
+    const bridge = this._subjectBridge;
+    if (!bridge) return value;
+    const toId = (name: unknown): unknown => {
+      if (typeof name !== 'string') return name;
+      const trimmed = name.trim();
+      if (trimmed === '') return UNRESOLVABLE_SUBJECT;
+      return bridge.find(trimmed, kind) ?? UNRESOLVABLE_SUBJECT;
+    };
+    // implicit-eq by name
+    if (typeof value === 'string') return toId(value);
+    // null (is-null) / arrays / non-operator scalars pass through unchanged
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+    // operator object
+    const out: Record<string, unknown> = {};
+    for (const [op, opVal] of Object.entries(value as Record<string, unknown>)) {
+      switch (op) {
+        case '$eq':
+        case '$neq':
+          out[op] = opVal === null ? opVal : toId(opVal);
+          break;
+        case '$in':
+        case '$nin':
+          out[op] = Array.isArray(opVal) ? opVal.map(toId) : opVal;
+          break;
+        case '$is_null':
+          out[op] = opVal;
+          break;
+        case '$like':
+        case '$gt':
+        case '$gte':
+        case '$lt':
+        case '$lte':
+          throw new Error(`Column "${colName}" links to a subject — filter it by the exact linked name (e.g. { "${colName}": "Anna Meier" }) or a name list ($in), not ${op}.`);
+        default:
+          out[op] = opVal; // unknown operator → _parseFilter throws the canonical error
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Replace each subject-column cell (a `subject_id`) with its display name for
+   * the agent-facing result. Distinct ids resolve once (cache). A stale/purged id
+   * the bridge can't name falls back to the raw id — the value is never dropped.
+   */
+  private _hydrateSubjectNames(
+    rows: Record<string, unknown>[],
+    subjectCols: Map<string, string>,
+  ): void {
+    const bridge = this._subjectBridge;
+    if (!bridge) return;
+    const cache = new Map<string, string>();
+    for (const colName of subjectCols.keys()) {
+      for (const row of rows) {
+        const id = row[colName];
+        if (typeof id !== 'string' || id === '') continue;
+        let display = cache.get(id);
+        if (display === undefined) {
+          display = bridge.name(id) ?? id;
+          cache.set(id, display);
+        }
+        row[colName] = display;
+      }
+    }
   }
 
   private _buildOrderBy(
