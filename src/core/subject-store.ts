@@ -348,8 +348,9 @@ export class SubjectStore {
    * Set (string) or clear (null) a subject's parent — the hierarchy edge the
    * context-scoping walk-up ascends (Projekt→Kunde→…). `findOrCreate`/`createSubject`
    * accept `parentId` at insert; this is the only mutator for an EXISTING subject.
-   * Rejects the 1-cycle (self-parent); deeper cycle-safety is the walk-up's job (a
-   * visited-set/depth cap in Slice C — a cycle can form across several setParent calls).
+   * Rejects the 1-cycle (self-parent); deeper cycle-safety is the walk-up's job
+   * ({@link getAncestors}'s visited-set/depth cap — a cycle can form across several
+   * setParent calls, so it is caught on the read side, not here).
    */
   setParent(subjectId: string, parentId: string | null): void {
     if (parentId === subjectId) {
@@ -358,6 +359,40 @@ export class SubjectStore {
     this.db.prepare(
       "UPDATE subjects SET parent_id = ?, updated_at = datetime('now') WHERE id = ?",
     ).run(parentId, subjectId);
+  }
+
+  /**
+   * Walk the `parent_id` chain UP from `subjectId` to the root, returning the STRICT
+   * ancestors nearest-first (parent, grandparent, …) — the subject itself is excluded.
+   * This is the context-scoping walk-up (Slice C): a thread anchored to a project
+   * ascends Projekt→Kunde→… so recall can weight the whole hierarchy.
+   *
+   * Cycle-safe by construction — the deferred safety {@link setParent} names. An
+   * iterative walk with an EXPLICIT visited-set terminates a `parent_id` loop (which
+   * can form across several setParent calls — the 1-cycle guard alone cannot prevent
+   * it), and a hard `maxDepth` cap bounds a pathological chain. Chosen over a bare
+   * `WITH RECURSIVE` (getScopeTree-style): SQLite's recursive CTE cannot carry a
+   * visited-set cheaply, so a cyclic edge would re-enumerate to the cap; the chain is
+   * short (Kunde→Projekt = depth 1-2), so the per-hop PK lookups are negligible and
+   * page-cached. A dangling `parent_id` (soft cross-ref to a purged subject) simply
+   * ends the walk. Archived ancestors ARE included — the hierarchy edge is structural,
+   * independent of a soft-archive.
+   */
+  getAncestors(subjectId: string, maxDepth = 32): SubjectRow[] {
+    const out: SubjectRow[] = [];
+    const visited = new Set<string>([subjectId]);
+    let current = this.getSubject(subjectId);
+    let depth = 0;
+    while (current?.parent_id && depth < maxDepth) {
+      if (visited.has(current.parent_id)) break; // cycle guard
+      const parent = this.getSubject(current.parent_id);
+      if (!parent) break; // dangling parent ref (purged ancestor)
+      out.push(parent);
+      visited.add(parent.id);
+      current = parent;
+      depth++;
+    }
+    return out;
   }
 
   // ── Detail tables (enc boundary lives here) ───────────────────

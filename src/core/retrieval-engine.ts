@@ -41,12 +41,55 @@ const VECTOR_WEIGHT = 0.55;
 const GRAPH_BOOST = 0.15;
 const THREAD_BOOST = 0.10;
 
+/**
+ * Context-Hierarchy Scoping (Slice C) — the SOFT walk-up weights that replace the
+ * flat `scopeWeight(scope_type)` when the active thread is anchored to a subject.
+ * A memory is weighted by how its PRIMARY subject relates to the anchor's hierarchy:
+ * in-context (the anchor itself) strongest, each step UP the Projekt→Kunde→… chain
+ * weaker, a sibling/cousin (shares an ancestor, off-chain) weakest, and an unrelated
+ * subject a visible floor. NONE is hidden — this is a soft re-rank, not a filter, so
+ * a strongly-matching cross-project memory still surfaces (Fable CORR-2: no security
+ * boundary here, only relevance ordering). Kept within the existing `scopeWeight`
+ * range [0.3, 1.0] so the downstream scoring dynamics (decay/MMR/caps) are unchanged.
+ */
+const ANCHOR_WEIGHT = 1.0;
+const ANCESTOR_PARENT_WEIGHT = 0.7;
+const ANCESTOR_STEP = 0.15;
+const ANCESTOR_FLOOR = 0.4;
+const SIBLING_WEIGHT = 0.35;
+const UNRELATED_WEIGHT = 0.3;
+
+/** Weight for an ancestor `depth` steps above the anchor (depth 1 = parent). */
+function ancestorWeight(depth: number): number {
+  return Math.max(ANCESTOR_FLOOR, ANCESTOR_PARENT_WEIGHT - ANCESTOR_STEP * (depth - 1));
+}
+
+/**
+ * The active thread's context hierarchy, resolved ONCE per retrieve() from the
+ * thread anchor. `chainWeights` maps the anchor + each ancestor id to its walk-up
+ * weight; `ancestorSet` is the same id set (for off-chain sibling detection); the
+ * `siblingCache` memoises the per-candidate-subject ancestor walk within one retrieve.
+ */
+interface AnchorContext {
+  chainWeights: Map<string, number>;
+  ancestorSet: Set<string>;
+  siblingCache: Map<string, boolean>;
+}
+
 export interface RetrievalOptions {
   topK?: number | undefined;
   threshold?: number | undefined;
   useHyDE?: boolean | undefined;
   useGraphExpansion?: boolean | undefined;
   namespace?: MemoryNamespace | undefined;
+  /**
+   * Context-Hierarchy Scoping (Slice C): the active thread's anchor subject
+   * (`threads.primary_subject_id`). When set AND the engine.db subject store is
+   * wired, Step-6 scoring weights each candidate by its subject's position in this
+   * anchor's hierarchy (see {@link AnchorContext}). Null/absent, or a stale anchor,
+   * or a candidate with no subject → the flat `scopeWeight(scope_type)` (back-compat).
+   */
+  threadAnchorSubjectId?: string | null | undefined;
 }
 
 interface ScoredCandidate {
@@ -55,6 +98,8 @@ interface ScoredCandidate {
   namespace: string;
   scopeType: string;
   scopeId: string;
+  /** The memory's primary subject (engine.db recall path); null on the legacy path. */
+  subjectId: string | null;
   createdAt: string;
   embedding: number[];
   confidence: number;
@@ -235,6 +280,7 @@ export class RetrievalEngine {
         namespace: row.namespace,
         scopeType: row.scope_type,
         scopeId: row.scope_id,
+        subjectId: row.subject_id ?? null,
         createdAt: row.created_at,
         embedding: emb,
         confidence: row.confidence,
@@ -261,6 +307,7 @@ export class RetrievalEngine {
         candidateMap.set(row.id, {
           id: row.id, text: row.text, namespace: row.namespace,
           scopeType: row.scope_type, scopeId: row.scope_id,
+          subjectId: row.subject_id ?? null,
           createdAt: row.created_at, embedding: emb,
           confidence: row.confidence, confirmationCount: row.confirmation_count,
           sourceRunId: row.source_run_id,
@@ -279,8 +326,15 @@ export class RetrievalEngine {
     );
 
     // === Step 6: Scoring with decay + confidence + run boost ===
+    // Context-Hierarchy Scoping (Slice C): resolve the active thread's anchor
+    // hierarchy ONCE. When present, the soft walk-up weight subsumes the flat
+    // scope_type weight; when absent (no anchor / no subject store / stale anchor),
+    // scoring is byte-identical to before (back-compat).
+    const anchorCtx = this._resolveAnchorContext(options?.threadAnchorSubjectId);
     for (const c of candidates) {
-      const sw = scopeWeight(c.scopeType as MemoryScopeType);
+      const sw = anchorCtx
+        ? this._contextScopeWeight(c.subjectId, c.scopeType, anchorCtx)
+        : scopeWeight(c.scopeType as MemoryScopeType);
       const decay = this._namespacedDecay(c.createdAt, c.namespace as MemoryNamespace);
 
       // Run boost: memories linked to successful runs score higher
@@ -560,6 +614,56 @@ export class RetrievalEngine {
     process.stderr.write(
       `[lynox:subject-graph] recall ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
     );
+  }
+
+  /**
+   * Context-Hierarchy Scoping (Slice C): resolve the active thread's anchor into its
+   * context hierarchy (anchor + ancestors + their walk-up weights), or null when
+   * scoping is inactive. Null (→ flat scope_type weighting) when: no anchor id, no
+   * engine.db subject store wired, or the anchor is a stale/purged subject (a
+   * cross-DB soft ref — the anchor lives on history.db `threads`, the subject on
+   * engine.db, with no enforceable FK; a dangling anchor must degrade, not scope).
+   */
+  private _resolveAnchorContext(anchorId: string | null | undefined): AnchorContext | null {
+    if (!anchorId || !this.subjectStore) return null;
+    if (!this.subjectStore.getSubject(anchorId)) return null; // stale anchor → no scoping
+    const chainWeights = new Map<string, number>();
+    chainWeights.set(anchorId, ANCHOR_WEIGHT);
+    const ancestors = this.subjectStore.getAncestors(anchorId);
+    ancestors.forEach((a, i) => {
+      // A cycle already broken by getAncestors yields distinct rows; guard a
+      // pathological repeat so an ancestor never downgrades an already-mapped id.
+      if (!chainWeights.has(a.id)) chainWeights.set(a.id, ancestorWeight(i + 1));
+    });
+    return { chainWeights, ancestorSet: new Set(chainWeights.keys()), siblingCache: new Map() };
+  }
+
+  /**
+   * The soft walk-up weight for a candidate given the active anchor context. Tiers:
+   * on-chain (anchor or an ancestor) → its mapped weight; off-chain but sharing an
+   * ancestor with the anchor (sibling/cousin) → {@link SIBLING_WEIGHT}; wholly
+   * unrelated subject → {@link UNRELATED_WEIGHT} (still visible). A memory with NO
+   * subject (legacy / un-anchored) falls back to the flat `scopeWeight(scope_type)`
+   * — this is the subsumption of the degenerate scope_type axis: global/user memories
+   * keep their scope weight, subject-bearing memories get the hierarchy weight.
+   */
+  private _contextScopeWeight(
+    subjectId: string | null,
+    scopeType: string,
+    ctx: AnchorContext,
+  ): number {
+    if (!subjectId) return scopeWeight(scopeType as MemoryScopeType);
+    const onChain = ctx.chainWeights.get(subjectId);
+    if (onChain !== undefined) return onChain;
+    let sibling = ctx.siblingCache.get(subjectId);
+    if (sibling === undefined) {
+      sibling = false;
+      for (const a of this.subjectStore!.getAncestors(subjectId)) {
+        if (ctx.ancestorSet.has(a.id)) { sibling = true; break; }
+      }
+      ctx.siblingCache.set(subjectId, sibling);
+    }
+    return sibling ? SIBLING_WEIGHT : UNRELATED_WEIGHT;
   }
 
   private _namespacedDecay(createdAt: string, namespace: MemoryNamespace): number {

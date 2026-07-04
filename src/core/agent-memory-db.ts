@@ -45,6 +45,13 @@ export interface MemoryRow {
   // v5 provenance lifecycle — present on every row (NOT NULL DEFAULT backfill).
   source_type: string;
   source_tool_name: string | null;
+  // Foundation Rework v2 — Context-Hierarchy Scoping (Slice C). The engine.db recall
+  // path (MemoryGraphStore) projects the memory's PRIMARY subject (the thread anchor
+  // it inherited in Slice B, or the person/org heuristic pick) so retrieval can weight
+  // it against the active thread's context hierarchy. Absent (undefined) on the LEGACY
+  // agent-memory.db path — that table has no subject column — which the walk-up treats
+  // as a neutral (scope_type-weighted) memory, keeping back-compat.
+  subject_id?: string | null | undefined;
 }
 
 export interface EntityRow {

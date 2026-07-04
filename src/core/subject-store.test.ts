@@ -278,4 +278,69 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
     expect(store.resolveAssigneeFilter('user')).toBe(self);
     expect(store.resolveAssigneeFilter('Sarah')).toBe(sarah);
   });
+
+  // ── getAncestors — the Slice C context-scoping walk-up ──────────
+  describe('getAncestors (Context-Hierarchy Scoping — Slice C)', () => {
+    it('walks parent_id up, nearest-first, excluding the subject itself', () => {
+      const { store } = makeStore();
+      const kunde = store.findOrCreate({ kind: 'organization', name: 'Kunde X' }).id;
+      const projekt = store.createSubject({ kind: 'engagement', name: 'Projekt A', parentId: kunde });
+      const task = store.createSubject({ kind: 'other', name: 'Sub-task', parentId: projekt });
+
+      const anc = store.getAncestors(task);
+      expect(anc.map(s => s.id)).toEqual([projekt, kunde]); // parent, then grandparent
+      expect(anc.map(s => s.name)).toEqual(['Projekt A', 'Kunde X']);
+    });
+
+    it('returns [] for a root subject (no parent) and for an unknown id', () => {
+      const { store } = makeStore();
+      const root = store.findOrCreate({ kind: 'organization', name: 'Root Co' }).id;
+      expect(store.getAncestors(root)).toEqual([]);
+      expect(store.getAncestors('ghost-id')).toEqual([]);
+    });
+
+    it('is cycle-safe — a parent_id loop across several setParent calls terminates', () => {
+      const { store } = makeStore();
+      // Build A→B→C then close the loop C→A (each edge legal on its own; the cycle
+      // only exists across the calls — exactly what setParent cannot catch alone).
+      const a = store.createSubject({ kind: 'other', name: 'A' });
+      const b = store.createSubject({ kind: 'other', name: 'B', parentId: a });
+      const c = store.createSubject({ kind: 'other', name: 'C', parentId: b });
+      store.setParent(a, c); // A's parent = C → cycle A→C→B→A
+
+      const anc = store.getAncestors(a);
+      // Terminates (no infinite loop / hang) and never revisits the start.
+      expect(anc.map(s => s.id)).toEqual([c, b]); // stops when it would revisit A
+      expect(anc.map(s => s.id)).not.toContain(a);
+    });
+
+    it('honours the depth cap on a long chain', () => {
+      const { store } = makeStore();
+      let prev: string | null = null;
+      const ids: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const id: string = prev
+          ? store.createSubject({ kind: 'other', name: `N${i}`, parentId: prev })
+          : store.createSubject({ kind: 'other', name: `N${i}` });
+        ids.push(id);
+        prev = id;
+      }
+      const leaf = ids[ids.length - 1]!;
+      // Full chain (9 ancestors) with a generous cap …
+      expect(store.getAncestors(leaf)).toHaveLength(9);
+      // … but a tight cap bounds the walk.
+      expect(store.getAncestors(leaf, 3)).toHaveLength(3);
+    });
+
+    it('ends the walk cleanly at a dangling parent ref (purged ancestor)', () => {
+      const { store, engine } = makeStore();
+      const kunde = store.findOrCreate({ kind: 'organization', name: 'Kunde Y' }).id;
+      const projekt = store.createSubject({ kind: 'engagement', name: 'Projekt B', parentId: kunde });
+      // Simulate a purged parent: drop the FK to allow an orphaned parent_id, then
+      // hard-delete the ancestor so getSubject(parent_id) returns null mid-walk.
+      engine.getDb().pragma('foreign_keys = OFF');
+      engine.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(kunde);
+      expect(store.getAncestors(projekt)).toEqual([]); // walk ends, no throw
+    });
+  });
 });

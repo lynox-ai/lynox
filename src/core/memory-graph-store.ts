@@ -36,7 +36,7 @@ const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
  * as one list so the four recall SELECTs stay column-consistent.
  */
 const RECALL_COLS =
-  'id, text, namespace, scope_type, scope_id, source_run_id, provider, embedding, ' +
+  'id, text, namespace, subject_id, scope_type, scope_id, source_run_id, provider, embedding, ' +
   'confidence, is_active, superseded_by, retrieval_count, confirmation_count, ' +
   'last_retrieved_at, created_at, updated_at, source_type, source_tool_name';
 
@@ -48,6 +48,7 @@ interface EngineMemoryRaw {
   id: string;
   text: string;
   namespace: string;
+  subject_id: string | null;
   scope_type: string;
   scope_id: string;
   source_run_id: string | null;
@@ -375,6 +376,7 @@ export class MemoryGraphStore {
     if (raw.text.startsWith(ENC_PREFIX) && text === raw.text) return null;
     return {
       id: raw.id, text, namespace: raw.namespace,
+      subject_id: raw.subject_id,
       scope_type: raw.scope_type, scope_id: raw.scope_id,
       source_run_id: raw.source_run_id,
       source_episode_id: null,
