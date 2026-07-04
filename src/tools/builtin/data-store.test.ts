@@ -192,6 +192,31 @@ describe('DataStore tools', () => {
       const { rows } = ds.queryRecords({ collection: 'orders' });
       expect(rows[0]!['buyer']).toBe('Clara Vogt');
     });
+
+    // Record-on-spine R2a: an occurred_at role on a date column marks the event
+    // time (not insert time). The handler must map it through to the schema, and
+    // the store's date-only validation must surface on a wrong column type.
+    it('threads an occurred_at role through to the persisted schema (R2a)', async () => {
+      const created = await dataStoreCreateTool.handler({
+        name: 'events',
+        columns: [
+          { name: 'label', type: 'string' },
+          { name: 'happened_on', type: 'date', role: 'occurred_at' },
+        ],
+      }, mockAgent);
+      expect(created).toContain('Created collection "events"');
+      const info = ds.getCollectionInfo('events');
+      expect(info?.columns.find(c => c.name === 'happened_on')?.role).toBe('occurred_at');
+    });
+
+    it('surfaces the store rejection when occurred_at is set on a non-date column (R2a)', async () => {
+      const result = await dataStoreCreateTool.handler({
+        name: 'bad_role',
+        columns: [{ name: 'when', type: 'string', role: 'occurred_at' }],
+      }, mockAgent);
+      expect(result).toContain('Only a "date" column');
+      expect(ds.listCollections().find(c => c.name === 'bad_role')).toBeUndefined();
+    });
   });
 
   // === data_store_insert ===

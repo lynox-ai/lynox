@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import { DataStore } from './data-store.js';
 import type { SubjectColumnBridge } from './subject-store.js';
 import type { MemoryScopeRef } from '../types/index.js';
@@ -1353,7 +1354,7 @@ describe('DataStore', () => {
       expect(rows[0]!['n']).toBe(2);
     });
 
-    it('rejects sorting by a subject column (would order by the internal id)', () => {
+    it('rejects sorting by a subject column (name is cross-DB, breaks the row limit)', () => {
       const { bridge } = makeStubBridge();
       ds.setSubjectBridge(bridge);
       seedAppointments(ds);
@@ -1365,16 +1366,122 @@ describe('DataStore', () => {
       })).toThrow(/sort by subject column/);
     });
 
-    it('rejects grouping by a subject column (keys would be internal ids)', () => {
+    it('groups by a subject column and returns hydrated NAME keys (R2a fence-lift)', () => {
       const { bridge } = makeStubBridge();
       ds.setSubjectBridge(bridge);
       seedAppointments(ds);
 
+      const { rows, total } = ds.queryRecords({
+        collection: 'appointments',
+        subjectsByName: true,
+        aggregate: { groupBy: ['patient'], metrics: [{ field: '*', fn: 'count', alias: 'n' }] },
+        sort: [{ field: 'n', order: 'desc' }], // sort by the metric alias, not the subject col
+      });
+
+      // Two subjects (Anna ×2, Ben ×1) → two groups, keyed by the display NAME, not a UUID.
+      expect(total).toBe(2);
+      const byName = new Map(rows.map(r => [r['patient'], r['n']]));
+      expect(byName.get('Anna Meier')).toBe(2);
+      expect(byName.get('Ben Roth')).toBe(1);
+    });
+
+    it('still rejects ordering the grouped subject column BY name (the fenced half)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      // Group-by is lifted, but sorting those groups by the subject name is the
+      // cross-DB case that can't respect LIMIT/OFFSET → still fenced.
       expect(() => ds.queryRecords({
         collection: 'appointments',
         subjectsByName: true,
         aggregate: { groupBy: ['patient'], metrics: [{ field: '*', fn: 'count', alias: 'n' }] },
-      })).toThrow(/group by subject column/);
+        sort: [{ field: 'patient', order: 'asc' }],
+      })).toThrow(/sort by subject column/);
+    });
+  });
+
+  // === R2a enablers: subject-column index + occurred_at role ===
+  describe('subject columns — R2a enablers (index + occurred_at)', () => {
+    function indexNames(path: string, table: string): string[] {
+      const db = new Database(path, { readonly: true });
+      try {
+        const rows = db.prepare(`PRAGMA index_list("${table}")`).all() as Array<{ name: string }>;
+        return rows.map(r => r.name);
+      } finally {
+        db.close();
+      }
+    }
+
+    it('creates a secondary index on each subject column at createCollection', () => {
+      ds.createCollection({
+        name: 'invoices',
+        scope,
+        columns: [
+          { name: 'amount', type: 'number' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+          { name: 'vendor', type: 'subject', subjectKind: 'organization' },
+        ],
+      });
+      const idx = indexNames(dbPath, 'ds_invoices');
+      expect(idx).toContain('idx_invoices_client_subj');
+      expect(idx).toContain('idx_invoices_vendor_subj');
+    });
+
+    it('indexes a subject column added later via alterCollection', () => {
+      ds.createCollection({ name: 'leads', scope, columns: [{ name: 'title', type: 'string' }] });
+      expect(indexNames(dbPath, 'ds_leads')).not.toContain('idx_leads_owner_subj');
+      ds.alterCollection({ collection: 'leads', addColumns: [{ name: 'owner', type: 'subject', subjectKind: 'person' }] });
+      expect(indexNames(dbPath, 'ds_leads')).toContain('idx_leads_owner_subj');
+    });
+
+    it('does not index a non-subject column', () => {
+      ds.createCollection({ name: 'plain', scope, columns: [{ name: 'x', type: 'number' }] });
+      expect(indexNames(dbPath, 'ds_plain').some(n => n.endsWith('_subj'))).toBe(false);
+    });
+
+    it('persists an occurred_at role on a date column (round-trips through the schema)', () => {
+      ds.createCollection({
+        name: 'events',
+        scope,
+        columns: [
+          { name: 'label', type: 'string' },
+          { name: 'happened_on', type: 'date', role: 'occurred_at' },
+        ],
+      });
+      const info = ds.getCollectionInfo('events');
+      expect(info?.columns.find(c => c.name === 'happened_on')?.role).toBe('occurred_at');
+    });
+
+    it('rejects occurred_at on a non-date column', () => {
+      expect(() => ds.createCollection({
+        name: 'bad_role',
+        scope,
+        columns: [{ name: 'when', type: 'string', role: 'occurred_at' }],
+      })).toThrow(/Only a "date" column/);
+    });
+
+    it('rejects a second occurred_at column at create', () => {
+      expect(() => ds.createCollection({
+        name: 'bad_two',
+        scope,
+        columns: [
+          { name: 'a', type: 'date', role: 'occurred_at' },
+          { name: 'b', type: 'date', role: 'occurred_at' },
+        ],
+      })).toThrow(/at most one "occurred_at"/);
+    });
+
+    it('rejects adding a second occurred_at column via alterCollection', () => {
+      ds.createCollection({
+        name: 'evt_alter',
+        scope,
+        columns: [{ name: 'a', type: 'date', role: 'occurred_at' }],
+      });
+      expect(() => ds.alterCollection({
+        collection: 'evt_alter',
+        addColumns: [{ name: 'b', type: 'date', role: 'occurred_at' }],
+      })).toThrow(/at most one "occurred_at"/);
     });
   });
 });

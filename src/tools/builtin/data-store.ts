@@ -14,7 +14,7 @@ import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 
 interface CreateInput {
   name: string;
-  columns: Array<{ name: string; type: string; unique?: boolean | undefined; subjectKind?: string | undefined }>;
+  columns: Array<{ name: string; type: string; unique?: boolean | undefined; subjectKind?: string | undefined; role?: string | undefined }>;
   unique_key?: string[] | undefined;
   scope?: string | undefined;
   description?: string | undefined;
@@ -38,6 +38,7 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
               type: { type: 'string', enum: ['string', 'number', 'date', 'boolean', 'json', 'subject'], description: 'Column data type. Use "subject" to link rows to a real person/company/project in the knowledge graph — requires subjectKind.' },
               unique: { type: 'boolean', description: 'Enforce unique values for this column' },
               subjectKind: { type: 'string', enum: [...NAME_DEDUPED_SUBJECT_KINDS], description: 'REQUIRED for a "subject" column: which kind to link — person, organization, product, or service (kinds that dedup by name).' },
+              role: { type: 'string', enum: ['occurred_at'], description: 'Mark this date column as when the record occurred (event time, e.g. invoice date), not insert time. Max one per table.' },
             },
             required: ['name', 'type'],
           },
@@ -83,6 +84,9 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
         type: c.type as DataStoreColumnDef['type'],
         unique: c.unique,
         ...(c.type === 'subject' ? { subjectKind: c.subjectKind as DataStoreColumnDef['subjectKind'] } : {}),
+        // Carry only the valid literal; an out-of-enum role is dropped, and role on
+        // a non-date column is rejected by the store's _validateOccurredAtRole.
+        ...(c.role === 'occurred_at' ? { role: 'occurred_at' as const } : {}),
       }));
 
       const info = storeRef.createCollection({

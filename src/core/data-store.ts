@@ -181,6 +181,8 @@ export class DataStore {
       colNames.add(col.name);
     }
 
+    this._validateOccurredAtRole(columns);
+
     // Validate unique key
     if (uniqueKey) {
       for (const key of uniqueKey) {
@@ -218,6 +220,9 @@ export class DataStore {
         const keyCols = uniqueKey.map(k => `"${k}"`).join(', ');
         this.db.exec(`CREATE UNIQUE INDEX "idx_${name}_ukey" ON "${tableName}" (${keyCols})`);
       }
+
+      // Secondary index on every subject column so per-subject FILTER isn't a full scan.
+      this._createSubjectIndexes(name, tableName, columns);
 
       this.db.prepare(`
         INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at)
@@ -404,19 +409,15 @@ export class DataStore {
       }
     }
 
-    // A subject column stores UUIDs under the flag, so ordering/grouping BY it
-    // would sort/key on the raw id — hydration only fixes displayed row cells, and
-    // re-sorting by name can't respect SQL LIMIT/OFFSET. Reject rather than
-    // silently regress vs the flag-off name-facing path; name-ordered sort +
-    // name-keyed group-by land with R2 (per-subject read + subject-column index).
+    // A subject column stores UUIDs under the flag. SORTING by it can't be made
+    // name-facing here: the name lives cross-DB in engine.db, so ordering would
+    // need fetch-all-then-JS-sort and couldn't respect SQL LIMIT/OFFSET — reject
+    // it (name-ordered sort is a later slice). GROUPING is fine: _queryAggregate
+    // groups on the id, then hydrates the group-key cells id→name post-aggregate.
     if (subjectCols.size > 0) {
       const sortedSubject = sort?.find(s => subjectCols.has(s.field));
       if (sortedSubject) {
-        throw new Error(`Cannot sort by subject column "${sortedSubject.field}" — it would order by the internal id, not the name. Sort by another column, or filter by the subject name instead.`);
-      }
-      const groupedSubject = aggregate?.groupBy?.find(g => subjectCols.has(g));
-      if (groupedSubject) {
-        throw new Error(`Cannot group by subject column "${groupedSubject}" — group keys would be internal ids, not names. Group by another column, or filter by the subject name instead.`);
+        throw new Error(`Cannot sort by subject column "${sortedSubject.field}" — its name lives in a separate store, so ordering can't respect the row limit. Filter or group by the subject name instead.`);
       }
     }
 
@@ -428,8 +429,8 @@ export class DataStore {
 
     if (aggregate) {
       // Name-filter resolution flows into aggregates too. A subject group_by key
-      // is rejected above; metrics/filters over subject columns still work.
-      return this._queryAggregate(tableName, aggregate, whereClause, whereParams, validColumns, sort, limit, offset);
+      // groups on the id, then its group-key cells hydrate id→name in _queryAggregate.
+      return this._queryAggregate(tableName, aggregate, whereClause, whereParams, validColumns, sort, limit, offset, subjectCols);
     }
 
     // Count total
@@ -509,6 +510,10 @@ export class DataStore {
       throw new Error(`Would exceed ${MAX_COLUMNS} column limit.`);
     }
 
+    // The occurred_at cardinality is per-collection — validate the merged set so a
+    // second occurrence column added later is rejected against the existing one.
+    this._validateOccurredAtRole([...existing, ...addColumns]);
+
     const tableName = `ds_${collection}`;
     const now = new Date().toISOString();
 
@@ -531,6 +536,9 @@ export class DataStore {
         this.db.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${col.name}" ${sqlType}`);
         existingNames.add(col.name);
       }
+
+      // Index any newly-added subject column (mirrors createCollection).
+      this._createSubjectIndexes(collection, tableName, addColumns);
 
       const updatedSchema = [...existing, ...addColumns];
       this.db.prepare(
@@ -908,6 +916,49 @@ export class DataStore {
   }
 
   /**
+   * Create a non-unique secondary index on every subject column so a per-subject
+   * FILTER (`WHERE "<col>" = <id>`) uses the index instead of scanning the table.
+   * The index is on the stored value (a UUID under the flag) — it speeds equality/
+   * IN filters, NOT name-ordered sort (the name lives cross-DB in engine.db).
+   * SECURITY: `collectionName`/`tableName` are safe via COLLECTION_NAME_RE and
+   * `col.name` via VALID_COLUMN_NAME_RE — the same invariant as the ukey index. The
+   * `_subj` suffix keeps these names disjoint from `idx_<name>_ukey`.
+   */
+  private _createSubjectIndexes(
+    collectionName: string,
+    tableName: string,
+    columns: DataStoreColumnDef[],
+  ): void {
+    for (const col of columns) {
+      if (col.type === 'subject') {
+        this.db.exec(
+          `CREATE INDEX "idx_${collectionName}_${col.name}_subj" ON "${tableName}" ("${col.name}")`,
+        );
+      }
+    }
+  }
+
+  /**
+   * A collection may mark at most ONE `date` column as its occurrence time
+   * (`role: 'occurred_at'`). Enforced over the full column set (create) or the
+   * merged existing+added set (alter) so the cardinality is per-collection.
+   */
+  private _validateOccurredAtRole(columns: DataStoreColumnDef[]): void {
+    let occurredAt = 0;
+    for (const col of columns) {
+      if (col.role === 'occurred_at') {
+        if (col.type !== 'date') {
+          throw new Error(`Column "${col.name}" has role "occurred_at" but type "${col.type}". Only a "date" column can mark when a record occurred.`);
+        }
+        occurredAt++;
+      }
+    }
+    if (occurredAt > 1) {
+      throw new Error('A collection may mark at most one "occurred_at" column (the single event time).');
+    }
+  }
+
+  /**
    * Replace each subject-column cell (a `subject_id`) with its display name for
    * the agent-facing result. Distinct ids resolve once (cache). A stale/purged id
    * the bridge can't name falls back to the raw id — the value is never dropped.
@@ -959,6 +1010,7 @@ export class DataStore {
     sort: DataStoreSort[] | undefined,
     limit: number,
     offset: number,
+    subjectCols: Map<string, string>,
   ): { rows: Record<string, unknown>[]; total: number } {
     const selectParts: string[] = [];
     const groupBy = aggregate.groupBy ?? [];
@@ -1014,6 +1066,16 @@ export class DataStore {
 
     const sql = `SELECT ${selectParts.join(', ')} FROM "${tableName}"${whereClause}${groupClause}${orderClause} LIMIT ? OFFSET ?`;
     const rows = this.db.prepare(sql).all(...whereParams, limit, offset) as Record<string, unknown>[];
+
+    // Grouping runs on the stored subject_id; hydrate the group-key cells id→name
+    // so the agent sees `{ client: "Acme GmbH", n: 3 }`, not a UUID key. Pagination/
+    // order stay on the id (name-ordered group sort is the fenced cross-DB case).
+    if (subjectCols.size > 0) {
+      const groupedSubjectCols = new Map(
+        [...subjectCols].filter(([name]) => groupBy.includes(name)),
+      );
+      if (groupedSubjectCols.size > 0) this._hydrateSubjectNames(rows, groupedSubjectCols);
+    }
 
     return { rows, total };
   }
