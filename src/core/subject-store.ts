@@ -344,6 +344,22 @@ export class SubjectStore {
     this.db.prepare("UPDATE subjects SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND archived_at IS NULL").run(id);
   }
 
+  /**
+   * Set (string) or clear (null) a subject's parent — the hierarchy edge the
+   * context-scoping walk-up ascends (Projekt→Kunde→…). `findOrCreate`/`createSubject`
+   * accept `parentId` at insert; this is the only mutator for an EXISTING subject.
+   * Rejects the 1-cycle (self-parent); deeper cycle-safety is the walk-up's job (a
+   * visited-set/depth cap in Slice C — a cycle can form across several setParent calls).
+   */
+  setParent(subjectId: string, parentId: string | null): void {
+    if (parentId === subjectId) {
+      throw new Error(`setParent: a subject cannot be its own parent (${subjectId})`);
+    }
+    this.db.prepare(
+      "UPDATE subjects SET parent_id = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(parentId, subjectId);
+  }
+
   // ── Detail tables (enc boundary lives here) ───────────────────
 
   /**

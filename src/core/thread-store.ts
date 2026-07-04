@@ -18,6 +18,11 @@ export interface ThreadRecord {
    *  hasn't seen yet (a failed run, a watcher finding). Floats to the top of the
    *  thread list until opened. SQLite boolean. */
   is_unread: number;
+  /** Context-Hierarchy Scoping (Slice A): this thread's anchor subject — a
+   *  project/customer subject id (engine.db `subjects`). Soft ref (subjects live in
+   *  a different DB → no FK). NULL = un-anchored. Drives the default subject_id on
+   *  this thread's memory writes (Slice B) + the retrieval walk-up weight (Slice C). */
+  primary_subject_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -104,6 +109,9 @@ export class ThreadStore {
     is_favorite?: boolean | undefined;
     skip_extraction?: boolean | undefined;
     is_unread?: boolean | undefined;
+    /** Slice A: set (string) or clear (null) the thread's anchor subject.
+     *  `undefined` leaves it unchanged (whitelist semantics — null is a real clear). */
+    primary_subject_id?: string | null | undefined;
   }): void {
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -118,6 +126,8 @@ export class ThreadStore {
     if (updates.is_favorite !== undefined) { sets.push('is_favorite = ?'); params.push(updates.is_favorite ? 1 : 0); }
     if (updates.skip_extraction !== undefined) { sets.push('skip_extraction = ?'); params.push(updates.skip_extraction ? 1 : 0); }
     if (updates.is_unread !== undefined) { sets.push('is_unread = ?'); params.push(updates.is_unread ? 1 : 0); }
+    // null is a real value here (clear the anchor); only `undefined` means "skip".
+    if (updates.primary_subject_id !== undefined) { sets.push('primary_subject_id = ?'); params.push(updates.primary_subject_id); }
 
     if (sets.length === 0) return;
 

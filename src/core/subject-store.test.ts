@@ -32,6 +32,24 @@ describe('SubjectStore (Foundation Rework v2 — S1a)', () => {
     engine.close();
   });
 
+  it('setParent sets, clears, and rejects a self-parent (Context-Hierarchy Scoping Slice A)', () => {
+    const { store, engine } = makeStore();
+    const kunde = store.findOrCreate({ kind: 'organization', name: 'Kunde X' });
+    const projekt = store.createSubject({ kind: 'engagement', name: 'Projekt A' });
+    expect(store.getSubject(projekt)?.parent_id).toBe(null); // no parent at insert
+    // set the Projekt→Kunde hierarchy edge (the walk-up substrate)
+    store.setParent(projekt, kunde.id);
+    expect(store.getSubject(projekt)?.parent_id).toBe(kunde.id);
+    // clear with null
+    store.setParent(projekt, null);
+    expect(store.getSubject(projekt)?.parent_id).toBe(null);
+    // the 1-cycle (self-parent) is rejected
+    expect(() => store.setParent(projekt, projekt)).toThrow(/own parent/);
+    // a non-existent parent is rejected by the parent_id self-FK (foreign_keys=ON) — no dangling ref
+    expect(() => store.setParent(projekt, 'ghost-subject-id')).toThrow();
+    engine.close();
+  });
+
   it('findOrCreate dedups via alias', () => {
     const { store, engine } = makeStore();
     const a = store.findOrCreate({ kind: 'person', name: 'Robert Smith', aliases: ['Robert Smith', 'Bob Smith'] });
