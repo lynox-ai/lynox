@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DataStore } from './data-store.js';
+import type { SubjectColumnBridge } from './subject-store.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
@@ -10,6 +11,31 @@ const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
 function makeTmpDb(): string {
   const dir = mkdtempSync(join(tmpdir(), 'ds-test-'));
   return join(dir, 'test.db');
+}
+
+// A findOrCreate-shaped bridge stub for the `subject`-column tests: `resolve`
+// dedups by (kind, lowercased name), mints a stable id per identity, and records
+// every call so tests can assert the kind was threaded through. `find` is the
+// get-ONLY twin (no create), and `name` reverses id → the original name — the
+// R1.5 query round-trip — all without touching engine.db.
+function makeStubBridge(): { bridge: SubjectColumnBridge; calls: Array<{ name: string; kind: string }> } {
+  const idByKey = new Map<string, string>();
+  const nameById = new Map<string, string>();
+  const calls: Array<{ name: string; kind: string }> = [];
+  let counter = 0;
+  const keyOf = (name: string, kind: string): string => `${kind}::${name.toLowerCase()}`;
+  const bridge: SubjectColumnBridge = {
+    resolve(name, kind) {
+      calls.push({ name, kind });
+      const key = keyOf(name, kind);
+      let id = idByKey.get(key);
+      if (id === undefined) { counter += 1; id = `subj-${String(counter)}`; idByKey.set(key, id); nameById.set(id, name); }
+      return id;
+    },
+    find(name, kind) { return idByKey.get(keyOf(name, kind)) ?? null; },
+    name(id) { return nameById.get(id) ?? null; },
+  };
+  return { bridge, calls };
 }
 
 describe('DataStore', () => {
@@ -879,31 +905,9 @@ describe('DataStore', () => {
   // === subject columns (Record-on-spine R1) ===
 
   describe('subject columns', () => {
-    // A findOrCreate-shaped stub: dedups by (kind, lowercased name), mints a
-    // stable id per identity, and records every call so tests can assert the
-    // kind was threaded through. Mirrors SubjectStore.findOrCreate semantics
-    // without touching engine.db.
-    function makeStubResolver() {
-      const idByKey = new Map<string, string>();
-      const calls: Array<{ name: string; kind: string }> = [];
-      let counter = 0;
-      const resolver = (name: string, kind: string): string | null => {
-        calls.push({ name, kind });
-        const key = `${kind}::${name.toLowerCase()}`;
-        let id = idByKey.get(key);
-        if (id === undefined) {
-          counter += 1;
-          id = `subj-${String(counter)}`;
-          idByKey.set(key, id);
-        }
-        return id;
-      };
-      return { resolver, calls };
-    }
-
     it('resolves a name to a subject_id and dedups the same name to one id', () => {
-      const { resolver, calls } = makeStubResolver();
-      ds.setSubjectResolver(resolver);
+      const { bridge, calls } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'appointments',
         scope,
@@ -930,8 +934,8 @@ describe('DataStore', () => {
     });
 
     it('stores null for an empty/missing subject value (unlinked row allowed)', () => {
-      const { resolver, calls } = makeStubResolver();
-      ds.setSubjectResolver(resolver);
+      const { bridge, calls } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'tickets',
         scope,
@@ -956,7 +960,7 @@ describe('DataStore', () => {
     });
 
     it('degrades to storing the raw string when no resolver is injected (flag off)', () => {
-      // No setSubjectResolver call — mirrors subject_graph_enabled === false.
+      // No setSubjectBridge call — mirrors subject_graph_enabled === false.
       ds.createCollection({
         name: 'orders',
         scope,
@@ -976,8 +980,8 @@ describe('DataStore', () => {
     });
 
     it('supports adding a subject column via alterCollection', () => {
-      const { resolver } = makeStubResolver();
-      ds.setSubjectResolver(resolver);
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'deliverables',
         scope,
@@ -999,8 +1003,8 @@ describe('DataStore', () => {
     // The universality proof: one mechanism links rows in a CLINIC shape and an
     // AGENCY shape, with different subject kinds, through the same resolver.
     it('links subjects across unrelated domains via one mechanism', () => {
-      const { resolver, calls } = makeStubResolver();
-      ds.setSubjectResolver(resolver);
+      const { bridge, calls } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
 
       // Clinic: an appointment links to a patient (person).
       ds.createCollection({
@@ -1043,7 +1047,7 @@ describe('DataStore', () => {
     it('stores null (not the raw name) when the resolver is present but returns null', () => {
       // A resolve FAILURE (distinct from flag-off) must keep the column id-pure —
       // never mix a raw name into a UUID column.
-      ds.setSubjectResolver(() => null);
+      ds.setSubjectBridge({ resolve: () => null, find: () => null, name: () => null });
       ds.createCollection({
         name: 'leads',
         scope,
@@ -1062,8 +1066,8 @@ describe('DataStore', () => {
     });
 
     it('treats a whitespace-only subject value as unlinked (null)', () => {
-      const { resolver, calls } = makeStubResolver();
-      ds.setSubjectResolver(resolver);
+      const { bridge, calls } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'visits',
         scope,
@@ -1083,8 +1087,8 @@ describe('DataStore', () => {
     });
 
     it('resolves a subject column that is part of a unique_key (upsert path)', () => {
-      const { resolver } = makeStubResolver();
-      ds.setSubjectResolver(resolver);
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'subscriptions',
         scope,
@@ -1105,6 +1109,188 @@ describe('DataStore', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]!['client']).toBe('subj-1'); // both resolved to the one subject
       expect(rows[0]!['seats']).toBe(9); // upsert updated the row
+    });
+  });
+
+  // ── R1.5: the subject-column QUERY round-trip ────────────────────
+  // Insert BY NAME (R1) → filter BY NAME + display the NAME (R1.5), so a subject
+  // column is usable end-to-end under the flag, never as raw UUIDs. Uses the same
+  // makeStubBridge as the write tests, and the agent-facing `subjectsByName` path.
+  describe('subject columns — name-facing query (R1.5)', () => {
+    function seedAppointments(ds: DataStore): void {
+      ds.createCollection({
+        name: 'appointments',
+        scope,
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'appointments',
+        records: [
+          { note: 'first visit', patient: 'Anna Meier' },
+          { note: 'new patient', patient: 'Ben Roth' },
+          { note: 'follow-up', patient: 'anna meier' }, // case-variant → same subject
+        ],
+      });
+    }
+
+    it('filters by exact name and displays the name, not the UUID (full round-trip)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows, total } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'Anna Meier' },
+        subjectsByName: true,
+        sort: [{ field: '_id', order: 'asc' }],
+      });
+
+      // Name resolved to the id → both Anna rows match (case-insensitive dedup).
+      expect(total).toBe(2);
+      // Result cells show the display NAME, not subj-1.
+      expect(rows.every(r => r['patient'] === 'Anna Meier')).toBe(true);
+    });
+
+    it('without subjectsByName, filtering by name misses and cells stay raw ids', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      // Default path (programmatic): stored value is the id, so a name filter
+      // matches nothing and the returned cell is the raw id.
+      const byName = ds.queryRecords({ collection: 'appointments', filter: { patient: 'Anna Meier' } });
+      expect(byName.total).toBe(0);
+      const all = ds.queryRecords({ collection: 'appointments', sort: [{ field: '_id', order: 'asc' }] });
+      expect(all.rows[0]!['patient']).toBe('subj-1');
+    });
+
+    it('filters by a name list ($in)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $in: ['Anna Meier', 'Ben Roth'] } },
+        subjectsByName: true,
+        sort: [{ field: '_id', order: 'asc' }],
+      });
+      expect(rows).toHaveLength(3); // 2 Anna + 1 Ben
+      expect([...new Set(rows.map(r => r['patient']))].sort()).toEqual(['Anna Meier', 'Ben Roth']);
+    });
+
+    it('an unresolvable name matches no rows (not everything)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows, total } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'Ghost Name' },
+        subjectsByName: true,
+      });
+      expect(total).toBe(0);
+      expect(rows).toHaveLength(0);
+    });
+
+    it('excludes a name via $neq', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $neq: 'Anna Meier' } },
+        subjectsByName: true,
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!['patient']).toBe('Ben Roth');
+    });
+
+    it('filters linked/unlinked rows via $is_null on a subject column', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      ds.createCollection({
+        name: 'tickets',
+        scope,
+        columns: [
+          { name: 'title', type: 'string' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'tickets',
+        records: [
+          { title: 'linked', client: 'Acme GmbH' },
+          { title: 'unlinked' }, // no client → null
+        ],
+      });
+
+      const linked = ds.queryRecords({ collection: 'tickets', filter: { client: { $is_null: false } }, subjectsByName: true });
+      const unlinked = ds.queryRecords({ collection: 'tickets', filter: { client: { $is_null: true } }, subjectsByName: true });
+      expect(linked.rows.map(r => r['title'])).toEqual(['linked']);
+      expect(unlinked.rows.map(r => r['title'])).toEqual(['unlinked']);
+    });
+
+    it('rejects $like and range operators on a subject column (identity, not text/range)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      expect(() => ds.queryRecords({ collection: 'appointments', filter: { patient: { $like: 'An%' } }, subjectsByName: true }))
+        .toThrow(/links to a subject/);
+      expect(() => ds.queryRecords({ collection: 'appointments', filter: { patient: { $gt: 'A' } }, subjectsByName: true }))
+        .toThrow(/links to a subject/);
+    });
+
+    it('shows the raw id when the subject name can no longer be resolved (stale)', () => {
+      // resolve+find work, but name() is null → the subject was purged. The id is
+      // shown (never dropped) rather than a blank or a crash.
+      const bridge: SubjectColumnBridge = { resolve: () => 'subj-x', find: () => 'subj-x', name: () => null };
+      ds.setSubjectBridge(bridge);
+      ds.createCollection({
+        name: 'orders',
+        scope,
+        columns: [{ name: 'buyer', type: 'subject', subjectKind: 'person' }],
+      });
+      ds.insertRecords({ collection: 'orders', records: [{ buyer: 'Anyone' }] });
+
+      const { rows } = ds.queryRecords({ collection: 'orders', subjectsByName: true });
+      expect(rows[0]!['buyer']).toBe('subj-x');
+    });
+
+    it('flag off (no bridge): a subject column filters + displays by raw name', () => {
+      // No setSubjectBridge — subject columns store raw names, so the name path is
+      // a pure pass-through: filter by name hits the stored string, display is the
+      // string. subjectsByName is a no-op without a bridge.
+      ds.createCollection({
+        name: 'orders',
+        scope,
+        columns: [{ name: 'buyer', type: 'subject', subjectKind: 'person' }],
+      });
+      ds.insertRecords({ collection: 'orders', records: [{ buyer: 'Clara Vogt' }, { buyer: 'Dan Ott' }] });
+
+      const { rows, total } = ds.queryRecords({ collection: 'orders', filter: { buyer: 'Clara Vogt' }, subjectsByName: true });
+      expect(total).toBe(1);
+      expect(rows[0]!['buyer']).toBe('Clara Vogt');
+    });
+
+    it('resolves a subject-column operand nested in $or', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { $or: [{ patient: 'Ben Roth' }, { note: 'first visit' }] },
+        subjectsByName: true,
+        sort: [{ field: '_id', order: 'asc' }],
+      });
+      // Ben's row (by resolved subject) + Anna's first-visit row (by note).
+      expect(rows.map(r => r['note'])).toEqual(['first visit', 'new patient']);
     });
   });
 });

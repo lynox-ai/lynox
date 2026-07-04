@@ -1519,17 +1519,19 @@ export class Engine {
     // thin per-call wrapper over engine.db (same pattern as CRM/KnowledgeLayer).
     if (this.userConfig.subject_graph_enabled === true && this.engineDb && this._threadStore) {
       try {
-        const { SubjectStore, makeSubjectColumnResolver } = await import('./subject-store.js');
+        const { SubjectStore, makeSubjectColumnBridge } = await import('./subject-store.js');
         const subjectStore = new SubjectStore(this.engineDb);
         this._toolContext.subjectStore = subjectStore;
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
-        // Record-on-spine (R1): make `subject`-typed DataStore columns resolve a
-        // row's name → a real subject_id via the SAME findOrCreate dedup that
-        // feeds the graph. Wired ONLY inside this flag-gated block — when the
-        // flag is off the resolver stays null and subject columns degrade to
-        // plain strings (zero new coupling on the legacy path).
-        this._dataStore?.setSubjectResolver(makeSubjectColumnResolver(subjectStore));
+        // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
+        // so `subject`-typed DataStore columns resolve a row's name → a real
+        // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
+        // filter by name, and display names instead of UUIDs. Wired ONLY inside
+        // this flag-gated block — when the flag is off the bridge stays null and
+        // subject columns degrade to plain strings (zero new coupling on the
+        // legacy path).
+        this._dataStore?.setSubjectBridge(makeSubjectColumnBridge(subjectStore));
       } catch (err) {
         process.stderr.write(`[lynox] context-scoping tool wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }

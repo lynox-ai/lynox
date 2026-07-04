@@ -30,22 +30,38 @@ export const KNOWN_SUBJECT_KINDS = [
 export type SubjectKind = (typeof KNOWN_SUBJECT_KINDS)[number];
 
 /**
- * Build the resolver the engine injects into DataStore (Record-on-spine R1) so
- * `subject`-typed columns store a real `subject_id` instead of a raw name. It
- * narrows an arbitrary kind string against {@link KNOWN_SUBJECT_KINDS} — a
- * defensive floor to `person` for the (tool-contract-prevented) case of an
- * unknown kind — then find-or-creates, inheriting the graph's dedup for free.
+ * The three faces of the DataStore ⇄ subject-graph bridge for a `subject`-typed
+ * column (Record-on-spine). One cohesive dependency the engine injects:
+ *  - `resolve` (WRITE)   — create-or-get: a row's name → a real `subject_id`, via
+ *    the graph's converged `findOrCreate` dedup. Used on insert (R1).
+ *  - `find`    (FILTER)  — get-ONLY: an existing `subject_id` for a name, or null.
+ *    Translates a name filter operand → id WITHOUT minting a subject (R1.5).
+ *  - `name`    (DISPLAY) — a `subject_id` → its display name, or null when purged.
+ *    Hydrates query results back to names instead of raw UUIDs (R1.5).
+ *
+ * An arbitrary kind string is narrowed against {@link KNOWN_SUBJECT_KINDS} with a
+ * defensive floor to `person` (the tool contract already restricts a column's
+ * subjectKind to the name-deduped set). `resolve`/`find` share the graph's default
+ * owner scope so the filter side finds exactly what the write side created.
  * Exported as a tiny factory so the wiring is unit-testable without booting the
- * engine; the engine only ever `setSubjectResolver(makeSubjectColumnResolver(store))`.
+ * engine; the engine only ever `setSubjectBridge(makeSubjectColumnBridge(store))`.
  */
-export function makeSubjectColumnResolver(
-  subjectStore: SubjectStore,
-): (name: string, kind: string) => string {
-  return (name, kind) => {
-    const k: SubjectKind = (KNOWN_SUBJECT_KINDS as readonly string[]).includes(kind)
-      ? (kind as SubjectKind)
-      : 'person';
-    return subjectStore.findOrCreate({ kind: k, name }).id;
+export interface SubjectColumnBridge {
+  resolve(name: string, kind: string): string | null;
+  find(name: string, kind: string): string | null;
+  name(id: string): string | null;
+}
+
+export function makeSubjectColumnBridge(subjectStore: SubjectStore): SubjectColumnBridge {
+  const narrow = (kind: string): SubjectKind =>
+    (KNOWN_SUBJECT_KINDS as readonly string[]).includes(kind) ? (kind as SubjectKind) : 'person';
+  return {
+    resolve: (name, kind) => subjectStore.findOrCreate({ kind: narrow(kind), name }).id,
+    find: (name, kind) => {
+      const k = narrow(kind);
+      return (subjectStore.findCanonical(name, k) ?? subjectStore.findByAlias(name, k))?.id ?? null;
+    },
+    name: (id) => subjectStore.getSubject(id)?.name ?? null,
   };
 }
 

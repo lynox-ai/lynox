@@ -196,7 +196,7 @@ export const dataStoreQueryTool: ToolEntry<QueryInput> = {
         collection: { type: 'string', description: 'Table name' },
         filter: {
           type: 'object',
-          description: 'Filter conditions as JSON. Examples: { status: "active" }, { revenue: { "$gt": 1000 } }, { "$or": [{ a: 1 }, { b: 2 }] }.',
+          description: 'Filter conditions as JSON. Examples: { status: "active" }, { revenue: { "$gt": 1000 } }, { "$or": [{ a: 1 }, { b: 2 }] }. Filter a subject column by the linked name, e.g. { client: "Acme GmbH" }.',
         },
         sort: {
           type: 'array',
@@ -264,6 +264,7 @@ export const dataStoreQueryTool: ToolEntry<QueryInput> = {
         limit: input.limit,
         offset: input.offset,
         aggregate,
+        subjectsByName: true,
       });
 
       if (rows.length === 0) {
