@@ -1292,5 +1292,89 @@ describe('DataStore', () => {
       // Ben's row (by resolved subject) + Anna's first-visit row (by note).
       expect(rows.map(r => r['note'])).toEqual(['first visit', 'new patient']);
     });
+
+    it('resolves a subject-column operand nested in $and', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { $and: [{ patient: 'Anna Meier' }, { note: 'first visit' }] },
+        subjectsByName: true,
+      });
+      // Only Anna's first-visit row satisfies BOTH the resolved subject and the note.
+      expect(rows.map(r => r['note'])).toEqual(['first visit']);
+    });
+
+    it('excludes a name list via $nin', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $nin: ['Anna Meier'] } },
+        subjectsByName: true,
+      });
+      // Both Anna rows excluded → only Ben remains.
+      expect(rows.map(r => r['patient'])).toEqual(['Ben Roth']);
+    });
+
+    it('$in with a mix of resolvable and unresolvable names matches only the resolvable', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $in: ['Anna Meier', 'Ghost Name'] } },
+        subjectsByName: true,
+        sort: [{ field: '_id', order: 'asc' }],
+      });
+      // The unresolvable name resolves to a per-element sentinel (NOT match-all),
+      // so only the two Anna rows come back.
+      expect(rows).toHaveLength(2);
+      expect(rows.every(r => r['patient'] === 'Anna Meier')).toBe(true);
+    });
+
+    it('aggregates with a subject name-filter (count of one subject) without grouping by it', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'Anna Meier' },
+        subjectsByName: true,
+        aggregate: { metrics: [{ field: '*', fn: 'count', alias: 'n' }] },
+      });
+      // Filter resolves the name → id, then counts the two Anna rows.
+      expect(rows[0]!['n']).toBe(2);
+    });
+
+    it('rejects sorting by a subject column (would order by the internal id)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      expect(() => ds.queryRecords({
+        collection: 'appointments',
+        sort: [{ field: 'patient', order: 'asc' }],
+        subjectsByName: true,
+      })).toThrow(/sort by subject column/);
+    });
+
+    it('rejects grouping by a subject column (keys would be internal ids)', () => {
+      const { bridge } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+
+      expect(() => ds.queryRecords({
+        collection: 'appointments',
+        subjectsByName: true,
+        aggregate: { groupBy: ['patient'], metrics: [{ field: '*', fn: 'count', alias: 'n' }] },
+      })).toThrow(/group by subject column/);
+    });
   });
 });

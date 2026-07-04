@@ -404,6 +404,22 @@ export class DataStore {
       }
     }
 
+    // A subject column stores UUIDs under the flag, so ordering/grouping BY it
+    // would sort/key on the raw id — hydration only fixes displayed row cells, and
+    // re-sorting by name can't respect SQL LIMIT/OFFSET. Reject rather than
+    // silently regress vs the flag-off name-facing path; name-ordered sort +
+    // name-keyed group-by land with R2 (per-subject read + subject-column index).
+    if (subjectCols.size > 0) {
+      const sortedSubject = sort?.find(s => subjectCols.has(s.field));
+      if (sortedSubject) {
+        throw new Error(`Cannot sort by subject column "${sortedSubject.field}" — it would order by the internal id, not the name. Sort by another column, or filter by the subject name instead.`);
+      }
+      const groupedSubject = aggregate?.groupBy?.find(g => subjectCols.has(g));
+      if (groupedSubject) {
+        throw new Error(`Cannot group by subject column "${groupedSubject}" — group keys would be internal ids, not names. Group by another column, or filter by the subject name instead.`);
+      }
+    }
+
     // Build WHERE clause (resolving subject-column name operands → ids first)
     const effectiveFilter = filter && subjectCols.size > 0
       ? this._resolveSubjectFilterValues(filter, subjectCols)
@@ -411,8 +427,8 @@ export class DataStore {
     const { whereClause, whereParams } = this._buildWhere(effectiveFilter, validColumns);
 
     if (aggregate) {
-      // Name-filter resolution flows into aggregates too; group-key hydration
-      // (a subject column used as a group_by key) is a deferred follow-on.
+      // Name-filter resolution flows into aggregates too. A subject group_by key
+      // is rejected above; metrics/filters over subject columns still work.
       return this._queryAggregate(tableName, aggregate, whereClause, whereParams, validColumns, sort, limit, offset);
     }
 
