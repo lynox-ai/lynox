@@ -27,6 +27,7 @@ function freshDb(): Database.Database {
       is_favorite INTEGER NOT NULL DEFAULT 0,
       skip_extraction INTEGER NOT NULL DEFAULT 0,
       is_unread INTEGER NOT NULL DEFAULT 0,
+      primary_subject_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -291,5 +292,27 @@ describe('ThreadStore — Slice B3 unread state', () => {
     const ids = store.listThreads().map((t) => t.id);
     expect(ids[0]).toBe('unread'); // unread (non-favorite) beats the favorite
     expect(ids[1]).toBe('fav');
+  });
+});
+
+describe('ThreadStore — anchor (Context-Hierarchy Scoping Slice A)', () => {
+  it('sets, reads back, and clears a thread anchor', () => {
+    const store = new ThreadStore(freshDb());
+    store.createThread('t1', { title: 'x' });
+    expect(store.getThread('t1')?.primary_subject_id).toBe(null); // default un-anchored
+    store.updateThread('t1', { primary_subject_id: 'subj-42' });
+    expect(store.getThread('t1')?.primary_subject_id).toBe('subj-42');
+    store.updateThread('t1', { primary_subject_id: null }); // null = a real clear, not a skip
+    expect(store.getThread('t1')?.primary_subject_id).toBe(null);
+  });
+
+  it('undefined leaves the anchor unchanged while another field updates (whitelist skip)', () => {
+    const store = new ThreadStore(freshDb());
+    store.createThread('t2');
+    store.updateThread('t2', { primary_subject_id: 'subj-7' });
+    store.updateThread('t2', { title: 'renamed' }); // anchor omitted → must survive
+    const t = store.getThread('t2');
+    expect(t?.primary_subject_id).toBe('subj-7');
+    expect(t?.title).toBe('renamed');
   });
 });

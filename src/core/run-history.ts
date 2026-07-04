@@ -1106,6 +1106,19 @@ const MIGRATIONS: string[] = [
    );
 
    CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(metric_name, window);`,
+
+  // v46 — Context-Hierarchy Scoping (Foundation Rework v2), Slice A: give the
+  // thread↔subject anchor a functional seat on the LIVE threads table. The engine.db
+  // threads mirror already carries `primary_subject_id` (with a real subjects FK) but
+  // that table stays empty until the thread-spine-cutover — live threads run here in
+  // history.db. Fork A: seat the anchor here now, decoupled from that cutover (the
+  // 2-seat consolidation becomes a named step of it). Soft ref — no cross-DB FK is
+  // possible (subjects live in engine.db). The un-guarded ADD COLUMN is safe: the
+  // runner only execs MIGRATIONS[i>=currentVersion], so v46 runs exactly once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (46);
+
+   ALTER TABLE threads ADD COLUMN primary_subject_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_threads_primary_subject ON threads(primary_subject_id);`,
 ];
 
 export class RunHistory {

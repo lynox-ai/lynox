@@ -36,6 +36,21 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('migration v46 adds the threads.primary_subject_id anchor column (Context-Hierarchy Scoping Slice A)', () => {
+    const h = createHistory(); // runs all MIGRATIONS incl. v46 on a real history.db
+    const db = h.getDb();
+    const cols = (db.prepare('PRAGMA table_info(threads)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain('primary_subject_id');
+    // the anchor lookup index is created alongside the column
+    const idxs = (db.prepare('PRAGMA index_list(threads)').all() as Array<{ name: string }>).map((i) => i.name);
+    expect(idxs).toContain('idx_threads_primary_subject');
+    // writable + nullable soft ref (no cross-DB FK — subjects live in engine.db)
+    db.prepare("INSERT INTO threads (id, primary_subject_id) VALUES ('anchor-t', 'subj-1')").run();
+    const row = db.prepare("SELECT primary_subject_id FROM threads WHERE id = 'anchor-t'").get() as { primary_subject_id: string | null };
+    expect(row.primary_subject_id).toBe('subj-1');
+    h.close();
+  });
+
   it('inserts and retrieves a run', () => {
     const h = createHistory();
     const id = h.insertRun({
@@ -2214,6 +2229,8 @@ describe('RunHistory', () => {
         );
         CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
         INSERT INTO schema_version (version) VALUES (41);
+        -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub — this test exercises the tasks split, not threads.
+        CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
         INSERT INTO tasks (id, title, assignee, priority, due_date) VALUES ('m-todo','Pay invoice','user','high','2026-07-01');
         INSERT INTO tasks (id, title) VALUES ('m-todo-null','Loose note');
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('m-cron','Digest','lynox','scheduled','0 9 * * *','2020-01-01T00:00:00.000Z');
@@ -2283,6 +2300,8 @@ describe('RunHistory', () => {
         );
         CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
         INSERT INTO schema_version (version) VALUES (41);
+        -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub for the tasks-split test.
+        CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
         -- a TRIGGER parent (scheduled) + a kept-TODO child pointing at it (cross-table)
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('par-trig','Weekly job','lynox','scheduled','0 9 * * 1','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-trig','Subtask','user','par-trig');
@@ -2361,6 +2380,8 @@ describe('RunHistory', () => {
         CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status);
         CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
         INSERT INTO schema_version (version) VALUES (42);
+        -- a real v42 db has threads (created v22); v46 ALTERs it. Minimal stub for the v43 prompts-migration test.
+        CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
       `);

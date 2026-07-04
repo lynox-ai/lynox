@@ -749,6 +749,9 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     raw.exec(`
       CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
       INSERT INTO schema_version (version) VALUES (43);
+      -- a real v43 db has threads (created v22); v46 ALTERs it. Minimal stub for the v44/v45/v46 migration test.
+      CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+      INSERT INTO threads (id) VALUES ('t-preexisting');
       CREATE TABLE triggers (id TEXT PRIMARY KEY, title TEXT);
       INSERT INTO triggers (id, title) VALUES ('t-legacy', 'x');
       CREATE TABLE pipeline_runs (
@@ -766,7 +769,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     raw.close();
 
     // Open via RunHistory → _migrate runs every migration after 43 (v44 teardown,
-    // then v45 metrics relocation), so the schema lands on the latest version.
+    // v45 metrics relocation, v46 threads-anchor), landing on the latest version.
     const history = new RunHistory(path);
     const db = history.getDb();
 
@@ -777,11 +780,14 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     const ids = (db.prepare('SELECT id FROM pipeline_runs ORDER BY id').all() as Array<{ id: string }>)
       .map(r => r.id);
     expect(ids).toEqual(['p-done', 'p-failed', 'p-run']);
-    // migrated forward through the latest version (v45 metrics table added in S5b'-c):
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(45);
+    // migrated forward through the latest version (v45 metrics S5b'-c, v46 threads-anchor):
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(46);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });
+    // v46 ADD COLUMN preserved the pre-existing thread row, new col defaulting NULL:
+    expect(db.prepare("SELECT primary_subject_id FROM threads WHERE id = 't-preexisting'").get())
+      .toEqual({ primary_subject_id: null });
 
     history.close();
   });
