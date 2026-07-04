@@ -875,4 +875,236 @@ describe('DataStore', () => {
       expect(rows[0]!['x']).toBe('a');
     });
   });
+
+  // === subject columns (Record-on-spine R1) ===
+
+  describe('subject columns', () => {
+    // A findOrCreate-shaped stub: dedups by (kind, lowercased name), mints a
+    // stable id per identity, and records every call so tests can assert the
+    // kind was threaded through. Mirrors SubjectStore.findOrCreate semantics
+    // without touching engine.db.
+    function makeStubResolver() {
+      const idByKey = new Map<string, string>();
+      const calls: Array<{ name: string; kind: string }> = [];
+      let counter = 0;
+      const resolver = (name: string, kind: string): string | null => {
+        calls.push({ name, kind });
+        const key = `${kind}::${name.toLowerCase()}`;
+        let id = idByKey.get(key);
+        if (id === undefined) {
+          counter += 1;
+          id = `subj-${String(counter)}`;
+          idByKey.set(key, id);
+        }
+        return id;
+      };
+      return { resolver, calls };
+    }
+
+    it('resolves a name to a subject_id and dedups the same name to one id', () => {
+      const { resolver, calls } = makeStubResolver();
+      ds.setSubjectResolver(resolver);
+      ds.createCollection({
+        name: 'appointments',
+        scope,
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'appointments',
+        records: [
+          { note: 'first visit', patient: 'Anna Meier' },
+          { note: 'follow-up', patient: 'Anna Meier' },
+          { note: 'new patient', patient: 'Ben Roth' },
+        ],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'appointments', sort: [{ field: '_id', order: 'asc' }] });
+      expect(rows[0]!['patient']).toBe('subj-1');
+      expect(rows[1]!['patient']).toBe('subj-1'); // same name → same subject
+      expect(rows[2]!['patient']).toBe('subj-2');
+      // Every resolve carried the column's declared kind.
+      expect(calls.every(c => c.kind === 'person')).toBe(true);
+    });
+
+    it('stores null for an empty/missing subject value (unlinked row allowed)', () => {
+      const { resolver, calls } = makeStubResolver();
+      ds.setSubjectResolver(resolver);
+      ds.createCollection({
+        name: 'tickets',
+        scope,
+        columns: [
+          { name: 'title', type: 'string' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'tickets',
+        records: [
+          { title: 'unassigned', client: '' },
+          { title: 'also unassigned' }, // omitted entirely
+        ],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'tickets', sort: [{ field: '_id', order: 'asc' }] });
+      expect(rows[0]!['client']).toBeNull();
+      expect(rows[1]!['client']).toBeNull();
+      // Empty/omitted never reaches the resolver.
+      expect(calls).toHaveLength(0);
+    });
+
+    it('degrades to storing the raw string when no resolver is injected (flag off)', () => {
+      // No setSubjectResolver call — mirrors subject_graph_enabled === false.
+      ds.createCollection({
+        name: 'orders',
+        scope,
+        columns: [
+          { name: 'sku', type: 'string' },
+          { name: 'buyer', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'orders',
+        records: [{ sku: 'A-1', buyer: 'Clara Vogt' }],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'orders' });
+      // Raw name preserved — column still usable without the subject graph.
+      expect(rows[0]!['buyer']).toBe('Clara Vogt');
+    });
+
+    it('supports adding a subject column via alterCollection', () => {
+      const { resolver } = makeStubResolver();
+      ds.setSubjectResolver(resolver);
+      ds.createCollection({
+        name: 'deliverables',
+        scope,
+        columns: [{ name: 'title', type: 'string' }],
+      });
+      ds.alterCollection({
+        collection: 'deliverables',
+        addColumns: [{ name: 'client', type: 'subject', subjectKind: 'organization' }],
+      });
+      ds.insertRecords({
+        collection: 'deliverables',
+        records: [{ title: 'Logo v1', client: 'Acme GmbH' }],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'deliverables' });
+      expect(rows[0]!['client']).toBe('subj-1');
+    });
+
+    // The universality proof: one mechanism links rows in a CLINIC shape and an
+    // AGENCY shape, with different subject kinds, through the same resolver.
+    it('links subjects across unrelated domains via one mechanism', () => {
+      const { resolver, calls } = makeStubResolver();
+      ds.setSubjectResolver(resolver);
+
+      // Clinic: an appointment links to a patient (person).
+      ds.createCollection({
+        name: 'clinic_appointments',
+        scope,
+        columns: [
+          { name: 'when', type: 'date' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'clinic_appointments',
+        records: [{ when: '2026-07-10', patient: 'Anna Meier' }],
+      });
+
+      // Agency: a deliverable links to a client company (organization).
+      ds.createCollection({
+        name: 'agency_deliverables',
+        scope,
+        columns: [
+          { name: 'title', type: 'string' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'agency_deliverables',
+        records: [{ title: 'Landing page', client: 'Acme GmbH' }],
+      });
+
+      const clinic = ds.queryRecords({ collection: 'clinic_appointments' });
+      const agency = ds.queryRecords({ collection: 'agency_deliverables' });
+      expect(typeof clinic.rows[0]!['patient']).toBe('string');
+      expect(typeof agency.rows[0]!['client']).toBe('string');
+      // Distinct identities (different kind AND name) → distinct ids.
+      expect(clinic.rows[0]!['patient']).not.toBe(agency.rows[0]!['client']);
+      // Both kinds flowed through the single resolver.
+      expect(calls.map(c => c.kind).sort()).toEqual(['organization', 'person']);
+    });
+
+    it('stores null (not the raw name) when the resolver is present but returns null', () => {
+      // A resolve FAILURE (distinct from flag-off) must keep the column id-pure —
+      // never mix a raw name into a UUID column.
+      ds.setSubjectResolver(() => null);
+      ds.createCollection({
+        name: 'leads',
+        scope,
+        columns: [
+          { name: 'label', type: 'string' },
+          { name: 'contact', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'leads',
+        records: [{ label: 'unresolvable', contact: 'Ghost Name' }],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'leads' });
+      expect(rows[0]!['contact']).toBeNull();
+    });
+
+    it('treats a whitespace-only subject value as unlinked (null)', () => {
+      const { resolver, calls } = makeStubResolver();
+      ds.setSubjectResolver(resolver);
+      ds.createCollection({
+        name: 'visits',
+        scope,
+        columns: [
+          { name: 'day', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      });
+      ds.insertRecords({
+        collection: 'visits',
+        records: [{ day: 'mon', patient: '   ' }],
+      });
+
+      const { rows } = ds.queryRecords({ collection: 'visits' });
+      expect(rows[0]!['patient']).toBeNull();
+      expect(calls).toHaveLength(0); // whitespace never reaches the resolver
+    });
+
+    it('resolves a subject column that is part of a unique_key (upsert path)', () => {
+      const { resolver } = makeStubResolver();
+      ds.setSubjectResolver(resolver);
+      ds.createCollection({
+        name: 'subscriptions',
+        scope,
+        columns: [
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+          { name: 'plan', type: 'string' },
+          { name: 'seats', type: 'number' },
+        ],
+        uniqueKey: ['client', 'plan'],
+      });
+      // Two inserts with the SAME (resolved client, plan) → the ON CONFLICT path
+      // must dedup on the resolved subject_id, updating rather than duplicating.
+      ds.insertRecords({ collection: 'subscriptions', records: [{ client: 'Acme GmbH', plan: 'pro', seats: 5 }] });
+      const second = ds.insertRecords({ collection: 'subscriptions', records: [{ client: 'acme gmbh', plan: 'pro', seats: 9 }] });
+
+      expect(second.updated).toBe(1);
+      const { rows } = ds.queryRecords({ collection: 'subscriptions' });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!['client']).toBe('subj-1'); // both resolved to the one subject
+      expect(rows[0]!['seats']).toBe(9); // upsert updated the row
+    });
+  });
 });

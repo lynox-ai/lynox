@@ -187,8 +187,17 @@ function measureStaticPrefixTokens(): number {
  * is on (OFF for the whole fleet today) — so its real every-turn cost is ZERO
  * until a tenant flips the flag; this guard counts the barrel worst-case, matching
  * the contacts/update_workflow_steps precedent (conditionally-registered tools count).
+ *
+ * 2026-07-04: bump to 22095 (measured 22083) — Record-on-Spine R1 adds a `subject`
+ * column type to DataStore, so `data_store_create` grows by the `subject` enum value
+ * + a `subjectKind` property (restricted post-review to the 4 name-deduped kinds) +
+ * a one-line "link to a person/company/project" note. Description trimmed first
+ * (dropped the R2-over-promising "everything about X" clause); the residual ~108 is
+ * the always-present tool describing a genuine new primitive (rows can carry a real
+ * subject_id). UNLIKE set_thread_context this rides an unconditionally-registered
+ * tool, so the cost is real every turn — hence trimmed hard.
  */
-const STATIC_PREFIX_BUDGET = 21975;
+const STATIC_PREFIX_BUDGET = 22095;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

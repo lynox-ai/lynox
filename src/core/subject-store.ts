@@ -30,6 +30,26 @@ export const KNOWN_SUBJECT_KINDS = [
 export type SubjectKind = (typeof KNOWN_SUBJECT_KINDS)[number];
 
 /**
+ * Build the resolver the engine injects into DataStore (Record-on-spine R1) so
+ * `subject`-typed columns store a real `subject_id` instead of a raw name. It
+ * narrows an arbitrary kind string against {@link KNOWN_SUBJECT_KINDS} — a
+ * defensive floor to `person` for the (tool-contract-prevented) case of an
+ * unknown kind — then find-or-creates, inheriting the graph's dedup for free.
+ * Exported as a tiny factory so the wiring is unit-testable without booting the
+ * engine; the engine only ever `setSubjectResolver(makeSubjectColumnResolver(store))`.
+ */
+export function makeSubjectColumnResolver(
+  subjectStore: SubjectStore,
+): (name: string, kind: string) => string {
+  return (name, kind) => {
+    const k: SubjectKind = (KNOWN_SUBJECT_KINDS as readonly string[]).includes(kind)
+      ? (kind as SubjectKind)
+      : 'person';
+    return subjectStore.findOrCreate({ kind: k, name }).id;
+  };
+}
+
+/**
  * Map a legacy KG `entity_type` to a Subject kind, or `null` when the entity is
  * NOT a subject. The S1b extraction mirror uses this to decide which extracted
  * entities become subjects: a `concept`/`location`/`collection` is knowledge-graph
@@ -84,8 +104,16 @@ export const ENTITY_MAPPABLE_SUBJECT_KINDS: readonly SubjectKind[] =
  * MUST stay in sync with the index DDL predicate (engine-db.ts) + findCanonical's
  * kind-IN list. `engagement` (identity = provider×client×period) and `other`
  * (unstructured) are deliberately excluded — they are not name-identified.
+ *
+ * This is ALSO the set of kinds a name-resolved carrier may use: a DataStore
+ * `subject` column resolves rows BY NAME (Record-on-spine R1), so it can only
+ * offer kinds that dedup by name — offering `engagement`/`other` would mint a
+ * fresh subject on every insert of the same name (the "same name → same id"
+ * promise silently breaks). `data_store_create` derives its allowed subjectKinds
+ * from this array; keep it as the single runtime source of truth.
  */
-const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(['person', 'organization', 'product', 'service']);
+export const NAME_DEDUPED_SUBJECT_KINDS = ['person', 'organization', 'product', 'service'] as const;
+const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS);
 
 export interface SubjectRow {
   id: string;

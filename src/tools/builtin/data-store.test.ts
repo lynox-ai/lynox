@@ -109,6 +109,85 @@ describe('DataStore tools', () => {
       }, mockAgent);
       expect(result).toContain('not available');
     });
+
+    // Record-on-spine R1: a `subject` column must declare its subjectKind (the
+    // kind is dedup identity — a silent wrong kind = permanent spine pollution).
+    it('rejects a subject column with no subjectKind', async () => {
+      const result = await dataStoreCreateTool.handler({
+        name: 'appointments',
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject' },
+        ],
+      }, mockAgent);
+
+      expect(result).toContain('subjectKind');
+      // Nothing was created.
+      expect(ds.listCollections().find(c => c.name === 'appointments')).toBeUndefined();
+    });
+
+    it('rejects a subject column with an invalid subjectKind', async () => {
+      const result = await dataStoreCreateTool.handler({
+        name: 'appointments',
+        columns: [
+          { name: 'patient', type: 'subject', subjectKind: 'patient' },
+        ],
+      }, mockAgent);
+
+      expect(result).toContain('not valid');
+      expect(ds.listCollections().find(c => c.name === 'appointments')).toBeUndefined();
+    });
+
+    it('accepts a subject column with a valid subjectKind and resolves through insert', async () => {
+      ds.setSubjectResolver((name, kind) => `subj:${kind}:${name.toLowerCase()}`);
+
+      const created = await dataStoreCreateTool.handler({
+        name: 'appointments',
+        columns: [
+          { name: 'note', type: 'string' },
+          { name: 'patient', type: 'subject', subjectKind: 'person' },
+        ],
+      }, mockAgent);
+      expect(created).toContain('Created collection "appointments"');
+      expect(created).toContain('patient (subject)');
+
+      await dataStoreInsertTool.handler({
+        collection: 'appointments',
+        records: [{ note: 'first visit', patient: 'Anna Meier' }],
+      }, mockAgent);
+
+      const { rows } = ds.queryRecords({ collection: 'appointments' });
+      expect(rows[0]!['patient']).toBe('subj:person:anna meier');
+    });
+
+    // A subject column resolves BY NAME, so engagement (composite identity) and
+    // other (unstructured) are NOT offered — they'd mint a fresh subject per
+    // insert. The tool must reject them even though they are real subject kinds.
+    it('rejects engagement/other as a subject column kind (not name-deduped)', async () => {
+      for (const kind of ['engagement', 'other']) {
+        const result = await dataStoreCreateTool.handler({
+          name: `projects_${kind}`,
+          columns: [{ name: 'ref', type: 'subject', subjectKind: kind }],
+        }, mockAgent);
+        expect(result).toContain('not valid');
+        expect(ds.listCollections().find(c => c.name === `projects_${kind}`)).toBeUndefined();
+      }
+    });
+
+    it('degrades a subject column to raw-string storage when no resolver is wired (flag off)', async () => {
+      // No setSubjectResolver — mirrors subject_graph_enabled === false.
+      await dataStoreCreateTool.handler({
+        name: 'orders',
+        columns: [{ name: 'buyer', type: 'subject', subjectKind: 'person' }],
+      }, mockAgent);
+      await dataStoreInsertTool.handler({
+        collection: 'orders',
+        records: [{ buyer: 'Clara Vogt' }],
+      }, mockAgent);
+
+      const { rows } = ds.queryRecords({ collection: 'orders' });
+      expect(rows[0]!['buyer']).toBe('Clara Vogt');
+    });
   });
 
   // === data_store_insert ===

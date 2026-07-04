@@ -516,12 +516,32 @@ export interface LynoxUserConfig {
 
 // === DataStore ===
 
-export type DataStoreSchemaType = 'string' | 'number' | 'date' | 'boolean' | 'json';
+export type DataStoreSchemaType = 'string' | 'number' | 'date' | 'boolean' | 'json' | 'subject';
+
+/**
+ * Subject kinds a `subject`-typed DataStore column may link its rows to. Limited
+ * to the NAME-DEDUPED kinds because a subject column resolves rows by NAME —
+ * `engagement` (composite identity) and `other` (unstructured) are excluded, as
+ * they would mint a fresh subject per insert. MUST stay in sync with
+ * `NAME_DEDUPED_SUBJECT_KINDS` in `core/subject-store.ts` (the runtime source of
+ * truth); duplicated here only to keep `src/types` a leaf with no import back
+ * into `core`. A drift-guard test (`subject-store.test.ts`) asserts they match.
+ */
+export type DataStoreSubjectKind =
+  | 'person' | 'organization' | 'product' | 'service';
 
 export interface DataStoreColumnDef {
   name: string;
   type: DataStoreSchemaType;
   unique?: boolean | undefined;
+  /**
+   * For a `subject`-typed column ONLY: which subject kind to find-or-create the
+   * linked subject as. The kind is part of the dedup IDENTITY — a `vendor`
+   * column resolved as `person` would never merge with the real `organization`
+   * subject (permanent spine pollution) — so `data_store_create` REQUIRES it on
+   * any `subject` column. Ignored for every other column type.
+   */
+  subjectKind?: DataStoreSubjectKind | undefined;
 }
 
 export interface DataStoreCollectionInfo {
