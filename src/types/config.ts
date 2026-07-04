@@ -530,6 +530,18 @@ export type DataStoreSchemaType = 'string' | 'number' | 'date' | 'boolean' | 'js
 export type DataStoreSubjectKind =
   | 'person' | 'organization' | 'product' | 'service';
 
+/**
+ * Optional semantic role for a column. The sole role today is `occurred_at`: it
+ * marks WHICH `date` column records when the row's event actually happened (an
+ * invoice's issue date, an appointment's time) — as opposed to `_created_at`
+ * (insert time). At most one column per collection may carry it, and only a
+ * `date` column. Stored + validated now; the per-subject timeline read (R2b)
+ * consumes it to order records by occurrence. Deliberately a single optional
+ * literal, NOT a general column-role system — widen the union only when a second
+ * role earns its way in (anti-manie).
+ */
+export type DataStoreColumnRole = 'occurred_at';
+
 export interface DataStoreColumnDef {
   name: string;
   type: DataStoreSchemaType;
@@ -542,6 +554,12 @@ export interface DataStoreColumnDef {
    * any `subject` column. Ignored for every other column type.
    */
   subjectKind?: DataStoreSubjectKind | undefined;
+  /**
+   * Marks a `date` column as the record's OCCURRENCE time (when the event
+   * happened) rather than `_created_at` (when it was inserted). At most one per
+   * collection. Consumed by the per-subject timeline read; ignored otherwise.
+   */
+  role?: DataStoreColumnRole | undefined;
 }
 
 export interface DataStoreCollectionInfo {

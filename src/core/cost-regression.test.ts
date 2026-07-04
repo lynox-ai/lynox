@@ -196,8 +196,17 @@ function measureStaticPrefixTokens(): number {
  * the always-present tool describing a genuine new primitive (rows can carry a real
  * subject_id). UNLIKE set_thread_context this rides an unconditionally-registered
  * tool, so the cost is real every turn — hence trimmed hard.
+ *
+ * 2026-07-04: bump to 22150 (measured 22138) — Record-on-Spine R2a adds the
+ * `occurred_at` column role to `data_store_create` (mark which date column is the
+ * event time vs insert time). Description trimmed hard first (−17 from the untrimmed
+ * 22155); the residual ~43 is a genuine new capability on the same unconditionally-
+ * registered tool, so real every turn. Exposed now (not deferred to R2b) on the
+ * write-first rhythm — records accumulate the occurrence marker before R2b's
+ * per-subject timeline read consumes it, mirroring how R1 exposed subject columns
+ * before R1.5 could query them.
  */
-const STATIC_PREFIX_BUDGET = 22095;
+const STATIC_PREFIX_BUDGET = 22150;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
