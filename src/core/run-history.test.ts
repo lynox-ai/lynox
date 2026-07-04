@@ -1981,16 +1981,16 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('index sets — tasks keeps its TODO indexes; the legacy triggers table + indexes are gone post-v44', () => {
+    it('index sets — tasks keeps its TODO indexes; the legacy triggers table + indexes SURVIVE post-v44 (B1)', () => {
       const h = createHistory();
       // Direct sqlite_master assertion — a botched migration that dropped
       // an index would still let a query return the row on tiny data
       // (full-scan), so we pin the index sets per table.
       //
       // The `tasks` table holds USER-TODOs only (v42 split) and keeps its
-      // TODO-only indexes. The legacy history.db `triggers` table (+ its
-      // idx_triggers_* indexes) was DROPPED in mig v44 (S3f write-cutover) —
-      // triggers now live in engine.db — so history.db carries none anymore.
+      // TODO-only indexes. B1 self-heal: mig v44 is now NON-destructive, so the
+      // legacy history.db `triggers` table (+ its v42 idx_triggers_* indexes) STAYS
+      // dormant as the boot-backfill source + rollback net (reads live on engine.db).
       const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
       const taskIdx = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name LIKE 'idx_tasks_%'`,
@@ -2003,11 +2003,16 @@ describe('RunHistory', () => {
         'idx_tasks_status',
       ]);
 
-      // The legacy history.db `triggers` table was dropped in v44 → no indexes.
+      // The legacy history.db `triggers` table SURVIVES v44 → keeps its v42 indexes.
       const triggerIdx = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='triggers' AND name LIKE 'idx_triggers_%'`,
       ).all().map(r => r.name).sort();
-      expect(triggerIdx).toEqual([]);
+      expect(triggerIdx).toEqual([
+        'idx_triggers_next_run',
+        'idx_triggers_pipeline_enabled',
+        'idx_triggers_scope',
+        'idx_triggers_type',
+      ]);
 
       // Plus the existing functional smoke that getDueTriggers works (engine.db) —
       // a due trigger row lands in the worker queue.
@@ -2200,14 +2205,14 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('(g) v42 MOVE + v44 DROP on a pre-v42 db: TODOs survive; legacy triggers are dropped (recover via pre-deploy backfill)', () => {
+    it('(g) v42 MOVE on a pre-v42 db: TODOs survive; legacy triggers SURVIVE v44 as the backfill source (B1)', () => {
       // Build a db at the PRE-v42 schema (one `tasks` table holding everything,
       // schema_version=41) with REAL mixed rows, then open a RunHistory so the FULL
       // migration chain runs: v42 splits tasks→tasks+triggers (history.db), then v44
-      // (S3f) DROPs the legacy `triggers` table. Without a pre-deploy backfill the
-      // moved trigger rows are GONE — exactly the data-loss the per-tenant
-      // Ops-Playbook prevents (backfill legacy→engine.db BEFORE deploying S3f). The
-      // TODOs never leave `tasks`, so they survive regardless.
+      // (now NON-destructive, B1) KEEPS the legacy `triggers` table dormant as the
+      // boot-backfill source + rollback net. The moved trigger rows are PRESERVED (no
+      // silent data-loss); the boot backfill relocates them into engine.db. The TODOs
+      // never leave `tasks`, so they survive regardless.
       const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-v42-'));
       tmpDirs.push(dir);
       const dbPath = join(dir, 'premig.db');
@@ -2249,23 +2254,26 @@ describe('RunHistory', () => {
       `);
       raw.close();
 
-      // Boot RunHistory → runs the FULL chain: v42 split, then v44 drops legacy triggers.
+      // Boot RunHistory → runs the FULL chain: v42 split, then the non-destructive v44.
       const h = new RunHistory(dbPath);
       // TODOs (2) survive: the user-TODO + the bare NULL-assignee note (NULL-safe predicate).
       // They never left `tasks`, so v42/v44 don't touch them.
       expect(new Set(h.getTasks().map(t => t.id))).toEqual(new Set(['m-todo', 'm-todo-null']));
-      // The legacy history.db `triggers` table is dropped by v44.
+      // B1: the legacy history.db `triggers` table SURVIVES v44 (backfill source).
       const db = (h as unknown as { db: { prepare(sql: string): { get(): unknown; all(): Array<{ id: string }> } } }).db;
-      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get()).toBeUndefined();
-      // The 4 moved trigger rows (cron/watch/pipeline/completed-one-shot) are GONE:
-      // v42 moved them into legacy `triggers`, v44 dropped it, and no backfill ran
-      // to relocate them into engine.db → getTriggers is empty (no engine.db store).
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get()).toEqual({ name: 'triggers' });
+      // The 4 moved trigger rows (cron/watch/pipeline/completed-one-shot) are PRESERVED
+      // in the legacy table — the boot backfill (not wired in this raw-migration test)
+      // relocates them into engine.db. getTriggers reads engine.db (no store here), so
+      // it is empty until that backfill runs — the data itself is safe in `triggers`.
+      const legacyTrigN = (db.prepare('SELECT COUNT(*) AS c FROM triggers').get() as unknown as { c: number }).c;
+      expect(legacyTrigN).toBe(4);
       expect(h.getTriggers()).toEqual([]);
       expect(rawCounts(h)).toEqual({ tasks: 2, triggers: 0 });
-      // v44 purged the orphaned workflow-def row (status='planned') but kept the
-      // run SPINE (status='running').
+      // v44 keeps ALL pipeline_runs — the planned workflow-def row is the backfill
+      // source (NOT purged); the run SPINE row is untouched too.
       const prIds = (db.prepare("SELECT id FROM pipeline_runs ORDER BY id").all()).map(r => r.id);
-      expect(prIds).toEqual(['pr-run']);
+      expect(prIds).toEqual(['pr-planned', 'pr-run']);
       // Column integrity for the surviving TODOs.
       const todo = h.getTask('m-todo')!;
       expect(todo.due_date).toBe('2026-07-01');
@@ -2323,10 +2331,11 @@ describe('RunHistory', () => {
       const h = new RunHistory(dbPath);
       // No TASK data loss: the 3 TODO rows all survived the full migration chain.
       expect(new Set(h.getTasks().map(t => t.id))).toEqual(new Set(['child-of-trig', 'par-todo', 'child-of-todo']));
-      // par-trig moved to legacy `triggers` in v42, then v44 dropped that table
-      // (no backfill here) → it is gone from history.db; engine.db has no store.
+      // par-trig moved to legacy `triggers` in v42; v44 (non-destructive, B1) KEEPS
+      // that table, so par-trig is preserved there (the boot backfill relocates it to
+      // engine.db). getTriggers reads engine.db (no store here) → empty until then.
       const db = (h as unknown as { db: { prepare(sql: string): { get(): unknown } } }).db;
-      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get()).toBeUndefined();
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get()).toEqual({ name: 'triggers' });
       expect(h.getTriggers()).toEqual([]);
       // Cross-table parent ref nulled (the trigger parent is gone from `tasks`).
       expect(h.getTask('child-of-trig')!.parent_task_id).toBeNull();

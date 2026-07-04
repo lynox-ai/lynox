@@ -1057,30 +1057,25 @@ const MIGRATIONS: string[] = [
    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_prompts_session_unique
      ON pending_prompts(session_id) WHERE status = 'pending';`,
 
-  // v44 (Foundation Rework v2, S3f verb write-cutover): retire the legacy verb-def
-  // storage now that engine.db is the SOLE authority for triggers + workflow defs.
-  //   - DROP the legacy history.db `triggers` table (created in v42). Trigger reads
-  //     AND writes now go to the engine.db `triggers` table (TriggerStore). ONE-WAY:
-  //     the per-tenant deploy playbook runs the s3-backfill CLI on the PRE-S3f image
-  //     FIRST (populating engine.db) and cold-snapshots history.db BEFORE this
-  //     migration boots — the rollback net. No FK references `triggers`, so the DROP
-  //     is clean and its indexes go with it; IF EXISTS tolerates a minimal-seed DB
-  //     that never created the table.
-  //   - PURGE the orphaned workflow-DEFINITION rows from `pipeline_runs`
-  //     (status='planned' saved workflows + status='executed' one-shots): workflow
-  //     defs now live in the engine.db `workflows` table (WorkflowStore) and the
-  //     write-cutover stopped emitting these rows. `pipeline_runs` STAYS as the run
-  //     SPINE (running/completed/failed/rejected) — those statuses are untouched,
-  //     and nothing reads 'executed'. Idempotent (both are no-ops on re-run).
-  //   Precondition: `pipeline_runs` exists (created back in v7), so the DELETE is
-  //   safe on any real migrated tenant — same "the table I touch exists" assumption
-  //   the v42 tasks→triggers move makes (v43's DROP-IF-EXISTS defensiveness is
-  //   specific to the ephemeral pending_prompts table).
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (44);
-
-   DROP TABLE IF EXISTS triggers;
-
-   DELETE FROM pipeline_runs WHERE status IN ('planned', 'executed');`,
+  // v44 (Foundation Rework v2, S3f verb write-cutover): reads AND writes for the verb
+  // DEFINITIONS (triggers + saved workflows) are now on engine.db (TriggerStore /
+  // WorkflowStore). The legacy history.db stores are RETIRED FROM READS — but this
+  // migration is DELIBERATELY NON-DESTRUCTIVE (a pure version stamp):
+  //   - The legacy `triggers` table + the workflow-DEFINITION `pipeline_runs` rows
+  //     (status='planned'/'executed') STAY DORMANT. A boot-time copy (engine.ts →
+  //     VerbGraphBackfill, gated exactly-once by engine.db `verb_backfill_marker`)
+  //     moves them into engine.db on the upgrade boot, so a v1.22.0→v2.0.0 tenant
+  //     keeps its full automation surface. Dropping them HERE would be forward-only
+  //     data-loss: v1.22.0 shipped no verb arc, so on the upgrade boot engine.db is
+  //     still empty when this runs — there is nothing to fall back to. (The earlier
+  //     "run the s3-backfill CLI on the PRE-S3f image first" playbook was
+  //     unexecutable: v1.22.0 has no such CLI, and the released one is tasks-only.)
+  //   - Leaving the legacy rows in place is the ROLLBACK NET (image-revert stays
+  //     healthy — the pre-migration code still finds its triggers) and lets the boot
+  //     copy self-heal after an engine.db recreate. The actual DROP is DEFERRED to a
+  //     future release, once the fleet is confirmed migrated — the same deferred-drop
+  //     pattern as the v45 metrics move (legacy table dormant until a later DROP).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (44);`,
 
   // v45 (Foundation Rework v2, S5b'-c metrics relocation): the KPI `metrics` table
   // moves agent-memory.db → history.db. KpiEngine already READS its inputs from
@@ -2696,6 +2691,27 @@ export class RunHistory {
   /** Expose database instance for shared-connection modules (e.g. ThreadStore). */
   getDb(): Database.Database {
     return this.db;
+  }
+
+  /**
+   * GDPR Art. 17: clear the DORMANT legacy verb-DEFINITION rows that the B1 self-heal
+   * keeps alive (the non-destructive v44 no longer drops them — they are the boot-
+   * backfill source + rollback net). The old destructive v44 removed these at
+   * migration, so an erasure never had to; now the erasure route must, else trigger
+   * titles/descriptions/watch-URLs + saved-workflow manifest JSON persist on disk AND
+   * an engine.db recreate would re-backfill them into live reads. Scoped to exactly
+   * the rows v44 used to drop (the legacy `triggers` table + planned/executed
+   * workflow-def `pipeline_runs`); the run SPINE + other tables are untouched.
+   * Table-absence-tolerant + atomic.
+   */
+  clearLegacyVerbDefs(): void {
+    const hasTriggers = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='triggers'")
+      .get();
+    this.db.transaction(() => {
+      if (hasTriggers) this.db.exec('DELETE FROM triggers');
+      this.db.prepare("DELETE FROM pipeline_runs WHERE status IN ('planned', 'executed')").run();
+    })();
   }
 
   close(): void {

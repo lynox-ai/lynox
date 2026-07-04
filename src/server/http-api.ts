@@ -6128,6 +6128,19 @@ export class LynoxHTTPApi {
         }
       }
 
+      // Clear the DORMANT legacy verb-def rows the B1 self-heal keeps alive (the
+      // non-destructive v44 no longer drops the legacy `triggers` + workflow-def
+      // `pipeline_runs`). Without this an Art.17 erasure would leave trigger/workflow
+      // PII on disk, and an engine.db recreate would re-backfill it into live reads.
+      const runHistoryForWipe = engine.getRunHistory();
+      if (runHistoryForWipe) {
+        try {
+          runHistoryForWipe.clearLegacyVerbDefs();
+        } catch (err) {
+          process.stderr.write(`⚠ /api/data: legacy verb-def wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+
       // Delete all DataStore collections (includes CRM tables)
       const ds = engine.getDataStore();
       if (ds) {

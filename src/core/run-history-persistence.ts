@@ -617,6 +617,73 @@ export function getAllTasks(db: Database.Database): TaskRecord[] {
   return db.prepare('SELECT * FROM tasks ORDER BY created_at ASC').all() as TaskRecord[];
 }
 
+/**
+ * The RAW legacy history.db `triggers` row (v42 schema — carries the pre-#850
+ * `task_type`, NOT the split source/effect axes). Read-only migration shape used
+ * ONLY by the verb-graph backfill; the derivation of source/effect from `task_type`
+ * lives in the backfill (via `deriveSourceEffect`) so the persistence layer keeps no
+ * cross-module dependency.
+ */
+export interface LegacyTriggerRow {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  assignee: string | null;
+  scope_type: string | null;
+  scope_id: string | null;
+  created_at: string;
+  updated_at: string;
+  schedule_cron: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_run_result: string | null;
+  last_run_status: string | null;
+  task_type: string | null;
+  watch_config: string | null;
+  max_retries: number | null;
+  retry_count: number | null;
+  notification_channel: string | null;
+  pipeline_id: string | null;
+  pipeline_params: string | null;
+  enabled: number | null;
+}
+
+/**
+ * UNBOUNDED read of every legacy `triggers` row — the verb-graph backfill's trigger
+ * source. Tolerates the table being ABSENT (a minimal-seed / fresh-v2 DB that never
+ * created it, or a future release that finally drops it): returns `[]` rather than
+ * throwing, so the backfill is a clean no-op on such a tenant. Ordered `created_at
+ * ASC` for a stable, reproducible backfill.
+ */
+export function getLegacyTriggerRows(db: Database.Database): LegacyTriggerRow[] {
+  const exists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='triggers'")
+    .get();
+  if (!exists) return [];
+  return db.prepare('SELECT * FROM triggers ORDER BY created_at ASC').all() as LegacyTriggerRow[];
+}
+
+/**
+ * UNBOUNDED read of every legacy saved-workflow definition (`pipeline_runs` rows
+ * with `status='planned'`) — the verb-graph backfill's workflow source. Tolerates
+ * `pipeline_runs` being absent (returns `[]`). Ordered `started_at DESC` (matches
+ * the pre-S3f library-list order).
+ */
+export function getAllPlannedPipelines(db: Database.Database): Array<{
+  id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+}> {
+  const exists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_runs'")
+    .get();
+  if (!exists) return [];
+  return db.prepare(
+    "SELECT id, manifest_name, manifest_json, step_count, started_at FROM pipeline_runs WHERE status = 'planned' ORDER BY started_at DESC"
+  ).all() as Array<{
+    id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
+  }>;
+}
+
 export function getTasksDueInRange(db: Database.Database, start: string, end: string, scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
   if (scopes && scopes.length > 0) {
     const scopeConditions = scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ');

@@ -477,6 +477,21 @@ const MIGRATIONS: string[] = [
   // (idx_triggers_next_run) — a read cutover exposing a missing legacy index.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (4);
    CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);`,
+
+  // v5 (B1 self-heal): the exactly-once gate for the boot-time verb-graph backfill.
+  // mig v44 (history.db) is now NON-destructive — the legacy `triggers` + planned-
+  // pipeline rows stay dormant — and the engine copies them into engine.db at boot
+  // (engine.ts) so a v1.22.0→v2.0.0 upgrade never loses a trigger/workflow. This
+  // one-row marker makes that copy run ONCE (on the upgrade boot, or after an
+  // engine.db recreate) instead of every boot, so a definition DELETED post-upgrade
+  // is never resurrected from the still-present legacy rows. `done=0` until the
+  // backfill succeeds; a fresh v2 tenant (no legacy rows) flips it to 1 on a no-op.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+   CREATE TABLE IF NOT EXISTS verb_backfill_marker (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO verb_backfill_marker (id, done) VALUES (1, 0);`,
 ];
 
 /**
@@ -514,25 +529,42 @@ export class EngineDb {
   /** Raw connection — S1 store classes (SubjectStore, etc.) share this. */
   getDb(): Database.Database { return this.db; }
 
+  /** True once the boot-time verb-graph backfill (B1 self-heal) has run for this
+   *  engine.db. Gates the copy to exactly-once so a deleted definition is never
+   *  resurrected from the still-present legacy rows (see verb_backfill_marker / v5). */
+  isVerbBackfillDone(): boolean {
+    const row = this.db.prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as
+      | { done: number }
+      | undefined;
+    return row?.done === 1;
+  }
+
+  /** Mark the boot-time verb-graph backfill complete (idempotent). */
+  markVerbBackfillDone(): void {
+    this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
   close(): void {
     this.db.close();
   }
 
   /**
    * GDPR Art. 17 (Right to Erasure): delete every user-data row in engine.db,
-   * leaving only the schema_version bookkeeping (so the schema stays intact and
-   * is NOT re-migrated on next open). Tables are enumerated from sqlite_master so
-   * any table a later sprint (S3–S6) adds is wiped automatically — a hardcoded
-   * list would silently leak PII the day a new table lands. `defer_foreign_keys`
-   * postpones every FK check to COMMIT, by which point all rows are gone, so the
-   * delete order is irrelevant and a future RESTRICT/CASCADE edge can't fail
-   * mid-wipe. Table names come from sqlite_master (schema identifiers, never user
-   * input) — the interpolation is injection-safe.
+   * leaving only the schema_version + verb_backfill_marker bookkeeping (so the
+   * schema stays intact and is NOT re-migrated on next open, AND the erasure is not
+   * silently UNDONE by the boot verb-graph backfill re-populating from the still-
+   * present legacy history.db). Tables are enumerated from sqlite_master so any table
+   * a later sprint (S3–S6) adds is wiped automatically — a hardcoded list would
+   * silently leak PII the day a new table lands. `defer_foreign_keys` postpones every
+   * FK check to COMMIT, by which point all rows are gone, so the delete order is
+   * irrelevant and a future RESTRICT/CASCADE edge can't fail mid-wipe. Table names
+   * come from sqlite_master (schema identifiers, never user input) — the
+   * interpolation is injection-safe.
    */
   deleteAllData(): void {
     const tables = this.db
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_version' AND name NOT LIKE 'sqlite_%'",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker') AND name NOT LIKE 'sqlite_%'",
       )
       .all() as { name: string }[];
     this.db.transaction(() => {

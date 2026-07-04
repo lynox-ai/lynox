@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * Foundation Rework v2 — verb-layer TASK backfill CLI.
+ * Foundation Rework v2 — verb-layer backfill CLI (manual re-sync / repair).
  *
- * One-shot command, run INSIDE a quiesced tenant container, that replays the
- * legacy history.db user-TASK rows into the engine.db verb-graph. Tasks are the one
- * verb primitive still legacy-authoritative + mirrored after the S3f write-cutover
- * (S4 will cut them over); workflows + triggers already cut over and their legacy
- * storage is dropped in mig v44, so this backfill covers TASKS only. Because it
- * reads solely the legacy `tasks` table (which v44 never touches) it is safe to run
- * on the S3f image. NOT a boot migration (an operator runs it while quiesced,
- * verifies, and can abort). The PRE-S3f full three-type backfill lives in the
- * v1.22.0 image, which the deploy playbook runs before cutting workflows/triggers.
+ * One-shot command that replays ALL legacy history.db verb DEFINITIONS — saved
+ * workflows (`pipeline_runs status='planned'`), agent-triggers (`triggers`), and
+ * user-tasks (`tasks`) — into the engine.db verb-graph. It shares the SAME
+ * {@link VerbGraphBackfill} the engine runs automatically at boot (B1 self-heal,
+ * gated once by the engine.db marker): a v1.22.0→v2.0.0 tenant is migrated on the
+ * upgrade boot with no operator action. This CLI stays as a MANUAL re-sync / repair
+ * tool — run it INSIDE a tenant container to force a re-backfill (e.g. after a
+ * restore). Since mig v44 is now non-destructive, the legacy tables survive as its
+ * source; running --apply also stamps the boot marker so the engine won't re-run it.
  *
  * Usage (in-container, e.g. via prod-rafael-exec.sh / staging-tenant-exec.sh):
  *   node dist/scripts/s3-backfill.js              # dry-run: report what WOULD backfill
@@ -34,7 +34,7 @@ import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { getLynoxDir, setDataDir, loadConfig } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { RunHistory } from '../core/run-history.js';
-import { getAllTasks } from '../core/run-history-persistence.js';
+import { getAllTasks, getAllPlannedPipelines, getLegacyTriggerRows } from '../core/run-history-persistence.js';
 import { VerbGraphBackfill } from '../core/verb-graph-backfill.js';
 
 export interface Args { apply: boolean; json: boolean; dataDir: string | null }
@@ -53,7 +53,7 @@ export function parseArgs(argv: string[]): Args {
 
 function printHelp(): void {
   process.stdout.write(
-    'verb-layer TASK backfill — relocate legacy history.db tasks into the engine.db verb-graph.\n' +
+    'verb-layer backfill — relocate legacy history.db workflows+triggers+tasks into the engine.db verb-graph.\n' +
     '  (no flag)        dry-run: report counts that WOULD backfill\n' +
     '  --apply          run the backfill (idempotent, safe to re-run)\n' +
     '  --json           emit machine-readable counts\n' +
@@ -74,12 +74,19 @@ function main(): void {
   const historyDb = runHistory.getDb();
 
   if (!args.apply) {
-    // Dry-run is side-effect-free: it reads only legacy history.db and never
-    // constructs EngineDb (whose ctor would migrate/materialize engine.db).
-    const tk = getAllTasks(historyDb).length;
-    const out = { mode: 'dry-run', legacy: { tasks: tk } };
+    // Dry-run is side-effect-free: it reads only the legacy history.db tables and
+    // never constructs EngineDb (whose ctor would migrate/materialize engine.db).
+    // (Since mig v44 is now non-destructive, merely opening RunHistory above no
+    // longer drops anything either — the dry-run is fully read-only.)
+    const legacy = {
+      workflows: getAllPlannedPipelines(historyDb).length,
+      triggers: getLegacyTriggerRows(historyDb).length,
+      tasks: getAllTasks(historyDb).length,
+    };
+    const out = { mode: 'dry-run', legacy };
     process.stdout.write(args.json ? JSON.stringify(out) + '\n'
-      : `[s3-backfill] DRY-RUN — would backfill ${tk} tasks. Re-run with --apply.\n`);
+      : `[s3-backfill] DRY-RUN — would backfill ${legacy.workflows} workflow(s), ` +
+        `${legacy.triggers} trigger(s), ${legacy.tasks} task(s). Re-run with --apply.\n`);
     closeAll(null, runHistory);
     return;
   }
@@ -89,15 +96,20 @@ function main(): void {
   // (a flag-OFF backfill mints no subjects, keeping engine.db subject-free).
   const resolveAssignee = loadConfig().subject_graph_enabled === true;
   const applied = new VerbGraphBackfill(engineDb, historyDb).run({ resolveAssignee });
+  // A manual re-sync also satisfies the boot marker — the engine won't re-run it.
+  engineDb.markVerbBackfillDone();
 
   const edb = engineDb.getDb();
   const post = {
+    workflows: (edb.prepare('SELECT COUNT(*) n FROM workflows').get() as { n: number }).n,
+    triggers: (edb.prepare('SELECT COUNT(*) n FROM triggers').get() as { n: number }).n,
     tasks: (edb.prepare('SELECT COUNT(*) n FROM tasks').get() as { n: number }).n,
   };
   const out = { mode: 'apply', applied, post };
   process.stdout.write(args.json ? JSON.stringify(out) + '\n'
-    : `[s3-backfill] APPLIED — tasks ${applied.tasks} (${applied.taskParentLinks} parent-links). ` +
-      `engine.db now has ${post.tasks} tasks.\n`);
+    : `[s3-backfill] APPLIED — workflows ${applied.workflows}, triggers ${applied.triggers}, ` +
+      `tasks ${applied.tasks} (${applied.taskParentLinks} parent-links). engine.db now has ` +
+      `${post.workflows} workflow(s), ${post.triggers} trigger(s), ${post.tasks} task(s).\n`);
   closeAll(engineDb, runHistory);
 }
 

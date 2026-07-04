@@ -728,18 +728,21 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     tmpDirs.length = 0;
   });
 
-  it('a fresh RunHistory has NO legacy `triggers` table (v44 dropped it)', () => {
+  it('a fresh RunHistory STILL HAS the legacy `triggers` table (v44 is non-destructive — B1)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-v44-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
     const db = history.getDb();
+    // B1 self-heal: v44 no longer DROPs the legacy triggers table — it stays dormant
+    // as the boot-backfill source + rollback net (the DROP is deferred to a future
+    // release, like the v45 metrics move). A v42-created empty table is expected.
     const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get();
-    expect(row).toBeUndefined();
+    expect(row).toEqual({ name: 'triggers' });
     expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBeGreaterThanOrEqual(44);
     history.close();
   });
 
-  it('v44 drops legacy triggers + purges planned/executed pipeline_runs, keeping the spine', () => {
+  it('v44 is NON-destructive: keeps the legacy triggers + ALL pipeline_runs (B1 rollback net)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-v44-data-'));
     tmpDirs.push(dir);
     const path = join(dir, 'history.db');
@@ -768,18 +771,21 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     `);
     raw.close();
 
-    // Open via RunHistory → _migrate runs every migration after 43 (v44 teardown,
-    // v45 metrics relocation, v46 threads-anchor), landing on the latest version.
+    // Open via RunHistory → _migrate runs every migration after 43 (v44 non-
+    // destructive stamp, v45 metrics relocation, v46 threads-anchor).
     const history = new RunHistory(path);
     const db = history.getDb();
 
-    // triggers table dropped:
+    // B1: the legacy triggers table + its row SURVIVE (backfill source + rollback net):
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='triggers'").get())
-      .toBeUndefined();
-    // planned + executed purged; the spine kept:
+      .toEqual({ name: 'triggers' });
+    expect(db.prepare("SELECT title FROM triggers WHERE id='t-legacy'").get())
+      .toEqual({ title: 'x' });
+    // ALL pipeline_runs kept — planned/executed def rows are NOT purged (they are the
+    // workflow-def backfill source; a future release drops them once fleet-migrated):
     const ids = (db.prepare('SELECT id FROM pipeline_runs ORDER BY id').all() as Array<{ id: string }>)
       .map(r => r.id);
-    expect(ids).toEqual(['p-done', 'p-failed', 'p-run']);
+    expect(ids).toEqual(['p-done', 'p-exec', 'p-failed', 'p-planned', 'p-run']);
     // migrated forward through the latest version (v45 metrics S5b'-c, v46 threads-anchor):
     expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(46);
     // v45 landed the relocated metrics table:
@@ -788,6 +794,30 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // v46 ADD COLUMN preserved the pre-existing thread row, new col defaulting NULL:
     expect(db.prepare("SELECT primary_subject_id FROM threads WHERE id = 't-preexisting'").get())
       .toEqual({ primary_subject_id: null });
+
+    history.close();
+  });
+
+  it('clearLegacyVerbDefs (GDPR Art.17) wipes the dormant legacy triggers + workflow-defs, keeps the run spine', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-v44-erase-'));
+    tmpDirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'));
+    const db = history.getDb();
+    // Seed the dormant legacy verb-def rows (post-B1 they survive migration) + a run
+    // SPINE row that must NOT be touched.
+    db.prepare("INSERT INTO triggers (id, title) VALUES ('tr-pii', 'watch https://secret.example')").run();
+    db.prepare("INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count) VALUES ('wf-pii','W','planned','{\"secret\":1}',1)").run();
+    db.prepare("INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count) VALUES ('run-1','R','completed','{}',1)").run();
+
+    history.clearLegacyVerbDefs();
+
+    // Legacy trigger PII + the planned workflow-def are gone.
+    expect((db.prepare('SELECT COUNT(*) c FROM triggers').get() as { c: number }).c).toBe(0);
+    expect(db.prepare("SELECT id FROM pipeline_runs WHERE status='planned'").get()).toBeUndefined();
+    // The run SPINE row (completed) is UNTOUCHED — clearLegacyVerbDefs only removes defs.
+    expect(db.prepare("SELECT id FROM pipeline_runs WHERE status='completed'").get()).toEqual({ id: 'run-1' });
+    // The triggers TABLE itself survives (only its rows are cleared) — idempotent re-run.
+    expect(() => history.clearLegacyVerbDefs()).not.toThrow();
 
     history.close();
   });
