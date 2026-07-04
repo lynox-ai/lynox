@@ -250,6 +250,7 @@ export class Engine {
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
+  private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
   private _subjectFootprintReader: import('./subject-footprint-reader.js').SubjectFootprintReader | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
@@ -1522,6 +1523,7 @@ export class Engine {
       try {
         const { SubjectStore, makeSubjectColumnBridge } = await import('./subject-store.js');
         const subjectStore = new SubjectStore(this.engineDb);
+        this._subjectStore = subjectStore;
         this._toolContext.subjectStore = subjectStore;
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
@@ -1698,6 +1700,10 @@ export class Engine {
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
+
+  /** The subject-graph store, or null when `subject_graph_enabled` is off. Present for
+   *  the R2b read surface (subjects list → footprint); reads only on the HTTP path. */
+  getSubjectStore(): import('./subject-store.js').SubjectStore | null { return this._subjectStore; }
 
   /**
    * Record-on-spine R2b: the id-keyed, on-demand subject-footprint read (records +

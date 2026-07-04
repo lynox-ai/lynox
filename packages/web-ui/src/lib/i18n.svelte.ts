@@ -91,6 +91,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.graph': { de: 'Graph (Beta)', en: 'Graph (beta)' },
 	'hub.intelligence.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'hub.intelligence.data': { de: 'Daten', en: 'Data' },
+	'hub.intelligence.subjects': { de: 'Subjekte', en: 'Subjects' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
@@ -431,6 +432,23 @@ const translations: Record<string, Record<Locale, string>> = {
 	'kg.list_view': { de: 'Liste', en: 'List' },
 	'kg.graph_view': { de: 'Graph', en: 'Graph' },
 	'kg.view_toggle_label': { de: 'Ansichtsmodus', en: 'View mode' },
+
+	// Subjects (Record-on-spine R2b) — read-only subject footprint
+	'subjects.title': { de: 'Subjekte', en: 'Subjects' },
+	'subjects.search': { de: 'Subjekte suchen...', en: 'Search subjects...' },
+	'subjects.no_subjects': { de: 'Keine Subjekte. Chatte mit lynox, um den Subjekt-Graphen aufzubauen.', en: 'No subjects. Chat with lynox to build the subject graph.' },
+	'subjects.showing': { de: 'Zeige', en: 'Showing' },
+	'subjects.load_more': { de: 'Mehr laden', en: 'Load more' },
+	'subjects.empty_footprint': { de: 'Noch keine Aktivität zu diesem Subjekt.', en: 'No activity for this subject yet.' },
+	'subjects.timeline': { de: 'Verlauf', en: 'Timeline' },
+	'subjects.memories': { de: 'Erinnerungen', en: 'Memories' },
+	'subjects.tasks': { de: 'Aufgaben', en: 'Tasks' },
+	'subjects.thread': { de: 'Unterhaltung', en: 'Conversation' },
+	'subjects.untitled_thread': { de: 'Unbenannte Unterhaltung', en: 'Untitled conversation' },
+	'subjects.logged': { de: 'erfasst', en: 'logged' },
+	'subjects.more_exist': { de: 'Weitere Einträge vorhanden', en: 'More entries exist' },
+	'subjects.discuss': { de: 'Im Chat besprechen', en: 'Discuss in chat' },
+	'subjects.discuss_prompt': { de: 'Lass uns über dieses Subjekt sprechen:', en: 'Let\'s talk about this subject:' },
 
 	// Insights
 	'insights.title': { de: 'Memory Insights', en: 'Memory Insights' },
