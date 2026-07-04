@@ -456,6 +456,22 @@ export class AgentMemoryDb {
   }
 
   /**
+   * The memory ids belonging to a thread — the S5b'-c id-parity bridge for
+   * purging engine.db stubs. The engine.db `memories.source_thread_id` column is
+   * NULL-by-design (the thread spine is not cut over to engine.db yet), so a
+   * thread-scoped engine.db purge can't target by thread directly. Instead the
+   * caller reads the thread's memory ids HERE (legacy owns `source_thread_id`) and
+   * deletes the SAME ids from engine.db by stub id-parity. Read BEFORE the legacy
+   * {@link purgeByThread} deletes the rows. (Native engine.db thread-provenance is
+   * an S5b'-d concern, coupled with the legacy DROP + thread-spine cutover.)
+   */
+  getMemoryIdsByThread(threadId: string): string[] {
+    return (this.db.prepare(
+      'SELECT id FROM memories WHERE source_thread_id = ?',
+    ).all(threadId) as Array<{ id: string }>).map(r => r.id);
+  }
+
+  /**
    * Purge all knowledge extracted from a specific thread.
    * Uses subqueries instead of IN-list placeholders to avoid SQLite's 999-param limit.
    * Deletes memories, orphaned entities (reference-counted), and their relations.

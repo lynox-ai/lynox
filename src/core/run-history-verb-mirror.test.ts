@@ -765,7 +765,8 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     `);
     raw.close();
 
-    // Open via RunHistory → _migrate runs v44 (only, since schema_version=43).
+    // Open via RunHistory → _migrate runs every migration after 43 (v44 teardown,
+    // then v45 metrics relocation), so the schema lands on the latest version.
     const history = new RunHistory(path);
     const db = history.getDb();
 
@@ -776,8 +777,11 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     const ids = (db.prepare('SELECT id FROM pipeline_runs ORDER BY id').all() as Array<{ id: string }>)
       .map(r => r.id);
     expect(ids).toEqual(['p-done', 'p-failed', 'p-run']);
-    // version bumped to 44:
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(44);
+    // migrated forward through the latest version (v45 metrics table added in S5b'-c):
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(45);
+    // v45 landed the relocated metrics table:
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
+      .toEqual({ name: 'metrics' });
 
     history.close();
   });
