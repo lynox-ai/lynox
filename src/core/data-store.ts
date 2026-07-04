@@ -69,6 +69,22 @@ const VALID_AGG_FNS = new Set<DataStoreAggFn>([
 
 // === DataStore ===
 
+/**
+ * One row in a subject's cross-collection record footprint (Record-on-spine R2b).
+ * `occurredAt` is the collection's `occurred_at`-marked date (the true event time)
+ * when `occurredAtIsEventTime` is true, else the `_created_at` insert-time fallback.
+ * `matchedColumns` names the subject column(s) that linked the row (e.g. `client`
+ * vs `vendor` on an invoice). `row` is the raw stored row (subject cells stay ids —
+ * display-name hydration is the caller's concern).
+ */
+export interface SubjectRecordOccurrence {
+  collection: string;
+  occurredAt: string | null;
+  occurredAtIsEventTime: boolean;
+  matchedColumns: string[];
+  row: Record<string, unknown>;
+}
+
 export class DataStore {
   private db: Database.Database;
 
@@ -447,6 +463,85 @@ export class DataStore {
     if (subjectCols.size > 0) this._hydrateSubjectNames(rows, subjectCols);
 
     return { rows, total: countResult.cnt };
+  }
+
+  /**
+   * Record-on-spine R2b — the cross-DB read half of a subject's footprint. Gather
+   * EVERY row, across every collection, that links `subjectId` through a
+   * `subject`-typed column, each projected with its occurrence time: the
+   * collection's `occurred_at`-marked date column (R2a), or `_created_at` as the
+   * insert-time fallback when a collection declared none. Each collection's lookup
+   * uses the R2a per-subject index (`idx_<len>_<coll>_<col>_subj`); results are
+   * merge-sorted newest-first across collections and capped at `limit` (`truncated`
+   * signals more exist — an honest partial, never a silent cut).
+   *
+   * id-keyed: the caller resolves a name → a subject_id ONCE (canonical + alias)
+   * before calling. Rows written flag-OFF hold raw NAMES, not ids, so they simply
+   * don't match a UUID — correct, not a bug. A single OR-query per collection folds
+   * a row that links the subject through two columns into ONE occurrence (no dupes).
+   */
+  getRecordsForSubject(
+    subjectId: string,
+    opts?: { limit?: number | undefined },
+  ): { occurrences: SubjectRecordOccurrence[]; truncated: boolean } {
+    const limit = Math.max(1, Math.min(opts?.limit ?? 50, 500));
+    const collections = this.db
+      .prepare('SELECT name, schema_json FROM ds_collections')
+      .all() as Array<{ name: string; schema_json: string }>;
+
+    const out: SubjectRecordOccurrence[] = [];
+    let perCollectionCapped = false;
+
+    for (const c of collections) {
+      const columns = JSON.parse(c.schema_json) as DataStoreColumnDef[];
+      const subjectCols = columns.filter(col => col.type === 'subject').map(col => col.name);
+      if (subjectCols.length === 0) continue;
+
+      const occurredAtCol = columns.find(col => col.role === 'occurred_at')?.name ?? null;
+      // occurredAtCol / subjectCols / name all come from the stored schema — every
+      // one has passed VALID_COLUMN_NAME_RE / COLLECTION_NAME_RE, so interpolating
+      // them is SQL-safe (the same invariant the ukey + subject indexes rely on).
+      // The subject id is a bound param. NULLIF(…, '') mirrors the JS projection
+      // below (which treats an empty-string date as absent) so the ORDER BY + cap
+      // rank a blank occurred_at by its `_created_at`, not as the oldest row.
+      const timeExpr = occurredAtCol
+        ? `COALESCE(NULLIF("${occurredAtCol}", ''), "_created_at")`
+        : '"_created_at"';
+      const whereOr = subjectCols.map(col => `"${col}" = ?`).join(' OR ');
+      const tableName = `ds_${c.name}`;
+
+      // Identifiers (tableName / column names in whereOr / timeExpr) are all
+      // schema-validated; the subject id + limit are bound params. Built as a const
+      // (not inlined into .prepare) to match the file's parameterized-query pattern.
+      const selectSql = `SELECT * FROM "${tableName}" WHERE ${whereOr} ORDER BY ${timeExpr} DESC LIMIT ?`;
+      const rows = this.db
+        .prepare(selectSql)
+        .all(...subjectCols.map(() => subjectId), limit + 1) as Record<string, unknown>[];
+
+      if (rows.length > limit) {
+        perCollectionCapped = true;
+        rows.pop(); // drop the +1 probe row
+      }
+
+      for (const row of rows) {
+        const matchedColumns = subjectCols.filter(col => row[col] === subjectId);
+        const rawOccurred = occurredAtCol ? row[occurredAtCol] : null;
+        const occurredAt = typeof rawOccurred === 'string' && rawOccurred !== '' ? rawOccurred : null;
+        const createdAt = typeof row['_created_at'] === 'string' ? row['_created_at'] : null;
+        out.push({
+          collection: c.name,
+          occurredAt: occurredAt ?? createdAt,
+          occurredAtIsEventTime: occurredAt !== null,
+          matchedColumns,
+          row,
+        });
+      }
+    }
+
+    // Global merge-sort newest-first; a null occurrence time sorts last.
+    out.sort((a, b) => (b.occurredAt ?? '').localeCompare(a.occurredAt ?? ''));
+    const truncated = perCollectionCapped || out.length > limit;
+    return { occurrences: out.slice(0, limit), truncated };
   }
 
   // === Collection Info ===

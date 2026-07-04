@@ -399,6 +399,20 @@ export class TaskStore {
     return rows.map(taskDbRowToRecord);
   }
 
+  /**
+   * Record-on-spine R2b: tasks assigned to a subject, resolved id-DIRECTLY (the
+   * footprint reader already holds the subject_id — no name round-trip). Uses
+   * `idx_tasks_assignee`; most-recently-updated first. Tasks are an ADJACENT
+   * (future-tense `due_date`) footprint section, not part of the occurrence timeline.
+   */
+  listBySubjectId(subjectId: string, limit = 50): TaskRecord[] {
+    const safeLimit = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      `${TASK_RECORD_SELECT} WHERE t.assignee_subject_id = ? ORDER BY t.updated_at DESC LIMIT ?`,
+    ).all(subjectId, safeLimit) as TaskRecordDbRow[];
+    return rows.map(taskDbRowToRecord);
+  }
+
   /** {@link persistence.getTasksDueInRange} equivalent. */
   dueInRange(start: string, end: string, scopes?: Array<{ type: string; id: string }> | undefined): TaskRecord[] {
     const where: string[] = ["t.due_date >= ? AND t.due_date <= ? AND t.status != 'completed'"];

@@ -316,3 +316,19 @@ describe('ThreadStore — anchor (Context-Hierarchy Scoping Slice A)', () => {
     expect(t?.title).toBe('renamed');
   });
 });
+
+describe('ThreadStore.listBySubjectId (R2b subject footprint)', () => {
+  it('returns threads anchored to a subject, newest activity first; others excluded', () => {
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    // Direct seed with explicit updated_at so the recency order is deterministic.
+    const ins = db.prepare('INSERT INTO threads (id, primary_subject_id, updated_at) VALUES (?, ?, ?)');
+    ins.run('th-old', 's-acme', '2026-01-01');
+    ins.run('th-new', 's-acme', '2026-05-01');
+    ins.run('th-other', 's-beta', '2026-09-01');
+    expect(store.listBySubjectId('s-acme').map(t => t.id)).toEqual(['th-new', 'th-old']);
+    expect(store.listBySubjectId('s-beta').map(t => t.id)).toEqual(['th-other']);
+    expect(store.listBySubjectId('s-none')).toEqual([]);
+    db.close();
+  });
+});

@@ -1550,4 +1550,162 @@ describe('DataStore', () => {
       );
     });
   });
+
+  // === R2b: cross-collection subject footprint (getRecordsForSubject) ===
+  describe('getRecordsForSubject — R2b subject footprint', () => {
+    // No bridge wired (the default) → a `subject` column stores the raw string, so we
+    // seed the subject_id directly and read it back by id. getRecordsForSubject is
+    // id-keyed and bridge-agnostic (it queries the stored value), so this exercises
+    // the real cross-collection gather + occurred_at projection without engine.db.
+    const ACME = 'subj-acme';
+    const OTHER = 'subj-other';
+
+    it('gathers rows across collections, newest occurred_at first, with event-time provenance', () => {
+      ds.createCollection({
+        name: 'invoices', scope,
+        columns: [
+          { name: 'amount', type: 'number' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+          { name: 'invoice_date', type: 'date', role: 'occurred_at' },
+        ],
+      });
+      ds.createCollection({
+        name: 'meetings', scope,
+        columns: [
+          { name: 'topic', type: 'string' },
+          { name: 'org', type: 'subject', subjectKind: 'organization' },
+          { name: 'met_on', type: 'date', role: 'occurred_at' },
+        ],
+      });
+      ds.insertRecords({ collection: 'invoices', records: [
+        { amount: 100, client: ACME, invoice_date: '2026-01-10' },
+        { amount: 200, client: ACME, invoice_date: '2026-03-15' },
+        { amount: 999, client: OTHER, invoice_date: '2026-06-01' }, // different subject
+      ] });
+      ds.insertRecords({ collection: 'meetings', records: [
+        { topic: 'kickoff', org: ACME, met_on: '2026-02-20' },
+      ] });
+
+      const { occurrences, truncated } = ds.getRecordsForSubject(ACME);
+      expect(truncated).toBe(false);
+      expect(occurrences.map(o => o.occurredAt)).toEqual(['2026-03-15', '2026-02-20', '2026-01-10']);
+      expect(occurrences.map(o => o.collection)).toEqual(['invoices', 'meetings', 'invoices']);
+      expect(occurrences.every(o => o.occurredAtIsEventTime)).toBe(true);
+      expect(occurrences.some(o => o.row['amount'] === 999)).toBe(false); // OTHER excluded
+      expect(occurrences[0]!.matchedColumns).toEqual(['client']);
+    });
+
+    it('falls back to _created_at when a collection declares no occurred_at (flagged not event-time)', () => {
+      ds.createCollection({
+        name: 'notes', scope,
+        columns: [
+          { name: 'body', type: 'string' },
+          { name: 'about', type: 'subject', subjectKind: 'organization' },
+        ],
+      });
+      ds.insertRecords({ collection: 'notes', records: [{ body: 'hi', about: ACME }] });
+      const { occurrences } = ds.getRecordsForSubject(ACME);
+      expect(occurrences).toHaveLength(1);
+      expect(occurrences[0]!.occurredAtIsEventTime).toBe(false);
+      // the fallback is the insert timestamp (an ISO string), never null/empty
+      expect(typeof occurrences[0]!.occurredAt).toBe('string');
+      expect(occurrences[0]!.occurredAt).not.toBe('');
+    });
+
+    it('folds a row linking the subject through two columns into ONE occurrence (both matched)', () => {
+      ds.createCollection({
+        name: 'transfers', scope,
+        columns: [
+          { name: 'sender', type: 'subject', subjectKind: 'organization' },
+          { name: 'receiver', type: 'subject', subjectKind: 'organization' },
+          { name: 'moved_on', type: 'date', role: 'occurred_at' },
+        ],
+      });
+      ds.insertRecords({ collection: 'transfers', records: [
+        { sender: ACME, receiver: ACME, moved_on: '2026-05-05' },   // intra-org — one row
+        { sender: ACME, receiver: OTHER, moved_on: '2026-04-04' },
+      ] });
+      const { occurrences } = ds.getRecordsForSubject(ACME);
+      expect(occurrences).toHaveLength(2); // NOT 3 — the both-columns row is one occurrence
+      const both = occurrences.find(o => o.occurredAt === '2026-05-05')!;
+      expect(both.matchedColumns.slice().sort()).toEqual(['receiver', 'sender']);
+      const one = occurrences.find(o => o.occurredAt === '2026-04-04')!;
+      expect(one.matchedColumns).toEqual(['sender']);
+    });
+
+    it('skips collections with no subject column and returns empty for an unknown subject', () => {
+      ds.createCollection({ name: 'plain', scope, columns: [{ name: 'x', type: 'string' }] });
+      ds.insertRecords({ collection: 'plain', records: [{ x: 'a' }] });
+      ds.createCollection({ name: 'linked', scope, columns: [
+        { name: 'y', type: 'string' }, { name: 'who', type: 'subject', subjectKind: 'person' },
+      ] });
+      ds.insertRecords({ collection: 'linked', records: [{ y: 'b', who: ACME }] });
+      expect(ds.getRecordsForSubject(ACME).occurrences).toHaveLength(1);
+      expect(ds.getRecordsForSubject('subj-nobody').occurrences).toHaveLength(0);
+    });
+
+    it('caps at limit (newest kept) and reports truncated when more rows exist', () => {
+      ds.createCollection({ name: 'events', scope, columns: [
+        { name: 'seq', type: 'number' },
+        { name: 'org', type: 'subject', subjectKind: 'organization' },
+        { name: 'on_date', type: 'date', role: 'occurred_at' },
+      ] });
+      ds.insertRecords({ collection: 'events', records: Array.from({ length: 5 }, (_, i) => ({
+        seq: i, org: ACME, on_date: `2026-01-0${String(i + 1)}`,
+      })) });
+      const { occurrences, truncated } = ds.getRecordsForSubject(ACME, { limit: 3 });
+      expect(occurrences).toHaveLength(3);
+      expect(truncated).toBe(true);
+      expect(occurrences.map(o => o.occurredAt)).toEqual(['2026-01-05', '2026-01-04', '2026-01-03']);
+    });
+
+    it('reports truncated when the SUM across collections exceeds limit (global cap, no single collection over)', () => {
+      ds.createCollection({ name: 'ca', scope, columns: [
+        { name: 'org', type: 'subject', subjectKind: 'organization' },
+        { name: 'd', type: 'date', role: 'occurred_at' },
+      ] });
+      ds.createCollection({ name: 'cb', scope, columns: [
+        { name: 'org', type: 'subject', subjectKind: 'organization' },
+        { name: 'd', type: 'date', role: 'occurred_at' },
+      ] });
+      // 2 rows in each collection: neither alone exceeds limit 3, but 4 total does.
+      ds.insertRecords({ collection: 'ca', records: [
+        { org: ACME, d: '2026-01-01' }, { org: ACME, d: '2026-01-03' },
+      ] });
+      ds.insertRecords({ collection: 'cb', records: [
+        { org: ACME, d: '2026-01-02' }, { org: ACME, d: '2026-01-04' },
+      ] });
+      const { occurrences, truncated } = ds.getRecordsForSubject(ACME, { limit: 3 });
+      expect(occurrences).toHaveLength(3);
+      expect(truncated).toBe(true); // the `out.length > limit` branch, not per-collection
+      expect(occurrences.map(o => o.occurredAt)).toEqual(['2026-01-04', '2026-01-03', '2026-01-02']);
+    });
+
+    it('re-times an empty/absent occurred_at value by _created_at (not treated as oldest by SQL or JS)', () => {
+      ds.createCollection({
+        name: 'dated', scope,
+        columns: [
+          { name: 'label', type: 'string' },
+          { name: 'client', type: 'subject', subjectKind: 'organization' },
+          { name: 'happened', type: 'date', role: 'occurred_at' },
+        ],
+      });
+      ds.insertRecords({ collection: 'dated', records: [
+        { label: 'real_old', client: ACME, happened: '2020-01-01' }, // the only true event time
+        { label: 'empty', client: ACME, happened: '' },              // '' → fallback, NOT epoch-old
+        { label: 'absent', client: ACME },                            // null → fallback
+      ] });
+      const { occurrences } = ds.getRecordsForSubject(ACME);
+      expect(occurrences).toHaveLength(3);
+      // the 2020 row is the genuine oldest → sorts LAST; empty/absent get the recent
+      // insert timestamp (the SQL NULLIF + JS guard agree), so they are NOT below it.
+      expect(occurrences[occurrences.length - 1]!.row['label']).toBe('real_old');
+      const byLabel = new Map(occurrences.map(o => [String(o.row['label']), o]));
+      expect(byLabel.get('real_old')!.occurredAtIsEventTime).toBe(true);
+      expect(byLabel.get('empty')!.occurredAtIsEventTime).toBe(false);
+      expect(byLabel.get('absent')!.occurredAtIsEventTime).toBe(false);
+      expect(byLabel.get('empty')!.occurredAt).not.toBe('');
+      expect(byLabel.get('empty')!.occurredAt).not.toBeNull();
+    });
+  });
 });
