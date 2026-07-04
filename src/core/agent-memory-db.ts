@@ -577,6 +577,18 @@ export class AgentMemoryDb {
     return row?.created_at;
   }
 
+  /**
+   * Read just a memory's `source_thread_id` (the thread it was written in) — the
+   * Context-Hierarchy-Scoping re-extraction path (updateMemoryText) resolves that
+   * thread's anchor so a text correction keeps the memory's project/client primary
+   * subject instead of reverting it to the extraction heuristic. Lean projection
+   * (no `SELECT *` blob materialization), mirroring {@link getMemoryCreatedAt}.
+   */
+  getMemorySourceThread(id: string): string | undefined {
+    const row = this.db.prepare('SELECT source_thread_id FROM memories WHERE id = ?').get(id) as { source_thread_id: string | null } | undefined;
+    return row?.source_thread_id ?? undefined;
+  }
+
   supersedMemory(memoryId: string, supersededById: string): void {
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = ? WHERE id = ?
