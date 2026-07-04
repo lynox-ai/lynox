@@ -441,7 +441,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'subjects.load_more': { de: 'Mehr laden', en: 'Load more' },
 	'subjects.empty_footprint': { de: 'Noch keine Aktivität zu diesem Subjekt.', en: 'No activity for this subject yet.' },
 	'subjects.timeline': { de: 'Verlauf', en: 'Timeline' },
-	'subjects.memories': { de: 'Gedächtnis', en: 'Memories' },
+	'subjects.memories': { de: 'Erinnerungen', en: 'Memories' },
 	'subjects.tasks': { de: 'Aufgaben', en: 'Tasks' },
 	'subjects.thread': { de: 'Unterhaltung', en: 'Conversation' },
 	'subjects.untitled_thread': { de: 'Unbenannte Unterhaltung', en: 'Untitled conversation' },

@@ -1959,6 +1959,8 @@ describe('LynoxHTTPApi', () => {
       // Dark gates: false until PRD-MCP / PRD-CAL backends land
       expect(caps['has_mcp_support']).toBe(false);
       expect(caps['has_calendar']).toBe(false);
+      // R2b subject-graph surface: false when the store is absent (flag off — default mock)
+      expect(caps['has_subject_graph']).toBe(false);
       // Self-host hard_limits = full payload from getHardLimits(); assert all 8 keys
       const hl = caps['hard_limits'] as Record<string, unknown>;
       expect(Object.keys(hl).sort()).toEqual([
@@ -2691,6 +2693,35 @@ describe('LynoxHTTPApi', () => {
         expect(await res.json()).toEqual(footprint);
         expect(captured[0]![0]).toBe('s1');
         expect(captured[0]![1]).toEqual({ limit: 10 });
+      });
+    });
+
+    it('GET /api/subjects paginates via offset/limit and reports the FULL total', async () => {
+      const rows = Array.from({ length: 5 }, (_, i) => ({ id: `s${String(i)}`, kind: 'person', name: `N${String(i)}`, aliases: '[]', embedding: null, owner_user_id: 'u1' }));
+      await swapEngine({ getSubjectStore: () => ({ listSubjects: () => rows }) }, async () => {
+        const res = await jsonFetch('/api/subjects?limit=2&offset=2');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { subjects: Array<{ id: string }>; total: number };
+        expect(body.subjects.map(s => s.id)).toEqual(['s2', 's3']); // the middle page
+        expect(body.total).toBe(5); // full count, not the page size
+      });
+    });
+
+    it('GET /api/subjects/:id/footprint clamps the limit param (500→200, abc→50)', async () => {
+      const captured: unknown[][] = [];
+      const footprint = {
+        subject: { id: 's1', kind: 'person', name: 'A' },
+        timeline: [], memories: [], tasks: [],
+        truncated: { records: false, threads: false, memories: false, tasks: false },
+      };
+      await swapEngine({
+        getSubjectStore: () => ({ listSubjects: () => [] }),
+        getSubjectFootprint: (...args: unknown[]) => { captured.push(args); return footprint; },
+      }, async () => {
+        await jsonFetch('/api/subjects/s1/footprint?limit=500');
+        await jsonFetch('/api/subjects/s1/footprint?limit=abc');
+        expect(captured[0]![1]).toEqual({ limit: 200 }); // over-cap clamped
+        expect(captured[1]![1]).toEqual({ limit: 50 });   // NaN → default
       });
     });
   });

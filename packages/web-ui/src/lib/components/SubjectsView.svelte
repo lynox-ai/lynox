@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
@@ -97,7 +98,11 @@
 		selected = s;
 		footprint = null;
 		footprintLoading = true;
-		footprint = await fetchSubjectFootprint(getApiBase(), s.id);
+		const fp = await fetchSubjectFootprint(getApiBase(), s.id);
+		// Drop a stale result: if the user picked another subject while this fetch
+		// was in flight, the newer selection owns `footprint`/`footprintLoading`.
+		if (selected?.id !== s.id) return;
+		footprint = fp;
 		footprintLoading = false;
 	}
 
@@ -116,7 +121,10 @@
 		return fmtDate(entry.occurredAt);
 	}
 
-	$effect(() => { loadSubjects(); });
+	// Initial load only. `untrack` so the mount effect does NOT track `query`
+	// (loadSubjects reads it synchronously) — otherwise every keystroke would
+	// re-fetch. Search is manual: Enter → handleSearch; load-more → loadSubjects(true).
+	$effect(() => { untrack(() => { void loadSubjects(); }); });
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
