@@ -361,6 +361,10 @@ export class TaskStore {
 
   /** {@link persistence.getTask} equivalent: exact-or-prefix id + optional scope filter. */
   getRecord(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
+    // An empty id makes `likePrefix('')` = `'%'`, which LIKE-matches every row —
+    // returning an arbitrary task across all scopes. Guard it like the sibling
+    // stores (workflow-store, trigger-store.getById) do.
+    if (id === '') return undefined;
     const where: string[] = ["(t.id = ? OR t.id LIKE ? ESCAPE '\\')"];
     const params: unknown[] = [id, likePrefix(id)];
     if (opts?.scopeFilter && opts.scopeFilter.length > 0) {

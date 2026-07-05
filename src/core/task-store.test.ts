@@ -405,6 +405,10 @@ describe('TaskStore S4a — assignee↔subject resolution + record reads', () =>
     // returned an arbitrary task; escaped, no id begins with a literal `%`.
     expect(store.getRecord('%')).toBeUndefined();
 
+    // Adversarial: an empty id makes `likePrefix('')` = `'%'` (matches all rows) —
+    // the guard must short-circuit to undefined, not return an arbitrary task.
+    expect(store.getRecord('')).toBeUndefined();
+
     // Regression: a legitimate literal prefix (including the `_` char) still hits.
     expect(store.getRecord('job_9')?.id).toBe('job_99');
   });
