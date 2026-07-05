@@ -4793,9 +4793,17 @@ export class LynoxHTTPApi {
           // so this branch is skipped for it. Non-fatal: reportMeteredCost
           // swallows hook errors, so billing never breaks the response.
           const { estimateAudioSecondsFromBytes } = await import('../core/audio-duration.js');
+          // `durationSec` (ffprobe) is the accurate basis and is never clamped.
+          // The byte estimate assumes the browser's ~48 kbps Opus; a much denser
+          // upload (e.g. WAV/PCM) whose ffprobe ALSO fails would over-estimate
+          // duration several-fold. Cap the FALLBACK to a sane ceiling so it can
+          // never over-bill by orders of magnitude — it still never prices a
+          // non-empty recording at $0. A genuinely long recording measured by
+          // ffprobe is unaffected; only the unmeasurable fallback is bounded.
+          const MAX_STT_FALLBACK_SEC = 600;
           const billedSec = durationSec !== null && durationSec > 0
             ? durationSec
-            : estimateAudioSecondsFromBytes(buffer.length);
+            : Math.min(estimateAudioSecondsFromBytes(buffer.length), MAX_STT_FALLBACK_SEC);
           reportMeteredCost(engine, sttGate.runId, (billedSec / 60) * VOXTRAL_USD_PER_MIN, 'fast');
         }
         try {
