@@ -40,6 +40,7 @@ import { ChangesetManager } from './changeset.js';
 import {
   ToolResultBlobStore,
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
+  evictImagesFrom,
 } from './tool-result-blob-store.js';
 import { isWorkspaceActive } from './workspace.js';
 import { checkPersistentBudget } from './session-budget.js';
@@ -1162,10 +1163,16 @@ export class Session {
       .entries()
       .map(({ id, blob }) => ({ id, descriptor: blob.descriptor }));
 
+    // #4 big-image preserve: collect the most-recent user image(s) BEFORE the
+    // reset so they can be re-attached inline in the post-compaction seed (a
+    // user image can't ride the string-only recall channel). Bounded by count +
+    // byte cap; empty for the common no-image thread (zero behaviour change).
+    const carriedImages = evictImagesFrom(preCompactionMessages);
+
     this.reset();
     if (summary) {
       this.loadMessages(
-        buildPostCompactionMessages(summary, handles, { confirmScope: opts?.confirmScope }),
+        buildPostCompactionMessages(summary, handles, { confirmScope: opts?.confirmScope, carriedImages }),
       );
       // Persist the visible marker for BOTH paths (auto + manual /compact) so a
       // user-triggered compaction is just as transparent on reload/export as an

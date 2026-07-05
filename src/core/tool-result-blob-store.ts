@@ -2,6 +2,7 @@ import type {
   BetaMessageParam,
   BetaToolResultBlockParam,
   BetaToolUseBlockParam,
+  BetaImageBlockParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 /**
@@ -35,6 +36,23 @@ export const DEFAULT_BLOB_STORE_MAX_ENTRIES = 128;
  * frequent compaction retains more tool-result payload that must stay recallable.
  */
 export const DEFAULT_BLOB_STORE_MAX_BYTES = 16 * 1_024 * 1_024;
+
+/**
+ * Default number of recent user images carried across a compaction (re-attached
+ * inline in the post-compaction seed). K=2 keeps the most-recent view(s) the
+ * agent is likely still working with, without re-sending the whole image
+ * history every turn. See `evictImagesFrom`.
+ */
+export const DEFAULT_CARRIED_IMAGE_COUNT = 2;
+
+/**
+ * Default byte cap (base64 chars) on the total carried-image payload. A carried
+ * image is re-attached inline into the post-compaction seed, so it rides the
+ * re-sent context every subsequent turn — bound it so a couple of huge uploads
+ * can't balloon the post-summary prompt. ~10 MB comfortably holds one or two
+ * typical screenshots; older images beyond the cap are dropped (drop-oldest).
+ */
+export const DEFAULT_CARRIED_IMAGE_MAX_BYTES = 10 * 1_024 * 1_024;
 
 /** One retained tool result, keyed by a short stable id in the blob store. */
 export interface ToolResultBlob {
@@ -213,4 +231,56 @@ export class ToolResultBlobStore {
     }
     return handles;
   }
+}
+
+/**
+ * Collect the most-recent user `image` blocks so they can be re-attached inline
+ * across a compaction (the storage sibling of `evictFrom`, but for images).
+ *
+ * Unlike tool results, a user image is irreplaceable and cannot be "recalled"
+ * through the string-only tool_result channel — so instead of storing a handle,
+ * `Session.compact()` re-attaches the returned blocks inline in the
+ * post-compaction seed (`buildPostCompactionMessages`). Inline re-attachment
+ * means the carried image persists through `content_json` and survives a reload
+ * for free, with no durable image store.
+ *
+ * Read-only with respect to `messages`. Returns at most `maxImages` blocks in
+ * chronological order (oldest → newest), bounded by `maxBytes` of total base64
+ * payload — walking newest→oldest and stopping once either cap would be
+ * exceeded, i.e. keep the most-recent, drop the oldest above the cap. Only
+ * inline base64 images are eligible (a `url`/`file` source carries no bytes to
+ * preserve). tool_result and text blocks are ignored; string-content user
+ * messages (no blocks) are tolerated.
+ */
+export function evictImagesFrom(
+  messages: readonly BetaMessageParam[],
+  opts: { maxImages?: number; maxBytes?: number } = {},
+): BetaImageBlockParam[] {
+  const maxImages = opts.maxImages ?? DEFAULT_CARRIED_IMAGE_COUNT;
+  const maxBytes = opts.maxBytes ?? DEFAULT_CARRIED_IMAGE_MAX_BYTES;
+
+  // Every inline base64 user image, in chronological order.
+  const all: BetaImageBlockParam[] = [];
+  for (const msg of messages) {
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === 'image' && block.source.type === 'base64') {
+        all.push(block);
+      }
+    }
+  }
+
+  // Keep the most-recent up to `maxImages`, honouring the byte cap (drop-oldest).
+  const kept: BetaImageBlockParam[] = [];
+  let bytes = 0;
+  for (let i = all.length - 1; i >= 0; i--) {
+    const block = all[i]!;
+    if (kept.length >= maxImages) break;
+    const size = block.source.type === 'base64' ? block.source.data.length : 0;
+    if (bytes + size > maxBytes) break;
+    kept.push(block);
+    bytes += size;
+  }
+  kept.reverse(); // restore chronological order (oldest → newest)
+  return kept;
 }

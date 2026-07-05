@@ -3,7 +3,11 @@
 // shape — summary, recall-handle descriptors, and the optional scope-confirm
 // steer — is unit-testable without driving a real summary run.
 
-import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type {
+  BetaMessageParam,
+  BetaImageBlockParam,
+  BetaContentBlockParam,
+} from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 /** A large tool result evicted into the blob store, re-fetchable until the
  *  next compaction. */
@@ -18,6 +22,12 @@ export interface PostCompactionOpts {
    *  mid-task, unprompted) so the agent doesn't silently rebuild from a lossy
    *  summary. Not set for an explicit user `/compact` (the user initiated it). */
   confirmScope?: boolean | undefined;
+  /** Recent user image blocks preserved across the compaction. A user image
+   *  cannot be recalled through the string-only tool_result channel, so instead
+   *  of a handle we re-attach the blocks INLINE (as a real user image message)
+   *  in the post-compaction seed — the agent can still see them, and they
+   *  persist through `content_json` so they survive a reload for free. */
+  carriedImages?: BetaImageBlockParam[] | undefined;
 }
 
 export function buildPostCompactionMessages(
@@ -40,6 +50,24 @@ export function buildPostCompactionMessages(
     },
     { role: 'assistant', content: 'Understood — I have the summary above as the faithful record of our conversation so far and will continue from there.' },
   ];
+
+  // #4 big-image preserve: re-attach the most-recent user image(s) INLINE so the
+  // agent can still see (and work with) what the user showed before the summary.
+  // A user image can't ride the string-only recall channel, but the image block
+  // is the already-supported shape — re-attaching it as a real user message keeps
+  // role alternation valid and persists it in the post-compaction seed (survives
+  // reload). Prepend a text label so the block(s) read as a deliberate carry-over.
+  const carriedImages = opts.carriedImages ?? [];
+  if (carriedImages.length > 0) {
+    const imageContent: BetaContentBlockParam[] = [
+      { type: 'text', text: '[Images carried across the summary — still visible below]' },
+      ...carriedImages,
+    ];
+    messages.push(
+      { role: 'user', content: imageContent },
+      { role: 'assistant', content: `Noted — I can still see the ${carriedImages.length} image(s) above.` },
+    );
+  }
 
   // D2 stub-with-a-handle: tell the agent which large tool results from before
   // the summary are still re-fetchable, one descriptor per id.

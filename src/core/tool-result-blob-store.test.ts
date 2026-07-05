@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type {
+  BetaMessageParam,
+  BetaImageBlockParam,
+} from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import {
   ToolResultBlobStore,
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
+  evictImagesFrom,
+  DEFAULT_CARRIED_IMAGE_COUNT,
 } from './tool-result-blob-store.js';
 
 const T = DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
@@ -233,5 +238,85 @@ describe('ToolResultBlobStore — carry-forward across compactions (W5)', () => 
     store.clear();
     expect(store.bytes).toBe(0);
     expect(store.size).toBe(0);
+  });
+});
+
+/** A user message carrying one inline base64 image (+ optional leading text). */
+function imgMsg(data: string, text = 'screenshot'): BetaMessageParam {
+  return {
+    role: 'user',
+    content: [
+      { type: 'text', text },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+    ],
+  };
+}
+
+/** The base64 payload of a returned image block (typesafe over the source union). */
+function dataOf(block: BetaImageBlockParam): string {
+  return block.source.type === 'base64' ? block.source.data : '';
+}
+
+describe('evictImagesFrom (#4 big-image preserve)', () => {
+  it('exposes a default carried-image count of 2', () => {
+    expect(DEFAULT_CARRIED_IMAGE_COUNT).toBe(2);
+  });
+
+  it('returns the most-recent K (default 2) user images in chronological order', () => {
+    const kept = evictImagesFrom([imgMsg('one'), imgMsg('two'), imgMsg('three')]);
+    expect(kept.map(dataOf)).toEqual(['two', 'three']);
+  });
+
+  it('honors a custom maxImages', () => {
+    const kept = evictImagesFrom([imgMsg('a'), imgMsg('b'), imgMsg('c')], { maxImages: 1 });
+    expect(kept.map(dataOf)).toEqual(['c']);
+  });
+
+  it('keeps every image whose cumulative size is below the byte cap', () => {
+    const kept = evictImagesFrom([imgMsg('x'.repeat(5)), imgMsg('y'.repeat(5))], { maxImages: 5, maxBytes: 1_000 });
+    expect(kept).toHaveLength(2);
+  });
+
+  it('drops the OLDEST image once the byte cap is exceeded (keep most-recent)', () => {
+    // three 10-byte images, cap 25 → the two newest fit (20 ≤ 25), the oldest is dropped.
+    const kept = evictImagesFrom(
+      [imgMsg('x'.repeat(10)), imgMsg('y'.repeat(10)), imgMsg('z'.repeat(10))],
+      { maxImages: 5, maxBytes: 25 },
+    );
+    expect(kept.map(dataOf)).toEqual(['y'.repeat(10), 'z'.repeat(10)]);
+  });
+
+  it('ignores tool_result and text blocks, and tolerates string-content user messages', () => {
+    const messages: BetaMessageParam[] = [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu-1', content: 'x'.repeat(9_000) }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'noted' }] },
+      { role: 'user', content: 'a plain string turn' },
+      imgMsg('the-real-image'),
+    ];
+    const kept = evictImagesFrom(messages);
+    expect(kept).toHaveLength(1);
+    expect(dataOf(kept[0]!)).toBe('the-real-image');
+  });
+
+  it('ignores non-base64 (url) image sources — nothing to preserve inline', () => {
+    const messages: BetaMessageParam[] = [
+      { role: 'user', content: [{ type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }] },
+    ];
+    expect(evictImagesFrom(messages)).toHaveLength(0);
+  });
+
+  it('only carries USER images (assistant-produced images are ignored)', () => {
+    const messages: BetaMessageParam[] = [
+      { role: 'assistant', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'z' } }] },
+    ];
+    expect(evictImagesFrom(messages)).toHaveLength(0);
+  });
+
+  it('returns empty for an image-free history (the common no-op case)', () => {
+    const messages: BetaMessageParam[] = [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ];
+    expect(evictImagesFrom(messages)).toHaveLength(0);
   });
 });

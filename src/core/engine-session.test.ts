@@ -341,6 +341,7 @@ vi.mock('./run-history.js', () => ({
 import { Engine } from './engine.js';
 import { Session, InternalRunBlockedError } from './session.js';
 import { Agent } from './agent.js';
+import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Memory } from './memory.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
@@ -467,6 +468,35 @@ describe('Engine + Session (Orchestrator)', () => {
           summaryChars: 'summary text'.length,
         }),
       );
+    });
+
+    it('#4: preserves the most-recent user image across a compaction (re-attached inline)', async () => {
+      const { session } = await createEngineAndSession();
+      const imageBlock = {
+        type: 'image' as const,
+        source: { type: 'base64' as const, media_type: 'image/png' as const, data: 'IMG'.repeat(1_024) },
+      };
+      // Pre-compaction history (what saveMessages()/getMessages() returns): a
+      // user image, an assistant reply, then a follow-up.
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: [{ type: 'text', text: 'here is a screenshot' }, imageBlock] },
+        { role: 'assistant', content: 'I see the dashboard screenshot.' },
+        { role: 'user', content: 'summarize please' },
+      ]);
+      mockSend.mockResolvedValueOnce('summary text'); // the internal summary run
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      // The post-compaction seed handed to the (mocked) agent must carry the
+      // summary AND the image, re-attached inline — proving the compact() wiring.
+      expect(mockLoadMessages).toHaveBeenCalled();
+      const seed = mockLoadMessages.mock.calls.at(-1)![0] as BetaMessageParam[];
+      expect(seed.some(m => typeof m.content === 'string' && m.content.includes('summary text'))).toBe(true);
+      const imgMsg = seed.find(
+        m => m.role === 'user' && Array.isArray(m.content) && m.content.some(b => b.type === 'image'),
+      );
+      expect(imgMsg).toBeDefined();
     });
 
     it('session always has an agent after construction', async () => {

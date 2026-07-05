@@ -58,6 +58,38 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 
+/**
+ * Per-image token estimate for occupancy accounting. Anthropic bills vision by
+ * pixels — a standard-resolution image is ~≤1600 tokens after the server-side
+ * auto-resize (grounded via the claude-api vision docs), NOT the ~1.4M "tokens"
+ * a naïve base64 char-count of a ~5 MB blob would imply. Used only to frame the
+ * delta of not-yet-sent messages: once the API reports real usage, the
+ * `_lastRealInputTokens` anchor supersedes this estimate for already-sent turns.
+ */
+export const IMAGE_TOKEN_ESTIMATE = 1600;
+
+/**
+ * Serialized length of a message for occupancy estimation, but with inline
+ * base64 image blocks counted by their pixel-based token-equivalent
+ * (`IMAGE_TOKEN_ESTIMATE`) instead of their raw base64 char length. Without
+ * this an arriving ~5 MB image is char-counted as ~1.4M "tokens" and trips a
+ * premature `_truncateHistory` (85%) / auto-compaction (budget) the instant it
+ * lands — even though the API will bill it at ~1–2k real tokens.
+ */
+export function imageAwareSerializedLen(msg: BetaMessageParam): number {
+  let len = JSON.stringify(msg).length;
+  const content = msg.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block.type === 'image' && block.source.type === 'base64') {
+        // Swap the base64 payload's char length for the pixel token-equivalent.
+        len += -block.source.data.length + IMAGE_TOKEN_ESTIMATE * CHARS_PER_TOKEN;
+      }
+    }
+  }
+  return len;
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   readonly model: string;
@@ -539,12 +571,12 @@ export class Agent implements IAgent {
       // Full recalculation after reset/truncation
       this._runningMsgLen = 0;
       for (const msg of this.messages) {
-        this._runningMsgLen += JSON.stringify(msg).length;
+        this._runningMsgLen += imageAwareSerializedLen(msg);
       }
     } else {
       // Incremental: only serialize newly added messages
       for (let i = this._msgCount; i < this.messages.length; i++) {
-        this._runningMsgLen += JSON.stringify(this.messages[i]).length;
+        this._runningMsgLen += imageAwareSerializedLen(this.messages[i]!);
       }
     }
     this._msgCount = this.messages.length;
@@ -563,7 +595,7 @@ export class Agent implements IAgent {
     if (this._lastRealInputTokens !== undefined && this.messages.length >= this._lastRealAtMsgCount) {
       let deltaLen = 0;
       for (let i = this._lastRealAtMsgCount; i < this.messages.length; i++) {
-        deltaLen += JSON.stringify(this.messages[i]).length;
+        deltaLen += imageAwareSerializedLen(this.messages[i]!);
       }
       // _lastRealInputTokens already includes system + tool overhead.
       return this._lastRealInputTokens + deltaLen / CHARS_PER_TOKEN;
