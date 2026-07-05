@@ -249,8 +249,12 @@ export class ArtifactStore {
       return { ...existing, content: opts.content, overwrite };
     }
 
-    // Create new artifact
-    const id = randomUUID().slice(0, 8);
+    // Create new artifact. If the caller supplied an `id` we couldn't find
+    // above (an intended UPDATE to an artifact missing from the index), honor
+    // that id when it's well-formed instead of minting a fresh random one — so
+    // the save is idempotent: a retry finds + updates THIS artifact rather than
+    // silently forking another divergent duplicate the caller can't open.
+    const id = opts.id && SAFE_ID.test(opts.id) ? opts.id : randomUUID().slice(0, 8);
     const meta: ArtifactMeta = {
       id,
       title: opts.title,

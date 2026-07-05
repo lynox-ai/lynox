@@ -374,6 +374,25 @@
 		return `${fence}artifact\n${header}${body}\n${fence}`;
 	}
 
+	/** Subtle per-message timestamp from the server's persisted `created_at`.
+	 *  Time-of-day for today, "Yesterday HH:MM", else "D Mon HH:MM" — mirrors
+	 *  AppShell's thread-date formatting. Timezone-naive strings are treated as
+	 *  UTC (the server persists UTC without an offset). Returns '' on a bad/absent
+	 *  value so callers can skip rendering. */
+	function formatMessageTime(createdAt: string): string {
+		const parsed = new Date(createdAt.endsWith('Z') || createdAt.includes('+') ? createdAt : createdAt + 'Z');
+		if (Number.isNaN(parsed.getTime())) return '';
+		const now = new Date();
+		const lang = getLocale();
+		const locale = lang === 'de' ? 'de-DE' : 'en-US';
+		const time = parsed.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+		if (parsed.toDateString() === now.toDateString()) return time;
+		const yesterday = new Date(now);
+		yesterday.setDate(yesterday.getDate() - 1);
+		if (parsed.toDateString() === yesterday.toDateString()) return `${lang === 'de' ? 'Gestern' : 'Yesterday'} ${time}`;
+		return `${parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' })} ${time}`;
+	}
+
 	// Precedence for the grouped tool-row status: error wins, running over
 	// done. Encoding it as a numeric rank keeps the rule explicit and makes
 	// the reducer below symmetric ("which member is worst?") rather than a
@@ -1918,6 +1937,15 @@
 	{/if}
 {/snippet}
 
+{#snippet messageTimestamp(createdAt: string | undefined, align: 'left' | 'right')}
+	{#if createdAt}
+		{@const label = formatMessageTime(createdAt)}
+		{#if label}
+			<div class="mt-0.5 text-[10px] text-text-subtle/50 select-none {align === 'right' ? 'text-right pr-1' : ''}">{label}</div>
+		{/if}
+	{/if}
+{/snippet}
+
 {#snippet speakButton(msgKey: string, msgContent: string)}
 	{#if ttsAvailable && !isStreaming}
 		{@const speakState = getSpeakState()}
@@ -2221,6 +2249,7 @@
 							{/if}
 						</button>
 					</div>
+					{@render messageTimestamp(msg.createdAt, 'right')}
 				{:else}
 					<!-- EU AI Act Art. 50 §1: persistent visible disclosure that the
 					     message is AI-generated. data-ai-generated exposes the same
@@ -2357,7 +2386,14 @@
 						{/if}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
-							{@const legacyGroups = groupedToolCalls((msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i })), msg.toolCalls ?? [])}
+							<!-- Legacy (no `blocks`) messages: feed msg.content in as a text
+							     block so groupedToolCalls can (a) surface an artifact_save
+							     card the old path dropped entirely, and (b) still de-dup a
+							     card whose content the agent already fenced inline in that
+							     prose. The prose text group is skipped in the loop below
+							     (it renders once via msg.content). -->
+							{@const legacyBlocks = [...(msg.content ? [{ type: 'text' as const, text: msg.content }] : []), ...(msg.toolCalls ?? []).map((_, i) => ({ type: 'tool_call' as const, index: i }))]}
+							{@const legacyGroups = groupedToolCalls(legacyBlocks, msg.toolCalls ?? [])}
 							{#each legacyGroups as lg}
 								{#if lg.type === 'tools'}
 									{@const lgDef = getToolIcon(lg.toolName)}
@@ -2367,6 +2403,11 @@
 										</svg>
 										<span>{lg.action}{lg.subjects.length > 0 ? ': ' + lg.subjects.join(', ') : ''}</span>
 									</div>
+								{:else if lg.type === 'text' && lg.text !== msg.content}
+									<!-- Artifact card (the only non-prose text group here) the
+									     pre-blocks path used to drop. Prose (=== msg.content)
+									     renders once below, so it's skipped here. -->
+									<MarkdownRenderer content={lg.text} streaming={isStreaming && msgIdx === messages.length - 1} />
 								{/if}
 							{/each}
 							{#if msg.content}
@@ -2375,6 +2416,7 @@
 								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
 							{/if}
 						{/if}
+						{@render messageTimestamp(msg.createdAt, 'left')}
 					</div>
 				{/if}
 			{/each}
