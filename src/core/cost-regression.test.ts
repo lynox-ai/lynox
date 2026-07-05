@@ -206,7 +206,10 @@ function measureStaticPrefixTokens(): number {
  * per-subject timeline read consumes it, mirroring how R1 exposed subject columns
  * before R1.5 could query them.
  */
-const STATIC_PREFIX_BUDGET = 22150;
+// Bumped 22150 → 23000 for the `media_process` tool definition (the 40th tool),
+// a deliberate, intended prefix growth. Keeps a modest headroom over the
+// measured ~22533 so the guard still fires on the next real regression.
+const STATIC_PREFIX_BUDGET = 23000;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

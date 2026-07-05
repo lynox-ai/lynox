@@ -184,6 +184,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
 
 vi.mock('../integrations/mail/state.js', () => ({
@@ -383,10 +384,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 34 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run); +1 `web_research` from the
-      // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
-      // configured; +5 mail tools when vault is available.
-      expect([37, 42]).toContain(mockRegister.mock.calls.length);
+      // 35 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run + media_process); +1 `web_research`
+      // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
+      // isn't configured; +5 mail tools when vault is available.
+      expect([38, 43]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -609,10 +610,10 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 34 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run); +1 `web_research` from the
-      // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
-      // configured; +5 mail tools when vault is available.
-      expect([37, 42]).toContain(mockRegister.mock.calls.length);
+      // 35 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run + media_process); +1 `web_research`
+      // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
+      // isn't configured; +5 mail tools when vault is available.
+      expect([38, 43]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
