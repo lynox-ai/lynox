@@ -227,4 +227,21 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(out).toContain('first-run-confirm was reset');
     expect(getPipeline('wf-1', history)!.confirmedAt).toBeUndefined();
   });
+
+  it('clears stale confirmedAt for an UNGOVERNED scheduled edit', async () => {
+    // No capabilityContract: the worker-loop scheduling gate still treats
+    // confirmedAt as consent for autonomous execution UNIFORMLY, so editing the
+    // steps of a confirmed schedule must re-open that consent — otherwise the
+    // edited (un-reconsented) steps run unattended on the human's stale confirm.
+    history.insertPlannedPipeline(makePlanned({ confirmedAt: '2026-06-24T10:00:00.000Z' }));
+    history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
+    const agent = makeAgent(history);
+
+    const out = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'changed' }], confirm: true },
+      agent,
+    );
+    expect(out).toContain('first-run-confirm was reset');
+    expect(getPipeline('wf-1', history)!.confirmedAt).toBeUndefined();
+  });
 });
