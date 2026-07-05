@@ -16,6 +16,7 @@ import {
   verifyHandshake,
   computeManifestHash,
   sha256,
+  MAX_CHUNK_BYTES,
 } from './migration-crypto.js';
 
 // ── Test helpers ──
@@ -418,6 +419,32 @@ describe('migration E2E', () => {
       const manifest = { ...base, manifestHash };
 
       expect(() => importer.setManifest(manifest)).toThrow('Total data size exceeds limit');
+      importer.cleanup();
+    });
+
+    it('rejects an oversized chunk even when the manifest under-declares its size', () => {
+      // The setManifest total-size guard sums the manifest's DECLARED originalSize
+      // values — which a malicious sender controls. Here the manifest declares a
+      // tiny 100-byte chunk (well under the cap, so setManifest accepts it), but
+      // the actual chunk streamed to receiveChunk carries a ciphertext far larger
+      // than MAX_CHUNK_BYTES. The importer must reject it on ACTUAL size rather
+      // than buffering the oversized payload into memory (declared-size DoS).
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+      performHandshake(importer);
+
+      const chunks = [{ seq: 0, type: 'sqlite_db' as const, name: 'history.db', originalSize: 100, checksum: 'abc' }];
+      const base = { version: 1 as const, exportedAt: '', lynoxVersion: '', totalChunks: 1, chunks };
+      const manifestHash = computeManifestHash(base);
+      importer.setManifest({ ...base, manifestHash }); // accepted — declares only 100 bytes
+
+      const oversized = {
+        seq: 0,
+        iv: 'ab'.repeat(12),
+        authTag: 'cd'.repeat(16),
+        data: Buffer.alloc(MAX_CHUNK_BYTES + 1).toString('base64'),
+      };
+      expect(() => importer.receiveChunk(oversized)).toThrow('exceeds max size');
+
       importer.cleanup();
     });
 

@@ -207,6 +207,21 @@ describe('chunk encryption', () => {
     expect(() => encryptChunk(plaintext, transferKey, 0, manifestHash)).toThrow('exceeds max size');
   });
 
+  it('rejects an oversized ciphertext on the RECEIVE side (before allocating plaintext)', () => {
+    // A malicious sender can bypass encryptChunk's send-side guard entirely and
+    // POST a hand-crafted chunk whose ciphertext far exceeds MAX_CHUNK_BYTES.
+    // decryptChunk must reject it on size BEFORE running the decipher (which
+    // would allocate the full oversized plaintext) — the actual-size cap must
+    // not depend on the manifest's declared originalSize.
+    const oversized = {
+      seq: 0,
+      iv: 'ab'.repeat(12),      // 12 bytes — a valid IV length, so the size guard is what fires
+      authTag: 'cd'.repeat(16), // 16 bytes — a valid tag length
+      data: Buffer.alloc(MAX_CHUNK_BYTES + 1).toString('base64'),
+    };
+    expect(() => decryptChunk(oversized, transferKey, manifestHash)).toThrow('exceeds max size');
+  });
+
   it('each encryption produces unique IV (ciphertext differs)', () => {
     const plaintext = Buffer.from('same data');
     const enc1 = encryptChunk(plaintext, transferKey, 0, manifestHash);

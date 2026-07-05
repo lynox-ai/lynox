@@ -391,4 +391,46 @@ describe('restoreBackup safety guards', () => {
     expect(result.error).toMatch(/verification failed/i);
     expect(liveRowCount()).toBe(2); // live DB never overwritten from a bad archive
   });
+
+  it('leaves ALL live files untouched when the restore fails part-way (stage+swap, not half-restored)', async () => {
+    // A backup that passes verify + key pre-flight can still fail DURING the
+    // apply (disk full, an I/O error, a decrypt that throws on a later file).
+    // The restore must not overwrite live DBs one-by-one in place — that leaves
+    // the data dir half old / half new (some DBs reverted, others still current).
+    // With stage+swap, all copy/decrypt runs to sibling temp paths first, so a
+    // failure staging a LATER file aborts before any live file is swapped.
+    const manager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null);
+    const created = await manager.createBackup(); // snapshot: history.db=2 rows, config.default_tier=balanced
+    expect(created.success).toBe(true);
+
+    // Drift the LIVE state away from the backup so a real restore WOULD change
+    // it — history.db → 4 rows, config → deep. The failed restore must leave
+    // exactly THIS drifted state intact (neither reverted nor half-reverted).
+    const live = new Database(join(lynoxDir, 'history.db'));
+    live.prepare("INSERT INTO test VALUES (3, 'three')").run();
+    live.prepare("INSERT INTO test VALUES (4, 'four')").run();
+    live.close();
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
+
+    // Force config.json's staging copy to fail mid-restore (AFTER history.db has
+    // already staged) by occupying its staging temp path with a directory —
+    // copyFileSync onto a directory throws EISDIR. (ESM blocks spying on fs, so
+    // this real-filesystem sabotage is the deterministic stand-in for a disk
+    // I/O error / ENOSPC on a later file.)
+    mkdirSync(join(lynoxDir, 'config.json.restore-staging'), { recursive: true });
+
+    const result = await manager.restoreBackup(created.path);
+    expect(result.success).toBe(false);
+
+    // history.db was NEVER reverted over the live DB: live still has its drifted
+    // 4 rows, not the backup's 2. (The pre-fix in-place restore copied history.db
+    // over live before config.json failed → this would have read 2, or the whole
+    // restore would have "succeeded" and reverted live wholesale.)
+    expect(liveRowCount()).toBe(4);
+    // config.json likewise untouched — still the drifted value.
+    const cfg = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    expect(cfg['default_tier']).toBe('deep');
+    // The staged temp for history.db was cleaned up on the abort.
+    expect(existsSync(join(lynoxDir, 'history.db.restore-staging'))).toBe(false);
+  });
 });
