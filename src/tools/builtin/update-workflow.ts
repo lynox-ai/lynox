@@ -85,13 +85,13 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const activeTriggers = runHistory.getTriggersByPipelineId(planned.id);
     if (activeTriggers.length > 0 && input.confirm !== true) {
       const cronCount = activeTriggers.filter(t => t.schedule_cron).length;
-      const contractNote = planned.capabilityContract
-        ? ' Because this workflow is contract-governed, the edit also resets its first-run-confirm — the schedule pauses until it is re-confirmed.'
+      const confirmResetNote = planned.confirmedAt
+        ? ' The edit also resets its first-run-confirm — the schedule pauses until it is re-confirmed.'
         : '';
       return (
         `⚠️ This workflow is scheduled (${activeTriggers.length} active task${activeTriggers.length === 1 ? '' : 's'}` +
         `${cronCount > 0 ? `, ${cronCount} on a cron` : ''}) — editing its steps changes what the next run does. ` +
-        `Confirm with the user, then call update_workflow_steps again with "confirm": true.${contractNote}`
+        `Confirm with the user, then call update_workflow_steps again with "confirm": true.${confirmResetNote}`
       );
     }
 
@@ -140,12 +140,15 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const contractErr = validateContractAgainstSteps(updated);
     if (contractErr) return contractErr;
 
-    // A contract-governed edit invalidates the human's first-run consent (given
-    // against the OLD steps). Clearing confirmedAt makes the scheduling gate
-    // force a re-confirm; the worker disables the schedule on its next tick until
-    // then. Ungoverned workflows carry no consent to invalidate.
-    const contractGoverned = planned.capabilityContract !== undefined;
-    if (contractGoverned) {
+    // Any step edit invalidates the human's first-run consent (given against
+    // the OLD steps). The worker-loop scheduling gate treats `confirmedAt` as
+    // consent for autonomous execution UNIFORMLY — contract-governed or not —
+    // so a stale confirmedAt would let the edited steps run unattended on the
+    // old consent. Clear it whenever it was set so the scheduling gate forces a
+    // re-confirm (the worker disables the schedule on its next tick until then);
+    // a no-op for an unconfirmed workflow.
+    const wasConfirmed = planned.confirmedAt !== undefined;
+    if (wasConfirmed) {
       updated.confirmedAt = undefined;
     }
 
@@ -162,8 +165,8 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const modeNote = newMode !== planned.mode
       ? ` Mode changed ${planned.mode} → ${newMode}.${newMode === 'interactive' ? ' ⚠️ It is now interactive and can no longer run on a cron/schedule.' : ''}`
       : '';
-    const confirmNote = contractGoverned
-      ? ' Its first-run-confirm was reset — re-confirm the contract before the next scheduled run.'
+    const confirmNote = wasConfirmed
+      ? ' Its first-run-confirm was reset — re-confirm before the next scheduled run.'
       : '';
     const stepList = steps.map((s, i) => `${i + 1}. ${s.id}: ${s.task}`).join('\n');
     return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${modeNote}${confirmNote}\n\n${stepList}`;
