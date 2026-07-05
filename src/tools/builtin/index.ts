@@ -18,3 +18,4 @@ export { apiSetupTool } from './api-setup.js';
 export { artifactSaveTool, artifactListTool, artifactDeleteTool, artifactHistoryTool, artifactRestoreTool } from './artifact.js';
 export { recallToolResultTool } from './recall-tool-result.js';
 export { setThreadContextTool } from './set-thread-context.js';
+export { mediaProcessTool } from './media-process.js';

@@ -6284,32 +6284,12 @@ export class LynoxHTTPApi {
       }
     });
 
-    /** Resolve a workspace-relative path, rejecting traversal and symlink escape. */
+    /** Resolve a workspace-relative path, rejecting traversal and symlink escape.
+     *  Delegates to the single shared file-area resolver in workspace.ts so this
+     *  endpoint and the media_process tool confine paths identically. */
     async function resolveWorkspacePath(filePath: string): Promise<string | null> {
-      const { resolve, join } = await import('node:path');
-      const { realpathSync } = await import('node:fs');
-      const { getWorkspaceDir } = await import('../core/workspace.js');
-      const { getLynoxDir } = await import('../core/config.js');
-      const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
-      const resolved = resolve(base, filePath);
-      // Logical path must be within workspace
-      if (resolved !== base && !resolved.startsWith(base + '/')) return null;
-      // Real path (after symlink resolution) must also be within workspace.
-      // Canonicalize the base too: if the base itself contains a symlinked
-      // component (e.g. macOS /tmp -> /private/tmp, a symlinked $HOME, or a
-      // symlinked Docker volume), realpath(resolved) would otherwise mismatch
-      // the literal base and false-reject every legitimate in-workspace path.
-      // realpathSync(base) may throw if the base hasn't been created yet — fall
-      // back to the literal base in that case.
-      try {
-        let realBase = base;
-        try { realBase = realpathSync(base); } catch { /* base not created yet */ }
-        const real = realpathSync(resolved);
-        if (real !== realBase && !real.startsWith(realBase + '/')) return null;
-      } catch {
-        // File doesn't exist yet — logical path check above is sufficient
-      }
-      return resolved;
+      const { resolveFileAreaPath } = await import('../core/workspace.js');
+      return resolveFileAreaPath(filePath);
     }
 
     this.addStatic('user', 'GET /api/files/download', async (req, res) => {
