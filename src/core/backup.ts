@@ -300,10 +300,13 @@ export class BackupManager {
       // Two-phase restore: STAGE every file to a sibling temp path first, then
       // SWAP them into place with atomic renames. The failure-prone work (decrypt
       // of a bad chunk, a copy hitting a full disk / I/O error) all runs in the
-      // staging phase BEFORE any live file is touched — so a mid-restore failure
-      // can never leave the data dir half old / half new (some DBs reverted,
-      // others still current). If staging throws, no live file was written and
-      // the pre-restore safety backup remains the recovery point.
+      // staging phase BEFORE any live file is touched — if staging throws, no
+      // live file was written and the pre-restore safety backup remains the
+      // recovery point. Each swap is atomic PER FILE (rename on the same
+      // filesystem), so no single DB is ever left partial or half-written. A
+      // crash between two renames could leave the SET half old / half new, but
+      // every file stays individually consistent and the safety backup covers a
+      // full recovery.
       const staged: Array<{ tmp: string; dest: string }> = [];
       try {
         for (const entry of manifest.files) {
