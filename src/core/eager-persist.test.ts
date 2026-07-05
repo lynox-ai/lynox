@@ -191,6 +191,16 @@ describe('persistFailedTurnDisplay (B-full)', () => {
     expect(m.updateThread).toHaveBeenCalledWith('s1', { message_count: 5 });
   });
 
+  it('an interruption (noteCode=run_interrupted) records a calm note with NO raw provider detail', () => {
+    const m = makeFailMockStore({ hadUserMessage: true, marked: 1, total: 3 });
+    persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'q', error: new Error('Run interrupted before completion'), noteCode: 'run_interrupted' });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { code: string; detail?: string } };
+    expect(note._lynox_note.code).toBe('run_interrupted');
+    // No error detail leaks into a calm interruption note.
+    expect(note._lynox_note.detail).toBeUndefined();
+  });
+
   it('swallows thread-store errors (fire-and-forget contract)', () => {
     const store = { markDisplayOnlyFrom: vi.fn().mockImplementation(() => { throw new Error('SQLite locked'); }) } as unknown as ThreadStore;
     const res = persistFailedTurnDisplay({ threadStore: store, sessionId: 's1', startSeq: 0, task: 'q', error: new Error('x') });

@@ -51,7 +51,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent } from './agent.js';
+import { Agent, RunAbortedError } from './agent.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
@@ -246,8 +246,9 @@ describe('Agent', () => {
       await new Promise(r => setTimeout(r, 5));
       agent.abort();
 
-      const result = await sendPromise;
-      expect(result).toBe('');
+      // send() THROWS RunAbortedError on abort (was: returned '') so the caller
+      // can record the run as interrupted instead of a silent empty success.
+      await expect(sendPromise).rejects.toBeInstanceOf(RunAbortedError);
       // The aborted user message stays in history so the next send has its context.
       expect(agent.getMessages()).toHaveLength(2);
       expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
@@ -583,8 +584,9 @@ describe('Agent', () => {
         throw new Error('aborted');
       });
 
-      const result = await agent.send('start');
-      expect(result).toBe(''); // abort returns '' (keeps context for the next turn)
+      // abort THROWS RunAbortedError (keeps context for the next turn); the
+      // buffer must stay dense (no undefined holes) after the mid-run shrink.
+      await expect(agent.send('start')).rejects.toBeInstanceOf(RunAbortedError);
       expect(hasSparseHoles(rawMessages(agent))).toBe(false);
     });
 

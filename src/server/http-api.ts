@@ -31,6 +31,7 @@ import { getRerankerCapability } from '../integrations/search/search-reranker.js
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
+import { RunAbortedError } from '../core/agent.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
@@ -2438,7 +2439,15 @@ export class LynoxHTTPApi {
           res.end();
         }
       } catch (err: unknown) {
-        if (!aborted) {
+        // A run aborted via takeover (stop button / stale-run reclaim) does NOT
+        // set the local `aborted` flag, yet session.run() now THROWS
+        // RunAbortedError (previously it swallowed the abort and returned ''). It
+        // was an intentional interruption, not a failure — end the stream cleanly
+        // WITHOUT a scary `error` event, matching the prior no-error behavior.
+        // (The backstop/disconnect paths already set `aborted` and tore down res.)
+        if (err instanceof RunAbortedError) {
+          if (!res.writableEnded && !res.destroyed) res.end();
+        } else if (!aborted) {
           const msg = err instanceof Error ? err.message : String(err);
           res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
           res.end();

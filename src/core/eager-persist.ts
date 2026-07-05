@@ -79,6 +79,12 @@ export interface FailedTurnDisplayInput {
   task: unknown;
   /** The error that aborted the run. */
   error: unknown;
+  /** Display-note code for the appended assistant note. Defaults to
+   *  `'provider_error'` (a genuine failure). An intentional interruption (user
+   *  stop / wall-clock backstop / takeover) passes `'run_interrupted'` so the UI
+   *  renders a calm note instead of a scary error banner, and no raw provider
+   *  detail is shown. */
+  noteCode?: string | undefined;
 }
 
 export type FailedTurnDisplayOutcome =
@@ -98,14 +104,19 @@ export type FailedTurnDisplayOutcome =
  */
 export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedTurnDisplayOutcome {
   const { threadStore, sessionId, startSeq, task, error } = input;
+  const noteCode = input.noteCode ?? 'provider_error';
   if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };
   try {
     const footprint = threadStore.markDisplayOnlyFrom(sessionId, startSeq);
     const notes: { role: 'user' | 'assistant'; content: unknown }[] = [];
     if (!footprint.hadUserMessage) notes.push({ role: 'user', content: task });
+    // An intentional interruption shows a calm note with no raw provider detail;
+    // a genuine failure keeps the sanitized provider-error snippet for debugging.
     notes.push({
       role: 'assistant',
-      content: buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error))),
+      content: noteCode === 'provider_error'
+        ? buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error)))
+        : buildDisplayNoteContent(noteCode),
     });
     const totalCount = threadStore.getMessageCount(sessionId);
     threadStore.appendDisplayNotes(sessionId, notes, threadStore.getNextSeq(sessionId));
