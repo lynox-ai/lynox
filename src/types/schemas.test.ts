@@ -294,6 +294,73 @@ describe('LynoxUserConfigSchema — max_context_window_tokens', () => {
   });
 });
 
+describe('LynoxUserConfigSchema — settable tier/profile fields survive .strict()', () => {
+  // These 4 fields live on the LynoxUserConfig interface AND are set via env
+  // (LYNOX_MAX_TIER / LYNOX_ACCOUNT_TIER / LYNOX_WORKER_PROFILE /
+  // LYNOX_MODEL_PROFILES_JSON). If they are absent from the `.strict()` schema
+  // they are unknown keys — `.strict()` rejects the whole object, so persisting
+  // any one of them nulls the ENTIRE config (every other setting dropped).
+  it('preserves account_tier / max_tier / worker_profile / model_profiles through a parse', () => {
+    const input = {
+      account_tier: 'pro' as const,
+      max_tier: 'deep' as const,
+      worker_profile: 'mistral-fast',
+      model_profiles: {
+        'mistral-fast': {
+          provider: 'openai' as const,
+          api_base_url: 'https://api.mistral.ai/v1',
+          api_key: 'sk-test',
+          model_id: 'ministral-8b-2512',
+        },
+      },
+    };
+    const result = LynoxUserConfigSchema.safeParse(input);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.account_tier).toBe('pro');
+      expect(result.data.max_tier).toBe('deep');
+      expect(result.data.worker_profile).toBe('mistral-fast');
+      expect(result.data.model_profiles?.['mistral-fast']?.model_id).toBe('ministral-8b-2512');
+    }
+  });
+
+  it('does NOT strip sibling fields when one of the 4 is present (the corruption path)', () => {
+    // The regression: writing `worker_profile` used to make `.strict()` reject
+    // the payload, so the config write nulled provider/default_tier/etc.
+    const result = LynoxUserConfigSchema.safeParse({
+      provider: 'anthropic' as const,
+      default_tier: 'balanced' as const,
+      max_session_cost_usd: 50,
+      worker_profile: 'mistral-fast',
+      account_tier: 'standard' as const,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.provider).toBe('anthropic');
+      expect(result.data.default_tier).toBe('balanced');
+      expect(result.data.max_session_cost_usd).toBe(50);
+      expect(result.data.worker_profile).toBe('mistral-fast');
+    }
+  });
+
+  it('normalizes a legacy Anthropic-brand max_tier (opus → deep)', () => {
+    const result = LynoxUserConfigSchema.safeParse({ max_tier: 'opus' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.max_tier).toBe('deep');
+  });
+
+  it('rejects an invalid account_tier value', () => {
+    expect(LynoxUserConfigSchema.safeParse({ account_tier: 'enterprise' }).success).toBe(false);
+  });
+
+  it('rejects a model_profiles entry with a non-openai provider', () => {
+    const result = LynoxUserConfigSchema.safeParse({
+      model_profiles: { bad: { provider: 'anthropic', api_base_url: 'x', api_key: 'y', model_id: 'z' } },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('LynoxUserConfigSchema — accepted_custom_endpoints (W3 server-persisted disclosure)', () => {
   it('accepts an array of {host, accepted_at} records', () => {
     const result = LynoxUserConfigSchema.safeParse({

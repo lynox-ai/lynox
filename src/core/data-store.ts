@@ -1131,8 +1131,18 @@ export class DataStore {
       if (!VALID_AGG_FNS.has(metric.fn)) {
         throw new Error(`Aggregation "${metric.fn}" is not supported. Use: ${[...VALID_AGG_FNS].join(', ')}.`);
       }
-      if (metric.fn !== 'count' && !validColumns.has(metric.field)) {
+      // Validate the field for EVERY case where it is interpolated raw into the
+      // SELECT — only `COUNT(*)` interpolates no field. This also closes the
+      // `count` + non-`*` field gap the old `fn !== 'count'` guard skipped.
+      const isCountStar = metric.fn === 'count' && metric.field === '*';
+      if (!isCountStar && !validColumns.has(metric.field)) {
         throw new Error(`Cannot compute metric on "${metric.field}" — no such column in this table.`);
+      }
+      // A user-supplied alias is interpolated into `... as "${alias}"`; without
+      // validation a `"`-bearing alias would break out of the quoted identifier.
+      // Constrain it to the same identifier grammar as column names.
+      if (metric.alias !== undefined && !VALID_COLUMN_NAME_RE.test(metric.alias)) {
+        throw new Error(`Aggregation alias "${metric.alias}" is not valid. Use lowercase letters, numbers, and underscores only (e.g., "total_revenue").`);
       }
       const alias = metric.alias ?? `${metric.fn}_${metric.field}`;
       if (metric.fn === 'count' && metric.field === '*') {

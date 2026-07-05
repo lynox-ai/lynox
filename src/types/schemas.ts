@@ -45,6 +45,22 @@ const TierSlotSchema = z.object({
   api_base_url: z.string().optional(),
 }).strict();
 
+// A named model profile (non-Claude openai-compat provider) — mirrors the
+// `ModelProfile` interface in models.ts. Not `.strict()`: an unknown key inside
+// a profile must be stripped (Zod default), never reject, so a forward-compat
+// profile field can't null the WHOLE config under the top-level `.strict()`.
+const ModelProfileSchema = z.object({
+  provider:          z.literal('openai'),
+  api_base_url:      z.string(),
+  api_key:           z.string(),
+  auth:              z.enum(['static', 'google-vertex']).optional(),
+  model_id:          z.string(),
+  context_window:    z.number().optional(),
+  max_tokens:        z.number().optional(),
+  max_continuations: z.number().optional(),
+  pricing:           z.object({ input: z.number(), output: z.number() }).optional(),
+});
+
 export const LynoxUserConfigSchema = z.object({
   api_key:              z.string().optional(),
   // Empty string permitted (UI "clear" gesture) — collapses to undefined at consume time.
@@ -83,6 +99,11 @@ export const LynoxUserConfigSchema = z.object({
   // it via MANAGED_USER_WRITABLE_CONFIG, not here.
   openai_context_window: z.number().int().positive().max(1_000_000).optional(),
   default_tier:         ModelTierSchema.optional(),
+  // Settable model-cost ceiling + account plan label. Present on the interface
+  // AND set via env (LYNOX_MAX_TIER / LYNOX_ACCOUNT_TIER) — without them here,
+  // `.strict()` strips a persisted value, nulling the whole config on write.
+  max_tier:             ModelTierSchema.optional(),
+  account_tier:         z.enum(['standard', 'pro']).optional(),
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),
   max_session_cost_usd: z.number().optional(),
@@ -199,6 +220,12 @@ export const LynoxUserConfigSchema = z.object({
     deep:     TierSlotSchema.optional(),
   }).strict().optional(),
   cp_supplied:             z.boolean().optional(),
+  // Named non-Claude model profiles + the profile used for background tasks.
+  // Both are on the interface AND loaded from env (LYNOX_MODEL_PROFILES_JSON /
+  // LYNOX_WORKER_PROFILE); omitting them here makes `.strict()` strip a
+  // persisted value and null the whole config on the next write.
+  model_profiles:          z.record(z.string(), ModelProfileSchema).optional(),
+  worker_profile:          z.string().optional(),
 }).strict(); // reject unknown keys — prevents stale-tab ghost-writes from
               // landing GET-response-only fields (capabilities, locks,
               // managed, bugsink_dsn_configured) in ~/.lynox/config.json.
