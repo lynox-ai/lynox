@@ -681,6 +681,43 @@ describe('DataStore', () => {
         },
       })).toThrow('is not supported');
     });
+
+    it('rejects an alias that tries to break out of the quoted identifier (SQL injection)', () => {
+      // A `"`-bearing alias is interpolated into `... as "${alias}"`. Without
+      // validation it would close the identifier and inject arbitrary SELECT
+      // structure. The builder must reject it before it reaches SQLite.
+      const injection = 'x") AS y, (SELECT 1';
+      expect(() => ds.queryRecords({
+        collection: 'sales',
+        aggregate: {
+          metrics: [{ field: 'revenue', fn: 'sum', alias: injection }],
+        },
+      })).toThrow('is not valid');
+
+      // The collection is intact — the injection never mutated the DB / schema.
+      const { rows } = ds.queryRecords({
+        collection: 'sales',
+        aggregate: { metrics: [{ field: '*', fn: 'count', alias: 'n' }] },
+      });
+      expect(rows[0]!['n']).toBe(5);
+    });
+
+    it('rejects an alias with a bare double-quote', () => {
+      expect(() => ds.queryRecords({
+        collection: 'sales',
+        aggregate: { metrics: [{ field: 'revenue', fn: 'sum', alias: 'a"b' }] },
+      })).toThrow('is not valid');
+    });
+
+    it('rejects a count on a non-existent field (closes the count-field validation gap)', () => {
+      // `count` with a non-`*` field is still interpolated raw into `COUNT("...")`.
+      // The old guard skipped field validation for every `count`, letting an
+      // unknown/injected field through; only `COUNT(*)` may skip a real column.
+      expect(() => ds.queryRecords({
+        collection: 'sales',
+        aggregate: { metrics: [{ field: 'no_such_col', fn: 'count' }] },
+      })).toThrow('no such column');
+    });
   });
 
   // === Collection Info & Listing ===
