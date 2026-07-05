@@ -50,6 +50,15 @@ vi.mock('../../core/agent.js', () => ({
     this.promptTabs = config.promptTabs;
     this.getCostSnapshot = () => mockCostSnapshot;
   }),
+  // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
+  // factory mock replaces the whole module, so this export must exist or the
+  // instanceof throws a TypeError (RHS undefined) and skips the updateRun.
+  RunAbortedError: class RunAbortedError extends Error {
+    constructor(message = 'Run interrupted before completion') {
+      super(message);
+      this.name = 'RunAbortedError';
+    }
+  },
 }));
 
 vi.mock('../../core/observability.js', () => ({

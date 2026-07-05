@@ -42,7 +42,12 @@ export interface RunRecord {
   duration_ms: number;
   user_wait_ms: number;
   stop_reason: string;
-  status: 'running' | 'completed' | 'failed';
+  // 'aborted' = interrupted before completion (user stop / wall-clock backstop /
+  // stale-run takeover) — distinct from 'failed' (a genuine error) so exports,
+  // dashboards and the UI can show an intentional interruption as calm, not
+  // scary. The `runs.status` column is a bare TEXT (no CHECK), so this is a pure
+  // type widening with no schema migration.
+  status: 'running' | 'completed' | 'failed' | 'aborted';
   run_type: 'single' | 'batch_parent' | 'batch_item' | 'pipeline_step';
   batch_parent_id: string | null;
   spawn_parent_id: string | null;
@@ -1361,7 +1366,7 @@ export class RunHistory {
     durationMs?: number | undefined;
     userWaitMs?: number | undefined;
     stopReason?: string | undefined;
-    status?: 'running' | 'completed' | 'failed' | undefined;
+    status?: 'running' | 'completed' | 'failed' | 'aborted' | undefined;
     /** Resolved concrete model id, finalized once the run picked its model
      * (A2: pipeline_step rows insert with `model_id=''` then stamp the resolved
      * model here at step end — the tier is known at insert, the concrete id only

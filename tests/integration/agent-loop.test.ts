@@ -50,7 +50,7 @@ vi.mock('../../src/core/observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent } from '../../src/core/agent.js';
+import { Agent, RunAbortedError } from '../../src/core/agent.js';
 
 // === Helpers ===
 
@@ -377,8 +377,10 @@ describe('Agent Loop Integration', () => {
     await new Promise(r => setTimeout(r, 5));
     agent.abort();
 
-    const result = await sendPromise;
-    expect(result).toBe('');
+    // send() now THROWS RunAbortedError on an abort (previously it returned '',
+    // which the caller couldn't tell apart from a real empty reply and recorded
+    // as a silent 'completed' turn). The interrupted turn is now distinct.
+    await expect(sendPromise).rejects.toBeInstanceOf(RunAbortedError);
     // The aborted user message is preserved so the next turn carries its context.
     expect(agent.getMessages()).toHaveLength(2);
     expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });

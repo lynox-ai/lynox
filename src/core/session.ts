@@ -27,7 +27,7 @@ import { effectiveContextWindow, getProviderDescriptor } from '../types/index.js
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent } from './agent.js';
+import { Agent, RunAbortedError } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -902,6 +902,13 @@ export class Session {
 
       return result;
     } catch (err: unknown) {
+      // An abort (user stop / 30-min wall-clock backstop / stale-run takeover)
+      // now THROWS RunAbortedError from agent.send() instead of returning '' —
+      // so it lands here in the failure path rather than being mis-stamped
+      // `status:'completed'` with 0 tokens / NULL composition on the success
+      // path. Record it distinctly as 'aborted' (not the scary 'failed') and
+      // surface a calm interruption note instead of a provider-error banner.
+      const isAbort = err instanceof RunAbortedError;
       // Bugsink capture — structured error with tags
       void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
         if (err instanceof LynoxError) {
@@ -951,7 +958,7 @@ export class Session {
             costUsd: failedCostUsd,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
-            status: 'failed',
+            status: isAbort ? 'aborted' : 'failed',
             errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
           });
         } catch {
@@ -1028,6 +1035,14 @@ export class Session {
         startSeq: runStartSeq,
         task,
         error: err,
+        // An abort renders a calm "interrupted" note; a real error keeps the
+        // provider-error banner + sanitized detail.
+        noteCode: isAbort ? 'run_interrupted' : 'provider_error',
+        // An internal (compaction) run must NOT surface a visible note — the
+        // success path (line ~707) already skips its display persist, so mirror
+        // that here or an aborted/errored compaction leaks its internal prompt
+        // into the user's thread. Rows are still flipped display-only inside.
+        internal: runOptions?.internal === true,
       });
 
       throw err;

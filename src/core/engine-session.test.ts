@@ -28,6 +28,14 @@ const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
 
 vi.mock('./agent.js', () => ({
+  // Real class so `err instanceof RunAbortedError` in session.ts (which imports
+  // from this same mocked module) matches the instances the tests construct.
+  RunAbortedError: class RunAbortedError extends Error {
+    constructor(message = 'Run interrupted before completion') {
+      super(message);
+      this.name = 'RunAbortedError';
+    }
+  },
   Agent: vi.fn().mockImplementation(function (config: { toolResultBlobStore?: unknown }) {
     // @ts-expect-error mock constructor — capture the Session-owned blob store
     // so compaction tests can assert recall round-trips through the real store.
@@ -176,6 +184,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
 
 vi.mock('../integrations/mail/state.js', () => ({
@@ -340,7 +349,7 @@ vi.mock('./run-history.js', () => ({
 
 import { Engine } from './engine.js';
 import { Session, InternalRunBlockedError } from './session.js';
-import { Agent } from './agent.js';
+import { Agent, RunAbortedError } from './agent.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Memory } from './memory.js';
 import { channels } from './observability.js';
@@ -375,10 +384,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 34 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run); +1 `web_research` from the
-      // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
-      // configured; +5 mail tools when vault is available.
-      expect([37, 42]).toContain(mockRegister.mock.calls.length);
+      // 35 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run + media_process); +1 `web_research`
+      // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
+      // isn't configured; +5 mail tools when vault is available.
+      expect([38, 43]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -428,6 +437,26 @@ describe('Engine + Session (Orchestrator)', () => {
         expect.any(String),
         expect.objectContaining({ status: 'failed', errorText: expect.stringContaining('rate_limit_error') }),
       );
+    });
+
+    it('an aborted run is recorded status:"aborted" (not "completed"/"failed") and re-throws', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // agent.send() throws RunAbortedError when the run is interrupted (stop
+      // button / wall-clock backstop / stale-run takeover). Pre-fix it returned
+      // '' and the success path stamped status:'completed' with 0 tokens / NULL
+      // composition — a silently-broken thread that looked like a healthy turn.
+      mockSend.mockRejectedValueOnce(new RunAbortedError());
+      await expect(session.run('go')).rejects.toBeInstanceOf(RunAbortedError);
+      const rh = engine.getRunHistory()!;
+      // Recorded as an intentional interruption, distinct from a genuine failure.
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'aborted' }),
+      );
+      // The success-path completion stamp must NOT have fired for this run.
+      const completedCall = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .find(c => (c[1] as { status?: string })?.status === 'completed');
+      expect(completedCall, 'an aborted run must never be stamped completed').toBeUndefined();
     });
 
     it('H2: a failed run still fires onAfterRun with the partial spend (managed debit)', async () => {
@@ -581,10 +610,10 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 34 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run); +1 `web_research` from the
-      // DuckDuckGo HTML-scrape fallback that lands whenever SearXNG isn't
-      // configured; +5 mail tools when vault is available.
-      expect([37, 42]).toContain(mockRegister.mock.calls.length);
+      // 35 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run + media_process); +1 `web_research`
+      // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
+      // isn't configured; +5 mail tools when vault is available.
+      expect([38, 43]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

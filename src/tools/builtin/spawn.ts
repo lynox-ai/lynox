@@ -4,7 +4,7 @@ import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationC
 import { getDefaultMaxTokens } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
-import { Agent } from '../../core/agent.js';
+import { Agent, RunAbortedError } from '../../core/agent.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
@@ -453,10 +453,14 @@ async function executeThinker(
 
     return { result, childRunId: childAgent.currentRunId, model };
   } catch (err) {
-    // Mark the child run failed so the cost cap and history UI don't show
-    // it as still-running. Fires for BOTH ctor failures (childAgent
+    // Mark the child run failed/aborted so the cost cap and history UI don't
+    // show it as still-running. Fires for BOTH ctor failures (childAgent
     // undefined, no spend yet) and send failures (childAgent constructed,
-    // partial spend possible — CostGuard tracks per-turn).
+    // partial spend possible — CostGuard tracks per-turn). An abort (parent
+    // stopped → abortSpawnedAgents) now THROWS RunAbortedError instead of
+    // returning '' (which mis-recorded the child 'completed'); mark it 'aborted'
+    // — an intentional interruption, not a failure.
+    const childAborted = err instanceof RunAbortedError;
     if (runHistory && childRunId) {
       try {
         const snap = childAgent?.getCostSnapshot() ?? null;
@@ -465,10 +469,23 @@ async function executeThinker(
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
-          status: 'failed',
-          stopReason: err instanceof Error ? err.message.slice(0, 200) : 'error',
+          status: childAborted ? 'aborted' : 'failed',
+          stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
         });
       } catch { /* swallow */ }
+    }
+    // A child that aborted / failed mid-run may have spent partial pool-key cost
+    // on its own token stream before throwing — never captured by the parent's
+    // onAfterRun. Mirror the success-path debit so that partial spend is still
+    // billed to the tenant balance instead of silently eaten. CP-only (same
+    // rationale as the success path), `> 0`-guarded inside reportMeteredCost,
+    // and a no-op when the child was never constructed (ctor throw → no spend).
+    if (childAgent) {
+      const meteredHost = parentAgent.toolContext.meteredHost;
+      if (meteredHost) {
+        const childCostUsd = childAgent.getCostSnapshot()?.estimatedCostUSD ?? 0;
+        reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
+      }
     }
     throw err;
   } finally {

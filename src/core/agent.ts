@@ -90,6 +90,24 @@ export function imageAwareSerializedLen(msg: BetaMessageParam): number {
   return len;
 }
 
+/**
+ * Thrown by `Agent.send()` when the run is aborted mid-flight (user stop button,
+ * the 30-min wall-clock backstop, or a stale-run takeover) instead of failing
+ * for a genuine reason. Previously `send()` swallowed an abort and returned `''`,
+ * which the caller could not tell apart from a real empty reply — so
+ * `Session.run()` stamped the run `status:'completed'` with 0 tokens / NULL
+ * composition (a silent, always-successful-looking interrupted turn: run-history
+ * corruption + a thread that goes quiet with no banner). Throwing a dedicated
+ * error (mirrors `InternalRunBlockedError`) funnels the abort into the caller's
+ * existing failure path, which records it distinctly and surfaces a note.
+ */
+export class RunAbortedError extends Error {
+  constructor(message = 'Run interrupted before completion') {
+    super(message);
+    this.name = 'RunAbortedError';
+  }
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   readonly model: string;
@@ -662,7 +680,12 @@ export class Agent implements IAgent {
         // then drops any tool pair the earlier truncation split.
         this.messages.length = Math.min(snapshot + 1, this.messages.length);
         this._persistedMark = Math.min(this._persistedMark, this.messages.length);
-        return '';
+        // Throw (do NOT `return ''`): a swallowed abort is indistinguishable from
+        // a real empty reply, so `Session.run()` stamped it `status:'completed'`
+        // with 0 tokens / NULL composition — run-history corruption + a silently
+        // broken thread. A dedicated error funnels into the caller's failure path
+        // (recorded distinctly as an interruption, with a user-visible note).
+        throw new RunAbortedError();
       }
       // Non-abort error (e.g. provider connection failure): fully roll the API
       // context back to before this turn (drop the failed user message AND any

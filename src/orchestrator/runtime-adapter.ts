@@ -390,6 +390,15 @@ export async function spawnViaAgent(
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     return { result, tokensIn, tokensOut, durationMs: Date.now() - startTime };
+  } catch (err) {
+    // A timeout aborts the agent mid-send → send() now THROWS RunAbortedError
+    // instead of returning ''; surface the clearer "timed out" message. Any
+    // other abort/error (e.g. the parent workflow was stopped) propagates as-is
+    // so the step is recorded as interrupted/failed, not a silent empty success.
+    if (timedOut) {
+      throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
@@ -571,6 +580,15 @@ export async function spawnInline(
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     return { result, tokensIn, tokensOut, durationMs: Date.now() - startTime };
+  } catch (err) {
+    // A timeout aborts the agent mid-send → send() now THROWS RunAbortedError
+    // instead of returning ''; surface the clearer "timed out" message. Any
+    // other abort/error (e.g. the parent workflow was stopped) propagates as-is
+    // so the step is recorded as interrupted/failed, not a silent empty success.
+    if (timedOut) {
+      throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
