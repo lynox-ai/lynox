@@ -37,6 +37,45 @@ export function getWorkspaceCwd(): string {
   return getWorkspaceDir() ?? process.cwd();
 }
 
+/** The tenant's FILE AREA root — the exact directory `GET /api/files/download`
+ *  serves from: the isolation workspace when active, else `~/.lynox/workspace`. */
+export function getFileAreaDir(): string {
+  return getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+}
+
+/**
+ * Resolve a file-area-relative (or absolute-in-area) path to an absolute path
+ * confined to the tenant's FILE AREA (see getFileAreaDir), rejecting `..`
+ * traversal and symlink escape. Returns `null` for anything that resolves
+ * outside the area. This is the SINGLE confinement resolver shared by
+ * `GET /api/files/download` (http-api.ts) and the media_process tool — so a
+ * file read for either path is confined identically. Callers that require an
+ * existing file must `stat` the result themselves; a not-yet-existing path
+ * passes the logical containment check (the real-path check is skipped when the
+ * file is absent, exactly as the download endpoint does).
+ */
+export function resolveFileAreaPath(filePath: string): string | null {
+  const base = getFileAreaDir();
+  const resolved = resolve(base, filePath);
+  // Logical path must be within the file area.
+  if (resolved !== base && !resolved.startsWith(base + '/')) return null;
+  // Real path (after symlink resolution) must also be within it. Canonicalize
+  // the base too: if the base itself contains a symlinked component (macOS
+  // /tmp -> /private/tmp, a symlinked $HOME, or a symlinked Docker volume),
+  // realpath(resolved) would otherwise mismatch the literal base and
+  // false-reject every legitimate in-area path. realpathSync(base) may throw
+  // if the base hasn't been created yet — fall back to the literal base.
+  try {
+    let realBase = base;
+    try { realBase = realpathSync(base); } catch { /* base not created yet */ }
+    const real = realpathSync(resolved);
+    if (real !== realBase && !real.startsWith(realBase + '/')) return null;
+  } catch {
+    // File doesn't exist yet — logical path check above is sufficient.
+  }
+  return resolved;
+}
+
 /**
  * True iff `child` resolves to `parent` itself or a path nested under it.
  * Relative-path based so a `..` that climbs out of `parent` fails. Exported so

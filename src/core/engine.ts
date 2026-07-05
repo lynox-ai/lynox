@@ -73,6 +73,7 @@ import {
   artifactRestoreTool,
   recallToolResultTool,
   setThreadContextTool,
+  mediaProcessTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
@@ -1159,7 +1160,8 @@ export class Engine {
       .register(taskUpdateTool)
       .register(taskListTool)
       .register(planTaskTool)
-      .register(recallToolResultTool);
+      .register(recallToolResultTool)
+      .register(mediaProcessTool);
 
     // Wire task manager if run history is available
     if (this.runHistory) {
