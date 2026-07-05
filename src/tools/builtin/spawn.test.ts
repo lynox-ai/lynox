@@ -1089,6 +1089,68 @@ describe('spawn_agent tool', () => {
       expect(updateArg.status).toBe('completed');
     });
 
+    it('debits the child\'s actual cost to the tenant balance via the parent metered host', async () => {
+      // The child ran on the managed pool key via its OWN token stream, so the
+      // parent turn's onAfterRun never captured this spend. executeThinker must
+      // fire a CP debit (reportMeteredCost) for the child's ACTUAL cost so
+      // managed billing sees it. This is the managed-CP twin of the runs-table
+      // recording asserted above.
+      const onAfterRun = vi.fn();
+      const meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => null };
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        meteredHost,
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      mockCostSnapshot = {
+        inputTokens: 10_000,
+        outputTokens: 4_000,
+        estimatedCostUSD: 0.37,
+        iterationsUsed: 2,
+        budgetPercent: 5,
+      };
+
+      const agent = makeAgent({ currentRunId: 'parent-run-debit', toolContext: parentToolContext });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'billed-child', task: 'Spend pool-key money' }] },
+        agent,
+      );
+
+      // The managed CP debit fired once with the child's actual cost.
+      expect(onAfterRun).toHaveBeenCalledOnce();
+      const debitedCost = onAfterRun.mock.calls[0]?.[1] as number;
+      expect(debitedCost).toBe(0.37);
+    });
+
+    it('does not double-count the child cost against the session cap (CP-only debit)', async () => {
+      // The handler already reserved an ESTIMATE via checkSessionBudget; the fix
+      // must debit the ACTUAL child cost to the CP ONLY (reportMeteredCost), NOT
+      // also recordSessionCost — else the per-session $ cap is charged twice.
+      // Invariant: the post-run session counter depends only on the (fixed) spec
+      // estimate, never on the child's actual cost — so the SAME spec run with
+      // two wildly different actual costs must leave the counter identical.
+      const onAfterRun = vi.fn();
+      const meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => null };
+      const makeParent = (): IAgent => makeAgent({
+        toolContext: { sessionCounters: testCounters, meteredHost } as unknown as import('../../core/tool-context.js').ToolContext,
+      });
+
+      mockCostSnapshot = { inputTokens: 1, outputTokens: 1, estimatedCostUSD: 0.01, iterationsUsed: 1, budgetPercent: 1 };
+      await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'x' }] }, makeParent());
+      const counterAfterCheap = testCounters.costUSD;
+
+      // Replay the SAME spec with a 100x actual cost after clearing the counter.
+      resetSessionSpawnCost(testCounters);
+      mockCostSnapshot = { inputTokens: 1, outputTokens: 1, estimatedCostUSD: 1.0, iterationsUsed: 1, budgetPercent: 1 };
+      await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'x' }] }, makeParent());
+      const counterAfterPricey = testCounters.costUSD;
+
+      // The reservation happened, and the 100x actual-cost delta did NOT leak
+      // into the session counter — proving the actual cost is CP-debited only.
+      expect(counterAfterCheap).toBeGreaterThan(0);
+      expect(counterAfterPricey).toBe(counterAfterCheap);
+    });
+
     it('falls back cleanly when toolContext has no runHistory (ad-hoc Agent)', async () => {
       // No runHistory on toolContext — spawn should still succeed, just no
       // cost recording. Important so unit tests + ad-hoc agent construction

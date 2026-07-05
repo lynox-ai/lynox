@@ -4782,8 +4782,29 @@ export class LynoxHTTPApi {
         // pool-key spend) and the duration probe succeeded. $0.003/min × minutes.
         // No-op on self-host. Non-fatal — never breaks the transcription response.
         const sttProvider = getActiveTranscribeProvider();
-        if (sttProvider?.name === 'mistral-voxtral' && durationSec !== null && durationSec > 0) {
-          reportMeteredCost(engine, sttGate.runId, (durationSec / 60) * VOXTRAL_USD_PER_MIN, 'fast');
+        if (sttProvider?.name === 'mistral-voxtral') {
+          // Voxtral spent the managed pool key above, so the debit MUST fire for
+          // every real transcription. `durationSec` is a best-effort ffprobe
+          // probe that returns null for the browser's chunked WebM/Opus
+          // (`recorder.start(1000)` → `duration=N/A` in the container header),
+          // i.e. essentially every real client recording — so DECOUPLE the debit
+          // from the probe and fall back to a byte-length estimate, which can
+          // never price a non-empty recording at $0. Local whisper.cpp is free,
+          // so this branch is skipped for it. Non-fatal: reportMeteredCost
+          // swallows hook errors, so billing never breaks the response.
+          const { estimateAudioSecondsFromBytes } = await import('../core/audio-duration.js');
+          // `durationSec` (ffprobe) is the accurate basis and is never clamped.
+          // The byte estimate assumes the browser's ~48 kbps Opus; a much denser
+          // upload (e.g. WAV/PCM) whose ffprobe ALSO fails would over-estimate
+          // duration several-fold. Cap the FALLBACK to a sane ceiling so it can
+          // never over-bill by orders of magnitude — it still never prices a
+          // non-empty recording at $0. A genuinely long recording measured by
+          // ffprobe is unaffected; only the unmeasurable fallback is bounded.
+          const MAX_STT_FALLBACK_SEC = 600;
+          const billedSec = durationSec !== null && durationSec > 0
+            ? durationSec
+            : Math.min(estimateAudioSecondsFromBytes(buffer.length), MAX_STT_FALLBACK_SEC);
+          reportMeteredCost(engine, sttGate.runId, (billedSec / 60) * VOXTRAL_USD_PER_MIN, 'fast');
         }
         try {
           const history = engine.getRunHistory();
