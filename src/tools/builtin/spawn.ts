@@ -474,6 +474,19 @@ async function executeThinker(
         });
       } catch { /* swallow */ }
     }
+    // A child that aborted / failed mid-run may have spent partial pool-key cost
+    // on its own token stream before throwing — never captured by the parent's
+    // onAfterRun. Mirror the success-path debit so that partial spend is still
+    // billed to the tenant balance instead of silently eaten. CP-only (same
+    // rationale as the success path), `> 0`-guarded inside reportMeteredCost,
+    // and a no-op when the child was never constructed (ctor throw → no spend).
+    if (childAgent) {
+      const meteredHost = parentAgent.toolContext.meteredHost;
+      if (meteredHost) {
+        const childCostUsd = childAgent.getCostSnapshot()?.estimatedCostUSD ?? 0;
+        reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
+      }
+    }
     throw err;
   } finally {
     if (childAgent) activeChildAgents.delete(childAgent);
