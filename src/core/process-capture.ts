@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { getBetasForProvider, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
-import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter } from '../types/index.js';
+import { calculateCost } from './pricing.js';
+import { debitInRunHelperCost } from './metered-request.js';
+import type { HookHost } from './metered-request.js';
+import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter, SessionCounters } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 
 /** Tools that are internal bookkeeping — excluded from process capture */
@@ -38,6 +41,16 @@ interface CaptureOptions {
   openaiModelId?: string | undefined;
   /** Auth mode for 'openai' provider. Default 'static'. */
   openaiAuth?: 'static' | 'google-vertex' | undefined;
+  /**
+   * Managed metered host + the caller's Session counters. When both are wired
+   * (the `save_workflow` tool passes the parent agent's), the Haiku annotation
+   * spend below is accounted to the local session cap AND the tenant balance —
+   * otherwise the pool-key spend on this separate stream is invisible to
+   * billing. Null host / absent counters (self-host, BYOK, ad-hoc callers,
+   * tests) make it a clean no-op.
+   */
+  meteredHost?: HookHost | null | undefined;
+  sessionCounters?: SessionCounters | undefined;
 }
 
 /**
@@ -397,6 +410,20 @@ export async function captureProcess(
     tools: [EXTRACT_TOOL],
     tool_choice: { type: 'tool', name: 'extract_process' },
   });
+
+  // The annotation call spent the pool key on a separate stream inside the
+  // (already gated) save_workflow tool run — account its spend to the local
+  // session cap + the tenant balance so it isn't invisible to billing. No-op
+  // on self-host / BYOK, or when the caller didn't wire the metered context.
+  if (options.sessionCounters) {
+    const cost = calculateCost(getModelId('fast', provider), {
+      input_tokens: response.usage?.input_tokens ?? 0,
+      output_tokens: response.usage?.output_tokens ?? 0,
+      cache_creation_input_tokens: response.usage?.cache_creation_input_tokens ?? undefined,
+      cache_read_input_tokens: response.usage?.cache_read_input_tokens ?? undefined,
+    });
+    debitInRunHelperCost(options.meteredHost ?? null, options.sessionCounters, cost, 'fast');
+  }
 
   // Extract annotations + parameters from the tool use response.
   const annotations: StepAnnotation[] = [];

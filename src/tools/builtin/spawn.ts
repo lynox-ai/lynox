@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
 import { getDefaultMaxTokens } from '../../types/index.js';
+import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent } from '../../core/agent.js';
 import type { AgentConfig } from '../../types/index.js';
@@ -429,6 +432,23 @@ async function executeThinker(
         // Persistence failure — non-fatal. The child's result still
         // returns; only the cost-attribution side-effect is missed.
       }
+    }
+
+    // The child spent the managed pool key on its OWN token stream, so the
+    // parent turn's `onAfterRun` debit never captured this spend — only the
+    // local runs table (above) and the pre-flight session-cap RESERVATION in
+    // the handler did. Debit the child's ACTUAL cost to the tenant balance so
+    // managed billing captures it. CP-only (`reportMeteredCost`, NOT
+    // `debitInRunHelperCost`): the local session ceiling was already reserved
+    // via `checkSessionBudget` in the handler and is deliberately not
+    // reconciled to actual (see the handler comment), so a `recordSessionCost`
+    // here would double-count it against the $-per-session cap. No-op on
+    // self-host / BYOK (meteredHost null) and for a zero-cost child (the
+    // `> 0` guard inside reportMeteredCost).
+    const meteredHost = parentAgent.toolContext.meteredHost;
+    if (meteredHost) {
+      const childCostUsd = childAgent.getCostSnapshot()?.estimatedCostUSD ?? 0;
+      reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
     }
 
     return { result, childRunId: childAgent.currentRunId, model };

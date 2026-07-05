@@ -243,6 +243,10 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       openaiModelId,
       openaiAuth,
       description: input.description,
+      // Account the annotation's pool-key spend to the local session cap +
+      // the tenant balance (no-op on self-host / BYOK).
+      meteredHost: agent.toolContext.meteredHost,
+      sessionCounters: agent.sessionCounters,
     });
   } catch (err) {
     logErrorChain('save_workflow:extract', err);

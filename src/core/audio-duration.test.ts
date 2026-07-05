@@ -24,7 +24,7 @@ vi.mock('node:child_process', async () => {
 });
 
 // Import after vi.mock is registered so the module captures the mocked execFile.
-const { getAudioDurationSec } = await import('./audio-duration.js');
+const { getAudioDurationSec, estimateAudioSecondsFromBytes, ASSUMED_OPUS_BITRATE_BPS } = await import('./audio-duration.js');
 
 describe('getAudioDurationSec', () => {
   beforeEach(() => {
@@ -56,5 +56,27 @@ describe('getAudioDurationSec', () => {
     _execFileImpl = (_cmd, _args, _opts, cb) => { cb(null, '-1.5\n', ''); return {}; };
     const duration = await getAudioDurationSec(Buffer.from('fake audio'), 'clip.webm');
     expect(duration).toBeNull();
+  });
+});
+
+describe('estimateAudioSecondsFromBytes — probe-free billing fallback', () => {
+  it('returns a non-zero estimate for any non-empty buffer (never bills $0)', () => {
+    expect(estimateAudioSecondsFromBytes(1)).toBeGreaterThan(0);
+    expect(estimateAudioSecondsFromBytes(48_000)).toBeGreaterThan(0);
+  });
+
+  it('applies seconds ≈ bytes*8 / assumed bitrate', () => {
+    // 48000 bytes × 8 bits ÷ 48000 bps = 8 seconds at the assumed bitrate.
+    expect(estimateAudioSecondsFromBytes(ASSUMED_OPUS_BITRATE_BPS)).toBeCloseTo(8, 6);
+    expect(estimateAudioSecondsFromBytes(2 * ASSUMED_OPUS_BITRATE_BPS)).toBeCloseTo(16, 6);
+  });
+
+  it('scales monotonically with byte length', () => {
+    expect(estimateAudioSecondsFromBytes(96_000)).toBeGreaterThan(estimateAudioSecondsFromBytes(48_000));
+  });
+
+  it('returns 0 for an empty or non-positive buffer (nothing to bill)', () => {
+    expect(estimateAudioSecondsFromBytes(0)).toBe(0);
+    expect(estimateAudioSecondsFromBytes(-10)).toBe(0);
   });
 });

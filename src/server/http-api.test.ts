@@ -254,7 +254,11 @@ vi.mock('../core/transcribe.js', async (importActual) => ({
   extractSessionContext: mockExtractSessionContext,
   getActiveTranscribeProvider: mockGetActiveTranscribeProvider,
 }));
-vi.mock('../core/audio-duration.js', () => ({
+vi.mock('../core/audio-duration.js', async (importActual) => ({
+  // Keep the real byte-length fallback estimator (pure, no ffprobe) so the
+  // transcribe route's null-duration debit path exercises the true math; only
+  // the ffprobe-backed probe is overridden per-test.
+  ...(await importActual<typeof import('../core/audio-duration.js')>()),
   getAudioDurationSec: mockGetAudioDurationSec,
 }));
 
@@ -4473,19 +4477,31 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(debitRunId).toBe(onBeforeRun.mock.calls[0]?.[0]);
     });
 
-    it('does not debit Voxtral when the audio-duration probe fails (no per-minute basis)', async () => {
+    it('debits Voxtral via a byte-length fallback when the duration probe returns null', async () => {
+      // The browser's chunked WebM/Opus carries no duration in its header, so
+      // ffprobe returns null for essentially every real client recording. The
+      // debit MUST still fire — decoupled from the best-effort probe — via a
+      // byte-length estimate, so managed billing is never $0 for real Voxtral
+      // spend on the pool key.
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun, onAfterRun }];
       mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
       mockGetAudioDurationSec.mockResolvedValue(null); // probe failed → no duration
-      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      // 48000 bytes ÷ 48 kbps assumed Opus bitrate ≈ 8 s of audio.
+      const audio = Buffer.alloc(48_000, 1);
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: audio.toString('base64') }) });
       expect(res.status).toBe(200);
       await readSse(res);
-      // Transcription still returned to the user; the debit is skipped because the
-      // Voxtral cost is per-minute and there is no duration to price it against.
+      // Transcription still returned to the user AND the debit fired.
       expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
-      expect(onAfterRun).not.toHaveBeenCalled();
+      expect(onAfterRun).toHaveBeenCalledOnce();
+      const costUsd = onAfterRun.mock.calls[0]?.[1] as number;
+      expect(costUsd).toBeGreaterThan(0);
+      // 8 s → (8/60) min × $0.003/min ≈ $0.0004. Proves a non-zero, length-scaled bill.
+      expect(costUsd).toBeCloseTo((8 / 60) * 0.003, 6);
+      // Same run id as the gate → the CP dedups the debit against the gate.
+      expect(onAfterRun.mock.calls[0]?.[0]).toBe(onBeforeRun.mock.calls[0]?.[0]);
     });
   });
 });

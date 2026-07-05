@@ -36,6 +36,32 @@ function runFfprobe(args: string[]): Promise<string> {
   });
 }
 
+/**
+ * Assumed encoded bitrate for the browser's WebM/Opus voice stream, used only
+ * by {@link estimateAudioSecondsFromBytes}. Browser `MediaRecorder` voice
+ * (mono Opus, no explicit `audioBitsPerSecond`) typically lands around
+ * 24-48 kbps. We assume the UPPER end (48 kbps) on purpose: for a fixed byte
+ * count a higher assumed bitrate yields FEWER seconds, so the fallback is a
+ * LOWER bound on true duration — it under-attributes rather than over-charging
+ * the tenant, while any non-empty buffer still estimates to > 0 seconds.
+ */
+export const ASSUMED_OPUS_BITRATE_BPS = 48_000;
+
+/**
+ * Best-effort audio-length estimate from encoded byte length, for when ffprobe
+ * can't read a real duration. The browser's chunked `recorder.start(1000)`
+ * WebM/Opus stream carries no `duration` in its header (`ffprobe` reports
+ * `duration=N/A`), so {@link getAudioDurationSec} returns null for essentially
+ * every real client recording. Metering must not depend on the probe
+ * succeeding, so this gives a defensible non-zero fallback:
+ * `seconds ≈ (bytes * 8) / ASSUMED_OPUS_BITRATE_BPS`. Returns 0 only for an
+ * empty buffer (no recording → nothing to bill).
+ */
+export function estimateAudioSecondsFromBytes(byteLength: number): number {
+  if (!(byteLength > 0)) return 0;
+  return (byteLength * 8) / ASSUMED_OPUS_BITRATE_BPS;
+}
+
 export async function getAudioDurationSec(buffer: Buffer, filename: string): Promise<number | null> {
   // Write the buffer to a private tmp dir — ffprobe reads from disk. Private
   // dir (not /tmp directly) so concurrent calls don't race on the same name.

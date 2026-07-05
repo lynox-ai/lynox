@@ -242,6 +242,46 @@ describe('captureProcess', () => {
     expect(record.steps).toHaveLength(2);
     expect(record.steps.map(s => s.tool)).toEqual(['http_request', 'write_file']);
   });
+
+  it('debits the annotation pool-key spend to the session cap + tenant balance when wired', async () => {
+    // The Haiku annotation runs on a SEPARATE stream inside the (already gated)
+    // save_workflow tool run, so its spend is invisible to the turn-boundary
+    // debit. When the caller wires meteredHost + counters, captureProcess must
+    // account it to both the local session cap and the tenant balance.
+    mockCreate.mockResolvedValue({
+      ...makeMockResponse(),
+      usage: { input_tokens: 5_000, output_tokens: 1_000 },
+    });
+    const onAfterRun = vi.fn();
+    const meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => null };
+    const counters: import('../types/index.js').SessionCounters = {
+      httpRequests: 0,
+      writeBytes: 0,
+      costUSD: 0,
+      approvedOutboundDomains: new Set<string>(),
+      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+    };
+    await captureProcess('run1', 'Report', makeToolCalls(), {
+      apiKey: 'k',
+      meteredHost: meteredHost as unknown as import('./metered-request.js').HookHost,
+      sessionCounters: counters,
+    });
+    // Local session cap saw the spend.
+    expect(counters.costUSD).toBeGreaterThan(0);
+    // Tenant balance (CP) debited with a positive cost.
+    expect(onAfterRun).toHaveBeenCalledOnce();
+    expect(onAfterRun.mock.calls[0]?.[1] as number).toBeGreaterThan(0);
+  });
+
+  it('is a clean no-op when no metered context is wired (self-host / ad-hoc caller)', async () => {
+    // No counters passed → the debit is skipped entirely; capture still works.
+    mockCreate.mockResolvedValue({
+      ...makeMockResponse(),
+      usage: { input_tokens: 5_000, output_tokens: 1_000 },
+    });
+    const record = await captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k' });
+    expect(record.steps).toHaveLength(3);
+  });
 });
 
 describe('collapseConsecutiveDuplicates', () => {
