@@ -122,6 +122,11 @@ export interface ChatMessage {
 	 *  banner; `detail` is a sanitized provider-error snippet. Present only on
 	 *  rows the render projection flagged as notes (reload path). */
 	note?: { code: string; detail?: string };
+	/** ISO timestamp the server persisted this message at (`created_at`), carried
+	 *  through the render projection so the UI can show a subtle per-message time.
+	 *  Optional/undefined-safe: older persisted rows + not-yet-reconciled live
+	 *  messages simply lack it. */
+	createdAt?: string;
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
 }
@@ -2377,7 +2382,19 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		// usage + any failure note; re-fetch it and surface a pending changeset.
 		if (completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {
 			await reconcileThread();
-			void fetchChangeset();
+			await fetchChangeset();
+			// Drain a send-queue entry typed mid-re-attach. The resumeThread
+			// comment above ("the queued turn drains after it") assumes THIS
+			// finally drains it — but it never did, so a message typed while a
+			// resumed run streamed sat in the queue forever. Mirror the
+			// normal-path drain in _executeRun's finally; skip if the resumed
+			// run left a changeset to review (sendMessage's guard is bypassed
+			// because we call _executeRun directly).
+			if (!pendingChangeset && messageQueue.length > 0) {
+				const next = messageQueue.shift()!;
+				persistChatNow(); // queue shrank — keep the durable copy in sync
+				setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
+			}
 		}
 		persistChat();
 	}
@@ -2496,6 +2513,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				toolCalls?: ToolCallInfo[];
 				usage?: UsageInfo;
 				note?: { code: string; detail?: string };
+				created_at?: string;
 			}
 			const msgData = (await msgRes.json()) as {
 				messages: ServerRenderedMessage[];
@@ -2521,6 +2539,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 					if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
 					if (m.usage) cm.usage = m.usage;
 					if (m.note) cm.note = m.note;
+					if (m.created_at) cm.createdAt = m.created_at;
 					return cm;
 				}),
 			);
@@ -2618,6 +2637,7 @@ export async function reconcileThread(): Promise<void> {
 			toolCalls?: ToolCallInfo[];
 			usage?: UsageInfo;
 			note?: { code: string; detail?: string };
+			created_at?: string;
 		}
 		const data = (await res.json()) as {
 			messages: ServerRenderedMessage[];
@@ -2637,6 +2657,7 @@ export async function reconcileThread(): Promise<void> {
 				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
 				if (m.usage) cm.usage = m.usage;
 				if (m.note) cm.note = m.note;
+				if (m.created_at) cm.createdAt = m.created_at;
 				return cm;
 			}),
 		);

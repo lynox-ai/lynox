@@ -153,4 +153,30 @@ describe('ArtifactStore', () => {
     const reloaded = new ArtifactStore(dir);
     expect(reloaded.get(a.id)?.version).toBe(1);
   });
+
+  it('honors a well-formed supplied id when the artifact is not yet in the index', () => {
+    // An intended UPDATE to an id the store has never seen must NOT silently
+    // fork a divergent random-id duplicate — it creates AT that id, so a retry
+    // updates the same artifact (idempotent) instead of spawning a second one.
+    const wanted = 'a1b2c3d4';
+    const created = store.save({ id: wanted, title: 'Doc', content: 'v1' });
+    expect(created.id).toBe(wanted);
+    expect(created.version).toBe(1);
+    expect(store.get(wanted)?.content).toBe('v1');
+
+    // Same id again → update in place, no duplicate.
+    const updated = store.save({ id: wanted, title: 'Doc', content: 'v2' });
+    expect(updated.id).toBe(wanted);
+    expect(updated.version).toBe(2);
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it('falls back to a generated id when the supplied id is not well-formed', () => {
+    // A malformed id can't be used as a content-file name (SAFE_ID guards path
+    // traversal), so the store mints a safe random id rather than throwing.
+    const a = store.save({ id: '../../etc/passwd', title: 'Doc', content: 'x' });
+    expect(a.id).not.toBe('../../etc/passwd');
+    expect(a.id).toMatch(/^[a-f0-9]{8}$/);
+    expect(store.get(a.id)?.content).toBe('x');
+  });
 });
