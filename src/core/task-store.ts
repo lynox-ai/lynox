@@ -186,6 +186,16 @@ const TASK_RECORD_SELECT = `
          s.name AS assignee_name, s.is_self AS assignee_is_self
   FROM tasks t LEFT JOIN subjects s ON t.assignee_subject_id = s.id`;
 
+/**
+ * Escape LIKE metacharacters so a `%`/`_` in a (possibly agent-supplied) id
+ * prefix cannot widen the `getRecord` prefix match to arbitrary rows (a bare
+ * `${id}%` lets `id='a_'`/`'a%'` match unrelated tasks). Mirrors `likePrefix`
+ * in workflow-store / trigger-store; use only with `LIKE ? ESCAPE '\'`.
+ */
+function likePrefix(id: string): string {
+  return `${id.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
 export class TaskStore {
   private readonly db: Database.Database;
   /** For the S4a assignee↔subject resolution (write-side create, read-filter lookup). */
@@ -351,8 +361,8 @@ export class TaskStore {
 
   /** {@link persistence.getTask} equivalent: exact-or-prefix id + optional scope filter. */
   getRecord(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {
-    const where: string[] = ['(t.id = ? OR t.id LIKE ?)'];
-    const params: unknown[] = [id, `${id}%`];
+    const where: string[] = ["(t.id = ? OR t.id LIKE ? ESCAPE '\\')"];
+    const params: unknown[] = [id, likePrefix(id)];
     if (opts?.scopeFilter && opts.scopeFilter.length > 0) {
       const ors = opts.scopeFilter.map(() => '(t.scope_type = ? AND t.scope_id = ?)').join(' OR ');
       where.push(`(${ors})`);

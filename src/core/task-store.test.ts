@@ -390,4 +390,22 @@ describe('TaskStore S4a — assignee↔subject resolution + record reads', () =>
     expect(store.getRecord('task-')?.id).toBe('task-abc'); // prefix
     expect(store.getRecord('task-abc', { scopeFilter: [{ type: 'project', id: 'other' }] })).toBeUndefined();
   });
+
+  it('getRecord escapes LIKE wildcards in the id prefix (no over-match)', () => {
+    const { store } = make();
+    store.upsert(row({ id: 'jobX42', scopeType: 'project', scopeId: 'p1' }), undefined, { manageAssignee: true });
+    store.upsert(row({ id: 'job_99', scopeType: 'project', scopeId: 'p1' }), undefined, { manageAssignee: true });
+
+    // Adversarial: `_` must be a LITERAL, not a single-char wildcard. Pre-fix the
+    // bare `${id}%` made `job_` match `jobX42` (`_`→`X`); escaped it matches only
+    // ids that literally begin `job_`, i.e. `job_99` — never `jobX42`.
+    expect(store.getRecord('job_')?.id).toBe('job_99');
+
+    // Adversarial: a lone `%` must not match every row. Pre-fix `LIKE '%%'`
+    // returned an arbitrary task; escaped, no id begins with a literal `%`.
+    expect(store.getRecord('%')).toBeUndefined();
+
+    // Regression: a legitimate literal prefix (including the `_` char) still hits.
+    expect(store.getRecord('job_9')?.id).toBe('job_99');
+  });
 });
