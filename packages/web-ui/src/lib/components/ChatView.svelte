@@ -3020,7 +3020,11 @@
 		{/if}
 
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">
-			<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
+			<!-- SVG is accepted: addFile() routes it through the image branch, which
+		     rasterizes it to JPEG via <img src=blob> + canvas before upload — the
+		     raw SVG XML is never inlined into the DOM (no script execution) nor
+		     sent to the vision API (which rejects image/svg+xml), so it's safe. -->
+		<input bind:this={fileInputEl} type="file" multiple class="hidden" onchange={handleFiles} accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.pdf,.txt,.md,.json,.csv,.ts,.js,.py,.html,.css" />
 
 			{#if transcribing}
 				<!-- Transcribing state — same animated agent presence as the
