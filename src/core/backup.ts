@@ -297,23 +297,49 @@ export class BackupManager {
       const needsDecrypt = manifest.encrypted && this.vaultKey;
       const key = needsDecrypt ? deriveBackupKey(this.vaultKey!) : null;
 
-      for (const entry of manifest.files) {
-        if (entry.type === 'directory') continue;
+      // Two-phase restore: STAGE every file to a sibling temp path first, then
+      // SWAP them into place with atomic renames. The failure-prone work (decrypt
+      // of a bad chunk, a copy hitting a full disk / I/O error) all runs in the
+      // staging phase BEFORE any live file is touched — so a mid-restore failure
+      // can never leave the data dir half old / half new (some DBs reverted,
+      // others still current). If staging throws, no live file was written and
+      // the pre-restore safety backup remains the recovery point.
+      const staged: Array<{ tmp: string; dest: string }> = [];
+      try {
+        for (const entry of manifest.files) {
+          if (entry.type === 'directory') continue;
 
-        const srcFile = join(backupPath, entry.path);
-        const destFile = join(this.lynoxDir, entry.path);
+          const srcFile = join(backupPath, entry.path);
+          const destFile = join(this.lynoxDir, entry.path);
 
-        if (!existsSync(srcFile)) continue;
+          if (!existsSync(srcFile)) continue;
 
-        // Ensure parent directory exists
-        const destDir = join(destFile, '..');
-        mkdirSync(destDir, { recursive: true, mode: 0o700 });
+          // Ensure parent directory exists
+          const destDir = join(destFile, '..');
+          mkdirSync(destDir, { recursive: true, mode: 0o700 });
 
-        if (needsDecrypt && key && isEncryptedBackupFile(srcFile)) {
-          decryptFile(srcFile, destFile, key);
-        } else {
-          copyFileSync(srcFile, destFile);
+          const tmpFile = `${destFile}.restore-staging`;
+          if (needsDecrypt && key && isEncryptedBackupFile(srcFile)) {
+            decryptFile(srcFile, tmpFile, key);
+          } else {
+            copyFileSync(srcFile, tmpFile);
+          }
+          staged.push({ tmp: tmpFile, dest: destFile });
         }
+      } catch (stageErr) {
+        // Staging failed before any live file was touched — drop the partial
+        // temps and rethrow so the whole restore aborts cleanly.
+        for (const { tmp } of staged) {
+          try { rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+        }
+        throw stageErr;
+      }
+
+      // Swap phase: atomic per-file rename over the live files. All bytes are
+      // already staged on the same filesystem, so each rename is atomic and does
+      // no decrypt/copy work — the window for a partial apply is minimal.
+      for (const { tmp, dest } of staged) {
+        renameSync(tmp, dest);
         filesRestored++;
       }
 

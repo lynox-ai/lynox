@@ -247,6 +247,17 @@ export function decryptChunk(
     throw new Error(`Invalid auth tag length: ${String(authTag.length)}`);
   }
 
+  // Bound the ACTUAL ciphertext on the RECEIVE side — never trust the manifest's
+  // declared originalSize (the importer's total-size guard sums those declared
+  // values, which a malicious sender fully controls; it can under-declare to slip
+  // past that cap and then stream oversized chunks). AES-GCM ciphertext length
+  // equals plaintext length, so this caps the plaintext allocation about to
+  // happen in decipher.update() below, and — combined with the MAX_CHUNKS cap —
+  // hard-bounds the total received bytes regardless of what the manifest claims.
+  if (ciphertext.length > MAX_CHUNK_BYTES) {
+    throw new Error(`Chunk ${String(chunk.seq)} exceeds max size: ${String(ciphertext.length)} > ${String(MAX_CHUNK_BYTES)}`);
+  }
+
   const decipher = createDecipheriv(CRYPTO_ALGORITHM, transferKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
   decipher.setAuthTag(authTag);
   decipher.setAAD(aad);
