@@ -1038,6 +1038,11 @@ export class Session {
         // An abort renders a calm "interrupted" note; a real error keeps the
         // provider-error banner + sanitized detail.
         noteCode: isAbort ? 'run_interrupted' : 'provider_error',
+        // An internal (compaction) run must NOT surface a visible note — the
+        // success path (line ~707) already skips its display persist, so mirror
+        // that here or an aborted/errored compaction leaks its internal prompt
+        // into the user's thread. Rows are still flipped display-only inside.
+        internal: runOptions?.internal === true,
       });
 
       throw err;

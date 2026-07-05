@@ -201,6 +201,28 @@ describe('persistFailedTurnDisplay (B-full)', () => {
     expect(note._lynox_note.detail).toBeUndefined();
   });
 
+  it('a failed INTERNAL (compaction) run flips its footprint but appends NO visible note', () => {
+    // The task here is the internal compaction prompt — synthesizing it as a
+    // user note would leak a system prompt into the user's thread. hadUserMessage
+    // is false (nothing eager-persisted), which on the normal path WOULD push a
+    // user note from `task`; the internal flag must suppress that entirely.
+    const m = makeFailMockStore({ hadUserMessage: false, marked: 3, total: 5 });
+    const res = persistFailedTurnDisplay({
+      threadStore: m.store,
+      sessionId: 's1',
+      startSeq: 2,
+      task: 'Summarize the conversation so far so work can continue…',
+      error: new Error('Run interrupted before completion'),
+      noteCode: 'run_interrupted',
+      internal: true,
+    });
+    // Footprint still neutralized from the model context, but zero notes appended.
+    expect(m.markDisplayOnlyFrom).toHaveBeenCalledWith('s1', 2);
+    expect(res).toEqual({ kind: 'persisted', appended: 0, flipped: 3 });
+    expect(m.appendDisplayNotes).not.toHaveBeenCalled();
+    expect(m.updateThread).not.toHaveBeenCalled();
+  });
+
   it('swallows thread-store errors (fire-and-forget contract)', () => {
     const store = { markDisplayOnlyFrom: vi.fn().mockImplementation(() => { throw new Error('SQLite locked'); }) } as unknown as ThreadStore;
     const res = persistFailedTurnDisplay({ threadStore: store, sessionId: 's1', startSeq: 0, task: 'q', error: new Error('x') });
