@@ -303,9 +303,19 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
       copyFileSync(localOutput, join(areaBase, outName));
 
       const kb = (outStat.size / 1024).toFixed(1);
+      // The output-duration ceiling is always applied as a safety bound. For a
+      // whole-file op (transcode / extract_audio) with no explicit duration it
+      // would silently truncate a source longer than the cap — disclose it so
+      // the truncation is never a surprise.
+      const capNote =
+        input.operation !== 'trim' && input.duration === undefined
+          ? `Output is capped at ${MAX_OUTPUT_DURATION_S / 60} min — a longer source was truncated; ` +
+            `pass an explicit 'duration' or 'trim' a range for a specific length. `
+          : '';
       return (
         `Done: ${input.operation} → ${input.format}. ` +
         `Saved to your files area as "${outName}" (${kb} KB). ` +
+        capNote +
         `Download it via /api/files/download?path=${encodeURIComponent(outName)}.`
       );
     } finally {
