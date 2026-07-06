@@ -41,17 +41,22 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
+import { SubjectStore, personNameTokens, isProperTokenSubset } from '../core/subject-store.js';
+import type { MergeLedgerEntry } from '../core/subject-store.js';
+import { DataStore } from '../core/data-store.js';
+import type { SubjectRepointRecord } from '../core/data-store.js';
 import { isCleanupTarget, isJunkPersonShape } from '../core/kg-stopwords.js';
 
-export interface Args { apply: boolean; json: boolean; dataDir: string | null; rollback: string | null }
+export interface Args { apply: boolean; json: boolean; dataDir: string | null; rollback: string | null; merge: string | null }
 
 export function parseArgs(argv: string[]): Args {
-  const args: Args = { apply: false, json: false, dataDir: null, rollback: null };
+  const args: Args = { apply: false, json: false, dataDir: null, rollback: null, merge: null };
   for (const a of argv) {
     if (a === '--apply') args.apply = true;
     else if (a === '--json') args.json = true;
     else if (a.startsWith('--data-dir=')) args.dataDir = a.slice('--data-dir='.length);
     else if (a.startsWith('--rollback=')) args.rollback = a.slice('--rollback='.length);
+    else if (a.startsWith('--merge=')) args.merge = a.slice('--merge='.length);
     else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
     else { process.stderr.write(`unknown arg: ${a}\n`); printHelp(); process.exit(2); }
   }
@@ -60,11 +65,12 @@ export function parseArgs(argv: string[]): Args {
 
 function printHelp(): void {
   process.stdout.write(
-    'Subject garbage-sweep (archive phase) — soft-archive legacy junk subjects.\n' +
-    '  (no flag)             dry-run: report candidates, blocked rows, escaped slashes\n' +
-    '  --apply               archive + write a rollback ledger\n' +
+    'Subject garbage-sweep — archive junk (slice 1) + dedup person subsets (slice 2).\n' +
+    '  (no flag)             dry-run: report junk candidates + person subset-merge pairs\n' +
+    '  --apply               archive junk + write a rollback ledger\n' +
+    '  --merge=DUP:CANON     merge a confirmed subset pair (dup → canonical) + write a ledger\n' +
     '  --json                machine-readable output\n' +
-    '  --rollback=PATH       restore from a ledger file\n' +
+    '  --rollback=PATH       restore from an archive OR merge ledger (phase-aware)\n' +
     '  --data-dir=PATH       override the .lynox data dir (else LYNOX_DATA_DIR / ~/.lynox)\n',
   );
 }
@@ -81,7 +87,98 @@ export interface Ledger {
   primaryNulled: PrimaryNull[];
 }
 
+/** A CONFIRM-class candidate: the subset person (dup) folds into the superset person (canonical). */
+export interface SubsetPair { dupId: string; dupName: string; canonicalId: string; canonicalName: string }
+
+/** A persisted merge — same `~/.lynox/sweeps/` home + `version` shape as the archive {@link Ledger}. */
+export interface MergeLedgerFile {
+  version: 1; phase: 'merge'; createdAt: string;
+  entry: MergeLedgerEntry;              // engine.db before-image (SubjectStore.planMerge)
+  dataStore: SubjectRepointRecord[];    // datastore.db before-image (DataStore.repointSubjectId)
+}
+
 type Db = Database.Database;
+
+/**
+ * Slice-2 CONFIRM report (NEVER auto-applied): existing person pairs where one is an
+ * unambiguous token-subset of exactly one other ("Ada" ⊂ "Dr. Ada Lovelace").
+ * The retroactive twin of the write-time resolvePersonSubject. Scoped per owner_user_id
+ * (a merge never crosses owners) and only reported when the superset is UNIQUE — the same
+ * "never guess" rule as the resolver. The operator confirms each with --merge.
+ */
+export function planPersonSubsetPairs(engineDb: EngineDb): SubsetPair[] {
+  const db = engineDb.getDb();
+  const persons = db.prepare(
+    "SELECT id, name, owner_user_id FROM subjects WHERE kind = 'person' AND archived_at IS NULL AND merged_into IS NULL AND is_self = 0",
+  ).all() as Array<{ id: string; name: string; owner_user_id: string }>;
+  const byOwner = new Map<string, Array<{ id: string; name: string; tokens: string[] }>>();
+  for (const p of persons) {
+    const list = byOwner.get(p.owner_user_id) ?? [];
+    list.push({ id: p.id, name: p.name, tokens: personNameTokens(p.name) });
+    byOwner.set(p.owner_user_id, list);
+  }
+  const pairs: SubsetPair[] = [];
+  for (const list of byOwner.values()) {
+    for (const sub of list) {
+      if (sub.tokens.length === 0) continue;
+      const supersets = list.filter(other => other.id !== sub.id && isProperTokenSubset(sub.tokens, other.tokens));
+      if (supersets.length === 1) {
+        const canon = supersets[0]!;
+        pairs.push({ dupId: sub.id, dupName: sub.name, canonicalId: canon.id, canonicalName: canon.name });
+      }
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Execute ONE confirmed merge (operator --merge), crash-safe: plan (read-only) → persist
+ * the engine.db before-image ledger BEFORE any mutation → executeMerge (engine.db) →
+ * repoint datastore.db cells → rewrite the ledger with the datastore before-image so
+ * --rollback reverses BOTH stores. The two DBs can't share a transaction, so a crash after
+ * executeMerge but before the datastore repoint leaves those cells still pointing at the
+ * (now archived) dup — the records are NOT lost (each store's write is its own atomic txn),
+ * but they read as temporarily UNATTRIBUTED under the canonical until recovered by
+ * `--rollback` (un-merges engine.db) followed by a re-run of `--merge`.
+ */
+export function doMerge(
+  engineDb: EngineDb, dataDir: string, dupId: string, canonicalId: string,
+): { ok: true; ledgerPath: string; dataStoreRows: number } | { ok: false; reason: string } {
+  const store = new SubjectStore(engineDb);
+  const plan = store.planMerge(dupId, canonicalId);
+  if (!plan.ok) return { ok: false, reason: plan.reason };
+
+  const sweepDir = join(dataDir, 'sweeps');
+  mkdirSync(sweepDir, { recursive: true });
+  const createdAt = new Date().toISOString();
+  const ledgerPath = join(sweepDir, `merge-${createdAt.replace(/[:.]/g, '-')}.json`);
+  const file: MergeLedgerFile = { version: 1, phase: 'merge', createdAt, entry: plan.entry, dataStore: [] };
+  writeFileSync(ledgerPath, JSON.stringify(file, null, 2));   // persist BEFORE mutating
+
+  store.executeMerge(plan.entry);
+
+  const dsPath = join(dataDir, 'datastore.db');
+  if (existsSync(dsPath)) {
+    const ds = new DataStore(dsPath);
+    try {
+      file.dataStore = ds.repointSubjectId(dupId, canonicalId);
+      if (file.dataStore.length > 0) writeFileSync(ledgerPath, JSON.stringify(file, null, 2));
+    } finally { ds.close(); }
+  }
+  return { ok: true, ledgerPath, dataStoreRows: file.dataStore.reduce((n, r) => n + r.ids.length, 0) };
+}
+
+/** Reverse a persisted merge (engine.db + datastore.db), the phase-'merge' half of --rollback. */
+export function rollbackMergeFile(engineDb: EngineDb, dataDir: string, file: MergeLedgerFile): { ok: boolean; reason?: string } {
+  const store = new SubjectStore(engineDb);
+  const dsPath = join(dataDir, 'datastore.db');
+  if (file.dataStore.length > 0 && existsSync(dsPath)) {
+    const ds = new DataStore(dsPath);
+    try { ds.rollbackRepoint(file.entry.dupId, file.entry.canonicalId, file.dataStore); }
+    finally { ds.close(); }
+  }
+  return store.rollbackMerge(file.entry);
+}
 
 /** Read the set of subject ids that are a thread anchor in history.db (read-only). */
 export function readThreadAnchorIds(historyDbPath: string): Set<string> {
@@ -204,22 +301,47 @@ function main(): void {
   const engineDb = new EngineDb(join(dir, 'engine.db'));   // ctor migrates on open (no-op)
   try {
     if (args.rollback) {
-      const ledger = JSON.parse(readFileSync(args.rollback, 'utf8')) as Ledger;
-      const r = rollback(engineDb, ledger);
+      // Phase-aware: an archive ledger un-archives; a merge ledger un-merges (both stores).
+      const parsed = JSON.parse(readFileSync(args.rollback, 'utf8')) as Ledger | MergeLedgerFile;
+      if (parsed.phase === 'merge') {
+        const r = rollbackMergeFile(engineDb, dir, parsed);
+        process.stdout.write(args.json ? JSON.stringify({ mode: 'rollback-merge', ...r }) + '\n'
+          : `[subject-sweep] ROLLBACK-MERGE — ${r.ok ? `un-merged ${parsed.entry.dupId} ← ${parsed.entry.canonicalId}` : `FAILED: ${r.reason}`}.\n`);
+        return;
+      }
+      const r = rollback(engineDb, parsed);
       process.stdout.write(args.json ? JSON.stringify({ mode: 'rollback', ...r }) + '\n'
-        : `[subject-sweep] ROLLBACK — restored ${r.restored} subjects, ${ledger.primaryNulled.length} primaries; ${r.collisions.length} collisions.\n`);
+        : `[subject-sweep] ROLLBACK — restored ${r.restored} subjects, ${parsed.primaryNulled.length} primaries; ${r.collisions.length} collisions.\n`);
+      return;
+    }
+    if (args.merge) {
+      // Operator-confirmed CONFIRM-class merge: `--merge=<dupId>:<canonicalId>`.
+      const sep = args.merge.indexOf(':');
+      if (sep < 0) { process.stderr.write('--merge expects <dupId>:<canonicalId>\n'); process.exitCode = 2; return; }
+      const dupId = args.merge.slice(0, sep);
+      const canonicalId = args.merge.slice(sep + 1);
+      const r = doMerge(engineDb, dir, dupId, canonicalId);
+      if (!r.ok) { process.stderr.write(`[subject-sweep] MERGE refused: ${r.reason}\n`); process.exitCode = 1; return; }
+      process.stdout.write(args.json ? JSON.stringify({ mode: 'merge', ...r }) + '\n'
+        : `[subject-sweep] MERGED ${dupId} → ${canonicalId} (${r.dataStoreRows} datastore cells repointed). Ledger: ${r.ledgerPath}\n`);
       return;
     }
     const threadAnchors = readThreadAnchorIds(join(dir, 'history.db'));
     const plan = planArchive(engineDb, threadAnchors);
     if (!args.apply) {
-      const out = { mode: 'dry-run', archiveCount: plan.archive.length, blocked: plan.blocked, escapedSlash: plan.escapedSlash };
+      // Slice-2 CONFIRM class: report person subset pairs (report-only, never auto-merged).
+      const subsetPairs = planPersonSubsetPairs(engineDb);
+      const out = { mode: 'dry-run', archiveCount: plan.archive.length, blocked: plan.blocked, escapedSlash: plan.escapedSlash, subsetPairs };
       process.stdout.write(args.json ? JSON.stringify(out) + '\n'
         : `[subject-sweep] DRY-RUN — would archive ${plan.archive.length} junk subjects ` +
           `(${plan.archive.reduce((n, a) => n + a.primaries, 0)} primary links NULLed). ` +
           `${plan.blocked.length} blocked (review), ${plan.escapedSlash.length} escaped-slash (review). Re-run with --apply.\n` +
           (plan.blocked.length ? `  blocked: ${plan.blocked.map(b => `${b.name}[${b.reason}]`).join(', ')}\n` : '') +
-          (plan.escapedSlash.length ? `  escaped-slash: ${plan.escapedSlash.map(s => s.name).join(', ')}\n` : ''));
+          (plan.escapedSlash.length ? `  escaped-slash: ${plan.escapedSlash.map(s => s.name).join(', ')}\n` : '') +
+          (subsetPairs.length
+            ? `  ${subsetPairs.length} person subset-merge candidate(s) (CONFIRM — apply with --merge=<dupId>:<canonicalId>):\n` +
+              subsetPairs.map(p => `    "${p.dupName}" (${p.dupId}) → "${p.canonicalName}" (${p.canonicalId})\n`).join('')
+            : ''));
       return;
     }
     // Persist the ledger BEFORE mutating — a crash after the DB write but before the

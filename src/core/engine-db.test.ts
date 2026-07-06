@@ -176,13 +176,13 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       INSERT INTO schema_version (version) VALUES (6);
       CREATE TABLE subjects (id TEXT PRIMARY KEY, name TEXT NOT NULL, archived_at TEXT);
     `);
-    raw.prepare('INSERT INTO subjects (id, name) VALUES (?, ?)').run('s1', 'Dr. Britta Massmann');
+    raw.prepare('INSERT INTO subjects (id, name) VALUES (?, ?)').run('s1', 'Dr. Ada Lovelace');
     raw.close();
 
     const e = new EngineDb(dbPath, '');
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
-    expect(row).toEqual({ id: 's1', name: 'Dr. Britta Massmann', merged_into: null });   // survived, column added NULL
+    expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
     expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(7);
     e.close();
   });

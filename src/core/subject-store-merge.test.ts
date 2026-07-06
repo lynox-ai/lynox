@@ -72,8 +72,8 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('mergeSubjects repoints EVERY subject FK dup→canonical + archives dup + sets merged_into', () => {
     const { store, engine, db } = makeStore();
-    const dup = store.createSubject({ kind: 'person', name: 'Britta' });
-    const canon = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     const other = store.createSubject({ kind: 'organization', name: 'Acme' });
     const engSubj = store.createSubject({ kind: 'engagement', name: 'Website' });
     const engSubj2 = store.createSubject({ kind: 'engagement', name: 'Redesign' });
@@ -113,14 +113,14 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
     const dupRow = store.getSubject(dup)!;
     expect(dupRow.archived_at).not.toBeNull();
     expect(dupRow.merged_into).toBe(canon);
-    expect(JSON.parse(store.getSubject(canon)!.aliases)).toContain('Britta');
+    expect(JSON.parse(store.getSubject(canon)!.aliases)).toContain('Ada');
     engine.close();
   });
 
   it('memory_subjects repoint is collision-safe (memory mentioning BOTH) + drops the dup link', () => {
     const { store, engine, db } = makeStore();
-    const dup = store.createSubject({ kind: 'person', name: 'Britta' });
-    const canon = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     db.prepare('INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?,?,?,?,?)').run('m1', 'x', 'knowledge', 'global', 'g');
     db.prepare('INSERT INTO memory_subjects (memory_id, subject_id) VALUES (?,?)').run('m1', dup);
     db.prepare('INSERT INTO memory_subjects (memory_id, subject_id) VALUES (?,?)').run('m1', canon);
@@ -136,8 +136,8 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('merges person detail: canonical wins on conflict, dup fills nulls (encrypted at rest)', () => {
     const { store, engine } = makeStore('vault-key-123');
-    const dup = store.createSubject({ kind: 'person', name: 'Britta' });
-    const canon = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     store.setPersonDetail(canon, { email: 'canon@x.com', role: 'CEO' });
     store.setPersonDetail(dup, { email: 'dup@x.com', phone: '+41 79 000' });
 
@@ -152,8 +152,8 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('repoints detail when canonical has none (dup detail moves over) + reverses on rollback', () => {
     const { store, engine } = makeStore();
-    const dup = store.createSubject({ kind: 'person', name: 'Britta' });
-    const canon = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     store.setPersonDetail(dup, { email: 'dup@x.com' });
     const res = store.mergeSubjects(dup, canon);
     expect(res.ok).toBe(true);
@@ -168,8 +168,8 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('memory_subjects rollback keeps canonical’s PRE-existing link (split-back only drops merge-added)', () => {
     const { store, engine, db } = makeStore();
-    const dup = store.createSubject({ kind: 'person', name: 'Britta' });
-    const canon = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     db.prepare('INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?,?,?,?,?)').run('m1', 'x', 'knowledge', 'global', 'g');
     db.prepare('INSERT INTO memory_subjects (memory_id, subject_id) VALUES (?,?)').run('m1', dup);
     db.prepare('INSERT INTO memory_subjects (memory_id, subject_id) VALUES (?,?)').run('m1', canon);   // canonical PRE-linked
@@ -188,8 +188,8 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
   it('resolveActiveSubject follows the redirect chain to the terminal active subject', () => {
     const { store, engine } = makeStore();
     const a = store.createSubject({ kind: 'person', name: 'Bri' });
-    const b = store.createSubject({ kind: 'person', name: 'Britta' });
-    const c = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const b = store.createSubject({ kind: 'person', name: 'Ada' });
+    const c = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     store.mergeSubjects(b, c);   // b → c
     store.mergeSubjects(a, c);   // a → c
     expect(store.resolveActiveSubject(a)).toBe(c);
@@ -232,8 +232,8 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('rollbackMerge restores the EXACT pre-merge state across every table', () => {
     const { store, engine, db } = makeStore('vault-key-xyz');
-    const dup = store.createSubject({ kind: 'person', name: 'Britta' });
-    const canon = store.createSubject({ kind: 'person', name: 'Dr. Britta Massmann' });
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
     const other = store.createSubject({ kind: 'organization', name: 'Acme' });
     store.setPersonDetail(canon, { email: 'canon@x.com' });
     store.setPersonDetail(dup, { phone: '123' });
@@ -271,19 +271,19 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('resolvePersonSubject: exact→canonical, alias→alias, unambiguous subset→alias, ambiguous→new', () => {
     const { store, engine } = makeStore();
-    const britta = store.findOrCreate({ kind: 'person', name: 'Dr. Britta Massmann', aliases: ['B. Massmann'] }).id;
+    const ada = store.findOrCreate({ kind: 'person', name: 'Dr. Ada Lovelace', aliases: ['A. Lovelace'] }).id;
 
-    expect(store.resolvePersonSubject('Dr. Britta Massmann')).toMatchObject({ id: britta, resolved: 'canonical', created: false });
-    expect(store.resolvePersonSubject('B. Massmann')).toMatchObject({ id: britta, resolved: 'alias', created: false });
-    // "Britta" ⊂ {britta, massmann} — exactly one superset → fold in as alias.
-    const sub = store.resolvePersonSubject('Britta');
-    expect(sub).toMatchObject({ id: britta, resolved: 'subset', created: false });
-    expect(JSON.parse(store.getSubject(britta)!.aliases)).toContain('Britta');
+    expect(store.resolvePersonSubject('Dr. Ada Lovelace')).toMatchObject({ id: ada, resolved: 'canonical', created: false });
+    expect(store.resolvePersonSubject('A. Lovelace')).toMatchObject({ id: ada, resolved: 'alias', created: false });
+    // "Ada" ⊂ {ada, lovelace} — exactly one superset → fold in as alias.
+    const sub = store.resolvePersonSubject('Ada');
+    expect(sub).toMatchObject({ id: ada, resolved: 'subset', created: false });
+    expect(JSON.parse(store.getSubject(ada)!.aliases)).toContain('Ada');
 
     // ambiguity → never guess → new subject.
-    store.findOrCreate({ kind: 'person', name: 'Thomas Müller' });
-    store.findOrCreate({ kind: 'person', name: 'Thomas Schmidt' });
-    const amb = store.resolvePersonSubject('Thomas');
+    store.findOrCreate({ kind: 'person', name: 'Alan Turing' });
+    store.findOrCreate({ kind: 'person', name: 'Alan Kay' });
+    const amb = store.resolvePersonSubject('Alan');
     expect(amb.created).toBe(true);
     expect(amb.resolved).toBe('created');
     engine.close();
@@ -291,9 +291,9 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   it('resolvePersonSubject scopes the subset search to the owner', () => {
     const { store, engine } = makeStore();
-    store.findOrCreate({ kind: 'person', name: 'Dr. Britta Massmann', ownerUserId: 'tenant-1' });
+    store.findOrCreate({ kind: 'person', name: 'Dr. Ada Lovelace', ownerUserId: 'tenant-1' });
     // Different owner → no superset visible → fresh subject in tenant-2.
-    const r = store.resolvePersonSubject('Britta', { ownerUserId: 'tenant-2' });
+    const r = store.resolvePersonSubject('Ada', { ownerUserId: 'tenant-2' });
     expect(r.created).toBe(true);
     engine.close();
   });
@@ -301,11 +301,11 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
   // ── token helpers ────────────────────────────────────────────────
 
   it('personNameTokens strips titles + punctuation; isProperTokenSubset is strict', () => {
-    expect(personNameTokens('Dr. Britta Massmann')).toEqual(['britta', 'massmann']);
-    expect(personNameTokens('Herr Thomas')).toEqual(['thomas']);
-    expect(isProperTokenSubset(['britta'], ['britta', 'massmann'])).toBe(true);
-    expect(isProperTokenSubset(['britta', 'massmann'], ['britta', 'massmann'])).toBe(false);   // not strict
-    expect(isProperTokenSubset(['anna'], ['britta', 'massmann'])).toBe(false);
+    expect(personNameTokens('Dr. Ada Lovelace')).toEqual(['ada', 'lovelace']);
+    expect(personNameTokens('Herr Alan')).toEqual(['alan']);
+    expect(isProperTokenSubset(['ada'], ['ada', 'lovelace'])).toBe(true);
+    expect(isProperTokenSubset(['ada', 'lovelace'], ['ada', 'lovelace'])).toBe(false);   // not strict
+    expect(isProperTokenSubset(['anna'], ['ada', 'lovelace'])).toBe(false);
     expect(isProperTokenSubset([], ['x'])).toBe(false);
   });
 });

@@ -34,13 +34,13 @@ describe('KnowledgeLayer → engine.db subject-graph mirror (S1b)', () => {
   const tmpDirs: string[] = [];
   const scope: MemoryScopeRef = { type: 'context', id: 'proj-1' };
 
-  function makeLayer(opts: { flag: boolean; withEngine?: boolean }): { layer: KnowledgeLayer; engine: EngineDb | null } {
+  function makeLayer(opts: { flag: boolean; withEngine?: boolean; reads?: boolean }): { layer: KnowledgeLayer; engine: EngineDb | null } {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-klsg-'));
     tmpDirs.push(dir);
     const engine = (opts.withEngine ?? true) ? new EngineDb(join(dir, 'engine.db'), '') : null;
     const layer = new KnowledgeLayer(
       join(dir, 'mem.db'), new LocalProvider(), undefined, undefined,
-      engine ?? undefined, opts.flag,
+      engine ?? undefined, opts.flag, opts.reads ?? false,
     );
     return { layer, engine };
   }
@@ -99,6 +99,51 @@ describe('KnowledgeLayer → engine.db subject-graph mirror (S1b)', () => {
     // cooccurrences: 3 distinct subjects → C(3,2) = 3 pairs
     expect(engine!.getDb().prepare('SELECT COUNT(*) c FROM subject_cooccurrences').get()).toMatchObject({ c: 3 });
 
+    engine!.close();
+    await layer.close();
+  });
+
+  it('person subset resolver: a later "Ada" folds into the existing "Dr. Ada Lovelace" (no duplicate)', async () => {
+    const { layer, engine } = makeLayer({ flag: true });
+    await layer.init();
+    // First mention mints the full-name person.
+    mock.extraction = { entities: [{ name: 'Dr. Ada Lovelace', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Dr. Ada Lovelace leitet das Projekt.', 'knowledge', scope);
+    // A later bare-first-name mention must fold into her as an alias, not a 2nd row.
+    mock.extraction = { entities: [{ name: 'Ada', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Ada hat heute angerufen.', 'knowledge', scope);
+
+    const subs = new SubjectStore(engine!);
+    const people = subs.listSubjects({ kind: 'person' });
+    expect(people).toHaveLength(1);
+    expect(people[0]!.name).toBe('Dr. Ada Lovelace');
+    expect(JSON.parse(people[0]!.aliases)).toContain('Ada');
+    // An ambiguous later mention (two supersets) stays a fresh subject (never guesses).
+    mock.extraction = { entities: [{ name: 'Alan Turing', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Alan Turing kam vorbei.', 'knowledge', scope);
+    mock.extraction = { entities: [{ name: 'Alan Kay', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Alan Kay auch.', 'knowledge', scope);
+    mock.extraction = { entities: [{ name: 'Alan', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Alan rief an.', 'knowledge', scope);
+    expect(subs.listSubjects({ kind: 'person' }).some(p => p.name === 'Alan')).toBe(true);   // ambiguous → new
+
+    engine!.close();
+    await layer.close();
+  });
+
+  it('person subset resolver also folds on the read-cutover (authoritative) write path', async () => {
+    // memoryReadsActive=true routes store() through the SECOND persist path (the write
+    // cutover), which got the same resolvePersonSubject wiring — prove the fold there too.
+    const { layer, engine } = makeLayer({ flag: true, reads: true });
+    await layer.init();
+    mock.extraction = { entities: [{ name: 'Dr. Ada Lovelace', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Dr. Ada Lovelace leitet das Projekt.', 'knowledge', scope);
+    mock.extraction = { entities: [{ name: 'Ada', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Ada hat angerufen.', 'knowledge', scope);
+
+    const people = new SubjectStore(engine!).listSubjects({ kind: 'person' });
+    expect(people).toHaveLength(1);
+    expect(JSON.parse(people[0]!.aliases)).toContain('Ada');
     engine!.close();
     await layer.close();
   });
