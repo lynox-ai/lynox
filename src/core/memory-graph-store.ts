@@ -571,6 +571,7 @@ export class MemoryGraphStore {
     const rows = this.db.prepare(`
       SELECT DISTINCT ${RECALL_COLS_M} FROM memories m
       JOIN memory_subjects ms ON m.id = ms.memory_id
+      JOIN subjects s ON s.id = ms.subject_id AND s.archived_at IS NULL
       JOIN relationships r ON (ms.subject_id = r.from_subject_id OR ms.subject_id = r.to_subject_id)
       WHERE (r.from_subject_id = ? OR r.to_subject_id = ?)
         AND ms.subject_id != ?
