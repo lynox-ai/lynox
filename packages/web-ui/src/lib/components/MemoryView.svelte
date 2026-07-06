@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	const namespaces = ['knowledge', 'methods', 'status', 'learnings'] as const;
 	let selectedNs = $state<(typeof namespaces)[number]>('knowledge');
@@ -191,7 +192,9 @@
 			</div>
 		</div>
 	{:else if content}
-		{@const entries = content.split('\n').filter(line => line.trim())}
+		<!-- Newest first: the document appends chronologically, so reverse for display. -->
+		{@const entries = content.split('\n').filter(line => line.trim()).reverse()}
+		<p class="text-xs text-text-subtle mb-2">{entries.length}&nbsp;{t('memory.entry_count_label')}</p>
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle divide-y divide-border">
 			{#each entries as entry, i}
 				{@const dateMatch = entry.match(/^\[(\d{4}-\d{2}-\d{2})\]\s*/)}
@@ -217,8 +220,10 @@
 							>{t('memory.cancel')}</button>
 						</div>
 					{:else}
-						<!-- Display mode -->
-						<p class="text-sm text-text leading-relaxed pr-16">{text}</p>
+						<!-- Display mode — render the stored markdown, not raw source. -->
+						<div class="text-sm text-text leading-relaxed pr-16 memory-entry-md">
+							<MarkdownRenderer content={text} />
+						</div>
 						{#if date}
 							<p class="text-[10px] text-text-subtle mt-1.5 font-mono">{date}</p>
 						{/if}

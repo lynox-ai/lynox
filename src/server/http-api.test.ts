@@ -120,6 +120,9 @@ vi.mock('../core/engine.js', () => ({
       update: mockMemoryUpdate,
       delete: mockMemoryDelete,
     });
+    // MemoryFacade (the /api/memory mutation choke point) reads this to mirror to the
+    // knowledge layer; null = doc-only, which is all the route tests assert on.
+    this.getKnowledgeLayer = vi.fn().mockReturnValue(null);
     this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
@@ -1818,6 +1821,17 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const body = await res.json() as { updated: boolean };
       expect(body.updated).toBe(true);
+    });
+
+    it('PATCH accepts the UI {old_content,new_content} body (T1 — was a silent no-op)', async () => {
+      mockMemoryUpdate.mockClear();
+      const res = await jsonFetch('/api/memory/knowledge', {
+        method: 'PATCH',
+        body: JSON.stringify({ old_content: 'old text', new_content: 'new text' }),
+      });
+      expect(res.status).toBe(200);
+      // The UI's payload must reach memory.update with the real strings, not '' / ''.
+      expect(mockMemoryUpdate).toHaveBeenCalledWith('knowledge', 'old text', 'new text');
     });
 
     it('DELETE deletes from namespace', async () => {

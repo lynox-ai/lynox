@@ -191,6 +191,12 @@ export class Memory implements IMemory {
       : GLOBAL_SCOPE;
   }
 
+  /** The scope a bare (unscoped) mutation lands in — so a caller (e.g. MemoryFacade)
+   *  can mirror the same write to the knowledge layer under the matching scope. */
+  currentScope(): MemoryScopeRef {
+    return this._defaultScope();
+  }
+
   /** Trim content to MAX_MEMORY_FILE_BYTES by removing oldest lines. */
   private _trimToLimit(content: string): string {
     let result = content;
@@ -439,7 +445,11 @@ export class Memory implements IMemory {
 
   async updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean> {
     const current = await this.loadScoped(ns, scope);
-    if (!current || !current.includes(oldText)) return false;
+    // Guard the empty-oldText footgun: `''.includes('')` is always true and
+    // `replace('', x)` prepends silently, so a malformed request (missing/renamed
+    // fields) would report success having corrupted or no-op'd the doc. An empty
+    // search text is never a real edit → refuse it.
+    if (!oldText || !current || !current.includes(oldText)) return false;
 
     const raw = current.replace(oldText, newText);
     const updated = this._trimToLimit(raw);

@@ -1461,6 +1461,7 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
+	'memory.entry_count_label': { de: 'Einträge in diesem Notizbuch (neueste zuerst)', en: 'entries in this notebook (newest first)' },
 	'memory.no_entries': { de: 'Keine Einträge in', en: 'No entries in' },
 	'memory.no_entries_hint': { de: 'Füge oben einen Eintrag hinzu, oder chatte mit lynox — Wissen wird automatisch gespeichert.', en: 'Add an entry above, or chat with lynox — knowledge is stored automatically.' },
 	'memory.edit': { de: 'Bearbeiten', en: 'Edit' },

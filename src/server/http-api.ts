@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
@@ -3153,7 +3154,7 @@ export class LynoxHTTPApi {
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
-      await memory.save(ns, content);
+      await new MemoryFacade(memory, engine.getKnowledgeLayer()).replaceDocument(ns, content);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -3164,7 +3165,7 @@ export class LynoxHTTPApi {
       const ns = params['ns'] as MemoryNs;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
       if (!text) { errorResponse(res, 400, 'Missing text'); return; }
-      await memory.append(ns, text);
+      await new MemoryFacade(memory, engine.getKnowledgeLayer()).append(ns, text);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -3175,7 +3176,7 @@ export class LynoxHTTPApi {
       const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const pattern = url.searchParams.get('pattern') ?? '';
-      const deleted = await memory.delete(ns, pattern);
+      const deleted = await new MemoryFacade(memory, engine.getKnowledgeLayer()).delete(ns, pattern);
       jsonResponse(res, 200, { deleted });
     }));
 
@@ -3184,10 +3185,17 @@ export class LynoxHTTPApi {
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
+      // Accept BOTH body contracts: the UI sends {old_content,new_content}; older/tool
+      // callers send {old,new}. Reading only {old,new} made every UI inline edit a
+      // silent no-op (empty strings → identity replace, reported as success).
       const b = body as Record<string, unknown> | null;
-      const oldText = b && typeof b['old'] === 'string' ? b['old'] : '';
-      const newText = b && typeof b['new'] === 'string' ? b['new'] : '';
-      const updated = await memory.update(ns, oldText, newText);
+      const pick = (primary: string, fallback: string): string => {
+        const v = b?.[primary] ?? b?.[fallback];
+        return typeof v === 'string' ? v : '';
+      };
+      const oldText = pick('old', 'old_content');
+      const newText = pick('new', 'new_content');
+      const updated = await new MemoryFacade(memory, engine.getKnowledgeLayer()).update(ns, oldText, newText);
       jsonResponse(res, 200, { updated });
     }));
 
