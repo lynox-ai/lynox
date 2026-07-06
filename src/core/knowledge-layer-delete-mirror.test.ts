@@ -1,0 +1,128 @@
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { KnowledgeLayer } from './knowledge-layer.js';
+import { LocalProvider } from './embedding.js';
+import { EngineDb } from './engine-db.js';
+import { MemoryGraphStore } from './memory-graph-store.js';
+import type { ExtractionResult } from './entity-extractor.js';
+import type { MemoryScopeRef } from '../types/index.js';
+
+/**
+ * S5b'-c delete mirror. `memory_delete` / `memory_update` route to
+ * KnowledgeLayer.deactivateByPattern, which deactivated ONLY the legacy store —
+ * so under the read cutover (recall serves engine.db) the "deleted" statement
+ * stayed recallable from engine.db: the "deleted means gone" privacy promise was
+ * broken by the cutover. The fix mirrors the deactivation onto the engine.db
+ * stubs by id (matched on the legacy plaintext, reaped by id in engine.db).
+ *
+ * Extraction is mocked EMPTY so stored memories are subject-less — proving the
+ * mirror works on the vector-recall path alone (no subject graph to lean on).
+ */
+const mock = vi.hoisted(() => ({ extraction: { entities: [], relations: [] } as ExtractionResult }));
+vi.mock('./entity-extractor.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./entity-extractor.js')>();
+  return { ...actual, extractEntities: vi.fn(async () => mock.extraction) };
+});
+
+describe('KnowledgeLayer delete mirror (S5b\'-c)', () => {
+  const provider = new LocalProvider();
+  const scope: MemoryScopeRef = { type: 'context', id: 'proj-1' };
+  const opts = { topK: 10, threshold: 0.2, useHyDE: false, useGraphExpansion: false };
+  const dirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const layers: KnowledgeLayer[] = [];
+
+  afterEach(async () => {
+    for (const l of layers) await l.close().catch(() => {});
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    layers.length = 0; engines.length = 0; dirs.length = 0;
+  });
+
+  function newLayer(opts: { subjectGraph: boolean; memReads: boolean }): { layer: KnowledgeLayer; engine: EngineDb; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-delmirror-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), 'vault-key-delmirror');
+    engines.push(engine);
+    const layer = new KnowledgeLayer(
+      join(dir, 'mem.db'), provider, undefined, undefined,
+      engine, opts.subjectGraph, opts.memReads,
+    );
+    layers.push(layer);
+    return { layer, engine, dir };
+  }
+
+  it('reaps the engine.db stub so a deleted fact stops surfacing under the read cutover', async () => {
+    const { layer, engine } = newLayer({ subjectGraph: true, memReads: true });
+    await layer.init();
+
+    const secret = 'The launch code for Projekt Titan is seven seven three.';
+    const stored = await layer.store(secret, 'knowledge', scope);
+    expect(stored.stored).toBe(true);
+
+    // Recallable from engine.db before the delete. (LocalProvider is a positional
+    // char-hash embedder, so the recall query must closely match the stored text
+    // to clear the threshold — this test exercises the mirror, not recall quality.)
+    const before = await layer.retrieve(secret, [scope], opts);
+    expect(before.memories.map(m => m.id)).toContain(stored.memoryId);
+
+    // memory_delete → deactivateByPattern on a matching substring.
+    const count = await layer.deactivateByPattern('launch code for Projekt Titan');
+    expect(count).toBe(1);
+
+    // Gone from engine.db recall …
+    const after = await layer.retrieve(secret, [scope], opts);
+    expect(after.memories.map(m => m.id)).not.toContain(stored.memoryId);
+    // … and the underlying stub is actually is_active=0 (not merely out-ranked).
+    const stub = new MemoryGraphStore(engine).getStub(stored.memoryId);
+    expect(stub!.is_active).toBe(0);
+  });
+
+  it('mirrors under subjectGraph ON even when reads are OFF (gate is writes, not reads)', async () => {
+    // The mirror WRITES stubs whenever subjectGraph is on, so a delete must reap
+    // them whenever it's on — independent of the read cutover. A regression that
+    // re-gated on memoryReadsActive would leave the stub active here.
+    const { layer, engine } = newLayer({ subjectGraph: true, memReads: false });
+    await layer.init();
+
+    const stored = await layer.store('Dual-write only secret about Projekt Nimbus', 'knowledge', scope);
+    expect(new MemoryGraphStore(engine).getStub(stored.memoryId)!.is_active).toBe(1);
+
+    const count = await layer.deactivateByPattern('Dual-write only secret');
+    expect(count).toBe(1);
+    expect(new MemoryGraphStore(engine).getStub(stored.memoryId)!.is_active).toBe(0);
+  });
+
+  it('isolates an engine.db mirror failure: legacy still deactivated, no throw', async () => {
+    const { layer } = newLayer({ subjectGraph: true, memReads: true });
+    await layer.init();
+    const stored = await layer.store('Fact whose mirror reap will fail', 'knowledge', scope);
+    expect(stored.stored).toBe(true);
+
+    // Force the engine.db reap to throw for this one call.
+    const spy = vi.spyOn(MemoryGraphStore.prototype, 'deactivateByIds').mockImplementationOnce(() => {
+      throw new Error('engine.db locked');
+    });
+    // Must NOT throw (the failure is swallowed) and must still report the legacy count.
+    const count = await layer.deactivateByPattern('Fact whose mirror reap will fail');
+    expect(count).toBe(1);
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+
+  it('flag-off: deactivates legacy only, returns the count, never touches engine.db', async () => {
+    // subjectGraph OFF → the mirror gate is skipped even though an engine.db exists.
+    const { layer, engine } = newLayer({ subjectGraph: false, memReads: false });
+    await layer.init();
+
+    const stored = await layer.store('Ephemeral note to delete later', 'knowledge', scope);
+    expect(stored.stored).toBe(true);
+
+    const count = await layer.deactivateByPattern('Ephemeral note');
+    expect(count).toBe(1);
+    // No stub was ever mirrored (subjectGraph off), so engine.db has no such id.
+    expect(new MemoryGraphStore(engine).getStub(stored.memoryId)).toBeNull();
+  });
+});

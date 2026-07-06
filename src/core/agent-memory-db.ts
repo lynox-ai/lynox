@@ -686,17 +686,22 @@ export class AgentMemoryDb {
     ).all(...params) as MemoryRow[];
   }
 
-  deactivateMemoriesByPattern(pattern: string, namespace?: string | undefined): number {
-    if (namespace) {
-      const result = this.db.prepare(`
-        UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? AND namespace = ?
-      `).run(new Date().toISOString(), `%${pattern}%`, namespace);
-      return result.changes;
-    }
-    const result = this.db.prepare(`
-      UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ?
-    `).run(new Date().toISOString(), `%${pattern}%`);
-    return result.changes;
+  /**
+   * Deactivate active memories whose text matches `pattern` (LIKE) and return the
+   * ids that were deactivated. Returns ids (not a count) so the caller can mirror
+   * the deactivation onto the engine.db subject-graph stubs by id — the pattern
+   * match can only run HERE, on the legacy plaintext (engine.db text is encrypted).
+   * `UPDATE … RETURNING id` yields exactly the flipped rows in one atomic statement
+   * (a single LIKE scan; see the same idiom in mail/state.ts `bumpScheduledAttempt`).
+   */
+  deactivateMemoriesByPattern(pattern: string, namespace?: string | undefined): string[] {
+    const like = `%${pattern}%`;
+    const now = new Date().toISOString();
+    const rows = (namespace
+      ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? AND namespace = ? RETURNING id').all(now, like, namespace)
+      : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? RETURNING id').all(now, like)
+    ) as { id: string }[];
+    return rows.map(r => r.id);
   }
 
   updateMemoryText(

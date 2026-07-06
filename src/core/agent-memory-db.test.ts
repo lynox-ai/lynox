@@ -200,11 +200,11 @@ describe('AgentMemoryDb', () => {
       expect(found[0]!.text).toContain('cats');
     });
 
-    it('deactivates by pattern', () => {
-      db.createMemory({ text: 'remove me', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+    it('deactivates by pattern and returns the deactivated ids', () => {
+      const removed = db.createMemory({ text: 'remove me', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
       db.createMemory({ text: 'keep me', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
-      const count = db.deactivateMemoriesByPattern('remove');
-      expect(count).toBe(1);
+      const ids = db.deactivateMemoriesByPattern('remove');
+      expect(ids).toEqual([removed]);
       expect(db.getActiveMemoryCount()).toBe(1);
     });
 
