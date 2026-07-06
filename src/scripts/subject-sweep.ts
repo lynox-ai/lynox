@@ -42,10 +42,13 @@ import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore, personNameTokens, isProperTokenSubset } from '../core/subject-store.js';
-import type { MergeLedgerEntry } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
-import type { SubjectRepointRecord } from '../core/data-store.js';
+import { runMerge, rollbackMergeRun } from '../core/subject-merge-runner.js';
+import type { MergeLedgerFile, MergeRunResult } from '../core/subject-merge-runner.js';
 import { isCleanupTarget, isJunkPersonShape } from '../core/kg-stopwords.js';
+
+// Re-exported so this script's API surface (its tests + callers) keeps one import site.
+export type { MergeLedgerFile } from '../core/subject-merge-runner.js';
 
 export interface Args { apply: boolean; json: boolean; dataDir: string | null; rollback: string | null; merge: string | null }
 
@@ -90,13 +93,6 @@ export interface Ledger {
 /** A CONFIRM-class candidate: the subset person (dup) folds into the superset person (canonical). */
 export interface SubsetPair { dupId: string; dupName: string; canonicalId: string; canonicalName: string }
 
-/** A persisted merge — same `~/.lynox/sweeps/` home + `version` shape as the archive {@link Ledger}. */
-export interface MergeLedgerFile {
-  version: 1; phase: 'merge'; createdAt: string;
-  entry: MergeLedgerEntry;              // engine.db before-image (SubjectStore.planMerge)
-  dataStore: SubjectRepointRecord[];    // datastore.db before-image (DataStore.repointSubjectId)
-}
-
 type Db = Database.Database;
 
 /**
@@ -132,52 +128,26 @@ export function planPersonSubsetPairs(engineDb: EngineDb): SubsetPair[] {
 }
 
 /**
- * Execute ONE confirmed merge (operator --merge), crash-safe: plan (read-only) → persist
- * the engine.db before-image ledger BEFORE any mutation → executeMerge (engine.db) →
- * repoint datastore.db cells → rewrite the ledger with the datastore before-image so
- * --rollback reverses BOTH stores. The two DBs can't share a transaction, so a crash after
- * executeMerge but before the datastore repoint leaves those cells still pointing at the
- * (now archived) dup — the records are NOT lost (each store's write is its own atomic txn),
- * but they read as temporarily UNATTRIBUTED under the canonical until recovered by
- * `--rollback` (un-merges engine.db) followed by a re-run of `--merge`.
+ * Operator `--merge`: open the two stores, delegate to the shared {@link runMerge} (crash-safe
+ * ledger-first + datastore repoint), close the datastore handle. The `subjects_merge` chat tool
+ * shares the SAME runner, so there is ONE merge-ledger format and ONE `--rollback` path.
  */
-export function doMerge(
-  engineDb: EngineDb, dataDir: string, dupId: string, canonicalId: string,
-): { ok: true; ledgerPath: string; dataStoreRows: number } | { ok: false; reason: string } {
+export function doMerge(engineDb: EngineDb, dataDir: string, dupId: string, canonicalId: string): MergeRunResult {
   const store = new SubjectStore(engineDb);
-  const plan = store.planMerge(dupId, canonicalId);
-  if (!plan.ok) return { ok: false, reason: plan.reason };
-
-  const sweepDir = join(dataDir, 'sweeps');
-  mkdirSync(sweepDir, { recursive: true });
-  const createdAt = new Date().toISOString();
-  const ledgerPath = join(sweepDir, `merge-${createdAt.replace(/[:.]/g, '-')}.json`);
-  const file: MergeLedgerFile = { version: 1, phase: 'merge', createdAt, entry: plan.entry, dataStore: [] };
-  writeFileSync(ledgerPath, JSON.stringify(file, null, 2));   // persist BEFORE mutating
-
-  store.executeMerge(plan.entry);
-
   const dsPath = join(dataDir, 'datastore.db');
-  if (existsSync(dsPath)) {
-    const ds = new DataStore(dsPath);
-    try {
-      file.dataStore = ds.repointSubjectId(dupId, canonicalId);
-      if (file.dataStore.length > 0) writeFileSync(ledgerPath, JSON.stringify(file, null, 2));
-    } finally { ds.close(); }
-  }
-  return { ok: true, ledgerPath, dataStoreRows: file.dataStore.reduce((n, r) => n + r.ids.length, 0) };
+  const ds = existsSync(dsPath) ? new DataStore(dsPath) : null;
+  try { return runMerge(store, ds, dataDir, dupId, canonicalId); }
+  finally { ds?.close(); }
 }
 
 /** Reverse a persisted merge (engine.db + datastore.db), the phase-'merge' half of --rollback. */
 export function rollbackMergeFile(engineDb: EngineDb, dataDir: string, file: MergeLedgerFile): { ok: boolean; reason?: string } {
   const store = new SubjectStore(engineDb);
   const dsPath = join(dataDir, 'datastore.db');
-  if (file.dataStore.length > 0 && existsSync(dsPath)) {
-    const ds = new DataStore(dsPath);
-    try { ds.rollbackRepoint(file.entry.dupId, file.entry.canonicalId, file.dataStore); }
-    finally { ds.close(); }
-  }
-  return store.rollbackMerge(file.entry);
+  // Only touch datastore.db when the merge actually repointed cells (else a no-op open/close).
+  const ds = (file.dataStore.length > 0 && existsSync(dsPath)) ? new DataStore(dsPath) : null;
+  try { return rollbackMergeRun(store, ds, file); }
+  finally { ds?.close(); }
 }
 
 /** Read the set of subject ids that are a thread anchor in history.db (read-only). */
