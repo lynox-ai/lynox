@@ -4213,6 +4213,37 @@ describe('LynoxHTTPApi', () => {
       expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(1);
       expect(statuses.slice(0, 6)).toEqual([200, 200, 200, 200, 200, 200]);
     });
+
+    it('rate-limit keys on the proxy-appended rightmost XFF hop, not the forged left-most', async () => {
+      // Wiring guard for the leftmost→rightmost fix: the existing burst test
+      // above sends a SINGLE-entry X-Forwarded-For, which is behaviour-invariant
+      // between the old `split(',')[0]` (left-most) and the new right-most
+      // resolution — so it can't catch a regression that re-introduces left-most
+      // keying at this call site. Here the LEFT-most (client-forged) entry VARIES
+      // every request while the proxy-appended right-most peer stays CONSTANT:
+      // right-most keying lands them all in one bucket (7th → 429); left-most
+      // keying would give each forged prefix its own bucket and never 429.
+      const peer = '198.51.100.240';
+      const statuses: number[] = [];
+      for (let i = 0; i < 7; i++) {
+        const res = await jsonFetch('/api/llm/test', {
+          method: 'POST',
+          headers: { 'X-Forwarded-For': `10.0.0.${i}, ${peer}` },
+          body: JSON.stringify({ provider: 'vertex' }),
+        });
+        statuses.push(res.status);
+      }
+      expect(statuses.filter((s) => s === 429).length).toBeGreaterThanOrEqual(1);
+
+      // A DIFFERENT appended peer (even with the same forged prefix) is a
+      // distinct real client → fresh bucket → not rate-limited.
+      const other = await jsonFetch('/api/llm/test', {
+        method: 'POST',
+        headers: { 'X-Forwarded-For': `10.0.0.0, 198.51.100.241` },
+        body: JSON.stringify({ provider: 'vertex' }),
+      });
+      expect(other.status).toBe(200);
+    });
   });
 
   // ── /api/privacy/delete-request — GDPR Art. 17 stop-gap mailto endpoint.

@@ -91,8 +91,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     cmake make g++ git curl ca-certificates
 
+# Pin whisper.cpp to the exact commit the v1.8.4 tag points at. The shallow
+# --branch clone stays (efficient), but we assert HEAD equals the expected
+# commit so a moved/re-pointed tag fails the build (tamper-detection) instead
+# of silently compiling swapped-out upstream code.
 RUN git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp /tmp/whisper \
     && cd /tmp/whisper \
+    && test "$(git rev-parse HEAD)" = "9386f239401074690479731c1e41683fbbeac557" \
     && cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
     && cmake --build build --config Release -j$(nproc) \
     && cp build/bin/whisper-cli /usr/local/bin/whisper-cli \
