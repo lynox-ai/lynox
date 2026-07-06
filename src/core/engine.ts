@@ -73,6 +73,7 @@ import {
   artifactRestoreTool,
   recallToolResultTool,
   setThreadContextTool,
+  subjectsMergeTool,
   mediaProcessTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
@@ -1560,6 +1561,7 @@ export class Engine {
         this._toolContext.subjectStore = subjectStore;
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
+        this.registry.register(subjectsMergeTool);
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
