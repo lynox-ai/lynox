@@ -38,6 +38,7 @@ import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
+import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
@@ -1142,15 +1143,10 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Resolve client IP (proxy-aware)
-      let clientIp = req.socket.remoteAddress ?? 'unknown';
-      if (trustProxy) {
-        const forwarded = req.headers['x-forwarded-for'];
-        if (typeof forwarded === 'string') {
-          clientIp = forwarded.split(',')[0]?.trim() ?? clientIp;
-        }
-      }
-      clientIp = clientIp.replace(/^::ffff:/, '');
+      // Resolve client IP (proxy-aware: trusts the proxy-appended rightmost
+      // X-Forwarded-For hop, never the client-controllable left-most entry —
+      // see client-ip.ts). Feeds the IP allowlist + request audit log.
+      const clientIp = resolveClientIp(req, trustProxy);
 
       // IP allowlist check
       if (ALLOWED_IPS.length > 0) {
@@ -4426,20 +4422,14 @@ export class LynoxHTTPApi {
       }
     }, LLM_TEST_WINDOW_MS).unref();
     this.addStatic('user', 'POST /api/llm/test', async (req, res, _params, body) => {
-      // Key on the proxy-aware client IP (matches LYNOX_TRUST_PROXY logic at
-      // the request entry point), not the raw socket — behind Traefik / a
-      // managed CP every user shares one socket-IP and one user would starve
-      // the 6/min window for all peers; conversely an attacker behind many
-      // forwarded IPs would bypass the limit entirely. Re-derive locally
-      // instead of plumbing clientIp through addStatic (touch surface = 1).
-      let ip = req.socket.remoteAddress ?? 'unknown';
-      if (process.env['LYNOX_TRUST_PROXY'] === 'true') {
-        const forwarded = req.headers['x-forwarded-for'];
-        if (typeof forwarded === 'string' && forwarded.length > 0) {
-          ip = forwarded.split(',')[0]?.trim() ?? ip;
-        }
-      }
-      ip = ip.replace(/^::ffff:/, '');
+      // Key on the proxy-aware client IP (resolveClientIp trusts the
+      // proxy-appended rightmost XFF hop, matching the request entry point),
+      // not the raw socket — behind Traefik / a managed CP every user shares
+      // one socket-IP and one user would starve the 6/min window for all peers.
+      // Using the rightmost hop (not the left-most) is also what stops an
+      // attacker from minting fresh buckets via forged X-Forwarded-For entries.
+      // Re-derive locally instead of plumbing clientIp through addStatic.
+      const ip = resolveClientIp(req, process.env['LYNOX_TRUST_PROXY'] === 'true');
       const nowTs = Date.now();
       const history = llmTestRateLimit.get(ip) ?? [];
       const recent = history.filter((t) => nowTs - t < LLM_TEST_WINDOW_MS);
