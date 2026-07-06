@@ -267,8 +267,8 @@ export type MergeResult =
   | { ok: false; reason: string };
 
 /**
- * Title tokens stripped before a person-name subset comparison, so "Dr. Britta
- * Massmann" ⊃ "Britta". Dotless (punctuation is replaced with spaces first).
+ * Title tokens stripped before a person-name subset comparison, so "Dr. Ada
+ * Lovelace" ⊃ "Ada". Dotless (punctuation is replaced with spaces first).
  */
 const PERSON_TITLE_TOKENS: ReadonlySet<string> = new Set([
   'dr', 'herr', 'frau', 'mr', 'ms', 'mrs', 'miss', 'prof', 'dipl', 'ing', 'mag', 'herrn',
@@ -727,12 +727,12 @@ export class SubjectStore {
   }
 
   /**
-   * Person-only WRITE-time subset resolver (the "Britta ⊂ Dr. Britta Massmann" dedup
+   * Person-only WRITE-time subset resolver (the "Ada ⊂ Dr. Ada Lovelace" dedup
    * at the source). Tries, in order: exact canonical → alias → an UNAMBIGUOUS token
    * subset of exactly ONE active person in the owner scope (titles stripped) — folding
    * the surface form in as an ALIAS of that person rather than minting a duplicate.
-   * Ambiguous (0 or ≥2 supersets — e.g. "Thomas" under both "Thomas Müller" and
-   * "Thomas Schmidt") falls through to a fresh subject: aliasing a mention is safe,
+   * Ambiguous (0 or ≥2 supersets — e.g. "Alan" under both "Alan Turing" and
+   * "Alan Kay") falls through to a fresh subject: aliasing a mention is safe,
    * GUESSING which of two people is not. Person-only + name-cased by design (same
    * conservatism as the extractor person-shape gate).
    */
@@ -746,6 +746,15 @@ export class SubjectStore {
     if (canonical) { this._mergeAliases(canonical, surfaceForms); return { id: canonical.id, created: false, resolved: 'canonical' }; }
     const alias = this.findByAlias(name, 'person', owner);
     if (alias) { this._mergeAliases(alias, surfaceForms); return { id: alias.id, created: false, resolved: 'alias' }; }
+    // Normalized fallback (mirrors findOrCreate): a punctuation/collapsed-whitespace variant
+    // of an already-stored clean name converges — token-equal forms differ only by trailing
+    // "." or doubled spaces, which findCanonical misses and the subset scan (STRICT superset)
+    // won't catch, so without this a "Ada Lovelace." would mint a duplicate of "Ada Lovelace".
+    const normalized = normalizeSubjectName('person', name);
+    if (normalized !== name) {
+      const normHit = this.findCanonical(normalized, 'person', owner);
+      if (normHit) { this._mergeAliases(normHit, surfaceForms); return { id: normHit.id, created: false, resolved: 'canonical' }; }
+    }
 
     const tokens = personNameTokens(name);
     if (tokens.length > 0) {

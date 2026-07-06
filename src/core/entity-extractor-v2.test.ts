@@ -50,11 +50,11 @@ describe('entity-extractor-v2 parseToolInput', () => {
         { canonical_name: 'CSV', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'exported a CSV' },
         { canonical_name: 'target', type: 'person', confidence: 0.88, aliases: [], evidence_span: 'hit the target' },
         { canonical_name: 'CSV', type: 'product', confidence: 0.9, aliases: [], evidence_span: 'the CSV format' },     // same shape, kept
-        { canonical_name: 'Roland Wagner', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'Roland Wagner said' },
+        { canonical_name: 'Grace Hopper', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'Grace Hopper said' },
       ],
       relations: [],
     });
-    expect(result.entities.map(e => e.canonicalName).sort()).toEqual(['CSV', 'Roland Wagner']);
+    expect(result.entities.map(e => e.canonicalName).sort()).toEqual(['CSV', 'Grace Hopper']);
   });
 
   it('mixed input: keeps proper nouns, drops common nouns', () => {

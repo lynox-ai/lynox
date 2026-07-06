@@ -199,13 +199,13 @@ describe('kg-cleanup', () => {
     });
     it('keeps real single + multi-token capitalized names (rule 3 territory, not rejected here)', () => {
       // capitalized single tokens survive — corroboration (rule 3) decides these elsewhere
-      for (const n of ['Will', 'Roland', 'Massmann', 'Portal', 'Peter']) expect(isJunkPersonShape(n)).toBe(false);
+      for (const n of ['Will', 'Roland', 'Lovelace', 'Portal', 'Peter']) expect(isJunkPersonShape(n)).toBe(false);
       // 7-char all-caps is past the acronym bound → kept (rule 1 is ≤6)
       expect(isJunkPersonShape('ABCDEFG')).toBe(false);
       // hyphenated + accented-capital single tokens are real names → kept
       for (const n of ['Jean-Pierre', 'Émile', 'Ø', 'Åsa']) expect(isJunkPersonShape(n)).toBe(false);
       // multi-token names always kept
-      for (const n of ['Will Smith', 'Dr. Britta Massmann', 'Roland Wagner', 'Target Corp']) expect(isJunkPersonShape(n)).toBe(false);
+      for (const n of ['Will Smith', 'Dr. Ada Lovelace', 'Grace Hopper', 'Target Corp']) expect(isJunkPersonShape(n)).toBe(false);
     });
   });
 });

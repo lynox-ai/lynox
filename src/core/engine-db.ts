@@ -513,7 +513,7 @@ const MIGRATIONS: string[] = [
    UPDATE triggers SET confirmed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE effect = 'run_agent';`,
 
   // v7 (PR-C subject-dedup): the retroactive-merge redirect pointer. When two rows
-  // turn out to be the same real subject (Britta ⊂ Dr. Britta Massmann), SubjectStore.mergeSubjects
+  // turn out to be the same real subject (Ada ⊂ Dr. Ada Lovelace), SubjectStore.mergeSubjects
   // repoints every FK from the duplicate onto the canonical, soft-archives the dup,
   // and stamps `merged_into = <canonical id>` so a stale id still held anywhere
   // (a soft `source_run_id`-carried ref, a cached UI id, a DataStore cell mid-flight)

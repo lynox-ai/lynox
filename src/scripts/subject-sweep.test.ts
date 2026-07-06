@@ -4,8 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
+import { DataStore } from '../core/data-store.js';
 import { MemoryGraphStore } from '../core/memory-graph-store.js';
-import { planArchive, applyArchive, rollback, parseArgs } from './subject-sweep.js';
+import { planArchive, applyArchive, rollback, parseArgs, planPersonSubsetPairs, doMerge, rollbackMergeFile } from './subject-sweep.js';
+import type { MergeLedgerFile } from './subject-sweep.js';
+import { readFileSync } from 'node:fs';
 
 /**
  * Slice-1 garbage-sweep (archive phase): soft-archive `isCleanupTarget` junk subjects
@@ -51,7 +54,7 @@ describe('subject-sweep — archive phase', () => {
     const { engine, subs } = make();
     const acr = subs.createSubject({ kind: 'person', name: 'CSV' });        // acronym → junk person
     const low = subs.createSubject({ kind: 'person', name: 'target' });     // lowercase → junk person (never a stopword)
-    const realPerson = subs.createSubject({ kind: 'person', name: 'Roland Wagner' });
+    const realPerson = subs.createSubject({ kind: 'person', name: 'Grace Hopper' });
     const orgSameShape = subs.createSubject({ kind: 'organization', name: 'CSV' }); // same shape, NOT person → kept
     const plan = planArchive(engine, new Set());
     expect(new Set(plan.archive.map(a => a.id))).toEqual(new Set([acr, low]));
@@ -145,5 +148,93 @@ describe('subject-sweep — archive phase', () => {
   it('parseArgs', () => {
     expect(parseArgs(['--apply', '--json'])).toMatchObject({ apply: true, json: true });
     expect(parseArgs(['--data-dir=/x', '--rollback=/y.json'])).toMatchObject({ dataDir: '/x', rollback: '/y.json' });
+    expect(parseArgs(['--merge=dup1:canon2'])).toMatchObject({ merge: 'dup1:canon2' });
+  });
+});
+
+describe('subject-sweep — slice 2 (person subset merge, CONFIRM class)', () => {
+  const dirs: string[] = [];
+  const engines: EngineDb[] = [];
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* */ } }
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    engines.length = 0; dirs.length = 0;
+  });
+  function make(): { dir: string; engine: EngineDb; subs: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-sweep2-')); dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), ''); engines.push(engine);
+    return { dir, engine, subs: new SubjectStore(engine) };
+  }
+
+  it('planPersonSubsetPairs reports the unambiguous subset, per-owner, skipping ambiguous', () => {
+    const { engine, subs } = make();
+    subs.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    const ada = subs.createSubject({ kind: 'person', name: 'Ada' });
+    // ambiguous: "Alan" under two → NOT reported.
+    subs.createSubject({ kind: 'person', name: 'Alan Turing' });
+    subs.createSubject({ kind: 'person', name: 'Alan Kay' });
+    subs.createSubject({ kind: 'person', name: 'Alan' });
+    // different owner → never paired across owners.
+    subs.createSubject({ kind: 'person', name: 'Grace Hopper', ownerUserId: 'tenant-2' });
+    subs.createSubject({ kind: 'person', name: 'Grace', ownerUserId: 'tenant-1' });
+
+    const pairs = planPersonSubsetPairs(engine);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({ dupId: ada, dupName: 'Ada', canonicalName: 'Dr. Ada Lovelace' });
+  });
+
+  it('doMerge executes + persists a merge ledger; --rollback reverses it (both stores)', () => {
+    const { dir, engine, subs } = make();
+    const dup = subs.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = subs.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    engine.getDb().prepare('INSERT INTO memories (id, text, namespace, subject_id, scope_type, scope_id) VALUES (?,?,?,?,?,?)').run('m1', 'x', 'knowledge', dup, 'global', 'g');
+
+    const r = doMerge(engine, dir, dup, canon);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(subs.getSubject(dup)!.merged_into).toBe(canon);
+    expect(engine.getDb().prepare('SELECT subject_id FROM memories WHERE id=?').get('m1')).toMatchObject({ subject_id: canon });
+
+    const file = JSON.parse(readFileSync(r.ledgerPath, 'utf8')) as MergeLedgerFile;
+    expect(file.phase).toBe('merge');
+    const rb = rollbackMergeFile(engine, dir, file);
+    expect(rb.ok).toBe(true);
+    expect(subs.getSubject(dup)!.merged_into).toBeNull();
+    expect(subs.getSubject(dup)!.archived_at).toBeNull();
+    expect(engine.getDb().prepare('SELECT subject_id FROM memories WHERE id=?').get('m1')).toMatchObject({ subject_id: dup });
+  });
+
+  it('doMerge refuses an invalid pair (cross-kind) without mutating', () => {
+    const { dir, engine, subs } = make();
+    const person = subs.createSubject({ kind: 'person', name: 'Ada' });
+    const org = subs.createSubject({ kind: 'organization', name: 'Acme' });
+    const r = doMerge(engine, dir, person, org);
+    expect(r.ok).toBe(false);
+    expect(subs.getSubject(person)!.merged_into).toBeNull();   // untouched
+  });
+
+  it('doMerge repoints datastore.db subject cells + --rollback reverses BOTH stores', () => {
+    const { dir, engine, subs } = make();
+    const dup = subs.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = subs.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    // A datastore.db carrying a subject cell = dup (the Record-on-spine follow-through target).
+    const ds = new DataStore(join(dir, 'datastore.db'));
+    ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [{ name: 'client', type: 'subject', subjectKind: 'person' }] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: dup }] });
+    ds.close();
+
+    const r = doMerge(engine, dir, dup, canon);
+    expect(r.ok && r.dataStoreRows).toBe(1);
+    const ds2 = new DataStore(join(dir, 'datastore.db'));
+    expect(ds2.queryRecords({ collection: 'invoices' }).rows[0]!['client']).toBe(canon);
+    ds2.close();
+
+    if (!r.ok) return;
+    const file = JSON.parse(readFileSync(r.ledgerPath, 'utf8')) as MergeLedgerFile;
+    expect(file.dataStore).toHaveLength(1);
+    rollbackMergeFile(engine, dir, file);
+    const ds3 = new DataStore(join(dir, 'datastore.db'));
+    expect(ds3.queryRecords({ collection: 'invoices' }).rows[0]!['client']).toBe(dup);   // reversed
+    ds3.close();
   });
 });
