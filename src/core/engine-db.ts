@@ -492,6 +492,25 @@ const MIGRATIONS: string[] = [
      done INTEGER NOT NULL DEFAULT 0
    );
    INSERT OR IGNORE INTO verb_backfill_marker (id, done) VALUES (1, 0);`,
+
+  // v6 (triggers-consent): a human first-run-confirm gate on the `run_agent`
+  // effect (the SEC leg of the Triggers primitive). An agent-created `run_agent`
+  // trigger — a scheduled/watch autonomous agent turn — can be steered by injected
+  // content and then fires unattended under the weaker autonomous bash guard: an
+  // injection-amplification hole `run_workflow` does NOT have (it gates on the
+  // workflow's own `confirmedAt`). A `run_agent` trigger now needs an explicit
+  // human `confirmed_at` before it is due / dispatched; anything created by other
+  // than an explicit human action lands unconfirmed (fail-closed — the store
+  // default is NULL, the human HTTP route stamps, the agent tool never does).
+  // GRANDFATHER (rafael decision): every EXISTING run_agent trigger predates the
+  // gate and was operator-created (pre-customer, no injected schedules) → stamp it
+  // confirmed so the one-time behaviour change never pauses the operator's own live
+  // schedules; the gate protects only NEW agent-created triggers. Scoped to
+  // `run_agent` — confirmed_at is read for no other effect, so stamping only the
+  // gated rows keeps the column meaningful.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+   ALTER TABLE triggers ADD COLUMN confirmed_at TEXT;
+   UPDATE triggers SET confirmed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE effect = 'run_agent';`,
 ];
 
 /**

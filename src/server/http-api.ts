@@ -4212,7 +4212,14 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Invalid runAt: must be ISO 8601 datetime'); return;
       }
       try {
-        const baseParams = { title, description, assignee, dueDate };
+        // A human creating a schedule via this authenticated route IS the consent
+        // action for a `run_agent` trigger (mirrors the pipelineId branch above,
+        // which stamps the workflow's confirmedAt). Stamp `confirmedAt` so a
+        // human-created autonomous trigger is due + dispatches immediately; the agent
+        // `task_create` tool never passes it, so ITS run_agent triggers land
+        // unconfirmed and wait for an explicit confirm. Ignored for TODOs /
+        // non-run_agent effects.
+        const baseParams = { title, description, assignee, dueDate, confirmedAt: new Date().toISOString() };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
           : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
@@ -4258,6 +4265,20 @@ export class LynoxHTTPApi {
       const task = taskManager.complete(params['id']!);
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
+    }));
+
+    // Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
+    // unattended execution — stamps `confirmed_at` so it becomes due + dispatches
+    // (an unconfirmed run_agent trigger is neither, closing the injection-
+    // amplification hole). This user-scope HTTP action is the ONLY consent surface;
+    // the agent `task_create` tool cannot reach it, so confirmation is always an
+    // explicit human step. Idempotent (re-confirming just re-stamps).
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params) => {
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
+      const trigger = taskManager.confirmTrigger(params['id']!);
+      if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
+      jsonResponse(res, 200, trigger);
     }));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"

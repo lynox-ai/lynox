@@ -75,6 +75,13 @@ export interface TaskCreateParams {
   pipelineId?: string | undefined;
   /** Slice B2: JSON-stringified bound param values for a scheduled workflow run. */
   pipelineParams?: string | undefined;
+  /** Triggers-consent: human first-run-confirm timestamp for a `run_agent` trigger.
+   *  Supplied ONLY by an explicit human create action (the HTTP `POST /api/tasks`
+   *  route stamps it); the agent `task_create` tool never passes it, so an
+   *  agent-scheduled autonomous trigger lands unconfirmed (fail-closed) and neither
+   *  becomes due nor dispatches until a human confirms it. Ignored for non-run_agent
+   *  effects (they aren't gated on it). */
+  confirmedAt?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -204,6 +211,7 @@ export class TaskManager {
         notificationChannel: params.notificationChannel,
         pipelineId: params.pipelineId,
         pipelineParams: params.pipelineParams,
+        confirmedAt: params.confirmedAt,
       });
 
       return this.history.getTrigger(id)!;
@@ -582,6 +590,24 @@ export class TaskManager {
    *  trigger matched. */
   setEnabled(id: string, enabled: boolean): boolean {
     return this.history.setTriggerEnabled(id, enabled);
+  }
+
+  /** Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
+   *  unattended execution — stamps `confirmed_at` so the trigger becomes due + is
+   *  dispatched (an unconfirmed `run_agent` trigger is neither). The human-consent
+   *  analog of the workflow first-run-confirm ({@link RunHistory.setWorkflowConfirmedAt}),
+   *  reached only from the user-scoped HTTP confirm route. The optional `scopeFilter`
+   *  is applied to the RESOLVE read (getTrigger → scope-filtered getById), so a caller
+   *  that passes scopes cannot confirm a trigger outside them; the write is exact-id on
+   *  the resolved id (same idiom as {@link setEnabled} + the workflow confirm — the
+   *  confirm surfaces are human-HTTP-only, not agent-tool mutation paths). Returns the
+   *  updated trigger, or undefined if not found / out of scope. */
+  confirmTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TriggerRecord | undefined {
+    const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
+    const trigger = this.history.getTrigger(id, scopeOpts);
+    if (!trigger) return undefined;
+    this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString());
+    return this.history.getTrigger(trigger.id, scopeOpts);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */

@@ -220,6 +220,10 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
       watchConfig: over.watchConfig,
       notificationChannel: over.notificationChannel,
       maxRetries: over.maxRetries,
+      // Confirmed by default: these fixtures represent already-scheduled triggers that
+      // FIRE, and a run_agent trigger must be human-confirmed to be due (triggers-
+      // consent). Restores the pre-gate default for all trig()-built fixtures.
+      confirmedAt: '2026-06-01T00:00:00.000Z',
     };
   }
 

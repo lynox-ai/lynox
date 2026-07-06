@@ -81,6 +81,10 @@ function makeTask(overrides?: Partial<TriggerRecord>): TriggerRecord {
     next_run_at: '2026-01-01T09:00:00.000Z',
     source: 'cron',
     effect: 'run_agent',
+    // Confirmed by default: these fixtures exercise the RUN path, and a `run_agent`
+    // trigger must be human-confirmed to dispatch (triggers-consent). The dispatch
+    // consent-gate test overrides this to undefined.
+    confirmed_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -208,6 +212,33 @@ describe('WorkerLoop', () => {
 
     expect(engine.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ costGuard: { maxBudgetUSD: 15 } }),
+    );
+  });
+
+  // ---- 2b'. run_agent consent gate (triggers-consent): an unconfirmed run_agent
+  // trigger reaching dispatch is refused — NEVER mints an autonomous run ----
+
+  it('refuses to dispatch an unconfirmed run_agent trigger (never mints a run)', async () => {
+    // getDueTriggers normally EXCLUDES an unconfirmed run_agent (the primary gate);
+    // forcing one through the mock proves the dispatch-time defense-in-depth.
+    const task = makeTask({ confirmed_at: undefined });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('should not run');
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The money-critical property: no autonomous session minted, no agent run.
+    expect(engine.createSession).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+    // Recorded as a skipped run so it surfaces + stops re-firing.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(
+      task.id,
+      expect.stringContaining('confirmation'),
+      'failed',
     );
   });
 

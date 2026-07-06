@@ -2020,6 +2020,7 @@ describe('RunHistory', () => {
         id: 'tdue',
         title: 'Due',
         nextRunAt: '2020-01-01T00:00:00.000Z',
+        confirmedAt: '2026-06-01T00:00:00.000Z', // confirmed → due (run_agent consent gate)
       });
       const due = h.getDueTriggers();
       expect(due.some(t => t.id === 'tdue')).toBe(true);
@@ -2066,6 +2067,7 @@ describe('RunHistory', () => {
         status: 'failed',
         scheduleCron: '0 9 * * *',
         nextRunAt: '2020-01-01T00:00:00.000Z',
+        confirmedAt: '2026-06-01T00:00:00.000Z', // confirmed → due (isolates the failed-cron recurrence SELECT)
       });
       const due = h.getDueTriggers();
       expect(due.some(t => t.id === 'tcronfail')).toBe(true);
@@ -2120,6 +2122,7 @@ describe('RunHistory', () => {
       h.insertTrigger({
         id: 'cron-1', title: 'Daily digest', source: 'cron', effect: 'run_agent',
         scheduleCron: '0 9 * * *', nextRunAt: '2020-01-01T00:00:00.000Z',
+        confirmedAt: '2026-06-01T00:00:00.000Z', // confirmed → due (run_agent consent gate)
       });
       expect(h.getTriggers().some(t => t.id === 'cron-1')).toBe(true);
       // Past next_run_at + enabled + open → due.

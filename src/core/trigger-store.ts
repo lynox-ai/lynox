@@ -63,6 +63,9 @@ export interface TriggerRow {
   notificationChannel?: string | null | undefined;
   maxRetries?: number | null | undefined;
   retryCount: number;
+  /** Human first-run-confirm for a `run_agent` trigger (the consent gate). null =
+   *  not confirmed. Fail-closed: only an explicit human action supplies it. */
+  confirmedAt?: string | null | undefined;
 }
 
 export interface StoredTrigger {
@@ -82,6 +85,7 @@ export interface StoredTrigger {
   lastRunStatus: string | null;
   retryCount: number;
   createdAt: string;
+  confirmedAt: string | null;
 }
 
 /**
@@ -117,6 +121,7 @@ export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
     notificationChannel: rec.notification_channel ?? null,
     maxRetries: rec.max_retries ?? null,
     retryCount: rec.retry_count ?? 0,
+    confirmedAt: rec.confirmed_at ?? null,
   };
 }
 
@@ -137,6 +142,7 @@ interface TriggerDbRow {
   last_run_status: string | null;
   retry_count: number;
   created_at: string;
+  confirmed_at: string | null;
 }
 
 /**
@@ -167,13 +173,15 @@ interface TriggerFullDbRow {
   retry_count: number;
   created_at: string;
   updated_at: string;
+  confirmed_at: string | null;
 }
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
-   last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at`;
+   last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
+   confirmed_at`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -230,6 +238,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     // (nullable params_json in the forward map) rides the S3f write-cutover.
     pipeline_params: row.params_json === '{}' ? undefined : row.params_json,
     enabled: row.enabled,
+    confirmed_at: row.confirmed_at ?? undefined,
   };
 }
 
@@ -273,9 +282,9 @@ export class TriggerStore {
         id, title, description, source, effect, condition_json, target_workflow_id,
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
-        max_retries, retry_count, created_at, updated_at
+        max_retries, retry_count, confirmed_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -295,6 +304,7 @@ export class TriggerStore {
         notification_channel = excluded.notification_channel,
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
+        confirmed_at = excluded.confirmed_at,
         updated_at = excluded.updated_at
     `).run(
       row.id,
@@ -316,6 +326,7 @@ export class TriggerStore {
       row.notificationChannel ?? null,
       row.maxRetries ?? null,
       row.retryCount,
+      row.confirmedAt ?? null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
     );
@@ -377,6 +388,11 @@ export class TriggerStore {
     notificationChannel?: string | undefined;
     pipelineId?: string | undefined;
     pipelineParams?: string | undefined;
+    /** Human first-run-confirm (the `run_agent` consent gate). Absent = unconfirmed
+     *  — fail-closed. Only the human HTTP create route supplies it; the agent
+     *  `task_create` tool never does, so an agent-scheduled `run_agent` trigger
+     *  lands unconfirmed and is neither due nor dispatched until a human confirms. */
+    confirmedAt?: string | undefined;
   }): void {
     this.upsert({
       id: params.id,
@@ -405,6 +421,7 @@ export class TriggerStore {
       notificationChannel: params.notificationChannel ?? null,
       maxRetries: params.maxRetries ?? 0,
       retryCount: 0,
+      confirmedAt: params.confirmedAt ?? null,
     });
   }
 
@@ -414,6 +431,16 @@ export class TriggerStore {
     return this.db.prepare(
       "UPDATE triggers SET enabled = ?, updated_at = datetime('now') WHERE id = ?",
     ).run(enabled ? 1 : 0, id).changes > 0;
+  }
+
+  /** Stamp (or clear) the human first-run-confirm on a trigger — the consent
+   *  surface's write. `confirmedAt` = an ISO timestamp to confirm a `run_agent`
+   *  trigger for unattended execution, or null to un-confirm. Exact-id (same idiom
+   *  as {@link setEnabled}); returns false if no row matched. */
+  setConfirmedAt(id: string, confirmedAt: string | null): boolean {
+    return this.db.prepare(
+      "UPDATE triggers SET confirmed_at = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(confirmedAt, id).changes > 0;
   }
 
   /**
@@ -439,6 +466,15 @@ export class TriggerStore {
     const values: unknown[] = [];
     if (params.title !== undefined) { sets.push('title = ?'); values.push(params.title); }
     if (params.description !== undefined) { sets.push('description = ?'); values.push(params.description); }
+    // Editing a trigger's INSTRUCTION (title/description) re-requires consent: an
+    // edited instruction is a new instruction, so an injected edit can't repurpose
+    // an already-confirmed `run_agent` trigger (mirrors update-workflow clearing the
+    // workflow's confirmedAt on any step edit). No-op for non-run_agent effects
+    // (confirmed_at is unread there). A schedule-only change doesn't alter WHAT runs,
+    // so it does NOT clear consent.
+    if (params.title !== undefined || params.description !== undefined) {
+      sets.push('confirmed_at = NULL');
+    }
     if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
     if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
     if (params.scheduleCron !== undefined) {
@@ -493,7 +529,7 @@ export class TriggerStore {
     const row = this.db.prepare(
       `SELECT id, title, description, source, effect, condition_json, target_workflow_id,
               params_json, status, enabled, next_run_at, last_run_at,
-              last_run_result, last_run_status, retry_count, created_at
+              last_run_result, last_run_status, retry_count, created_at, confirmed_at
        FROM triggers WHERE id = ?`,
     ).get(id) as TriggerDbRow | undefined;
     if (!row) return undefined;
@@ -507,7 +543,7 @@ export class TriggerStore {
     const rows = this.db.prepare(
       `SELECT id, title, description, source, effect, condition_json, target_workflow_id,
               params_json, status, enabled, next_run_at, last_run_at,
-              last_run_result, last_run_status, retry_count, created_at
+              last_run_result, last_run_status, retry_count, created_at, confirmed_at
        FROM triggers ORDER BY updated_at DESC LIMIT ?`,
     ).all(limit) as TriggerDbRow[];
     return rows.map(r => this._map(r));
@@ -522,6 +558,17 @@ export class TriggerStore {
    * `idx_triggers_enabled(enabled, next_run_at)` index supports it. `now` is a
    * param (default `new Date().toISOString()`, matching legacy) purely for test
    * determinism.
+   *
+   * CONSENT GATE (triggers-consent, engine.db v6): an unconfirmed `run_agent`
+   * trigger is NOT due — `NOT (effect = 'run_agent' AND confirmed_at IS NULL)`.
+   * This is the PRIMARY enforcement of the human first-run-confirm on autonomous
+   * agent triggers (the injection-amplification hole): an agent-created
+   * `run_agent` trigger (which lands `confirmed_at = NULL`, fail-closed) is simply
+   * never selected until a human confirms it — so `next_run_at` is preserved (no
+   * disable / no run-result mangling) and confirming makes it due in place. The
+   * WorkerLoop dispatch adds a defense-in-depth backstop. `run_workflow` keeps its
+   * own {@link PlannedPipeline.confirmedAt} gate (in executePipeline);
+   * `backup`/`notify` are deterministic → never gated here.
    */
   getDue(now: string = new Date().toISOString()): TriggerRecord[] {
     const rows = this.db.prepare(
@@ -532,6 +579,7 @@ export class TriggerStore {
          AND enabled != 0
          AND status != 'completed'
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND NOT (effect = 'run_agent' AND confirmed_at IS NULL)
        ORDER BY next_run_at ASC`,
     ).all(now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
@@ -622,6 +670,7 @@ export class TriggerStore {
       lastRunStatus: row.last_run_status,
       retryCount: row.retry_count,
       createdAt: row.created_at,
+      confirmedAt: row.confirmed_at,
     };
   }
 }

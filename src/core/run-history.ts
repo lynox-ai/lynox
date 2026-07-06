@@ -2390,6 +2390,13 @@ export class RunHistory {
     return this._requireTriggerStore().setEnabled(id, enabled);
   }
 
+  /** Triggers-consent: stamp/clear the human first-run-confirm on a trigger (the
+   *  consent surface's write). Pass an ISO timestamp to confirm a `run_agent`
+   *  trigger for unattended execution, null to un-confirm. */
+  setTriggerConfirmedAt(id: string, confirmedAt: string | null): boolean {
+    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt);
+  }
+
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {
     return this._requireWorkflowStore().remove(id);
@@ -2439,6 +2446,10 @@ export class RunHistory {
     notificationChannel?: string | undefined;
     pipelineId?: string | undefined;
     pipelineParams?: string | undefined;
+    /** Human first-run-confirm (the `run_agent` consent gate). Absent = unconfirmed
+     *  (fail-closed) — only the human HTTP create route supplies it, never the agent
+     *  `task_create` tool. */
+    confirmedAt?: string | undefined;
   }): void {
     this._requireTriggerStore().insert(params);
   }
