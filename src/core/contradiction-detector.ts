@@ -1,6 +1,7 @@
 import type { MemoryNamespace, MemoryScopeRef, ContradictionInfo } from '../types/index.js';
 import type { ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
+import { KG_COMMON_NOUNS } from './kg-stopwords.js';
 
 /**
  * A cosine-recall over active memories — either legacy `AgentMemoryDb.findSimilarMemories`
@@ -81,11 +82,15 @@ export async function detectContradictions(
       checkStateChange(newText, existing.text);
 
     if (isContradiction) {
+      // Subject-agreement guard: the heuristics above are subject-BLIND, so a fact
+      // about a DIFFERENT project/client would supersede an unrelated one. When the
+      // two texts name distinct subjects, demote to `coexist` so both survive —
+      // see `subjectsDisagree` for the full rationale + the deliberate asymmetry.
       results.push({
         existingMemoryId: existing.id,
         existingText: existing.text,
         similarity: existing._similarity,
-        resolution: 'superseded',
+        resolution: subjectsDisagree(newText, existing.text) ? 'coexist' : 'superseded',
       });
     }
   }
@@ -106,6 +111,101 @@ export function hasHeuristicContradiction(newText: string, existingText: string)
     checkNumberChange(newText, existingText) ||
     checkStateChange(newText, existingText)
   );
+}
+
+// === Subject-agreement guard ===
+
+/**
+ * Capitalized-token pattern for the proper-noun scan. Matches a leading
+ * upper-case letter (incl. umlauts / accents via \p{Lu}) followed by letters or
+ * digits, allowing internal caps (WordPress), digits (S3), and hyphen/apostrophe
+ * joins (Hans-Peter, O'Brien). Unicode-aware so it works across DE/EN/FR text.
+ */
+const PROPER_NOUN_RE = /\p{Lu}[\p{L}\p{N}]*(?:[-'’]\p{L}[\p{L}\p{N}]*)*/gu;
+
+/**
+ * Capitalized tokens that are NOT distinguishing proper nouns — sentence-openers,
+ * articles, pronouns, conjunctions, prepositions, generic business nouns (German
+ * nouns are ALWAYS capitalized, so the generic ones must be listed), currency
+ * codes and month names. Kept lower-cased for case-insensitive lookup. This list
+ * only needs the tokens that would otherwise masquerade as a subject on ONE side
+ * of a pair; a shared generic word is harmless (it cancels in the set diff).
+ *
+ * Composes the shared "not a real entity" vocabulary from the single-source
+ * {@link KG_COMMON_NOUNS} (generic verbs/nouns the KG already vets — its contract
+ * forbids adding anything that could be a real proper noun, exactly our need) and
+ * adds the categories it does not carry: articles/pronouns (esp. German),
+ * discourse openers, negations, always-capitalized German business nouns,
+ * currency codes and month names.
+ */
+const GENERIC_CAPS: ReadonlySet<string> = new Set<string>([
+  ...KG_COMMON_NOUNS,
+  // German sentence-openers / articles / pronouns / conjunctions / prepositions
+  'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einer', 'eines',
+  'er', 'sie', 'es', 'wir', 'ihr', 'ich', 'du', 'man', 'dies', 'diese', 'dieser', 'dieses',
+  'für', 'wenn', 'und', 'aber', 'oder', 'weil', 'dass', 'doch', 'also', 'nun', 'jetzt',
+  'im', 'am', 'an', 'auf', 'aus', 'bei', 'mit', 'nach', 'von', 'zu', 'zum', 'zur', 'über',
+  // English sentence-openers / articles / pronouns / conjunctions
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'it', 'we', 'they', 'he', 'she', 'i', 'you',
+  'if', 'and', 'but', 'or', 'because', 'so', 'now', 'then', 'here', 'there', 'over',
+  // Sentence-opener adverbs / discourse markers that lead a correction (DE + EN).
+  // A capitalized opener must not masquerade as a distinguishing subject, else a
+  // "Actually …" vs "Originally …" correction would falsely coexist.
+  'actually', 'originally', 'however', 'currently', 'previously', 'finally',
+  'first', 'firstly', 'second', 'secondly', 'also', 'still', 'note', 'update',
+  'correction', 'meanwhile', 'therefore', 'thus',
+  'aktuell', 'ursprünglich', 'zunächst', 'ausserdem', 'außerdem', 'jedoch',
+  'inzwischen', 'schliesslich', 'schließlich', 'zuerst', 'korrektur', 'hinweis',
+  // Negation words (never a subject; a capitalized "Don't"/"Kein" opens a clause).
+  // Kept in sync with ALL_NEGATION_PATTERNS below — listed here as single tokens.
+  "don't", "doesn't", "won't", "can't", 'cannot', "isn't", "shouldn't",
+  'not', 'no', 'never', 'kein', 'keine', 'keinen', 'nicht', 'nie', 'niemals', 'ohne',
+  // Generic business nouns (always-capitalized DE nouns + EN equivalents)
+  'projekt', 'project', 'budget', 'projektbudget', 'deadline', 'frist', 'status',
+  'kunde', 'kundin', 'customer', 'client', 'team', 'server', 'deployment', 'system',
+  'task', 'aufgabe', 'ziel', 'goal', 'termin', 'meeting', 'preis', 'price', 'kosten',
+  'cost', 'umsatz', 'revenue', 'plan', 'phase', 'sprint', 'release', 'version', 'update',
+  'feature', 'bug', 'issue', 'ticket', 'account', 'user', 'profil', 'profile',
+  'firma', 'unternehmen', 'company', 'abteilung', 'department',
+  // Currency codes
+  'chf', 'eur', 'usd', 'gbp', 'fr', 'rp',
+  // Month names DE / EN
+  'januar', 'februar', 'märz', 'april', 'mai', 'juni', 'juli', 'august',
+  'september', 'oktober', 'november', 'dezember',
+  'january', 'february', 'march', 'june', 'july', 'october', 'december',
+]);
+
+/** Extract the set of distinguishing proper-noun tokens (lower-cased) from a text. */
+function properNounTokens(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of text.matchAll(PROPER_NOUN_RE)) {
+    const lower = match[0].toLowerCase();
+    if (lower.length < 2) continue;
+    if (GENERIC_CAPS.has(lower)) continue;
+    out.add(lower);
+  }
+  return out;
+}
+
+/**
+ * True when the two texts concern DIFFERENT named subjects — i.e. EACH carries a
+ * proper-noun token the OTHER lacks. Requiring a unique token on BOTH sides is
+ * the conservative test: it fires only on positive evidence of two distinct
+ * subjects (cross-project pairs), and stays silent when one side merely adds a
+ * name or the subject is unnamed/shared — so genuine same-subject corrections
+ * ("Orion budget 30000" → "45000") still supersede. Used to VETO a heuristic
+ * contradiction from deactivating an unrelated fact (cross-subject data loss),
+ * and (in KnowledgeLayer) to veto a cross-subject dedup-merge of the same class.
+ */
+export function subjectsDisagree(a: string, b: string): boolean {
+  const sa = properNounTokens(a);
+  const sb = properNounTokens(b);
+  if (sa.size === 0 || sb.size === 0) return false;
+  let aUnique = false;
+  for (const t of sa) if (!sb.has(t)) { aUnique = true; break; }
+  if (!aUnique) return false;
+  for (const t of sb) if (!sa.has(t)) return true;
+  return false;
 }
 
 // === Heuristic Contradiction Checks ===

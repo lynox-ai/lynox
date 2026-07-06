@@ -25,7 +25,7 @@ import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
-import { detectContradictions, hasHeuristicContradiction } from './contradiction-detector.js';
+import { detectContradictions, hasHeuristicContradiction, subjectsDisagree } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
@@ -265,8 +265,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const candidate = similar[0]!;
       // If the texts contain contradictory signals (different numbers, negation,
       // state change), this is an update — not a duplicate. Skip dedup and let
-      // the contradiction detector handle it.
-      if (!hasHeuristicContradiction(trimmedText, candidate.text)) {
+      // the contradiction detector handle it. Also skip when the two texts name
+      // DIFFERENT subjects (`subjectsDisagree`): at 0.95 similarity a cross-project
+      // near-twin ("Orion budget 30000" vs "Vega budget 30000") would otherwise be
+      // silently absorbed as a confirmation of the wrong project's fact — the same
+      // subject-blind data-loss class the supersede veto guards, at the dedup gate.
+      if (!hasHeuristicContradiction(trimmedText, candidate.text) && !subjectsDisagree(trimmedText, candidate.text)) {
         this.db.confirmMemory(candidate.id);
         // S5b recall parity: mirror the confirmation onto the engine.db stub so its
         // confirmation_count/confidence don't go stale under the read cutover. Dual-
