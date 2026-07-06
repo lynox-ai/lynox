@@ -176,7 +176,7 @@ const GENERIC_CAPS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /** Extract the set of distinguishing proper-noun tokens (lower-cased) from a text. */
-function properNounTokens(text: string): Set<string> {
+export function properNounTokens(text: string): Set<string> {
   const out = new Set<string>();
   for (const match of text.matchAll(PROPER_NOUN_RE)) {
     const lower = match[0].toLowerCase();
@@ -198,8 +198,16 @@ function properNounTokens(text: string): Set<string> {
  * and (in KnowledgeLayer) to veto a cross-subject dedup-merge of the same class.
  */
 export function subjectsDisagree(a: string, b: string): boolean {
-  const sa = properNounTokens(a);
-  const sb = properNounTokens(b);
+  return subjectTokensDisagree(properNounTokens(a), properNounTokens(b));
+}
+
+/**
+ * The set-level core of {@link subjectsDisagree}: true when EACH proper-noun set
+ * has a token the OTHER lacks. Exposed (with {@link properNounTokens}) so a caller
+ * that compares many texts pairwise (memory consolidation) can tokenize each text
+ * ONCE and reuse the sets, instead of re-tokenizing on every pair.
+ */
+export function subjectTokensDisagree(sa: ReadonlySet<string>, sb: ReadonlySet<string>): boolean {
   if (sa.size === 0 || sb.size === 0) return false;
   let aUnique = false;
   for (const t of sa) if (!sb.has(t)) { aUnique = true; break; }

@@ -112,6 +112,15 @@ export interface MetricRow {
   computed_at: string;
 }
 
+/** One memory consolidated away: `victimId` superseded by `keeperId`, with the
+ *  victim's confirmation count transferred to the keeper. Returned by
+ *  {@link AgentMemoryDb.consolidateMemories} so the caller can mirror the merge. */
+export interface ConsolidationPair {
+  victimId: string;
+  keeperId: string;
+  victimConfirmations: number;
+}
+
 // ── Scored memory (vector search result) ────────────────────────
 
 export interface ScoredMemoryRow extends MemoryRow {
@@ -1172,14 +1181,24 @@ export class AgentMemoryDb {
   /**
    * Find clusters of similar active memories and merge them.
    * Keeps the longest (or most-confirmed) memory, supersedes the rest.
-   * Returns number of memories consolidated.
+   * Returns the victim→keeper pairs (with the transferred confirmation count) so
+   * the caller can mirror the supersedes onto the engine.db subject-graph stubs.
    */
   consolidateMemories(
     namespace: string,
     scopeType: string,
     scopeId: string,
     threshold = 0.85,
-  ): number {
+    // Optional subject-agreement veto (injected by KnowledgeLayer, kept out of this
+    // storage layer). `tokenize` turns a text into its distinguishing proper-noun
+    // set; `disagree` is true when two such sets name DIFFERENT subjects — such a
+    // pair must never be clustered, else consolidation silently merges two projects'
+    // facts (cross-subject data loss). Each row is tokenized ONCE, not per pair.
+    subjectVeto?: {
+      tokenize: (text: string) => ReadonlySet<string>;
+      disagree: (a: ReadonlySet<string>, b: ReadonlySet<string>) => boolean;
+    },
+  ): ConsolidationPair[] {
     // scopeId='*' means all scopes of this type
     const rows = scopeId === '*'
       ? this.db.prepare(`
@@ -1193,7 +1212,7 @@ export class AgentMemoryDb {
           ORDER BY created_at DESC LIMIT 500
         `).all(namespace, scopeType, scopeId) as MemoryRow[];
 
-    if (rows.length < 2) return 0;
+    if (rows.length < 2) return [];
 
     const dim = this._embeddingDimensions ?? 384;
     const expectedBlobLen = dim * 8;
@@ -1207,10 +1226,14 @@ export class AgentMemoryDb {
         : null;
     }
 
+    // Precompute each row's proper-noun set ONCE (O(N)) so the veto below is a set
+    // comparison, not a re-tokenization on every above-threshold pair (O(N²)).
+    const tokenSets = subjectVeto ? rows.map(r => subjectVeto.tokenize(r.text)) : null;
+
     // Wrap in transaction for atomicity
     return this.transaction(() => {
     const merged = new Set<number>(); // track by index to avoid Set<string> hashing
-    let consolidatedCount = 0;
+    const pairs: ConsolidationPair[] = [];
 
     for (let i = 0; i < rows.length; i++) {
       if (merged.has(i)) continue;
@@ -1225,9 +1248,12 @@ export class AgentMemoryDb {
         if (!candEmb) continue;
 
         const sim = cosineSimilarity(anchorEmb, candEmb);
-        if (sim >= threshold) {
-          cluster.push(j);
-        }
+        if (sim < threshold) continue;
+        // Subject-agreement veto: skip a candidate that names a different subject
+        // than ANY current cluster member (checking the anchor alone would let an
+        // unnamed anchor bridge two distinct subjects into one cluster).
+        if (subjectVeto && tokenSets && cluster.some(idx => subjectVeto.disagree(tokenSets[idx]!, tokenSets[j]!))) continue;
+        cluster.push(j);
       }
 
       if (cluster.length < 2) continue;
@@ -1252,11 +1278,13 @@ export class AgentMemoryDb {
           `).run(victim.confirmation_count, now, keeper.id);
         }
         merged.add(cluster[k]!);
-        consolidatedCount++;
+        // Return the victim→keeper pair so KnowledgeLayer can mirror the supersede
+        // + confirmation transfer onto the engine.db stubs (recall-parity cutover).
+        pairs.push({ victimId: victim.id, keeperId: keeper.id, victimConfirmations: victim.confirmation_count });
       }
     }
 
-    return consolidatedCount;
+    return pairs;
     }); // end transaction
   }
 

@@ -25,7 +25,7 @@ import type { RetrievalOptions } from './retrieval-engine.js';
 import { extractEntities } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
-import { detectContradictions, hasHeuristicContradiction, subjectsDisagree } from './contradiction-detector.js';
+import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, properNounTokens, subjectTokensDisagree } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
@@ -1292,6 +1292,37 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /** Consolidate similar memories within a scope. Returns count merged. */
   consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number {
-    return this.db.consolidateMemories(namespace, scopeType, scopeId);
+    // Inject the subject-agreement veto so the clusterer never merges two projects'
+    // facts (cross-subject data loss — the same guard M1 added to supersede/dedup).
+    // Pass the set-level primitives so each row is tokenized once, not per pair;
+    // `undefined` keeps the DB method's default threshold.
+    const pairs = this.db.consolidateMemories(
+      namespace, scopeType, scopeId, undefined,
+      { tokenize: properNounTokens, disagree: subjectTokensDisagree },
+    );
+    // S5b'-c: mirror every consolidation supersede + confirmation transfer onto the
+    // engine.db stubs (the authoritative recall store under the cutover), else the
+    // two stores diverge on the first GC — a consolidated-away duplicate stays
+    // recallable from engine.db, and the keeper's confidence lags. Gated on
+    // subjectGraphEnabled (the mirror writes stubs whenever it's on); one engine.db
+    // transaction for atomicity; isolated so a mirror failure leaves the legacy
+    // consolidation (already committed) standing. (Reads-flip reconcile residual as
+    // in deactivateByPattern/purgeThread.)
+    if (this.subjectGraphEnabled && this.memoryGraphStore && pairs.length > 0) {
+      const memoryGraph = this.memoryGraphStore;
+      try {
+        this.engineDb!.getDb().transaction(() => {
+          for (const p of pairs) {
+            memoryGraph.markSuperseded(p.victimId, p.keeperId);
+            memoryGraph.addConfirmations(p.keeperId, p.victimConfirmations);
+          }
+        })();
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] consolidation mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    return pairs.length;
   }
 }

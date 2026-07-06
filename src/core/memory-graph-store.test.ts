@@ -131,6 +131,26 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
+  it('addConfirmations transfers count WITHOUT changing confidence, and no-ops on delta<=0/missing', () => {
+    const { engine, mem } = make();
+    mem.upsertStub({ id: 'k', text: 'keeper', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    const read = (): { confirmation_count: number; confidence: number } =>
+      engine.getDb().prepare('SELECT confirmation_count, confidence FROM memories WHERE id = ?').get('k') as { confirmation_count: number; confidence: number };
+    const before = read();
+    expect(before.confirmation_count).toBe(0);
+
+    mem.addConfirmations('k', 3);
+    const after = read();
+    expect(after.confirmation_count).toBe(3);
+    expect(after.confidence).toBe(before.confidence);   // confidence untouched (unlike bumpConfirmation)
+
+    mem.addConfirmations('k', 0);                        // no-op
+    mem.addConfirmations('k', -2);                       // no-op
+    expect(read().confirmation_count).toBe(3);
+    expect(() => mem.addConfirmations('ghost', 5)).not.toThrow();   // missing stub → silent
+    engine.close();
+  });
+
   it('carries embedding/is_active/superseded_by/confidence, and PRESERVES them on a bare re-upsert (S5a)', () => {
     const { engine, mem } = make();
     const emb = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
