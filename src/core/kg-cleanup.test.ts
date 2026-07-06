@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import { isCleanupTarget, cleanupBadEntities } from './kg-cleanup.js';
+import { isJunkPersonShape } from './kg-stopwords.js';
 
 describe('kg-cleanup', () => {
   describe('isCleanupTarget', () => {
@@ -184,6 +185,27 @@ describe('kg-cleanup', () => {
       const result = cleanupBadEntities(db, { dryRun: true });
       expect(result.matched).toBe(30);
       expect(result.sample.length).toBe(20);
+    });
+  });
+
+  describe('isJunkPersonShape (person-only gate — rules 1-2)', () => {
+    it('rejects acronym / digit / lowercase-initial single tokens', () => {
+      // rule 1: short all-caps acronyms, incl. the ≤6 boundary
+      for (const n of ['CSV', 'API', 'S3', 'R&D', 'PDF', 'ABCDEF']) expect(isJunkPersonShape(n)).toBe(true);
+      // rule 1b: any digit in a single token
+      for (const n of ['v2', '360', 'x1', 'GPT4']) expect(isJunkPersonShape(n)).toBe(true);
+      // rule 2: lowercase-initial single token (the ones that can't be stopwords)
+      for (const n of ['will', 'target', 'data', 'portal']) expect(isJunkPersonShape(n)).toBe(true);
+    });
+    it('keeps real single + multi-token capitalized names (rule 3 territory, not rejected here)', () => {
+      // capitalized single tokens survive — corroboration (rule 3) decides these elsewhere
+      for (const n of ['Will', 'Roland', 'Massmann', 'Portal', 'Peter']) expect(isJunkPersonShape(n)).toBe(false);
+      // 7-char all-caps is past the acronym bound → kept (rule 1 is ≤6)
+      expect(isJunkPersonShape('ABCDEFG')).toBe(false);
+      // hyphenated + accented-capital single tokens are real names → kept
+      for (const n of ['Jean-Pierre', 'Émile', 'Ø', 'Åsa']) expect(isJunkPersonShape(n)).toBe(false);
+      // multi-token names always kept
+      for (const n of ['Will Smith', 'Dr. Britta Massmann', 'Roland Wagner', 'Target Corp']) expect(isJunkPersonShape(n)).toBe(false);
     });
   });
 });

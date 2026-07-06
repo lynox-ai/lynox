@@ -8,7 +8,7 @@ import type {
 import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getActiveProvider, isCustomProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
-import { isCleanupTarget } from './kg-stopwords.js';
+import { isCleanupTarget, isJunkPersonShape } from './kg-stopwords.js';
 import { calculateCost } from './pricing.js';
 
 /**
@@ -392,6 +392,11 @@ function parseEntity(raw: unknown): ExtractedEntityV2 | null {
   // leading digit) spares real names like "2026 Roadmap" / "360 Campaign", and a
   // space in a slash name ("Q3/Q4 Planning") keeps it out of the `^\S+/\S+$` match.
   if (type === 'project' && (/^\S+\/\S+$/.test(canonicalName) || /^\d+[-/]/.test(canonicalName))) return null;
+  // Person-shape gate: an acronym ("CSV"/"API"), a digit-bearing token, or a
+  // lowercase-initial single word ("will"/"target"/"data") is almost never a real
+  // person — but these can't be stopwords (they collide with real names/brands), so
+  // shape-reject them only when the LLM tagged them `person`.
+  if (type === 'person' && isJunkPersonShape(canonicalName)) return null;
 
   const aliases = aliasesRaw
     .filter((a): a is string => typeof a === 'string')

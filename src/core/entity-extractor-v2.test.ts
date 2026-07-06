@@ -44,6 +44,19 @@ describe('entity-extractor-v2 parseToolInput', () => {
     expect(result.entities).toEqual([]);
   });
 
+  it('drops junk-SHAPED persons (acronym/lowercase, NOT generic nouns) — kind-conditional', () => {
+    const result = parseToolInput({
+      entities: [
+        { canonical_name: 'CSV', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'exported a CSV' },
+        { canonical_name: 'target', type: 'person', confidence: 0.88, aliases: [], evidence_span: 'hit the target' },
+        { canonical_name: 'CSV', type: 'product', confidence: 0.9, aliases: [], evidence_span: 'the CSV format' },     // same shape, kept
+        { canonical_name: 'Roland Wagner', type: 'person', confidence: 0.9, aliases: [], evidence_span: 'Roland Wagner said' },
+      ],
+      relations: [],
+    });
+    expect(result.entities.map(e => e.canonicalName).sort()).toEqual(['CSV', 'Roland Wagner']);
+  });
+
   it('mixed input: keeps proper nouns, drops common nouns', () => {
     const result = parseToolInput({
       entities: [

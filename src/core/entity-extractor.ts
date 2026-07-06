@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { EntityType, MemoryNamespace } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
-import { isCleanupTarget } from './kg-stopwords.js';
+import { isCleanupTarget, isJunkPersonShape } from './kg-stopwords.js';
 import { calculateCost } from './pricing.js';
 
 export interface ExtractedEntity {
@@ -112,13 +112,16 @@ function isEnumValue(name: string): boolean {
  * Validate an extracted entity — returns false for likely false positives.
  * Shared between regex and LLM tiers.
  */
-export function isValidEntity(name: string, _type: EntityType): boolean {
+export function isValidEntity(name: string, type: EntityType): boolean {
   const trimmed = name.trim();
   if (trimmed.length < 2) return false;
   // Apply the shared single-source KG gate (kg-stopwords) so the regex tier
   // drops the same generic nouns / pricing fragments / slash-enums as the v2
   // LLM post-filter and the cleanup pass — no drift between the three.
   if (isCleanupTarget(trimmed)) return false;
+  // Person-shape gate (same single-source oracle as the v2 tier): acronym /
+  // digit-bearing / lowercase-initial single tokens are not real people.
+  if (type === 'person' && isJunkPersonShape(trimmed)) return false;
   // Reject slash-separated enum values (deal stages, status labels)
   if (isEnumValue(trimmed)) return false;
   // Reject single-word stopwords (case-insensitive)

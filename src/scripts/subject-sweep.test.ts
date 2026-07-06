@@ -47,6 +47,18 @@ describe('subject-sweep — archive phase', () => {
     expect(planArchive(engine, new Set()).archive).toHaveLength(0);
   });
 
+  it('archives junk-SHAPED person subjects isCleanupTarget misses — but only for kind=person', () => {
+    const { engine, subs } = make();
+    const acr = subs.createSubject({ kind: 'person', name: 'CSV' });        // acronym → junk person
+    const low = subs.createSubject({ kind: 'person', name: 'target' });     // lowercase → junk person (never a stopword)
+    const realPerson = subs.createSubject({ kind: 'person', name: 'Roland Wagner' });
+    const orgSameShape = subs.createSubject({ kind: 'organization', name: 'CSV' }); // same shape, NOT person → kept
+    const plan = planArchive(engine, new Set());
+    expect(new Set(plan.archive.map(a => a.id))).toEqual(new Set([acr, low]));
+    expect(plan.archive.map(a => a.id)).not.toContain(realPerson);
+    expect(plan.archive.map(a => a.id)).not.toContain(orgSameShape);
+  });
+
   it('NULLs a memory primary pointing at junk (ranking fix) and rollback restores it', () => {
     const { engine, subs, mg } = make();
     const junk = subs.createSubject({ kind: 'person', name: 'confirmation' });
