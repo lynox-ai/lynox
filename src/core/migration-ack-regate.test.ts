@@ -1,12 +1,14 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { ConnectionStore } from './connection-store.js';
 import { ApiStore, type ApiProfile } from './api-store.js';
 import { MigrationExporter } from './migration-export.js';
 import { MigrationImporter } from './migration-import.js';
+import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import {
   generateEphemeralKeypair,
   serializePublicKey,
@@ -62,6 +64,22 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       store.save(profile);
     } finally {
       engine.close();
+    }
+  }
+
+  /**
+   * Seed a valid, whitelisted NON-engine.db (`history.db`) in `dir` and NO
+   * engine.db, so a migration carries data but `databasesRestored` never
+   * contains `engine.db` — the input the re-gate's engine.db-presence guard
+   * must short-circuit on.
+   */
+  function seedHistoryDbOnly(dir: string): void {
+    const db = new Database(join(dir, 'history.db'));
+    try {
+      db.exec('CREATE TABLE marker (id INTEGER PRIMARY KEY)');
+      db.prepare('INSERT INTO marker (id) VALUES (1)').run();
+    } finally {
+      db.close();
     }
   }
 
@@ -233,5 +251,87 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       .get() as { config_json: string };
     check.close();
     expect(JSON.parse(mailRow.config_json).custom_endpoint_ack).toEqual({ accepted: true });
+  });
+
+  it('skips the re-gate on a managed import that carries NO engine.db (presence guard)', () => {
+    const srcDir = tmp();
+    const dstDir = tmp();
+    seedHistoryDbOnly(srcDir); // whitelisted data, but no engine.db in the set
+    process.env['LYNOX_BILLING_TIER'] = 'starter'; // managed signal ON
+
+    const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections');
+    try {
+      const restored = runMigration(srcDir, dstDir);
+      // engine.db was never migrated, so the presence half of the `&&` guard is
+      // false — the re-gate must not be attempted (and must not crash opening a
+      // non-existent engine.db).
+      expect(restored).toContain('history.db');
+      expect(restored).not.toContain('engine.db');
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fails the managed import CLOSED when the re-gate throws (propagates, no silent success)', () => {
+    const srcDir = tmp();
+    const dstDir = tmp();
+    seedEngineDb(srcDir, ackedProfile());
+    process.env['LYNOX_BILLING_TIER'] = 'starter'; // managed signal ON
+
+    // The re-gate runs LAST, after data + secrets are in. A strip failure must
+    // propagate out of restore() (the operator retries; regate is idempotent),
+    // NOT be swallowed into a "success" that leaves the un-disclosed ack in place.
+    const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation(() => {
+      throw new Error('regate boom');
+    });
+    try {
+      expect(() => runMigration(srcDir, dstDir)).toThrow(/regate boom/);
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('re-gates an OAuth2 token_url custom endpoint, not just a base_url (token_url egress axis)', () => {
+    const dir = tmp();
+    const TOKEN_HOST = 'oauth.custom-idp.example';
+    const TOKEN_URL = `https://${TOKEN_HOST}/token`;
+    // base_url is allowlisted, so the ONLY non-allowlisted egress is the OAuth
+    // token endpoint — the ack covers that host.
+    const oauthProfile: ApiProfile = {
+      id: 'oauthapi',
+      name: 'OAuth API',
+      base_url: 'https://api.anthropic.com',
+      description: 'An OAuth2 API whose token endpoint is a non-allowlisted host',
+      auth: {
+        type: 'oauth2',
+        oauth: {
+          token_url: TOKEN_URL,
+          grant_type: 'client_credentials',
+          client_id_key: 'OAUTH_CLIENT_ID',
+          client_secret_key: 'OAUTH_CLIENT_SECRET',
+        },
+        vault_keys: ['OAUTH_CLIENT_SECRET'],
+      },
+      custom_endpoint_ack: { accepted: true, hosts: [TOKEN_HOST], accepted_at: '2026-07-03T00:00:00.000Z' },
+      provenance: { source: 'manual', schema_version: 2 },
+    };
+    seedEngineDb(dir, oauthProfile);
+
+    // Before: the token_url egress is acked (fetch_token would be allowed).
+    const before = readProfile(dir, SRC_VAULT_KEY, 'oauthapi');
+    expect(isEndpointAcked(before?.custom_endpoint_ack, TOKEN_URL)).toBe(true);
+
+    // Re-gate (managed destination) strips the ack regardless of which egress
+    // axis it covered.
+    expect(ApiStore.regateMigratedApiConnections(join(dir, 'engine.db'), SRC_VAULT_KEY)).toBe(1);
+
+    // After: the token_url egress re-gates fail-closed — the OAuth token fetch
+    // must re-disclose before reuse.
+    const after = readProfile(dir, SRC_VAULT_KEY, 'oauthapi');
+    expect(after?.custom_endpoint_ack).toBeUndefined();
+    expect(isEndpointAcked(after?.custom_endpoint_ack, TOKEN_URL)).toBe(false);
+    expect(after?.auth?.oauth?.token_url).toBe(TOKEN_URL); // rest of the profile survives
   });
 });
