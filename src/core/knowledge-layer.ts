@@ -570,6 +570,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * The organization to file an extracted engagement (project) under, derived from
+   * the thread's anchor: an org anchor IS the parent; an engagement anchor lends its
+   * OWN parent (a sibling project of the same client); anything else → unparented.
+   * Passed to `findOrCreateEngagement` so extraction converges on the same
+   * `(name, parent)` row `set_thread_context` would resolve.
+   */
+  private _engagementParent(subjects: SubjectStore, anchorId: string | null): string | null {
+    if (!anchorId) return null;
+    const anchor = subjects.getSubject(anchorId);
+    if (!anchor) return null;
+    if (anchor.kind === 'organization') return anchor.id;
+    if (anchor.kind === 'engagement') return anchor.parent_id;
+    return null;
+  }
+
+  /**
    * Foundation Rework v2 (S1b): additively mirror one stored memory's extraction
    * into the engine.db subject-graph. In execution order: a supersession mirror
    * (flips superseded old stubs), then entities → subjects (the converged
@@ -622,7 +638,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       for (const e of entities) {
         const kind = entityTypeToSubjectKind(e.entityType);
         if (!kind) continue;
-        const { id: subjectId } = subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
+        // Engagements route through the single (name, parent) resolver — filed under
+        // the thread's client anchor — so extraction converges with set_thread_context
+        // instead of minting a duplicate project row on every store.
+        const { id: subjectId } = kind === 'engagement'
+          ? subjects.findOrCreateEngagement(e.canonicalName, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
+          : subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
         entityToSubject.set(e.id, subjectId);
         subjectIds.push(subjectId);
         // primary = the first person/organization the memory concerns; else the
@@ -789,7 +810,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       for (const e of entities) {
         const kind = entityTypeToSubjectKind(e.type);
         if (!kind) continue;
-        const { id: subjectId } = subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
+        // Engagements route through the single (name, parent) resolver (see the twin
+        // above) so extraction converges with set_thread_context, not a fresh row.
+        const { id: subjectId } = kind === 'engagement'
+          ? subjects.findOrCreateEngagement(e.name, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
+          : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
         nameToSubject.set(e.name.toLowerCase(), subjectId);
         subjectIds.push(subjectId);
         resolvedEntities.push({

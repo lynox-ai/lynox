@@ -384,6 +384,14 @@ function parseEntity(raw: unknown): ExtractedEntityV2 | null {
   // fragments. Same gate as the historical cleanup pass — keeps the prompt,
   // the runtime filter, and the purge in lockstep.
   if (isCleanupTarget(canonicalName)) return null;
+  // Project-name slop (M4): a `project` whose name is a slash-compound ("Website/App")
+  // or a digit-run followed by a separator ("2024-roadmap", "153/h") is almost always
+  // a fragment, not a real project — and these mint garbage engagement subjects. Scoped
+  // to `project` so real slash-acronyms (AC/DC, TCP/IP) and digit-leading products
+  // (1Password, S3) of other kinds are untouched; the `\d+[-/]` shape (not a bare
+  // leading digit) spares real names like "2026 Roadmap" / "360 Campaign", and a
+  // space in a slash name ("Q3/Q4 Planning") keeps it out of the `^\S+/\S+$` match.
+  if (type === 'project' && (/^\S+\/\S+$/.test(canonicalName) || /^\d+[-/]/.test(canonicalName))) return null;
 
   const aliases = aliasesRaw
     .filter((a): a is string => typeof a === 'string')
