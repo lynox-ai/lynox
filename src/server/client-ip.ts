@@ -26,16 +26,20 @@ function trustedHops(): number {
  * the IPv4-mapped-IPv6 `::ffff:` prefix, yielding a bare address.
  */
 function normalizeIp(addr: string): string {
-  let host = addr;
+  // Strip the IPv4-mapped-IPv6 `::ffff:` prefix FIRST so a mapped address that
+  // also carries a port (`::ffff:1.2.3.4:56789`) collapses to a single-colon
+  // `host:port` the port-strip below handles — otherwise its 4 colons look like
+  // a bare IPv6 and the port is kept.
+  let host = addr.replace(/^::ffff:/, '');
   const bracket = /^\[(.+)\](?::\d+)?$/.exec(host);
   if (bracket?.[1]) {
-    host = bracket[1];
+    host = bracket[1].replace(/^::ffff:/, '');
   } else if ((host.match(/:/g)?.length ?? 0) === 1) {
     // Exactly one colon ⇒ IPv4 `host:port`; bare IPv6 has multiple colons → leave it.
     const h = host.split(':')[0];
     if (h) host = h;
   }
-  return host.replace(/^::ffff:/, '');
+  return host;
 }
 
 /**

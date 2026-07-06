@@ -69,6 +69,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `LYNOX_BUGSINK_DSN` | No | Error reporting (opt-in) |
 | `LYNOX_LANGUAGE` | No | Force response language (e.g. `de`, `en`) |
 | `LYNOX_TRUST_PROXY` | No | Trust X-Forwarded-For headers (set behind reverse proxy) |
+| `LYNOX_TRUSTED_PROXY_HOPS` | No | Trailing X-Forwarded-For hops appended by trusted proxies (default `1`) |
 | `LYNOX_ALLOWED_ORIGINS` | No | CORS allowed origins (comma-separated) |
 | `LYNOX_ALLOWED_IPS` | No | Restrict access to specific IPs (comma-separated) |
 | `LYNOX_TLS_CERT` | No | Path to TLS certificate (enables HTTPS) |

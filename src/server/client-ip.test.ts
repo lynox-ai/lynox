@@ -77,6 +77,11 @@ describe('resolveClientIp', () => {
       expect(resolveClientIp(makeReq('10.0.0.1', '::ffff:1.2.3.4'), true)).toBe('1.2.3.4');
     });
 
+    it('strips both the ::ffff: prefix AND a trailing :port on a mapped address', () => {
+      expect(resolveClientIp(makeReq('10.0.0.1', '::ffff:1.2.3.4:56789'), true)).toBe('1.2.3.4');
+      expect(resolveClientIp(makeReq('10.0.0.1', '[::ffff:1.2.3.4]:443'), true)).toBe('1.2.3.4');
+    });
+
     it('strips a trailing :port from an IPv4 address', () => {
       expect(resolveClientIp(makeReq('10.0.0.1', '1.2.3.4:56789'), true)).toBe('1.2.3.4');
     });
