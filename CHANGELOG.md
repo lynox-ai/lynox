@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.0.0 — 2026-07-06
+
+Foundation Rework v2 goes active for the verb layer. Workflow, trigger, and task **definitions** now live in the consolidated per-tenant `engine.db` with a first-class **source/effect** model (a trigger's *when* and *what* are separate axes) and a **Connection** primitive over API profiles. The legacy `triggers` table and planned/executed workflow rows in `history.db` are retired from the read+write path. **On upgrade, every engine self-heals at boot**: it migrates your existing triggers, saved workflows, and tasks from the legacy stores into `engine.db` exactly once (no operator action, no data loss), leaving the legacy rows dormant as a rollback net. Alongside the verb cut: project/customer **context-scoping** (memories seat on a thread's subject anchor and recall walks the subject hierarchy), the memory-consolidation lifecycle moves onto the subject graph, a read-only **Subjects** surface, and a broad correctness + billing + security hardening wave. The subject-graph **read path stays flag-gated off** (`subject_graph_enabled`) — the per-tenant data cutover remains a separate step.
+
+**⚠️ Breaking / migration.**
+- **Verb-layer store cut (`history.db` v44).** Trigger/workflow/task definitions are read from and written to `engine.db`. The boot self-heal backfills legacy definitions the first time a 2.0.0 engine starts; v44 is **non-destructive** (legacy rows are kept dormant, not dropped — a later release drops them once the fleet is confirmed migrated).
+- **Rollback is NOT a plain image-swap for this release.** A `engine.db`/`history.db` that has run the 2.0.0 migrations will not cleanly downgrade to a pre-2.0.0 image — roll back via a **cold-snapshot restore** of the tenant volume (rehearsed), not an image revert.
+- **`llm_mode` / eu-sovereign routing retired** (control-plane migration `0034_drop_llm_mode`; apply after confirming zero eu-sovereign rows). The provider-agnostic routing model (provider + per-tier Tier-Set) is authoritative.
+- **Env / tier ABI renames** across the engine and the CP-emitted tenant env — a version-only rollout does not re-sync tenant env; the deploy runs a fleet `sync-env`.
+
+### Added
+- **Verb layer on `engine.db` with a source/effect model.** Triggers split their legacy `task_type` into an explicit **source** (`cron` · `watch` · `manual`) and **effect** (`run_agent` · `run_workflow` · `notify` · `backup`) axis; workflows and tasks resolve their assignee through the subject graph. (#835, #836, #838, #843, #850, #852)
+- **Connection primitive** over API profiles — a reusable connection a workflow/trigger plugs into. (S4b, #853)
+- **Project/customer context-scoping.** A thread carries a subject **anchor**; memories written in-thread inherit it, and recall weights results by walking the subject hierarchy up from the active anchor. New `set_thread_context` agent tool. (#868, #869, #870, #871)
+- **Read-only Subjects surface** — an on-demand subject footprint (records + threads timeline, adjacent memories/tasks) in the Intelligence hub, flag-gated. (#875, #876)
+- **Memory-consolidation lifecycle on the subject graph** — recall, write-path dedup/contradiction, entity cutover, and the consolidation lifecycle move onto `engine.db` (flag-gated), with metrics recorded to history. (#857, #858, #865, #866, #867)
+- **`media_process` tool** — a constrained ffmpeg builtin (transcode, extract-audio, thumbnail, probe) with array-arg exec, closed operation/format enums, a protocol whitelist, and hard time/size caps. (#887)
+
+### Fixed
+- **Upgrade data-safety:** engines self-heal legacy trigger/workflow/task definitions into `engine.db` on first 2.0.0 boot — exactly once, no resurrection, non-destructive. (#879)
+- **Billing accuracy:** every managed pool-key spend path fires the credit gate + debit (#833); failed-run cost is counted in spend aggregates (#837); managed billing charges exact whole cents with a sub-cent carry (#855); the inbox classifier is priced per region (Mistral vs Haiku) (#864); the budget stack fails closed on non-finite pricing (#863); out-of-turn helper LLM calls (spawn children, STT byte-fallback, workflow capture) also debit the tenant balance (#885).
+- **Run lifecycle:** interrupted/aborted runs are recorded distinctly instead of silently completed, surfacing a `run_interrupted` state rather than an empty turn. (#880)
+- **Context estimator:** the compaction occupancy estimate is image-aware and preserves recent images across compaction. (#882)
+- **Config persistence:** tier/profile fields persist across reloads. (#883)
+- **Web UI:** message timestamps, queued-send drain after a run, artifact-card fallback, and artifact-id idempotency; SVG uploads rasterise client-side. (#886)
+- **Mail:** prevent inbound-mail loss and duplicate scheduled sends. (#846)
+- **Consent:** storing a secret via `SecretStore.set()` records consent. (#860)
+- **Knowledge graph:** stop entity/relation garbage inflow at the extractor. (#832)
+
+### Hardened
+- Vault key lifecycle is crash- and corruption-safe (#839); background task cost + schedule intervals are bounded (#854); relative filesystem paths are confined to the workspace outside isolation mode (#851, #845); `api_setup` custom endpoints are gated through the sub-processor allowlist for OAuth token URLs and persisted for runtime egress (#848, #849); the bash guard scans the whole command for danger patterns (#862); whisper tmp paths sanitize the user filename (#861); Google Docs append is gated behind the destructive prompt (#859); managed import re-gates custom endpoints (#856); plus egress/consent/content-scan guards (#841, #842, #844). Vault restore is an atomic stage-and-swap with a receive-side chunk-size cap (#881); record lookups escape the LIKE prefix and workflow confirmations reset on any edit (#884); aggregate query aliases are validated against a column allowlist (#883).
+
+### Managed hosting
+- **EU right-of-withdrawal** button (Widerrufsbutton) for consumer checkout. (pro #347)
+- **Per-tenant subject / memory-graph flags** emitted from the control plane, enabling the staged subject-graph cutover. (pro #349)
+- **Checkout provisioning is idempotent on replay** — a duplicated Stripe event no longer double-provisions. (pro #350)
+- Provisioning **reconciler for orphans + capacity drift**, a daily DNS-takeover scan, a fleet-wide spend tripwire, and root-cause fixes for provisioning/DNS leaks. (pro #337, #339, #340, #341, #345)
+- Renewal **credit-grant netting** corrected with a row lock; the credit-ledger balance invariant restored. (pro #348, #329)
+
+### Internal
+- The verb-layer landed as a mirror-then-cut sequence (S3a–S3f: mirror definitions to `engine.db`, backfill legacy, then cut reads/writes over) so each step shipped dormant before the cut. (#835–#843)
+
 ## 1.22.0 — 2026-06-30
 
 Foundation Rework v2 lands as dormant infrastructure: a new consolidated per-tenant `engine.db` subject-graph store (subjects · people · organizations · memories · relationships · artifacts · the workflow/trigger/task verb layer), wired behind the `subject_graph_enabled` flag which ships **off**. The legacy agent-memory path stays authoritative until a separate per-tenant data cutover, so this release is behaviourally inert on existing instances. Alongside it: a configurable outbound network policy, customer-route auth scoping, GDPR engine.db erasure + paginated export, a managed credit gate on voice, and cross-origin credential-replay hardening. **No control-plane database migration**; the engine creates the additive `engine.db` on boot (idempotent) — rollback to 1.21.0 is a clean single-image swap (the new DB is simply orphaned).
