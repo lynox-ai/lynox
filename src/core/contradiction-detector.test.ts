@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { detectContradictions, hasHeuristicContradiction, type MemoryRecall } from './contradiction-detector.js';
+import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, type MemoryRecall } from './contradiction-detector.js';
 import type { ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 
@@ -138,6 +138,10 @@ describe('detectContradictions', () => {
       'learnings', { type: 'context', id: 'test' }, recall, mockProvider,
     );
     expect(result).toHaveLength(1);
+    // A negation reversal about the same (unnamed) subject must still supersede —
+    // the leading capitalized "Don't"/"Mocking" are sentence-openers, NOT distinct
+    // subjects, so the subject-agreement guard must not veto this.
+    expect(result[0]!.resolution).toBe('superseded');
   });
 
   it('scopes the similarity query by scope ID so a memory cannot supersede across projects', async () => {
@@ -153,6 +157,112 @@ describe('detectContradictions', () => {
       expect.any(Number),
       expect.objectContaining({ scopeIds: ['acme'] }),
     );
+  });
+});
+
+// The heuristics (negation/number/state) are subject-BLIND: they key on the
+// predicate, not on WHICH named thing the fact is about. When memories share a
+// scope (e.g. all HTTP-API memories share `context:http-api`), two DIFFERENT
+// projects' attribute memories embed ≥0.80 and trip a heuristic — so a new
+// project's fact would silently supersede (deactivate → GC-delete) an unrelated
+// project's fact: cross-subject data loss. The guard demotes `superseded` →
+// `coexist` when the two texts name distinct subjects.
+describe('detectContradictions — subject-agreement guard (cross-subject data loss)', () => {
+  const scope = { type: 'context' as const, id: 'test' };
+  const prov = createMockProvider();
+  const run = (newText: string, oldText: string, sim = 0.9): Promise<import('../types/index.js').ContradictionInfo[]> =>
+    detectContradictions(newText, 'knowledge', scope, createMockRecall([mockMemory('old', oldText, sim)]), prov);
+
+  // === Cross-subject shapes — must COEXIST, not supersede ===
+  it('vetoes a cross-project NUMBER supersede (shape 1: name not adjacent to attribute)', async () => {
+    const r = await run(
+      'Für Projekt Vega: das Budget beträgt CHF 45000',
+      'Für Projekt Orion: das Budget beträgt CHF 30000', 0.9336,
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('coexist');
+  });
+
+  it('vetoes a cross-project STATE supersede (shape 2)', async () => {
+    const r = await run(
+      'Für Projekt Vega: der Status ist aktiv',
+      'Für Projekt Orion: der Status ist abgeschlossen', 0.8689,
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('coexist');
+  });
+
+  it('vetoes a cross-project NEGATION supersede (shape 3: shared object, distinct subject)', async () => {
+    const r = await run(
+      'Projekt Vega nutzt WordPress',
+      'Projekt Orion nutzt WordPress nicht mehr', 0.8792,
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('coexist');
+  });
+
+  it('vetoes even when the distinct subject is the leading token (bare name)', async () => {
+    const r = await run('Orion nutzt WordPress nicht mehr', 'Vega nutzt WordPress');
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('coexist');
+  });
+
+  // === Same-subject contradictions — must STILL supersede (no over-veto) ===
+  it('still supersedes a same-subject number change', async () => {
+    const r = await run('Meridian Budget beträgt CHF 45000', 'Meridian Budget beträgt CHF 30000');
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('superseded');
+  });
+
+  it('still supersedes a same-subject state change', async () => {
+    const r = await run('Orion ist abgeschlossen', 'Orion ist aktiv');
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('superseded');
+  });
+
+  it('still supersedes a same subject+object negation reversal', async () => {
+    const r = await run('Orion nutzt Docker nicht mehr', 'Orion nutzt Docker');
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('superseded');
+  });
+
+  it('still supersedes a correction that opens with a different capitalized adverb', async () => {
+    const r = await run('Actually the budget is 8000', 'Originally the budget is 5000');
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('superseded');
+  });
+
+  it('still supersedes the #891 CHF correction (same subject, currency + apostrophe)', async () => {
+    const r = await run(
+      "Meridian AG – Projektbudget: CHF 30'000. Deadline: 15. September 2027.",
+      "Meridian AG – Projektbudget: CHF 24'000 (bestätigt). Deadline: 15. September 2027.", 0.97,
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]!.resolution).toBe('superseded');
+  });
+});
+
+describe('subjectsDisagree (proper-noun set diff)', () => {
+  it('is true only when EACH side has a proper noun the other lacks', () => {
+    expect(subjectsDisagree('Projekt Orion: Budget 30000', 'Projekt Vega: Budget 45000')).toBe(true);
+    expect(subjectsDisagree('Orion nutzt WordPress', 'Vega nutzt WordPress')).toBe(true); // shared object, distinct subject
+  });
+  it('is false for the same named subject', () => {
+    expect(subjectsDisagree('Meridian Budget 30000', 'Meridian Budget 45000')).toBe(false);
+  });
+  it('is false when a subject is unnamed on one/both sides', () => {
+    expect(subjectsDisagree('Budget is 5000', 'Budget is 8000')).toBe(false);
+    expect(subjectsDisagree('Orion budget is 5000', 'budget is 8000')).toBe(false); // only one side named
+  });
+  it('is false when one side merely ADDS a name to a shared subject (b ⊆ a)', () => {
+    // a-side has a unique token but b's names are a subset of a's — no evidence of
+    // a DISTINCT subject, so a genuine correction that adds context still supersedes.
+    expect(subjectsDisagree('Orion Vega budget 5000', 'Orion budget 8000')).toBe(false);
+  });
+  it('ignores generic capitalized business nouns, currency, months, and openers', () => {
+    expect(subjectsDisagree('Der Status ist aktiv', 'Das Deployment ist offen')).toBe(false);
+    expect(subjectsDisagree('Actually the Budget is 8000', 'Originally the Budget is 5000')).toBe(false);
+    expect(subjectsDisagree("Don't mock the database", 'Mocking the database is fine')).toBe(false);
   });
 });
 
