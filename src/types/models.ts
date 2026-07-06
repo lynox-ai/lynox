@@ -183,6 +183,75 @@ export function getActiveOpenAIModelMap(): Record<ModelTier, string> | null {
   return _openaiModelMap;
 }
 
+// === Config-aware balanced-model resolver (Sonnet variant selection) ===
+// The `balanced` tier resolves to `claude-sonnet-4-6` by default (MODEL_MAP),
+// but a per-instance config field (`balanced_model`) can opt-in to a different
+// served Sonnet — currently `claude-sonnet-5`. This mirrors the openai resolver
+// pattern above: a pure `resolveBalancedModel(config)` computes the value, the
+// engine pushes it to the process-global at bootstrap + reload, and the
+// Anthropic/custom descriptors consult the global at CALL time. The raw
+// MODEL_MAP stays the ultimate fallback, so an absent/invalid selection is a
+// zero-behaviour no-op (default = Sonnet 4.6).
+
+/** The only Sonnet ids `balanced_model` may select. Anything else falls back
+ *  to `MODEL_MAP.balanced` — an invalid value can never route balanced to a
+ *  non-Sonnet (or unknown) model. */
+export const SERVED_BALANCED_SONNET_IDS: ReadonlySet<string> = new Set([
+  'claude-sonnet-4-6',
+  'claude-sonnet-5',
+]);
+
+/**
+ * Resolve which concrete Sonnet the `balanced` tier should use for this
+ * instance. Returns the configured `balanced_model` iff it is a served Sonnet
+ * id; otherwise the raw `MODEL_MAP.balanced` default (Sonnet 4.6). Pure — the
+ * default (4.6) is the fallback, so nothing changes unless a valid override is
+ * set. Accepts a minimal config shape to avoid a types↔config import cycle.
+ */
+export function resolveBalancedModel(config: { balanced_model?: string | undefined }): string {
+  const requested = config.balanced_model;
+  if (requested !== undefined && SERVED_BALANCED_SONNET_IDS.has(requested)) return requested;
+  return MODEL_MAP.balanced;
+}
+
+/**
+ * Process-global override for the `balanced` tier on the Claude-wire providers
+ * (anthropic + custom). `null` = no override (use MODEL_MAP.balanced). Set at
+ * engine bootstrap + reload via {@link setBalancedModelResolver}. Read at call
+ * time by {@link anthropicTierModel} so a config reload takes effect without a
+ * restart — same lifecycle seam as `_openaiModelMap`.
+ */
+let _balancedModelOverride: string | null = null;
+
+/**
+ * Configure the active `balanced`-tier Sonnet override. Defensively refuses any
+ * id that is not a served Sonnet (falls back to no-override) so a malformed
+ * value can never leak onto the wire. Pass `null` to reset (tests / defaults).
+ */
+export function setBalancedModelResolver(modelId: string | null): void {
+  if (modelId === null) {
+    _balancedModelOverride = null;
+    return;
+  }
+  _balancedModelOverride = SERVED_BALANCED_SONNET_IDS.has(modelId) ? modelId : null;
+}
+
+/** The `balanced` model the Claude-wire providers currently resolve to
+ *  (override if set + valid, else MODEL_MAP.balanced). Tests + debug. */
+export function getActiveBalancedModel(): string {
+  return _balancedModelOverride ?? MODEL_MAP.balanced;
+}
+
+/**
+ * Tier→model resolution for the Claude-wire providers (anthropic + custom).
+ * Identical to `MODEL_MAP[tier]` EXCEPT `balanced`, which honours the active
+ * per-instance Sonnet override. `deep`/`fast` are untouched. Read at call time.
+ */
+function anthropicTierModel(tier: ModelTier): string {
+  if (tier === 'balanced' && _balancedModelOverride !== null) return _balancedModelOverride;
+  return MODEL_MAP[tier];
+}
+
 // === Provider Registry (resolution) ===
 // PR-1a: route tier→model resolution through a per-provider descriptor registry
 // instead of the hardcoded `if (provider === …)` branches. Byte-parity — each
@@ -234,7 +303,9 @@ export function resolveModelIdViaRegistry(tier: ModelTier, provider: ProviderKey
 // caches automatic-prefix.
 registerProvider({
   id: 'anthropic', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
-  resolveModelId: (tier) => MODEL_MAP[tier],
+  // `balanced` honours the per-instance Sonnet override (anthropicTierModel);
+  // deep/fast are the raw MODEL_MAP. Default (no override) = byte-identical.
+  resolveModelId: (tier) => anthropicTierModel(tier),
   cache: { mechanism: 'explicit-breakpoint' },
 });
 registerProvider({
@@ -247,8 +318,10 @@ registerProvider({
   // maps them) — hence wireClient:'anthropic'. But the engine treats it as a
   // custom proxy and STRIPS cache_control (agent.ts:1140), so cache-wise it is
   // automatic-prefix like openai, NOT explicit-breakpoint.
+  // A custom (Anthropic-compatible) proxy resolves `balanced` through the same
+  // per-instance Sonnet override — the proxy maps whichever Claude id it gets.
   id: 'custom', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
-  resolveModelId: (tier) => MODEL_MAP[tier],
+  resolveModelId: (tier) => anthropicTierModel(tier),
   cache: { mechanism: 'automatic-prefix' },
 });
 registerProvider({
@@ -348,6 +421,16 @@ export interface ModelCapability {
   pricing: ModelPricing;
   /** Human-readable label for UI dropdowns / pills. */
   uiLabel: string;
+  /**
+   * Per-model chars-per-token override for context estimation. When absent,
+   * consumers fall back to the global {@link CHARS_PER_TOKEN} (3.5). Set only
+   * for models whose tokenizer diverges materially from the 3.5 baseline —
+   * e.g. Sonnet 5's new tokenizer emits ~30% more tokens for the same text, so
+   * a LOWER chars-per-token (more tokens per char) keeps the occupancy meter +
+   * truncation math conservative. Leaving existing Claude 4.6 entries unset
+   * preserves byte-identical estimation for today's default fleet.
+   */
+  charsPerToken?: number | undefined;
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -434,6 +517,31 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
     uiLabel: 'Claude Sonnet 4.6',
+  },
+  // Claude Sonnet 5 — additive opt-in (4.6 stays the balanced default). 1M
+  // context NATIVELY (no `context-1m` beta header, unlike the 4.6[1m] variant),
+  // mirroring the Opus base entries' shape. Pricing is $3/$15 STICKER: Anthropic
+  // lists an intro $2/$10 through 2026-08-31, then reverts to $3/$15 on Sep 1 —
+  // we bill sticker so the customer-facing rate is stable across that cutover
+  // (no 2026-09 re-deploy; the intro window is temporary extra margin). The
+  // pricing-vs-TTL contract (models.test.ts) requires cacheWrite = input×2 (1h
+  // TTL) and cacheRead = input×0.1, so 6 and 0.30 are the only valid values.
+  // charsPerToken 2.7 (≈ 3.5 / 1.3): Sonnet 5's new tokenizer emits ~30% more
+  // tokens/text (documented Anthropic fact) — a conservative baseline pending
+  // live count_tokens measurement (measure-first). Same per-token RATE as 4.6;
+  // the real cost delta is the tokenizer, which the metered debit counts directly.
+  'claude-sonnet-5': {
+    id: 'claude-sonnet-5',
+    provider: 'anthropic',
+    tier: 'balanced',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
+    uiLabel: 'Claude Sonnet 5',
+    charsPerToken: 2.7,
   },
   'claude-haiku-4-5-20251001': {
     id: 'claude-haiku-4-5-20251001',
@@ -817,6 +925,17 @@ export function getMaxContinuations(model: string): number {
   return modelCapabilityOrFallback(model).maxContinuations;
 }
 
+/**
+ * Model-aware chars-per-token for context estimation. Returns the model's
+ * per-entry `charsPerToken` when set, else the global {@link CHARS_PER_TOKEN}
+ * (3.5). Unknown ids + every model without an override → 3.5, so existing
+ * default-fleet estimation is byte-identical; only models with a materially
+ * different tokenizer (e.g. Sonnet 5 at 2.7) shift. Normalizes @-suffixed ids.
+ */
+export function getCharsPerToken(model: string): number {
+  return modelCapability(model)?.charsPerToken ?? CHARS_PER_TOKEN;
+}
+
 // === Thinking & Effort ===
 
 export type ThinkingMode =
@@ -825,6 +944,37 @@ export type ThinkingMode =
   | { type: 'disabled' };
 
 export type ThinkingHint = ThinkingMode['type'];
+
+/**
+ * Claude model families that still accept the LEGACY manual extended-thinking
+ * shape `{ type: 'enabled', budget_tokens }`. Anthropic REMOVED manual thinking
+ * in the 4.7/5 generation (Sonnet 5, Opus 4.7+): those hard-400 on an `enabled`
+ * block and require `adaptive` instead. This is a POSITIVE allowlist of the
+ * legacy-accepting ids so any NEW/unknown Claude id defaults to the SAFE path
+ * (treated as rejecting → coerced to adaptive, which every Claude model
+ * accepts). Over-coercing is harmless (adaptive works on 4.6 too); UNDER-
+ * coercing 400s — so the safe bias is "unknown Claude ⇒ reject".
+ */
+const CLAUDE_MODELS_ACCEPTING_MANUAL_THINKING: ReadonlySet<string> = new Set([
+  'claude-sonnet-4-6', 'claude-sonnet-4-6[1m]',
+  'claude-opus-4-6', 'claude-opus-4-6[1m]',
+  // Haiku 4.5 has no extended thinking at all (force-disabled upstream), so it
+  // never carries an `enabled` block to coerce — omitting it is inconsequential.
+]);
+
+/**
+ * True when a model is a Claude model that REJECTS the legacy manual
+ * `{ type: 'enabled', budget_tokens }` thinking shape (i.e. the 4.7/5 family and
+ * anything newer). Non-Claude models return false — their thinking support is
+ * governed by their own provider guard. Used as a defense-in-depth normalizer
+ * so a free-form `thinking` object handed in via the spawn tool schema can never
+ * 400 a Sonnet-5/Opus-4.7+ run. Normalizes @-suffixed ids.
+ */
+export function claudeModelRejectsManualThinking(model: string): boolean {
+  const id = normalizeModelId(model);
+  if (!id.startsWith('claude-')) return false;
+  return !CLAUDE_MODELS_ACCEPTING_MANUAL_THINKING.has(id);
+}
 
 /**
  * Structured warning produced by the engine that the HTTP-API surfaces as a

@@ -187,6 +187,59 @@ describe('Agent', () => {
     });
   });
 
+  // -- 4.7/5-family thinking normalizer (defense-in-depth) --
+
+  describe('4.7/5-family manual-thinking normalizer', () => {
+    it('coerces manual enabled → adaptive on Sonnet 5 (would hard-400 otherwise)', () => {
+      // A raw `{type:'enabled', budget_tokens}` can arrive via the free-form
+      // spawn tool schema; on Sonnet 5 / Opus 4.7+ that shape 400s, so the
+      // constructor coerces it to adaptive before it can reach the wire.
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-5',
+        thinking: { type: 'enabled', budget_tokens: 8000 },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'adaptive' });
+    });
+
+    it('leaves manual enabled intact on Sonnet 4.6 (still accepts it)', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        thinking: { type: 'enabled', budget_tokens: 8000 },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'enabled', budget_tokens: 8000 });
+    });
+
+    it('leaves adaptive intact on Sonnet 5', () => {
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-5',
+        thinking: { type: 'adaptive' },
+      });
+      expect(agent.getThinking()).toEqual({ type: 'adaptive' });
+    });
+  });
+
+  // -- per-model tokenizer (charsPerToken) wiring --
+
+  describe('per-model charsPerToken occupancy', () => {
+    it('divides occupancy by the model-specific chars/token (Sonnet 5 counts ~30% more than 4.6)', () => {
+      // End-to-end: the Agent must use its OWN _charsPerToken (2.7 for Sonnet 5's new
+      // tokenizer vs the 3.5 global 4.6 keeps), so identical text occupies more tokens
+      // on Sonnet 5. Same messages, no real API call → the pure char-estimate path.
+      const msgs = [{ role: 'user' as const, content: 'x'.repeat(3500) }];
+      const a46 = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const a5 = new Agent({ name: 'test', model: 'claude-sonnet-5' });
+      a46.loadMessages(msgs);
+      a5.loadMessages(msgs);
+      const t46 = a46.getEstimatedOccupancyTokens();
+      const t5 = a5.getEstimatedOccupancyTokens();
+      expect(t5).toBeGreaterThan(t46);
+      expect(t5 / t46).toBeCloseTo(3.5 / 2.7, 1);   // the exact ratio of the two chars/token
+    });
+  });
+
   // -- send() --
 
   describe('send()', () => {

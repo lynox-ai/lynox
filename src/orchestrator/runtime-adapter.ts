@@ -323,12 +323,13 @@ export async function spawnViaAgent(
     tools = tools.filter(t => !disabled.has(t.definition.name));
   }
 
-  // Resolve thinking from step hint, fallback to adaptive
-  const thinking: ThinkingMode = step.thinking === 'enabled'
-    ? { type: 'enabled', budget_tokens: 10_000 }
-    : step.thinking === 'disabled'
-      ? { type: 'disabled' }
-      : { type: 'adaptive' };
+  // Resolve thinking from step hint, fallback to adaptive. The legacy
+  // `'enabled'` hint maps to adaptive: the manual `{type:'enabled',
+  // budget_tokens}` shape 400s on Sonnet 5 / Opus 4.7+ (manual extended
+  // thinking removed in the 4.7/5 generation); adaptive is safe on 4.6 too.
+  const thinking: ThinkingMode = step.thinking === 'disabled'
+    ? { type: 'disabled' }
+    : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
 
@@ -500,11 +501,12 @@ export async function spawnInline(
   let thinking: ThinkingMode;
   if (isHaikuStep) {
     thinking = { type: 'disabled' };
-  } else if (step.thinking === 'enabled') {
-    thinking = { type: 'enabled', budget_tokens: 10_000 };
   } else if (step.thinking === 'disabled') {
     thinking = { type: 'disabled' };
   } else {
+    // Legacy `'enabled'` hint → adaptive: the manual `{type:'enabled',
+    // budget_tokens}` shape 400s on Sonnet 5 / Opus 4.7+ (manual extended
+    // thinking removed in the 4.7/5 generation); adaptive is safe on 4.6 too.
     thinking = { type: 'adaptive' };
   }
   // Parity with agent.ts:271 main-agent default (non-Haiku, non-custom-proxy).

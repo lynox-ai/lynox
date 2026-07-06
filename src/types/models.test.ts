@@ -17,6 +17,13 @@ import {
   AGENT_CACHE_TTL,
   CACHE_TTL_WRITE_MULTIPLIER,
   CACHE_READ_MULTIPLIER,
+  MODEL_MAP,
+  CHARS_PER_TOKEN,
+  getCharsPerToken,
+  resolveBalancedModel,
+  setBalancedModelResolver,
+  getActiveBalancedModel,
+  claudeModelRejectsManualThinking,
 } from './models.js';
 
 describe('pricing-vs-TTL contract (cache-write must match the TTL the agent sends)', () => {
@@ -394,7 +401,7 @@ describe('ModelCapability registry', () => {
   it('exposes every routed Claude + Mistral model with full capability data', async () => {
     const { MODEL_CAPABILITIES, modelCapability } = await import('./models.js');
     const routedIds = [
-      'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6',
+      'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-5',
       'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
       'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]',
       // 2026-05-29 tier refresh: deep=mistral-large-2512, balanced=ministral-14b-2512,
@@ -425,7 +432,7 @@ describe('ModelCapability registry', () => {
     // a silent flip of a mistral entry to provider:'anthropic' (or vice versa)
     // would mis-route LLM calls. Lock the families.
     const { MODEL_CAPABILITIES } = await import('./models.js');
-    for (const id of ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001',
+    for (const id of ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-haiku-4-5-20251001',
                       'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]']) {
       expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('anthropic');
     }
@@ -481,5 +488,102 @@ describe('ModelCapability registry', () => {
     }
     // Base (non-1M) variants stay header-free.
     expect(MODEL_CAPABILITIES['claude-sonnet-4-6']!.betaHeaders).toEqual([]);
+  });
+
+  it('registers claude-sonnet-5 as native-1M, sticker-priced, no beta header', async () => {
+    const { MODEL_CAPABILITIES } = await import('./models.js');
+    const cap = MODEL_CAPABILITIES['claude-sonnet-5'];
+    expect(cap).toBeDefined();
+    expect(cap!.provider).toBe('anthropic');
+    expect(cap!.tier).toBe('balanced');
+    // 1M NATIVELY — no context-1m beta header (unlike the 4.6[1m] variant).
+    expect(cap!.contextWindow).toBe(1_000_000);
+    expect(cap!.betaHeaders).toEqual([]);
+    // Sticker $3/$15; cacheWrite=input×2 (1h TTL), cacheRead=input×0.1.
+    expect(cap!.pricing).toEqual({ input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 });
+    expect(cap!.defaultMaxOutput).toBe(16_000);
+    // New-tokenizer baseline (~+30% tokens/text → lower chars-per-token).
+    expect(cap!.charsPerToken).toBe(2.7);
+    // effectiveContextWindow propagates the native 1M with no beta plumbing.
+    expect(effectiveContextWindow('claude-sonnet-5', undefined)).toBe(1_000_000);
+  });
+});
+
+describe('getCharsPerToken (model-aware tokenizer estimate)', () => {
+  it('returns the per-model override when set (Sonnet 5 = 2.7)', () => {
+    expect(getCharsPerToken('claude-sonnet-5')).toBe(2.7);
+  });
+  it('falls back to the global 3.5 for models without an override', () => {
+    expect(getCharsPerToken('claude-sonnet-4-6')).toBe(CHARS_PER_TOKEN);
+    expect(getCharsPerToken('claude-opus-4-6')).toBe(CHARS_PER_TOKEN);
+  });
+  it('falls back to the global 3.5 for unknown ids', () => {
+    expect(getCharsPerToken('totally-unknown-model')).toBe(CHARS_PER_TOKEN);
+  });
+});
+
+describe('resolveBalancedModel + balanced-tier Sonnet override', () => {
+  afterEach(() => {
+    // Reset the process-global so leakage can't affect other suites.
+    setBalancedModelResolver(null);
+  });
+
+  it('defaults to claude-sonnet-4-6 when balanced_model is unset', () => {
+    expect(resolveBalancedModel({})).toBe('claude-sonnet-4-6');
+    expect(resolveBalancedModel({})).toBe(MODEL_MAP.balanced);
+  });
+  it('returns claude-sonnet-5 when balanced_model selects it', () => {
+    expect(resolveBalancedModel({ balanced_model: 'claude-sonnet-5' })).toBe('claude-sonnet-5');
+  });
+  it('returns claude-sonnet-4-6 when balanced_model explicitly selects it', () => {
+    expect(resolveBalancedModel({ balanced_model: 'claude-sonnet-4-6' })).toBe('claude-sonnet-4-6');
+  });
+  it('falls back to the default for an invalid / non-Sonnet value (never crashes)', () => {
+    expect(resolveBalancedModel({ balanced_model: 'claude-opus-4-6' })).toBe('claude-sonnet-4-6');
+    expect(resolveBalancedModel({ balanced_model: 'mistral-large-2512' })).toBe('claude-sonnet-4-6');
+    expect(resolveBalancedModel({ balanced_model: 'garbage' })).toBe('claude-sonnet-4-6');
+    expect(resolveBalancedModel({ balanced_model: '' })).toBe('claude-sonnet-4-6');
+  });
+
+  it('getModelId(balanced) honours a set override for anthropic + custom only', () => {
+    // Default (no override): balanced = 4.6, deep/fast untouched.
+    expect(getModelId('balanced', 'anthropic')).toBe('claude-sonnet-4-6');
+    setBalancedModelResolver('claude-sonnet-5');
+    expect(getModelId('balanced', 'anthropic')).toBe('claude-sonnet-5');
+    expect(getModelId('balanced', 'custom')).toBe('claude-sonnet-5');
+    // deep + fast are NOT affected by the balanced override.
+    expect(getModelId('deep', 'anthropic')).toBe('claude-opus-4-6');
+    expect(getModelId('fast', 'anthropic')).toBe('claude-haiku-4-5-20251001');
+    // Vertex balanced stays on its own map (out of scope) = 4.6.
+    expect(getModelId('balanced', 'vertex')).toBe('claude-sonnet-4-6');
+    expect(getActiveBalancedModel()).toBe('claude-sonnet-5');
+  });
+
+  it('setBalancedModelResolver refuses a non-served id (no off-Sonnet routing)', () => {
+    setBalancedModelResolver('claude-opus-4-6');
+    // Refused → no override → default 4.6.
+    expect(getModelId('balanced', 'anthropic')).toBe('claude-sonnet-4-6');
+    expect(getActiveBalancedModel()).toBe('claude-sonnet-4-6');
+  });
+});
+
+describe('claudeModelRejectsManualThinking (4.7/5-family predicate)', () => {
+  it('flags Sonnet 5 + Opus 4.7+ (reject legacy enabled thinking)', () => {
+    expect(claudeModelRejectsManualThinking('claude-sonnet-5')).toBe(true);
+    expect(claudeModelRejectsManualThinking('claude-opus-4-7')).toBe(true);
+    // Unknown/future Claude ids default to the safe (reject → coerce) path.
+    expect(claudeModelRejectsManualThinking('claude-sonnet-6')).toBe(true);
+    expect(claudeModelRejectsManualThinking('claude-opus-4-8')).toBe(true);
+  });
+  it('does NOT flag the 4.6-era models that still accept enabled', () => {
+    expect(claudeModelRejectsManualThinking('claude-sonnet-4-6')).toBe(false);
+    expect(claudeModelRejectsManualThinking('claude-sonnet-4-6[1m]')).toBe(false);
+    expect(claudeModelRejectsManualThinking('claude-opus-4-6')).toBe(false);
+    // @-suffixed vertex ids normalize before the allowlist check.
+    expect(claudeModelRejectsManualThinking('claude-sonnet-4-6@20260101')).toBe(false);
+  });
+  it('does NOT flag non-Claude models (governed by their own provider guard)', () => {
+    expect(claudeModelRejectsManualThinking('mistral-large-2512')).toBe(false);
+    expect(claudeModelRejectsManualThinking('ministral-14b-2512')).toBe(false);
   });
 });
