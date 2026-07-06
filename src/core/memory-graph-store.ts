@@ -252,6 +252,24 @@ export class MemoryGraphStore {
   }
 
   /**
+   * Add `delta` confirmations to a stub WITHOUT touching confidence — the engine.db
+   * mirror of legacy consolidation TRANSFERRING a victim's confirmation_count to the
+   * keeper ({@link AgentMemoryDb.consolidateMemories}), which likewise moves only the
+   * count. Distinct from {@link bumpConfirmation} (a single +1 that also raises
+   * confidence): a transfer must not compound the keeper's confidence beyond legacy.
+   * No-op on a missing stub or a non-positive delta.
+   */
+  addConfirmations(memoryId: string, delta: number): void {
+    if (delta <= 0) return;
+    this.db.prepare(`
+      UPDATE memories
+      SET confirmation_count = confirmation_count + ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(delta, memoryId);
+  }
+
+  /**
    * Mirror a negative-feedback PENALTY — drops confidence like legacy
    * {@link AgentMemoryDb.penalizeMemory} (−0.1, floored at 0.1). Same recall-parity
    * rationale + no-op-on-missing-stub behaviour as {@link bumpConfirmation}.
