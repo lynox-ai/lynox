@@ -31,17 +31,23 @@ describe('LLM_CATALOG', () => {
 
   it('anthropic models pin Sonnet/Opus/Haiku with provider-specific IDs', () => {
     const entry = getCatalogForProvider('anthropic')!;
+    // Two balanced Sonnets (4.6 default + opt-in Sonnet 5), one deep, one fast.
     const tiers = entry.models.map((m) => m.tier).sort();
-    expect(tiers).toEqual(['balanced', 'deep', 'fast']);
-    const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
-    expect(byTier['balanced']?.id).toBe('claude-sonnet-4-6');
-    expect(byTier['deep']?.id).toBe('claude-opus-4-6');
+    expect(tiers).toEqual(['balanced', 'balanced', 'deep', 'fast']);
+    const byId = Object.fromEntries(entry.models.map((m) => [m.id, m]));
+    expect(byId['claude-sonnet-4-6']?.tier).toBe('balanced');
+    expect(byId['claude-sonnet-5']?.tier).toBe('balanced');
+    expect(byId['claude-opus-4-6']?.tier).toBe('deep');
     // Haiku ID has date suffix on Anthropic Direct, NOT on Vertex — pin both.
-    expect(byTier['fast']?.id).toBe('claude-haiku-4-5-20251001');
-    expect(byTier['balanced']?.pricing).toEqual({ input: 3, output: 15 });
-    expect(byTier['deep']?.pricing).toEqual({ input: 15, output: 75 });
-    expect(byTier['fast']?.pricing).toEqual({ input: 0.80, output: 4 });
-    expect(byTier['balanced']?.notes).toContain('Recommended');
+    expect(byId['claude-haiku-4-5-20251001']?.tier).toBe('fast');
+    // Canonical pricing (mirrors MODEL_CAPABILITIES — the pre-existing Opus
+    // 15/75 + Haiku 0.80/4 drift was corrected in the Sonnet 5 pass).
+    expect(byId['claude-sonnet-4-6']?.pricing).toEqual({ input: 3, output: 15 });
+    expect(byId['claude-sonnet-5']?.pricing).toEqual({ input: 3, output: 15 });
+    expect(byId['claude-sonnet-5']?.context_window).toBe(1_000_000);
+    expect(byId['claude-opus-4-6']?.pricing).toEqual({ input: 5, output: 25 });
+    expect(byId['claude-haiku-4-5-20251001']?.pricing).toEqual({ input: 1, output: 5 });
+    expect(byId['claude-sonnet-4-6']?.notes).toContain('Recommended');
   });
 
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {

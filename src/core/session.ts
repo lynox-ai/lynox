@@ -556,11 +556,13 @@ export class Session {
         this._effort = pendingHint.effort;
       }
       if (pendingHint.thinking) {
-        this._thinking = pendingHint.thinking === 'enabled'
-          ? { type: 'enabled', budget_tokens: 10_000 }
-          : pendingHint.thinking === 'disabled'
-            ? { type: 'disabled' }
-            : { type: 'adaptive' };
+        // Map the legacy `'enabled'` hint to adaptive: the manual
+        // `{type:'enabled', budget_tokens}` shape 400s on Sonnet 5 / Opus 4.7+
+        // (Anthropic removed manual extended thinking in the 4.7/5 generation),
+        // and adaptive is the recommended mode on 4.6 too — safe across the fleet.
+        this._thinking = pendingHint.thinking === 'disabled'
+          ? { type: 'disabled' }
+          : { type: 'adaptive' };
       }
     }
 

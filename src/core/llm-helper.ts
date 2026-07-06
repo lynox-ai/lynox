@@ -322,6 +322,14 @@ export async function callForStructuredJson<T = unknown>(
   const response = await client.messages.create({
     model,
     max_tokens: maxOutputTokens,
+    // Explicit thinking-OFF for the forced-tool extraction. Omitting `thinking`
+    // means thinking-off on Sonnet 4.6, but on Sonnet 5 the silent default is
+    // adaptive-ON — which would spend reasoning tokens inside this call's small
+    // 4K `max_tokens` cap (truncation risk) and bill extra output on every
+    // extraction. Explicit `disabled` is accepted on Sonnet 5 (only Fable 5
+    // rejects it, and this path is never Fable). Cheap deterministic extraction
+    // wants no thinking regardless of the model.
+    thinking: { type: 'disabled' },
     system,
     messages: [{ role: 'user', content: user }],
     tools: [{

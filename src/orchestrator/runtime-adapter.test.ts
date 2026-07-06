@@ -27,7 +27,8 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from '../types/orchestration.js';
@@ -267,14 +268,17 @@ describe('spawnInline thinking gating', () => {
     expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
   });
 
-  it('honors explicit thinking=enabled on non-Haiku step', async () => {
+  it('maps the legacy thinking=enabled hint to adaptive on non-Haiku step', async () => {
+    // The manual `{type:'enabled', budget_tokens}` shape 400s on Sonnet 5 /
+    // Opus 4.7+ (manual extended thinking removed in the 4.7/5 generation), so
+    // the legacy `'enabled'` hint now resolves to adaptive — safe on 4.6 too.
     const step: ManifestStep = {
       id: 's-step', agent: 's-step', runtime: 'inline',
       model: 'balanced', thinking: 'enabled',
     };
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentConfig['thinking']).toEqual({ type: 'enabled', budget_tokens: 10_000 });
+    expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
   });
 
   it('honors explicit thinking=disabled on non-Haiku step', async () => {
@@ -285,6 +289,21 @@ describe('spawnInline thinking gating', () => {
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(agentConfig['thinking']).toEqual({ type: 'disabled' });
+  });
+
+  it('maps the legacy thinking=enabled hint to adaptive on the named-agent path', async () => {
+    // spawnViaAgent is the named-agent pipeline emitter — same 'enabled'→adaptive
+    // mapping so a pre-4.7 manifest hint never emits the 400-ing manual shape.
+    const step: ManifestStep = {
+      id: 'n-step', agent: 'n-step', runtime: 'agent',
+      model: 'balanced', thinking: 'enabled',
+    };
+    const agentDef: AgentDef = {
+      name: 'n-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
+    };
+    await spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1');
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
   });
 
   it('Haiku gate also fires on the canonical model ID (not just the tier alias)', async () => {

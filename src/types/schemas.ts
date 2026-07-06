@@ -99,6 +99,13 @@ export const LynoxUserConfigSchema = z.object({
   // it via MANAGED_USER_WRITABLE_CONFIG, not here.
   openai_context_window: z.number().int().positive().max(1_000_000).optional(),
   default_tier:         ModelTierSchema.optional(),
+  // Which concrete Sonnet the `balanced` tier resolves to for this instance.
+  // Free-form string (NOT a z.enum): an unrecognised value must fall back
+  // safely at the resolver (resolveBalancedModel) to the default Sonnet 4.6 —
+  // a strict enum would reject the key and, under `.strict()`, null the WHOLE
+  // config. Present on the interface AND loaded from env (LYNOX_BALANCED_MODEL);
+  // without it here `.strict()` would strip a persisted value. Unset = Sonnet 4.6.
+  balanced_model:       z.string().min(1).max(64).optional(),
   // Settable model-cost ceiling + account plan label. Present on the interface
   // AND set via env (LYNOX_MAX_TIER / LYNOX_ACCOUNT_TIER) — without them here,
   // `.strict()` strips a persisted value, nulling the whole config on write.

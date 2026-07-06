@@ -101,7 +101,7 @@ export function loadConfig(): LynoxUserConfig {
 
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
-    'default_tier', 'thinking_mode', 'effort_level',
+    'default_tier', 'balanced_model', 'thinking_mode', 'effort_level',
     'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider', 'plugins',
     'organization_id', 'client_id',
     'changeset_review', 'greeting', 'context_name',
@@ -220,6 +220,14 @@ export function loadConfig(): LynoxUserConfig {
   // band names and the legacy Anthropic-brand names so old env vars keep working.
   const defaultTier = envTier('LYNOX_DEFAULT_MODEL_TIER');
   if (defaultTier) merged.default_tier = defaultTier;
+  // Balanced-tier Sonnet selection. The CP (or a self-host operator) can flip a
+  // tenant to Sonnet 5 via env without editing config.json. Assigned as-is; an
+  // unrecognised value is validated + safely defaulted at resolveBalancedModel
+  // (never routes balanced off-Sonnet), so no enum gate is needed here.
+  const balancedModel = process.env['LYNOX_BALANCED_MODEL'];
+  if (balancedModel !== undefined && balancedModel.trim() !== '') {
+    merged.balanced_model = balancedModel.trim();
+  }
   // Max model tier cap (managed hosting cost control — StepHints and pipelines
   // are clamped): `LYNOX_MAX_MODEL_TIER` (canonical) / legacy `LYNOX_MAX_TIER`.
   const maxTier = envTier('LYNOX_MAX_MODEL_TIER');

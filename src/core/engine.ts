@@ -12,7 +12,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver } from '../types/index.js';
 import { setTierSetResolver } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -790,6 +790,11 @@ export class Engine {
       ? this.userConfig.openai_model_id ?? null
       : null;
     setOpenAIModelResolver({ map, fallbackModelId: fallback });
+    // Sync the config-aware `balanced` Sonnet override (default Sonnet 4.6 →
+    // opt-in Sonnet 5). resolveBalancedModel returns a validated served Sonnet
+    // id (or the 4.6 default), so an unset/invalid config is a no-op. Same
+    // bootstrap+reload seam so a UI/CP flip takes effect without a restart.
+    setBalancedModelResolver(resolveBalancedModel(this.userConfig));
     // Sync the hybrid Tier-Set resolver too, so a routing_mode/tier_set change
     // takes effect at bootstrap + reload without a restart (same hook). For
     // hybrid we enrich each slot with its provider's vault key at this seam so

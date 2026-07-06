@@ -31,6 +31,30 @@ describe('LynoxUserConfigSchema — default_tier back-compat (2026-05-29 rename)
   });
 });
 
+describe('LynoxUserConfigSchema — balanced_model (Sonnet variant selection)', () => {
+  it('preserves a persisted balanced_model through the .strict() schema (not stripped)', () => {
+    // Config-field 3-place contract: a value absent from the schema is dropped
+    // by .strict(), nulling the whole config on write. Lock that it survives.
+    for (const id of ['claude-sonnet-4-6', 'claude-sonnet-5']) {
+      const result = LynoxUserConfigSchema.safeParse({ balanced_model: id });
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.balanced_model).toBe(id);
+    }
+  });
+
+  it('accepts an arbitrary string (resolveBalancedModel validates + safely defaults)', () => {
+    // NOT a z.enum: an unrecognised value must parse (the whole config would
+    // otherwise be nulled) and be defaulted downstream, never route off-Sonnet.
+    const result = LynoxUserConfigSchema.safeParse({ balanced_model: 'some-future-sonnet' });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an over-long value', () => {
+    const result = LynoxUserConfigSchema.safeParse({ balanced_model: 'x'.repeat(65) });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('LynoxUserConfigSchema — openai_context_window (self-host native window)', () => {
   it('round-trips a positive integer window (self-host openai-compat)', () => {
     const result = LynoxUserConfigSchema.safeParse({ openai_context_window: 262_144 });

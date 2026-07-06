@@ -303,13 +303,14 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
   /** Capture the `model` the SDK is asked to invoke + the create-call payload. */
   function captureClient(toolInput: unknown): {
     client: Anthropic;
-    lastCall: { model?: string };
+    lastCall: { model?: string; thinking?: unknown };
   } {
-    const lastCall: { model?: string } = {};
+    const lastCall: { model?: string; thinking?: unknown } = {};
     const client = {
       messages: {
-        create: async (req: { model: string }) => {
+        create: async (req: { model: string; thinking?: unknown }) => {
           lastCall.model = req.model;
+          lastCall.thinking = req.thinking;
           return {
             id: 'msg_test',
             type: 'message',
@@ -416,5 +417,21 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
     });
 
     expect(lastCall.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('sends explicit thinking:{type:disabled} (Sonnet 5 adaptive-on-omit guard)', async () => {
+    // Omitting `thinking` = thinking-off on 4.6 but adaptive-ON on Sonnet 5,
+    // which would spend reasoning inside the small extraction max_tokens cap and
+    // bill extra output. The extraction call must set disabled explicitly.
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      client,
+    });
+
+    expect(lastCall.thinking).toEqual({ type: 'disabled' });
   });
 });

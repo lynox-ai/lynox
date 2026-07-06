@@ -290,6 +290,14 @@ export interface LynoxUserConfig {
   cp_supplied?: boolean | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
+  /**
+   * Which concrete Sonnet the `balanced` tier resolves to (opt-in Sonnet
+   * variant selection). One of the served Sonnet ids — `'claude-sonnet-4-6'`
+   * (default when unset) or `'claude-sonnet-5'`. An unrecognised value falls
+   * back safely to Sonnet 4.6 at `resolveBalancedModel`. Loaded from config,
+   * project config, or the `LYNOX_BALANCED_MODEL` env var.
+   */
+  balanced_model?: string | undefined;
   max_session_cost_usd?: number | undefined;
   /** Max chat runs executing concurrently across all threads (Tier-2 run
    *  executor). Bounds LLM-cost blast + run-buffer memory from many parallel

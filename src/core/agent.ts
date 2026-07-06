@@ -23,7 +23,7 @@ import type {
   PromptSecretFn,
   PromptMailConnectFn,
 } from '../types/index.js';
-import { getBetasForProvider, CHARS_PER_TOKEN, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL } from '../types/index.js';
+import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -139,6 +139,10 @@ export class Agent implements IAgent {
   private readonly provider: LLMProvider;
   private readonly systemPrompt: string | undefined;
   private thinking: ThinkingMode;
+  /** Model-aware chars-per-token for context estimation (Sonnet 5's tokenizer
+   *  emits ~30% more tokens/text). Falls back to the global 3.5 for models
+   *  without an override, so the default fleet is byte-identical. */
+  private readonly _charsPerToken: number;
   /**
    * Structured warnings produced during agent init / per-call that the
    * HTTP-API surfaces as `warning` SSE events so the web-UI can render a
@@ -442,6 +446,18 @@ export class Agent implements IAgent {
     this.thinking = isHaiku || this.isCustomProxy
       ? { type: 'disabled' }
       : requestedThinking;
+    // Defense-in-depth normalizer for the 4.7/5 Claude family: the legacy manual
+    // `{type:'enabled', budget_tokens}` shape hard-400s on Sonnet 5 / Opus 4.7+
+    // (Anthropic removed manual extended thinking in that generation). The three
+    // step-hint emitters already map 'enabled'→adaptive, but a raw thinking
+    // object can still arrive via the free-form spawn tool schema — coerce it
+    // here so it can never reach the wire. Scoped to Claude models that REJECT
+    // 'enabled' (a positive allowlist governs which 4.6-era ids still accept it),
+    // so 4.6 keeps its existing behaviour; adaptive is valid on 4.6 regardless.
+    if (this.thinking.type === 'enabled' && claudeModelRejectsManualThinking(this.model)) {
+      this.thinking = { type: 'adaptive' };
+    }
+    this._charsPerToken = getCharsPerToken(this.model);
     this.effort = (isHaiku || this.isCustomProxy) ? undefined : (config.effort ?? 'high');
     this.maxTokens = config.maxTokens ?? getDefaultMaxTokens(this.model);
     this.maxContinuations = getMaxContinuations(this.model);
@@ -616,9 +632,9 @@ export class Agent implements IAgent {
         deltaLen += imageAwareSerializedLen(this.messages[i]!);
       }
       // _lastRealInputTokens already includes system + tool overhead.
-      return this._lastRealInputTokens + deltaLen / CHARS_PER_TOKEN;
+      return this._lastRealInputTokens + deltaLen / this._charsPerToken;
     }
-    return this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens;
+    return this._estimateMsgLen() / this._charsPerToken + overheadTokens;
   }
 
   /**
@@ -998,14 +1014,14 @@ export class Agent implements IAgent {
       this._persistedMark = Math.max(0, this.messages.length - unpersistedTail);
 
       if (this.onStream && dropped > 0) {
-        const newUsage = (this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens) / maxCtx * 100;
+        const newUsage = (this._estimateMsgLen() / this._charsPerToken + overheadTokens) / maxCtx * 100;
         void this.onStream({ type: 'context_pressure', droppedMessages: dropped, usagePercent: Math.round(newUsage), agent: this.name });
       }
     }
 
     // Second pass: truncate large content blocks if still oversized.
     // Keep the last user message intact; trim from oldest to newest.
-    const afterDrop = this._estimateMsgLen() / CHARS_PER_TOKEN + overheadTokens;
+    const afterDrop = this._estimateMsgLen() / this._charsPerToken + overheadTokens;
     if (afterDrop >= maxCtx * 0.85) {
       const TARGET_CHARS_PER_MSG = 8000 * ctxScale;
       for (let i = 0; i < this.messages.length - 1; i++) {
@@ -1028,8 +1044,16 @@ export class Agent implements IAgent {
     usage: BetaUsage;
   }> {
     const systemBlocks = this._buildSystemPrompt();
-    const thinkingEnabled = this.thinking.type !== 'disabled';
-    const thinkingConfig: BetaThinkingConfigParam = this.thinking as BetaThinkingConfigParam;
+    // Wire-chokepoint thinking normalizer (defense-in-depth): the ctor coerces a
+    // legacy {type:'enabled'} shape for the 4.7/5 Claude family, but setThinking()
+    // + runtime overrides write this.thinking raw — so re-assert it here, the single
+    // point every path converges before the API call. A manual-thinking 'enabled'
+    // hard-400s on Sonnet 5 / Opus 4.7+; adaptive is valid on 4.6 too.
+    const wireThinking: ThinkingMode = this.thinking.type === 'enabled' && claudeModelRejectsManualThinking(this.model)
+      ? { type: 'adaptive' }
+      : this.thinking;
+    const thinkingEnabled = wireThinking.type !== 'disabled';
+    const thinkingConfig: BetaThinkingConfigParam = wireThinking as BetaThinkingConfigParam;
     // web_search is an Anthropic-direct-only server-side tool — not supported on Vertex AI or custom.
     // Disabled when web_research (SearXNG / DDG fallback) is registered to avoid redundant search tools.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
@@ -1063,10 +1087,10 @@ export class Agent implements IAgent {
 
     // Estimate overhead from system prompt + tools (+ ephemeral tail) so
     // truncation accounts for it.
-    const systemTokens = JSON.stringify(systemBlocks).length / CHARS_PER_TOKEN;
-    const toolTokens = JSON.stringify(toolsDef).length / CHARS_PER_TOKEN;
+    const systemTokens = JSON.stringify(systemBlocks).length / this._charsPerToken;
+    const toolTokens = JSON.stringify(toolsDef).length / this._charsPerToken;
     const ephemeralTokens = ephemeralBlocks.length > 0
-      ? JSON.stringify(ephemeralBlocks).length / CHARS_PER_TOKEN
+      ? JSON.stringify(ephemeralBlocks).length / this._charsPerToken
       : 0;
     const overheadTokens = systemTokens + toolTokens + ephemeralTokens;
     this._truncateHistory(overheadTokens);
@@ -1102,7 +1126,7 @@ export class Agent implements IAgent {
     // moment later; emitted every call so the meter is live before the
     // (possibly long) response and can fall after truncation.
     if (this.onStream) {
-      const messageTokens = this._estimateMsgLen() / CHARS_PER_TOKEN;
+      const messageTokens = this._estimateMsgLen() / this._charsPerToken;
       const totalTokens = this._estimateOccupancyTokens(overheadTokens);
       const maxCtx = this._effectiveContextWindow();
       void this.onStream({
