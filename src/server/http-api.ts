@@ -37,7 +37,7 @@ import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -246,6 +246,14 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // tenants while appearing interactive. Each field can only reduce surface
   // or shape the user's own session — never widen blast radius.
   'max_context_window_tokens',  // LLM Advanced radios (200k / 500k / 1M) — caps the agent trim budget, no cost / capability impact on CP.
+  // Sonnet-variant picker (LLM Advanced): which served Sonnet the `balanced`
+  // tier resolves to (4.6 ↔ 5). A user-preference — same Anthropic provider,
+  // ~same per-token price, debit auto-metered — so it shapes the user's own
+  // session and never widens blast radius. The PUT handler additionally
+  // validates the value against SERVED_BALANCED_SONNET_IDS (400 otherwise), so
+  // an invalid/non-Sonnet id can never reach config even though the field is
+  // user-writable.
+  'balanced_model',
   'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
   'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
   'context_cost_log',           // Diagnostic: opt-in content-free per-turn composition log to the instance's own data dir. Shapes only the user's own session, writes no content, never widens blast radius.
@@ -3618,6 +3626,14 @@ export class LynoxHTTPApi {
         // Surface for support tracing.
         console.warn(`[http-api] /config: no MODEL_CAPABILITIES entry for ${activeModelId} (tier=${activeTier}, provider=${activeProvider})`);
       }
+      // Sonnet-variant selection (Sonnet 5 opt-in): surface the RESOLVED
+      // `balanced_model` so the LLM-Advanced variant picker always has a
+      // concrete served-Sonnet value to bind to — present even when the field
+      // is unset (defaults to Sonnet 4.6) or holds a stale/invalid value
+      // (resolveBalancedModel falls it back to the default). The redaction
+      // spread already carries the raw stored value; overriding it with the
+      // resolver guarantees the UI never sees `undefined` or a non-served id.
+      redacted['balanced_model'] = resolveBalancedModel(config);
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
@@ -3685,6 +3701,21 @@ export class LynoxHTTPApi {
       if (!parsed.success) {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
+      }
+      // Sonnet-variant selection: the schema admits any 1–64-char string
+      // (`balanced_model` is intentionally NOT a z.enum — an unrecognised value
+      // must degrade at the resolver, not null the whole `.strict()` config).
+      // Enforce the served-Sonnet allowlist HERE, before any persistence, so an
+      // invalid or non-Sonnet id (e.g. an Opus id, or a typo) is rejected with a
+      // clear 400 and can never route the `balanced` tier off-Sonnet. Runs for
+      // EVERY tier (self-host + managed) and before the managed lock-gate, so a
+      // bad value is a 400 (invalid), not a 403 (the field itself IS writable).
+      const incomingBalancedModel = (parsed.data as Record<string, unknown>)['balanced_model'];
+      if (incomingBalancedModel !== undefined) {
+        if (typeof incomingBalancedModel !== 'string' || !SERVED_BALANCED_SONNET_IDS.has(incomingBalancedModel)) {
+          errorResponse(res, 400, `Invalid balanced_model: must be one of ${[...SERVED_BALANCED_SONNET_IDS].join(', ')}`);
+          return;
+        }
       }
       // Managed-pool tiers (managed / managed_pro / eu): CP locks provider +
       // cost-caps + integrations. Starter BYOK is NOT gated here — customer

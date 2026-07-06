@@ -50,6 +50,12 @@
 		pendingProvider?: 'anthropic' | 'vertex' | 'openai' | 'custom' | null | undefined;
 	} = $props();
 
+	// The two served Sonnet ids the `balanced` tier may resolve to. Mirrors
+	// SERVED_BALANCED_SONNET_IDS in core `types/models.ts` — web-ui has no direct
+	// dep on `@lynox-ai/core`, so the constant is duplicated as a literal union.
+	const SONNET_46 = 'claude-sonnet-4-6';
+	const SONNET_5 = 'claude-sonnet-5';
+
 	interface UserConfig {
 		experience?: 'business' | 'developer';
 		effort_level?: 'low' | 'medium' | 'high' | 'max';
@@ -57,6 +63,10 @@
 		embedding_provider?: 'onnx' | 'local';
 		llm_mode?: 'standard' | 'eu-sovereign';
 		max_context_window_tokens?: number;
+		// Which served Sonnet the `balanced` tier resolves to. The server always
+		// sends a resolved value on GET (defaults to Sonnet 4.6), so this is
+		// populated for every Anthropic instance.
+		balanced_model?: string;
 	}
 
 	interface Locks {
@@ -123,6 +133,7 @@
 				embedding_provider: body.embedding_provider,
 				llm_mode: body.llm_mode,
 				max_context_window_tokens: body.max_context_window_tokens,
+				balanced_model: body.balanced_model,
 			};
 			// Displayed state — coalesce unset fields to the engine's actual
 			// defaults so the dropdowns always have a matching selection that
@@ -134,6 +145,9 @@
 				embedding_provider: body.embedding_provider,
 				llm_mode: body.llm_mode,
 				max_context_window_tokens: body.max_context_window_tokens,
+				// Server resolves this to a served Sonnet id (default 4.6); the
+				// `?? SONNET_46` is defensive for a legacy engine that omits it.
+				balanced_model: body.balanced_model ?? SONNET_46,
 			};
 			locks = body.locks ?? {};
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
@@ -167,6 +181,12 @@
 			if (config.max_context_window_tokens !== origConfig.max_context_window_tokens) {
 				update.max_context_window_tokens = config.max_context_window_tokens;
 			}
+			// Sonnet-variant selection — only meaningful (and only rendered) on
+			// Anthropic, so stage it only when the picker was shown, mirroring the
+			// provider-bound gating of llm_mode / embedding_provider above.
+			if (config.balanced_model !== origConfig.balanced_model && effectiveIsAnthropic) {
+				update.balanced_model = config.balanced_model;
+			}
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -194,6 +214,20 @@
 		if (pendingProvider === 'anthropic' || pendingProvider === 'vertex') return true;
 		if (pendingProvider === 'openai' || pendingProvider === 'custom') return false;
 		return activeModel?.features?.extendedThinking ?? false;
+	});
+
+	// Sonnet-variant picker visibility — intentionally scoped to Anthropic-DIRECT.
+	// The `balanced_model` override resolves to a served Sonnet on the `anthropic`
+	// AND `custom` descriptors (models.ts `anthropicTierModel`), but a custom OpenAI-
+	// compat proxy already picks its model via its own endpoint/model_id config, so a
+	// Sonnet picker there would be misleading; vertex/openai don't resolve `balanced`
+	// to a Sonnet at all. So the picker is surfaced only on anthropic-direct. Reacts
+	// to the parent's in-flight tile selection when embedded (same pattern as thinking
+	// above), falling back to the persisted active provider standalone.
+	const effectiveIsAnthropic = $derived.by(() => {
+		if (pendingProvider === 'anthropic') return true;
+		if (pendingProvider === 'vertex' || pendingProvider === 'openai' || pendingProvider === 'custom') return false;
+		return activeModel?.provider === 'anthropic';
 	});
 
 	$effect(() => { void load(); });
@@ -335,6 +369,37 @@
 				</select>
 			</label>
 		</section>
+
+		<!-- Sonnet-variant picker — lets the user opt the `balanced` tier into
+		     Sonnet 5 (default stays Sonnet 4.6). Anthropic-only: the override has
+		     no effect on Mistral/OpenAI-compat/custom providers, so it's hidden
+		     there. Placed above the context-window section because picking Sonnet
+		     5 (1M native) unlocks the larger context-window radios below. -->
+		{#if effectiveIsAnthropic}
+			<section aria-labelledby="adv-variant-heading" class="border-t border-border pt-6">
+				<h2 id="adv-variant-heading" class="text-lg font-medium mb-1">{t('llm.variant.heading')}</h2>
+				<p class="text-xs text-text-muted mb-3">{t('llm.variant.description')}</p>
+				<div class="space-y-2">
+					<label class="flex items-start gap-3 cursor-pointer">
+						<input type="radio" name="llm-balanced-model" value={SONNET_46}
+							bind:group={config.balanced_model} disabled={!loaded} class="mt-1 disabled:opacity-50" />
+						<div class="flex-1">
+							<div class="text-sm font-medium">{t('llm.variant.sonnet46_label')}</div>
+							<div class="text-xs text-text-muted">{t('llm.variant.sonnet46_hint')}</div>
+						</div>
+					</label>
+					<label class="flex items-start gap-3 cursor-pointer">
+						<input type="radio" name="llm-balanced-model" value={SONNET_5}
+							bind:group={config.balanced_model} disabled={!loaded} class="mt-1 disabled:opacity-50" />
+						<div class="flex-1">
+							<div class="text-sm font-medium">{t('llm.variant.sonnet5_label')}</div>
+							<div class="text-xs text-text-muted">{t('llm.variant.sonnet5_hint')}</div>
+						</div>
+					</label>
+				</div>
+				<p class="text-xs text-text-muted mt-3">{t('llm.variant.note')}</p>
+			</section>
+		{/if}
 
 		<!-- Context window — was a temporary interim on CostLimits.svelte (P2-PR-C),
 		     now lands at its final canonical home. CostLimits page was deleted in

@@ -1918,6 +1918,96 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    // ── Sonnet-variant selection (balanced_model, Sonnet 5 opt-in) ──
+    it('GET exposes the resolved balanced_model (defaults to Sonnet 4.6 when unset)', async () => {
+      // The base mock config sets no balanced_model → resolveBalancedModel
+      // falls back to MODEL_MAP.balanced, so the field is ALWAYS present for
+      // the UI picker to bind to (never undefined).
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['balanced_model']).toBe('claude-sonnet-4-6');
+    });
+
+    it('GET surfaces a persisted Sonnet 5 selection', async () => {
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
+        default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
+      });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['balanced_model']).toBe('claude-sonnet-5');
+    });
+
+    it('PUT accepts a valid served balanced_model (Sonnet 5) and persists it', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'claude-sonnet-5' }),
+      });
+      expect(res.status).toBe(200);
+      const { saveUserConfig } = await import('../core/config.js');
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall).toBeDefined();
+      expect(lastCall![0]['balanced_model']).toBe('claude-sonnet-5');
+    });
+
+    it('PUT accepts resetting balanced_model to the Sonnet 4.6 default', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'claude-sonnet-4-6' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('PUT rejects a non-Sonnet balanced_model with 400 AND persists nothing (never routes balanced off-Sonnet)', async () => {
+      // A real Claude id that is NOT a served Sonnet — passes the schema
+      // string check but must be rejected by the served-Sonnet allowlist so
+      // the balanced tier can never resolve to Opus. The whole PUT is atomic-
+      // rejected: saveUserConfig must NOT be called.
+      const { saveUserConfig } = await import('../core/config.js');
+      const before = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'claude-opus-4-6' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('balanced_model');
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
+    });
+
+    it('PUT rejects an unknown balanced_model id with 400 and no write', async () => {
+      const { saveUserConfig } = await import('../core/config.js');
+      const before = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'gpt-4o' }),
+      });
+      expect(res.status).toBe(400);
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
+    });
+
+    it('PUT rejects a null balanced_model with 400', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: null }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('PUT with an invalid balanced_model is atomic — a co-submitted valid field is NOT written', async () => {
+      // The invalid value must reject the WHOLE PUT, not partially persist default_tier.
+      const { saveUserConfig } = await import('../core/config.js');
+      const before = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'gpt-4o', default_tier: 'balanced' }),
+      });
+      expect(res.status).toBe(400);
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
+    });
+
     it('PUT strips env-pinned provider fields instead of persisting/rejecting them (H-001)', async () => {
       // When LYNOX_LLM_PROVIDER is set the provider is env-controlled; a user
       // PUT of provider/api_base_url/openai_model_id must NOT persist (it would
@@ -3420,6 +3510,9 @@ describe('LynoxHTTPApi', () => {
         ['custom_endpoints', [{ id: 'mistral-eu', name: 'Mistral EU', base_url: 'https://api.mistral.ai/v1' }]],
         ['disabled_tools', ['web_search']],
         ['context_cost_log', true],
+        // Sonnet-variant opt-in is a user-preference (same provider, ~same
+        // price), so a managed tenant may set it without a 403.
+        ['balanced_model', 'claude-sonnet-5'],
       ])(
         'PUT /api/config accepts user-pref %s in managed mode',
         async (field, value) => {
