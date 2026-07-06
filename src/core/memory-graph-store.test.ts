@@ -114,6 +114,23 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
+  it('deactivateByIds flips is_active for the given ids only, and no-ops on empty', () => {
+    const { engine, mem } = make();
+    mem.upsertStub({ id: 'm1', text: 'delete me', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'm2', text: 'delete me too', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'm3', text: 'keep me', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+
+    const changed = mem.deactivateByIds(['m1', 'm2']);
+    expect(changed).toBe(2);
+    expect(mem.getStub('m1')!.is_active).toBe(0);
+    expect(mem.getStub('m2')!.is_active).toBe(0);
+    expect(mem.getStub('m3')!.is_active).toBe(1);   // untouched
+
+    expect(mem.deactivateByIds([])).toBe(0);          // empty → no-op
+    expect(mem.deactivateByIds(['ghost'])).toBe(0);   // unknown id → 0 changes, no throw
+    engine.close();
+  });
+
   it('carries embedding/is_active/superseded_by/confidence, and PRESERVES them on a bare re-upsert (S5a)', () => {
     const { engine, mem } = make();
     const emb = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);

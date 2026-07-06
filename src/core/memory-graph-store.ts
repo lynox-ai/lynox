@@ -341,6 +341,32 @@ export class MemoryGraphStore {
   }
 
   /**
+   * Deactivate memory stubs by id (`is_active = 0`) — the engine.db mirror of a
+   * legacy pattern-deactivation (`memory_delete` / `memory_update`). The caller
+   * passes the ids matched on the legacy store (which owns the plaintext for the
+   * LIKE match; engine.db text is encrypted). id-parity: a stub shares the legacy
+   * memory id. Flips is_active so the deactivated content stops surfacing in
+   * `findSimilarRecall` (which filters is_active=1) under the read cutover — the
+   * "deleted means gone" promise. Chunked under SQLite's 999-variable limit; one
+   * transaction. Returns the number of stubs deactivated.
+   */
+  deactivateByIds(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    return this.db.transaction(() => {
+      let changed = 0;
+      const CHUNK = 500;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const placeholders = chunk.map(() => '?').join(',');
+        changed += this.db.prepare(
+          `UPDATE memories SET is_active = 0, updated_at = datetime('now') WHERE is_active = 1 AND id IN (${placeholders})`,
+        ).run(...chunk).changes;
+      }
+      return changed;
+    })();
+  }
+
+  /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
    * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children.
    * Returns the number of stubs deleted.

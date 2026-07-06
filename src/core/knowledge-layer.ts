@@ -1130,7 +1130,31 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
-    return this.db.deactivateMemoriesByPattern(pattern, namespace);
+    const ids = this.db.deactivateMemoriesByPattern(pattern, namespace);
+    // S5b'-c: mirror the deactivation onto the engine.db stubs (the authoritative
+    // recall store under the read cutover) so the deleted content stops surfacing
+    // there too — else `memory_delete` leaves the statement recallable via
+    // engine.db, breaking the "deleted means gone" privacy promise. id-parity
+    // bridge: the pattern is matched on legacy (plaintext), then the SAME ids are
+    // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on
+    // subjectGraphEnabled (NOT reads) — the mirror WRITES stubs whenever it's on,
+    // so a delete must reap them whenever it's on (matching purgeThread /
+    // _mirrorConfidence). Isolated: an engine.db failure is logged + swallowed so
+    // the legacy deactivation above still stands. Residual (tracked for the
+    // reads-flip reconcile, like purgeThread): once memoryGraphReads is on, a
+    // swallowed reap leaves the deleted content recallable in engine.db — and a
+    // re-run finds ids=[] (the legacy rows are already inactive), so it is not
+    // self-healing. No live tenant has reads on yet.
+    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.deactivateByIds(ids);
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] deactivate mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    return ids.length;
   }
 
   async updateMemoryText(
