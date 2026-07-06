@@ -5,7 +5,10 @@
  *   - {@link ./entity-extractor-v2.ts} as a post-filter on LLM tool-call output.
  *     Even with a strict prompt, Haiku occasionally returns common nouns at
  *     ≥0.8 confidence; this guards write-time.
+ *   - {@link ./entity-extractor.ts} (the regex tier) as the same write-time filter.
  *   - {@link ./kg-cleanup.ts} as the rule for the historical purge.
+ *   - {@link ../scripts/subject-sweep.ts} as the garbage-sweep archive predicate
+ *     (incl. the person-shape class via {@link isJunkPersonShape}).
  *
  * Keeping the gate in one file means the prompt, the runtime filter, and the
  * cleanup endpoint can never drift apart.
@@ -127,5 +130,36 @@ export function isCleanupTarget(name: string): boolean {
       if ((left && KG_COMMON_NOUNS.has(left)) || (right && KG_COMMON_NOUNS.has(right))) return true;
     }
   }
+  return false;
+}
+
+/**
+ * True if a `person`-typed name has a shape that is almost never a real person, so the
+ * extractor can refuse to mint a person subject WITHOUT a stopword entry — which would
+ * collide with real names/brands (this is exactly why 'will'/'target' are kept OUT of
+ * KG_COMMON_NOUNS). Only shape-based (rules 1–2 of the person gate); the harder
+ * "single-token capitalized name needs corroboration" (rule 3) needs the extraction's
+ * relations/resolver context and lives at the persist layer, not here.
+ *
+ * Caller MUST gate on `type === 'person'` — these shapes are legitimate for other kinds
+ * (org "IBM", product "S3", "3M"). Multi-token names are always kept.
+ */
+export function isJunkPersonShape(name: string): boolean {
+  const t = name.trim();
+  if (!t || t.includes(' ')) return false;   // empty / multi-token → not our concern here
+  // Rule 1: acronym / symbol token — all-caps + digits/&/./- , short (CSV, API, S3, R&D).
+  // ACCEPTED RECALL TRADE: a short all-caps mononym or initials used AS the person's
+  // canonical name (SZA, JR, TJ) is shape-identical to junk (CSV) and gets dropped too —
+  // acronym-junk-as-person is far more common than that in a business assistant, and a
+  // real person re-enters via their full name when the model has it. Same shape-trade
+  // philosophy as the slash-fragment rule.
+  if (/^[A-Z0-9][A-Z0-9.&-]*$/.test(t) && t.length <= 6) return true;
+  // Rule 1b: any digit in a single token — a real person's single name has none (v2, 360, x1).
+  if (/\d/.test(t)) return true;
+  // Rule 2: lowercase-initial single token — 'will', 'target', 'data' as they occur
+  // mid-sentence. A capitalized single token (Will, Roland) is NOT rejected here — that
+  // is rule 3's job (corroboration), so real first names survive. (A lowercase-stylized
+  // real mononym like 'bell'/'danah' is dropped — relies on names being proper-cased.)
+  if (/^\p{Ll}/u.test(t)) return true;
   return false;
 }

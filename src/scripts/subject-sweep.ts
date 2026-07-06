@@ -41,7 +41,7 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
-import { isCleanupTarget } from '../core/kg-stopwords.js';
+import { isCleanupTarget, isJunkPersonShape } from '../core/kg-stopwords.js';
 
 export interface Args { apply: boolean; json: boolean; dataDir: string | null; rollback: string | null }
 
@@ -119,7 +119,11 @@ export function planArchive(engineDb: EngineDb, threadAnchors: ReadonlySet<strin
   const primCount = db.prepare('SELECT COUNT(*) c FROM memories WHERE subject_id = ?');
   const plan: ArchivePlan = { archive: [], blocked: [], escapedSlash: [] };
   for (const s of subjects) {
-    if (!isCleanupTarget(s.name)) {
+    // Candidate = the name-generic oracle OR a person with a junk shape (acronym /
+    // digit / lowercase-initial) — the kind-conditional class the write-path gate
+    // now blocks, swept from legacy data under the same single oracle.
+    const isJunk = isCleanupTarget(s.name) || (s.kind === 'person' && isJunkPersonShape(s.name));
+    if (!isJunk) {
       if (s.name.includes('/')) plan.escapedSlash.push({ id: s.id, name: s.name, kind: s.kind });
       continue;
     }
