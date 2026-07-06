@@ -76,6 +76,7 @@ const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' 
 const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'completed' });
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
+const mockConfirmTrigger = vi.fn().mockReturnValue({ id: 'task-1', confirmed_at: '2026-06-01T00:00:00.000Z' });
 const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
 const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
 const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state', state: 'test-state' });
@@ -151,6 +152,7 @@ vi.mock('../core/engine.js', () => ({
       complete: mockTaskComplete,
       createPipelineTask: mockTaskCreatePipeline,
       setEnabled: mockTaskSetEnabled,
+      confirmTrigger: mockConfirmTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
@@ -2857,6 +2859,26 @@ describe('LynoxHTTPApi', () => {
     it('POST /api/tasks/:id/complete completes a task', async () => {
       const res = await jsonFetch('/api/tasks/task-1/complete', { method: 'POST' });
       expect(res.status).toBe(200);
+    });
+
+    // triggers-consent — the human consent surface.
+    it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { confirmed_at: string };
+      expect(body.confirmed_at).toBeTruthy();
+    });
+
+    it('POST /api/tasks/:id/confirm returns 404 for an unknown trigger', async () => {
+      mockConfirmTrigger.mockReturnValueOnce(undefined);
+      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST' });
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /api/tasks stamps confirmedAt on the created row (human consent path)', async () => {
+      await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Immediate', assignee: 'lynox' }) });
+      // the human HTTP create route supplies confirmedAt; the agent task_create tool never does.
+      expect(mockTaskCreate).toHaveBeenCalledWith(expect.objectContaining({ confirmedAt: expect.any(String) }));
     });
   });
 

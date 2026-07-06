@@ -265,4 +265,14 @@ export interface TriggerRecord {
   /** Slice B2: cron kill-switch (SQLite 0/1). 1 = fires on schedule, 0 = the
    *  worker skips it. Absent = enabled (the column defaults to 1). */
   enabled?: number | undefined;
+  /** Human first-run-confirm timestamp for an autonomous agent trigger (the
+   *  `run_agent` consent gate — SEC leg of the Triggers primitive). Set once by a
+   *  human via the confirm surface; absent = NOT confirmed. A `run_agent` trigger
+   *  with no `confirmed_at` is excluded from `getDueTriggers` and refused at
+   *  dispatch (never mints an autonomous Run) — the asymmetry that closes the
+   *  agent-scheduled injection-amplification hole (`run_workflow` has its own
+   *  {@link PlannedPipeline.confirmedAt}; `backup`/`notify` are deterministic and
+   *  exempt). Fail-closed: a trigger created by anything other than an explicit
+   *  human action lands unconfirmed. */
+  confirmed_at?: string | undefined;
 }

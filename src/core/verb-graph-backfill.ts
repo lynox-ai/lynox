@@ -97,6 +97,14 @@ function legacyTriggerToRecord(row: LegacyTriggerRow): TriggerRecord {
     pipeline_id: row.pipeline_id ?? undefined,
     pipeline_params: row.pipeline_params ?? undefined,
     enabled: row.enabled ?? undefined,
+    // Grandfather (triggers-consent, engine.db v6): a legacy trigger predates the
+    // `run_agent` consent gate and was operator-created (pre-customer) → treat it
+    // as confirmed so a direct v1.22→2.x upgrade whose triggers arrive via THIS
+    // backfill (rather than pre-existing in engine.db, which the v6 UPDATE handles)
+    // never pauses the operator's own schedules. Scoped to `run_agent` (the only
+    // gated effect); deterministic `created_at`, no wall-clock. Matches the v6
+    // migration's grandfather so both entry paths agree.
+    confirmed_at: effect === 'run_agent' ? row.created_at : undefined,
   };
 }
 

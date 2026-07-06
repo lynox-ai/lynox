@@ -1,5 +1,6 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
+import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { logErrorChain } from '../../core/utils.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
@@ -107,6 +108,26 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     const embeddedErr = detectEmbeddedParams('description', input.description)
       ?? detectEmbeddedParams('title', input.title);
     if (embeddedErr) return embeddedErr;
+
+    // Injection defense-in-depth (triggers-consent / SEC leg): an agent that
+    // ingested poisoned content (mail / web / doc) could be steered into SCHEDULING
+    // a trigger whose instruction IS the attack, which then runs autonomously under
+    // the weaker background guard. The consent gate stops it from RUNNING unattended
+    // (agent-created run_agent triggers land unconfirmed); this additionally refuses
+    // to CREATE a *firing* trigger whose title/description carries injection markers,
+    // so a poisoned schedule never lands (and never presents a tempting "confirm" to
+    // the human). Scoped to firing triggers (schedule / watch / run_at / lynox
+    // auto-trigger) — a plain user-TODO fires nothing, so it isn't gated (no FP on a
+    // legit "mail X to a@b.com" reminder). The human HTTP create route is NOT scanned
+    // (the human is the trusted author + the confirmer).
+    const willFire = Boolean(input.schedule) || Boolean(input.watch_url)
+      || Boolean(input.run_at) || input.assignee === 'lynox';
+    if (willFire) {
+      const scan = detectInjectionAttempt(`${input.title}\n${input.description ?? ''}`);
+      if (scan.detected) {
+        return `Error: refused to schedule this trigger — its title/description matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, set it up from the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
+      }
+    }
 
     let scopeType = 'context';
     let scopeId = '';

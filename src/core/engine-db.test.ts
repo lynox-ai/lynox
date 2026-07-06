@@ -25,10 +25,10 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v5', () => {
+  it('creates the database and stamps schema_version v6', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(5); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker)
+    expect(row.v).toBe(6); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather)
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -121,6 +121,40 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       expect(['cron', 'watch', 'webhook', 'inbox_event', 'manual']).toContain(r.source);
       expect(['run_workflow', 'run_agent', 'backup', 'notify']).toContain(r.effect);
     }
+    e.close();
+  });
+
+  it('v6 migration grandfathers pre-existing run_agent triggers (ISO confirmed_at); other effects stay NULL', () => {
+    // A pre-v6 engine.db: schema at v5 (the `effect` column from v3 is present, but
+    // `confirmed_at` is not). v6 must stamp the EXISTING run_agent rows confirmed (so a
+    // deploy never pauses the operator's own live schedules — the FORK-1 grandfather)
+    // while leaving deterministic/workflow effects NULL (they aren't gated on it).
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig6-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'engine.db');
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (5);
+      CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, effect TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', next_run_at TEXT);
+    `);
+    const seed = raw.prepare('INSERT INTO triggers (id, source, effect) VALUES (?, ?, ?)');
+    seed.run('g-agent', 'cron', 'run_agent');
+    seed.run('g-workflow', 'cron', 'run_workflow');
+    seed.run('g-backup', 'cron', 'backup');
+    seed.run('g-notify', 'cron', 'notify');
+    raw.close();
+
+    const e = new EngineDb(dbPath, '');
+    const rows = e.getDb().prepare('SELECT id, confirmed_at FROM triggers').all() as Array<{ id: string; confirmed_at: string | null }>;
+    const byId = Object.fromEntries(rows.map(r => [r.id, r.confirmed_at]));
+    // run_agent grandfathered, stamped in the SAME ISO format every other writer uses
+    // (toISOString) — not SQLite's space-separated datetime('now').
+    expect(byId['g-agent']).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(byId['g-workflow']).toBeNull();
+    expect(byId['g-backup']).toBeNull();
+    expect(byId['g-notify']).toBeNull();
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(6);
     e.close();
   });
 
@@ -232,7 +266,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(5); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(6); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -366,7 +400,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // boot backfill re-populating from the still-present legacy history.db).
     expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(5);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(6);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -377,7 +411,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(5);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(6);
     e.close();
   });
 
@@ -392,7 +426,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(5);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(6);
     e.close();
   });
 });

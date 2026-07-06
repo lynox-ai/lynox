@@ -202,3 +202,96 @@ describe('triggerRecordToRow (record → engine.db row mapping)', () => {
     expect(triggerRecordToRow(rec({ enabled: 0 })).enabled).toBe(false);
   });
 });
+
+describe('TriggerStore — run_agent consent gate (triggers-consent)', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const PAST = '2020-01-01T00:00:00.000Z';
+  const CONFIRMED = '2026-06-01T00:00:00.000Z';
+
+  function make(): { store: TriggerStore; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-trgc-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    return { store: new TriggerStore(engine), engine };
+  }
+
+  /** A run_agent trigger already due to fire (next_run_at in the past). */
+  function dueRow(over: Partial<TriggerRow> = {}): TriggerRow {
+    return {
+      id: 't1', title: 'x', description: '', source: 'cron', effect: 'run_agent',
+      conditionJson: JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }),
+      paramsJson: '{}', status: 'open', enabled: true, retryCount: 0,
+      nextRunAt: PAST, ...over,
+    };
+  }
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('migration adds the confirmed_at column; a fresh insert lands unconfirmed (fail-closed)', () => {
+    const { store, engine } = make();
+    const cols = (engine.getDb().prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string }>)
+      .map(c => c.name);
+    expect(cols).toContain('confirmed_at');
+    store.insert({ id: 'a', title: 'x', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * *', nextRunAt: PAST });
+    expect(store.get('a')?.confirmedAt).toBeNull();
+  });
+
+  it('insert stamps confirmed_at when supplied (the human-consent path)', () => {
+    const { store } = make();
+    store.insert({ id: 'a', title: 'x', source: 'cron', effect: 'run_agent', nextRunAt: PAST, confirmedAt: CONFIRMED });
+    expect(store.get('a')?.confirmedAt).toBe(CONFIRMED);
+  });
+
+  it('getDue EXCLUDES an unconfirmed run_agent trigger but INCLUDES a confirmed one', () => {
+    const { store } = make();
+    store.upsert(dueRow({ id: 'unconf', confirmedAt: null }));
+    store.upsert(dueRow({ id: 'conf', confirmedAt: CONFIRMED }));
+    const due = store.getDue();
+    const ids = due.map(t => t.id);
+    expect(ids).not.toContain('unconf');
+    expect(ids).toContain('conf');
+    expect(due.find(t => t.id === 'conf')?.confirmed_at).toBe(CONFIRMED);
+  });
+
+  it('getDue does NOT gate non-run_agent effects on confirmed_at (run_workflow / backup / notify)', () => {
+    const { store, engine } = make();
+    engine.getDb().prepare("INSERT INTO workflows (id, name, definition_json) VALUES ('wf', 'W', '{}')").run();
+    store.upsert(dueRow({ id: 'wf1', effect: 'run_workflow', targetWorkflowId: 'wf', confirmedAt: null }));
+    store.upsert(dueRow({ id: 'bk', effect: 'backup', confirmedAt: null }));
+    store.upsert(dueRow({ id: 'nt', effect: 'notify', confirmedAt: null }));
+    expect(store.getDue().map(t => t.id)).toEqual(expect.arrayContaining(['wf1', 'bk', 'nt']));
+  });
+
+  it('setConfirmedAt makes an unconfirmed trigger due in place (next_run_at preserved)', () => {
+    const { store } = make();
+    store.upsert(dueRow({ id: 'p', confirmedAt: null }));
+    expect(store.getDue().map(t => t.id)).not.toContain('p');
+    expect(store.setConfirmedAt('p', CONFIRMED)).toBe(true);
+    const due = store.getDue();
+    expect(due.map(t => t.id)).toContain('p');
+    // next_run_at untouched — confirm-in-place, no reschedule mangling.
+    expect(due.find(t => t.id === 'p')?.next_run_at).toBe(PAST);
+  });
+
+  it('editing the instruction (title/description) clears consent; schedule-only / status-only edits keep it', () => {
+    const { store } = make();
+    store.upsert(dueRow({ id: 'e', confirmedAt: CONFIRMED }));
+    store.updateFields('e', { nextRunAt: PAST });        // reschedule only
+    expect(store.get('e')?.confirmedAt).toBe(CONFIRMED);
+    store.updateFields('e', { status: 'open' });          // status only
+    expect(store.get('e')?.confirmedAt).toBe(CONFIRMED);
+    store.updateFields('e', { title: 'repurposed instruction' }); // title edit
+    expect(store.get('e')?.confirmedAt).toBeNull();
+    // a description-only edit ALSO re-requires consent (the instruction changed).
+    store.upsert(dueRow({ id: 'e2', confirmedAt: CONFIRMED }));
+    store.updateFields('e2', { description: 'repurposed via description' });
+    expect(store.get('e2')?.confirmedAt).toBeNull();
+  });
+});

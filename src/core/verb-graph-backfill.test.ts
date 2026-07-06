@@ -284,6 +284,31 @@ describe('VerbGraphBackfill — workflows + triggers (B1 self-heal)', () => {
     expect(new TriggerStore(engine).get('tr-1')).toBeDefined();
   });
 
+  it('grandfathers backfilled run_agent triggers (confirmed_at = created_at); deterministic effects stay unconfirmed', () => {
+    const { history, engine } = make();
+    const hdb = history.getDb();
+    // bare manual + watch → run_agent (grandfathered); backup/reminder → backup/notify (not gated).
+    seedLegacyTrigger(hdb, { id: 'g-manual', task_type: 'manual', created_at: '2025-03-03T03:03:03Z' });
+    seedLegacyTrigger(hdb, { id: 'g-watch', task_type: 'manual', watch_config: '{"url":"https://x"}', created_at: '2025-04-04T04:04:04Z' });
+    seedLegacyTrigger(hdb, { id: 'g-backup', task_type: 'backup' });
+    seedLegacyTrigger(hdb, { id: 'g-reminder', task_type: 'reminder' });
+
+    new VerbGraphBackfill(engine, hdb).run();
+
+    const ts = new TriggerStore(engine);
+    // A legacy run_agent trigger predates the consent gate → grandfathered (confirmed
+    // as of its creation), so a direct v1.22→2.x upgrade whose triggers arrive via
+    // THIS backfill never pauses the operator's own schedules. Matches the v6
+    // migration's grandfather (which handles rows ALREADY in engine.db).
+    expect(ts.get('g-manual')?.effect).toBe('run_agent');
+    expect(ts.get('g-manual')?.confirmedAt).toBe('2025-03-03T03:03:03Z');
+    expect(ts.get('g-watch')?.effect).toBe('run_agent');
+    expect(ts.get('g-watch')?.confirmedAt).toBe('2025-04-04T04:04:04Z');
+    // Deterministic effects aren't gated → not grandfathered (confirmed_at stays null).
+    expect(ts.get('g-backup')?.confirmedAt).toBeNull();
+    expect(ts.get('g-reminder')?.confirmedAt).toBeNull();
+  });
+
   it('derives source/effect from the legacy task_type (the #850 remap twin)', () => {
     const { history, engine } = make();
     const hdb = history.getDb();

@@ -327,6 +327,20 @@ export class WorkerLoop {
             await this.executePipeline(task);
             break;
           case 'run_agent':
+            // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
+            // primary getDueTriggers exclusion. A `run_agent` trigger runs an
+            // AUTONOMOUS agent turn (the injection-amplification surface), so unlike
+            // the deterministic effects it needs an explicit human first-run-confirm
+            // (`run_workflow` has its own confirmedAt gate in executePipeline;
+            // backup/notify are deterministic → exempt). getDueTriggers already
+            // excludes an unconfirmed one, so this branch is normally unreachable; if
+            // a `confirmed_at`-less run_agent trigger ever reaches dispatch (a direct
+            // executeTask call, a bypassed read path), refuse it — record + stop,
+            // NEVER mint the autonomous run.
+            if (!task.confirmed_at) {
+              this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
+              break;
+            }
             // Source-gated executor choice — NOT a money boundary (both branches are
             // the run_agent effect = may mint a Run). A `watch` source runs its
             // change-detection gate first (executeWatch: no change → no spend); any

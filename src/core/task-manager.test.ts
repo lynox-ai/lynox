@@ -538,7 +538,9 @@ describe('TaskManager', () => {
     });
 
     it('a failed one-shot task is no longer selected by getDueTriggers', () => {
-      const task = tm.create({ title: 'Bad task', assignee: 'lynox' });
+      // confirmedAt so it's due (isolates recordTaskRun termination, not the
+      // separate run_agent consent gate).
+      const task = tm.create({ title: 'Bad task', assignee: 'lynox', confirmedAt: '2026-06-01T00:00:00.000Z' });
       // Pre-condition: the trigger is due.
       expect(tm.getDueTriggers().some(t => t.id === task.id)).toBe(true);
 
@@ -644,6 +646,7 @@ describe('TaskManager', () => {
       const task = tm.createScheduled({
         title: 'Hourly check',
         scheduleCron: '0 * * * *',
+        confirmedAt: '2026-06-01T00:00:00.000Z', // confirmed → due; isolates the recurrence SELECT, not consent
       });
       tm.recordTaskRun(task.id, 'boom', 'failed');
       expect(tm.getTrigger(task.id)!.status).toBe('failed');
@@ -737,7 +740,9 @@ describe('TaskManager', () => {
     it('a disabled task is excluded from getDueTriggers and re-enabling restores it (reversible, no side effects)', () => {
       // A due one-shot scheduled AGENT-TRIGGER (past next_run_at, status open).
       // taskType='scheduled' + nextRunAt routes it to the `triggers` table.
-      const t = tm.create({ title: 'Due', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z' });
+      // Confirmed so the test isolates the enabled kill-switch, not the separate
+      // run_agent consent gate (an unconfirmed run_agent trigger is never due).
+      const t = tm.create({ title: 'Due', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z' });
       expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(true);
 
       tm.setEnabled(t.id, false);
@@ -750,5 +755,65 @@ describe('TaskManager', () => {
       tm.setEnabled(t.id, true);
       expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(true);
     });
+  });
+});
+
+describe('TaskManager — run_agent consent (triggers-consent)', () => {
+  let dir: string;
+  let history: RunHistory;
+  let engine: EngineDb;
+  let tm: TaskManager;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-task-consent-'));
+    history = new RunHistory(join(dir, 'test.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    tm = new TaskManager(history);
+  });
+
+  afterEach(() => {
+    try { history.close(); } catch { /* already closed */ }
+    try { engine.close(); } catch { /* already closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an unconfirmed run_agent trigger (agent path) is NOT due even past its next_run_at', () => {
+    const t = tm.create({ title: 'Poll inbox', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z' }) as TriggerRecord;
+    expect(t.effect).toBe('run_agent');
+    expect(t.confirmed_at).toBeUndefined();
+    expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(false);
+  });
+
+  it('createScheduled with confirmedAt (human HTTP path) lands confirmed AND due', () => {
+    const t = tm.createScheduled({ title: 'Poll inbox', scheduleCron: '0 * * * *', confirmedAt: '2026-06-01T00:00:00.000Z' });
+    expect(t.confirmed_at).toBe('2026-06-01T00:00:00.000Z');
+    // confirm a past-due one to prove it reaches getDueTriggers.
+    const due = tm.create({ title: 'Due now', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z' }) as TriggerRecord;
+    expect(tm.getDueTriggers().some((x) => x.id === due.id)).toBe(true);
+  });
+
+  it('confirmTrigger stamps consent so the trigger becomes visible-confirmed', () => {
+    const t = tm.createWatch({ title: 'Watch x', watchUrl: 'https://example.test' });
+    expect(t.confirmed_at).toBeUndefined();
+    const confirmed = tm.confirmTrigger(t.id);
+    expect(confirmed?.confirmed_at).toBeTruthy();
+    expect(tm.getTrigger(t.id)?.confirmed_at).toBeTruthy();
+  });
+
+  it('confirmTrigger returns undefined for an unknown id', () => {
+    expect(tm.confirmTrigger('nope')).toBeUndefined();
+  });
+
+  it('confirmTrigger respects the scope filter — cannot confirm an out-of-scope trigger', () => {
+    const t = tm.create({
+      title: 'scoped', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z',
+      scopeType: 'client', scopeId: 'acme',
+    }) as TriggerRecord;
+    // Wrong scope → the scope-filtered resolve read misses → no confirm.
+    expect(tm.confirmTrigger(t.id, [{ type: 'client', id: 'other' }])).toBeUndefined();
+    expect(tm.getTrigger(t.id)?.confirmed_at).toBeUndefined();
+    // Right scope → confirmed.
+    expect(tm.confirmTrigger(t.id, [{ type: 'client', id: 'acme' }])?.confirmed_at).toBeTruthy();
   });
 });
