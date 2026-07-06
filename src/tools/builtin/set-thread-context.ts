@@ -1,5 +1,4 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import type { SubjectStore } from '../../core/subject-store.js';
 import { logErrorChain } from '../../core/utils.js';
 
 // Foundation Rework v2 — Context-Hierarchy Scoping, Slice A2.
@@ -23,44 +22,10 @@ interface SetThreadContextInput {
   clear?: boolean | undefined;
 }
 
-/**
- * Resolve an existing engagement (project) by `(name, parent-customer)` or create
- * one. Engagements are NOT name-deduped in the store (identity = provider×client×
- * period), so `findOrCreate` would always insert — the correct idempotency key
- * here is the composite `(name, parent)`: two clients can each have a "Website"
- * project and they must stay distinct rows.
- */
-function resolveOrCreateEngagement(
-  subjects: SubjectStore,
-  name: string,
-  parentId: string | null,
-): string {
-  const wanted = name.toLowerCase();
-  const matches = subjects
-    .listSubjects({ kind: 'engagement' })
-    .filter((s) => s.name.toLowerCase() === wanted);
-
-  if (parentId) {
-    const underParent = matches.find((s) => s.parent_id === parentId);
-    if (underParent) return underParent.id;
-    // A same-named project not yet filed under any client → adopt it here.
-    const orphan = matches.find((s) => s.parent_id === null);
-    if (orphan) {
-      subjects.setParent(orphan.id, parentId);
-      return orphan.id;
-    }
-    // Only matches under OTHER clients exist → this is a distinct project.
-    return subjects.createSubject({ kind: 'engagement', name, parentId });
-  }
-
-  // No client given → prefer a client-agnostic (unparented) same-named project
-  // (matches the "no client named" intent), else the most-recent same-named one
-  // (list is updated_at DESC), else create an unparented one. The handler names
-  // the resolved client in its confirmation so a reuse under a client is not silent.
-  const match = matches.find((s) => s.parent_id === null) ?? matches[0];
-  if (match) return match.id;
-  return subjects.createSubject({ kind: 'engagement', name });
-}
+// Engagement resolution moved to SubjectStore.findOrCreateEngagement (the single
+// resolver both this tool and the extraction path route through, so they converge
+// on one row per project). Composite `(normalized-name, parent)` idempotency lives
+// there; two clients can each have a "Website" project and stay distinct rows.
 
 export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
   definition: {
@@ -107,7 +72,10 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
       let anchorId: string;
       let label: string;
       if (project) {
-        anchorId = resolveOrCreateEngagement(subjects, project, customerId);
+        // The handler names the resolved client back to the user (below), so a
+        // client-less project may reuse an existing client-parented row (a guess the
+        // human sees + can correct). Extraction never does this — isolation guard.
+        anchorId = subjects.findOrCreateEngagement(project, customerId, { allowParentedReuseOnNullParent: true }).id;
         if (customer) {
           label = `project "${project}" for client "${customer}"`;
         } else {

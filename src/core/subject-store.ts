@@ -131,6 +131,25 @@ export const ENTITY_MAPPABLE_SUBJECT_KINDS: readonly SubjectKind[] =
 export const NAME_DEDUPED_SUBJECT_KINDS = ['person', 'organization', 'product', 'service'] as const;
 const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS);
 
+/** Leading generic project word (+ separator) stripped from an engagement name. */
+const ENGAGEMENT_LEADING_GENERIC_RE = /^(?:projekt|project|projet)[\s:]+/iu;
+
+/**
+ * Canonicalize a subject name for dedup matching: trim, collapse internal
+ * whitespace, strip trailing punctuation. For `engagement`, additionally strip a
+ * leading generic project word so "Projekt Orion" and "Orion" resolve to the same
+ * canonical (the original surface form is preserved separately as an alias). Pure
+ * + deterministic; never returns empty (falls back to the trimmed input).
+ */
+export function normalizeSubjectName(kind: string, name: string): string {
+  let n = name.trim().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/u, '').trim();
+  if (kind === 'engagement') {
+    const stripped = n.replace(ENGAGEMENT_LEADING_GENERIC_RE, '').trim();
+    if (stripped) n = stripped;   // keep "Projekt" alone (→empty) as-is
+  }
+  return n || name.trim();
+}
+
 export interface SubjectRow {
   id: string;
   kind: string;
@@ -212,8 +231,15 @@ export class SubjectStore {
   }): { id: string; created: boolean } {
     const owner = params.ownerUserId ?? DEFAULT_OWNER;
     if (NAME_DEDUP_KINDS.has(params.kind)) {
+      // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
+      // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
+      // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
+      // normalized query against stored raw names, so the clean form must have been
+      // stored first — full symmetry would need a stored normalized-name column.
+      const normalized = normalizeSubjectName(params.kind, params.name);
       const existing = this.findCanonical(params.name, params.kind, owner)
-        ?? this.findByAlias(params.name, params.kind, owner);
+        ?? this.findByAlias(params.name, params.kind, owner)
+        ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
       if (existing) {
         // Fold the caller's surface forms into the existing subject's aliases
         // (case-insensitive — case-variants of an existing alias are no-ops).
@@ -222,6 +248,71 @@ export class SubjectStore {
       }
     }
     return { id: this.createSubject(params), created: true };
+  }
+
+  /**
+   * Resolve or create an ENGAGEMENT (project) by `(normalized-name, parent)`. This
+   * is the single engagement resolver — the extraction path and the
+   * `set_thread_context` tool both route through it, so they converge on ONE row
+   * per real project instead of minting duplicates.
+   *
+   * Engagements are NOT name-deduped in {@link findOrCreate} (identity is
+   * provider×client×period, not name): two clients can each have a "Website" project
+   * and they MUST stay distinct rows. So the key is the composite `(name, parent)`,
+   * matched on the NORMALIZED name ("Projekt Orion" ≡ "Orion") with the original
+   * surface form preserved as an alias. Never merges across parents — the isolation
+   * guard. Orphan-adopt: a same-named project not yet filed under any client is
+   * adopted under the given parent (the pre-anchor extraction created it unparented).
+   */
+  findOrCreateEngagement(
+    name: string,
+    parentId: string | null,
+    opts?: {
+      ownerUserId?: string | undefined;
+      aliases?: string[] | undefined;
+      // When no parent is given AND no unparented match exists, may we reuse a
+      // same-named project that lives under SOME client? That is a GUESS at the
+      // client — safe ONLY when a human confirms it (the set_thread_context handler
+      // names the resolved client back to the user). The extraction path has no such
+      // gate, so it must NOT silently attribute a memory to an arbitrary client;
+      // it leaves this false and gets a fresh unparented row instead.
+      allowParentedReuseOnNullParent?: boolean | undefined;
+    },
+  ): { id: string; created: boolean } {
+    const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
+    const canonical = normalizeSubjectName('engagement', name);
+    const wanted = canonical.toLowerCase();
+    const surfaceForms = [canonical, name, ...(opts?.aliases ?? [])];
+    const matches = this.listSubjects({ kind: 'engagement', ownerUserId: owner })
+      .filter(s => normalizeSubjectName('engagement', s.name).toLowerCase() === wanted);
+
+    const reuse = (row: SubjectRow): { id: string; created: boolean } => {
+      this._mergeAliases(row, surfaceForms);
+      return { id: row.id, created: false };
+    };
+    const create = (parent: string | null): { id: string; created: boolean } => ({
+      id: this.createSubject({ kind: 'engagement', name: canonical, aliases: surfaceForms, parentId: parent ?? undefined, ownerUserId: owner }),
+      created: true,
+    });
+
+    if (parentId) {
+      const underParent = matches.find(s => s.parent_id === parentId);
+      if (underParent) return reuse(underParent);
+      // A same-named project not yet filed under any client → adopt it here.
+      const orphan = matches.find(s => s.parent_id === null);
+      if (orphan) { this.setParent(orphan.id, parentId); return reuse(orphan); }
+      // Only matches under OTHER clients exist → this is a distinct project.
+      return create(parentId);
+    }
+    // No client given → prefer a client-agnostic (unparented) same-named project.
+    const orphan = matches.find(s => s.parent_id === null);
+    if (orphan) return reuse(orphan);
+    // No unparented match. Reusing a client-parented row here guesses the client —
+    // only the human-confirmed tool path opts in (listSubjects is updated_at DESC, so
+    // matches[0] is the most-recent). Extraction gets a fresh unparented row so a bare
+    // mention is never silently attributed to an arbitrary client (isolation guard).
+    if (opts?.allowParentedReuseOnNullParent && matches[0]) return reuse(matches[0]);
+    return create(null);
   }
 
   /** Raw insert (no dedup) — callers should prefer {@link findOrCreate}. */

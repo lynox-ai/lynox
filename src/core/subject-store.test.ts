@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS, normalizeSubjectName } from './subject-store.js';
 import { DataStore } from './data-store.js';
 import type { DataStoreSubjectKind } from '../types/index.js';
 
@@ -454,5 +454,127 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
       const bidirectional: BothWays = true;
       expect(bidirectional).toBe(true);
     });
+  });
+});
+
+describe('normalizeSubjectName (M4 subject-dedup)', () => {
+  it('trims, collapses whitespace, strips trailing punctuation', () => {
+    expect(normalizeSubjectName('organization', '  Meridian   AG  ')).toBe('Meridian AG');
+    expect(normalizeSubjectName('organization', 'Meridian AG.')).toBe('Meridian AG');
+    expect(normalizeSubjectName('person', 'Maria Keller!')).toBe('Maria Keller');
+  });
+  it('strips a leading generic project word for engagements only', () => {
+    expect(normalizeSubjectName('engagement', 'Projekt Orion')).toBe('Orion');
+    expect(normalizeSubjectName('engagement', 'Project Alpha')).toBe('Alpha');
+    expect(normalizeSubjectName('engagement', 'Projet Lune')).toBe('Lune');   // French
+    expect(normalizeSubjectName('engagement', 'PROJEKT Orion')).toBe('Orion'); // case-insensitive
+    expect(normalizeSubjectName('engagement', 'Projekt: Vega')).toBe('Vega');
+    // NOT an engagement → the leading word is kept.
+    expect(normalizeSubjectName('organization', 'Project Alpha')).toBe('Project Alpha');
+    // A name that IS just the generic word (or starts without a separator) is kept.
+    expect(normalizeSubjectName('engagement', 'Projekt')).toBe('Projekt');
+    expect(normalizeSubjectName('engagement', 'Projektron')).toBe('Projektron');
+  });
+  it('never returns empty', () => {
+    expect(normalizeSubjectName('engagement', '   ')).toBe('');   // trimmed input is empty → returns it
+    expect(normalizeSubjectName('person', '...')).toBe('...');    // all-punct → falls back to trimmed input
+  });
+});
+
+describe('SubjectStore.findOrCreateEngagement (M4 subject-dedup)', () => {
+  const tmpDirs: string[] = [];
+  function makeStore(): { store: SubjectStore; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-eng-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { store: new SubjectStore(engine), engine };
+  }
+  afterEach(() => {
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('dedups the same project name to one row', () => {
+    const { store, engine } = makeStore();
+    const org = store.findOrCreate({ kind: 'organization', name: 'Kunde A' }).id;
+    const a = store.findOrCreateEngagement('Website', org);
+    const b = store.findOrCreateEngagement('Website', org);
+    expect(b.created).toBe(false);
+    expect(b.id).toBe(a.id);
+    expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(1);
+    engine.close();
+  });
+
+  it('converges "Projekt Orion" and "Orion" onto one row (normalized name + alias)', () => {
+    const { store, engine } = makeStore();
+    const org = store.findOrCreate({ kind: 'organization', name: 'Kunde A' }).id;
+    const a = store.findOrCreateEngagement('Projekt Orion', org);
+    const b = store.findOrCreateEngagement('Orion', org);
+    expect(b.id).toBe(a.id);
+    expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(1);
+    // canonical name is the normalized form; the surface form is kept as an alias.
+    const row = store.getSubject(a.id)!;
+    expect(row.name).toBe('Orion');
+    expect(JSON.parse(row.aliases) as string[]).toContain('Projekt Orion');
+    engine.close();
+  });
+
+  it('keeps the SAME project name under DIFFERENT clients as two distinct rows (isolation)', () => {
+    const { store, engine } = makeStore();
+    const orgA = store.findOrCreate({ kind: 'organization', name: 'Kunde A' }).id;
+    const orgB = store.findOrCreate({ kind: 'organization', name: 'Kunde B' }).id;
+    const a = store.findOrCreateEngagement('Website', orgA);
+    const b = store.findOrCreateEngagement('Website', orgB);
+    expect(b.id).not.toBe(a.id);
+    expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(2);
+    engine.close();
+  });
+
+  it('adopts an unparented same-named project under the given client', () => {
+    const { store, engine } = makeStore();
+    // Extraction created it unparented (no anchor yet).
+    const orphan = store.findOrCreateEngagement('Orion', null);
+    expect(store.getSubject(orphan.id)!.parent_id).toBeNull();
+    // Later a client is known → adopt the orphan, don't mint a new row.
+    const org = store.findOrCreate({ kind: 'organization', name: 'Kunde A' }).id;
+    const adopted = store.findOrCreateEngagement('Orion', org);
+    expect(adopted.id).toBe(orphan.id);
+    expect(store.getSubject(orphan.id)!.parent_id).toBe(org);
+    expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(1);
+    engine.close();
+  });
+
+  it('does NOT attribute an unanchored (null-parent) extraction resolve to an arbitrary client', () => {
+    const { store, engine } = makeStore();
+    const orgA = store.findOrCreate({ kind: 'organization', name: 'Kunde A' }).id;
+    store.findOrCreateEngagement('Orion', orgA);   // "Orion" exists ONLY under client A
+    // Extraction has no human gate → a bare "Orion" mention with no anchor must NOT
+    // silently reuse client A's project; it gets a fresh UNPARENTED row (isolation).
+    const bare = store.findOrCreateEngagement('Orion', null);
+    expect(bare.created).toBe(true);
+    expect(store.getSubject(bare.id)!.parent_id).toBeNull();
+    expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(2);
+    engine.close();
+  });
+
+  it('the human-confirmed tool path MAY reuse a client-parented row on a null-parent resolve', () => {
+    const { store, engine } = makeStore();
+    const orgA = store.findOrCreate({ kind: 'organization', name: 'Kunde A' }).id;
+    const under = store.findOrCreateEngagement('Orion', orgA);
+    // set_thread_context({project:'Orion'}) with no customer → opt-in reuses A's row
+    // (the handler names client A back to the user), no new row.
+    const viaTool = store.findOrCreateEngagement('Orion', null, { allowParentedReuseOnNullParent: true });
+    expect(viaTool.id).toBe(under.id);
+    expect(store.listSubjects({ kind: 'engagement' })).toHaveLength(1);
+    engine.close();
+  });
+
+  it('normalize-fallback in findOrCreate converges trailing-punct org variants', () => {
+    const { store, engine } = makeStore();
+    const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+    const b = store.findOrCreate({ kind: 'organization', name: 'Meridian AG.' });
+    expect(b.id).toBe(a.id);
+    expect(store.listSubjects({ kind: 'organization' })).toHaveLength(1);
+    engine.close();
   });
 });

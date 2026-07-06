@@ -80,12 +80,14 @@ describe('KnowledgeLayer subject-graph READ migration (S1d)', () => {
 
     const entities = await layer.listEntities();
     const byName = new Map(entities.map(e => [e.canonicalName, e]));
-    // Shopify (concept) dropped; engagement maps back to 'project'.
-    expect([...byName.keys()].sort()).toEqual(['Acme GmbH', 'Alice Schmidt', 'Project Phoenix', 'Widget Pro']);
+    // Shopify (concept) dropped; engagement maps back to 'project'. The engagement
+    // resolver (M4) normalizes the canonical name — "Project Phoenix" → "Phoenix"
+    // (the surface form is kept as an alias).
+    expect([...byName.keys()].sort()).toEqual(['Acme GmbH', 'Alice Schmidt', 'Phoenix', 'Widget Pro']);
     expect(byName.get('Alice Schmidt')!.entityType).toBe('person');
     expect(byName.get('Acme GmbH')!.entityType).toBe('organization');
     expect(byName.get('Widget Pro')!.entityType).toBe('product');
-    expect(byName.get('Project Phoenix')!.entityType).toBe('project');
+    expect(byName.get('Phoenix')!.entityType).toBe('project');
 
     const e = byName.get('Acme GmbH')!;
     expect(e).toMatchObject({
@@ -168,7 +170,7 @@ describe('KnowledgeLayer subject-graph READ migration (S1d)', () => {
     await layer.store(TEXT, 'knowledge', scope);
 
     expect((await layer.listEntities({ type: 'person' })).map(e => e.canonicalName)).toEqual(['Alice Schmidt']);
-    expect((await layer.listEntities({ type: 'project' })).map(e => e.canonicalName)).toEqual(['Project Phoenix']);
+    expect((await layer.listEntities({ type: 'project' })).map(e => e.canonicalName)).toEqual(['Phoenix']);   // M4: normalized canonical
     expect(await layer.listEntities({ type: 'concept' })).toEqual([]);  // concept → no subject kind
   });
 

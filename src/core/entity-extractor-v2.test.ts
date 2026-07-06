@@ -127,4 +127,25 @@ describe('entity-extractor-v2 parseToolInput', () => {
     });
     expect(result.entities).toEqual([]);
   });
+
+  it('M4 slop filter: drops slash-compound + digit-leading PROJECT names, keeps other kinds', () => {
+    const result = parseToolInput({
+      entities: [
+        // Newly dropped by the M4 project-scoped rule (old filter missed these:
+        // uppercase halves, non-common-noun, no space).
+        { canonical_name: 'Orion/Vega', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'Orion/Vega merge' },
+        { canonical_name: '2024-roadmap', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'the 2024-roadmap' },
+        // Kept — the rule is scoped to `project`, so real acronyms / digit-leading
+        // products of OTHER kinds survive, and multi-word projects (a space) survive.
+        { canonical_name: 'AC/DC', type: 'concept', confidence: 0.9, aliases: [], evidence_span: 'AC/DC' },
+        { canonical_name: '1Password', type: 'product', confidence: 0.9, aliases: [], evidence_span: '1Password vault' },
+        { canonical_name: 'Q3/Q4 Planning', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'Q3/Q4 Planning' },
+        // digit-leading but NOT digit+separator → a real project, kept (the rule is
+        // `\d+[-/]`, not a bare leading digit).
+        { canonical_name: '2026 Roadmap', type: 'project', confidence: 0.9, aliases: [], evidence_span: 'the 2026 Roadmap' },
+      ],
+      relations: [],
+    });
+    expect(result.entities.map(e => e.canonicalName).sort()).toEqual(['1Password', '2026 Roadmap', 'AC/DC', 'Q3/Q4 Planning']);
+  });
 });
