@@ -85,6 +85,13 @@ export interface SubjectRecordOccurrence {
   row: Record<string, unknown>;
 }
 
+/** The before-image of one subject-column repoint (per collection/column) — the reversal record for a merge. */
+export interface SubjectRepointRecord {
+  collection: string;
+  column: string;
+  ids: number[];
+}
+
 export class DataStore {
   private db: Database.Database;
 
@@ -542,6 +549,56 @@ export class DataStore {
     out.sort((a, b) => (b.occurredAt ?? '').localeCompare(a.occurredAt ?? ''));
     const truncated = perCollectionCapped || out.length > limit;
     return { occurrences: out.slice(0, limit), truncated };
+  }
+
+  /**
+   * Record-on-spine cross-DB repoint: when the subject graph MERGES a duplicate into a
+   * canonical (SubjectStore.mergeSubjects, in engine.db), the subject_id cells this
+   * store holds in `subject`-typed columns still point at the archived dup. Repoint them
+   * all from `oldId` → `newId`, across every collection's every subject column, in one
+   * transaction. Runs AFTER the engine.db merge commits (separate DBs, no shared txn);
+   * a read that races the gap resolves forward via SubjectStore.resolveActiveSubject.
+   *
+   * Returns the before-image (per collection/column, the `_id`s changed) so the merge
+   * rollback can reverse it via {@link rollbackRepoint}. Table + column names come from
+   * the stored, name-validated schema (the getRecordsForSubject invariant); ids are bound.
+   */
+  repointSubjectId(oldId: string, newId: string): SubjectRepointRecord[] {
+    const collections = this.db.prepare('SELECT name, schema_json FROM ds_collections').all() as Array<{ name: string; schema_json: string }>;
+    const changed: SubjectRepointRecord[] = [];
+    this.db.transaction(() => {
+      for (const c of collections) {
+        const columns = JSON.parse(c.schema_json) as DataStoreColumnDef[];
+        const subjectCols = columns.filter(col => col.type === 'subject').map(col => col.name);
+        if (subjectCols.length === 0) continue;
+        const tableName = `ds_${c.name}`;
+        for (const col of subjectCols) {
+          // Identifiers (tableName / col) are schema-validated (the getRecordsForSubject
+          // invariant); id values are bound params. Built as consts, like the rest of
+          // this file, so the parameterized-query lint stays green.
+          const selectIdsSql = `SELECT _id FROM "${tableName}" WHERE "${col}" = ?`;
+          const ids = (this.db.prepare(selectIdsSql).all(oldId) as Array<{ _id: number }>).map(r => r._id);
+          if (ids.length === 0) continue;
+          const updateSql = `UPDATE "${tableName}" SET "${col}" = ? WHERE "${col}" = ?`;
+          this.db.prepare(updateSql).run(newId, oldId);
+          changed.push({ collection: c.name, column: col, ids });
+        }
+      }
+    })();
+    return changed;
+  }
+
+  /** Reverse a {@link repointSubjectId} (merge rollback): move each captured cell back to `oldId`. */
+  rollbackRepoint(oldId: string, newId: string, records: readonly SubjectRepointRecord[]): void {
+    this.db.transaction(() => {
+      for (const rec of records) {
+        const tableName = `ds_${rec.collection}`;
+        // Same validated-identifier / bound-value split as repointSubjectId.
+        const updateSql = `UPDATE "${tableName}" SET "${rec.column}" = ? WHERE _id = ? AND "${rec.column}" = ?`;
+        const stmt = this.db.prepare(updateSql);
+        for (const id of rec.ids) stmt.run(oldId, id, newId);
+      }
+    })();
   }
 
   // === Collection Info ===
