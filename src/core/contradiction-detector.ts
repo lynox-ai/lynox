@@ -141,27 +141,55 @@ function checkNegation(a: string, b: string): boolean {
 }
 
 /**
+ * Matches "<attribute> <connector> <number>" so a value change under the SAME
+ * attribute can be flagged as a contradiction. Module-scoped (mirrors
+ * `ALL_NEGATION_PATTERNS` / `STATE_WORDS`) — the `/g` regex is safe to share
+ * because `String.matchAll` clones it (no `lastIndex` re-entrancy). Handles the
+ * shapes real memories use:
+ *   - symbol connectors ':' '=' may abut the attribute ("Projektbudget: …"),
+ *     while word connectors (is/sind/beträgt) stay space-delimited;
+ *   - the attribute key folds in ONE preceding qualifier token so a shared bare
+ *     noun does not collapse distinct facts: "Q1 budget:" ≠ "Q2 budget:", while
+ *     "Projektbudget:" (qualifier-less) still equals itself;
+ *   - an optional currency/unit token may sit between the connector and the
+ *     number ("Budget: CHF 24'000", "budget = $5,000");
+ *   - the number tolerates ' ’ , . thousands separators (Swiss "24'000",
+ *     EN "24,000", DE "24.000"), normalised to bare digits before compare.
+ * (Pre-fix the regex required a space before BOTH the connector and the digit,
+ * so "Projektbudget: CHF 24'000" never matched → a budget correction was never
+ * seen as a contradiction → an orphaned stale memory. Staging dogfood 2026-07-06.)
+ *
+ * Deliberate limitation: `toDigits` strips ALL non-digits, so magnitude/decimal
+ * notation is not normalised ("100k"≠"100000", "3.5"→"35"). The failure mode is
+ * a MISS or a same-value re-supersede (no data loss), never a wrong drop of a
+ * distinct fact — acceptable for a coarse heuristic gated by ≥0.80 similarity.
+ */
+const NUMBER_CONTEXT_RE =
+  /((?:[\p{L}\d][\p{L}\d_-]*\s+)?[\p{L}][\p{L}\d_-]*)(?:\s*[:=]|\s+(?:is|sind|beträgt)\b)\s*(?:(?:CHF|EUR|USD|GBP|Fr|Rp)\.?\s*|[$€£]\s*)?(\d[\d.,'’]*\d|\d)/giu;
+
+/**
  * Check if numbers in similar statements have changed.
  * "budget is 5000" vs "budget is 8000" → contradiction.
  */
 function checkNumberChange(a: string, b: string): boolean {
-  // Extract numbers with context (word before number)
-  const numberContextRe = /(\w+)\s+(?:is|sind|beträgt|=|:)\s*(\d[\d,.]*)/gi;
-
-  const aNumbers = new Map<string, string>();
-  for (const match of a.matchAll(numberContextRe)) {
-    if (match[1] && match[2]) {
-      aNumbers.set(match[1].toLowerCase(), match[2].replace(/,/g, ''));
+  const toDigits = (raw: string): string => raw.replace(/\D/g, '');
+  const collect = (text: string): Map<string, string> => {
+    const nums = new Map<string, string>();
+    for (const match of text.matchAll(NUMBER_CONTEXT_RE)) {
+      // Collapse internal whitespace so "Q1  budget" and "Q1 budget" key alike.
+      const attr = match[1]?.toLowerCase().replace(/\s+/g, ' ').trim();
+      const value = match[2] ? toDigits(match[2]) : '';
+      // First occurrence wins so a later restatement in the SAME text can't
+      // shadow the attribute we compare against the other text.
+      if (attr && value && !nums.has(attr)) nums.set(attr, value);
     }
-  }
+    return nums;
+  };
 
-  for (const match of b.matchAll(numberContextRe)) {
-    const context = match[1]?.toLowerCase();
-    const value = match[2]?.replace(/,/g, '');
-    if (context && value && aNumbers.has(context)) {
-      const aValue = aNumbers.get(context);
-      if (aValue !== value) return true;
-    }
+  const aNumbers = collect(a);
+  for (const [attr, value] of collect(b)) {
+    const aValue = aNumbers.get(attr);
+    if (aValue !== undefined && aValue !== value) return true;
   }
 
   return false;
