@@ -511,6 +511,21 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
    ALTER TABLE triggers ADD COLUMN confirmed_at TEXT;
    UPDATE triggers SET confirmed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE effect = 'run_agent';`,
+
+  // v7 (PR-C subject-dedup): the retroactive-merge redirect pointer. When two rows
+  // turn out to be the same real subject (Britta ⊂ Dr. Britta Massmann), SubjectStore.mergeSubjects
+  // repoints every FK from the duplicate onto the canonical, soft-archives the dup,
+  // and stamps `merged_into = <canonical id>` so a stale id still held anywhere
+  // (a soft `source_run_id`-carried ref, a cached UI id, a DataStore cell mid-flight)
+  // resolves forward via `resolveActiveSubject` instead of dangling. A real self-FK
+  // (mirrors `parent_id`) ON DELETE SET NULL: a hard subject purge nulls the pointer
+  // rather than orphaning it; the merge path itself only soft-archives, never deletes.
+  // Nullable, no default → the ALTER is SQLite-legal (an FK column added by ALTER must
+  // default NULL). The index serves the reverse "who merged into X" read the rollback
+  // uses to find the dup(s) of a canonical.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
+   ALTER TABLE subjects ADD COLUMN merged_into TEXT REFERENCES subjects(id) ON DELETE SET NULL;
+   CREATE INDEX IF NOT EXISTS idx_subjects_merged_into ON subjects(merged_into);`,
 ];
 
 /**

@@ -161,6 +161,7 @@ export interface SubjectRow {
   owner_user_id: string;
   embedding: Buffer | null;
   archived_at: string | null;
+  merged_into: string | null;   // v7: redirect pointer set by mergeSubjects on the duplicate
   created_at: string;
   updated_at: string;
 }
@@ -200,6 +201,95 @@ export const SELF_PERSON_NAME = 'Me';
  * separate rows, and a task assigned to that named 'Me' reads back as its name, not 'user'.
  */
 const SELF_OWNER = '__self__';
+
+// ── Retroactive merge (PR-C dedup) ────────────────────────────────
+//
+// Every engine.db column that holds a PLAIN (non-PK) subject_id FK — the ones a
+// merge repoints wholesale from the duplicate onto the canonical. The 1:1 detail
+// tables (people/organizations/… where subject_id IS the PK) are handled separately
+// (COALESCE-merge), as are the junction tables (memory_subjects / subject_cooccurrences,
+// composite PKs) whose repoint can collide. Table + column names here are STATIC
+// literals — never user input — so interpolating them into SQL is injection-safe.
+interface RepointTarget { table: string; pkCol: string; column: string }
+const REPOINT_TARGETS: readonly RepointTarget[] = [
+  { table: 'memories',      pkCol: 'id',         column: 'subject_id' },
+  { table: 'tasks',         pkCol: 'id',         column: 'subject_id' },
+  { table: 'tasks',         pkCol: 'id',         column: 'assignee_subject_id' },
+  { table: 'triggers',      pkCol: 'id',         column: 'subject_id' },
+  { table: 'connections',   pkCol: 'id',         column: 'subject_id' },
+  { table: 'artifacts',     pkCol: 'id',         column: 'subject_id' },
+  { table: 'threads',       pkCol: 'id',         column: 'primary_subject_id' },
+  { table: 'relationships', pkCol: 'id',         column: 'from_subject_id' },
+  { table: 'relationships', pkCol: 'id',         column: 'to_subject_id' },
+  { table: 'engagements',   pkCol: 'subject_id', column: 'provider_subject_id' },
+  { table: 'engagements',   pkCol: 'subject_id', column: 'client_subject_id' },
+  // subjects.parent_id is repointed too (children of the dup re-hang under canonical),
+  // but the canonical's OWN parent_id === dup case is handled specially (self-parent
+  // guard) via `canonicalParentWasDup`, so canonical is EXCLUDED from these pks.
+  { table: 'subjects',      pkCol: 'id',         column: 'parent_id' },
+];
+
+/** The 1:1 detail table per kind (subject_id PK) + its non-PK columns for COALESCE-merge. */
+const DETAIL_TABLE: Record<string, { table: string; cols: readonly string[] }> = {
+  person:       { table: 'people',        cols: ['email', 'phone', 'role', 'type'] },
+  organization: { table: 'organizations', cols: ['domain', 'vat_id', 'country', 'type'] },
+  engagement:   { table: 'engagements',   cols: ['provider_subject_id', 'client_subject_id', 'started_at', 'ended_at', 'budget_cents', 'currency', 'billing_model'] },
+  product:      { table: 'products',      cols: ['sku', 'price_cents', 'currency'] },
+  service:      { table: 'services',      cols: ['hourly_rate_cents', 'currency'] },
+};
+
+/**
+ * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
+ * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
+ * caller can persist it FIRST (same crash-safety discipline as the archive sweep:
+ * a mutate-then-crash-before-persist would otherwise be irreversible).
+ */
+export interface MergeLedgerEntry {
+  dupId: string;
+  canonicalId: string;
+  kind: string;
+  ownerUserId: string;
+  dupArchivedAtWas: string | null;
+  dupMergedIntoWas: string | null;
+  canonicalAliasesWas: string;                                  // exact JSON string, restored verbatim
+  canonicalParentWasDup: boolean;                               // canonical.parent_id === dup (self-parent guard)
+  repoints: Array<{ table: string; pkCol: string; column: string; pks: string[] }>;
+  memorySubjects: {
+    dupRows: Array<{ memory_id: string; mention_type: string; created_at: string }>;
+    canonicalMemoryIdsBefore: string[];                          // to know which canonical links to DROP on rollback
+  };
+  cooccurrences: Array<{ a: string; b: string; count: number; last_seen_at: string }>;
+  detail: { table: string; dupRow: Record<string, unknown> | null; canonicalRow: Record<string, unknown> | null } | null;
+}
+
+export type MergeResult =
+  | { ok: true; entry: MergeLedgerEntry }
+  | { ok: false; reason: string };
+
+/**
+ * Title tokens stripped before a person-name subset comparison, so "Dr. Britta
+ * Massmann" ⊃ "Britta". Dotless (punctuation is replaced with spaces first).
+ */
+const PERSON_TITLE_TOKENS: ReadonlySet<string> = new Set([
+  'dr', 'herr', 'frau', 'mr', 'ms', 'mrs', 'miss', 'prof', 'dipl', 'ing', 'mag', 'herrn',
+]);
+
+/** Lowercase content tokens of a person name (titles + punctuation stripped). */
+export function personNameTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .replace(/[.,;:!?"'()]/gu, ' ')
+    .split(/\s+/u)
+    .map(t => t.trim())
+    .filter(t => t.length > 0 && !PERSON_TITLE_TOKENS.has(t));
+}
+
+/** True when `sub` is a STRICT token subset of `sup` (every token present AND sup has more). */
+export function isProperTokenSubset(sub: readonly string[], sup: readonly string[]): boolean {
+  if (sub.length === 0 || sup.length <= sub.length) return false;
+  const supSet = new Set(sup);
+  return sub.every(t => supSet.has(t));
+}
 
 export class SubjectStore {
   private readonly db: Database.Database;
@@ -609,6 +699,293 @@ export class SubjectStore {
       country: row.country ?? undefined,
       type: row.type,
     };
+  }
+
+  // ── Retroactive merge + redirect (PR-C dedup) ─────────────────
+
+  /**
+   * Chase the `merged_into` redirect chain from `id` to the terminal ACTIVE subject
+   * (the canonical a duplicate was folded into). Returns `id` unchanged when it was
+   * never merged. Any stale id still held somewhere (a soft cross-file ref, a cached
+   * UI id, a DataStore cell not yet repointed) resolves forward through this instead
+   * of dangling on an archived stub. Cycle-safe (visited-set + hop cap, like
+   * {@link getAncestors}); a dangling redirect ends the walk at the last known id.
+   */
+  resolveActiveSubject(id: string, maxHops = 16): string {
+    const seen = new Set<string>([id]);
+    let current = this.getSubject(id);
+    let hops = 0;
+    while (current?.merged_into && hops < maxHops) {
+      if (seen.has(current.merged_into)) break;      // cycle guard
+      const next = this.getSubject(current.merged_into);
+      if (!next) break;                              // dangling redirect → last known id
+      seen.add(next.id);
+      current = next;
+      hops++;
+    }
+    return current?.id ?? id;
+  }
+
+  /**
+   * Person-only WRITE-time subset resolver (the "Britta ⊂ Dr. Britta Massmann" dedup
+   * at the source). Tries, in order: exact canonical → alias → an UNAMBIGUOUS token
+   * subset of exactly ONE active person in the owner scope (titles stripped) — folding
+   * the surface form in as an ALIAS of that person rather than minting a duplicate.
+   * Ambiguous (0 or ≥2 supersets — e.g. "Thomas" under both "Thomas Müller" and
+   * "Thomas Schmidt") falls through to a fresh subject: aliasing a mention is safe,
+   * GUESSING which of two people is not. Person-only + name-cased by design (same
+   * conservatism as the extractor person-shape gate).
+   */
+  resolvePersonSubject(
+    name: string,
+    opts?: { aliases?: string[] | undefined; ownerUserId?: string | undefined },
+  ): { id: string; created: boolean; resolved: 'canonical' | 'alias' | 'subset' | 'created' } {
+    const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
+    const surfaceForms = [name, ...(opts?.aliases ?? [])];
+    const canonical = this.findCanonical(name, 'person', owner);
+    if (canonical) { this._mergeAliases(canonical, surfaceForms); return { id: canonical.id, created: false, resolved: 'canonical' }; }
+    const alias = this.findByAlias(name, 'person', owner);
+    if (alias) { this._mergeAliases(alias, surfaceForms); return { id: alias.id, created: false, resolved: 'alias' }; }
+
+    const tokens = personNameTokens(name);
+    if (tokens.length > 0) {
+      // Projected id+name only (NOT listSubjects, which SELECT *s the embedding BLOB +
+      // filesorts): this is the write path once wired (PR-C2), one scan per new person
+      // surface form. No sort needed — we only test each candidate's token superset.
+      const rows = this.db.prepare(
+        "SELECT id, name FROM subjects WHERE kind = 'person' AND owner_user_id = ? AND archived_at IS NULL",
+      ).all(owner) as Array<{ id: string; name: string }>;
+      const supersets = rows.filter(s => isProperTokenSubset(tokens, personNameTokens(s.name)));
+      if (supersets.length === 1) {
+        const target = this.getSubject(supersets[0]!.id)!;
+        this._mergeAliases(target, surfaceForms);
+        return { id: target.id, created: false, resolved: 'subset' };
+      }
+      // 0 or ≥2 supersets → ambiguous → mint a fresh subject (never guess).
+    }
+    const id = this.createSubject({ kind: 'person', name, aliases: surfaceForms, ownerUserId: owner });
+    return { id, created: true, resolved: 'created' };
+  }
+
+  /**
+   * Validate a merge + capture its complete before-image, READ-ONLY (no mutation).
+   * The caller persists the returned entry BEFORE calling {@link executeMerge} — a
+   * merge repoints/deletes rows the ledger is the only record of, so a
+   * mutate-then-crash-before-persist would be irreversible (the archive-sweep lesson).
+   *
+   * Refuses (returns `{ok:false}`, never throws) on: unknown id, same subject, a KIND
+   * mismatch, an OWNER mismatch (NEVER crosses `owner_user_id`), either side being the
+   * operator self, or either side already merged / the canonical archived. `dup` MAY be
+   * already archived (a swept junk row folded into a real one) — its archive state is
+   * captured + restored on rollback.
+   */
+  planMerge(dupId: string, canonicalId: string): MergeResult {
+    const dup = this.getSubject(dupId);
+    const canonical = this.getSubject(canonicalId);
+    if (!dup) return { ok: false, reason: `dup subject not found: ${dupId}` };
+    if (!canonical) return { ok: false, reason: `canonical subject not found: ${canonicalId}` };
+    if (dup.id === canonical.id) return { ok: false, reason: 'cannot merge a subject into itself' };
+    if (dup.kind !== canonical.kind) return { ok: false, reason: `kind mismatch: ${dup.kind} ≠ ${canonical.kind}` };
+    if (dup.owner_user_id !== canonical.owner_user_id) return { ok: false, reason: 'owner_user_id mismatch — a merge never crosses owners' };
+    if (dup.is_self === 1 || canonical.is_self === 1) return { ok: false, reason: 'cannot merge the operator self-subject' };
+    if (dup.merged_into) return { ok: false, reason: `dup already merged into ${dup.merged_into}` };
+    if (canonical.merged_into) return { ok: false, reason: `canonical is itself merged into ${canonical.merged_into}` };
+    if (canonical.archived_at) return { ok: false, reason: 'canonical is archived' };
+
+    const db = this.db;
+    const repoints: MergeLedgerEntry['repoints'] = [];
+    for (const t of REPOINT_TARGETS) {
+      const rows = db.prepare(`SELECT "${t.pkCol}" AS pk FROM "${t.table}" WHERE "${t.column}" = ?`).all(dupId) as Array<{ pk: string }>;
+      let pks = rows.map(r => r.pk);
+      // subjects.parent_id: exclude the canonical itself (self-parent handled separately).
+      if (t.table === 'subjects' && t.column === 'parent_id') pks = pks.filter(pk => pk !== canonicalId);
+      if (pks.length > 0) repoints.push({ table: t.table, pkCol: t.pkCol, column: t.column, pks });
+    }
+
+    const dupMs = db.prepare('SELECT memory_id, mention_type, created_at FROM memory_subjects WHERE subject_id = ?')
+      .all(dupId) as Array<{ memory_id: string; mention_type: string; created_at: string }>;
+    const canonicalMs = db.prepare('SELECT memory_id FROM memory_subjects WHERE subject_id = ?')
+      .all(canonicalId) as Array<{ memory_id: string }>;
+
+    const cooccurrences = db.prepare(
+      'SELECT subject_a_id AS a, subject_b_id AS b, count, last_seen_at FROM subject_cooccurrences WHERE subject_a_id = ? OR subject_b_id = ?',
+    ).all(dupId, dupId) as MergeLedgerEntry['cooccurrences'];
+
+    const detailDef = DETAIL_TABLE[dup.kind];
+    const detail = detailDef
+      ? {
+          table: detailDef.table,
+          dupRow: (db.prepare(`SELECT * FROM "${detailDef.table}" WHERE subject_id = ?`).get(dupId) as Record<string, unknown> | undefined) ?? null,
+          canonicalRow: (db.prepare(`SELECT * FROM "${detailDef.table}" WHERE subject_id = ?`).get(canonicalId) as Record<string, unknown> | undefined) ?? null,
+        }
+      : null;
+
+    return {
+      ok: true,
+      entry: {
+        dupId, canonicalId, kind: dup.kind, ownerUserId: dup.owner_user_id,
+        dupArchivedAtWas: dup.archived_at,
+        dupMergedIntoWas: dup.merged_into,
+        canonicalAliasesWas: canonical.aliases,
+        canonicalParentWasDup: canonical.parent_id === dupId,
+        repoints,
+        memorySubjects: { dupRows: dupMs, canonicalMemoryIdsBefore: canonicalMs.map(r => r.memory_id) },
+        cooccurrences,
+        detail,
+      },
+    };
+  }
+
+  /**
+   * Apply a merge from its {@link planMerge} entry, in ONE atomic transaction:
+   * repoint every plain FK dup→canonical, collision-safe-repoint memory_subjects,
+   * drop the dup's derived co-occurrence rows, COALESCE-merge the 1:1 detail row
+   * (canonical wins, dup fills its nulls), union the dup's name+aliases onto canonical,
+   * then soft-archive the dup + stamp `merged_into`. A resulting relationship self-loop
+   * (canonical↔canonical, only if the two were directly related) is left as harmless
+   * noise — reads skip self-loops; deleting it would break the pure-repoint symmetry
+   * the rollback relies on.
+   */
+  executeMerge(entry: MergeLedgerEntry): void {
+    const db = this.db;
+    const { dupId, canonicalId } = entry;
+    // Defense-in-depth: executeMerge is public (the planMerge→persist→executeMerge split
+    // is what makes the ledger crash-safe), so re-assert the boundary planMerge checked —
+    // a stale or hand-built entry must NEVER repoint across owner_user_id or kind.
+    const dupNow = this.getSubject(dupId);
+    const canonNow = this.getSubject(canonicalId);
+    if (!dupNow || !canonNow) throw new Error(`executeMerge: subject vanished (${dupId} / ${canonicalId})`);
+    if (dupNow.owner_user_id !== canonNow.owner_user_id) throw new Error('executeMerge: owner_user_id mismatch — a merge never crosses owners');
+    if (dupNow.kind !== canonNow.kind) throw new Error(`executeMerge: kind mismatch (${dupNow.kind} ≠ ${canonNow.kind})`);
+    db.transaction(() => {
+      // 1. Plain FK repoints (drive off the live column; the pks are the rollback record).
+      for (const t of entry.repoints) {
+        if (t.table === 'subjects' && t.column === 'parent_id') {
+          // Only the captured children (canonical already excluded in planMerge).
+          const stmt = db.prepare("UPDATE subjects SET parent_id = ?, updated_at = datetime('now') WHERE id = ? AND parent_id = ?");
+          for (const pk of t.pks) stmt.run(canonicalId, pk, dupId);
+        } else {
+          db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE "${t.column}" = ?`).run(canonicalId, dupId);
+        }
+      }
+      // Self-parent guard: canonical.parent_id was the dup → the dup is gone, so drop it.
+      if (entry.canonicalParentWasDup) {
+        db.prepare("UPDATE subjects SET parent_id = NULL, updated_at = datetime('now') WHERE id = ?").run(canonicalId);
+      }
+
+      // 2. memory_subjects: collision-safe (a memory mentioning BOTH already has the
+      //    canonical link) — INSERT OR IGNORE the canonical link, then drop dup's.
+      const insMs = db.prepare('INSERT OR IGNORE INTO memory_subjects (memory_id, subject_id, mention_type, created_at) VALUES (?, ?, ?, ?)');
+      for (const r of entry.memorySubjects.dupRows) insMs.run(r.memory_id, canonicalId, r.mention_type, r.created_at);
+      db.prepare('DELETE FROM memory_subjects WHERE subject_id = ?').run(dupId);
+
+      // 3. co-occurrences are a DERIVED materialization — just drop the dup's; they
+      //    recompute on the next co-mention (repointing risks PK collisions + self-pairs).
+      db.prepare('DELETE FROM subject_cooccurrences WHERE subject_a_id = ? OR subject_b_id = ?').run(dupId, dupId);
+
+      // 4. detail COALESCE-merge (values are raw/ciphertext bags — never decrypted here).
+      if (entry.detail) {
+        const def = DETAIL_TABLE[entry.kind]!;
+        if (entry.detail.dupRow && !entry.detail.canonicalRow) {
+          db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(canonicalId, dupId);
+        } else if (entry.detail.dupRow && entry.detail.canonicalRow) {
+          const sets = def.cols.map(c => `"${c}" = COALESCE("${c}", ?)`).join(', ');
+          const vals = def.cols.map(c => (entry.detail!.dupRow as Record<string, unknown>)[c] ?? null);
+          db.prepare(`UPDATE "${def.table}" SET ${sets} WHERE subject_id = ?`).run(...vals, canonicalId);
+          db.prepare(`DELETE FROM "${def.table}" WHERE subject_id = ?`).run(dupId);
+        }
+      }
+
+      // 5. union dup's name + aliases onto canonical; 6. soft-archive dup + redirect.
+      const canonicalRow = this.getSubject(canonicalId);
+      const dupRow = this.getSubject(dupId);
+      if (canonicalRow && dupRow) this._mergeAliases(canonicalRow, [dupRow.name, ...this._parseAliases(dupRow.aliases)]);
+      db.prepare("UPDATE subjects SET merged_into = ?, archived_at = COALESCE(archived_at, datetime('now')), updated_at = datetime('now') WHERE id = ?")
+        .run(canonicalId, dupId);
+    })();
+  }
+
+  /**
+   * Convenience: {@link planMerge} then {@link executeMerge} with no crash window
+   * between (for tests + callers that persist the ledger from the returned entry
+   * AFTER the fact is acceptable — the operator/agent surfaces persist BEFORE via the
+   * split planMerge/executeMerge pair). Returns the same {@link MergeResult}.
+   */
+  mergeSubjects(dupId: string, canonicalId: string): MergeResult {
+    const plan = this.planMerge(dupId, canonicalId);
+    if (!plan.ok) return plan;
+    this.executeMerge(plan.entry);
+    return plan;
+  }
+
+  /**
+   * Reverse a merge from its ledger entry, in ONE atomic transaction: un-archive +
+   * un-redirect the dup (restoring its captured archive state), restore canonical's
+   * exact aliases, restore the 1:1 detail rows, re-insert the derived co-occurrences,
+   * split the memory_subjects links back, and repoint every captured FK back to the
+   * dup. Un-archiving a name-deduped dup can (near-never — the two carried DIFFERENT
+   * name forms, else they'd have auto-deduped) collide on the partial UNIQUE index. That
+   * collision ABORTS the whole rollback (the transaction rolls back → the state stays
+   * MERGED, never a half-reversed inconsistency) and returns `{ok:false}` — the caller
+   * can leave it merged or resolve the colliding row and retry.
+   */
+  rollbackMerge(entry: MergeLedgerEntry): { ok: boolean; reason?: string } {
+    const db = this.db;
+    const { dupId, canonicalId } = entry;
+    try {
+      db.transaction(() => {
+      // 1. restore dup archive/redirect state. A UNIQUE-index collision here THROWS →
+      //    the transaction rolls back atomically (no partial reversal).
+      db.prepare("UPDATE subjects SET merged_into = ?, archived_at = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(entry.dupMergedIntoWas, entry.dupArchivedAtWas, dupId);
+
+      // 2. restore canonical aliases + self-parent.
+      db.prepare("UPDATE subjects SET aliases = ?, updated_at = datetime('now') WHERE id = ?").run(entry.canonicalAliasesWas, canonicalId);
+      if (entry.canonicalParentWasDup) db.prepare("UPDATE subjects SET parent_id = ? WHERE id = ?").run(dupId, canonicalId);
+
+      // 3. detail rollback (inverse of the COALESCE-merge).
+      if (entry.detail) {
+        const def = DETAIL_TABLE[entry.kind]!;
+        const cols = def.cols;
+        if (entry.detail.dupRow && !entry.detail.canonicalRow) {
+          // was a repoint → move it back to the dup.
+          db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(dupId, canonicalId);
+        } else if (entry.detail.dupRow && entry.detail.canonicalRow) {
+          // was a COALESCE+delete → restore canonical's exact columns + re-insert dup's row.
+          const setC = cols.map(c => `"${c}" = ?`).join(', ');
+          db.prepare(`UPDATE "${def.table}" SET ${setC} WHERE subject_id = ?`)
+            .run(...cols.map(c => (entry.detail!.canonicalRow as Record<string, unknown>)[c] ?? null), canonicalId);
+          const insCols = ['subject_id', ...cols];
+          db.prepare(`INSERT OR REPLACE INTO "${def.table}" (${insCols.map(c => `"${c}"`).join(', ')}) VALUES (${insCols.map(() => '?').join(', ')})`)
+            .run(dupId, ...cols.map(c => (entry.detail!.dupRow as Record<string, unknown>)[c] ?? null));
+        }
+      }
+
+      // 4. re-insert derived co-occurrences.
+      const insCo = db.prepare('INSERT OR IGNORE INTO subject_cooccurrences (subject_a_id, subject_b_id, count, last_seen_at) VALUES (?, ?, ?, ?)');
+      for (const c of entry.cooccurrences) insCo.run(c.a, c.b, c.count, c.last_seen_at);
+
+      // 5. memory_subjects: re-attach dup links; drop the canonical links the merge ADDED
+      //    (those in dup's set that canonical did NOT already carry before the merge).
+      const canonicalBefore = new Set(entry.memorySubjects.canonicalMemoryIdsBefore);
+      const insMs = db.prepare('INSERT OR IGNORE INTO memory_subjects (memory_id, subject_id, mention_type, created_at) VALUES (?, ?, ?, ?)');
+      const delMs = db.prepare('DELETE FROM memory_subjects WHERE memory_id = ? AND subject_id = ?');
+      for (const r of entry.memorySubjects.dupRows) {
+        insMs.run(r.memory_id, dupId, r.mention_type, r.created_at);
+        if (!canonicalBefore.has(r.memory_id)) delMs.run(r.memory_id, canonicalId);
+      }
+
+      // 6. plain FK repoints back to the dup (guard on still-pointing-at-canonical so a
+      //    row re-assigned meanwhile is not clobbered).
+      for (const t of entry.repoints) {
+        const stmt = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE "${t.pkCol}" = ? AND "${t.column}" = ?`);
+        for (const pk of t.pks) stmt.run(dupId, pk, canonicalId);
+      }
+      })();
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+    return { ok: true };
   }
 
   // ── internals ─────────────────────────────────────────────────
