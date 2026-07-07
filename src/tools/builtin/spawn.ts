@@ -10,7 +10,8 @@ import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
 import { getRole, getRoleNames } from '../../core/roles.js';
-import { resolveRunModel, resolveTierModel, hybridSlotClientConfig } from '../../core/tier-resolver.js';
+import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRoutingMode } from '../../core/tier-resolver.js';
+import { resolveProviderApiKey } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
@@ -133,6 +134,74 @@ export function resolveChildProviderConfig(
     openaiModelId: profile?.model_id ?? parent?.openaiModelId,
     openaiAuth: profile?.auth ?? parent?.openaiAuth,
   };
+}
+
+/**
+ * Full wire + creds a spawned child Agent is built with, chosen from the tier the
+ * child resolved to — the SEAM the hybrid-spawn provider bug is pinned to.
+ *
+ * The child Agent is always CONSTRUCTED FRESH (no ambient-client reuse), so it
+ * must carry an explicit, self-consistent provider+model+key. Three cases:
+ *
+ *   1. **Cross-provider hybrid slot** (`crossProviderSlot`) — the slot drives the
+ *      wire + creds (Slice 2). A slot that names a DIFFERENT provider than base
+ *      is key-enriched upstream; but a slot that is the SAME provider as base and
+ *      only carries an `api_base_url` is ALSO reported cross (see
+ *      `hybridSlotClientConfig`) yet `enrichTierSetCreds` deliberately left it
+ *      key-LESS (same-provider slots relied on the ambient client's key, which a
+ *      fresh child doesn't have). So resolve the provider's key when the slot
+ *      didn't supply one — else the child mis-routes / 401s with an empty key.
+ *
+ *   2. **Hybrid BASE-fallback tier** (`routing_mode==='hybrid'`, no cross slot) —
+ *      resolve from the BASE provider, NOT the parent. In hybrid the parent runs
+ *      on ITS OWN tier's slot (e.g. a Sonnet `balanced` main on the anthropic
+ *      wire), so inheriting the parent's provider would pair this child's
+ *      base-tier model (ministral-8b) with the parent's anthropic endpoint → a
+ *      `404 no Route matched` (the v2.1.1 bug: fast collectors died silently).
+ *      Mirror the session's base-tier resolution. An explicit `profile` opts out
+ *      → case 3, which honours it.
+ *
+ *   3. **Standard mode (or an explicit profile)** — inherit the parent. This
+ *      closes the managed-tier staging bug where a live UI provider-switch isn't
+ *      yet in `config.json`; in standard mode the parent IS on the base provider,
+ *      so inheritance is correct.
+ *
+ * Pure + table-testable: the caller passes a `resolveKey` closure (bound to
+ * `resolveProviderApiKey` over the parent's secret store) so no SecretStore is
+ * needed in tests.
+ */
+export function resolveSpawnChildProviderConfig(input: {
+  hybridSlot: ReturnType<typeof hybridSlotClientConfig>;
+  routingMode: 'standard' | 'hybrid';
+  profile: ModelProfile | undefined;
+  parent: ProviderConfigSnapshot | null;
+  baseProvider: LLMProvider;
+  userConfig: LynoxUserConfig;
+  resolveKey: (provider: LLMProvider) => string | undefined;
+}): ChildProviderConfig {
+  const { hybridSlot, routingMode, profile, parent, baseProvider, userConfig, resolveKey } = input;
+
+  if (hybridSlot.crossProviderSlot) {
+    return {
+      provider: hybridSlot.provider,
+      apiKey: hybridSlot.apiKey ?? resolveKey(hybridSlot.provider),
+      apiBaseURL: hybridSlot.apiBaseURL,
+      openaiModelId: hybridSlot.openaiModelId,
+      openaiAuth: undefined,
+    };
+  }
+
+  if (!profile && routingMode === 'hybrid') {
+    return {
+      provider: baseProvider,
+      apiKey: resolveKey(baseProvider),
+      apiBaseURL: userConfig.api_base_url,
+      openaiModelId: userConfig.openai_model_id,
+      openaiAuth: undefined,
+    };
+  }
+
+  return resolveChildProviderConfig(profile, parent, userConfig);
 }
 
 // Control characters (incl. CR/LF) that could be used to spoof log lines or
@@ -356,22 +425,18 @@ async function executeThinker(
     // else inherit the parent's so a sub-agent on the same custom/BYOK/self-host
     // model trims against the real window, not the 200k id-fallback.
     nativeContextWindow: profile?.context_window ?? parentAgent.getNativeContextWindow(),
-    // Profile overrides provider credentials; otherwise INHERIT from parent
-    // agent (runtime config), not from loadConfig() (config.json file).
-    // Closes the staging bug where managed-tier UI provider-switch isn't
-    // reflected in config.json — sub-agent got undefined apiBaseURL and
-    // llm-client threw "OpenAI provider requires apiBaseURL". Profile +
-    // userConfig.* preserved as fallback for self-host paths where the
-    // parent might not have set its provider config explicitly.
-    // Precedence chain documented + unit-tested in `resolveChildProviderConfig`.
-    // Slice 2: a cross-provider hybrid slot supersedes the profile>parent>config
-    // chain — the child's wire + creds come from the slot (already sanitized +
-    // CP-key-enriched upstream), so a `deep` spawn from a Mistral main lands on
-    // the deep slot's provider (e.g. Anthropic Sonnet 5) with a dedicated client.
-    // Only reachable when !profile (crossProviderSlot is forced false otherwise).
-    ...(hybridSlot.crossProviderSlot
-      ? { provider: hybridSlot.provider, apiKey: hybridSlot.apiKey, apiBaseURL: hybridSlot.apiBaseURL, openaiModelId: hybridSlot.openaiModelId }
-      : resolveChildProviderConfig(profile, readParentProviderConfig(parentAgent), userConfig)),
+    // Child wire + creds, resolved from the child's OWN tier (never the parent's
+    // runtime slot in hybrid — the v2.1.1 silent-fast-spawn 404). Full rationale
+    // in `resolveSpawnChildProviderConfig`.
+    ...resolveSpawnChildProviderConfig({
+      hybridSlot,
+      routingMode: getActiveRoutingMode(),
+      profile,
+      parent: readParentProviderConfig(parentAgent),
+      baseProvider,
+      userConfig,
+      resolveKey: (provider) => resolveProviderApiKey({ provider, secretStore: parentAgent.secretStore, userConfig }),
+    }),
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
