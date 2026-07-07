@@ -1556,6 +1556,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.data_queried': { de: 'Daten abgefragt', en: 'Data queried' },
 	'tool.artifact_creating': { de: 'Artifact wird erstellt...', en: 'Creating artifact...' },
 	'markdown.mermaid_error': { de: 'Mermaid-Diagramm konnte nicht gerendert werden', en: 'Mermaid diagram could not be rendered' },
+	'markdown.mermaid_reloading': { de: 'Neue Version verfügbar — Seite wird neu geladen, um dieses Diagramm anzuzeigen…', en: 'A newer version is available — reloading to render this diagram…' },
 	'tool.command': { de: 'Befehl', en: 'Command' },
 	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
 	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },
