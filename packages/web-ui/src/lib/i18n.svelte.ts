@@ -559,7 +559,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.context_auto_compact_imminent': { de: 'Auto-Komprimierung steht an', en: 'auto-compaction imminent' },
 	'chat.compact_now': { de: 'Zusammenfassen & komprimieren', en: 'Summarize & compact' },
 	'chat.compact_in_progress': { de: 'Komprimiere…', en: 'Compacting…' },
-	'chat.context_offer': { de: 'Der Kontext füllt sich — ich kann den Verlauf zusammenfassen, damit wir Platz schaffen.', en: 'Context is filling up — I can summarize the history to free up room.' },
+	'chat.context_offer': { de: 'Der Verlauf wird lang — Zusammenfassen hält die nächsten Antworten schnell und günstig.', en: 'This conversation is getting long — summarizing keeps the next replies fast and low-cost.' },
 	'chat.compact_failed': { de: 'Komprimierung fehlgeschlagen', en: 'Compaction failed' },
 	'chat.compact_done': { de: 'Kontext komprimiert', en: 'Context compacted' },
 	'status.panel_title': { de: 'Systemstatus', en: 'System Status' },

@@ -2948,10 +2948,13 @@
 	     that turned amber from 60 % up (rafael: "mega scary, kam superfrüh").
 	     The button triggers a user-controlled compaction (compactNow → /compact)
 	     so the user compacts at a good moment instead of being auto-compacted
-	     mid-task. -->
+	     mid-task. No raw % is shown: the offer fires against the cost-aware
+	     compaction budget (min of window + carried-token floor), NOT the real
+	     window, so a "%" here contradicts the footer's window meter on a
+	     large-window model (e.g. Sonnet 5's 1M) — the copy carries the reason
+	     (keep replies fast + low-cost), the footer stays the honest window gauge. -->
 	{#if compactionOffer !== null || (ctxBudget && ctxBudget.usagePercent >= 80)}
 		{@const rawPct = compactionOffer ?? ctxBudget?.usagePercent ?? 80}
-		{@const pct = Math.min(rawPct, 100)}
 		{@const nearNet = rawPct >= 88}
 		<div
 			class="border-t {nearNet ? 'border-warning/30 bg-warning/10 text-warning/90' : 'border-border bg-bg-subtle text-text-subtle'} px-4 py-1.5 text-xs"
@@ -2963,7 +2966,6 @@
 					<path stroke-linecap="round" stroke-linejoin="round" d="M8 7h8m-8 4h8m-8 4h5m6 5l-3-3v-2a2 2 0 00-2-2H6a2 2 0 00-2-2V6a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2h-2z" />
 				</svg>
 				<span class="hidden sm:inline">{t('chat.context_offer')}</span>
-				<span class="font-mono tabular-nums opacity-70">{pct}%</span>
 				{#if nearNet}
 					<span class="opacity-80 hidden md:inline">— {t('chat.context_auto_compact_imminent')}</span>
 				{/if}
