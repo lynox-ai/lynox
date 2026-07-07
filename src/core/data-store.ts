@@ -108,6 +108,10 @@ export class DataStore {
     const path = dbPath ?? join(getLynoxDir(), 'datastore.db');
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
+    // Absorb transient cross-process lock contention — the operator subject-sweep
+    // repoints datastore.db cells while the live engine may hold the connection —
+    // instead of throwing an instant SQLITE_BUSY.
+    this.db.pragma('busy_timeout = 5000');
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this._initMeta();
