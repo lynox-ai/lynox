@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0 — 2026-07-07
+
+Pick the model your main chat runs on. A new **main-chat model picker** in LLM settings lets you choose the band (fast / balanced / deep) — and its concrete model — for the primary conversation, clamped to your plan's ceiling. Under the hood, **hybrid sub-agents** can now run on a different provider than the main agent (a Mistral main can delegate to an Anthropic sub-agent, and vice-versa), each tier resolving to its own provider, model, and key. An opt-in **lazy tool-loading** mode (`lazy_tools_enabled`, default off, Anthropic-direct only) defers heavy tool schemas behind the native tool-search tool to shrink the cached prompt prefix. The rest is correctness: agent-opened escalation threads resume instead of erroring, failed and cross-provider sub-agents surface real errors instead of completing silently, and the chat's context/compaction UI got an honesty pass. **No engine.db migration** — rollback to 2.1.1 is a clean image swap.
+
+### Added
+- **Main-chat model picker (standard mode)** — choose the band and model your main conversation runs on, from LLM settings. Options come from the provider catalog (so every provider's models appear) and are clamped to your plan's ceiling; the Anthropic balanced band splits into its served-Sonnet variants (4.6 / 5). (#924)
+- **Hybrid cross-provider sub-agents** — sub-agents may run on a different provider than the main agent, each tier resolving to its own provider, model, and key. (#924)
+- **Lazy tool-loading (opt-in)** — `lazy_tools_enabled` (default off, Anthropic-direct only) defers heavy/long-tail tool schemas behind the native tool-search tool to shrink the cached prompt prefix; every tool stays reachable on demand. (#923)
+
+### Fixed
+- **Escalation threads resume** — an agent-opened escalation thread (`escalation-*`) can be reopened instead of erroring. (#922)
+- **Hybrid sub-agent routing & error surfacing** — a hybrid base-fallback sub-agent now routes to its own tier (previously it could pair a tier's model with the wrong provider's endpoint and 404 silently); failed and hybrid sub-agents record a structured error and are marked failed instead of completing silently. (#925)
+- **API-shape fails loud** — when a `response_shape.include` matches no fields, the tool reports the real top-level shape instead of returning an empty result that looked like success. (#925)
+- **Honest context UI** — the compaction banner drops the misleading percentage, and a completed message keeps its usage line visible while a later reply streams. (#926)
+- **Grounding** — the agent reasons from a verified fact that contradicts an assumption instead of quietly proceeding on the assumption. (#925)
+
 ## 2.1.1 — 2026-07-07
 
 Fixes the knowledge-graph view on instances with the subject-graph enabled: the graph now renders the connected relationship subgraph (it previously showed a disconnected ring of the most-recently-touched entities), and entity mention counts reflect the real number of linked memories instead of always showing zero. No migration; rollback to 2.1.0 is a clean image swap.
