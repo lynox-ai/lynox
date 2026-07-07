@@ -11,6 +11,7 @@ import {
   buildResidencyIndex,
   dedupToolResultBatch,
   DEFAULT_DEDUP_MIN_CHARS,
+  type ResidentPayload,
 } from './tool-result-hygiene.js';
 
 const MIN = DEFAULT_DEDUP_MIN_CHARS;
@@ -108,6 +109,25 @@ describe('buildResidencyIndex', () => {
     expect(index.size).toBe(1);
     expect(index.get(contentKey(payload))!.tool).toBe('read_file'); // first wins
   });
+
+  it('falls back to "tool" for a tool_result with no matching tool_use', () => {
+    const payload = big('a');
+    // Orphan tool_result (no assistant tool_use with this id) — e.g. a
+    // synthesized/rehydrated block. The tool name is unknown → 'tool'.
+    const index = buildResidencyIndex([toolResultMsg('orphan-id', payload)]);
+    expect(index.get(contentKey(payload))!.tool).toBe('tool');
+  });
+
+  it('is empty for a post-compaction shape (no large payload resident inline)', () => {
+    // After compaction the large payloads live in the blob store, not inline —
+    // the synthetic seed is a summary + short handle list. The index must be
+    // empty so a fresh identical result is NOT collapsed against evicted content.
+    const index = buildResidencyIndex([
+      { role: 'user', content: 'Summary of the conversation so far. Recall tr-1 for the earlier dump.' },
+      { role: 'assistant', content: 'Understood.' },
+    ]);
+    expect(index.size).toBe(0);
+  });
 });
 
 describe('dedupToolResultBatch', () => {
@@ -134,6 +154,33 @@ describe('dedupToolResultBatch', () => {
     expect(elided).toBe(1);
     expect(results[0]!.content).toBe(payload); // first stays verbatim
     expect(results[1]!.content).toBe(buildDedupReference('read_file'));
+  });
+
+  it('collapses a 3rd+ copy against the first verbatim payload, not the elided reference', () => {
+    // The reference (< minChars) is never indexed, so the 3rd copy must still
+    // match the FIRST (verbatim) occurrence — proving the index holds the
+    // original, not the substitute.
+    const payload = big('a');
+    const results = [resultBlock('tu-1', payload), resultBlock('tu-2', payload), resultBlock('tu-3', payload)];
+
+    const elided = dedupToolResultBatch(results, nameFor, new Map());
+
+    expect(elided).toBe(2);
+    expect(results[0]!.content).toBe(payload); // first verbatim
+    expect(results[1]!.content).toBe(buildDedupReference('read_file'));
+    expect(results[2]!.content).toBe(buildDedupReference('read_file'));
+  });
+
+  it('registers a distinct array-content result so a later string duplicate elides against it', () => {
+    const text = big('a');
+    const arrayContent: BetaToolResultBlockParam['content'] = [{ type: 'text', text }];
+    const index = new Map<string, ResidentPayload>();
+    // First: an array-content result (no resident match) registers under its text key.
+    expect(dedupToolResultBatch([resultBlock('tu-1', arrayContent)], nameFor, index)).toBe(0);
+    // Then a plain-string result with the same text collapses against it.
+    const later = [resultBlock('tu-2', text)];
+    expect(dedupToolResultBatch(later, nameFor, index)).toBe(1);
+    expect(later[0]!.content).toBe(buildDedupReference('read_file'));
   });
 
   it('leaves distinct payloads untouched', () => {

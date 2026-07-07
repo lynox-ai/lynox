@@ -1,10 +1,9 @@
 import type {
   BetaMessageParam,
   BetaToolResultBlockParam,
-  BetaToolUseBlockParam,
   BetaImageBlockParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
-import { contentKey, toolResultText } from './tool-result-hygiene.js';
+import { contentKey, toolResultText, toolNameById } from './tool-result-hygiene.js';
 
 /**
  * Phase 2 — Context Hygiene. Default blob threshold in characters.
@@ -211,17 +210,9 @@ export class ToolResultBlobStore {
     messages: readonly BetaMessageParam[],
     thresholdChars: number,
   ): Array<{ id: string; descriptor: string }> {
-    // Map tool_use_id → tool name from every assistant tool_use block.
-    const toolNameById = new Map<string, string>();
-    for (const msg of messages) {
-      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
-      for (const block of msg.content) {
-        if (block.type === 'tool_use') {
-          const useBlock = block as BetaToolUseBlockParam;
-          toolNameById.set(useBlock.id, useBlock.name);
-        }
-      }
-    }
+    // Map tool_use_id → tool name from every assistant tool_use block (shared
+    // with the append-time dedup so both key the same content the same way).
+    const toolNames = toolNameById(messages);
 
     const handles: Array<{ id: string; descriptor: string }> = [];
     for (const msg of messages) {
@@ -231,7 +222,7 @@ export class ToolResultBlobStore {
         const resultBlock = block as BetaToolResultBlockParam;
         const payload = toolResultText(resultBlock.content);
         if (payload.length <= thresholdChars) continue;
-        const tool = toolNameById.get(resultBlock.tool_use_id) ?? 'tool';
+        const tool = toolNames.get(resultBlock.tool_use_id) ?? 'tool';
         // Dedup: an identical payload already resident reuses its handle instead
         // of minting a second blob. This is what breaks the cross-compaction
         // amplifier — the same file dump re-parked at each compaction now maps
