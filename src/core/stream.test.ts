@@ -133,6 +133,34 @@ describe('StreamProcessor', () => {
     });
   });
 
+  describe('server-side tool blocks (tool_search / web_search)', () => {
+    it('passes server_tool_use + tool_search_tool_result through into content without emitting a tool_call', async () => {
+      const { proc, collected } = createProcessor();
+
+      const result = await proc.process(mockStream([
+        // The model invokes the server-side tool-search tool. Its input may stream
+        // as deltas; the processor does not accumulate server_tool_use input (only
+        // client `tool_use`) — the block rides through whole, exactly as web_search
+        // does today. block_stop on a non-tool_use block must be a safe no-op.
+        { type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 'srvtu_1', name: 'tool_search_tool_regex', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"regex":"mail"}' } },
+        { type: 'content_block_stop', index: 0 },
+        // The API appends the server-executed result inline (nested tool_reference).
+        { type: 'content_block_start', index: 1, content_block: { type: 'tool_search_tool_result', tool_use_id: 'srvtu_1', content: { tool_references: [{ type: 'tool_reference', tool_name: 'mail_search' }] } } },
+        { type: 'content_block_stop', index: 1 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5, input_tokens: 10 } },
+      ]) as AsyncIterable<never>);
+
+      // Both server blocks survive in content, in order, types intact.
+      expect(result.content.map(b => b.type)).toEqual(['server_tool_use', 'tool_search_tool_result']);
+      expect(result.content[0]).toMatchObject({ type: 'server_tool_use', name: 'tool_search_tool_regex' });
+      expect(result.content[1]).toMatchObject({ type: 'tool_search_tool_result', tool_use_id: 'srvtu_1' });
+      // Server-executed tools must NOT surface as a client tool_call (no handler runs).
+      expect(collected.filter(e => e.type === 'tool_call')).toHaveLength(0);
+      expect(result.stop_reason).toBe('end_turn');
+    });
+  });
+
   describe('usage extraction', () => {
     it('extracts usage from message_delta', async () => {
       const { proc } = createProcessor();

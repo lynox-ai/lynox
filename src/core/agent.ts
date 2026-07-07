@@ -44,6 +44,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
+  BetaTool,
+  BetaToolSearchToolRegex20251119,
   BetaToolResultBlockParam,
   BetaContentBlock,
   BetaTextBlock,
@@ -54,6 +56,7 @@ import type {
   BetaTextBlockParam,
   BetaThinkingConfigParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-key.js';
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
@@ -67,6 +70,31 @@ import { appendContextCostLog } from './context-cost-log.js';
  * `_lastRealInputTokens` anchor supersedes this estimate for already-sent turns.
  */
 export const IMAGE_TOKEN_ESTIMATE = 1600;
+
+/** Tools deferred behind the tool-search tool when lazy_tools_enabled (Anthropic-direct).
+ *  Core interactive tools stay eagerly loaded; heavy/long-tail integration tools are
+ *  discovered on demand — every tool stays reachable, only its schema is lazy.
+ *  (Slice 1 verification dropped 4 spec names with no matching registry definition:
+ *  list_workflows, delete_workflow, data_store_update, contacts_upsert.) */
+export const LAZY_DEFERRED_TOOLS = new Set<string>([
+  'google_calendar','google_docs','google_drive','google_sheets',
+  'mail_connect','mail_read','mail_reply','mail_search','mail_send','mail_triage',
+  'artifact_save','artifact_list','artifact_delete','artifact_history','artifact_restore',
+  'run_workflow','save_workflow',
+  'data_store_create','data_store_insert','data_store_query','data_store_delete','data_store_list',
+  'contacts_search',
+  'media_process','plan_task','api_setup','recall_tool_result',
+  'memory_update','memory_delete','memory_promote','memory_list',
+  'subjects_merge','set_thread_context',
+]);
+
+/** The server-side tool-search tool (SDK union member) prepended to the tools
+ *  array on the lazy path. A fixed 2-field literal with no instance state —
+ *  module-level so the flag-OFF path allocates nothing new. */
+const LAZY_TOOL_SEARCH_TOOL: BetaToolSearchToolRegex20251119 = {
+  type: 'tool_search_tool_regex_20251119',
+  name: 'tool_search_tool_regex',
+};
 
 /**
  * Serialized length of a message for occupancy estimation, but with inline
@@ -1060,25 +1088,55 @@ export class Agent implements IAgent {
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !this._suppressTools
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
-    // Tools fully suppressed for this turn (compaction summary must be TEXT).
-    const rawTools = this._suppressTools
+    // Lazy-tools (Slice 1): Anthropic-direct only, flag-gated, never on the
+    // compaction (suppress) path. When active, heavy/long-tail tool schemas are
+    // deferred behind the native tool-search tool so the cached prefix shrinks —
+    // every tool stays reachable (discovered on demand), only its schema is lazy.
+    const lazyToolsActive = this.toolContext.userConfig?.lazy_tools_enabled === true
+      && !this.isNonDirectAnthropic
+      && !this._suppressTools;
+    // Tenant tool definitions. Deterministically SORTED by name (code-point) — a
+    // cheap cache-safety pin: order today is registration order, so a future
+    // refactor that reorders registration would silently bust every tenant's
+    // cached prefix (the byte-stability invariant the whole conversation cache
+    // rests on, see _buildSystemPrompt / agent.ts:1216-1225). Sorting + deferring
+    // act on a mapped COPY — the registry (this.tools) is never reordered/mutated;
+    // each deferred tool gets defer_loading:true on a SHALLOW COPY.
+    //
+    // The deterministic name-sort is applied ONLY on the lazy path: an opt-in
+    // lazy tenant gets a brand-new prefix (defer markers + the search tool) so a
+    // one-time re-write is unavoidable anyway, and the sort makes THAT prefix
+    // reorder-proof. Flag OFF stays byte-identical to today's registration order —
+    // Slice 1 is a true no-op for every tenant not using the feature (no
+    // fleet-wide re-write on the release that carries this dormant slice).
+    const mappedTenantTools: BetaTool[] = this._suppressTools
       ? []
-      : [
-          ...this.tools
-            .filter(t => !this._excludeSet.has(t.definition.name))
-            .map(t => t.definition),
-          ...builtinTools,
-        ];
+      : this.tools
+          .filter(t => !this._excludeSet.has(t.definition.name))
+          .map(t => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(t.definition.name)
+            ? { ...t.definition, defer_loading: true }
+            : t.definition));
+    const tenantTools: BetaTool[] = lazyToolsActive
+      ? [...mappedTenantTools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      : mappedTenantTools;
     // Strip eager_input_streaming for non-direct-Anthropic providers (Vertex/Custom don't support it)
-    const toolsDef = !this.isNonDirectAnthropic
-      ? rawTools
-      : rawTools.map(t => {
+    const strippedTenantTools: BetaTool[] = !this.isNonDirectAnthropic
+      ? tenantTools
+      : tenantTools.map(t => {
           if ('eager_input_streaming' in t) {
             const { eager_input_streaming: _, ...rest } = t;
             return rest;
           }
           return t;
         });
+    // The tool-search tool (module-level LAZY_TOOL_SEARCH_TOOL) heads the array
+    // when lazy, then the sorted tenant tools, then the web_search builtin — a
+    // stable, deterministic layout.
+    const toolsDef = [
+      ...(lazyToolsActive ? [LAZY_TOOL_SEARCH_TOOL] : []),
+      ...strippedTenantTools,
+      ...builtinTools,
+    ];
 
     // Per-turn grounding (knowledge + briefing) now rides as an uncached tail
     // on the current user message instead of as system blocks — computed here
@@ -1088,7 +1146,21 @@ export class Agent implements IAgent {
     // Estimate overhead from system prompt + tools (+ ephemeral tail) so
     // truncation accounts for it.
     const systemTokens = JSON.stringify(systemBlocks).length / this._charsPerToken;
-    const toolTokens = JSON.stringify(toolsDef).length / this._charsPerToken;
+    // Deferred tools are pulled out of the cached prefix (discovered on demand via
+    // the tool-search tool), so their full schemas must NOT count toward the
+    // per-turn overhead. When lazy: count the eagerly-sent tools in full plus a
+    // small conservative stub (name + first 120 desc chars + JSON overhead) per
+    // deferred tool. Flag OFF → the whole toolsDef is eager, so this is unchanged.
+    let toolTokens: number;
+    if (lazyToolsActive) {
+      const eager = toolsDef.filter(t => !('defer_loading' in t && t.defer_loading === true));
+      const deferredStubChars = strippedTenantTools
+        .filter(t => t.defer_loading === true)
+        .reduce((sum, t) => sum + t.name.length + (t.description ?? '').slice(0, 120).length + 20, 0);
+      toolTokens = (JSON.stringify(eager).length + deferredStubChars) / this._charsPerToken;
+    } else {
+      toolTokens = JSON.stringify(toolsDef).length / this._charsPerToken;
+    }
     const ephemeralTokens = ephemeralBlocks.length > 0
       ? JSON.stringify(ephemeralBlocks).length / this._charsPerToken
       : 0;
@@ -1143,6 +1215,16 @@ export class Agent implements IAgent {
 
     const signal = this.abortController?.signal;
 
+    // Lazy-tools (Slice 1): the native tool-search + defer_loading path needs the
+    // advanced-tool-use beta. The string isn't in the SDK's AnthropicBeta union
+    // yet (v0.98) — cast, same as the 'xhigh' effort cast below. Only appended
+    // when lazyToolsActive (already gated on Anthropic-direct + flag-on +
+    // not-suppressed), and never sent for a custom proxy (the betas gate below).
+    const requestBetas: AnthropicBeta[] = [
+      ...getBetasForProvider(this.provider),
+      ...(lazyToolsActive ? ['advanced-tool-use-2025-11-20' as AnthropicBeta] : []),
+    ];
+
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
       try {
         const stream = this.client.beta.messages.stream({
@@ -1158,7 +1240,7 @@ export class Agent implements IAgent {
           // grounding tail (different every turn → never reused).
           system: systemBlocks,
           messages: outboundMessages,
-          ...( this.isCustomProxy ? {} : { betas: getBetasForProvider(this.provider) }),
+          ...( this.isCustomProxy ? {} : { betas: requestBetas }),
           // Mistral/openai-compat prefix caching: a stable per-thread cache key
           // for the OpenAIAdapter to salt + forward (openai-adapter.ts). Gate on
           // the openai WIRE, not isCustomProxy: only the 'openai' provider's

@@ -155,6 +155,17 @@ export function loadConfig(): LynoxUserConfig {
   } else if (subjectGraph === 'false' || subjectGraph === '0') {
     merged.subject_graph_enabled = false;
   }
+  // Lazy-tools (Slice 1): Anthropic-direct only — defer heavy/long-tail tool
+  // schemas behind the native tool-search tool so the cached prefix shrinks. The
+  // CP flips this per-tenant via env without editing config.json. Same explicit
+  // 'true'/'1' vs 'false'/'0' parse as the mirror flag above (no z.coerce, which
+  // would treat any non-empty string as true).
+  const lazyTools = process.env['LYNOX_LAZY_TOOLS_ENABLED'];
+  if (lazyTools === 'true' || lazyTools === '1') {
+    merged.lazy_tools_enabled = true;
+  } else if (lazyTools === 'false' || lazyTools === '0') {
+    merged.lazy_tools_enabled = false;
+  }
   // Foundation Rework v2 (S5b): the engine.db memory-recall read flag. Like the
   // mirror flag above, the CP flips this per-tenant via env (after running the
   // s5-backfill) without editing config.json. Explicit 'true'/'1' vs 'false'/'0'

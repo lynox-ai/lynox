@@ -194,6 +194,11 @@ export const LynoxUserConfigSchema = z.object({
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
   // would otherwise reject this key from config.json (silently disabling the flag).
   subject_graph_enabled:   z.boolean().optional(),
+  // Lazy-tools (Slice 1): Anthropic-direct only — defer heavy/long-tail tool
+  // schemas behind the tool-search tool so the cached prefix shrinks. Default off;
+  // per-tenant flip. The .strict() schema would otherwise reject this key from
+  // config.json (silently disabling the flag).
+  lazy_tools_enabled:      z.boolean().optional(),
   // Foundation Rework v2 (S5b): re-point memory recall onto engine.db. Default
   // off; flipped per-tenant after the s5-backfill. Co-gated on subject_graph_enabled
   // at the read path. The .strict() schema would otherwise reject this key from
