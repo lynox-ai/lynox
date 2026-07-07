@@ -90,7 +90,7 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError } from './spawn.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 
@@ -1360,6 +1360,56 @@ describe('spawn_agent tool', () => {
       expect(out.provider).toBeUndefined();
       expect(out.openaiModelId).toBeUndefined();
       expect(out.openaiAuth).toBeUndefined();
+    });
+  });
+
+  // #2 silent-fail: a failed sub-agent must be LOUD — structured error_text on
+  // the run (was NULL in prod, undiagnosable) + an unambiguous FAILED section.
+  describe('failed sub-agent is loud (error_text recorded + FAILED section)', () => {
+    it('formatSpawnError: HTTP status prefix + name + message; String() for non-Error', () => {
+      expect(formatSpawnError(Object.assign(new Error('no Route matched'), { status: 404 })))
+        .toBe('[404] Error: no Route matched');
+      expect(formatSpawnError(new TypeError('bad shape'))).toBe('TypeError: bad shape');
+      expect(formatSpawnError('raw string reason')).toBe('raw string reason');
+      // A non-numeric status must NOT produce a `[undefined]`/`[foo]` prefix.
+      expect(formatSpawnError(Object.assign(new Error('x'), { status: 'weird' }))).toBe('Error: x');
+    });
+
+    it('records structured error_text on a failed run — not just status=failed with a null error_text', async () => {
+      const insertRun = vi.fn().mockReturnValue('run-fail-1');
+      const updateRun = vi.fn();
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory: { insertRun, updateRun },
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+      mockSend.mockRejectedValue(Object.assign(new Error('no Route matched with those values'), { status: 404 }));
+
+      const agent = makeAgent({ currentRunId: 'parent-fail', toolContext: parentToolContext });
+      await expect(
+        spawnAgentTool.handler({ agents: [{ name: 'collector', task: 'fetch' }] }, agent),
+      ).rejects.toThrow(/All sub-agents failed/);
+
+      const failUpdate = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'failed');
+      expect(failUpdate).toBeDefined();
+      const arg = failUpdate![1] as { status: string; errorText?: string };
+      expect(arg.status).toBe('failed');
+      expect(arg.errorText).toBe('[404] Error: no Route matched with those values'); // was undefined → NULL pre-fix
+    });
+
+    it('marks a failed section FAILED with the formatted error while a sibling still succeeds', async () => {
+      // Partial failure: the parent must SEE the dead sub-agent, not silently
+      // treat the batch as fine. Deterministic call order (map order → send order).
+      mockSend
+        .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 500 }))
+        .mockResolvedValueOnce('good result');
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'bad', task: 'x' }, { name: 'good', task: 'y' }] },
+        makeAgent(),
+      );
+      expect(result).toContain('## bad — FAILED');
+      expect(result).toContain('**Error:** [500] Error: boom');
+      expect(result).toContain('## good (ran on');
+      expect(result).toContain('good result');
     });
   });
 

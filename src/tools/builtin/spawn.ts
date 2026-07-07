@@ -249,6 +249,22 @@ function validateSpawnInput(input: SpawnAgentInput): void {
   }
 }
 
+/**
+ * Structured error detail for a failed spawn child's `error_text` column. The
+ * compact `stop_reason` gets a 200-char slice of the message; `error_text` gets
+ * the FULL detail — name, an HTTP `status` when the SDK error carries one (so a
+ * provider mis-route surfaces as `[404] …` not a bare message), and the message.
+ * Without this the runs row records status=failed with a null error_text, which
+ * makes a silent sub-agent failure undiagnosable after the fact (the exact gap
+ * that hid the v2.1.1 hybrid 404s until the DB was read by hand).
+ */
+export function formatSpawnError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const status = (err as { status?: unknown }).status;
+  const statusPrefix = typeof status === 'number' ? `[${status}] ` : '';
+  return `${statusPrefix}${err.name}: ${err.message}`;
+}
+
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
@@ -562,6 +578,10 @@ async function executeThinker(
           durationMs: Date.now() - childStart,
           status: childAborted ? 'aborted' : 'failed',
           stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
+          // Record the FULL structured error so a failed sub-agent is diagnosable
+          // (not just status=failed + a null error_text). Skipped for an abort —
+          // an intentional interruption isn't an error to store.
+          errorText: childAborted ? undefined : formatSpawnError(err),
         });
       } catch { /* swallow */ }
     }
@@ -796,7 +816,12 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           ? outcome.reason
           : new Error(String(outcome.reason));
         errors.push(err);
-        sections.push(`## ${spec.name}\n\n**Error:** ${err.message}`);
+        // Mark the section as a FAILURE unambiguously so the parent can't mistake
+        // a dead sub-agent for one that returned nothing useful — a silent
+        // sub-agent failure is more dangerous than a loud one. `formatSpawnError`
+        // adds the HTTP status (e.g. `[404] …`) so a provider mis-route reads as
+        // a config failure, not a vague error.
+        sections.push(`## ${spec.name} — FAILED\n\n**Error:** ${formatSpawnError(err)}`);
         childRunIds.push(undefined);
       }
     }
