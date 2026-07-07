@@ -67,10 +67,12 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     }
     // Subject names are KG-extracted from untrusted content, so a crafted name could inject
     // newlines/instructions or bidi/zero-width spoofing into the very approval text that
-    // authorizes the repoint. Strip zero-width + bidi-control chars, collapse whitespace to a
-    // single space (kills line-break injection), and length-clamp before display.
+    // authorizes the repoint. Strip ALL Unicode format/invisible chars (\p{Cf} \u2014 covers the
+    // bidi overrides + isolates, zero-width joiners/spaces, the Arabic letter mark, word
+    // joiner, BOM, etc.), collapse whitespace to a single space (kills line-break injection),
+    // and length-clamp before display.
     const clip = (n: string): string =>
-      n.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
+      n.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
     const dupSafe = clip(dup.name), canonSafe = clip(canon.name);
     const answer = await agent.promptUser(
       `Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. This is reversible.`,
