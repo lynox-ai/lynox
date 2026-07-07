@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
-import { MODEL_CAPABILITIES, MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
+import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
 import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
 
 describe('LLM_CATALOG', () => {
@@ -237,6 +237,18 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
   it('mistral: each option resolves to its own id via MISTRAL_MODEL_MAP', () => {
     for (const opt of getCatalogEntryByKey('mistral')!.main_chat_models ?? []) {
       expect(MISTRAL_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
+    }
+  });
+
+  it('vertex: each option resolves to its own id via VERTEX_MODEL_MAP (haiku suffix-drop)', () => {
+    // Vertex builds main_chat_models too (VERTEX_MODEL_MAP; fast = claude-haiku-4-5,
+    // NOT the ...-20251001 direct id). No balanced variant (vertex doesn't honour
+    // the balanced_model override), so every option is a plain tier representative.
+    const opts = getCatalogForProvider('vertex')!.main_chat_models ?? [];
+    expect(opts.length).toBeGreaterThan(0);
+    for (const opt of opts) {
+      expect(opt.balanced_model).toBeUndefined();
+      expect(VERTEX_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
     }
   });
 });

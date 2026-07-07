@@ -26,6 +26,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
+	import { buildMainModelOptions, selectMainModelId, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -43,14 +44,8 @@
 		residency: string;
 		notes?: string;
 	}
-	// One standard-mode main-chat option, computed server-side (catalog.ts
-	// `main_chat_models`) so the UI never mirrors the engine's tier→model maps.
-	// Picking it writes {default_tier: tier, balanced_model?}.
-	interface MainChatOption {
-		id: string;
-		tier: ModelTier;
-		balanced_model?: string;
-	}
+	// MainChatOption (the server-computed catalog.ts `main_chat_models` shape) +
+	// the picker helpers live in ../utils/llm-main-model.js — imported above.
 	interface CatalogProvider {
 		provider: LLMProvider;
 		/**
@@ -310,15 +305,10 @@
 		return entry.models[0]?.id;
 	}
 
-	/**
-	 * A model is "expensive" when its output price is in Opus territory
-	 * ($20+/M out). The catalog's deep Claude (Opus, $75/M) trips this; Sonnet
-	 * ($15), Haiku ($4) and every Mistral model ($≤1.50) do not — so the ⚡ cue
-	 * lands exactly on the budget-heavy choices the user should think twice
-	 * about (D8: no gating, cost-transparency instead).
-	 */
+	// The ⚡ "expensive" cue ($20+/M out) — threshold owned by the picker helper
+	// (isExpensiveModel) so the hybrid editor + the main picker can't drift apart.
 	function isExpensive(m: CatalogModel): boolean {
-		return typeof m.pricing?.output === 'number' && m.pricing.output >= 20;
+		return isExpensiveModel(m.pricing);
 	}
 
 	/**
@@ -737,70 +727,14 @@
 	// knob. Options come verbatim from the server-computed `main_chat_models`, so
 	// the UI never mirrors the tier→model map (drift-free; Grok/Gemini providers
 	// get options for free). Background tasks + subagents keep auto-routing across
-	// bands regardless — this only pins the main-chat starting model. ──
-	const TIER_RANK: Record<ModelTier, number> = { fast: 0, balanced: 1, deep: 2 };
-
-	/** Normalise a stored tier name (incl. legacy haiku/sonnet/opus) → canonical band, or undefined. */
-	function normalizeTier(t: string | undefined): ModelTier | undefined {
-		switch (t) {
-			case 'fast': case 'haiku': return 'fast';
-			case 'balanced': case 'sonnet': return 'balanced';
-			case 'deep': case 'opus': return 'deep';
-			default: return undefined;
-		}
-	}
-
-	interface MainModelOption {
-		id: string;
-		tier: ModelTier;
-		balanced_model?: string;
-		label: string;
-		pricing?: { input: number; output: number };
-		expensive: boolean;
-		/** Above the tenant's `max_tier` ceiling → disabled with a tooltip. */
-		overCeiling: boolean;
-		/** `fast` as a main chat model — offered, but flagged "not recommended". */
-		notRecommended: boolean;
-	}
-
-	// The picker's options for the active provider. Empty for free-text
-	// providers (openai-compat / custom have no `main_chat_models`) → they keep
-	// the explicit model-id field below instead.
-	const mainModelOptions = $derived.by<MainModelOption[]>(() => {
-		const entry = activeProviderEntry;
-		if (!entry?.main_chat_models || entry.main_chat_models.length === 0) return [];
-		const ceiling = normalizeTier(config.max_tier);
-		const ceilingRank = ceiling ? TIER_RANK[ceiling] : null;
-		return entry.main_chat_models.map((opt) => {
-			const m = entry.models.find((mm) => mm.id === opt.id);
-			return {
-				id: opt.id,
-				tier: opt.tier,
-				...(opt.balanced_model ? { balanced_model: opt.balanced_model } : {}),
-				label: m?.label ?? opt.id,
-				...(m?.pricing ? { pricing: m.pricing } : {}),
-				expensive: m ? isExpensive(m) : false,
-				overCeiling: ceilingRank !== null && TIER_RANK[opt.tier] > ceilingRank,
-				notRecommended: opt.tier === 'fast',
-			};
-		});
-	});
-
-	// The option id currently selected — matched from `default_tier` (+
-	// `balanced_model` to disambiguate the two Anthropic balanced variants).
-	const mainModelSelection = $derived.by<string>(() => {
-		const opts = mainModelOptions;
-		if (opts.length === 0) return '';
-		const tier = normalizeTier(config.default_tier) ?? 'balanced';
-		if (tier === 'balanced') {
-			const bm = config.balanced_model;
-			const match = opts.find((o) => o.tier === 'balanced' && o.balanced_model === bm)
-				?? opts.find((o) => o.tier === 'balanced' && o.balanced_model === undefined)
-				?? opts.find((o) => o.tier === 'balanced');
-			return match?.id ?? '';
-		}
-		return opts.find((o) => o.tier === tier)?.id ?? '';
-	});
+	// bands regardless — this only pins the main-chat starting model. The option-
+	// derivation + selection-matching logic is unit-tested in ../utils/llm-main-model.js. ──
+	const mainModelOptions = $derived.by<MainModelOption[]>(
+		() => buildMainModelOptions(activeProviderEntry, config.max_tier),
+	);
+	const mainModelSelection = $derived.by<string>(
+		() => selectMainModelId(mainModelOptions, config.default_tier, config.balanced_model),
+	);
 
 	function setMainModel(id: string): void {
 		const opt = mainModelOptions.find((o) => o.id === id);
