@@ -121,6 +121,19 @@ export class ToolResultBlobStore {
   private seq = 0;
   /** Running sum of retained payload bytes — the byte half of the LRU cap. */
   private totalBytes = 0;
+  /**
+   * Content-dedup index. `idByContent` maps a payload's content-key → the id of
+   * the blob already holding it, so an identical payload evicted AGAIN — the
+   * same file dump re-parked at the next compaction, or content that was
+   * recalled and is now resident twice — reuses the existing blob instead of
+   * minting a duplicate. Without this, `evictFrom` mints a fresh id for the same
+   * bytes on every compaction, so a heavy multi-compaction thread accumulates
+   * duplicate handles + duplicate stored bytes (the observed cross-compaction
+   * duplicate-resident amplification). `contentById` is the reverse map so
+   * `pruneToCap`/`clear` keep the index consistent without re-hashing.
+   */
+  private readonly idByContent = new Map<string, string>();
+  private readonly contentById = new Map<string, string>();
 
   /** Number of retained blobs. */
   get size(): number {
@@ -158,6 +171,8 @@ export class ToolResultBlobStore {
    */
   clear(): void {
     this.blobs.clear();
+    this.idByContent.clear();
+    this.contentById.clear();
     this.totalBytes = 0;
   }
 
@@ -178,6 +193,13 @@ export class ToolResultBlobStore {
       if (this.blobs.size <= maxEntries && this.totalBytes <= maxBytes) break;
       this.blobs.delete(id);
       this.totalBytes -= blob.payload.length;
+      const key = this.contentById.get(id);
+      if (key !== undefined) {
+        this.contentById.delete(id);
+        // Only clear the forward entry if it still points at THIS id (dedup
+        // guarantees one id per content, but stay defensive).
+        if (this.idByContent.get(key) === id) this.idByContent.delete(key);
+      }
     }
   }
 
@@ -185,6 +207,21 @@ export class ToolResultBlobStore {
   private nextId(): string {
     this.seq += 1;
     return `tr-${this.seq}`;
+  }
+
+  /**
+   * Content key for dedup: the payload length + a fast FNV-1a 32-bit hash. A
+   * hash clash is guarded by a payload-equality check at the reuse site, so a
+   * collision only ever costs a missed dedup (a duplicate blob), never a wrong
+   * reuse (serving the wrong payload). Length-prefixing makes clashes rarer.
+   */
+  private static contentKey(payload: string): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < payload.length; i++) {
+      h ^= payload.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return `${payload.length}:${(h >>> 0).toString(36)}`;
   }
 
   /**
@@ -222,10 +259,27 @@ export class ToolResultBlobStore {
         const payload = toolResultText(resultBlock.content);
         if (payload.length <= thresholdChars) continue;
         const tool = toolNameById.get(resultBlock.tool_use_id) ?? 'tool';
+        // Dedup: an identical payload already resident reuses its handle instead
+        // of minting a second blob. This is what breaks the cross-compaction
+        // amplifier — the same file dump re-parked at each compaction now maps
+        // to ONE id. `this.get()` promotes the reused blob to most-recently-used
+        // (it is being referenced again). The `payload ===` guard makes a hash
+        // clash cost only a missed dedup, never a wrong reuse.
+        const key = ToolResultBlobStore.contentKey(payload);
+        const existingId = this.idByContent.get(key);
+        if (existingId !== undefined) {
+          const existing = this.get(existingId);
+          if (existing !== undefined && existing.payload === payload) {
+            handles.push({ id: existingId, descriptor: existing.descriptor });
+            continue;
+          }
+        }
         const id = this.nextId();
         const descriptor = buildDescriptor(tool, payload);
         this.blobs.set(id, { tool, descriptor, payload });
         this.totalBytes += payload.length;
+        this.idByContent.set(key, id);
+        this.contentById.set(id, key);
         handles.push({ id, descriptor });
       }
     }
