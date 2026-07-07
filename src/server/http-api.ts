@@ -5796,6 +5796,19 @@ export class LynoxHTTPApi {
       }
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/graph', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { nodes: [], edges: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '80', 10) || 80, 1), 300);
+      try {
+        const graph = await kg.getGraph(limit);
+        jsonResponse(res, 200, graph);
+      } catch {
+        jsonResponse(res, 200, { nodes: [], edges: [] });
+      }
+    }));
+
     // ── Thread Insights + Metrics ──────────────────────────────────
 
     this.addStatic('user', 'GET /api/thread-insights', async (req, res) => {

@@ -122,6 +122,13 @@ export class RelationshipStore {
       .all(subjectId, subjectId) as RelationshipRow[];
   }
 
+  /** The most-recently-created relationships, capped — the edge set for the graph subgraph. */
+  listRecent(limit: number): RelationshipRow[] {
+    return this.db.prepare(
+      'SELECT * FROM relationships ORDER BY created_at DESC LIMIT ?',
+    ).all(limit) as RelationshipRow[];
+  }
+
   /** Total edge count. */
   count(): number {
     return (this.db.prepare('SELECT COUNT(*) AS n FROM relationships').get() as { n: number }).n;
