@@ -387,3 +387,42 @@ describe('Allowlist gate symmetry — init + reload paths share one decision fun
     expect(warningCalls).toHaveLength(0);
   });
 });
+
+// ── Main-chat tier (default_tier → config.model) — the "Main chat model" picker ──
+// Wire-proof for the picker: the picked tier must reach `config.model` (which
+// session._model reads), clamped to the CP max_tier ceiling, at BOTH the ctor
+// and reload seams. The reload test pins G1 (default_tier was restart-only).
+describe('Engine — main-chat tier (default_tier → config.model)', () => {
+  const modelOf = (e: Engine): string | undefined =>
+    (e as unknown as { config: { model?: string } }).config.model;
+
+  it('ctor: config.model comes from default_tier, clamped to max_tier (G3)', () => {
+    mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'balanced' });
+    const engine = new Engine({}); // no explicit model → applies default_tier
+    expect(modelOf(engine)).toBe('balanced'); // clamped down to the ceiling
+  });
+
+  it('ctor: default_tier passes through when under the max_tier ceiling', () => {
+    mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'deep' });
+    const engine = new Engine({});
+    expect(modelOf(engine)).toBe('deep');
+  });
+
+  it('reloadUserConfig re-syncs config.model from a changed default_tier WITHOUT restart (G1)', async () => {
+    const engine = makeEngine(); // ctor with explicit model:'balanced'
+    expect(modelOf(engine)).toBe('balanced');
+    // User picks a new main-chat model → PUT persists default_tier → reload.
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC, default_tier: 'deep' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('deep'); // took effect without a process restart
+  });
+
+  it('reloadUserConfig clamps the re-synced tier to max_tier (G1+G3)', async () => {
+    const engine = makeEngine();
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'balanced' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('balanced'); // ceiling still enforced on reload
+  });
+});

@@ -260,6 +260,13 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // an invalid/non-Sonnet id can never reach config even though the field is
   // user-writable.
   'balanced_model',
+  // Main-chat model picker (standard mode): the band the main conversation runs
+  // in (fast/balanced/deep → the provider's concrete model). Shapes the user's
+  // own session and NEVER widens blast radius because the engine clamps it to
+  // the CP-emitted `max_tier` ceiling (engine.ts ctor + reloadUserConfig). The
+  // PUT handler additionally validates the value via `normalizeTier` (400
+  // otherwise), so an unrecognised tier can never reach config.
+  'default_tier',
   'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
   'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
   'context_cost_log',           // Diagnostic: opt-in content-free per-turn composition log to the instance's own data dir. Shapes only the user's own session, writes no content, never widens blast radius.

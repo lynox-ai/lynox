@@ -101,6 +101,37 @@ describe('Config', () => {
     expect(config.api_key).toBe('sk-from-env');
   });
 
+  // Main-chat model picker (Slice 1): default_tier is env-as-SEED, not a lock —
+  // a persisted file value (the user's picker choice) wins over the CP env.
+  it('default_tier: a file value WINS over the LYNOX_DEFAULT_MODEL_TIER env (seed, not override)', async () => {
+    const userDir = join(fakeHome, '.lynox');
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
+
+    process.env['LYNOX_DEFAULT_MODEL_TIER'] = 'balanced'; // CP-emitted seed
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.default_tier).toBe('deep'); // the user's picker choice wins
+  });
+
+  it('default_tier: the env SEEDS the value when the file has none', async () => {
+    process.env['LYNOX_DEFAULT_MODEL_TIER'] = 'balanced';
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.default_tier).toBe('balanced'); // seed applies on a fresh instance
+  });
+
+  it('max_tier STILL env-wins over a file value (the ceiling is a lock, not a seed)', async () => {
+    const userDir = join(fakeHome, '.lynox');
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ max_tier: 'deep' }));
+
+    process.env['LYNOX_MAX_MODEL_TIER'] = 'balanced'; // CP cost ceiling — must win
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.max_tier).toBe('balanced'); // env-wins asymmetry vs default_tier
+  });
+
   it('keeps network_policy + network_allowed_hosts from config.json (not stripped by .strict())', async () => {
     const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
