@@ -6,6 +6,7 @@ import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
@@ -1223,8 +1224,14 @@ export class RunHistory {
   }
 
   /**
-   * Open the SQLite database, running an integrity check.
-   * If the database is malformed, rename the corrupt file and create a fresh one.
+   * Open the SQLite database. ONLY a failed `integrity_check` (genuine file
+   * corruption) may rename the file aside and start fresh. Schema migration runs
+   * AFTER that decision, OUTSIDE the corruption-catch, and fails LOUD (propagates,
+   * keeps the file): a migration error — a transient SQLITE_BUSY/disk-full/IO fault
+   * mid-migration, or a deterministic migration bug — must NEVER be mistaken for
+   * corruption and trigger the wipe-and-recreate path, which would silently destroy
+   * the run log + thread anchors + resumable prompts this DB holds. (Mirrors the
+   * EngineDb open flow — same class of fix.)
    */
   private _openOrRecreate(path: string): void {
     let db = new Database(path);
@@ -1233,10 +1240,6 @@ export class RunHistory {
       if (result[0]?.integrity_check !== 'ok') {
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
-      db.pragma('journal_mode = WAL');
-      db.pragma('foreign_keys = ON');
-      this.db = db;
-      this._migrate();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ History database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
@@ -1248,10 +1251,22 @@ export class RunHistory {
         try { renameSync(`${path}-shm`, `${corruptPath}-shm`); } catch { /* may not exist */ }
       } catch { /* rename failed */ }
       db = new Database(path);
+    }
+    // Common path for both the healthy open and the freshly-recreated DB. The
+    // busy_timeout absorbs transient cross-process lock contention (prompt-store
+    // polls this DB every 2s; the operator sweep repoints thread anchors here)
+    // instead of an instant SQLITE_BUSY. Migration runs here (not in the
+    // corruption-catch) so any failure surfaces loud, file intact; the handle is
+    // closed on throw so a caught boot failure doesn't leak the fd + WAL lock.
+    try {
+      db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
       db.pragma('journal_mode = WAL');
       db.pragma('foreign_keys = ON');
       this.db = db;
       this._migrate();
+    } catch (err) {
+      try { db.close(); } catch { /* best-effort */ }
+      throw err;
     }
   }
 

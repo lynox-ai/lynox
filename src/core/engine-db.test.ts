@@ -207,7 +207,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     raw.close();
 
     // The open THROWS (fail loud), rather than silently recreating.
-    expect(() => new EngineDb(dbPath, '')).toThrow(/duplicate column|merged_into/i);
+    expect(() => new EngineDb(dbPath, '')).toThrow(/duplicate column name: merged_into/i);
     // No .corrupt-* sidecar was minted — the original file was left in place…
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(false);
     // …and the real row survives, still stamped v6 (the v7 txn rolled back).

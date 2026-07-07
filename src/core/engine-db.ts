@@ -5,6 +5,7 @@ import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:cr
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -650,13 +651,20 @@ export class EngineDb {
     // operator subject-sweep opening a second handle against the live engine)
     // instead of throwing an instant SQLITE_BUSY — which mid-migration would be
     // the very fault that used to trigger the wipe. Migration runs here (not in
-    // the corruption-catch above) so any failure surfaces loud, file intact.
-    db.pragma('busy_timeout = 5000');
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    this.db = db;
-    this._ensureSchemaVersion();
-    this._migrate();
+    // the corruption-catch above) so any failure surfaces loud, file intact —
+    // closing the handle first so a caught boot failure (engine.ts keeps running
+    // with engineDb=null) doesn't leak the fd + WAL lock for the process lifetime.
+    try {
+      db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      this.db = db;
+      this._ensureSchemaVersion();
+      this._migrate();
+    } catch (err) {
+      try { db.close(); } catch { /* best-effort */ }
+      throw err;
+    }
   }
 
   private _ensureSchemaVersion(): void {
