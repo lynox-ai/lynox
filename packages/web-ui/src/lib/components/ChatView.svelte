@@ -1888,13 +1888,19 @@
 	</button>
 {/snippet}
 
-{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined)}
+{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined, isStreamingMsg: boolean)}
 	<!-- Inline footer: usage stats on the left, action icons (speak +
 	     copy) on the right. Right-alignment of the tappable buttons puts
 	     them in the thumb sweep zone for right-handed mobile users — the
-	     stats column is read-only, the icons are the actual touch targets. -->
+	     stats column is read-only, the icons are the actual touch targets.
+	     The usage line is gated on THIS message being the actively-streaming
+	     one (`isStreamingMsg`), NOT the global `isStreaming` — else a new turn
+	     streaming below wrongly blanks the stats of every completed message
+	     above it (they only reappeared once the turn finished). A completed
+	     message's usage is final, so it stays visible while a later reply
+	     streams; only the in-progress reply hides its (still-partial) stats. -->
 	<div class="flex items-center gap-2 mt-2">
-		{#if usage && !isStreaming}
+		{#if usage && !isStreamingMsg}
 			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage, !getDemoMode())}</span>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
@@ -1914,7 +1920,7 @@
 	<!-- Diagnostics panel: opt-in (Advanced metrics setting), never on demo
 	     tenants. Token breakdown + finish reason + iterations are live-only;
 	     duration / tok-s / run-id persist via usage_json and survive a reload. -->
-	{#if usage && !isStreaming && isDiagnosticsEnabled() && !getDemoMode()}
+	{#if usage && !isStreamingMsg && isDiagnosticsEnabled() && !getDemoMode()}
 		{@const tps = tokPerSec(usage)}
 		<details class="mt-1 text-[11px] text-text-subtle/80">
 			<summary class="cursor-pointer text-text-subtle/60 hover:text-text-muted font-mono uppercase tracking-widest text-[10px]">{t('diagnostics.details')}</summary>
@@ -2382,7 +2388,7 @@
 						     message content. -->
 						{#if msg.blocks?.length && msg.content}
 							{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
-							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
+							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1)}
 						{/if}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
@@ -2413,7 +2419,7 @@
 							{#if msg.content}
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
+								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1)}
 							{/if}
 						{/if}
 						{@render messageTimestamp(msg.createdAt, 'left')}
