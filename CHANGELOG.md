@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.1.0 — 2026-07-07
+
+Claude **Sonnet 5** joins as an opt-in model for the balanced tier — pick it from a new in-settings variant picker, with the extended (1M-token) context window surfaced where the tier allows. Alongside it, the flag-gated subject-graph memory gains a **person-dedup** capability: when two entries turn out to be the same real person ("Ada" and "Dr. Ada Lovelace"), a new `subjects_merge` chat tool folds one into the other — confirmed, reversible, and never run unattended — and a background garbage-sweep archives extraction junk. The bulk of this release is a **correctness + data-safety hardening wave** on the memory subsystem and the boot/migration path. The subject-graph write path **stays flag-gated off** (`subject_graph_enabled`), and the read path is additionally gated (`memory_graph_reads`) — the per-tenant data cutover remains a separate step. **No control-plane database migration**; the engine applies two additive `engine.db` migrations (v6, v7 — nullable columns) on boot — rollback to 2.0.0 is a clean single-image swap (the added columns are inert on the older engine). One rollback caveat: if you set a Sonnet-5 balanced model, strip `balanced_model` from `config.json` before downgrading (or set it via the `LYNOX_BALANCED_MODEL` env, which never touches the config file) — the older engine's strict config parser otherwise ignores the whole file.
+
+**⚠️ Self-hosted operational change.** Client-IP resolution no longer trusts `X-Forwarded-For` by default (previously the leftmost, spoofable entry). If you run behind a reverse proxy and rely on per-client rate-limiting or the IP allowlist, set `LYNOX_TRUST_PROXY=true` (and `LYNOX_TRUSTED_PROXY_HOPS=<n>` if you chain proxies) — otherwise all clients now resolve to the proxy's address. Managed instances are unaffected (the platform sets this).
+
+### Added
+- **Claude Sonnet 5 as an opt-in balanced-tier model**, selectable from a new variant picker in LLM settings, with the extended (1M-token) context window surfaced where the tier allows. Existing balanced-tier behaviour is unchanged until you pick it. (#907, #910)
+- **`subjects_merge` chat tool** — fold a duplicate person entry into the canonical one (moving every note, task, and mention onto it) from chat. Always confirmed, reversible from the merge ledger, and refused in unattended/autonomous runs. (#906, #908, #909, #915)
+- **Subject garbage-sweep** — a background archive phase that clears extraction junk (acronym/lowercase non-people) out of the subject graph, with an archived-recall guard so cleaned entries don't resurface. (#903, #905)
+- **Agent-scheduled agent runs require human confirmation** — a trigger whose effect is to start another agent run now asks for explicit confirmation before firing. (#888)
+
+### Fixed
+- **Boot data-safety:** a database migration *error* is no longer mistaken for *corruption* — the engine fails loud and keeps the file instead of wiping it, across the engine, run-history, and agent-memory stores. (#911)
+- **Memory edits stay consistent:** editing a memory in the UI now mirrors to the subject-graph store under the write flag (previously gated on the read flag), and UI memory mutations route through a single doc↔knowledge-graph sync facade. (#904, #912)
+- **Person-dedup correctness:** the merge repoints the live thread anchor and applies the redirect atomically, the resolver treats name *shape* as identity (so "Ada Jr." and "Ada Sr." are never folded together, and a title-only match isn't a false duplicate), and cross-currency values are no longer stitched into one. (#913, #914)
+- **Subject-graph write path (flag-gated):** engagement subjects converge through a single (name, parent) resolver; consolidation and deactivation mirror to `engine.db`; a contradiction supersede can't cross subjects and lose data; currency/qualified value changes are flagged as contradictions. (#891, #892, #893, #894, #895)
+
+### Hardened / Internal
+- CI actions + build dependencies are **pinned to commit SHAs**, and client-IP derivation is hardened against forwarded-header spoofing. (#889)
+- The per-turn memory auto-extraction is metered through the managed billing gate (previously it spent unmetered on managed). (#917)
+- The `subjects_merge` consent prompt strips the full set of invisible format characters before display. (#918)
+- A gold-corpus recall-quality harness (real ONNX embeddings) and expanded migration-path test coverage. (#890, #896)
+
 ## 2.0.0 — 2026-07-06
 
 Foundation Rework v2 goes active for the verb layer. Workflow, trigger, and task **definitions** now live in the consolidated per-tenant `engine.db` with a first-class **source/effect** model (a trigger's *when* and *what* are separate axes) and a **Connection** primitive over API profiles. The legacy `triggers` table and planned/executed workflow rows in `history.db` are retired from the read+write path. **On upgrade, every engine self-heals at boot**: it migrates your existing triggers, saved workflows, and tasks from the legacy stores into `engine.db` exactly once (no operator action, no data loss), leaving the legacy rows dormant as a rollback net. Alongside the verb cut: project/customer **context-scoping** (memories seat on a thread's subject anchor and recall walks the subject hierarchy), the memory-consolidation lifecycle moves onto the subject graph, a read-only **Subjects** surface, and a broad correctness + billing + security hardening wave. The subject-graph **read path stays flag-gated off** (`subject_graph_enabled`) — the per-tenant data cutover remains a separate step.
