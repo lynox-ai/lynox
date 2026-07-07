@@ -246,6 +246,37 @@ describe('buildLLMConfigUpdate — provider-binding round-trip', () => {
     });
   });
 
+  describe('balanced_model (Sonnet variant — main-chat picker owns it)', () => {
+    it('stages balanced_model on Anthropic when set', () => {
+      const update = buildLLMConfigUpdate(input({
+        activeProvider: 'anthropic',
+        activeProviderEntry: anthropic,
+        config: { default_tier: 'balanced', balanced_model: 'claude-sonnet-5' },
+      }));
+      expect(update.balanced_model).toBe('claude-sonnet-5');
+      expect(update.default_tier).toBe('balanced');
+    });
+
+    it('does NOT stage balanced_model on Mistral (engine ignores it there — no stray Sonnet id)', () => {
+      const update = buildLLMConfigUpdate(input({
+        activeProvider: 'openai',
+        activeProviderEntry: mistral,
+        config: { default_tier: 'deep', balanced_model: 'claude-sonnet-5' },
+      }));
+      expect(update).not.toHaveProperty('balanced_model');
+      expect(update.default_tier).toBe('deep');
+    });
+
+    it('omits balanced_model when not set', () => {
+      const update = buildLLMConfigUpdate(input({
+        activeProvider: 'anthropic',
+        activeProviderEntry: anthropic,
+        config: { default_tier: 'balanced' },
+      }));
+      expect(update).not.toHaveProperty('balanced_model');
+    });
+  });
+
   describe('round-trip simulation (the exact bug from 2026-05-17 staging QA)', () => {
     it('Anthropic → Mistral → Anthropic leaves NO Mistral leak in final PUT', () => {
       // Step 1: start on Anthropic, save.

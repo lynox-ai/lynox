@@ -72,6 +72,9 @@ vi.mock('../../core/observability.js', () => ({
     // Sub-agents run a real Agent loop; the warm-cache-miss detector publishes
     // here when it fires, so the channel must exist even if never tripped.
     cacheHealth: { publish: vi.fn() },
+    // Slice 2: the child's tier now resolves through resolveTierModel (to honor
+    // a hybrid tier_set), which publishes a routing-attribution signal here.
+    llmCall: { publish: vi.fn() },
   },
 }));
 
@@ -1357,6 +1360,53 @@ describe('spawn_agent tool', () => {
       expect(out.provider).toBeUndefined();
       expect(out.openaiModelId).toBeUndefined();
       expect(out.openaiAuth).toBeUndefined();
+    });
+  });
+
+  // Slice 2: a subagent's tier follows the hybrid tier_set — so a Mistral main
+  // can spawn cross-provider deep-leaves (e.g. Sonnet 5) without a per-spawn profile.
+  describe('hybrid tier_set steers subagent provider (cross-provider deep-leaves)', () => {
+    it('a deep spawn from a Mistral main lands on the deep slot (Sonnet 5) with a dedicated client', async () => {
+      const { initLLMProvider } = await import('../../core/llm-client.js');
+      const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      await initLLMProvider('openai'); // Mistral is the base/main provider
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' } },
+      });
+      try {
+        vi.mocked(MockAgent).mockClear();
+        await spawnAgentTool.handler(
+          { agents: [{ name: 'researcher', task: 'deep analysis', model: 'deep' }] },
+          makeAgent(),
+        );
+        const child = vi.mocked(MockAgent).mock.calls[0]![0] as {
+          provider?: string; model?: string; apiKey?: string;
+        };
+        // The deep-leaf follows the deep slot → Anthropic Sonnet 5 on a dedicated
+        // client (slot creds), NOT the base Mistral wire. Exactly ask 3.
+        expect(child.provider).toBe('anthropic');
+        expect(child.model).toBe('claude-sonnet-5');
+        expect(child.apiKey).toBe('sk-ant-slot');
+      } finally {
+        setTierSetResolver({ routingMode: 'standard', tierSet: null });
+        await initLLMProvider('anthropic'); // restore the default for sibling tests
+      }
+    });
+
+    it('standard mode: a deep spawn inherits the base provider (no tier_set) — byte-parity', async () => {
+      const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'researcher', task: 'x', model: 'deep' }] },
+        makeAgent(),
+      );
+      const child = vi.mocked(MockAgent).mock.calls[0]![0] as { model?: string };
+      // No hybrid slot → base anthropic deep model, unchanged (crossProviderSlot=false).
+      expect(child.model).toBe('claude-opus-4-6');
     });
   });
 });

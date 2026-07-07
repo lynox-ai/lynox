@@ -229,8 +229,14 @@ export function loadConfig(): LynoxUserConfig {
   // Default model tier: `LYNOX_DEFAULT_MODEL_TIER` (canonical) with the legacy
   // `LYNOX_DEFAULT_TIER` accepted forever. envTier normalizes both the canonical
   // band names and the legacy Anthropic-brand names so old env vars keep working.
+  // env-as-SEED (not lock): a persisted file/project `default_tier` — the user's
+  // "Main chat model" picker choice — WINS; the CP env only seeds a fresh
+  // instance that has none. The env var's contract is a floor/default, not a hard
+  // override (env-abi-contract.ts), and this mirrors `LYNOX_LLM_PROVIDER`, which
+  // is deliberately unpinned so the in-app provider switch works. Contrast
+  // `max_tier` below, which STAYS env-wins because it is the cost ceiling/lock.
   const defaultTier = envTier('LYNOX_DEFAULT_MODEL_TIER');
-  if (defaultTier) merged.default_tier = defaultTier;
+  if (defaultTier && merged.default_tier === undefined) merged.default_tier = defaultTier;
   // Balanced-tier Sonnet selection. The CP (or a self-host operator) can flip a
   // tenant to Sonnet 5 via env without editing config.json. Assigned as-is; an
   // unrecognised value is validated + safely defaulted at resolveBalancedModel

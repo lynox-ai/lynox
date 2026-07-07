@@ -26,6 +26,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
+	import { buildMainModelOptions, selectMainModelId, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -43,6 +44,8 @@
 		residency: string;
 		notes?: string;
 	}
+	// MainChatOption (the server-computed catalog.ts `main_chat_models` shape) +
+	// the picker helpers live in ../utils/llm-main-model.js — imported above.
 	interface CatalogProvider {
 		provider: LLMProvider;
 		/**
@@ -53,6 +56,8 @@
 		preset_id?: string;
 		display_name: string;
 		models: CatalogModel[];
+		/** Standard-mode "Main chat model" picker options (server-computed). */
+		main_chat_models?: MainChatOption[];
 		requires_base_url: boolean;
 		requires_region: boolean;
 		default_residency: string;
@@ -87,6 +92,13 @@
 		gcp_project_id?: string;
 		gcp_region?: string;
 		default_tier?: string;
+		// Served-Sonnet variant the Anthropic `balanced` band resolves to (4.6 ↔ 5).
+		// GET /api/config always sends a resolved value (defaults to Sonnet 4.6).
+		balanced_model?: string;
+		// CP-emitted tier ceiling (env → seed as a lock). Options above it render
+		// disabled with a tooltip. Vestigial today (managed + hosted both 'deep'),
+		// kept as the safety seam so a future lower ceiling greys correctly.
+		max_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
 		// 'standard' (default) = one provider for all tiers (lynox routes per task
@@ -259,10 +271,11 @@
 			// Mistral tenant (api_base_url not on disk) resolves the Mistral
 			// preset instead of the generic OpenAI-compat tile.
 			activeCatalogKey = resolveCatalogKey(activeProvider, configBody.api_base_url ?? effProvider?.api_base_url);
-			// Starting tier is NOT exposed in standard mode — lynox auto-routes per
-			// turn from the engine's own balanced default, so we leave default_tier
-			// untouched (undefined → engine default; a managed CP value resends as a
-			// no-op). This avoids a two-way-bind footgun and a managed-save 403.
+			// `config = configBody` above already carries default_tier + balanced_model
+			// + max_tier — the standard-mode "Main chat model" picker binds to them via
+			// `mainModelSelection`/`setMainModel`. An unset default_tier resolves to the
+			// balanced option (the engine default). Background tasks/subagents still
+			// auto-route across bands regardless of this pick.
 			// PR-4 routing state: hybrid only when explicitly persisted; seed the
 			// per-tier {provider, model} slots from the saved tier_set (else defaults).
 			routingMode = configBody.routing_mode === 'hybrid' ? 'hybrid' : 'standard';
@@ -292,15 +305,10 @@
 		return entry.models[0]?.id;
 	}
 
-	/**
-	 * A model is "expensive" when its output price is in Opus territory
-	 * ($20+/M out). The catalog's deep Claude (Opus, $75/M) trips this; Sonnet
-	 * ($15), Haiku ($4) and every Mistral model ($≤1.50) do not — so the ⚡ cue
-	 * lands exactly on the budget-heavy choices the user should think twice
-	 * about (D8: no gating, cost-transparency instead).
-	 */
+	// The ⚡ "expensive" cue ($20+/M out) — threshold owned by the picker helper
+	// (isExpensiveModel) so the hybrid editor + the main picker can't drift apart.
 	function isExpensive(m: CatalogModel): boolean {
-		return typeof m.pricing?.output === 'number' && m.pricing.output >= 20;
+		return isExpensiveModel(m.pricing);
 	}
 
 	/**
@@ -609,6 +617,7 @@
 					gcp_project_id: config.gcp_project_id,
 					gcp_region: config.gcp_region,
 					default_tier: config.default_tier,
+					balanced_model: config.balanced_model,
 					openai_model_id: config.openai_model_id,
 					custom_endpoints: config.custom_endpoints,
 				},
@@ -711,6 +720,32 @@
 	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
 	// reload + backend 403s the save). Drives the read-only tile state below.
 	const providerEnvPinned = $derived(!!config.env_overrides?.provider);
+
+	// ── Standard-mode "Main chat model" picker (PR model-select · arch-v2 Simple
+	// view). The main chat runs on `default_tier` (+ the Anthropic `balanced_model`
+	// variant); this select lets the user set it directly instead of hiding the
+	// knob. Options come verbatim from the server-computed `main_chat_models`, so
+	// the UI never mirrors the tier→model map (drift-free; Grok/Gemini providers
+	// get options for free). Background tasks + subagents keep auto-routing across
+	// bands regardless — this only pins the main-chat starting model. The option-
+	// derivation + selection-matching logic is unit-tested in ../utils/llm-main-model.js. ──
+	const mainModelOptions = $derived.by<MainModelOption[]>(
+		() => buildMainModelOptions(activeProviderEntry, config.max_tier),
+	);
+	const mainModelSelection = $derived.by<string>(
+		() => selectMainModelId(mainModelOptions, config.default_tier, config.balanced_model),
+	);
+
+	function setMainModel(id: string): void {
+		const opt = mainModelOptions.find((o) => o.id === id);
+		if (!opt || opt.overCeiling) return;
+		config.default_tier = opt.tier;
+		// Only the Anthropic balanced band carries a variant. Set it when the
+		// picked option specifies one; leave the stored preference otherwise (so
+		// switching to Opus and back to a balanced pick remembers Sonnet 4.6/5).
+		if (opt.balanced_model) config.balanced_model = opt.balanced_model;
+		if (loaded) void saveConfig();
+	}
 
 	// Per-tile predicate — extracted to ../utils/llm-tile-lock.js so the
 	// env-pin / lock matrix is unit-tested. On Managed only free-text endpoints
@@ -1030,11 +1065,31 @@
 						{t('llm.api_key_managed_note')}
 					</p>
 				{/if}
-			{:else if activeProviderEntry.models.length > 0}
-				<!-- Standard mode shows NO tier control: lynox auto-routes per turn
-				     from a balanced baseline (the engine's own default), so a
-				     starting-tier knob would be noise — the auto-routing promise is
-				     the point. Explicit per-tier control is the Hybrid path above. -->
+			{:else if mainModelOptions.length > 0}
+				<!-- Standard-mode "Main chat model" picker (arch-v2 Simple view). Sets
+				     `default_tier` (+ the Anthropic `balanced_model` variant) so the
+				     user can move the main chat from e.g. Ministral to Mistral Large.
+				     Options are server-computed (`main_chat_models`) — one per reachable
+				     band — so the picker can never offer a model a tier-pick wouldn't
+				     actually reach. Background tasks + subagents keep auto-routing. -->
+				<div class="space-y-2">
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('llm.main_model.heading')}</span>
+						<select value={mainModelSelection}
+							disabled={!loaded || providerLocked}
+							onchange={(e) => setMainModel(e.currentTarget.value)}
+							aria-label={t('llm.main_model.heading')}
+							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+							{#each mainModelOptions as opt (opt.id)}
+								<option value={opt.id} disabled={opt.overCeiling}>
+									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
+								</option>
+							{/each}
+						</select>
+					</label>
+					<p class="text-xs text-text-muted">{t('llm.main_model.applies_hint')}</p>
+					<p class="text-xs text-text-muted">{t('llm.main_model.autoroute_hint')}</p>
+				</div>
 			{:else if activeProvider === 'custom' || activeCatalogKey === 'openai-compat'}
 				<!--
 					Free-text endpoints with no enumerated model catalog need an

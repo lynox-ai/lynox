@@ -50,7 +50,7 @@ Only **anthropic** and **openai with the Mistral endpoint** are exercised on eve
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `default_tier` | `fast`, `balanced`, `deep` | `balanced` |
+| `default_tier` | `fast`, `balanced`, `deep` — the band the **main chat** runs on (also picked visually via **Settings → LLM → Main chat model**). Background tasks and subagents auto-route across bands regardless | `balanced` |
 | `thinking_mode` | `adaptive`, `disabled` | `adaptive` |
 | `effort_level` | `low`, `medium`, `high`, `max` | `high` |
 | `balanced_model` | Which Claude Sonnet build serves the **balanced** tier (Anthropic provider). Set `claude-sonnet-5` to opt into the 1M-token context window; leave unset for the default | default Sonnet |

@@ -52,6 +52,8 @@ export interface LLMConfigUpdateInput {
     gcp_project_id?: string;
     gcp_region?: string;
     default_tier?: string;
+    /** Served-Sonnet variant for the Anthropic balanced band (Sonnet 4.6 ↔ 5). */
+    balanced_model?: string;
     openai_model_id?: string;
     custom_endpoints?: CustomEndpoint[];
   };
@@ -63,6 +65,7 @@ export interface LLMConfigUpdate {
   gcp_project_id?: string;
   gcp_region?: string;
   default_tier?: string;
+  balanced_model?: string;
   openai_model_id?: string;
   custom_endpoints?: CustomEndpoint[];
   llm_mode?: 'standard' | 'eu-sovereign';
@@ -114,6 +117,16 @@ export function buildLLMConfigUpdate(input: LLMConfigUpdateInput): LLMConfigUpda
   }
 
   if (input.config.default_tier) update.default_tier = input.config.default_tier;
+
+  // balanced_model (Sonnet 4.6 ↔ 5) — the main-chat picker owns this now that
+  // the standalone Sonnet-variant radio is gone. Only meaningful on Anthropic-
+  // direct, where the balanced band resolves via `resolveBalancedModel`; other
+  // providers ignore the field, so we stage it there only (matches the old
+  // radio's `effectiveIsAnthropic` gate and keeps a Mistral save from carrying
+  // a stray Sonnet id).
+  if (input.activeProvider === 'anthropic' && input.config.balanced_model) {
+    update.balanced_model = input.config.balanced_model;
+  }
 
   // openai_model_id covers openai (Mistral / generic) + custom (Anthropic-compat).
   // Always stage so a stale value (e.g. mistral-large-2512 after switch to

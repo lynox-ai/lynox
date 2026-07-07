@@ -12,7 +12,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
 import { setTierSetResolver } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -263,9 +263,12 @@ export class Engine {
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
-    // Apply user config defaults if not already set in LynoxConfig
+    // Apply user config defaults if not already set in LynoxConfig. The
+    // main-chat tier comes from `default_tier` (the "Main chat model" picker),
+    // clamped to `max_tier` (G3) so a user pick can never exceed the CP cost
+    // ceiling. normalizeTier accepts legacy brand names in an old config.json.
     if (!config.model) {
-      config.model = this.userConfig.default_tier ?? 'balanced';
+      config.model = clampTier(normalizeTier(this.userConfig.default_tier) ?? 'balanced', this.userConfig.max_tier);
     }
     if (!config.effort && this.userConfig.effort_level) {
       config.effort = this.userConfig.effort_level;
@@ -348,6 +351,13 @@ export class Engine {
     // delta but must still take effect. Idempotent; safe to call always; runs
     // before the client swap below.
     this._configureOpenAIResolver();
+    // G1: `config.model` (the main-chat tier) is assigned from `default_tier`
+    // in the ctor ONLY — re-sync it here so a runtime "Main chat model" change
+    // (PUT /api/config { default_tier }) takes effect WITHOUT a process restart.
+    // Clamped to `max_tier` (G3) so a user pick can't exceed the CP cost ceiling.
+    // New sessions pick this up via `session._model`; open sessions keep their
+    // persisted per-thread tier (no cache-prefix churn).
+    this.config.model = clampTier(normalizeTier(this.userConfig.default_tier) ?? 'balanced', this.userConfig.max_tier);
     // Recreate API client if credentials or provider changed
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
       // Provider switch: load new SDK if needed

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
-import { MODEL_CAPABILITIES } from '../../types/models.js';
+import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
 import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
 
 describe('LLM_CATALOG', () => {
@@ -164,6 +164,92 @@ describe('LLM_CATALOG', () => {
     const mistral = getCatalogEntryByKey('mistral')!;
     expect(mistral.preset_id).toBe('mistral');
     expect(catalogEntryKey(mistral)).toBe('mistral');
+  });
+});
+
+describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
+  // The main-chat picker renders these verbatim; each option's (tier, balanced_model?)
+  // MUST be a config the engine's tier router resolves BACK to the same model — the
+  // #459 anti-pattern is a picker option that silently routes elsewhere.
+  it('anthropic offers one option per reachable band, balanced split by Sonnet variant', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    expect(entry.main_chat_models).toEqual([
+      { id: 'claude-haiku-4-5-20251001', tier: 'fast' },
+      { id: 'claude-sonnet-4-6', tier: 'balanced', balanced_model: 'claude-sonnet-4-6' },
+      { id: 'claude-sonnet-5', tier: 'balanced', balanced_model: 'claude-sonnet-5' },
+      { id: 'claude-opus-4-6', tier: 'deep' },
+    ]);
+  });
+
+  it('mistral offers exactly the 3 tier representatives — Ministral 3B (fast extra) is EXCLUDED', () => {
+    // fast→ministral-8b (MISTRAL_MODEL_MAP), so 3B is a catalog extra a
+    // default_tier:'fast' write can never reach; listing it would be the #459 lie.
+    const entry = getCatalogEntryByKey('mistral')!;
+    expect(entry.main_chat_models).toEqual([
+      { id: 'ministral-8b-2512', tier: 'fast' },
+      { id: 'ministral-14b-2512', tier: 'balanced' },
+      { id: 'mistral-large-2512', tier: 'deep' },
+    ]);
+    const ids = (entry.main_chat_models ?? []).map((o) => o.id);
+    expect(ids).not.toContain('ministral-3b-2512');
+    // Non-Anthropic bands carry NO balanced_model (Mistral doesn't honour the override).
+    expect((entry.main_chat_models ?? []).every((o) => o.balanced_model === undefined)).toBe(true);
+  });
+
+  it('every main_chat_models option maps to a model the catalog actually lists', () => {
+    for (const entry of LLM_CATALOG) {
+      for (const opt of entry.main_chat_models ?? []) {
+        expect(entry.models.some((m) => m.id === opt.id), `${catalogEntryKey(entry)} → ${opt.id}`).toBe(true);
+        // A balanced_model, when present, equals the option id (round-trips the pick).
+        if (opt.balanced_model !== undefined) {
+          expect(opt.tier).toBe('balanced');
+          expect(opt.balanced_model).toBe(opt.id);
+        }
+      }
+    }
+  });
+
+  it('free-text providers (openai-compat, custom) expose no main_chat_models', () => {
+    expect(getCatalogEntryByKey('openai-compat')!.main_chat_models).toBeUndefined();
+    expect(getCatalogForProvider('custom')!.main_chat_models).toBeUndefined();
+  });
+
+  it('main_chat_models is runtime-frozen', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    expect(Object.isFrozen(entry.main_chat_models)).toBe(true);
+    expect(Object.isFrozen(entry.main_chat_models![0])).toBe(true);
+  });
+
+  // ── The anti-#459 end-to-end guard ──
+  // Every picker option's (tier[, balanced_model]) MUST resolve, through the
+  // SAME maps the engine's tier router uses on the wire, back to the option's own
+  // id. This is what makes the picker honest: a `default_tier`/`balanced_model`
+  // write can never silently route to a different model than the label shown.
+  it('anthropic: each option resolves to its own id via MODEL_MAP / resolveBalancedModel', () => {
+    for (const opt of getCatalogForProvider('anthropic')!.main_chat_models ?? []) {
+      const resolved = opt.tier === 'balanced'
+        ? resolveBalancedModel({ balanced_model: opt.balanced_model })
+        : MODEL_MAP[opt.tier];
+      expect(resolved, `${opt.id} (tier=${opt.tier}, balanced_model=${opt.balanced_model})`).toBe(opt.id);
+    }
+  });
+
+  it('mistral: each option resolves to its own id via MISTRAL_MODEL_MAP', () => {
+    for (const opt of getCatalogEntryByKey('mistral')!.main_chat_models ?? []) {
+      expect(MISTRAL_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
+    }
+  });
+
+  it('vertex: each option resolves to its own id via VERTEX_MODEL_MAP (haiku suffix-drop)', () => {
+    // Vertex builds main_chat_models too (VERTEX_MODEL_MAP; fast = claude-haiku-4-5,
+    // NOT the ...-20251001 direct id). No balanced variant (vertex doesn't honour
+    // the balanced_model override), so every option is a plain tier representative.
+    const opts = getCatalogForProvider('vertex')!.main_chat_models ?? [];
+    expect(opts.length).toBeGreaterThan(0);
+    for (const opt of opts) {
+      expect(opt.balanced_model).toBeUndefined();
+      expect(VERTEX_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
+    }
   });
 });
 
