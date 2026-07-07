@@ -13,6 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 
 /** Row cap for an `exhaustive` similarity scan (dedup). 50× the old dedup floor
@@ -284,6 +285,9 @@ export class AgentMemoryDb {
     this.dbPath = dbPath;
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
+    // Wait out transient lock contention instead of throwing an instant
+    // SQLITE_BUSY (parity with the other engine SQLite stores).
+    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this._ensureSchemaVersion();

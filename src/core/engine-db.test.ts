@@ -187,6 +187,42 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
+  it('fails LOUD on a migration error — never wipes the file as if corrupt', () => {
+    // A migration throw must propagate (refuse to boot, keep the file), NOT be
+    // mistaken for corruption and routed to rename-aside + recreate — which would
+    // silently destroy a reads-ON tenant's real subject-graph data while the engine
+    // boots "healthy". Reproduce the exact non-idempotent fault: a v6-stamped DB
+    // whose subjects table ALREADY carries v7's merged_into column, so v7's
+    // `ALTER … ADD COLUMN merged_into` throws "duplicate column name".
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-migfail-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'engine.db');
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (6);
+      CREATE TABLE subjects (id TEXT PRIMARY KEY, name TEXT NOT NULL, merged_into TEXT);
+    `);
+    raw.prepare('INSERT INTO subjects (id, name) VALUES (?, ?)').run('keep-me', 'Real Data');
+    raw.close();
+
+    // The open THROWS (fail loud), rather than silently recreating.
+    expect(() => new EngineDb(dbPath, '')).toThrow(/duplicate column name: merged_into/i);
+    // No .corrupt-* sidecar was minted — the original file was left in place…
+    expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(false);
+    // …and the real row survives, still stamped v6 (the v7 txn rolled back).
+    const check = new Database(dbPath);
+    expect(check.prepare("SELECT name FROM subjects WHERE id = 'keep-me'").get()).toEqual({ name: 'Real Data' });
+    expect((check.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(6);
+    check.close();
+  });
+
+  it('sets a busy_timeout so a concurrent operator sweep waits instead of throwing SQLITE_BUSY', () => {
+    const e = createEngineDb();
+    expect(e.getDb().pragma('busy_timeout', { simple: true })).toBe(5000);
+    e.close();
+  });
+
   it('creates every baseline table', () => {
     const e = createEngineDb();
     const expected = [

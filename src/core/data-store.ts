@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 import type {
   DataStoreSchemaType,
   DataStoreColumnDef,
@@ -108,6 +109,10 @@ export class DataStore {
     const path = dbPath ?? join(getLynoxDir(), 'datastore.db');
     mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
+    // Absorb transient cross-process lock contention — the operator subject-sweep
+    // repoints datastore.db cells while the live engine may hold the connection —
+    // instead of throwing an instant SQLITE_BUSY.
+    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this._initMeta();

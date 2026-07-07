@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
@@ -33,6 +33,41 @@ describe('RunHistory', () => {
   it('creates database and schema', () => {
     const h = createHistory();
     expect(h).toBeDefined();
+    h.close();
+  });
+
+  it('fails LOUD on a migration error — never wipes the history DB as if corrupt', () => {
+    // Same class of fix as EngineDb: a migration throw must propagate (keep the
+    // file — it holds the run log, thread anchors + resumable prompts), NOT be
+    // mistaken for corruption and routed to rename-aside + recreate. Reproduce the
+    // non-idempotent fault: a v45-stamped DB whose threads table ALREADY carries
+    // v46's primary_subject_id column, so v46's `ALTER … ADD COLUMN` throws.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-migfail-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'test.db');
+    const raw = new BetterSqlite3(dbPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (45);
+      CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT);
+    `);
+    raw.prepare('INSERT INTO threads (id) VALUES (?)').run('keep-me');
+    raw.close();
+
+    // The open THROWS (fail loud), rather than silently recreating.
+    expect(() => new RunHistory(dbPath)).toThrow(/duplicate column name: primary_subject_id/i);
+    // No .corrupt-* sidecar was minted — the original file was left in place…
+    expect(readdirSync(dir).some(f => f.startsWith('test.db.corrupt-'))).toBe(false);
+    // …and the real row survives, still stamped v45 (the v46 txn rolled back).
+    const check = new BetterSqlite3(dbPath);
+    expect(check.prepare("SELECT id FROM threads WHERE id = 'keep-me'").get()).toEqual({ id: 'keep-me' });
+    expect((check.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(45);
+    check.close();
+  });
+
+  it('sets a busy_timeout on the history connection', () => {
+    const h = createHistory();
+    expect(h.getDb().pragma('busy_timeout', { simple: true })).toBe(5000);
     h.close();
   });
 
