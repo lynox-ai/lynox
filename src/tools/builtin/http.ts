@@ -333,6 +333,15 @@ function detectGetExfiltration(url: string): string | null {
 async function maybeShapeJson(json: unknown, url: string, toolContext: ToolContext | undefined): Promise<string> {
   const defaultBody = JSON.stringify(json, null, 2);
 
+  // When an EXPLICIT profile shape errors (esp. include paths that matched no
+  // fields), surface WHY to the agent so it fixes the paths in one pass instead
+  // of thrashing refine→refine. Threaded into every safety-net return below.
+  let explicitShapeError: string | undefined;
+  const shapeHint = (): string =>
+    explicitShapeError
+      ? `\n[response_shape not applied — ${explicitShapeError}. Returning the raw response (capped if large) so you can see its real structure; fix the include paths and retry.]`
+      : '';
+
   // 1. Explicit per-API shape — a profile's `response_shape` wins when present.
   const apiStore = toolContext?.apiStore;
   if (apiStore) {
@@ -358,6 +367,7 @@ async function maybeShapeJson(json: unknown, url: string, toolContext: ToolConte
         }
         return result.shaped;
       }
+      explicitShapeError = result.error;
       if (channels.shapeError.hasSubscribers) {
         channels.shapeError.publish({ profileId: profile.id, hostname, error: result.error });
       }
@@ -367,9 +377,9 @@ async function maybeShapeJson(json: unknown, url: string, toolContext: ToolConte
 
   // 2. Safety-net: no explicit shape (or it errored). Return raw unless the body
   //    is large enough to bloat the context, then apply the generic structural cap.
-  if (defaultBody.length <= DEFAULT_SHAPE_THRESHOLD_CHARS) return defaultBody;
+  if (defaultBody.length <= DEFAULT_SHAPE_THRESHOLD_CHARS) return defaultBody + shapeHint();
   const capped = applyShape(json, DEFAULT_LARGE_RESPONSE_SHAPE);
-  if (capped.error) return defaultBody;
+  if (capped.error) return defaultBody + shapeHint();
   if (channels.shapeApplied.hasSubscribers) {
     channels.shapeApplied.publish({
       profileId: '(default-cap)',
@@ -381,7 +391,8 @@ async function maybeShapeJson(json: unknown, url: string, toolContext: ToolConte
   }
   return capped.shaped +
     `\n[note: large API response auto-capped (${capped.beforeChars}→${capped.afterChars} chars) to protect the context window — ` +
-    `define a response_shape on this API profile for precise field selection, or use spawn_agent role='collector' to work the full dataset in an isolated context.]`;
+    `define a response_shape on this API profile for precise field selection, or use spawn_agent role='collector' to work the full dataset in an isolated context.]` +
+    shapeHint();
 }
 
 interface HttpRequestInput {
