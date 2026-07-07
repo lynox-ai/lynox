@@ -1714,9 +1714,18 @@ export class Session {
       // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
       // Cross-provider hybrid slot → use the slot's enriched creds (the vault/CP
       // key + Mistral host injected by enrichTierSetCreds / applyManagedTierSet-
-      // Constraints). Otherwise the base resolution, unchanged (byte-parity).
+      // Constraints). A SAME-provider slot that carries only an `api_base_url` is
+      // ALSO reported crossProviderSlot but is left key-LESS by enrichTierSetCreds
+      // (same-provider slots relied on the ambient key) → resolve the provider's
+      // key here or the main Agent gets an empty key → 401 (mirror of the spawn
+      // path's `resolveSpawnChildProviderConfig`). Otherwise the base resolution,
+      // unchanged (a key-bearing slot short-circuits → byte-parity).
       apiKey: slotCfg.crossProviderSlot
-        ? slotCfg.apiKey
+        ? (slotCfg.apiKey ?? resolveProviderApiKey({
+            provider: effectiveProvider,
+            secretStore: engine.getSecretStore(),
+            userConfig,
+          }))
         : (this._profileOverride?.api_key ?? resolveProviderApiKey({
             provider: this._profileOverride?.provider ?? userConfig.provider,
             secretStore: engine.getSecretStore(),

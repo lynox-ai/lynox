@@ -90,9 +90,9 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig } from './spawn.js';
 import { channels } from '../../core/observability.js';
-import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot } from '../../types/index.js';
+import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 
 function makeTool(name: string): ToolEntry {
   return {
@@ -1363,6 +1363,138 @@ describe('spawn_agent tool', () => {
     });
   });
 
+  // The v2.1.1 hybrid-spawn provider bug + its fix, pinned at the pure seam.
+  // In hybrid a base-fallback tier must resolve from the child's OWN tier (slot
+  // or base), NEVER inherit the parent's runtime provider — the parent runs on
+  // ITS tier's slot, so inheriting it pairs a base-tier model with the wrong
+  // wire → `404 no Route matched` (fast collectors died silently on rafael prod).
+  describe('resolveSpawnChildProviderConfig: hybrid resolves from child tier, not parent', () => {
+    const ANTHROPIC_PARENT: ProviderConfigSnapshot = {
+      // The parent (main chat) runs on its balanced Sonnet-5 slot → anthropic.
+      provider: 'anthropic',
+      apiKey: 'sk-ant-parent-slot',
+      apiBaseURL: undefined,
+      openaiModelId: 'claude-sonnet-5',
+      openaiAuth: undefined,
+    };
+    const USER_CONFIG = {
+      provider: 'openai',
+      api_base_url: 'https://api.mistral.ai/v1',
+      openai_model_id: 'ministral-8b-2512',
+    } as LynoxUserConfig;
+    const KEYS: Record<string, string> = { openai: 'mistral-base-key', anthropic: 'sk-ant-vault' };
+    const resolveKey = (p: LLMProvider): string | undefined => KEYS[p];
+
+    it('BUG-REPRO: a hybrid fast base-fallback child gets the BASE (openai) wire, not the parent anthropic slot', () => {
+      // The exact bug shape: fast slot unset → crossProviderSlot=false, parent on
+      // anthropic. Old code returned provider:"anthropic" (parent-inherit) paired
+      // with a ministral model → 404. The fix routes to the base provider.
+      const out = resolveSpawnChildProviderConfig({
+        hybridSlot: { crossProviderSlot: false },
+        routingMode: 'hybrid',
+        profile: undefined,
+        parent: ANTHROPIC_PARENT,
+        baseProvider: 'openai',
+        userConfig: USER_CONFIG,
+        resolveKey,
+      });
+      expect(out.provider).toBe('openai'); // NOT 'anthropic'
+      expect(out.apiKey).toBe('mistral-base-key'); // resolved for the base, not the parent slot key
+      expect(out.apiBaseURL).toBe('https://api.mistral.ai/v1');
+      expect(out.openaiModelId).toBe('ministral-8b-2512');
+    });
+
+    it('a cross-provider slot WITH its own key keeps the slot creds (Slice-2 parity)', () => {
+      const out = resolveSpawnChildProviderConfig({
+        hybridSlot: { crossProviderSlot: true, provider: 'anthropic', apiKey: 'sk-ant-slot', apiBaseURL: undefined, openaiModelId: 'claude-sonnet-5' },
+        routingMode: 'hybrid',
+        profile: undefined,
+        parent: ANTHROPIC_PARENT,
+        baseProvider: 'openai',
+        userConfig: USER_CONFIG,
+        resolveKey,
+      });
+      expect(out.provider).toBe('anthropic');
+      expect(out.apiKey).toBe('sk-ant-slot');
+      expect(out.openaiModelId).toBe('claude-sonnet-5');
+      expect(out.openaiAuth).toBeUndefined();
+    });
+
+    it('a same-base slot reported cross (base_url, no key) gets its key RESOLVED, not left empty', () => {
+      // rafael's CURRENT config: fast slot {provider:openai, api_base_url:…} but no
+      // api_key (enrichTierSetCreds skips same-provider slots) → crossProviderSlot
+      // is true yet apiKey is undefined. A fresh child Agent needs an explicit key.
+      const out = resolveSpawnChildProviderConfig({
+        hybridSlot: { crossProviderSlot: true, provider: 'openai', apiKey: undefined, apiBaseURL: 'https://api.mistral.ai/v1', openaiModelId: 'ministral-14b-2512' },
+        routingMode: 'hybrid',
+        profile: undefined,
+        parent: ANTHROPIC_PARENT,
+        baseProvider: 'openai',
+        userConfig: USER_CONFIG,
+        resolveKey,
+      });
+      expect(out.provider).toBe('openai');
+      expect(out.apiKey).toBe('mistral-base-key'); // resolved, not undefined → no 401
+      expect(out.apiBaseURL).toBe('https://api.mistral.ai/v1');
+      expect(out.openaiAuth).toBeUndefined();
+    });
+
+    it('an unresolvable base key stays undefined → a clean 401 at request time, not a mis-route', () => {
+      // BYOK / vault-misconfig: resolveKey returns nothing. The child must carry
+      // apiKey:undefined (→ clean 401 surfaced by the adapter), never a wrong key.
+      const out = resolveSpawnChildProviderConfig({
+        hybridSlot: { crossProviderSlot: false },
+        routingMode: 'hybrid',
+        profile: undefined,
+        parent: ANTHROPIC_PARENT,
+        baseProvider: 'openai',
+        userConfig: USER_CONFIG,
+        resolveKey: () => undefined,
+      });
+      expect(out.provider).toBe('openai');
+      expect(out.apiKey).toBeUndefined();
+      expect(out.apiBaseURL).toBe('https://api.mistral.ai/v1');
+    });
+
+    it('standard mode still inherits the parent (managed config.json staging fix preserved)', () => {
+      const out = resolveSpawnChildProviderConfig({
+        hybridSlot: { crossProviderSlot: false },
+        routingMode: 'standard',
+        profile: undefined,
+        parent: ANTHROPIC_PARENT,
+        baseProvider: 'openai',
+        userConfig: USER_CONFIG,
+        resolveKey,
+      });
+      // Standard mode: parent IS the base provider → inheritance is correct.
+      expect(out.provider).toBe('anthropic');
+      expect(out.apiKey).toBe('sk-ant-parent-slot');
+    });
+
+    it('an explicit profile in hybrid still wins (opts out of tier routing)', () => {
+      const profile: ModelProfile = {
+        provider: 'openai',
+        api_base_url: 'https://profile.example.com/v1',
+        api_key: 'profile-key',
+        model_id: 'profile-model',
+        auth: 'static',
+      };
+      const out = resolveSpawnChildProviderConfig({
+        hybridSlot: { crossProviderSlot: false },
+        routingMode: 'hybrid',
+        profile,
+        parent: ANTHROPIC_PARENT,
+        baseProvider: 'openai',
+        userConfig: USER_CONFIG,
+        resolveKey,
+      });
+      expect(out.provider).toBe('openai');
+      expect(out.apiKey).toBe('profile-key');
+      expect(out.apiBaseURL).toBe('https://profile.example.com/v1');
+      expect(out.openaiModelId).toBe('profile-model');
+    });
+  });
+
   // Slice 2: a subagent's tier follows the hybrid tier_set — so a Mistral main
   // can spawn cross-provider deep-leaves (e.g. Sonnet 5) without a per-spawn profile.
   describe('hybrid tier_set steers subagent provider (cross-provider deep-leaves)', () => {
@@ -1407,6 +1539,54 @@ describe('spawn_agent tool', () => {
       const child = vi.mocked(MockAgent).mock.calls[0]![0] as { model?: string };
       // No hybrid slot → base anthropic deep model, unchanged (crossProviderSlot=false).
       expect(child.model).toBe('claude-opus-4-6');
+    });
+
+    it('BUG-REPRO e2e: a fast base-fallback spawn from a Sonnet-slot parent lands on the base Mistral wire, not the parent anthropic slot', async () => {
+      const { initLLMProvider } = await import('../../core/llm-client.js');
+      const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+      const { setOpenAIModelResolver, MISTRAL_MODEL_MAP } = await import('../../types/models.js');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      await initLLMProvider('openai'); // Mistral is the base/main provider
+      // Mirror prod bootstrap: the openai-base tier map is Mistral, so a `fast`
+      // tier resolves to ministral-8b (not the Anthropic default).
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+      // Hybrid tier_set: balanced + deep are cross-provider anthropic slots; the
+      // FAST slot is UNSET → it falls back to the base openai (Mistral) wire.
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: {
+          balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' },
+          deep: { provider: 'anthropic', model_id: 'claude-opus-4-6', api_key: 'sk-ant-slot' },
+        },
+      });
+      // The parent (main chat) runs on its balanced Sonnet slot → its runtime
+      // provider snapshot is anthropic. Pre-fix, a fast child inherited THIS.
+      const parent = makeAgent({
+        getProviderConfig: () => ({
+          provider: 'anthropic',
+          apiKey: 'sk-ant-slot',
+          apiBaseURL: undefined,
+          openaiModelId: 'claude-sonnet-5',
+          openaiAuth: undefined,
+        }),
+      } as Partial<IAgent>);
+      try {
+        vi.mocked(MockAgent).mockClear();
+        await spawnAgentTool.handler(
+          { agents: [{ name: 'collector', task: 'fetch data', model: 'fast' }] },
+          parent,
+        );
+        const child = vi.mocked(MockAgent).mock.calls[0]![0] as { provider?: string; model?: string };
+        // The fast base-fallback child resolves to the BASE provider (openai /
+        // Mistral) with the base-tier model — NOT the parent's anthropic slot.
+        // Pre-fix this was provider:'anthropic' + model:'ministral-8b-2512' → 404.
+        expect(child.provider).toBe('openai');
+        expect(child.model).toBe('ministral-8b-2512');
+      } finally {
+        setTierSetResolver({ routingMode: 'standard', tierSet: null });
+        setOpenAIModelResolver({ map: null });
+        await initLLMProvider('anthropic'); // restore the default for sibling tests
+      }
     });
   });
 });
