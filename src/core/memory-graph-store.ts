@@ -284,6 +284,25 @@ export class MemoryGraphStore {
   }
 
   /**
+   * Refresh an existing memory stub's text + embedding after a text correction.
+   * The caller gates this on the WRITE flag (subject_graph_enabled), NOT the read
+   * flag — so a redaction/correction made during the dual-write window (write-on,
+   * read-off) is present in engine.db when reads flip on, instead of recall serving
+   * the stale pre-edit text (the same privacy divergence the deactivate mirror
+   * closes). No-op if the memory has no stub (never resolved a subject) — like the
+   * other mirror updates it never CREATES a stub. `text` is PII → encrypted at rest;
+   * a null embedding preserves the stored vector (the caller always supplies the
+   * re-embedded vector for the new text).
+   */
+  updateStubText(memoryId: string, text: string, embedding: Buffer | null): void {
+    this.db.prepare(`
+      UPDATE memories
+      SET text = ?, embedding = COALESCE(?, embedding), updated_at = datetime('now')
+      WHERE id = ?
+    `).run(this.engine.enc(text), embedding, memoryId);
+  }
+
+  /**
    * Record a supersession provenance edge (the `supersedes` junction, the S2/S5
    * successor to legacy `supersedes`). Idempotent on the (new, old) pair. Both
    * memory stubs must exist — the guarded INSERT skips a pair whose endpoints are
