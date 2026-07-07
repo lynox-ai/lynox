@@ -854,6 +854,37 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    // Agent-opened escalation threads (`escalation-<key>`, see core/escalation.ts) are
+    // legitimate RESUMABLE chats but are NOT UUIDs — rejecting them was the
+    // "conversation could not be opened" bug on agent-escalation threads.
+    it('accepts an escalation-<key> threadId as resume', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'escalation-5cad0bc0' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toBe('escalation-5cad0bc0');
+    });
+
+    it('keeps an escalation id VERBATIM (not lowercased — matches the stored PK)', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'escalation-AbC123' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toBe('escalation-AbC123');   // NOT normalised to lowercase
+    });
+
+    it('rejects an escalation id with path/SQL metachars (injection-safe)', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'escalation-../../etc/passwd' }),
+      });
+      expect(res.status).toBe(400);
+    });
+
     it('deletes a session', async () => {
       mockSessionGet.mockReturnValue(mockSessionInstance);
       const res = await jsonFetch('/api/sessions/test-session', { method: 'DELETE' });

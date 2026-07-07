@@ -128,6 +128,12 @@ const TZ_MAX_LENGTH = 64;
  * statements). Matches the shape `randomUUID()` produces (lowercase hex).
  */
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Agent-opened escalation threads use `escalation-<key>` ids (see core/escalation.ts),
+// which are legitimate RESUMABLE chat threads but are NOT UUIDs — so the resume
+// (`POST /api/sessions`) must accept them alongside UUIDs. Injection-safe charset
+// (alphanumeric + hyphen, bounded); these ids are used verbatim as the SQLite TEXT PK,
+// never lowercased (unlike UUIDs), so they match the stored thread row exactly.
+const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
 /**
  * Three deployment modes the engine has to keep distinct. The billing tier
@@ -1770,15 +1776,27 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
       const rawThreadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
-      // Lowercase-normalise BEFORE the regex check. SQLite TEXT PRIMARY KEY
-      // is case-sensitive with the default BINARY collation, so an uppercased
-      // UUID resend would mint a NEW sessionStore Map entry + a NEW thread row
-      // in SQLite, silently forking history. `randomUUID()` always emits
-      // lowercase; normalising here makes resume tolerant to either case.
-      const threadId = rawThreadId?.toLowerCase();
-      if (threadId !== undefined && !UUID_REGEX.test(threadId)) {
-        errorResponse(res, 400, 'Invalid threadId — expected UUID');
-        return;
+      // Resolve the resume id, accepting two shapes:
+      //  • a UUID — lowercase-normalised BEFORE the check. SQLite TEXT PRIMARY KEY
+      //    is case-sensitive (BINARY collation), so an uppercased UUID resend would
+      //    mint a NEW sessionStore entry + a NEW thread row, silently forking
+      //    history. `randomUUID()` always emits lowercase; normalising makes resume
+      //    case-tolerant.
+      //  • an `escalation-<key>` id — an agent-opened, RESUMABLE chat thread whose id
+      //    is NOT a UUID. Used VERBATIM (never lowercased) so it matches the stored
+      //    thread PK exactly. Rejecting these was the "conversation could not be
+      //    opened" bug on agent-escalation threads.
+      let threadId: string | undefined;
+      if (rawThreadId !== undefined) {
+        const lower = rawThreadId.toLowerCase();
+        if (UUID_REGEX.test(lower)) {
+          threadId = lower;
+        } else if (ESCALATION_ID_REGEX.test(rawThreadId)) {
+          threadId = rawThreadId;
+        } else {
+          errorResponse(res, 400, 'Invalid threadId — expected a UUID or escalation id');
+          return;
+        }
       }
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
