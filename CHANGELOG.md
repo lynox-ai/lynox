@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.1 — 2026-07-07
+
+Fixes the knowledge-graph view on instances with the subject-graph enabled: the graph now renders the connected relationship subgraph (it previously showed a disconnected ring of the most-recently-touched entities), and entity mention counts reflect the real number of linked memories instead of always showing zero. No migration; rollback to 2.1.0 is a clean image swap.
+
+### Fixed
+- **Knowledge-graph view:** serve the connected subgraph (`GET /api/kg/graph` — the recent relationships plus exactly the subjects they touch) so relationships render as edges, and populate the real memory-link mention count. (#920)
+
 ## 2.1.0 — 2026-07-07
 
 Claude **Sonnet 5** joins as an opt-in model for the balanced tier — pick it from a new in-settings variant picker, with the extended (1M-token) context window surfaced where the tier allows. Alongside it, the flag-gated subject-graph memory gains a **person-dedup** capability: when two entries turn out to be the same real person ("Ada" and "Dr. Ada Lovelace"), a new `subjects_merge` chat tool folds one into the other — confirmed, reversible, and never run unattended — and a background garbage-sweep archives extraction junk. The bulk of this release is a **correctness + data-safety hardening wave** on the memory subsystem and the boot/migration path. The subject-graph write path **stays flag-gated off** (`subject_graph_enabled`), and the read path is additionally gated (`memory_graph_reads`) — the per-tenant data cutover remains a separate step. **No control-plane database migration**; the engine applies two additive `engine.db` migrations (v6, v7 — nullable columns) on boot — rollback to 2.0.0 is a clean single-image swap (the added columns are inert on the older engine). One rollback caveat: if you set a Sonnet-5 balanced model, strip `balanced_model` from `config.json` before downgrading (or set it via the `LYNOX_BALANCED_MODEL` env, which never touches the config file) — the older engine's strict config parser otherwise ignores the whole file.
