@@ -112,6 +112,24 @@ describe('KnowledgeLayer getGraph + mentionCount (subject-graph read)', () => {
     const nodeIds = new Set(graph.nodes.map(n => n.id));
     expect(nodeIds.has(ids.widget)).toBe(false);              // archived node dropped
     expect(graph.edges.map(e => e.relationType)).toEqual(['works_at']);  // 'makes' edge dropped
+    // acme survives — it still has the alice→acme edge (not orphaned by widget's loss).
+    expect(nodeIds.has(ids.acme)).toBe(true);
+
+    await layer.close();
+  });
+
+  it('flag ON: getGraph prunes nodes left orphan when the hub endpoint is archived', async () => {
+    const { layer, subs, ids } = makeSeed();
+    await layer.init();
+
+    // Archive the hub `acme`: BOTH edges (alice→acme, acme→widget) lose an endpoint,
+    // so alice + widget have no surviving edge → they must be pruned, not left as
+    // edge-less orphan nodes. Result: an empty connected subgraph.
+    subs.archiveSubject(ids.acme);
+
+    const graph = await layer.getGraph(80);
+    expect(graph.edges).toHaveLength(0);
+    expect(graph.nodes).toHaveLength(0);   // no orphan alice/widget nodes leak through
 
     await layer.close();
   });

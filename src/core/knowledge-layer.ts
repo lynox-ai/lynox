@@ -1014,9 +1014,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           const rec = this._subjectRowToEntityRecord(row, counts.get(id) ?? 0);
           if (rec) nodes.push(rec);
         }
-        // Drop edges whose endpoint was archived/missing (node filtered out).
+        // Drop edges whose endpoint was archived/missing (node filtered out), then
+        // prune any node left with no surviving edge — keep "exactly the nodes the
+        // surviving edges touch" so an archived partner can't leave an orphan node.
         const present = new Set(nodes.map(n => n.id));
-        return { nodes, edges: edges.filter(e => present.has(e.fromEntityId) && present.has(e.toEntityId)) };
+        const survivingEdges = edges.filter(e => present.has(e.fromEntityId) && present.has(e.toEntityId));
+        const referenced = new Set<string>();
+        for (const e of survivingEdges) { referenced.add(e.fromEntityId); referenced.add(e.toEntityId); }
+        return { nodes: nodes.filter(n => referenced.has(n.id)), edges: survivingEdges };
       } catch (err: unknown) { this._logReadFallback('getGraph', err); }
     }
     // Legacy fallback (flag-off): top entities by mention + their relations.
@@ -1054,7 +1059,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (this.subjectGraphEnabled && this.subjectStore) {
       try {
         const row = this.subjectStore.getSubject(id);
-        return row ? this._subjectRowToEntityRecord(row) : null;
+        if (!row) return null;
+        const count = this.subjectStore.getMentionCounts([id]).get(id) ?? 0;
+        return this._subjectRowToEntityRecord(row, count);
       } catch (err: unknown) { this._logReadFallback('getEntity', err); }
     }
     const row = this.db.getEntity(id);

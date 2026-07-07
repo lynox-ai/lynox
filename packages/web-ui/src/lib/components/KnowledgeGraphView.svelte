@@ -44,6 +44,11 @@
 	let graphNodes = $state<GraphNode[]>([]);
 	let graphEdges = $state<GraphEdge[]>([]);
 	let graphLoading = $state(false);
+	// Load-once latch: gate the graph-load effect on this, NOT `graphNodes.length`.
+	// A connected-subgraph fetch legitimately returns 0 nodes (a tenant with no
+	// relationships), and reassigning the `$state` array always re-notifies — so a
+	// `.length === 0` guard would re-fire loadGraph() forever.
+	let graphLoaded = $state(false);
 	let hoveredNode = $state<string | null>(null);
 	let svgEl: SVGSVGElement | undefined = $state(undefined);
 
@@ -187,6 +192,7 @@
 			graphEdges = edges;
 		} catch { error = t('common.load_failed'); }
 		graphLoading = false;
+		graphLoaded = true;   // latch after the attempt (success OR fail) — never re-loop
 	}
 
 	function handleGraphNodeClick(entity: Entity) {
@@ -246,7 +252,7 @@
 	$effect(() => { loadEntities(); });
 
 	$effect(() => {
-		if (viewMode === 'graph' && graphNodes.length === 0) loadGraph();
+		if (viewMode === 'graph' && !graphLoaded && !graphLoading) loadGraph();
 	});
 
 	function handleSearch() { loadEntities(); }
