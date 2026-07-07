@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, personNameTokens, isProperTokenSubset } from './subject-store.js';
+import { SubjectStore, personNameTokens, isProperTokenSubset, isPersonSubsetSafe, personTokenKey } from './subject-store.js';
 import { DataStore } from './data-store.js';
 
 /**
@@ -166,6 +166,23 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
     engine.close();
   });
 
+  it('merge detail: a money (amount, currency) pair moves together — no cross-currency stitch', () => {
+    const { store, engine, db } = makeStore();
+    const canon = store.createSubject({ kind: 'product', name: 'Widget' });
+    const dup = store.createSubject({ kind: 'product', name: 'Widget v2' });
+    // Canonical has a currency but NO price; the dup has a EUR price. A per-column COALESCE
+    // would fill the price from the dup but keep the canonical's stale USD → 5000 "USD".
+    db.prepare("INSERT INTO products (subject_id, price_cents, currency) VALUES (?, NULL, 'USD')").run(canon);
+    db.prepare("INSERT INTO products (subject_id, price_cents, currency) VALUES (?, 5000, 'EUR')").run(dup);
+
+    store.mergeSubjects(dup, canon);
+
+    const row = db.prepare('SELECT price_cents, currency FROM products WHERE subject_id = ?').get(canon) as { price_cents: number; currency: string };
+    expect(row.price_cents).toBe(5000);   // amount filled from the dup…
+    expect(row.currency).toBe('EUR');     // …and its currency came WITH it, not the stale USD
+    engine.close();
+  });
+
   it('memory_subjects rollback keeps canonical’s PRE-existing link (split-back only drops merge-added)', () => {
     const { store, engine, db } = makeStore();
     const dup = store.createSubject({ kind: 'person', name: 'Ada' });
@@ -298,6 +315,29 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
     engine.close();
   });
 
+  it('resolvePersonSubject: a title-only variant with EQUAL content tokens folds in (no dup)', () => {
+    const { store, engine } = makeStore();
+    const ada = store.findOrCreate({ kind: 'person', name: 'Ada Lovelace' }).id;
+    // "Dr. Ada Lovelace" strips to the same content tokens as "Ada Lovelace"; exact/normalized
+    // miss the honorific and the STRICT subset scan rejects an equal set — pre-fix this minted
+    // a permanent duplicate. Now it folds in as an alias.
+    const r = store.resolvePersonSubject('Dr. Ada Lovelace');
+    expect(r).toMatchObject({ id: ada, created: false });
+    expect(JSON.parse(store.getSubject(ada)!.aliases)).toContain('Dr. Ada Lovelace');
+    engine.close();
+  });
+
+  it('resolvePersonSubject: a generational suffix is identity-bearing (father not folded into son)', () => {
+    const { store, engine } = makeStore();
+    const jr = store.findOrCreate({ kind: 'person', name: 'John Smith Jr' }).id;
+    // "John Smith" ⊂ {john, smith, jr} by raw tokens, but Jr is a different generation → must
+    // NOT fold; mint a fresh distinct subject.
+    const r = store.resolvePersonSubject('John Smith');
+    expect(r.created).toBe(true);
+    expect(r.id).not.toBe(jr);
+    engine.close();
+  });
+
   // ── token helpers ────────────────────────────────────────────────
 
   it('personNameTokens strips titles + punctuation; isProperTokenSubset is strict', () => {
@@ -307,6 +347,17 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
     expect(isProperTokenSubset(['ada', 'lovelace'], ['ada', 'lovelace'])).toBe(false);   // not strict
     expect(isProperTokenSubset(['anna'], ['ada', 'lovelace'])).toBe(false);
     expect(isProperTokenSubset([], ['x'])).toBe(false);
+  });
+
+  it('isPersonSubsetSafe rejects a generational-suffix difference; personTokenKey ignores titles', () => {
+    // A plain name is a safe subset of the same name + a middle/first token…
+    expect(isPersonSubsetSafe(['john', 'smith'], ['john', 'q', 'smith'])).toBe(true);
+    // …but NOT when the extra token is a generational suffix (father vs son).
+    expect(isPersonSubsetSafe(['john', 'smith'], ['john', 'smith', 'jr'])).toBe(false);
+    expect(isPersonSubsetSafe(['john', 'smith'], ['john', 'smith', 'iii'])).toBe(false);
+    // personTokenKey is title-insensitive + order-insensitive.
+    expect(personTokenKey('Dr. Ada Lovelace')).toBe('ada lovelace');
+    expect(personTokenKey('Ada Lovelace')).toBe(personTokenKey('Lovelace, Ada'));
   });
 });
 

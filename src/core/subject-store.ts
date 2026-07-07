@@ -238,6 +238,15 @@ const DETAIL_TABLE: Record<string, { table: string; cols: readonly string[] }> =
   service:      { table: 'services',      cols: ['hourly_rate_cents', 'currency'] },
 };
 
+/** (amount, currency) columns that must merge as a UNIT: a per-column COALESCE would stitch a
+ *  dup's amount onto the canonical's currency (e.g. 5000 EUR → 5000 "USD"). The currency
+ *  follows its amount's owner — see the detail-merge in {@link SubjectStore.executeMerge}. */
+const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> = {
+  engagement: { amount: 'budget_cents',      currency: 'currency' },
+  product:    { amount: 'price_cents',       currency: 'currency' },
+  service:    { amount: 'hourly_rate_cents', currency: 'currency' },
+};
+
 /**
  * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
  * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
@@ -289,6 +298,29 @@ export function isProperTokenSubset(sub: readonly string[], sup: readonly string
   if (sub.length === 0 || sup.length <= sub.length) return false;
   const supSet = new Set(sup);
   return sub.every(t => supSet.has(t));
+}
+
+/** Generational suffixes are IDENTITY-bearing, not honorifics: "John Smith" and
+ *  "John Smith Jr" are a father and son, NOT the same person a subset-fold may merge. */
+const GENERATIONAL_SUFFIX_TOKENS: ReadonlySet<string> = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'junior', 'senior']);
+
+/**
+ * Person-name subset fold, but a difference that is (or includes) a GENERATIONAL SUFFIX is
+ * NOT a subset — "John Smith" ⊄ "John Smith Jr" (distinct people). Used at both the write-time
+ * resolver and the retroactive sweep so neither ever folds a father into his son.
+ */
+export function isPersonSubsetSafe(sub: readonly string[], sup: readonly string[]): boolean {
+  if (!isProperTokenSubset(sub, sup)) return false;
+  const subSet = new Set(sub);
+  // The tokens sup has beyond sub are what "distinguish" them; a generational suffix among
+  // them means a different generation, so it is not the same person.
+  return !sup.some(t => GENERATIONAL_SUFFIX_TOKENS.has(t) && !subSet.has(t));
+}
+
+/** Sorted content-token key for a person name (titles stripped): "Dr. Ada Lovelace" and
+ *  "Ada Lovelace" share the key "ada lovelace", so a title-only variant can be deduped. */
+export function personTokenKey(name: string): string {
+  return personNameTokens(name).slice().sort().join(' ');
 }
 
 export class SubjectStore {
@@ -767,13 +799,28 @@ export class SubjectStore {
       const rows = this.db.prepare(
         "SELECT id, name FROM subjects WHERE kind = 'person' AND owner_user_id = ? AND archived_at IS NULL",
       ).all(owner) as Array<{ id: string; name: string }>;
-      const supersets = rows.filter(s => isProperTokenSubset(tokens, personNameTokens(s.name)));
-      if (supersets.length === 1) {
-        const target = this.getSubject(supersets[0]!.id)!;
+      // (a) Title-stripped token-EQUAL fold: "Dr. Ada Lovelace" vs stored "Ada Lovelace" share
+      // the SAME content tokens, so findCanonical + the normalized fallback miss (honorific /
+      // punctuation differ) and the STRICT subset scan rejects equal sets — a permanent dup.
+      // Fold the variant in as an alias when the match is UNAMBIGUOUS (exactly one).
+      const key = tokens.slice().sort().join(' ');
+      const equal = rows.filter(s => personTokenKey(s.name) === key);
+      if (equal.length === 1) {
+        const target = this.getSubject(equal[0]!.id)!;
         this._mergeAliases(target, surfaceForms);
-        return { id: target.id, created: false, resolved: 'subset' };
+        return { id: target.id, created: false, resolved: 'canonical' };
       }
-      // 0 or ≥2 supersets → ambiguous → mint a fresh subject (never guess).
+      // (b) STRICT subset fold — but a generational suffix (Jr/Sr/II) is identity-bearing, so
+      // "John Smith" is NOT folded into "John Smith Jr" (a father into his son).
+      if (equal.length === 0) {
+        const supersets = rows.filter(s => isPersonSubsetSafe(tokens, personNameTokens(s.name)));
+        if (supersets.length === 1) {
+          const target = this.getSubject(supersets[0]!.id)!;
+          this._mergeAliases(target, surfaceForms);
+          return { id: target.id, created: false, resolved: 'subset' };
+        }
+      }
+      // ambiguous (0/≥2 equal-key, or 0/≥2 supersets) → mint a fresh subject (never guess).
     }
     const id = this.createSubject({ kind: 'person', name, aliases: surfaceForms, ownerUserId: owner });
     return { id, created: true, resolved: 'created' };
@@ -901,8 +948,19 @@ export class SubjectStore {
         if (entry.detail.dupRow && !entry.detail.canonicalRow) {
           db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(canonicalId, dupId);
         } else if (entry.detail.dupRow && entry.detail.canonicalRow) {
-          const sets = def.cols.map(c => `"${c}" = COALESCE("${c}", ?)`).join(', ');
-          const vals = def.cols.map(c => (entry.detail!.dupRow as Record<string, unknown>)[c] ?? null);
+          // Per-column COALESCE keeps the canonical's non-null values, filling its nulls from
+          // the dup — EXCEPT a money pair's currency, which must follow its AMOUNT's owner: a
+          // bare COALESCE would stitch the dup's amount onto the canonical's currency (5000 EUR
+          // → 5000 "USD"). The currency takes the dup's value ONLY when the canonical's amount
+          // was null (so the amount COALESCE also takes the dup's) — the whole pair moves as one.
+          const pair = DETAIL_MONEY_PAIRS[entry.kind];
+          const dupRow = entry.detail.dupRow as Record<string, unknown>;
+          const sets = def.cols.map(c =>
+            pair && c === pair.currency
+              ? `"${c}" = CASE WHEN "${pair.amount}" IS NULL THEN ? ELSE "${c}" END`
+              : `"${c}" = COALESCE("${c}", ?)`,
+          ).join(', ');
+          const vals = def.cols.map(c => dupRow[c] ?? null);
           db.prepare(`UPDATE "${def.table}" SET ${sets} WHERE subject_id = ?`).run(...vals, canonicalId);
           db.prepare(`DELETE FROM "${def.table}" WHERE subject_id = ?`).run(dupId);
         }
