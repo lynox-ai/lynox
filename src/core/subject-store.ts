@@ -596,6 +596,21 @@ export class SubjectStore {
     return (this.db.prepare(`SELECT COUNT(*) AS n FROM subjects ${clause}`).get(...args) as { n: number }).n;
   }
 
+  /**
+   * memory_subjects link counts for a set of subjects — the KG "mention count"
+   * proxy (how many memories reference each subject). One GROUP BY, not N+1.
+   */
+  getMentionCounts(subjectIds: string[]): Map<string, number> {
+    const counts = new Map<string, number>();
+    if (subjectIds.length === 0) return counts;
+    const placeholders = subjectIds.map(() => '?').join(', ');
+    const rows = this.db.prepare(
+      `SELECT subject_id AS id, COUNT(*) AS n FROM memory_subjects WHERE subject_id IN (${placeholders}) GROUP BY subject_id`,
+    ).all(...subjectIds) as { id: string; n: number }[];
+    for (const r of rows) counts.set(r.id, r.n);
+    return counts;
+  }
+
   /** Soft-archive (queries default to active; cascades remain via FK ON DELETE on hard purge). */
   archiveSubject(id: string): void {
     this.db.prepare("UPDATE subjects SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND archived_at IS NULL").run(id);

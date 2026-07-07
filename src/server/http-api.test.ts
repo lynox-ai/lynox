@@ -4796,6 +4796,34 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('GET /api/kg/graph returns getGraph nodes+edges and clamps the limit [1,300]', async () => {
+      const getGraph = vi.fn((_limit: number) => Promise.resolve({
+        nodes: [{ id: 'a', canonicalName: 'A', entityType: 'person', aliases: [], description: '', scopeType: 'global', scopeId: 'global', mentionCount: 3, firstSeenAt: '', lastSeenAt: '' }],
+        edges: [{ fromEntityId: 'a', toEntityId: 'a', relationType: 'self', description: '', confidence: 1, sourceMemoryId: '', createdAt: '' }],
+      }));
+      await swapEngine({ getKnowledgeLayer: () => ({ getGraph }) }, async () => {
+        const res = await jsonFetch('/api/kg/graph?limit=80');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { nodes: unknown[]; edges: unknown[] };
+        expect(body.nodes).toHaveLength(1);
+        expect(body.edges).toHaveLength(1);
+        expect(getGraph).toHaveBeenCalledWith(80);
+        // Over-max clamps to 300; a missing/zero limit defaults to 80.
+        await jsonFetch('/api/kg/graph?limit=9999');
+        expect(getGraph).toHaveBeenCalledWith(300);
+      });
+    });
+
+    it('GET /api/kg/graph returns empty graph (never 500) when getGraph throws', async () => {
+      await swapEngine({
+        getKnowledgeLayer: () => ({ getGraph: () => { throw new Error('engine.db closed'); } }),
+      }, async () => {
+        const res = await jsonFetch('/api/kg/graph');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ nodes: [], edges: [] });
+      });
+    });
+
     it('DELETE /api/data wipes engine.db PII via deleteAllData (Right to Erasure)', async () => {
       const deleteAllData = vi.fn();
       await swapEngine({

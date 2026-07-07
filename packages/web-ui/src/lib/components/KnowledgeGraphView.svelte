@@ -44,6 +44,11 @@
 	let graphNodes = $state<GraphNode[]>([]);
 	let graphEdges = $state<GraphEdge[]>([]);
 	let graphLoading = $state(false);
+	// Load-once latch: gate the graph-load effect on this, NOT `graphNodes.length`.
+	// A connected-subgraph fetch legitimately returns 0 nodes (a tenant with no
+	// relationships), and reassigning the `$state` array always re-notifies — so a
+	// `.length === 0` guard would re-fire loadGraph() forever.
+	let graphLoaded = $state(false);
 	let hoveredNode = $state<string | null>(null);
 	let svgEl: SVGSVGElement | undefined = $state(undefined);
 
@@ -99,30 +104,20 @@
 	async function loadGraph() {
 		graphLoading = true;
 		try {
-			// Load top entities (by mention count)
-			const res = await fetch(`${getApiBase()}/kg/entities?limit=30`);
+			// Fetch the connected subgraph directly — the recency-ordered
+			// `/kg/entities` page returned mostly orphan nodes whose partners fell
+			// outside the page, so no edges could draw. `/kg/graph` returns edges
+			// with BOTH endpoints present, plus exactly the nodes they touch.
+			const res = await fetch(`${getApiBase()}/kg/graph?limit=80`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { entities: Entity[] };
-			const ents = data.entities;
-
-			// Fetch relations for each entity in parallel
-			const relResults = await Promise.allSettled(
-				ents.map(e => fetch(`${getApiBase()}/kg/entities/${e.id}`).then(r => r.ok ? r.json() as Promise<{ entity: Entity; relations: Relation[] }> : { entity: e, relations: [] }))
-			);
-
-			const allEdges = new Map<string, GraphEdge>();
+			const data = (await res.json()) as { nodes: Entity[]; edges: { fromEntityId: string; toEntityId: string; relationType: string }[] };
+			const ents = data.nodes;
 			const entityIds = new Set(ents.map(e => e.id));
-
-			for (const result of relResults) {
-				if (result.status !== 'fulfilled') continue;
-				const { relations: rels } = result.value;
-				for (const rel of rels) {
-					if (entityIds.has(rel.fromEntityId) && entityIds.has(rel.toEntityId)) {
-						const key = `${rel.fromEntityId}-${rel.toEntityId}-${rel.relationType}`;
-						if (!allEdges.has(key)) {
-							allEdges.set(key, { source: rel.fromEntityId, target: rel.toEntityId, label: rel.relationType });
-						}
-					}
+			const allEdges = new Map<string, GraphEdge>();
+			for (const rel of data.edges) {
+				if (entityIds.has(rel.fromEntityId) && entityIds.has(rel.toEntityId)) {
+					const key = `${rel.fromEntityId}-${rel.toEntityId}-${rel.relationType}`;
+					if (!allEdges.has(key)) allEdges.set(key, { source: rel.fromEntityId, target: rel.toEntityId, label: rel.relationType });
 				}
 			}
 
@@ -197,6 +192,7 @@
 			graphEdges = edges;
 		} catch { error = t('common.load_failed'); }
 		graphLoading = false;
+		graphLoaded = true;   // latch after the attempt (success OR fail) — never re-loop
 	}
 
 	function handleGraphNodeClick(entity: Entity) {
@@ -256,7 +252,7 @@
 	$effect(() => { loadEntities(); });
 
 	$effect(() => {
-		if (viewMode === 'graph' && graphNodes.length === 0) loadGraph();
+		if (viewMode === 'graph' && !graphLoaded && !graphLoading) loadGraph();
 	});
 
 	function handleSearch() { loadEntities(); }

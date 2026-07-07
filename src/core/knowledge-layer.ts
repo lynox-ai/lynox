@@ -992,6 +992,53 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * The connected subgraph for the graph visualization: the most-recent N
+   * relationships (edges) plus exactly the subjects they touch (nodes) — so the
+   * client always gets edges whose BOTH endpoints are present. This is what the
+   * `/api/kg/graph` view needs; the recency-ordered `listEntities` returned mostly
+   * orphan nodes whose partners fell outside the page, so no edges could draw.
+   */
+  async getGraph(limit: number): Promise<{ nodes: EntityRecord[]; edges: RelationRecord[] }> {
+    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore) {
+      try {
+        const relRows = this.relationshipStore.listRecent(limit);
+        const edges = relRows.map(r => this._relRowToRelationRecord(r));
+        const ids = new Set<string>();
+        for (const e of edges) { ids.add(e.fromEntityId); ids.add(e.toEntityId); }
+        const store = this.subjectStore;
+        const counts = store.getMentionCounts([...ids]);
+        const nodes: EntityRecord[] = [];
+        for (const id of ids) {
+          const row = store.getSubject(id);
+          if (!row || row.archived_at) continue;
+          const rec = this._subjectRowToEntityRecord(row, counts.get(id) ?? 0);
+          if (rec) nodes.push(rec);
+        }
+        // Drop edges whose endpoint was archived/missing (node filtered out), then
+        // prune any node left with no surviving edge — keep "exactly the nodes the
+        // surviving edges touch" so an archived partner can't leave an orphan node.
+        const present = new Set(nodes.map(n => n.id));
+        const survivingEdges = edges.filter(e => present.has(e.fromEntityId) && present.has(e.toEntityId));
+        const referenced = new Set<string>();
+        for (const e of survivingEdges) { referenced.add(e.fromEntityId); referenced.add(e.toEntityId); }
+        return { nodes: nodes.filter(n => referenced.has(n.id)), edges: survivingEdges };
+      } catch (err: unknown) { this._logReadFallback('getGraph', err); }
+    }
+    // Legacy fallback (flag-off): top entities by mention + their relations.
+    const ents = this.db.listEntities({ limit }).map(toEntityRecord);
+    const ids = new Set(ents.map(e => e.id));
+    const edges: RelationRecord[] = [];
+    for (const e of ents) {
+      for (const r of this.db.getEntityRelations(e.id, 50)) {
+        if (ids.has(r.from_entity_id) && ids.has(r.to_entity_id)) {
+          edges.push({ fromEntityId: r.from_entity_id, toEntityId: r.to_entity_id, relationType: r.relation_type, description: r.description, confidence: r.confidence, sourceMemoryId: r.source_memory_id ?? '', createdAt: r.created_at });
+        }
+      }
+    }
+    return { nodes: ents, edges };
+  }
+
+  /**
    * Entity browse-search (the `/api/kg/entities?q=` path). When the subject-graph
    * read path is active this is a case-insensitive name/alias substring match over
    * subjects (no semantic search over subjects yet — substring is predictable for a
@@ -1012,7 +1059,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (this.subjectGraphEnabled && this.subjectStore) {
       try {
         const row = this.subjectStore.getSubject(id);
-        return row ? this._subjectRowToEntityRecord(row) : null;
+        if (!row) return null;
+        const count = this.subjectStore.getMentionCounts([id]).get(id) ?? 0;
+        return this._subjectRowToEntityRecord(row, count);
       } catch (err: unknown) { this._logReadFallback('getEntity', err); }
     }
     const row = this.db.getEntity(id);
@@ -1063,10 +1112,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   /**
    * The subject-graph read of the entity list: maps Subjects back to the stable
    * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
-   * Filter order: kind (`type`) → name/alias substring (`q`) → offset/limit slice.
-   * Rows come `updated_at DESC` (via `listSubjects`); the legacy path orders by
-   * `mention_count DESC`, but subjects carry no mention count, so browse order +
-   * `mentionCount` (0) differ from legacy — tracked with the memory sprint.
+   * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
+   * backfill → offset/limit slice. Rows come `updated_at DESC` (via `listSubjects`);
+   * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
+   * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
+   * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
    */
   private _listSubjectEntities(
     opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
@@ -1090,11 +1140,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
     const offset = Math.max(opts?.offset ?? 0, 0);
     const limit = opts?.limit ?? mapped.length;
-    return mapped.slice(offset, offset + limit);
+    const page = mapped.slice(offset, offset + limit);
+    // Populate the real mention count (memory_subjects links) — the subject path
+    // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
+    // the returned page ONLY: bounded against the SQLite variable cap on a large
+    // graph, and no wasted counting of rows we slice away.
+    const counts = store.getMentionCounts(page.map(e => e.id));
+    for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
+    return page;
   }
 
   /** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
-  private _subjectRowToEntityRecord(row: SubjectRow): EntityRecord | null {
+  private _subjectRowToEntityRecord(row: SubjectRow, mentionCount = 0): EntityRecord | null {
     const entityType = subjectKindToEntityType(row.kind);
     if (!entityType) return null;
     let aliases: string[];
@@ -1112,7 +1169,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       description: '',
       scopeType: 'global',
       scopeId: 'global',
-      mentionCount: 0,
+      mentionCount,
       firstSeenAt: row.created_at,
       lastSeenAt: row.updated_at,
     };
