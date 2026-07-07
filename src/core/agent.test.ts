@@ -2526,6 +2526,11 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
       expect(req.tools.find((t) => t.name === n)?.defer_loading).toBeUndefined();
     }
     expect(req.betas).toContain(ADVANCED_TOOL_USE);
+    // The lazy beta is ADDED to the base provider betas, never replaces them —
+    // regression guard so a future refactor can't drop the base betas.
+    for (const b of getBetasForProvider('anthropic')) {
+      expect(req.betas).toContain(b);
+    }
   });
 
   it('flag ON + non-direct provider (custom) → full flat set, NO tool-search tool, NO defer_loading, NO advanced-tool-use beta', async () => {

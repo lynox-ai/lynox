@@ -88,6 +88,14 @@ export const LAZY_DEFERRED_TOOLS = new Set<string>([
   'subjects_merge','set_thread_context',
 ]);
 
+/** The server-side tool-search tool (SDK union member) prepended to the tools
+ *  array on the lazy path. A fixed 2-field literal with no instance state —
+ *  module-level so the flag-OFF path allocates nothing new. */
+const LAZY_TOOL_SEARCH_TOOL: BetaToolSearchToolRegex20251119 = {
+  type: 'tool_search_tool_regex_20251119',
+  name: 'tool_search_tool_regex',
+};
+
 /**
  * Serialized length of a message for occupancy estimation, but with inline
  * base64 image blocks counted by their pixel-based token-equivalent
@@ -1121,15 +1129,11 @@ export class Agent implements IAgent {
           }
           return t;
         });
-    // The tool-search tool (typed to the SDK union member) heads the array when
-    // lazy, then the sorted tenant tools, then the web_search builtin — a stable,
-    // deterministic layout.
-    const toolSearchTool: BetaToolSearchToolRegex20251119 = {
-      type: 'tool_search_tool_regex_20251119',
-      name: 'tool_search_tool_regex',
-    };
+    // The tool-search tool (module-level LAZY_TOOL_SEARCH_TOOL) heads the array
+    // when lazy, then the sorted tenant tools, then the web_search builtin — a
+    // stable, deterministic layout.
     const toolsDef = [
-      ...(lazyToolsActive ? [toolSearchTool] : []),
+      ...(lazyToolsActive ? [LAZY_TOOL_SEARCH_TOOL] : []),
       ...strippedTenantTools,
       ...builtinTools,
     ];

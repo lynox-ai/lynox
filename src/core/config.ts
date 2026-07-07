@@ -160,7 +160,7 @@ export function loadConfig(): LynoxUserConfig {
   // CP flips this per-tenant via env without editing config.json. Same explicit
   // 'true'/'1' vs 'false'/'0' parse as the mirror flag above (no z.coerce, which
   // would treat any non-empty string as true).
-  const lazyTools = process.env['LYNOX_LAZY_TOOLS'];
+  const lazyTools = process.env['LYNOX_LAZY_TOOLS_ENABLED'];
   if (lazyTools === 'true' || lazyTools === '1') {
     merged.lazy_tools_enabled = true;
   } else if (lazyTools === 'false' || lazyTools === '0') {
