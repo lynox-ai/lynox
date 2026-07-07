@@ -1054,6 +1054,30 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.currentRunId).toBe(MINTED_ID);
     });
 
+    it('records the resolved provider on the spawn run (no more provider="")', async () => {
+      // #6: spawn's insertRun omitted `provider` → every child row stored '' (the
+      // recording gap that made the hybrid 404s show provider=""). It now records
+      // the child's actually-resolved provider.
+      const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+      const insertRun = vi.fn().mockReturnValue('run-prov');
+      const updateRun = vi.fn();
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory: { insertRun, updateRun },
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+      const agent = makeAgent({
+        currentRunId: 'p',
+        toolContext: parentToolContext,
+        getProviderConfig: () => ({
+          provider: 'anthropic', apiKey: 'k', apiBaseURL: undefined, openaiModelId: undefined, openaiAuth: undefined,
+        }),
+      } as Partial<IAgent>);
+      await spawnAgentTool.handler({ agents: [{ name: 'rec', task: 'x' }] }, agent);
+      const insertArg = insertRun.mock.calls[0]![0] as { provider?: string };
+      expect(insertArg.provider).toBe('anthropic'); // was omitted → '' pre-fix
+    });
+
     it('records actual spawn cost into runs table so daily/monthly cap aggregation sees it', async () => {
       const MINTED_ID = 'run-child-cost-abc';
       const insertRun = vi.fn().mockReturnValue(MINTED_ID);
