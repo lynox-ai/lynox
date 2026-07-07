@@ -2588,4 +2588,76 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
       ['tool_search_tool_regex', 'artifact_save', 'bash', 'mail_send', 'web_search'],
     );
   });
+
+  // === Slice 2: close the safety-review test gaps ===
+
+  it('flag OFF → tenant tools stay in REGISTRATION order even when unsorted (sort is lazy-only)', async () => {
+    // The OFF byte-identity test above registers a PRE-SORTED fixture, so it cannot
+    // catch an accidental OFF-path sort. This one registers UNSORTED: OFF must NOT
+    // reorder — a sorted OFF output would re-write the cached prefix fleet-wide for
+    // every non-lazy tenant (the whole reason the sort is gated on lazyToolsActive).
+    const toolEntries = [makeTool('mail_send'), makeTool('artifact_save'), makeTool('bash')];
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      // lazy_tools_enabled unset (default OFF)
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    expect(req.tools.map((t) => t.name)).toEqual(['mail_send', 'artifact_save', 'bash', 'web_search']);
+    expect(req.tools.some((t) => t.type === SEARCH_TOOL_TYPE)).toBe(false);
+  });
+
+  it('flag ON marks defer_loading on COPIES — the registry tool definitions are never mutated', async () => {
+    const toolEntries = ['bash', 'mail_send', 'artifact_save'].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    await agent.send('hi');
+
+    // The wire request carried defer_loading on the deferred tools…
+    const req = streamRequestOf(agent);
+    expect(req.tools.find((t) => t.name === 'mail_send')?.defer_loading).toBe(true);
+    expect(req.tools.find((t) => t.name === 'artifact_save')?.defer_loading).toBe(true);
+    // …but the original registry definitions must be pristine (no leaked mutation),
+    // else a later OFF or non-direct call would inherit a stale defer_loading.
+    for (const entry of toolEntries) {
+      expect((entry.definition as { defer_loading?: boolean }).defer_loading).toBeUndefined();
+    }
+  });
+
+  it('flag ON tolerates an all-deferred tenant set and a missing description without corrupting the token estimate', async () => {
+    // Every tenant tool is in the defer-set (all leave the eager estimate) and one
+    // has NO description — the lazy toolTokens branch stubs `(desc ?? '').slice(0,120)`
+    // and filters deferred bodies out. A NaN/throw there would reject this send.
+    const toolEntries = ['mail_send', 'artifact_save', 'data_store_query', 'google_drive'].map((n) => makeTool(n));
+    delete (toolEntries[3]!.definition as { description?: string }).description;
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    // Must not throw — the estimate cannot crash the run.
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    // Search tool heads the eager set; web_search is the only other eager entry.
+    expect(req.tools[0]!.type).toBe(SEARCH_TOOL_TYPE);
+    expect(req.tools.some((t) => t.name === 'web_search')).toBe(true);
+    for (const n of ['mail_send', 'artifact_save', 'data_store_query', 'google_drive']) {
+      expect(req.tools.find((t) => t.name === n)?.defer_loading).toBe(true);
+    }
+  });
 });
