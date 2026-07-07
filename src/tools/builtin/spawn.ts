@@ -213,7 +213,13 @@ async function executeThinker(
   const baseProvider = getActiveProvider();
   const resolvedRun = resolveRunModel({
     requested: spec.model,
-    defaultTier: (resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier,
+    // Unroled spawns pin to `balanced`, NOT the main chat's `default_tier`
+    // (rafael 2026-07-07): once the "Main chat model" picker can raise the main
+    // chat to `deep` (Opus/Large), letting tier-unspecified spawns inherit that
+    // would silently multiply per-message cost. Roles keep their own tier
+    // (operator/collector=fast); an explicit `spec.model` still wins via
+    // resolveRunModel's `requested`.
+    defaultTier: (resolved?.model ?? 'balanced') as ModelTier,
     accountTier: userConfig.account_tier,
     maxTier: userConfig.max_tier,
     provider: baseProvider,
