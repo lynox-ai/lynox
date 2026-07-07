@@ -410,6 +410,12 @@ export interface LynoxUserConfig {
    */
   subject_graph_enabled?: boolean | undefined;
   /**
+   * Anthropic-direct only: defer heavy/long-tail tool schemas via the tool-search
+   * tool so the cached prefix shrinks. Default off; per-tenant flip like
+   * subject_graph_enabled.
+   */
+  lazy_tools_enabled?: boolean | undefined;
+  /**
    * Foundation Rework v2 (S5b): re-point the memory RECALL reads (vector search +
    * graph-expand + the no-query recency list) from the legacy agent-memory.db onto
    * the engine.db subject-graph `memories`. Default: false — recall stays on the

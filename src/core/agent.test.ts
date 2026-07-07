@@ -51,7 +51,8 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, RunAbortedError } from './agent.js';
+import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import { getBetasForProvider } from '../types/index.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
@@ -2429,5 +2430,162 @@ describe('Agent — context_cost_log live hook (wiring)', () => {
     // Give any (incorrect) async write the same window the ON-case needs.
     await new Promise((r) => setTimeout(r, 60));
     expect(existsSync(join(dir, CONTEXT_COST_LOG_FILE))).toBe(false);
+  });
+});
+
+// === Lazy-tools (Slice 1): tool-search + defer_loading assembly ===
+
+describe('Agent lazy-tools assembly (Slice 1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  interface StreamToolLike { name?: string; type?: string; defer_loading?: boolean }
+  interface StreamRequest { tools: StreamToolLike[]; betas?: string[] }
+
+  // The mock Anthropic client is per-agent; its beta.messages.stream is a vi.fn
+  // that records the request params (StreamProcessor.process is separately mocked,
+  // so stream's return value is irrelevant — only the call args matter here).
+  function streamRequestOf(agent: Agent): StreamRequest {
+    const stream = (agent as unknown as {
+      client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } };
+    }).client.beta.messages.stream;
+    const calls = stream.mock.calls;
+    if (calls.length === 0) throw new Error('client.beta.messages.stream was not called');
+    return calls[0]![0] as StreamRequest;
+  }
+
+  const ADVANCED_TOOL_USE = 'advanced-tool-use-2025-11-20';
+  const SEARCH_TOOL_TYPE = 'tool_search_tool_regex_20251119';
+
+  it('flag OFF → toolsDef byte-identical to today (no tool-search tool, no defer_loading, no advanced-tool-use beta)', async () => {
+    // Registered already name-sorted so the deterministic sort is a no-op and the
+    // OFF output is byte-identical to today's registration-order assembly. (The
+    // one-time sort re-write is exercised by the dedicated ordering test below.)
+    const toolEntries = [
+      makeTool('artifact_save'), // deferred in the set — must stay eager when OFF
+      makeTool('bash'),          // core
+      makeTool('mail_send'),     // deferred in the set
+      makeTool('read_file'),     // core
+    ];
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      // lazy_tools_enabled unset (default OFF)
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    const expectedTools = [
+      ...toolEntries.map((t) => t.definition),
+      { type: 'web_search_20250305', name: 'web_search' },
+    ];
+    expect(req.tools).toEqual(expectedTools);
+    // Zero lazy machinery leaks into the OFF path.
+    expect(req.tools.some((t) => t.type === SEARCH_TOOL_TYPE)).toBe(false);
+    expect(req.tools.every((t) => t.defer_loading === undefined)).toBe(true);
+    expect(req.betas).toEqual(getBetasForProvider('anthropic'));
+    expect(req.betas).not.toContain(ADVANCED_TOOL_USE);
+  });
+
+  it('flag ON + anthropic-direct → tool-search tool first, deferred tools marked, core tools eager, advanced-tool-use beta present', async () => {
+    const core = ['bash', 'read_file', 'memory_recall', 'spawn_agent'];
+    const deferred = ['mail_send', 'artifact_save', 'data_store_query', 'google_drive'];
+    const toolEntries = [...core, ...deferred].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    // Tool-search tool present and FIRST.
+    expect(req.tools[0]!.type).toBe(SEARCH_TOOL_TYPE);
+    expect(req.tools[0]!.name).toBe('tool_search_tool_regex');
+    expect(req.tools.filter((t) => t.type === SEARCH_TOOL_TYPE).length).toBe(1);
+    // Every LAZY_DEFERRED_TOOLS member present is deferred; everything else is eager.
+    for (const t of req.tools) {
+      if (t.name !== undefined && LAZY_DEFERRED_TOOLS.has(t.name)) {
+        expect(t.defer_loading).toBe(true);
+      } else {
+        expect(t.defer_loading).toBeUndefined();
+      }
+    }
+    // Spot-check the two axes explicitly.
+    for (const n of deferred) {
+      expect(req.tools.find((t) => t.name === n)?.defer_loading).toBe(true);
+    }
+    for (const n of core) {
+      expect(req.tools.find((t) => t.name === n)?.defer_loading).toBeUndefined();
+    }
+    expect(req.betas).toContain(ADVANCED_TOOL_USE);
+  });
+
+  it('flag ON + non-direct provider (custom) → full flat set, NO tool-search tool, NO defer_loading, NO advanced-tool-use beta', async () => {
+    const toolEntries = ['bash', 'mail_send', 'artifact_save', 'data_store_query'].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'custom', // isNonDirectAnthropic → lazy path suppressed
+      tools: toolEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    expect(req.tools.some((t) => t.type === SEARCH_TOOL_TYPE)).toBe(false);
+    expect(req.tools.every((t) => t.defer_loading === undefined)).toBe(true);
+    // custom proxy omits betas entirely — so advanced-tool-use is definitely absent.
+    expect(req.betas).toBeUndefined();
+    // Full flat set in REGISTRATION order (sort is lazy-only; non-direct suppresses
+    // the lazy path entirely → byte-identical to today's fallback), none deferred.
+    expect(req.tools.map((t) => t.name)).toEqual(['bash', 'mail_send', 'artifact_save', 'data_store_query']);
+  });
+
+  it('flag ON + _suppressTools → no tools at all (compaction path unaffected)', async () => {
+    const toolEntries = ['bash', 'mail_send', 'artifact_save'].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('summary'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    await agent.send('compact this', { suppressTools: true });
+
+    const req = streamRequestOf(agent);
+    expect(req.tools).toEqual([]);
+    expect(req.betas).not.toContain(ADVANCED_TOOL_USE);
+  });
+
+  it('deterministic ordering (lazy path): tenant tools come out name-sorted', async () => {
+    // Registered deliberately UNSORTED — the lazy assembly must emit them
+    // name-sorted (the sort is lazy-only: flag OFF stays registration-order, so
+    // Slice 1 is a no-op for non-lazy tenants — proven by the OFF test above).
+    const toolEntries = [makeTool('mail_send'), makeTool('artifact_save'), makeTool('bash')];
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    // tool-search tool heads the array, then the sorted tenant tools, then web_search.
+    expect(req.tools.map((t) => t.name)).toEqual(
+      ['tool_search_tool_regex', 'artifact_save', 'bash', 'mail_send', 'web_search'],
+    );
   });
 });
