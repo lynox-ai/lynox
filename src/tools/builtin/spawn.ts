@@ -10,7 +10,7 @@ import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
 import { getRole, getRoleNames } from '../../core/roles.js';
-import { resolveRunModel } from '../../core/tier-resolver.js';
+import { resolveRunModel, resolveTierModel, hybridSlotClientConfig } from '../../core/tier-resolver.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
@@ -210,16 +210,29 @@ async function executeThinker(
   // the cost ceiling THEN map to the provider's model id. Routing through
   // resolveRunModel adds the max_tier clamp this path previously skipped — a run
   // under a lower ceiling no longer reaches the deep model past its cap.
+  const baseProvider = getActiveProvider();
   const resolvedRun = resolveRunModel({
     requested: spec.model,
     defaultTier: (resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier,
     accountTier: userConfig.account_tier,
     maxTier: userConfig.max_tier,
-    provider: getActiveProvider(),
+    provider: baseProvider,
   });
   const modelTier = resolvedRun.tier;
-  // Profile overrides model ID + provider; otherwise use the resolved tier id.
-  const model = profile ? profile.model_id : resolvedRun.modelId;
+  // Slice 2: a subagent's tier follows the hybrid tier_set. When the resolved
+  // tier has a CROSS-provider slot (e.g. a Mistral main with a `deep`→Sonnet-5
+  // slot), the child runs on that slot's provider/model/creds with a dedicated
+  // client — no per-spawn `profile:` needed. `spec.profile` still WINS (an
+  // explicit opt-out of inheritance). Standard mode returns no slot
+  // (resolveTierModel gates on hybrid) → this is byte-parity with before.
+  const hybridSlot = profile
+    ? { crossProviderSlot: false as const }
+    : hybridSlotClientConfig(resolveTierModel(modelTier, baseProvider), baseProvider);
+  // Profile overrides model ID + provider; a cross-provider hybrid slot supplies
+  // its own model; otherwise use the resolved tier id for the base provider.
+  const model = profile
+    ? profile.model_id
+    : (hybridSlot.crossProviderSlot ? hybridSlot.openaiModelId : resolvedRun.modelId);
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
   // the child falls through to agent.ts's bare default, which has NO grounding.
@@ -345,7 +358,14 @@ async function executeThinker(
     // userConfig.* preserved as fallback for self-host paths where the
     // parent might not have set its provider config explicitly.
     // Precedence chain documented + unit-tested in `resolveChildProviderConfig`.
-    ...resolveChildProviderConfig(profile, readParentProviderConfig(parentAgent), userConfig),
+    // Slice 2: a cross-provider hybrid slot supersedes the profile>parent>config
+    // chain — the child's wire + creds come from the slot (already sanitized +
+    // CP-key-enriched upstream), so a `deep` spawn from a Mistral main lands on
+    // the deep slot's provider (e.g. Anthropic Sonnet 5) with a dedicated client.
+    // Only reachable when !profile (crossProviderSlot is forced false otherwise).
+    ...(hybridSlot.crossProviderSlot
+      ? { provider: hybridSlot.provider, apiKey: hybridSlot.apiKey, apiBaseURL: hybridSlot.apiBaseURL, openaiModelId: hybridSlot.openaiModelId }
+      : resolveChildProviderConfig(profile, readParentProviderConfig(parentAgent), userConfig)),
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,

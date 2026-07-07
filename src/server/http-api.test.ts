@@ -2064,13 +2064,15 @@ describe('LynoxHTTPApi', () => {
     it('PUT in managed mode rejects locked-field changes', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
       try {
+        // max_tier is the cost CEILING — it stays managed-locked even though
+        // default_tier opened up to the user's "Main chat model" picker.
         const res = await jsonFetch('/api/config', {
           method: 'PUT',
-          body: JSON.stringify({ default_tier: 'fast' }), // mock effective is 'deep'
+          body: JSON.stringify({ max_tier: 'fast' }),
         });
         expect(res.status).toBe(403);
         const body = await res.json() as { error: string };
-        expect(body.error).toContain('default_tier');
+        expect(body.error).toContain('max_tier');
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -3582,7 +3584,9 @@ describe('LynoxHTTPApi', () => {
       });
 
       it.each([
-        ['default_tier', 'fast'],
+        // default_tier is NO LONGER here — it is the user's "Main chat model"
+        // picker, now user-writable on managed (clamped to max_tier at the
+        // engine). See the acceptance test below.
         ['max_session_cost_usd', 1_000_000],
         ['max_daily_cost_usd', 1_000_000],
         ['max_monthly_cost_usd', 1_000_000],
@@ -3614,6 +3618,24 @@ describe('LynoxHTTPApi', () => {
           }
         },
       );
+
+      it('PUT /api/config ACCEPTS a user-scope default_tier change in managed mode (the Main chat model picker)', async () => {
+        // default_tier is now the user's "Main chat model" band — user-writable
+        // on managed (a genuine change from the effective 'deep' → 'balanced'),
+        // never widening blast radius because the engine clamps it to max_tier.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ default_tier: 'balanced' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
 
       it('PUT /api/config rejects unknown fields under user-scope in managed mode (schema-strict fail-closed)', async () => {
         // PRD-IA-V2 P1-PR-A2: schema is `.strict()`, so a hostile or typo'd

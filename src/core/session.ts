@@ -23,8 +23,8 @@ import type {
   MailConnectPromptData,
   PromptMeta,
 } from '../types/index.js';
-import { effectiveContextWindow, getProviderDescriptor } from '../types/index.js';
-import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
+import { effectiveContextWindow } from '../types/index.js';
+import { resolveRunModel, resolveTierModel, hybridSlotClientConfig } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError } from './agent.js';
@@ -1854,37 +1854,10 @@ export function sanitizeLLMTitle(raw: string): string {
   return title;
 }
 
-/**
- * Wire-level Agent client config for a resolved per-tier snapshot under hybrid
- * routing. A CROSS-provider slot — one whose provider differs from the base, or
- * that carries enriched `api_key`/`api_base_url` (injected by enrichTierSetCreds
- * / applyManagedTierSetConstraints) — drives the Agent's wire + creds from the
- * slot, mapping the registry ProviderKey to the wire-level LLMProvider the Agent
- * client + beta/cache logic understand (mirrors `clientForTierSnapshot`:
- * mistral→openai). So a hybrid Mistral slot becomes the SAME Agent shape as a
- * standard managed-Mistral session (provider 'openai' + Mistral host), reusing
- * that well-tested path end-to-end. A same-provider/standard snapshot returns
- * `{crossProviderSlot:false}` and the caller keeps its base values (byte-parity).
- *
- * Pure + table-testable — this is the seam the hybrid hot-path regression is
- * pinned to: before this, `session.ts` dispatched a cross-provider tier through
- * the AMBIENT client with only the model id swapped, so a chat-tier→Mistral slot
- * sent a Mistral model id to the Anthropic endpoint → 404.
- */
-export function hybridSlotClientConfig(
-  snap: ReturnType<typeof resolveTierModel>,
-  baseProvider: LLMProvider | undefined,
-):
-  | { crossProviderSlot: true; provider: LLMProvider; apiKey: string | undefined; apiBaseURL: string | undefined; openaiModelId: string }
-  | { crossProviderSlot: false } {
-  const isCross = snap.provider !== baseProvider
-    || snap.apiKey !== undefined
-    || snap.apiBaseURL !== undefined;
-  if (!isCross) return { crossProviderSlot: false };
-  const wire = getProviderDescriptor(snap.provider)?.wireClient ?? 'anthropic';
-  const provider: LLMProvider = wire === 'openai' ? 'openai' : wire === 'vertex' ? 'vertex' : 'anthropic';
-  return { crossProviderSlot: true, provider, apiKey: snap.apiKey, apiBaseURL: snap.apiBaseURL, openaiModelId: snap.modelId };
-}
+// `hybridSlotClientConfig` moved to `tier-resolver.ts` (it is pure tier-routing
+// logic, now shared with spawn.ts for Slice 2). Imported above for session's own
+// use; re-exported here so existing importers of `session.js` keep resolving it.
+export { hybridSlotClientConfig };
 
 /**
  * Flatten the readable text of a message array (string content, text blocks,
