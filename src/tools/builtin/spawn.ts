@@ -324,6 +324,19 @@ async function executeThinker(
   const model = profile
     ? profile.model_id
     : (hybridSlot.crossProviderSlot ? hybridSlot.openaiModelId : resolvedRun.modelId);
+  // Resolve the child's wire + creds ONCE, up front, so (a) the runs row records
+  // the ACTUAL provider instead of '' — the recording gap that made the hybrid
+  // 404s show `provider=""` and hid which wire the child hit — and (b) the
+  // AgentConfig below reuses the same result (no double resolution).
+  const childProviderCfg = resolveSpawnChildProviderConfig({
+    hybridSlot,
+    routingMode: getActiveRoutingMode(),
+    profile,
+    parent: readParentProviderConfig(parentAgent),
+    baseProvider,
+    userConfig,
+    resolveKey: (provider) => resolveProviderApiKey({ provider, secretStore: parentAgent.secretStore, userConfig }),
+  });
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
   // the child falls through to agent.ts's bare default, which has NO grounding.
@@ -404,6 +417,7 @@ async function executeThinker(
         taskText: spec.task,
         modelTier: modelTier as string,
         modelId: model,
+        provider: childProviderCfg.provider,
         runType: 'single',
         spawnParentId: parentAgent.currentRunId,
         spawnDepth: childDepth,
@@ -442,17 +456,10 @@ async function executeThinker(
     // model trims against the real window, not the 200k id-fallback.
     nativeContextWindow: profile?.context_window ?? parentAgent.getNativeContextWindow(),
     // Child wire + creds, resolved from the child's OWN tier (never the parent's
-    // runtime slot in hybrid — the v2.1.1 silent-fast-spawn 404). Full rationale
-    // in `resolveSpawnChildProviderConfig`.
-    ...resolveSpawnChildProviderConfig({
-      hybridSlot,
-      routingMode: getActiveRoutingMode(),
-      profile,
-      parent: readParentProviderConfig(parentAgent),
-      baseProvider,
-      userConfig,
-      resolveKey: (provider) => resolveProviderApiKey({ provider, secretStore: parentAgent.secretStore, userConfig }),
-    }),
+    // runtime slot in hybrid — the v2.1.1 silent-fast-spawn 404). Resolved once
+    // above so the runs row records the same provider. Rationale in
+    // `resolveSpawnChildProviderConfig`.
+    ...childProviderCfg,
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
