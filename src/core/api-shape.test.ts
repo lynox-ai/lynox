@@ -139,6 +139,16 @@ describe('applyShape — projection', () => {
     expect(result.error).toBeUndefined();
     expect(JSON.parse(result.shaped)).toEqual({});
   });
+
+  it('errors loudly when include matches nothing against a top-level ARRAY response', () => {
+    // Some APIs return a bare array; the hint must describe the array shape, and
+    // the empty-projection detection must handle the array-root case.
+    const raw = [{ id: 1 }, { id: 2 }, { id: 3 }];
+    const result = applyShape(raw, { kind: 'reduce', include: ['results[].name'] });
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain('array of 3');
+    expect(JSON.parse(result.shaped)).toEqual(raw); // raw preserved, not '[]'
+  });
 });
 
 describe('applyShape — reducers', () => {

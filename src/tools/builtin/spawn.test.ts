@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IAgent, ToolEntry, StreamHandler } from '../../types/index.js';
 import type { RoleConfig } from '../../core/roles.js';
 
@@ -150,6 +150,19 @@ describe('spawn_agent tool', () => {
       pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     resetSessionSpawnCost(testCounters);
+  });
+
+  // Safety-net: the hybrid tests mutate process-global routing resolvers and
+  // restore them in their own `finally`, but this guarantees a clean baseline
+  // even if a future test forgets — routing/model leakage into a sibling test
+  // is a silent flake source (beforeEach doesn't reset these).
+  afterEach(async () => {
+    const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+    const { setOpenAIModelResolver } = await import('../../types/models.js');
+    const { initLLMProvider } = await import('../../core/llm-client.js');
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    setOpenAIModelResolver({ map: null });
+    await initLLMProvider('anthropic');
   });
 
   it('spawns a sub-agent and returns result', async () => {
@@ -1418,6 +1431,29 @@ describe('spawn_agent tool', () => {
       const arg = failUpdate![1] as { status: string; errorText?: string };
       expect(arg.status).toBe('failed');
       expect(arg.errorText).toBe('[404] Error: no Route matched with those values'); // was undefined → NULL pre-fix
+    });
+
+    it('an aborted child is recorded status=aborted with NO error_text (interruption, not an error)', async () => {
+      const { RunAbortedError } = await import('../../core/agent.js');
+      const insertRun = vi.fn().mockReturnValue('run-abort-1');
+      const updateRun = vi.fn();
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory: { insertRun, updateRun },
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+      mockSend.mockRejectedValue(new RunAbortedError());
+
+      const agent = makeAgent({ currentRunId: 'parent-abort', toolContext: parentToolContext });
+      await expect(
+        spawnAgentTool.handler({ agents: [{ name: 'aborted', task: 'x' }] }, agent),
+      ).rejects.toThrow();
+
+      const abortUpdate = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'aborted');
+      expect(abortUpdate).toBeDefined();
+      const arg = abortUpdate![1] as { status: string; errorText?: string; stopReason?: string };
+      expect(arg.status).toBe('aborted');
+      expect(arg.errorText).toBeUndefined(); // an intentional interruption is not an error to store
+      expect(arg.stopReason).toBe('aborted');
     });
 
     it('marks a failed section FAILED with the formatted error while a sibling still succeeds', async () => {
