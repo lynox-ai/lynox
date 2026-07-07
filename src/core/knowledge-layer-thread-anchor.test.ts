@@ -153,6 +153,28 @@ describe('KnowledgeLayer — thread-anchor write inheritance (Context-Hierarchy 
     engine.close(); await layer.close();
   });
 
+  it('an anchor pointing at a MERGED subject resolves forward to the canonical (not the archived dup)', async () => {
+    // A thread anchored to a subject that later got merged (soft-archived + stamped
+    // merged_into). Even if the history.db anchor was never repointed — a pre-fix merge, or
+    // a direct mergeSubjects — the anchor read must resolve the redirect FORWARD so new
+    // memories attach to the LIVE canonical, not the archived dup stub.
+    mock.extraction = { entities: [], relations: [] };
+    const { layer, engine, threads } = makeLayer({ flag: true });
+    await layer.init();
+
+    const subs = new SubjectStore(engine);
+    const dupProject = subs.createSubject({ kind: 'engagement', name: 'Website Relaunch (dup)' });
+    const canonProject = subs.createSubject({ kind: 'engagement', name: 'Website Relaunch' });
+    threads.createThread('t-merged');
+    threads.updateThread('t-merged', { primary_subject_id: dupProject });
+    subs.mergeSubjects(dupProject, canonProject); // primitive only → the anchor is now stale
+
+    const res = await layer.store('The Q3 numbers look strong.', 'knowledge', scope, { sourceThreadId: 't-merged' });
+    expect(res.stored).toBe(true);
+    // Forwarded to the live canonical, NOT the archived dup.
+    expect(new MemoryGraphStore(engine).getStub(res.memoryId)!.subject_id).toBe(canonProject);
+  });
+
   it('cutover path (memoryGraphReads ON): the anchor overrides the heuristic on the authoritative write too', async () => {
     mock.extraction = { entities: [{ name: 'Acme GmbH', type: 'organization', confidence: 0.9 }], relations: [] };
     const { layer, engine, threads } = makeLayer({ flag: true, memoryGraphReads: true });

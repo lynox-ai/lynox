@@ -557,12 +557,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
     if (!this._anchorThreadStore) return null;
     try {
-      const anchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
-      // Validate the cross-DB soft ref: the thread's anchor lives in history.db and points
-      // at an engine.db subject with NO enforceable FK, so a hard-deleted subject leaves a
-      // dangling id. Fall back to the heuristic (null) rather than write a dangling
-      // memories.subject_id — which WOULD FK-throw on the authoritative cutover write.
-      if (anchorId && this.subjectStore?.getSubject(anchorId)) return anchorId;
+      const rawAnchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
+      if (!rawAnchorId) return null;
+      // Resolve the v7 merge redirect FORWARD: if the anchor's subject was folded into a
+      // canonical (merged_into), use the canonical — so a thread anchored to a since-merged
+      // dup keeps attaching memories to the LIVE subject, not the archived stub. This is the
+      // read-side of the three-store merge repoint (the write side repoints the history.db
+      // anchor directly; this also masks any stale id a pre-fix ledger never repointed).
+      const anchorId = this.subjectStore?.resolveActiveSubject(rawAnchorId) ?? rawAnchorId;
+      // Validate the cross-DB soft ref (no enforceable FK): the resolved subject must still
+      // exist AND be active — a hard-deleted or archived anchor falls back to the heuristic
+      // (null) rather than writing a dangling/archived memories.subject_id, which WOULD
+      // FK-throw (or mis-attribute) on the authoritative cutover write.
+      const subject = this.subjectStore?.getSubject(anchorId);
+      if (subject && !subject.archived_at) return anchorId;
       return null;
     } catch {
       return null;
