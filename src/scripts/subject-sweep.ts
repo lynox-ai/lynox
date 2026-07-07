@@ -43,6 +43,8 @@ import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore, personNameTokens, isProperTokenSubset } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
+import { ThreadStore } from '../core/thread-store.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from '../core/sqlite-constants.js';
 import { runMerge, rollbackMergeRun } from '../core/subject-merge-runner.js';
 import type { MergeLedgerFile, MergeRunResult } from '../core/subject-merge-runner.js';
 import { isCleanupTarget, isJunkPersonShape } from '../core/kg-stopwords.js';
@@ -128,26 +130,63 @@ export function planPersonSubsetPairs(engineDb: EngineDb): SubsetPair[] {
 }
 
 /**
- * Operator `--merge`: open the two stores, delegate to the shared {@link runMerge} (crash-safe
- * ledger-first + datastore repoint), close the datastore handle. The `subjects_merge` chat tool
+ * Open a WRITABLE history.db ThreadStore for the merge's thread-anchor repoint — the LIVE
+ * anchor store (engine.db's `threads` is an empty mirror). Returns nulls when history.db is
+ * absent, so the merge simply repoints no anchors. busy_timeout so a repoint waits out a
+ * live engine holding the handle rather than throwing SQLITE_BUSY.
+ */
+function openThreadStore(dataDir: string): { threadStore: ThreadStore | null; historyDb: Database.Database | null } {
+  const historyPath = join(dataDir, 'history.db');
+  if (!existsSync(historyPath)) return { threadStore: null, historyDb: null };
+  const historyDb = new Database(historyPath);
+  historyDb.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+  historyDb.pragma('journal_mode = WAL'); // parity with the other opens (no-op on an already-WAL file)
+  return { threadStore: new ThreadStore(historyDb), historyDb };
+}
+
+/**
+ * Operator `--merge`: open the stores, delegate to the shared {@link runMerge} (crash-safe
+ * ledger-first + three-store repoint), close the handles. The `subjects_merge` chat tool
  * shares the SAME runner, so there is ONE merge-ledger format and ONE `--rollback` path.
  */
 export function doMerge(engineDb: EngineDb, dataDir: string, dupId: string, canonicalId: string): MergeRunResult {
   const store = new SubjectStore(engineDb);
   const dsPath = join(dataDir, 'datastore.db');
-  const ds = existsSync(dsPath) ? new DataStore(dsPath) : null;
-  try { return runMerge(store, ds, dataDir, dupId, canonicalId); }
-  finally { ds?.close(); }
+  // Open every handle INSIDE the try so a throw from the second open can't leak the first,
+  // and close each independently so one close() throwing can't skip the other.
+  let ds: DataStore | null = null;
+  let historyDb: Database.Database | null = null;
+  try {
+    ds = existsSync(dsPath) ? new DataStore(dsPath) : null;
+    const t = openThreadStore(dataDir);
+    historyDb = t.historyDb;
+    return runMerge(store, ds, t.threadStore, dataDir, dupId, canonicalId);
+  } finally {
+    try { ds?.close(); } catch { /* best-effort */ }
+    try { historyDb?.close(); } catch { /* best-effort */ }
+  }
 }
 
-/** Reverse a persisted merge (engine.db + datastore.db), the phase-'merge' half of --rollback. */
+/** Reverse a persisted merge across all three stores, the phase-'merge' half of --rollback. */
 export function rollbackMergeFile(engineDb: EngineDb, dataDir: string, file: MergeLedgerFile): { ok: boolean; reason?: string } {
   const store = new SubjectStore(engineDb);
   const dsPath = join(dataDir, 'datastore.db');
-  // Only touch datastore.db when the merge actually repointed cells (else a no-op open/close).
-  const ds = (file.dataStore.length > 0 && existsSync(dsPath)) ? new DataStore(dsPath) : null;
-  try { return rollbackMergeRun(store, ds, file); }
-  finally { ds?.close(); }
+  let ds: DataStore | null = null;
+  let historyDb: Database.Database | null = null;
+  try {
+    // Only open a store when the merge actually touched it (else a no-op open/close).
+    ds = (file.dataStore.length > 0 && existsSync(dsPath)) ? new DataStore(dsPath) : null;
+    let threadStore: ThreadStore | null = null;
+    if ((file.threadAnchors?.length ?? 0) > 0) {
+      const t = openThreadStore(dataDir);
+      threadStore = t.threadStore;
+      historyDb = t.historyDb;
+    }
+    return rollbackMergeRun(store, ds, threadStore, file);
+  } finally {
+    try { ds?.close(); } catch { /* best-effort */ }
+    try { historyDb?.close(); } catch { /* best-effort */ }
+  }
 }
 
 /** Read the set of subject ids that are a thread anchor in history.db (read-only). */
@@ -293,7 +332,7 @@ function main(): void {
       const r = doMerge(engineDb, dir, dupId, canonicalId);
       if (!r.ok) { process.stderr.write(`[subject-sweep] MERGE refused: ${r.reason}\n`); process.exitCode = 1; return; }
       process.stdout.write(args.json ? JSON.stringify({ mode: 'merge', ...r }) + '\n'
-        : `[subject-sweep] MERGED ${dupId} → ${canonicalId} (${r.dataStoreRows} datastore cells repointed). Ledger: ${r.ledgerPath}\n`);
+        : `[subject-sweep] MERGED ${dupId} → ${canonicalId} (${r.dataStoreRows} datastore cells, ${r.threadRows} thread anchors repointed). Ledger: ${r.ledgerPath}\n`);
       return;
     }
     const threadAnchors = readThreadAnchorIds(join(dir, 'history.db'));

@@ -64,7 +64,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
 
     try {
-      const r = runMerge(subjects, agent.toolContext.dataStore, getLynoxDir(), dup.id, canon.id);
+      const r = runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id);
       if (!r.ok) return `Merge refused: ${r.reason}`;
       const cells = r.dataStoreRows > 0 ? `, ${r.dataStoreRows} record cell${r.dataStoreRows === 1 ? '' : 's'} repointed` : '';
       return `Merged "${r.dupName}" into "${r.canonicalName}" — one person now${cells}. Reversible from the merge ledger.`;

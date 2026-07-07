@@ -156,6 +156,32 @@ export class ThreadStore {
     this.db.prepare('UPDATE threads SET is_unread = 0 WHERE id = ?').run(id);
   }
 
+  /**
+   * Retroactive-merge support: repoint every thread anchored to `fromSubjectId`
+   * onto `toSubjectId`. history.db carries the LIVE thread anchor (engine.db's
+   * `threads` is an empty mirror), so a subject merge must repoint it HERE — else
+   * the thread stays anchored to the now-archived duplicate and keeps attaching new
+   * memories to it. Returns the ids of the threads it repointed (for the merge
+   * ledger's rollback); empty when nothing was anchored to the dup. Does NOT bump
+   * updated_at — a structural repoint shouldn't re-sort the user's thread list.
+   */
+  repointPrimarySubject(fromSubjectId: string, toSubjectId: string): string[] {
+    const affected = this.db
+      .prepare('SELECT id FROM threads WHERE primary_subject_id = ?')
+      .all(fromSubjectId) as Array<{ id: string }>;
+    if (affected.length === 0) return [];
+    this.db
+      .prepare('UPDATE threads SET primary_subject_id = ? WHERE primary_subject_id = ?')
+      .run(toSubjectId, fromSubjectId);
+    return affected.map(r => r.id);
+  }
+
+  /** Reverse {@link repointPrimarySubject}: set the named threads back to `toSubjectId`. */
+  restorePrimarySubject(threadIds: readonly string[], toSubjectId: string): void {
+    const stmt = this.db.prepare('UPDATE threads SET primary_subject_id = ? WHERE id = ?');
+    for (const id of threadIds) stmt.run(toSubjectId, id);
+  }
+
   deleteThread(id: string): void {
     this.db.prepare('DELETE FROM threads WHERE id = ?').run(id);
   }

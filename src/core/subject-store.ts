@@ -704,12 +704,15 @@ export class SubjectStore {
   // ── Retroactive merge + redirect (PR-C dedup) ─────────────────
 
   /**
-   * Chase the `merged_into` redirect chain from `id` to the terminal ACTIVE subject
-   * (the canonical a duplicate was folded into). Returns `id` unchanged when it was
-   * never merged. Any stale id still held somewhere (a soft cross-file ref, a cached
-   * UI id, a DataStore cell not yet repointed) resolves forward through this instead
-   * of dangling on an archived stub. Cycle-safe (visited-set + hop cap, like
-   * {@link getAncestors}); a dangling redirect ends the walk at the last known id.
+   * Chase the `merged_into` redirect chain from `id` to its TERMINAL (the canonical a
+   * duplicate was folded into). Returns `id` unchanged when it was never merged. Any stale
+   * id still held somewhere (a soft cross-file ref, a cached UI id, a DataStore cell not yet
+   * repointed) resolves forward through this instead of dangling on an archived stub.
+   * NOTE: the terminal is normally active, but this only follows `merged_into` — it does NOT
+   * assert liveness, so a canonical archived AFTER the merge yields an archived terminal; a
+   * caller that needs an active subject must check `archived_at` itself. Cycle-safe
+   * (visited-set + hop cap, like {@link getAncestors}); a dangling redirect ends the walk at
+   * the last known id.
    */
   resolveActiveSubject(id: string, maxHops = 16): string {
     const seen = new Set<string>([id]);
