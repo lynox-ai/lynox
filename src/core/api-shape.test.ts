@@ -113,6 +113,32 @@ describe('applyShape — projection', () => {
     const result = applyShape(raw, { kind: 'reduce', include: ['a', 'missing.path'] });
     expect(JSON.parse(result.shaped)).toEqual({ a: 1 });
   });
+
+  // #3 (v2.1.1): the DataForSEO refine-thrash bug — shallow paths against a deep
+  // response projected to `{}` SILENTLY, so the agent had no signal its paths were
+  // wrong and retried refine 3×. Now it errors loudly with the real top-level shape.
+  it('errors LOUDLY when include matches nothing against a non-empty response (no silent {})', () => {
+    const raw = { tasks: [{ result: [{ items: [{ keyword: 'x', search_volume: 10 }] }] }] };
+    // wrong shallow paths: `result.*` does not exist at the top level (it's under tasks[]).
+    const result = applyShape(raw, { kind: 'reduce', include: ['result.keyword', 'result.search_volume'] });
+    expect(result.error).toBeDefined();
+    expect(result.error).toMatch(/matched no fields/);
+    expect(result.error).toContain('tasks'); // surfaces the real top-level key
+    // shaped falls back to the raw so the caller sees the real structure, not '{}'.
+    expect(JSON.parse(result.shaped)).toEqual(raw);
+  });
+
+  it('does NOT error on a partial match (at least one path resolves)', () => {
+    const result = applyShape({ a: 1, b: 2 }, { kind: 'reduce', include: ['a', 'missing.path'] });
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(result.shaped)).toEqual({ a: 1 });
+  });
+
+  it('does NOT error when the raw response itself is empty (nothing to match)', () => {
+    const result = applyShape({}, { kind: 'reduce', include: ['a'] });
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(result.shaped)).toEqual({});
+  });
 });
 
 describe('applyShape — reducers', () => {
