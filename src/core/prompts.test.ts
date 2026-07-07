@@ -7,12 +7,22 @@ import {
   NO_WEB_SEARCH_PROMPT_SUFFIX,
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
+  GROUNDING_PROMPT_BLOCK,
 } from './prompts.js';
 
 // File-level reset so a forgotten useRealTimers() in a future test can't
 // poison the next case's `new Date()` reads.
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('GROUNDING_PROMPT_BLOCK', () => {
+  it('keeps the source-typing spine + the reason-from-facts rule (guards accidental reverts)', () => {
+    expect(GROUNDING_PROMPT_BLOCK).toContain('Grounding & provenance');
+    // #4 (v2.1.1): the discipline that a fetched fact contradicting an assumption
+    // must be reasoned FROM, not silently reasoned past.
+    expect(GROUNDING_PROMPT_BLOCK).toContain('Reason FROM the facts');
+  });
 });
 
 describe('currentDateContext', () => {
