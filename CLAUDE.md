@@ -33,9 +33,9 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — ~119 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, engine-db (subject-graph store, flag-gated OFF), subject-store, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
+- `src/core/` — ~130 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, engine-db (subject-graph store, flag-gated OFF), subject-store, knowledge-layer, memory-facade, subject-merge-runner, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream-handler, docker-installer, approval-dialog, changeset-review, dag-visualizer, markdown, interactive)
-- `src/tools/builtin/` — 32 builtin tool functions across 21 modules (incl. api_setup, media_process, artifact_save/list/delete); `src/tools/` holds the registry + permission guard
+- `src/tools/builtin/` — 41 builtin tool functions across 22 modules (incl. api_setup, media_process, artifact_save/list/delete/history/restore, subjects_merge); `src/tools/` holds the registry + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, DuckDuckGo HTML-scrape fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/src/content/docs/setup/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/src/content/docs/archive/whatsapp-inbox.md`.)
 - `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see core PR #536.)

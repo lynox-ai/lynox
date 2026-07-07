@@ -52,6 +52,8 @@ Or create tasks in the Web UI under Settings → Tasks.
 | **Backup** | Automated database backup (no LLM cost) |
 | **Workflow** | Multi-step workflow with dependent tasks |
 
+When the **agent itself** schedules a Standard (autonomous agent) run, that trigger requires your explicit confirmation before it first fires — so a task set up on your behalf can't start running unattended without you approving it. Tasks you create yourself in the UI are already explicit and run as scheduled.
+
 ### Scheduling
 
 Tasks use **cron syntax** for scheduling:

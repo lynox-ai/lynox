@@ -58,6 +58,16 @@ Direct connection to the Anthropic API. Simplest setup, recommended for most use
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### Balanced-tier model (opt into Claude Sonnet 5)
+
+The **balanced** intelligence tier runs on Claude Sonnet. It defaults to the established Sonnet build; you can opt into **Claude Sonnet 5** — which unlocks a **1M-token context window** — without changing tiers. Pick it in **Settings → LLM (Advanced)**, or set it explicitly:
+
+```bash
+LYNOX_BALANCED_MODEL=claude-sonnet-5
+```
+
+The choice also persists in `config.json` (`balanced_model`) and is exposed over `GET`/`PUT /api/config`. Leaving it unset keeps the default balanced model — existing setups are unaffected.
+
 ## OpenAI-Compatible (`provider: openai`)
 
 `provider: 'openai'` is the path for everything that speaks the OpenAI Chat Completions API. No proxy needed — lynox translates natively. The same code path serves **Mistral** (the only target we exercise on every release) and a long list of experimental targets (OpenAI itself, Groq, Gemini, Ollama, LM Studio, vLLM, LiteLLM in OpenAI mode, …).
