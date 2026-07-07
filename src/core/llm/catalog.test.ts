@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
+import { MODEL_CAPABILITIES } from '../../types/models.js';
 import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
 
 describe('LLM_CATALOG', () => {
@@ -48,6 +49,24 @@ describe('LLM_CATALOG', () => {
     expect(byId['claude-opus-4-6']?.pricing).toEqual({ input: 5, output: 25 });
     expect(byId['claude-haiku-4-5-20251001']?.pricing).toEqual({ input: 1, output: 5 });
     expect(byId['claude-sonnet-4-6']?.notes).toContain('Recommended');
+  });
+
+  it('every catalog model in MODEL_CAPABILITIES mirrors its pricing + context window (SoT drift guard)', () => {
+    // catalog.ts re-literals pricing/context_window that models.ts (MODEL_CAPABILITIES) owns,
+    // and has drifted before (Opus 15/75, Haiku 0.80/4, corrected in the Sonnet 5 pass). Derive
+    // the expectation from the SoT so any future divergence fails HERE, not as a wrong cost display.
+    let checked = 0;
+    for (const model of LLM_CATALOG.flatMap((cat) => cat.models)) {
+      const cap = MODEL_CAPABILITIES[model.id];
+      if (!cap) continue; // custom / provider-specific ids not in the registry
+      checked++;
+      expect(model.context_window, `${model.id} context_window`).toBe(cap.contextWindow);
+      if (model.pricing) {
+        expect(model.pricing.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
+        expect(model.pricing.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
+      }
+    }
+    expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
 
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {

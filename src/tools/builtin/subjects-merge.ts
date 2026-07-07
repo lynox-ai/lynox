@@ -21,6 +21,12 @@ interface SubjectsMergeInput {
 
 export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
   requiresConfirmation: true,
+  // A graph-wide repoint of every note/task/mention is destructive-class (like its
+  // data-store/memory peers) — defense-in-depth so isDangerous flags it. The actual
+  // hard refusal in autonomous mode lives in the handler (a self-confirming tool's
+  // [BLOCKED] would otherwise route through the worker-wired promptUser as a
+  // rubber-stampable notification, not a hard deny).
+  destructive: { mode: 'data' },
   definition: {
     name: 'subjects_merge',
     description:
@@ -52,13 +58,22 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     if (!canon) return `Error: no person named "${canonName}" found in the knowledge graph.`;
     if (dup.id === canon.id) return `"${dupName}" and "${canonName}" are already the same person — nothing to merge.`;
 
-    // requiresConfirmation → confirm in the conversation. No promptUser channel
-    // (autonomous / headless) ⇒ fail closed: a graph-wide repoint is not auto-safe.
-    if (!agent.promptUser) {
+    // A graph-wide repoint is not auto-safe: HARD-refuse in autonomous mode independent of a
+    // wired promptUser. The worker loop wires promptUser to a notification, so relying on the
+    // requiresConfirmation/[BLOCKED] path alone would let an injected instruction surface a
+    // rubber-stampable "Merge X into Y?" — so we fail closed here (both autonomous and no-channel).
+    if (agent.autonomy === 'autonomous' || !agent.promptUser) {
       return 'Error: merging people needs interactive confirmation and cannot run autonomously.';
     }
+    // Subject names are KG-extracted from untrusted content, so a crafted name could inject
+    // newlines/instructions or bidi/zero-width spoofing into the very approval text that
+    // authorizes the repoint. Strip zero-width + bidi-control chars, collapse whitespace to a
+    // single space (kills line-break injection), and length-clamp before display.
+    const clip = (n: string): string =>
+      n.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
+    const dupSafe = clip(dup.name), canonSafe = clip(canon.name);
     const answer = await agent.promptUser(
-      `Merge "${dup.name}" into "${canon.name}"? Every note, task and mention of "${dup.name}" moves to "${canon.name}", and "${dup.name}" is archived. This is reversible.`,
+      `Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. This is reversible.`,
       ['Merge', 'Cancel'],
     );
     if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
