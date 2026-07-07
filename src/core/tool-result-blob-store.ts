@@ -4,6 +4,7 @@ import type {
   BetaToolUseBlockParam,
   BetaImageBlockParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { contentKey, toolResultText } from './tool-result-hygiene.js';
 
 /**
  * Phase 2 — Context Hygiene. Default blob threshold in characters.
@@ -62,19 +63,6 @@ export interface ToolResultBlob {
   readonly descriptor: string;
   /** The full verbatim tool-result payload. */
   readonly payload: string;
-}
-
-/**
- * Extract a string payload from a tool_result block's `content`, which the SDK
- * types as `string | Array<text|image block>`. Image blocks are not recallable
- * text, so they are skipped; only the concatenated text survives.
- */
-function toolResultText(content: BetaToolResultBlockParam['content']): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map(block => (block.type === 'text' ? block.text : ''))
-    .join('');
 }
 
 /** Build a compact one-line descriptor from the tool name + payload head. */
@@ -210,21 +198,6 @@ export class ToolResultBlobStore {
   }
 
   /**
-   * Content key for dedup: the payload length + a fast FNV-1a 32-bit hash. A
-   * hash clash is guarded by a payload-equality check at the reuse site, so a
-   * collision only ever costs a missed dedup (a duplicate blob), never a wrong
-   * reuse (serving the wrong payload). Length-prefixing makes clashes rarer.
-   */
-  private static contentKey(payload: string): string {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < payload.length; i++) {
-      h ^= payload.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return `${payload.length}:${(h >>> 0).toString(36)}`;
-  }
-
-  /**
    * Scan `messages` for tool-result blocks whose payload exceeds
    * `thresholdChars` and move each into the store. Returns the minted handles
    * so the caller can list them in the post-compaction synthetic context.
@@ -265,7 +238,7 @@ export class ToolResultBlobStore {
         // to ONE id. `this.get()` promotes the reused blob to most-recently-used
         // (it is being referenced again). The `payload ===` guard makes a hash
         // clash cost only a missed dedup, never a wrong reuse.
-        const key = ToolResultBlobStore.contentKey(payload);
+        const key = contentKey(payload);
         const existingId = this.idByContent.get(key);
         if (existingId !== undefined) {
           const existing = this.get(existingId);

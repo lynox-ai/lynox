@@ -40,6 +40,7 @@ import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
+import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -1492,6 +1493,27 @@ export class Agent implements IAgent {
         is_error: true,
       });
     }
+
+    // Append-time in-context dedup: replace a large tool_result byte-identical to
+    // one already resident (or an earlier block in this same batch) with a
+    // compact reference, so the duplicate bytes don't ride every subsequent
+    // turn's cached prefix. The residency index is built from the CURRENT
+    // messages (pre-append), so it reflects exactly what is resident right now —
+    // no cross-method invalidation bookkeeping, and after a compaction the large
+    // payloads live in the blob store (not inline), so the index is naturally
+    // empty and nothing wrongly dedups against evicted content. Cache-safe by
+    // construction: only this new batch's blocks are ever rewritten (a new
+    // suffix), never an already-resident block, so the cached prefix is untouched.
+    const nameById = new Map<string, string>();
+    for (const b of content) {
+      if (b.type === 'tool_use') nameById.set(b.id, b.name);
+    }
+    const residency = buildResidencyIndex(this.messages);
+    dedupToolResultBatch(
+      results,
+      block => nameById.get(block.tool_use_id) ?? 'tool',
+      residency,
+    );
 
     return results;
   }
