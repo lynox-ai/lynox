@@ -679,6 +679,27 @@ describe('Memory', () => {
       expect(mockCreate).toHaveBeenCalledOnce();       // extraction still runs on self-host
     });
 
+    it('debits the spend even when the response carries no usable text (bills before the early return)', async () => {
+      const mem = new Memory(dir);
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mem.setMeteredHost({ getHooks: () => [{ onBeforeRun, onAfterRun }], getContext: () => undefined });
+      mockCreate.mockClear();
+      // No text block → maybeUpdate early-returns right after the call. The debit
+      // must ALREADY have fired: the pool key was spent regardless of a usable
+      // extraction. This locks the debit's placement BEFORE the early returns.
+      mockCreate.mockResolvedValueOnce({
+        content: [],
+        usage: { input_tokens: 900, output_tokens: 0 },
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(mockCreate).toHaveBeenCalledOnce();
+      expect(onAfterRun).toHaveBeenCalledOnce();       // billed despite the empty extraction
+      expect(onAfterRun.mock.calls[0]?.[1] as number).toBeGreaterThan(0);
+    });
+
     it('maybeUpdate publishes channel event with scope metadata when auto-classified', async () => {
       const mem = new Memory(dir, undefined, undefined, 'proj1');
       mem.setActiveScopes([globalScope, projectScope, userScope]);
