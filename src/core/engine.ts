@@ -1054,6 +1054,10 @@ export class Engine {
       this.config, this.userConfig, this.activeScopes,
       this.context?.id, this.secretStore,
     );
+    // Route the per-turn auto-extraction pool-key spend through the managed gate
+    // + debit (same onBeforeRun/onAfterRun lifecycle as the KG extractor and
+    // chat/voice). No-op on self-host.
+    this.memory?.setMeteredHost(this);
 
     // Initialize embedding provider + knowledge graph
     this.embeddingProvider = initEmbeddingProvider(this.userConfig, this.runHistory);

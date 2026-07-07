@@ -94,6 +94,8 @@ vi.mock('./memory.js', () => ({
     // @ts-expect-error mock constructor
     this.maybeUpdate = vi.fn();
     // @ts-expect-error mock constructor
+    this.setMeteredHost = vi.fn();
+    // @ts-expect-error mock constructor
     this.appendScoped = vi.fn();
     // @ts-expect-error mock constructor
     this.loadScoped = vi.fn().mockResolvedValue(null);
