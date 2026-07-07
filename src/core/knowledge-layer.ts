@@ -1201,11 +1201,26 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const id = this.db.updateMemoryText(oldText, newText, namespace, embedding);
     if (!id) return false;
 
-    // Re-extract for the corrected text. Under the read cutover (S5b'-b) the
-    // re-extraction persists onto the subject graph — and refreshes the engine.db
-    // stub's text + embedding via upsertStub, so recall (which reads engine.db) sees
-    // the corrected text instead of the stale original. Pre-cutover: the legacy
-    // mention path, unchanged.
+    // Privacy/recall parity: refresh the engine.db stub's text + embedding under the
+    // WRITE flag (subject_graph_enabled) — NOT the read flag — so a correction/redaction
+    // made during the dual-write window (write-on, read-off, e.g. cat's soak) is present
+    // in engine.db when reads flip on, instead of recall serving the stale pre-edit text
+    // (the same divergence the deactivate/consolidate mirrors close). No-op when the memory
+    // has no stub; isolated so a mirror failure never fails the legacy edit.
+    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.updateStubText(id, newText, embedToBlob(embedding));
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] text-edit mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+
+    // Re-extract for the corrected text. Under the read cutover (S5b'-b) the re-extraction
+    // re-resolves the subject linkage and re-upserts the stub; pre-cutover: the legacy
+    // mention path, unchanged. The stub's TEXT is already refreshed above under the write
+    // flag, independent of this read-gated (cost-bearing) re-extraction.
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       // A text correction is not credit-gated (the legacy path re-extracts unconditionally).
       const createdAt = this.db.getMemoryCreatedAt(id);
