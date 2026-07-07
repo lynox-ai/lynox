@@ -60,7 +60,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ### Balanced-tier model (opt into Claude Sonnet 5)
 
-The **balanced** intelligence tier runs on Claude Sonnet. It defaults to the established Sonnet build; you can opt into **Claude Sonnet 5** — which unlocks a **1M-token context window** — without changing tiers. Pick it in **Settings → LLM (Advanced)**, or set it explicitly:
+The **balanced** intelligence tier runs on Claude Sonnet. It defaults to the established Sonnet build; you can opt into **Claude Sonnet 5** — which unlocks a **1M-token context window** — without changing tiers. Pick it from the **Main chat model** dropdown in **Settings → LLM** (both Sonnet builds appear as balanced-band choices), or set it explicitly:
 
 ```bash
 LYNOX_BALANCED_MODEL=claude-sonnet-5

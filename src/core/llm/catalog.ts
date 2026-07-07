@@ -6,6 +6,12 @@
  */
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
+import {
+  MODEL_MAP,
+  VERTEX_MODEL_MAP,
+  MISTRAL_MODEL_MAP,
+  SERVED_BALANCED_SONNET_IDS,
+} from '../../types/models.js';
 
 export interface CatalogModel {
   id: string;
@@ -18,6 +24,25 @@ export interface CatalogModel {
   capabilities?: ReadonlyArray<'vision' | 'tool_use' | 'extended_thinking'>;
   residency: string;
   notes?: string;
+}
+
+/**
+ * One selectable main-chat model in standard (non-hybrid) routing. Mirrors the
+ * reachable `(default_tier[, balanced_model])` config combos for a provider so
+ * the UI can render the "Main chat model" picker without mirroring the engine's
+ * tier→model maps (drift-free — computed here where the maps live).
+ */
+export interface MainChatModel {
+  /** Catalog model id this option represents (label/pricing looked up in `models`). */
+  id: string;
+  /** Routing band written to `config.default_tier` when picked. */
+  tier: ModelTier;
+  /**
+   * For the Anthropic balanced band only: the served-Sonnet variant to write to
+   * `config.balanced_model` so the picker round-trips (Sonnet 4.6 vs Sonnet 5).
+   * Absent for bands with a single reachable model.
+   */
+  balanced_model?: string;
 }
 
 export interface CatalogProviderEntry {
@@ -37,6 +62,14 @@ export interface CatalogProviderEntry {
   display_name: string;
   /** Empty array signals free-text fallback — user types model ID themselves. */
   models: ReadonlyArray<CatalogModel>;
+  /**
+   * The models pickable as the MAIN chat model in standard routing — one per
+   * reachable band, the Anthropic balanced band split by served-Sonnet variant.
+   * Excludes same-band catalog extras standard-mode tier-routing can't reach
+   * (e.g. Ministral 3B — `fast` resolves to 8B). Absent for free-text providers.
+   * Computed at module load (see the freeze block below), never hand-authored.
+   */
+  main_chat_models?: ReadonlyArray<MainChatModel>;
   requires_base_url: boolean;
   requires_region: boolean;
   default_residency: string;
@@ -310,10 +343,60 @@ export function resolveCatalogKey(
   return catalogEntryKey(generic ?? candidates[0]!);
 }
 
+/**
+ * Canonical tier→model map for a catalogued provider entry, or `null` for
+ * free-text providers (openai-compat / custom) whose model is user-typed.
+ * These are the same maps the engine's tier router resolves through, so the
+ * derived picker options can never drift from what a `default_tier` write
+ * actually reaches on the wire.
+ */
+function tierMapForEntry(entry: CatalogProviderEntry): Record<ModelTier, string> | null {
+  if (entry.models.length === 0) return null;
+  if (entry.provider === 'anthropic') return MODEL_MAP;
+  if (entry.provider === 'vertex') return VERTEX_MODEL_MAP;
+  if (entry.provider === 'openai' && entry.preset_id === 'mistral') return MISTRAL_MODEL_MAP;
+  return null;
+}
+
+/**
+ * Build the standard-mode "main chat model" options for a provider entry: one
+ * per reachable band (fast / balanced / deep), the Anthropic balanced band split
+ * into its served-Sonnet variants (4.6 / 5) since that provider resolves balanced
+ * via `resolveBalancedModel(config.balanced_model)`. A band is only offered if the
+ * catalog actually lists the model its tier resolves to — so Ministral 3B (a fast
+ * extra that `fast`→8B never reaches) is correctly excluded, and no option can
+ * point at a label the catalog doesn't carry.
+ */
+function buildMainChatModels(entry: CatalogProviderEntry): MainChatModel[] | undefined {
+  const map = tierMapForEntry(entry);
+  if (!map) return undefined;
+  const has = (id: string): boolean => entry.models.some((m) => m.id === id);
+  const out: MainChatModel[] = [];
+  if (has(map.fast)) out.push({ id: map.fast, tier: 'fast' });
+  if (entry.provider === 'anthropic') {
+    // Every served-Sonnet the catalog lists is a reachable balanced pick via the
+    // `balanced_model` override; carry it so the picker round-trips the choice.
+    for (const m of entry.models) {
+      if (m.tier === 'balanced' && SERVED_BALANCED_SONNET_IDS.has(m.id)) {
+        out.push({ id: m.id, tier: 'balanced', balanced_model: m.id });
+      }
+    }
+  } else if (has(map.balanced)) {
+    out.push({ id: map.balanced, tier: 'balanced' });
+  }
+  if (has(map.deep)) out.push({ id: map.deep, tier: 'deep' });
+  return out.length > 0 ? out : undefined;
+}
+
 // Deep-freeze at module load: protects the singleton against accidental
 // mutation when consumers hand `LLM_CATALOG` straight to `jsonResponse`
 // (the response body shares the reference until serialization).
 for (const entry of LLM_CATALOG) {
+  const mainChat = buildMainChatModels(entry);
+  if (mainChat) {
+    for (const opt of mainChat) Object.freeze(opt);
+    entry.main_chat_models = Object.freeze(mainChat);
+  }
   Object.freeze(entry.models);
   for (const m of entry.models) {
     Object.freeze(m);

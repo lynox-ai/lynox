@@ -1,11 +1,16 @@
 <!--
-	LLM Advanced (PRD-IA-V2 P3-PR-C) — final canonical home for the
-	provider-adjacent dials that previously lived as collapsible panels on
-	LLMSettings (effort, thinking, llm_mode, embedding_provider, experience)
-	and the context-window radio that took a temporary detour through
-	CostLimits.svelte (P2-PR-C interim, deleted in P3-PR-X). Backend SSoT
-	stays `/api/config`; this surface PUTs the same fields the legacy
-	locations did, so a stale tab cannot drift state.
+	LLM Advanced (PRD-IA-V2 P3-PR-C) — canonical home for the provider-adjacent
+	dials that previously lived as collapsible panels on LLMSettings (effort,
+	thinking, llm_mode, embedding_provider, experience). Backend SSoT stays
+	`/api/config`; this surface PUTs the same fields the legacy locations did,
+	so a stale tab cannot drift state.
+
+	The Sonnet-variant picker (`balanced_model`) moved to the main "Main chat
+	model" picker on LLMSettings — a served Sonnet is just one balanced-band
+	choice there. The context-window radios (`max_context_window_tokens`) were
+	removed entirely: every model now uses its native window, so a user-facing
+	cap is redundant; the field stays honored as a config-file-only escape hatch
+	(superseded by `compaction_token_budget`).
 
 	Tier-awareness audit (Settings v3 Item 2, 2026-05-19):
 	| Setting              | Self-host | BYOK | Managed |
@@ -15,22 +20,17 @@
 	| thinking_mode        | ✓         | ✓    | ✓        |
 	| experience           | ✓         | ✓    | ✓        |
 	| embedding_provider   | ✓         | ✓    | ✗ silent-403 → hidden |
-	| max_context_window   | ✓         | ✓    | ✓ (managed caps still apply) |
 
 	Managed-tier gotchas baked in:
 	- `embedding_provider` is NOT in MANAGED_USER_WRITABLE_CONFIG (silent-403
 	  on managed) → hidden behind `isManaged`.
 	- `llm_mode` toggle is admin-only on managed per project_managed_llm_strategy
 	  → hidden when `providerLocked` OR when Mistral capability is not wired.
-	- `max_context_window_tokens` user choice clamps to model native via
-	  `effectiveContextWindow()` (server-side). Settings v3 Item 6 filters the
-	  radio set so users can't pick a cap above their active model's native.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { buildContextOptions, formatContextWindow, type ContextMilestone } from '../utils/context-window.js';
 
 	// Settings v3 PR 4.6 (2026-05-19) — `embedded=true` skips the page chrome
 	// (back-link + h1 + subtitle) so this component can render inline inside
@@ -50,23 +50,12 @@
 		pendingProvider?: 'anthropic' | 'vertex' | 'openai' | 'custom' | null | undefined;
 	} = $props();
 
-	// The two served Sonnet ids the `balanced` tier may resolve to. Mirrors
-	// SERVED_BALANCED_SONNET_IDS in core `types/models.ts` — web-ui has no direct
-	// dep on `@lynox-ai/core`, so the constant is duplicated as a literal union.
-	const SONNET_46 = 'claude-sonnet-4-6';
-	const SONNET_5 = 'claude-sonnet-5';
-
 	interface UserConfig {
 		experience?: 'business' | 'developer';
 		effort_level?: 'low' | 'medium' | 'high' | 'max';
 		thinking_mode?: 'adaptive' | 'disabled';
 		embedding_provider?: 'onnx' | 'local';
 		llm_mode?: 'standard' | 'eu-sovereign';
-		max_context_window_tokens?: number;
-		// Which served Sonnet the `balanced` tier resolves to. The server always
-		// sends a resolved value on GET (defaults to Sonnet 4.6), so this is
-		// populated for every Anthropic instance.
-		balanced_model?: string;
 	}
 
 	interface Locks {
@@ -132,8 +121,6 @@
 				thinking_mode: body.thinking_mode,
 				embedding_provider: body.embedding_provider,
 				llm_mode: body.llm_mode,
-				max_context_window_tokens: body.max_context_window_tokens,
-				balanced_model: body.balanced_model,
 			};
 			// Displayed state — coalesce unset fields to the engine's actual
 			// defaults so the dropdowns always have a matching selection that
@@ -144,10 +131,6 @@
 				thinking_mode: body.thinking_mode ?? 'adaptive',
 				embedding_provider: body.embedding_provider,
 				llm_mode: body.llm_mode,
-				max_context_window_tokens: body.max_context_window_tokens,
-				// Server resolves this to a served Sonnet id (default 4.6); the
-				// `?? SONNET_46` is defensive for a legacy engine that omits it.
-				balanced_model: body.balanced_model ?? SONNET_46,
 			};
 			locks = body.locks ?? {};
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
@@ -178,15 +161,9 @@
 			// when the UI was allowed to render them (lock + capability gates).
 			if (config.llm_mode !== origConfig.llm_mode && !providerLocked) update.llm_mode = config.llm_mode;
 			if (config.embedding_provider !== origConfig.embedding_provider && !isManaged) update.embedding_provider = config.embedding_provider;
-			if (config.max_context_window_tokens !== origConfig.max_context_window_tokens) {
-				update.max_context_window_tokens = config.max_context_window_tokens;
-			}
-			// Sonnet-variant selection — only meaningful (and only rendered) on
-			// Anthropic, so stage it only when the picker was shown, mirroring the
-			// provider-bound gating of llm_mode / embedding_provider above.
-			if (config.balanced_model !== origConfig.balanced_model && effectiveIsAnthropic) {
-				update.balanced_model = config.balanced_model;
-			}
+			// `balanced_model` (Sonnet variant) + `max_context_window_tokens` moved
+			// off this view — the main-chat picker owns the former; the latter is now
+			// a config-file-only escape hatch (native windows made the UI knob moot).
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -216,65 +193,7 @@
 		return activeModel?.features?.extendedThinking ?? false;
 	});
 
-	// Sonnet-variant picker visibility — intentionally scoped to Anthropic-DIRECT.
-	// The `balanced_model` override resolves to a served Sonnet on the `anthropic`
-	// AND `custom` descriptors (models.ts `anthropicTierModel`), but a custom OpenAI-
-	// compat proxy already picks its model via its own endpoint/model_id config, so a
-	// Sonnet picker there would be misleading; vertex/openai don't resolve `balanced`
-	// to a Sonnet at all. So the picker is surfaced only on anthropic-direct. Reacts
-	// to the parent's in-flight tile selection when embedded (same pattern as thinking
-	// above), falling back to the persisted active provider standalone.
-	const effectiveIsAnthropic = $derived.by(() => {
-		if (pendingProvider === 'anthropic') return true;
-		if (pendingProvider === 'vertex' || pendingProvider === 'openai' || pendingProvider === 'custom') return false;
-		return activeModel?.provider === 'anthropic';
-	});
-
 	$effect(() => { void load(); });
-
-	// Context-window radio options — final canonical home for the
-	// `max_context_window_tokens` radio after P3-PR-X deleted CostLimits.svelte.
-	// LLMSettings used to host this literal too (pre-P3-PR-C extraction); both
-	// historic surfaces PUT the same `/api/config` field, so backend SSoT was
-	// never duplicated.
-	//
-	// Settings v3 Item 6 (2026-05-19): cap milestones strictly less than the
-	// active model's native window. Pre-fix, picking "1M" on Sonnet base (200K
-	// native) silently capped to 200K — UI lied about effective cap. Picking
-	// "500K" on Mistral Large (131K native) did the same. Server resolves the
-	// native window via MODEL_CAPABILITIES[active_model.id] and the UI filters
-	// CAP_MILESTONES to those strictly below it (above-native is redundant
-	// with "default"). PR 3 will switch this to show-all-grayed.
-	const CAP_MILESTONES: ReadonlyArray<ContextMilestone> = [
-		{ value: 32_000,    labelKey: 'llm.context_window.option.32k',  hintKey: 'llm.context_window.option.32k_hint' },
-		{ value: 100_000,   labelKey: 'llm.context_window.option.100k', hintKey: 'llm.context_window.option.100k_hint' },
-		{ value: 200_000,   labelKey: 'llm.context_window.option.200k', hintKey: 'llm.context_window.option.200k_hint' },
-		{ value: 500_000,   labelKey: 'llm.context_window.option.500k', hintKey: 'llm.context_window.option.500k_hint' },
-		{ value: 1_000_000, labelKey: 'llm.context_window.option.1m',   hintKey: 'llm.context_window.option.1m_hint' },
-	];
-
-	const DEFAULT_OPTION = {
-		value: undefined as number | undefined,
-		labelKey: 'llm.context_window.option.default',
-		hintKey: 'llm.context_window.option.default_hint',
-		disabled: false,
-		hidden: false,
-	};
-
-	// Settings v3 Item 8: show-all-grayed — above-native milestones render
-	// disabled with a tooltip rather than vanishing, so users see WHY they
-	// can't pick 1M on Sonnet base. Below-native and exact-native are still
-	// filtered (hidden) to keep the list focused; PR 2 introduced this split
-	// and PR 3 only flips the above-native branch from filtered to disabled.
-	// Hide native-match milestone (redundant with "Default") UNLESS the user
-	// explicitly saved that exact value — otherwise the bound radio would have
-	// no match and silently render as "no selection" on re-load.
-	const contextOptions = $derived([
-		DEFAULT_OPTION,
-		...buildContextOptions(activeModel?.contextWindow, CAP_MILESTONES).filter(
-			(opt) => !opt.hidden || opt.value === config.max_context_window_tokens,
-		),
-	]);
 </script>
 
 <div class="space-y-6 {embedded ? '' : 'max-w-3xl mx-auto p-4'}">
@@ -370,68 +289,16 @@
 			</label>
 		</section>
 
-		<!-- Sonnet-variant picker — lets the user opt the `balanced` tier into
-		     Sonnet 5 (default stays Sonnet 4.6). Anthropic-only: the override has
-		     no effect on Mistral/OpenAI-compat/custom providers, so it's hidden
-		     there. Placed above the context-window section because picking Sonnet
-		     5 (1M native) unlocks the larger context-window radios below. -->
-		{#if effectiveIsAnthropic}
-			<section aria-labelledby="adv-variant-heading" class="border-t border-border pt-6">
-				<h2 id="adv-variant-heading" class="text-lg font-medium mb-1">{t('llm.variant.heading')}</h2>
-				<p class="text-xs text-text-muted mb-3">{t('llm.variant.description')}</p>
-				<div class="space-y-2">
-					<label class="flex items-start gap-3 cursor-pointer">
-						<input type="radio" name="llm-balanced-model" value={SONNET_46}
-							bind:group={config.balanced_model} disabled={!loaded} class="mt-1 disabled:opacity-50" />
-						<div class="flex-1">
-							<div class="text-sm font-medium">{t('llm.variant.sonnet46_label')}</div>
-							<div class="text-xs text-text-muted">{t('llm.variant.sonnet46_hint')}</div>
-						</div>
-					</label>
-					<label class="flex items-start gap-3 cursor-pointer">
-						<input type="radio" name="llm-balanced-model" value={SONNET_5}
-							bind:group={config.balanced_model} disabled={!loaded} class="mt-1 disabled:opacity-50" />
-						<div class="flex-1">
-							<div class="text-sm font-medium">{t('llm.variant.sonnet5_label')}</div>
-							<div class="text-xs text-text-muted">{t('llm.variant.sonnet5_hint')}</div>
-						</div>
-					</label>
-				</div>
-				<p class="text-xs text-text-muted mt-3">{t('llm.variant.note')}</p>
-			</section>
-		{/if}
+		<!-- The Sonnet-variant picker (Sonnet 4.6 ↔ 5) moved to the main "Main chat
+		     model" picker on the LLM Settings page — a served-Sonnet is just one
+		     balanced-band choice there. The `balanced_model` config field is
+		     unchanged; this view no longer owns it.
 
-		<!-- Context window — was a temporary interim on CostLimits.svelte (P2-PR-C),
-		     now lands at its final canonical home. CostLimits page was deleted in
-		     P3-PR-X; the legacy URL 301-redirects to `/app/settings/workspace/limits`. -->
-		<section aria-labelledby="adv-context-heading" class="border-t border-border pt-6">
-			<h2 id="adv-context-heading" class="text-lg font-medium mb-1">{t('llm.context_window.heading')}</h2>
-			<p class="text-xs text-text-muted mb-3">{t('llm.context_window.description')}</p>
-			{#if activeModel}
-				<!-- Settings v3 Item 6: surface the active model so the radio set
-				     below makes sense ("why is there no 500K option?" → because
-				     Sonnet caps at 200K). Single line, non-intrusive. -->
-				<p class="text-xs text-text-muted mb-3 italic">
-					{t('llm.context_window.active_model_label')}: <span class="font-mono not-italic">{activeModel.uiLabel}</span> ({formatContextWindow(activeModel.contextWindow)} {t('llm.context_window.native')})
-				</p>
-			{/if}
-			<div class="space-y-2">
-				{#each contextOptions as opt (opt.value ?? 'default')}
-					<label class="flex items-start gap-3 {opt.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}"
-						title={opt.disabled && activeModel
-							? `${t('llm.context_window.option.above_native_tooltip')} (${formatContextWindow(activeModel.contextWindow)} ${t('llm.context_window.native')}).`
-							: undefined}>
-						<input type="radio" name="llm-context-window" value={opt.value}
-							bind:group={config.max_context_window_tokens}
-							disabled={!loaded || opt.disabled} class="mt-1 disabled:opacity-50" />
-						<div class="flex-1">
-							<div class="text-sm font-medium">{t(opt.labelKey)}</div>
-							<div class="text-xs text-text-muted">{t(opt.hintKey)}</div>
-						</div>
-					</label>
-				{/each}
-			</div>
-		</section>
+		     The context-window radios were removed too: every model now uses its
+		     native window (`resolveNativeContextWindow`), so a user-facing cap is
+		     redundant. `max_context_window_tokens` stays honored as a config-file-
+		     only escape hatch (superseded by `compaction_token_budget`); it simply
+		     has no UI control anymore. -->
 
 		<div class="flex justify-end">
 			<button type="button" onclick={save} disabled={saving || !loaded}
