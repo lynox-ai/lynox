@@ -183,6 +183,14 @@ describe('subject-sweep — slice 2 (person subset merge, CONFIRM class)', () =>
     expect(pairs[0]).toMatchObject({ dupId: ada, dupName: 'Ada', canonicalName: 'Dr. Ada Lovelace' });
   });
 
+  it('planPersonSubsetPairs excludes a generational-suffix pair (father not reported under son)', () => {
+    const { engine, subs } = make();
+    subs.createSubject({ kind: 'person', name: 'John Smith Jr' });
+    subs.createSubject({ kind: 'person', name: 'John Smith' });
+    // "John Smith" ⊂ {john, smith, jr} by raw tokens, but Jr is identity-bearing → NOT a pair.
+    expect(planPersonSubsetPairs(engine)).toHaveLength(0);
+  });
+
   it('doMerge executes + persists a merge ledger; --rollback reverses it (both stores)', () => {
     const { dir, engine, subs } = make();
     const dup = subs.createSubject({ kind: 'person', name: 'Ada' });

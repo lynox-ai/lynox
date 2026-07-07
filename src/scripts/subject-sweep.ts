@@ -41,7 +41,7 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
-import { SubjectStore, personNameTokens, isProperTokenSubset } from '../core/subject-store.js';
+import { SubjectStore, personNameTokens, isPersonSubsetSafe } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
 import { ThreadStore } from '../core/thread-store.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from '../core/sqlite-constants.js';
@@ -119,7 +119,7 @@ export function planPersonSubsetPairs(engineDb: EngineDb): SubsetPair[] {
   for (const list of byOwner.values()) {
     for (const sub of list) {
       if (sub.tokens.length === 0) continue;
-      const supersets = list.filter(other => other.id !== sub.id && isProperTokenSubset(sub.tokens, other.tokens));
+      const supersets = list.filter(other => other.id !== sub.id && isPersonSubsetSafe(sub.tokens, other.tokens));
       if (supersets.length === 1) {
         const canon = supersets[0]!;
         pairs.push({ dupId: sub.id, dupName: sub.name, canonicalId: canon.id, canonicalName: canon.name });
