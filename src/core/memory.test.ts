@@ -630,6 +630,76 @@ describe('Memory', () => {
       expect(existsSync(join(contextDir, 'learnings.txt'))).toBe(false);
     });
 
+    it('routes the auto-extraction pool-key spend through the managed gate + debit', async () => {
+      const mem = new Memory(dir);
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mem.setMeteredHost({ getHooks: () => [{ onBeforeRun, onAfterRun }], getContext: () => undefined });
+      mockCreate.mockClear();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: '{"status": "shipped auth"}' }],
+        usage: { input_tokens: 1200, output_tokens: 80 },
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(onBeforeRun).toHaveBeenCalledOnce();     // gate fired before the call
+      expect(mockCreate).toHaveBeenCalledOnce();      // the fast extraction ran
+      expect(onAfterRun).toHaveBeenCalledOnce();      // spend was debited
+      const runId = onAfterRun.mock.calls[0]?.[0] as string;
+      const cost = onAfterRun.mock.calls[0]?.[1] as number;
+      expect(cost).toBeGreaterThan(0);                // real usage → non-zero debit
+      expect(runId).toBe(onBeforeRun.mock.calls[0]?.[0]); // debit keyed on the gate run id
+    });
+
+    it('skips the extraction call entirely when the gate blocks (exhausted tenant)', async () => {
+      const mem = new Memory(dir);
+      const onBeforeRun = vi.fn().mockRejectedValue(new Error('AI budget for this period reached.'));
+      const onAfterRun = vi.fn();
+      mem.setMeteredHost({ getHooks: () => [{ onBeforeRun, onAfterRun }], getContext: () => undefined });
+      mockCreate.mockClear();
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect(mockCreate).not.toHaveBeenCalled();      // no pool-key spend when blocked
+      expect(onAfterRun).not.toHaveBeenCalled();      // nothing debited
+    });
+
+    it('runs the extraction ungated + undebited when no metered host is set (self-host)', async () => {
+      const mem = new Memory(dir);
+      mockCreate.mockClear();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: '{}' }],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(mockCreate).toHaveBeenCalledOnce();       // extraction still runs on self-host
+    });
+
+    it('debits the spend even when the response carries no usable text (bills before the early return)', async () => {
+      const mem = new Memory(dir);
+      const onBeforeRun = vi.fn();
+      const onAfterRun = vi.fn();
+      mem.setMeteredHost({ getHooks: () => [{ onBeforeRun, onAfterRun }], getContext: () => undefined });
+      mockCreate.mockClear();
+      // No text block → maybeUpdate early-returns right after the call. The debit
+      // must ALREADY have fired: the pool key was spent regardless of a usable
+      // extraction. This locks the debit's placement BEFORE the early returns.
+      mockCreate.mockResolvedValueOnce({
+        content: [],
+        usage: { input_tokens: 900, output_tokens: 0 },
+      });
+
+      await mem.maybeUpdate(LONG_ANSWER);
+
+      expect(mockCreate).toHaveBeenCalledOnce();
+      expect(onAfterRun).toHaveBeenCalledOnce();       // billed despite the empty extraction
+      expect(onAfterRun.mock.calls[0]?.[1] as number).toBeGreaterThan(0);
+    });
+
     it('maybeUpdate publishes channel event with scope metadata when auto-classified', async () => {
       const mem = new Memory(dir, undefined, undefined, 'proj1');
       mem.setActiveScopes([globalScope, projectScope, userScope]);

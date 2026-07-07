@@ -12,6 +12,8 @@ import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
 import { ensureDir } from './atomic-write.js';
 import { detectInjectionAttempt } from './data-boundary.js';
+import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
+import { calculateCost } from './pricing.js';
 
 const DEFAULT_DIR = 'memory';
 const CONTEXT_TTL_DAYS = 30;
@@ -117,6 +119,7 @@ export class Memory implements IMemory {
   private readonly maskFn: ((text: string) => string) | null;
   private apiKey: string | undefined;
   private apiBaseURL: string | undefined;
+  private meteredHost: HookHost | null = null;
   private readonly _flatFileEnabled: boolean;
   private _activeScopes: MemoryScopeRef[] = [];
   private _autoScope = true;
@@ -147,6 +150,17 @@ export class Memory implements IMemory {
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
     this._flatFileEnabled = flatFileEnabled ?? true;
+  }
+
+  /**
+   * Route the per-turn `fast`-tier extraction spend through the managed
+   * onBeforeRun gate + onAfterRun debit (same lifecycle as the KnowledgeLayer
+   * extractor and chat/voice). Without this the auto-extraction pool-key call
+   * is billed to nobody on managed and skips the credit gate. No-op on
+   * self-host (no hooks registered).
+   */
+  setMeteredHost(host: HookHost | null): void {
+    this.meteredHost = host;
   }
 
   /**
@@ -494,6 +508,13 @@ export class Memory implements IMemory {
         ? finalAnswer.slice(0, extractionLimit)
         : finalAnswer;
 
+      // Route the auto-extraction pool-key spend through the managed gate: when
+      // the tenant's balance is exhausted the onBeforeRun hook throws →
+      // blockedReason is set → skip the extraction entirely (fail-closed),
+      // matching the KnowledgeLayer extractor. No-op on self-host (no hooks).
+      const extractGate = this.meteredHost ? await fireBeforeRunGate(this.meteredHost, 'fast') : null;
+      if (extractGate && extractGate.blockedReason !== null) return;
+
       const fast = resolveTierModel('fast', getActiveProvider());
       const fastClient = clientForTierSnapshot(fast, this.client, getActiveProvider());
       const stream = fastClient.beta.messages.stream({
@@ -506,6 +527,22 @@ export class Memory implements IMemory {
         }],
       });
       const response = await stream.finalMessage();
+
+      // Debit the spend BEFORE any early return so an empty extraction still
+      // bills the tenant (mirrors the KG extractor). reportMeteredCost no-ops on
+      // zero/undefined cost, so a usage-less response is a clean skip.
+      if (extractGate && this.meteredHost) {
+        const u = response.usage;
+        const costUsd = u
+          ? calculateCost(fast.modelId, {
+              input_tokens: u.input_tokens,
+              output_tokens: u.output_tokens,
+              cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+              cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+            })
+          : 0;
+        reportMeteredCost(this.meteredHost, extractGate.runId, costUsd, 'fast');
+      }
 
       const textBlock = response.content.find(b => b.type === 'text');
       if (!textBlock || textBlock.type !== 'text') return;
