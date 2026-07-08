@@ -52,6 +52,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import { buildDedupReference } from './tool-result-hygiene.js';
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -488,6 +489,31 @@ describe('Agent', () => {
       expect(result).toBe('Done');
       expect(tool.handler).toHaveBeenCalledWith({ x: 1 }, agent);
       expect(mockProcess).toHaveBeenCalledTimes(2);
+    });
+
+    it('elides a large tool_result byte-identical to an earlier one (append-time dedup)', async () => {
+      // Same tool run twice returns the SAME large payload. The first copy stays
+      // verbatim resident; the second collapses to a compact reference so the
+      // duplicate bytes don't ride every subsequent turn's cached prefix.
+      const payload = 'x'.repeat(3_000); // > DEFAULT_DEDUP_MIN_CHARS (2048)
+      const tool = makeTool('big_tool', vi.fn().mockResolvedValue(payload));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'big_tool', input: {} }]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_2', name: 'big_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('Use the tool twice');
+
+      const toolResults = agent.getMessages().flatMap(m =>
+        Array.isArray(m.content)
+          ? m.content.filter((b): b is Extract<typeof b, { type: 'tool_result' }> => b.type === 'tool_result')
+          : [],
+      );
+      expect(toolResults).toHaveLength(2);
+      expect(toolResults[0]!.content).toBe(payload); // first verbatim
+      expect(toolResults[1]!.content).toBe(buildDedupReference('big_tool')); // second elided
+      expect(toolResults[1]!.content).not.toContain('xxxx');
     });
 
     // ENGINE-10 regression (rafael prod 2026-06-05): a dangling `tool_use`
