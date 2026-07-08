@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.1 — 2026-07-08
+
+A small reliability patch for the chat's live view. If the live connection drops mid-run — a mobile tab going to the background, a proxy idling the stream, a frozen tab — answering an `ask_user` prompt no longer strands you: the client detects the drop, re-attaches to the still-running turn, and streams the continuation live, instead of showing your answer as "not sent" and only recovering after a manual reload-from-history. Plus a "Compact context" entry in the thread menu so you can summarize the conversation on demand to keep context cost down. **No engine.db migration** — rollback to 2.3.0 is a clean image swap.
+
+### Fixed
+- **ask_user live-resume** — when the live stream drops while a run is parked on an `ask_user` prompt, the client re-attaches to the run's resumable stream and the answer + continuation appear live, with no reload-from-history needed. (#931)
+
+### Added
+- **Manual context compaction** — a "Compact context" entry in the thread menu compacts the loaded conversation on demand, instead of waiting for the automatic prepare-offer. (#931)
+
 ## 2.3.0 — 2026-07-08
 
 This release makes hybrid mode reliable end to end and hardens the agent's honesty. Pipeline and workflow steps now follow the hybrid tier-set — a cross-provider slot steers each step's provider, model, and key (fixing a hybrid-mode workflow that could 404). Workflow sub-agents now receive the parent's secret store, so a step's tools resolve vault secrets, and a referenced secret that can't be found is reported plainly instead of sent as a literal or papered over with invented data. The agent grounds recommendations in verified data and never fills an empty tool result with made-up figures. Plus: a run parked on an ask_user prompt no longer aborts at the 30-minute mark, warm browser tabs hard-reload onto the fresh build after a deploy, and the chat footer reads clearer. **No engine.db migration** — rollback to 2.2.0 is a clean image swap.
