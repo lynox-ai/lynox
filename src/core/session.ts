@@ -1367,6 +1367,11 @@ export class Session {
    *  - [COMPACT_PREPARE_PERCENT, AUTO): offer "prepare & compact" ONCE (a stream
    *    event the UI surfaces as a calm suggestion + button) so the USER compacts
    *    at a good moment instead of the system silently doing it mid-task.
+   * A single large run can leap occupancy from below PREPARE straight past AUTO
+   * in one check, skipping the [80,90) zone entirely — `_compactionOffered`
+   * being still false when we reach the safety net is exactly that signal, so
+   * the offer fires there too (once) before compacting, instead of the user
+   * never seeing the "prepare" moment they'd have gotten by crossing 80 first.
    * Guard flag prevents recursion since compact() calls run().
    */
   private async _autoCompactIfNeeded(): Promise<void> {
@@ -1398,7 +1403,18 @@ export class Session {
     }
 
     // Safety net (≥90): the user ignored the offer and kept going — compact now
-    // to avoid hard truncation.
+    // to avoid hard truncation. If we got here WITHOUT ever offering (a single
+    // run leaped straight from <80% to ≥90%, skipping the [80,90) zone), fire
+    // the prepare offer signal first so the UI still surfaces the "prepare &
+    // compact" moment it would have gotten by crossing 80 on the way up — then
+    // fall through to the safety-net compact regardless (already at ≥90, so
+    // waiting for the next turn to offer-only isn't safe).
+    if (!this._compactionOffered) {
+      this._compactionOffered = true;
+      if (this.onStream) {
+        void this.onStream({ type: 'compaction_offer', usagePercent, agent: this.agent.name });
+      }
+    }
     this._isCompacting = true;
     try {
       // confirmScope: this compaction fires mid-task (unprompted), so steer the
@@ -1691,6 +1707,15 @@ export class Session {
       // Track tool names for thread insights
       if (event.type === 'tool_call' && 'name' in event) {
         this.recordToolName(event.name as string);
+      }
+      if (event.type === 'context_budget') {
+        // Inject the cost-aware budget occupancy alongside the honest window-fill
+        // `usagePercent` the Agent already computed — the SAME figure
+        // `_autoCompactIfNeeded` triggers the offer/auto-compact on, so a
+        // consumer wanting "how close to a compaction is this thread, cost-wise"
+        // reads this instead of re-deriving it (and drifting) from totalTokens/
+        // maxTokens. Cheap: reuses the agent's already-fresh occupancy read.
+        (event as { budgetPercent?: number }).budgetPercent = this._compactionUsagePercent();
       }
       if (this.onStream) {
         await this.onStream(event);
