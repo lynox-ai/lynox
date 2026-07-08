@@ -1258,6 +1258,103 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // #77 regression: the run wall-clock must PAUSE while parked on an
+    // ask_user prompt so human think-time never consumes the compute budget.
+    // Pre-fix, the single 30-min setTimeout kept running during the human
+    // wait; a user who answered after it elapsed landed on an already-aborted
+    // run (their /reply was captured but nobody was awaiting it). Here we
+    // shrink the compute budget to 1500 ms (above the 1s re-arm floor so it
+    // reflects the true budget), park the run on a real ask_user prompt, let
+    // the "human" think for 2500 ms (> budget), then answer — and assert the
+    // run CONTINUES to a done event instead of aborting.
+    it('does NOT abort a run parked on ask_user past the wall-clock — human answer CONTINUES it (#77)', async () => {
+      const prevBudget = process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+      process.env['LYNOX_RUN_WALL_CLOCK_MS'] = '1500'; // 1500 ms compute budget
+
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+
+      try {
+        // The mocked agent loop parks on the handler-wired ask_user callback and
+        // returns only once the human answers — exactly the real park/continue.
+        mockSessionRun.mockImplementationOnce(async () => {
+          const promptUser = mockSessionInstance.promptUser as
+            (q: string, o?: string[]) => Promise<string>;
+          const answer = await promptUser('Continue the plan?', ['yes', 'no']);
+          return `continued:${answer}`;
+        });
+
+        // /run resolves on headers; the SSE body streams until the run ends.
+        const res = await jsonFetch('/api/sessions/wallclock-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'do the thing', protocol: 1 }),
+        });
+        expect(res.status).toBe(200);
+
+        // Wait until the run has parked (prompt row inserted).
+        let pending = realPromptStore.getPending('wallclock-1');
+        for (let i = 0; i < 200 && !pending; i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+          pending = realPromptStore.getPending('wallclock-1');
+        }
+        expect(pending).toBeDefined();
+
+        // "Human thinks" for well over the 1500 ms compute budget. Pre-fix the
+        // wall-clock would have fired ~1500 ms in and aborted the parked run.
+        await new Promise<void>((r) => setTimeout(r, 2500));
+        // Still pending after 2500 ms > budget → the wall-clock did NOT fire.
+        expect(realPromptStore.getPending('wallclock-1')).toBeDefined();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+
+        // Human answers via the real /reply route.
+        const replyRes = await jsonFetch('/api/sessions/wallclock-1/reply', {
+          method: 'POST',
+          body: JSON.stringify({ promptId: pending!.id, answer: 'yes' }),
+        });
+        expect(replyRes.status).toBe(200);
+
+        // The run CONTINUED: a done event carrying the answered result, and the
+        // wall-clock never aborted the session.
+        const text = await res.text();
+        expect(text).toContain('event: done');
+        expect(text).toContain('continued:yes');
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        if (prevBudget === undefined) delete process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+        else process.env['LYNOX_RUN_WALL_CLOCK_MS'] = prevBudget;
+        db.close();
+      }
+    });
+
     // Companion test: verify the slot remembers stream death so a later
     // /run can detect the stale state. Exercises the req.on('close') path
     // by going through the public /run endpoint and checking the internal

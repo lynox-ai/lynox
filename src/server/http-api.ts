@@ -39,6 +39,7 @@ import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
+import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
@@ -107,6 +108,19 @@ const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
 const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
+/** Run wall-clock: max wall-time a run may spend ACTIVELY COMPUTING. Human
+ *  think-time on a pending prompt is paused out of this budget (#77), so this
+ *  is a compute-only ceiling, not elapsed-time. Overridable for tests/ops via
+ *  LYNOX_RUN_WALL_CLOCK_MS. */
+const DEFAULT_RUN_WALL_CLOCK_MS = 30 * 60_000; // 30 min
+function resolveRunWallClockMs(): number {
+  const raw = process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_RUN_WALL_CLOCK_MS;
+}
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
 /** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
@@ -2131,6 +2145,20 @@ export class LynoxHTTPApi {
 
       let aborted = false;
 
+      // ── Pausable run wall-clock (compute-only 30-min budget) ──
+      // The wall-clock is a single timer, but a run PARKED on a pending prompt
+      // (ask_user / tabs / ask_secret / connect_mail) is waiting on a HUMAN,
+      // not computing. Human think-time must NOT consume the budget —
+      // otherwise someone who answers after the budget elapsed lands on an
+      // already-aborted run (their reply is captured but nobody awaits it; the
+      // #77 prod bug). We PAUSE the timer on every prompt-start and re-arm it
+      // with the REMAINING budget on prompt-settle. The budget arithmetic lives
+      // in WallClockBudget (unit-tested); this handler owns the actual timer.
+      const wallClockBudget = new WallClockBudget(resolveRunWallClockMs());
+      // `undefined` = no live timer (paused, fired, or not yet armed). Kept in
+      // sync with wallClockBudget.paused; the guards below never touch a stale id.
+      let streamTimeout: ReturnType<typeof setTimeout> | undefined;
+
       // ── Per-run identity + resumable event buffer ──
       // `runId` identifies this run to the client-queryable registry
       // (GET /api/runs/active) and the resumable stream endpoint
@@ -2200,6 +2228,7 @@ export class LynoxHTTPApi {
         if (!promptStore) return 'n'; // fallback if store unavailable
         const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true);
         hasActivePendingPrompt = true;
+        pauseWallClock(); // parked on a human — don't spend the compute budget
         // Best-effort SSE notification (client may not be connected).
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
@@ -2215,6 +2244,7 @@ export class LynoxHTTPApi {
         }
         const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
+        resumeWallClock(); // human answered/dismissed — resume the compute budget
         if (outcome.status === 'answered') return outcome.row.answer ?? '__dismissed__';
         // Surface an explicit reason to the client — no silent 'n' default.
         if (!aborted && !res.writableEnded) {
@@ -2232,6 +2262,7 @@ export class LynoxHTTPApi {
           if (!promptStore) return [];
           const promptId = promptStore.insertAskUserTabs(sessionId, questions);
           hasActivePendingPrompt = true;
+          pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded) {
             const data = JSON.stringify({
               promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
@@ -2241,6 +2272,7 @@ export class LynoxHTTPApi {
           }
           const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
           hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
           if (outcome.status === 'answered' && outcome.row.answer) {
             try {
               const parsed = JSON.parse(outcome.row.answer) as unknown;
@@ -2298,6 +2330,7 @@ export class LynoxHTTPApi {
 
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
         hasActivePendingPrompt = true;
+        pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, name, prompt, key_type: keyType,
@@ -2307,6 +2340,7 @@ export class LynoxHTTPApi {
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
+        resumeWallClock(); // human answered/dismissed — resume the compute budget
         // answer_error wins over answer_saved when set — see SecretOutcome contract
         // (server-side rejection must not be mistranslated as a user cancel).
         if (row?.answer_error === 'managed_blocked') return 'managed_blocked';
@@ -2335,6 +2369,7 @@ export class LynoxHTTPApi {
           JSON.stringify(data),
         );
         hasActivePendingPrompt = true;
+        pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded) {
           const payload = JSON.stringify({
             promptId, ...data,
@@ -2344,6 +2379,7 @@ export class LynoxHTTPApi {
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
+        resumeWallClock(); // human answered/dismissed — resume the compute budget
         // answer_saved === 1 means the consent step POSTed the account and the
         // route accepted it. No row (expired / session aborted) or a 0 flag is
         // a dismissal — the agent must NOT fall back to asking for the password
@@ -2373,17 +2409,46 @@ export class LynoxHTTPApi {
         }
       }, 10_000);
 
-      // Wall-clock backstop (30 min max). Fires for a still-streaming run AND
-      // for a headless run whose client already disconnected (disconnect≠abort
-      // leaves this armed). `res.destroyed` guards the post-disconnect case so
-      // we never call res.end() on a torn-down socket.
-      const streamTimeout = setTimeout(() => {
+      // Wall-clock backstop (compute-only budget, 30 min default). Fires for a
+      // still-streaming run AND for a headless run whose client already
+      // disconnected (disconnect≠abort leaves this armed). `res.destroyed`
+      // guards the post-disconnect case so we never call res.end() on a
+      // torn-down socket.
+      //
+      // The abort action is factored out so the INITIAL arm and every
+      // pause/resume re-arm reuse the EXACT same teardown — no drift.
+      const fireWallClockAbort = (): void => {
         aborted = true;
         clearInterval(keepaliveTimer);
         sessionAbortController.abort();
         session.abort();
         if (!res.writableEnded && !res.destroyed) res.end();
-      }, 30 * 60_000);
+        streamTimeout = undefined; // timer consumed — keep the paused/armed invariant honest
+      };
+      // Arm (or re-arm) the wall-clock with whatever compute budget remains.
+      const armWallClock = (): void => {
+        streamTimeout = setTimeout(fireWallClockAbort, wallClockBudget.arm(Date.now()));
+      };
+      // PAUSE at prompt-start: stop the timer and bank the compute-time spent so
+      // far. Idempotent — with no live timer it is a no-op, so a defensive
+      // double-pause can never double-subtract the budget.
+      const pauseWallClock = (): void => {
+        if (streamTimeout === undefined) return;
+        clearTimeout(streamTimeout);
+        streamTimeout = undefined;
+        wallClockBudget.pause(Date.now());
+      };
+      // RESUME at prompt-settle: re-arm with the remaining (compute-only)
+      // budget. Skips re-arming if the run was already aborted (a disconnect set
+      // `aborted` while parked → the run either finishes headless with no
+      // wall-clock, matching the prior disconnect-drops-the-timer behavior, or a
+      // takeover is about to throw RunAbortedError). Skips if a timer is somehow
+      // already live so it never stacks two timers.
+      const resumeWallClock = (): void => {
+        if (aborted || streamTimeout !== undefined) return;
+        armWallClock();
+      };
+      armWallClock();
 
       req.on('close', () => {
         clearInterval(keepaliveTimer);
@@ -2417,11 +2482,14 @@ export class LynoxHTTPApi {
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
         if (hasActivePendingPrompt) {
-          // Already parked on a prompt at close → the agent loop is blocked on
-          // the prompt (not computing), so the 30-min compute backstop is moot.
-          // Drop it; the orphan watchdog above bounds the wait. The user can
-          // reconnect and answer (the loop keeps polling SQLite).
-          clearTimeout(streamTimeout);
+          // Already parked on a prompt at close → the wall-clock is already
+          // PAUSED (pauseWallClock cleared it at prompt-start), so there is
+          // normally no live timer here. The guarded clearTimeout is defense in
+          // depth against any race where it was re-armed; the orphan watchdog
+          // above bounds the wait. The user can reconnect and answer (the loop
+          // keeps polling SQLite) — resumeWallClock then no-ops because `aborted`
+          // is now set, matching the prior disconnect-drops-the-timer behavior.
+          if (streamTimeout !== undefined) clearTimeout(streamTimeout);
         }
         // else: RUNNING with no prompt → Tier-1 disconnect≠abort. Do NOT abort
         // the session; let it finish headless. Eager-persist keeps the
@@ -2483,7 +2551,9 @@ export class LynoxHTTPApi {
           res.end();
         }
       } finally {
-        clearTimeout(streamTimeout);
+        // May be undefined if the run ended while paused on a prompt (or the
+        // timer already fired) — guard the clear so we never touch a stale id.
+        if (streamTimeout !== undefined) clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
         // Free the concurrency slot + abort handle (idempotent). The next queued
