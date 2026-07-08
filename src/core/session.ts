@@ -1215,7 +1215,7 @@ export class Session {
 
     // Structured compaction: a lossy prose summary used to drop artifacts and
     // open tasks, leaving the agent unable to continue. Name what must survive.
-    const base = 'Summarize the conversation so far so work can continue without the full history. Reply with the summary itself as plain text — do NOT call any tool and do NOT save it as an artifact; this text IS the surviving context. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
+    const base = 'Summarize the conversation so far so work can continue without the full history. Reply with the summary itself as plain text — do NOT call any tool and do NOT save it as an artifact; this text IS the surviving context. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks (keep their ids) and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
     // A3: carry provenance THROUGH compaction — tag each concrete fact with its
     // source tier so a guess can't read as verified after the history is gone.
     const taggingClause = ' For each concrete fact you carry forward, wrap it in an inline `<fact kind="…">fact text</fact>` element whose kind is `user_asserted` (the user stated it), `tool_verified` (a tool result confirmed it this session), or `agent_inferred` (you derived or assumed it) — this preserves which facts are trustworthy. Keep tags terse and only on facts (not on headings, decisions, or task labels). Still record open tasks plainly; do not drop or disown them.';
@@ -1286,7 +1286,26 @@ export class Session {
       // user-triggered compaction is just as transparent on reload/export as an
       // automatic one. Best-effort — never block. (The live UI marker is streamed
       // by _autoCompactIfNeeded for auto, and pushed by compactNow() for manual.)
-      persistCompactionMarker(this.engine.getThreadStore(), this.sessionId);
+      const threadStore = this.engine.getThreadStore();
+      persistCompactionMarker(threadStore, this.sessionId);
+      // Slice B (#86/#80): persist the fact-tagged summary durably. Without this
+      // it lives only in the in-memory post-compaction seed (which loadMessages
+      // marks non-persistable), so an evicted/resumed session finds thread.summary
+      // null (#86) and RE-summarizes the full raw history from scratch via
+      // generateThreadSummary's `!thread.summary` fallback (#80 double-summarize).
+      // Writing it here makes resume build on THIS (better, fact-tagged) summary
+      // and suppresses the redundant re-summarize. summary_up_to = the api message
+      // count now (the display-only marker just written is excluded) — the span
+      // the summary covers; currently write-only (future delta-resume), read by
+      // nothing yet. Best-effort — never block or fail the compaction.
+      if (threadStore) {
+        try {
+          threadStore.updateThread(this.sessionId, {
+            summary,
+            summary_up_to: threadStore.getApiMessageCount(this.sessionId),
+          });
+        } catch { /* fire-and-forget: a persisted summary is an optimization, not correctness */ }
+      }
       // Debug-export Tier 2: record the compaction event (counts + trigger only,
       // no PII). Best-effort — never block or fail the compaction. run_id is the
       // run active when compaction fired (the triggering user run for auto; null
@@ -1367,6 +1386,11 @@ export class Session {
    *  - [COMPACT_PREPARE_PERCENT, AUTO): offer "prepare & compact" ONCE (a stream
    *    event the UI surfaces as a calm suggestion + button) so the USER compacts
    *    at a good moment instead of the system silently doing it mid-task.
+   * A single large run can leap occupancy from below PREPARE straight past AUTO
+   * in one check, skipping the [80,90) zone entirely — `_compactionOffered`
+   * being still false when we reach the safety net is exactly that signal, so
+   * the offer fires there too (once) before compacting, instead of the user
+   * never seeing the "prepare" moment they'd have gotten by crossing 80 first.
    * Guard flag prevents recursion since compact() calls run().
    */
   private async _autoCompactIfNeeded(): Promise<void> {
@@ -1398,7 +1422,18 @@ export class Session {
     }
 
     // Safety net (≥90): the user ignored the offer and kept going — compact now
-    // to avoid hard truncation.
+    // to avoid hard truncation. If we got here WITHOUT ever offering (a single
+    // run leaped straight from <80% to ≥90%, skipping the [80,90) zone), fire
+    // the prepare offer signal first so the UI still surfaces the "prepare &
+    // compact" moment it would have gotten by crossing 80 on the way up — then
+    // fall through to the safety-net compact regardless (already at ≥90, so
+    // waiting for the next turn to offer-only isn't safe).
+    if (!this._compactionOffered) {
+      this._compactionOffered = true;
+      if (this.onStream) {
+        void this.onStream({ type: 'compaction_offer', usagePercent, agent: this.agent.name });
+      }
+    }
     this._isCompacting = true;
     try {
       // confirmScope: this compaction fires mid-task (unprompted), so steer the
@@ -1691,6 +1726,15 @@ export class Session {
       // Track tool names for thread insights
       if (event.type === 'tool_call' && 'name' in event) {
         this.recordToolName(event.name as string);
+      }
+      if (event.type === 'context_budget') {
+        // Inject the cost-aware budget occupancy alongside the honest window-fill
+        // `usagePercent` the Agent already computed — the SAME figure
+        // `_autoCompactIfNeeded` triggers the offer/auto-compact on, so a
+        // consumer wanting "how close to a compaction is this thread, cost-wise"
+        // reads this instead of re-deriving it (and drifting) from totalTokens/
+        // maxTokens. Cheap: reuses the agent's already-fresh occupancy read.
+        (event as { budgetPercent?: number }).budgetPercent = this._compactionUsagePercent();
       }
       if (this.onStream) {
         await this.onStream(event);

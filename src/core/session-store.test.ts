@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SessionStore } from './session-store.js';
+import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { SessionStore, buildResumeContext } from './session-store.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
+import type { ThreadRecord } from './thread-store.js';
 
 let sessionCounter = 0;
 
@@ -236,5 +238,54 @@ describe('SessionStore', () => {
       store.reset('session-y');
       expect(store.get('session-y')).toBeUndefined();
     });
+  });
+});
+
+describe('buildResumeContext (Slice B — delta-since-summary resume)', () => {
+  function mkThread(summary: string | null, summary_up_to: number): ThreadRecord {
+    return { summary, summary_up_to } as unknown as ThreadRecord;
+  }
+  function mkMessages(n: number): BetaMessageParam[] {
+    return Array.from({ length: n }, (_, i) => ({
+      role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: `msg-${i}`,
+    }));
+  }
+
+  it('loads [summary + every message since summary_up_to], closing the gap the fixed recent-window left', () => {
+    const messages = mkMessages(100);
+    // Summary covers up to index 50. The OLD fixed last-40 window started at
+    // index 60 and silently DROPPED messages 50–59; the delta slice includes them.
+    const ctx = buildResumeContext(mkThread('SUMMARY', 50), messages);
+    expect(ctx[1]).toMatchObject({ role: 'assistant', content: 'SUMMARY' });
+    const recent = ctx.slice(2);
+    expect(recent).toHaveLength(50); // messages 50..99, not just the last 40
+    expect(recent[0]).toMatchObject({ content: 'msg-50' }); // the gap-closer is present
+    expect(recent.at(-1)).toMatchObject({ content: 'msg-99' });
+  });
+
+  it('caps the post-summary tail at MAX_RESUME_DELTA so a pathological long tail cannot blow up the payload', () => {
+    const messages = mkMessages(500);
+    const ctx = buildResumeContext(mkThread('SUMMARY', 10), messages); // raw delta would be 490
+    const recent = ctx.slice(2);
+    expect(recent).toHaveLength(120); // capped, not 490
+    expect(recent[0]).toMatchObject({ content: 'msg-380' }); // 500 - 120
+    expect(recent.at(-1)).toMatchObject({ content: 'msg-499' });
+  });
+
+  it('falls back to the fixed recent window for a legacy summary with an unset (0) summary_up_to', () => {
+    const messages = mkMessages(100);
+    const ctx = buildResumeContext(mkThread('LEGACY SUMMARY', 0), messages);
+    const recent = ctx.slice(2);
+    expect(recent).toHaveLength(40); // pre-Slice-B behavior preserved
+    expect(recent[0]).toMatchObject({ content: 'msg-60' });
+  });
+
+  it('uses the placeholder path (unchanged) when no summary exists', () => {
+    const messages = mkMessages(100);
+    const ctx = buildResumeContext(mkThread(null, 0), messages);
+    expect(JSON.stringify(ctx[0]?.content)).toContain('Resuming conversation');
+    expect(JSON.stringify(ctx[0]?.content)).toContain('60'); // dropped count = 100 - 40
+    expect(ctx.slice(2)).toHaveLength(40);
   });
 });
