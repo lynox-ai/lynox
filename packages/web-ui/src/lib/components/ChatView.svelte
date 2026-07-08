@@ -1894,8 +1894,16 @@
 		{/if}
 		{#if isLast && ctxBudget && !isStreamingMsg}
 			{@const pct = Math.min(ctxBudget.usagePercent, 100)}
-			{@const barColor = pct >= 75 ? 'bg-danger' : pct >= 60 ? 'bg-warning' : 'bg-accent'}
-			{@const txtColor = pct >= 75 ? 'text-danger' : pct >= 60 ? 'text-warning' : 'text-text-subtle'}
+			<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
+			     thread is to a compaction, cost-wise) when the engine sends it;
+			     falls back to the window-fill `pct` when it's absent (older /
+			     non-lazy engines) so the chip looks EXACTLY as before (#78b). The
+			     DISPLAYED number stays `pct` (honest window-fill) either way — no
+			     second number, per rafael's call that a raw cost-% contradicts the
+			     window meter on large-window models. -->
+			{@const colorPct = ctxBudget.budgetPercent !== undefined ? Math.min(ctxBudget.budgetPercent, 100) : pct}
+			{@const barColor = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
+			{@const txtColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
 			<span
 				class="inline-flex items-center gap-1 shrink-0"
 				title="{t('chat.ctx_occupancy_tooltip')} · {ctxBudget.totalTokens.toLocaleString()} / {ctxBudget.maxTokens.toLocaleString()}"

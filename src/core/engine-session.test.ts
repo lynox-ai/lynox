@@ -36,7 +36,10 @@ vi.mock('./agent.js', () => ({
       this.name = 'RunAbortedError';
     }
   },
-  Agent: vi.fn().mockImplementation(function (config: { toolResultBlobStore?: unknown }) {
+  Agent: vi.fn().mockImplementation(function (config: {
+    toolResultBlobStore?: unknown;
+    onStream?: ((event: unknown) => void | Promise<void>) | undefined;
+  }) {
     // @ts-expect-error mock constructor — capture the Session-owned blob store
     // so compaction tests can assert recall round-trips through the real store.
     this.toolResultBlobStore = config?.toolResultBlobStore;
@@ -73,8 +76,11 @@ vi.mock('./agent.js', () => ({
     this.promptUser = undefined;
     // @ts-expect-error mock constructor
     this.promptTabs = undefined;
-    // @ts-expect-error mock constructor
-    this.onStream = null;
+    // @ts-expect-error mock constructor — captures Session's real streamHandler
+    // closure so tests can invoke `agent.onStream(event)` directly to exercise
+    // Session's event-interception logic (turn_end model/contextWindow inject,
+    // context_budget budgetPercent inject, etc.) without a full run().
+    this.onStream = config?.onStream ?? null;
     // @ts-expect-error mock constructor
     this.name = 'lynox';
     // @ts-expect-error mock constructor
@@ -1492,6 +1498,23 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true, trigger: 'auto' });
     });
 
+    it('a single-run leap from <80% straight past 90% still fires the prepare offer (not skipped) before auto-compacting', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<{ type: string; usagePercent?: number }> = [];
+      session.onStream = (e) => { events.push(e as { type: string; usagePercent?: number }); return Promise.resolve(); };
+      // No prior check ever landed in [80,90) — usage jumps in one turn from
+      // well below the prepare threshold to well above the auto-compact one.
+      vi.spyOn(session as unknown as AutoCompact, '_compactionUsagePercent').mockReturnValue(95);
+      const compactSpy = vi.spyOn(session, 'compact').mockResolvedValue({ success: true, summary: 'S' });
+
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded();
+
+      const offers = events.filter(e => e.type === 'compaction_offer');
+      expect(offers).toHaveLength(1);
+      expect(offers[0]!.usagePercent).toBe(95);
+      expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true, trigger: 'auto' });
+    });
+
     it('does nothing below the prepare threshold', async () => {
       const { session } = await createEngineAndSession();
       const events: Array<{ type: string }> = [];
@@ -1540,6 +1563,47 @@ describe('Engine + Session (Orchestrator)', () => {
       agentMock.getEstimatedOccupancyTokens = () => 150_000;
       // budget 300K → ceiling 375K → 150K/375K = 40% — below the offer; no trim.
       expect((session as unknown as AutoCompact)._compactionUsagePercent()).toBe(40);
+    });
+  });
+
+  describe('context_budget stream event: budgetPercent injection', () => {
+    type AgentOnStream = { model: string; getEstimatedOccupancyTokens: () => number;
+      onStream: (event: unknown) => void | Promise<void> };
+
+    it('injects budgetPercent (the cost-aware compaction-trigger figure) alongside the honest usagePercent', async () => {
+      const { session } = await createEngineAndSession({ compaction_token_budget: 150_000 });
+      const events: Array<Record<string, unknown>> = [];
+      session.onStream = (e) => { events.push(e as Record<string, unknown>); return Promise.resolve(); };
+      const agentMock = (session as unknown as { agent: AgentOnStream }).agent;
+      agentMock.model = 'claude-sonnet-4-6[1m]'; // 1M native window
+      // 150K carried tokens: honest window meter ~15%, but the cost-aware
+      // budget ceiling (150K / 0.8 = 187.5K) puts the trigger figure at 80% —
+      // the same divergence the L1 tests above exercise on _compactionUsagePercent.
+      agentMock.getEstimatedOccupancyTokens = () => 150_000;
+
+      await agentMock.onStream({
+        type: 'context_budget',
+        totalTokens: 150_000,
+        maxTokens: 1_000_000,
+        usagePercent: 15,
+        agent: 'lynox',
+      });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!['usagePercent']).toBe(15);   // honest meter left untouched
+      expect(events[0]!['budgetPercent']).toBe(80);  // cost-aware trigger figure injected
+    });
+
+    it('does not add budgetPercent to unrelated event types', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<Record<string, unknown>> = [];
+      session.onStream = (e) => { events.push(e as Record<string, unknown>); return Promise.resolve(); };
+      const agentMock = (session as unknown as { agent: AgentOnStream }).agent;
+
+      await agentMock.onStream({ type: 'text', text: 'hi', agent: 'lynox' });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).not.toHaveProperty('budgetPercent');
     });
   });
 

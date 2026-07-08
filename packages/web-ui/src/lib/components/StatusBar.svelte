@@ -438,8 +438,15 @@
 	<!-- Context Window -->
 	{#if getContextBudget()}
 		{@const pct = getContextBudget()?.usagePercent ?? 0}
-		{@const color = pct >= 75 ? 'bg-danger' : pct >= 60 ? 'bg-warning' : 'bg-accent'}
-		{@const textColor = pct >= 75 ? 'text-danger' : pct >= 60 ? 'text-warning' : 'text-text-subtle'}
+		<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
+		     thread is to a compaction, cost-wise) when the engine sends it, else
+		     falls back to the window-fill `pct` so the bar is unchanged on older /
+		     non-lazy engines (colorPct === pct then). Displayed number stays `pct`
+		     (honest window-fill) — no second number. Mirrors ChatView's chip so the
+		     persistent status-strip bar and the per-message chip never disagree (#78b). -->
+		{@const colorPct = getContextBudget()?.budgetPercent !== undefined ? Math.min(getContextBudget()!.budgetPercent!, 100) : pct}
+		{@const color = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
+		{@const textColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
 		<span class="text-border">|</span>
 		<div class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="{getContextBudget()?.totalTokens ?? 0} / {getContextBudget()?.maxTokens ?? 0} tokens{getSessionModel() ? ` · ${getSessionModel()}` : ''}">
 			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">

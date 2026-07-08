@@ -83,7 +83,15 @@ export type StreamEvent =
       summary?: string | undefined; agent: string }
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
   | { type: 'context_budget'; systemTokens?: number; toolTokens?: number; messageTokens?: number;
-      totalTokens: number; maxTokens: number; usagePercent: number; agent: string }
+      totalTokens: number; maxTokens: number; usagePercent: number;
+      // Cost-aware budget occupancy (Session._compactionUsagePercent — the SAME
+      // figure that drives `_autoCompactIfNeeded`'s offer/auto-compact triggers),
+      // injected by Session's stream wrapper alongside the honest window-fill
+      // `usagePercent` above. Distinct on purpose: on a large native window a
+      // thread can carry cost past the compaction budget long before the real
+      // window fills, so a consumer that wants a cost signal (not just window
+      // fill) reads this field instead of re-deriving it from totalTokens/maxTokens.
+      budgetPercent?: number | undefined; agent: string }
   | { type: 'changeset_ready'; fileCount: number; agent: string }
   | { type: 'context_compacted'; summary: string; previousUsagePercent: number; agent: string }
   | { type: 'compaction_offer'; usagePercent: number; agent: string };
