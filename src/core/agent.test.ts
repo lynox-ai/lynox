@@ -1472,6 +1472,40 @@ describe('Agent', () => {
       const input = callArgs[0] as { headers: { Authorization: string } };
       expect(input.headers.Authorization).toBe('secret:MY_KEY');
     });
+
+    it('fails loud (does NOT send the literal) when a referenced secret is not in the vault', async () => {
+      // Core regression: a tool that references `secret:DATAFORSEO` when the
+      // vault has no such secret must ERROR (fail-loud guard), NOT send the
+      // literal `secret:DATAFORSEO` to the external service. Before the
+      // orchestrator threaded the parent SecretStore into pipeline sub-agents,
+      // `this.secretStore` was undefined for a workflow step, the whole block
+      // was skipped, and the literal went out → 401/empty body → the model
+      // fabricated data. This test pins the fail-loud behaviour that a present
+      // (but missing-the-key) secretStore restores.
+      const store = makeSecretStore({ resolve: vi.fn().mockReturnValue(null) });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'http_request',
+          input: { url: 'https://api.dataforseo.com', headers: { Authorization: 'Bearer secret:DATAFORSEO' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6',
+        tools: [tool], secretStore: store,
+      });
+      await agent.send('Call API');
+
+      // The tool handler must NOT run — the literal never reaches the service.
+      expect(tool.handler).not.toHaveBeenCalled();
+      const messages = agent.getMessages();
+      const toolResults = messages[2] as { content: Array<{ content: string; is_error: boolean }> };
+      expect(toolResults.content[0]!.is_error).toBe(true);
+      expect(toolResults.content[0]!.content).toContain('DATAFORSEO');
+      expect(toolResults.content[0]!.content).toContain("vault doesn't have");
+    });
   });
 
   describe('unlimited iterations (maxIterations: 0)', () => {

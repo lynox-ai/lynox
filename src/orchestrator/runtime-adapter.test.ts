@@ -522,6 +522,75 @@ describe('spawnInline + parentMemory propagation (regression-gate for memory_* i
   });
 });
 
+describe('secretStore propagation into pipeline sub-agents (fail-loud secret resolution)', () => {
+  // The orchestrator pipeline path (run_workflow → spawnViaAgent / spawnInline)
+  // previously built each step Agent with NO secretStore. That skipped the whole
+  // secret block in agent.ts: `secret:NAME` refs were neither resolved NOR
+  // fail-loud-guarded, so the literal `secret:NAME` was sent to the external
+  // service (401/empty → model fabricates). These tests pin that the parent's
+  // SecretStore now threads into the built Agent — the precondition for
+  // agent.ts's fail-loud unresolved-secret guard to fire for a sub-agent.
+  // Mirrors spawn.ts threading `parentAgent.secretStore` for `spawn_agent`.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  // A minimal SecretStoreLike stand-in — identity is what we assert (toBe).
+  const mockSecretStore = {
+    getMasked: vi.fn(),
+    resolve: vi.fn(),
+    listNames: vi.fn(),
+    containsSecret: vi.fn(),
+    maskSecrets: vi.fn((t: string) => t),
+    recordConsent: vi.fn(),
+    hasConsent: vi.fn(),
+    isExpired: vi.fn(),
+    findUnresolvedSecretRefs: vi.fn(),
+    extractSecretNames: vi.fn(),
+    resolveSecretRefs: vi.fn(),
+  } as unknown as NonNullable<Parameters<typeof spawnInline>[13]>;
+
+  it('spawnInline threads the given secretStore into the built Agent', async () => {
+    const step: ManifestStep = { id: 'creds', agent: 'creds', runtime: 'inline', task: 'call api with secret' };
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      mockSecretStore,
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBe(mockSecretStore);
+  });
+
+  it('spawnViaAgent threads the given secretStore into the built Agent', async () => {
+    const step: ManifestStep = { id: 'n-creds', agent: 'n-creds', runtime: 'agent', model: 'balanced' };
+    const agentDef: AgentDef = { name: 'n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(
+      step, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      mockSecretStore,
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBe(mockSecretStore);
+  });
+
+  it('spawnInline leaves secretStore undefined when none supplied (backward-compat)', async () => {
+    const step: ManifestStep = { id: 'no-creds', agent: 'no-creds', runtime: 'inline', task: 'no secret' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // Pre-fix behaviour for non-run_workflow callers: no crash, secretStore stays undefined.
+    expect(agentConfig['secretStore']).toBeUndefined();
+  });
+
+  it('spawnViaAgent leaves secretStore undefined when none supplied (backward-compat)', async () => {
+    const step: ManifestStep = { id: 'no-n-creds', agent: 'no-n-creds', runtime: 'agent', model: 'balanced' };
+    const agentDef: AgentDef = { name: 'no-n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1');
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBeUndefined();
+  });
+});
+
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
   // Pins the inline-step sandbox allowlist so a future "let me trim a few
   // tools" refactor can't silently break workflows that depend on memory

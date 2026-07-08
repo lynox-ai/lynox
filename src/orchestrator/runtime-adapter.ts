@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -305,6 +305,7 @@ export async function spawnViaAgent(
   capabilityContract?: CapabilityContract | undefined,
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -398,6 +399,13 @@ export async function spawnViaAgent(
     preApproval,
     autonomy,
     capabilityContract,
+    // Share the parent agent's SecretStore so this step's tools resolve
+    // `secret:NAME` refs against the vault AND the fail-loud unresolved-secret
+    // guard (agent.ts) fires. Without it the whole secret block is skipped: the
+    // literal `secret:NAME` is sent to the external service and the model then
+    // papers over the empty/4xx result. Mirrors spawn.ts threading it for
+    // `spawn_agent`. Undefined for callers that supply none → unchanged.
+    secretStore,
     // A2: the step's own run id (reuses the Agent's `currentRunId` attribution
     // tag), so an isDangerous guard decision during this step is stamped onto
     // the append-only audit with the run it occurred in.
@@ -486,6 +494,7 @@ export async function spawnInline(
   capabilityContract?: CapabilityContract | undefined,
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -581,6 +590,12 @@ export async function spawnInline(
     // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
     currentRunId: stepRunId,
     toolContext: parentToolContext,
+    // Share the parent agent's SecretStore so this inline step's tools resolve
+    // `secret:NAME` refs AND the fail-loud unresolved-secret guard (agent.ts)
+    // fires — instead of silently sending the literal `secret:NAME` to the
+    // external service. Mirrors spawn.ts for `spawn_agent`; undefined for
+    // callers that supply none → unchanged.
+    secretStore,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
@@ -674,6 +689,7 @@ export async function spawnPipeline(
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   capabilityContract?: CapabilityContract | undefined,
   runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -730,6 +746,10 @@ export async function spawnPipeline(
     // `pipeline_step` rows (under the sub-pipeline's run id) — observability at
     // every nesting depth, not just the top level.
     runHistory: runHistory ?? undefined,
+    // Carry the parent SecretStore into the nested pipeline so a
+    // `runtime:'pipeline'` step's inner inline/named steps also resolve secrets
+    // + fire the fail-loud guard, instead of dropping it one level down.
+    secretStore,
   });
 
   // Aggregate results
