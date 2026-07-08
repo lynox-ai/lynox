@@ -1215,7 +1215,7 @@ export class Session {
 
     // Structured compaction: a lossy prose summary used to drop artifacts and
     // open tasks, leaving the agent unable to continue. Name what must survive.
-    const base = 'Summarize the conversation so far so work can continue without the full history. Reply with the summary itself as plain text — do NOT call any tool and do NOT save it as an artifact; this text IS the surviving context. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
+    const base = 'Summarize the conversation so far so work can continue without the full history. Reply with the summary itself as plain text — do NOT call any tool and do NOT save it as an artifact; this text IS the surviving context. Keep, as compact bullet points: decisions made (and why), artifacts created (keep their titles/ids), open tasks (keep their ids) and the immediate next step, and concrete facts the user provided. Drop small talk and resolved detours.';
     // A3: carry provenance THROUGH compaction — tag each concrete fact with its
     // source tier so a guess can't read as verified after the history is gone.
     const taggingClause = ' For each concrete fact you carry forward, wrap it in an inline `<fact kind="…">fact text</fact>` element whose kind is `user_asserted` (the user stated it), `tool_verified` (a tool result confirmed it this session), or `agent_inferred` (you derived or assumed it) — this preserves which facts are trustworthy. Keep tags terse and only on facts (not on headings, decisions, or task labels). Still record open tasks plainly; do not drop or disown them.';
@@ -1286,7 +1286,26 @@ export class Session {
       // user-triggered compaction is just as transparent on reload/export as an
       // automatic one. Best-effort — never block. (The live UI marker is streamed
       // by _autoCompactIfNeeded for auto, and pushed by compactNow() for manual.)
-      persistCompactionMarker(this.engine.getThreadStore(), this.sessionId);
+      const threadStore = this.engine.getThreadStore();
+      persistCompactionMarker(threadStore, this.sessionId);
+      // Slice B (#86/#80): persist the fact-tagged summary durably. Without this
+      // it lives only in the in-memory post-compaction seed (which loadMessages
+      // marks non-persistable), so an evicted/resumed session finds thread.summary
+      // null (#86) and RE-summarizes the full raw history from scratch via
+      // generateThreadSummary's `!thread.summary` fallback (#80 double-summarize).
+      // Writing it here makes resume build on THIS (better, fact-tagged) summary
+      // and suppresses the redundant re-summarize. summary_up_to = the api message
+      // count now (the display-only marker just written is excluded) — the span
+      // the summary covers; currently write-only (future delta-resume), read by
+      // nothing yet. Best-effort — never block or fail the compaction.
+      if (threadStore) {
+        try {
+          threadStore.updateThread(this.sessionId, {
+            summary,
+            summary_up_to: threadStore.getApiMessageCount(this.sessionId),
+          });
+        } catch { /* fire-and-forget: a persisted summary is an optimization, not correctness */ }
+      }
       // Debug-export Tier 2: record the compaction event (counts + trigger only,
       // no PII). Best-effort — never block or fail the compaction. run_id is the
       // run active when compaction fired (the triggering user run for auto; null

@@ -1339,6 +1339,62 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  // -- Slice B (#86/#80): compact() persists the summary durably to thread.summary --
+
+  describe('compact() durable summary persistence', () => {
+    it('writes the summary + summary_up_to to the thread row so resume builds on it (fixes #86 null + #80 double-summarize)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const threadStore = engine.getThreadStore();
+      expect(threadStore).not.toBeNull();
+      const session = engine.createSession({ model: 'deep' });
+
+      const updateSpy = vi.spyOn(threadStore!, 'updateThread');
+      // Stub the api-message-count so summary_up_to is deterministic (the real
+      // count depends on eager-persist, which is mocked away here).
+      vi.spyOn(threadStore!, 'getApiMessageCount').mockReturnValue(7);
+
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ]);
+      mockSend.mockResolvedValueOnce('DURABLE SUMMARY TEXT');
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      // The fact-tagged summary from THIS compaction must land in thread.summary
+      // (not stay null waiting for the resume-time generateThreadSummary
+      // fallback), with summary_up_to = the api-message-count at persist time.
+      expect(updateSpy).toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ summary: 'DURABLE SUMMARY TEXT', summary_up_to: 7 }),
+      );
+    });
+
+    it('does NOT persist a summary when the summary run yields nothing (guarded early-return, thread stays intact)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const threadStore = engine.getThreadStore();
+      expect(threadStore).not.toBeNull();
+      const session = engine.createSession({ model: 'deep' });
+
+      const updateSpy = vi.spyOn(threadStore!, 'updateThread');
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce(''); // empty reply → compaction is a no-op
+
+      const result = await session.compact();
+      expect(result.success).toBe(false);
+      // No summary produced → the early return fires BEFORE reset()/persist, so
+      // no summary is written (a stale/empty summary must never overwrite a good
+      // one, and the live thread is left whole).
+      expect(updateSpy).not.toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ summary: expect.anything() }),
+      );
+    });
+  });
+
   // -- _compactionInFlight: serialize user turns behind a background auto-compaction --
 
   describe('_compactionInFlight serialization', () => {
