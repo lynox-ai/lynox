@@ -60,7 +60,7 @@
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
-	import { formatCost as fmtCost } from '../format.js';
+	import { formatTurnTokens, formatUsageMeta } from '../stores/chat-usage.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
@@ -1797,34 +1797,12 @@
 	// `tool-call-details`, but the new interleaved-block rendering doesn't
 	// emit that class anywhere — the toggle never had anything to expand.
 
-	// `includeCost` gates ONLY the dollar figures (LLM + third-party API). The
-	// token/model/cache metrics always render — they're free of pricing and
-	// carry the provider/tier verification self-hosters + BYOK users rely on.
-	// Demo tenants pass includeCost=false so the public playground shows
-	// metrics (not a black box) without surfacing prices. Real tenants
-	// (self-host, BYOK, Managed) always see cost — keeping AI spend
-	// transparent rather than hidden. (rafael 2026-05-29)
-	function formatUsage(u: UsageInfo, includeCost: boolean): string {
-		const totalIn = u.tokensIn;
-		const cachePct = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
-		const parts = [`${(totalIn + u.tokensOut).toLocaleString()} tokens`];
-		if (includeCost) {
-			parts.push(fmtCost(u.costUsd));
-			// Phase E: surface third-party API cost (DataForSEO etc.) next to the
-			// LLM cost when the message hit any profiled API. Threshold of >$0.001
-			// keeps the row clean when nothing meaningful happened.
-			if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
-				parts.push(`API: ${fmtCost(u.apiCostUsd)}`);
-			}
-		}
-		if (cachePct > 0) parts.push(`${cachePct}% cache`);
-		// rafael QA 2026-05-18: surface the actual dispatched model id so the
-		// user can verify their provider choice actually applies (and so
-		// auto-downgrade is observable rather than hidden behind an
-		// Anthropic-flavoured tier alias in the model's text response).
-		if (u.model) parts.push(u.model);
-		return parts.join(' · ');
-	}
+	// The footer usage line is split into two pure helpers in `chat-usage.ts`:
+	// `formatTurnTokens` (the per-turn SUM, with a `Σ` prefix + tooltip so it
+	// no longer reads as a single over-window prompt) and `formatUsageMeta`
+	// (the $ / cache / model tail). The real current window fill is shown
+	// separately as the co-located occupancy chip. `includeCost` gates only the
+	// dollar figures (demo tenants pass false). See chat-usage.ts for rationale.
 
 	// Diagnostics panel helpers (opt-in via Advanced metrics setting).
 	function fmtMs(ms: number): string {
@@ -1888,7 +1866,7 @@
 	</button>
 {/snippet}
 
-{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined, isStreamingMsg: boolean)}
+{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined, isStreamingMsg: boolean, isLast: boolean)}
 	<!-- Inline footer: usage stats on the left, action icons (speak +
 	     copy) on the right. Right-alignment of the tappable buttons puts
 	     them in the thumb sweep zone for right-handed mobile users — the
@@ -1898,10 +1876,36 @@
 	     streaming below wrongly blanks the stats of every completed message
 	     above it (they only reappeared once the turn finished). A completed
 	     message's usage is final, so it stays visible while a later reply
-	     streams; only the in-progress reply hides its (still-partial) stats. -->
+	     streams; only the in-progress reply hides its (still-partial) stats.
+	     The token count is a per-turn SUM over all tool-loop steps (can exceed
+	     the window); the co-located occupancy chip beside it shows the REAL
+	     current window fill, so the two numbers read as distinct — not one
+	     broken over-window figure. The chip only rides the LAST message because
+	     `ctxBudget` is a single live session value, not a per-message stat. -->
 	<div class="flex items-center gap-2 mt-2">
 		{#if usage && !isStreamingMsg}
-			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage, !getDemoMode())}</span>
+			{@const meta = formatUsageMeta(usage, !getDemoMode())}
+			<span class="text-[11px] font-mono text-text-subtle truncate">
+				<span
+					class="cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+					title={t('chat.footer_tokens_tooltip')}
+				>{formatTurnTokens(usage)}</span>{#if meta} · {meta}{/if}
+			</span>
+		{/if}
+		{#if isLast && ctxBudget && !isStreamingMsg}
+			{@const pct = Math.min(ctxBudget.usagePercent, 100)}
+			{@const barColor = pct >= 75 ? 'bg-danger' : pct >= 60 ? 'bg-warning' : 'bg-accent'}
+			{@const txtColor = pct >= 75 ? 'text-danger' : pct >= 60 ? 'text-warning' : 'text-text-subtle'}
+			<span
+				class="inline-flex items-center gap-1 shrink-0"
+				title="{t('chat.ctx_occupancy_tooltip')} · {ctxBudget.totalTokens.toLocaleString()} / {ctxBudget.maxTokens.toLocaleString()}"
+			>
+				<span class="hidden sm:inline text-[10px] text-text-subtle/60">{t('chat.ctx_occupancy_label')}</span>
+				<span class="w-10 h-1 rounded-full bg-border overflow-hidden">
+					<span class="block {barColor} h-full rounded-full transition-all duration-500" style="width: {pct}%"></span>
+				</span>
+				<span class="text-[10px] font-mono {txtColor}">{pct}%</span>
+			</span>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
 			{@render speakButton(msgKey, msgContent)}
@@ -2388,7 +2392,7 @@
 						     message content. -->
 						{#if msg.blocks?.length && msg.content}
 							{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
-							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1)}
+							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 						{/if}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
@@ -2419,7 +2423,7 @@
 							{#if msg.content}
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1)}
+								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
 						{/if}
 						{@render messageTimestamp(msg.createdAt, 'left')}
