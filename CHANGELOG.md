@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.3.0 — 2026-07-08
+
+This release makes hybrid mode reliable end to end and hardens the agent's honesty. Pipeline and workflow steps now follow the hybrid tier-set — a cross-provider slot steers each step's provider, model, and key (fixing a hybrid-mode workflow that could 404). Workflow sub-agents now receive the parent's secret store, so a step's tools resolve vault secrets, and a referenced secret that can't be found is reported plainly instead of sent as a literal or papered over with invented data. The agent grounds recommendations in verified data and never fills an empty tool result with made-up figures. Plus: a run parked on an ask_user prompt no longer aborts at the 30-minute mark, warm browser tabs hard-reload onto the fresh build after a deploy, and the chat footer reads clearer. **No engine.db migration** — rollback to 2.2.0 is a clean image swap.
+
+### Added
+- **Ground-first behavior** — before recommending a strategy or plan, the agent gathers and verifies the real data it depends on and shows it as the basis; an empty or failed tool result is reported honestly rather than backfilled with estimates. (#75)
+
+### Fixed
+- **Hybrid pipeline/workflow routing** — pipeline and workflow steps follow the hybrid tier-set instead of silently running on the base provider (or 404-ing on a model/endpoint mismatch). (#65/#66)
+- **Workflow sub-agent secrets** — a workflow sub-agent's tools resolve `secret:NAME` vault references, and an unresolved secret fails loudly instead of being sent as a literal. (#79)
+- **Legacy key scope** — the legacy `config.api_key` fallback is scoped to an Anthropic base, so a non-Anthropic tenant's key is never used for an Anthropic slot. (#81)
+- **ask_user wall-clock** — the run wall-clock pauses while a run is parked on a prompt, so answering after the 30-minute mark continues the run instead of aborting it. (#77)
+- **Stale bundle recovery** — warm browser tabs hard-reload onto the freshly deployed build; Mermaid diagram chunk-load failures recover instead of rendering a syntax error. (#73)
+- **Clearer chat footer** — per-turn token totals and context occupancy are co-located and labeled. (#74)
+- **Private-mode toggle** — the header private-mode control uses a ghost icon and an explicit on/off label. (#76)
+- **Context-cost** — repeated large tool-result payloads are de-duplicated in the resident context. (#72)
+
 ## 2.2.0 — 2026-07-07
 
 Pick the model your main chat runs on. A new **main-chat model picker** in LLM settings lets you choose the band (fast / balanced / deep) — and its concrete model — for the primary conversation, clamped to your plan's ceiling. Under the hood, **hybrid sub-agents** can now run on a different provider than the main agent (a Mistral main can delegate to an Anthropic sub-agent, and vice-versa), each tier resolving to its own provider, model, and key. An opt-in **lazy tool-loading** mode (`lazy_tools_enabled`, default off, Anthropic-direct only) defers heavy tool schemas behind the native tool-search tool to shrink the cached prompt prefix. The rest is correctness: agent-opened escalation threads resume instead of erroring, failed and cross-provider sub-agents surface real errors instead of completing silently, and the chat's context/compaction UI got an honesty pass. **No engine.db migration** — rollback to 2.1.1 is a clean image swap.
