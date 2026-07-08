@@ -1119,23 +1119,31 @@ export class Agent implements IAgent {
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !this._suppressTools
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
-    // Lazy-tools (Slice 4 = default-ON): Anthropic-direct only, never on the
+    // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the
     // compaction (suppress) path. Heavy/long-tail tool schemas are deferred behind
-    // the native tool-search tool so the cached prefix shrinks (~35% measured);
-    // every tool stays reachable (discovered on demand), only its schema is lazy.
-    // DEFAULT-ON for Anthropic-direct — `lazy_tools_enabled` defaults to on; only
-    // an explicit `false` opts a tenant out (kill-switch = set false or code
-    // revert). The `!isNonDirectAnthropic` gate is a COMPLIANCE invariant: Mistral
-    // / any non-Anthropic-direct provider NEVER gets the tool-search / defer_loading
-    // / advanced-tool-use beta — it dominates the default-on and must never loosen.
-    const lazyEnabled = this.toolContext.userConfig?.lazy_tools_enabled !== false
+    // the native tool-search tool so the cached prefix shrinks (~35% measured).
+    //
+    // The default stays OFF because reachability is NOT proven: run against the
+    // real API (tests/online/lazy-tool-reachability.test.ts), the model rediscovers
+    // only 9 of 17 deferred tools on the `balanced` tier (claude-sonnet-4-6) and
+    // 0 of 17 on `fast` (claude-haiku-4-5) — it answers in text or reaches for an
+    // eager near-substitute instead of searching. A deferred tool that is never
+    // searched for is INVISIBLE to the user with no error anywhere, so default-ON
+    // would be a silent fleet regression. Note this gate keys on provider, not on
+    // model tier: any tier can reach this path. Re-enabling by default requires a
+    // green matrix on every tier the tenant fleet can run.
+    //
+    // The `!isNonDirectAnthropic` gate is a COMPLIANCE invariant: Mistral / any
+    // non-Anthropic-direct provider NEVER gets the tool-search / defer_loading /
+    // advanced-tool-use beta — it must never loosen.
+    const lazyEnabled = this.toolContext.userConfig?.lazy_tools_enabled === true
       && !this.isNonDirectAnthropic
       && !this._suppressTools;
     // Only engage the lazy machinery when at least one deferrable tool is actually
     // present: with nothing to defer, the tool-search tool + advanced-tool-use beta
-    // are pure prefix overhead. This also makes default-ON a true no-op for
-    // minimal-tool agents (most sub-agents), so the flip only reshapes the prefix
-    // where it pays — full-tool tenants carrying mail_*/google_*/api_setup/etc.
+    // are pure prefix overhead. This keeps an opt-in tenant's minimal-tool
+    // sub-agents byte-identical, so the flag only reshapes the prefix where it
+    // pays — full-tool tenants carrying mail_*/google_*/api_setup/etc.
     const lazyToolsActive = lazyEnabled
       && this.tools.some(t => !this._excludeSet.has(t.definition.name)
         && LAZY_DEFERRED_TOOLS.has(t.definition.name));
