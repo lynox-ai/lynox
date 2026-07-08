@@ -355,6 +355,17 @@ export interface LynoxUserConfig {
    * (not in the managed-user allowlist). Default: 150_000 (`DEFAULT_COMPACTION_TOKEN_BUDGET`).
    */
   compaction_token_budget?: number | undefined;
+  /**
+   * Model tier the compaction SUMMARIZER run resolves against — independent of
+   * the live session's own tier (`resolveTierModel`, provider-agnostic: Haiku
+   * on Anthropic, the small Mistral model under BYOK/hybrid). The summary is
+   * one internal, tools-suppressed turn per compaction; running it on a cheap
+   * tier instead of the session's real (often `deep`/`balanced`) tier cuts its
+   * cost roughly 4x with no accuracy requirement beyond faithfully condensing
+   * the transcript. CP-tunable (not in the managed-user allowlist, mirrors
+   * `compaction_token_budget`). Default: `'fast'`.
+   */
+  compaction_model?: ModelTier | undefined;
   /** Max HTTP requests per hour (across sessions). */
   max_http_requests_per_hour?: number | undefined;
   /** Max HTTP requests per day (across sessions). */

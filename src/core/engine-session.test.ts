@@ -356,6 +356,8 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import { Memory } from './memory.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+import { initLLMProvider } from './llm-client.js';
+import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/index.js';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -1071,7 +1073,15 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(result.success).toBe(false);
       expect(result.summary).toBe('');
       expect(mockReset).not.toHaveBeenCalled();        // thread NOT wiped on failure
-      expect(mockLoadMessages).not.toHaveBeenCalled();
+      // Slice A (issue #72 cost): the compaction-tier swap restores the session's
+      // real tier in run()'s `finally` — success OR failure — via a scoped
+      // _recreateAgent(), which round-trips the agent's OWN unchanged messages
+      // through loadMessages(). That identity round-trip is expected here; what
+      // must NEVER happen is the failure content (guard string / provider error)
+      // getting injected as if it were an authoritative summary.
+      for (const call of mockLoadMessages.mock.calls) {
+        expect(JSON.stringify(call[0])).not.toContain('provider 503');
+      }
     });
 
     it('recall_tool_result round-trips the evicted payload by id', async () => {
@@ -1191,6 +1201,193 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(prompt).not.toContain('NOT engine markers');
       // AC6: tagging must NOT cause the summarizer to drop/disown open tasks.
       expect(prompt).toContain('do not drop or disown');
+    });
+  });
+
+  // -- compact() summarizer model tier (Slice A, issue #72 cost) --
+
+  describe('compact() summarizer model tier', () => {
+    it('runs the summary on compaction_model (default fast), not the session tier, and restores the session tier after', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      expect(session.getModelTier()).toBe('deep');
+
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      // The summarizer run itself must be constructed on the fast (Haiku)
+      // tier — NOT the session's own configured `deep` (Opus) tier. The
+      // scoped swap-and-restore also reconstructs a `deep` Agent immediately
+      // after (to hand the live session back its real tier), so the LAST
+      // construction during compact() must be the restore, not the summarizer.
+      const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+      expect(constructedModels.some((m) => m?.includes('haiku') === true)).toBe(true);
+      expect(constructedModels.at(-1)).toBe('claude-opus-4-6');
+
+      // The live session's configured tier is UNCHANGED once compact() returns
+      // — and no further Agent reconstruction is needed for the next turn
+      // (the restore already left it on `deep`), so a plain run() reuses the
+      // existing agent rather than rebuilding again.
+      expect(session.getModelTier()).toBe('deep');
+      vi.mocked(Agent).mockClear();
+      mockSend.mockResolvedValueOnce('next turn reply');
+      await session.run('continue please');
+      expect(Agent).not.toHaveBeenCalled();
+    });
+
+    it('honors an explicit compaction_model override from userConfig instead of the fast default', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      // userConfig is loaded from disk, not the engine ctor — mutate it directly
+      // (same pattern as the tool_result_blob_threshold_chars test above).
+      engine.getUserConfig().compaction_model = 'balanced';
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+      expect(constructedModels.some((m) => m === 'claude-sonnet-4-6')).toBe(true); // balanced tier used
+      expect(constructedModels.some((m) => m?.includes('haiku') === true)).toBe(false); // NOT the fast default
+      expect(session.getModelTier()).toBe('deep');
+
+      delete engine.getUserConfig().compaction_model;
+    });
+
+    it('clamps an operator-set compaction_model that exceeds the tenant max_tier cost ceiling', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      // An operator sets compaction_model to `deep` (e.g. Opus) but the tenant's
+      // own cost ceiling is `balanced` — the override must resolve through the
+      // same `resolveRunModel` clamp as every other tier-selection site, so the
+      // summarizer never exceeds the tenant's max_tier.
+      engine.getUserConfig().compaction_model = 'deep';
+      engine.getUserConfig().max_tier = 'balanced';
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      try {
+        const result = await session.compact();
+        expect(result.success).toBe(true);
+
+        const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+        // The summarizer must be clamped DOWN to balanced (Sonnet) — never the
+        // requested deep (Opus) — proving the max_tier ceiling took effect. Same
+        // as the plain compaction_model-override test above, the scoped
+        // swap-and-restore also reconstructs a `deep` Agent immediately after
+        // (to hand the live session back its real tier), so the summarizer
+        // construction is specifically the FIRST call, not just "some" call.
+        expect(constructedModels[0]).toBe('claude-sonnet-4-6');
+        expect(constructedModels.at(-1)).toBe('claude-opus-4-6');
+        // The live session's own configured tier is restored to `deep` once
+        // compact() returns — the clamp is scoped to this one summarizer run.
+        expect(session.getModelTier()).toBe('deep');
+      } finally {
+        delete engine.getUserConfig().compaction_model;
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('is provider-agnostic — under Mistral/openai the fast tier resolves to the Mistral small model, never a hardcoded Haiku', async () => {
+      // Model-agnosticity proof (rafael follow-up): the summarizer must ride the
+      // `fast` TIER through `resolveTierModel(getActiveProvider())`, not a
+      // hardcoded Anthropic id. Force the active provider to openai + the Mistral
+      // tier-map (exactly what a managed-EU / BYOK-Mistral tenant bootstraps) and
+      // assert the summarizer Agent is built on `ministral-8b-2512` — Mistral's
+      // fast model — with no `claude-*` id constructed anywhere in the flow.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+
+      await initLLMProvider('openai');
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+      try {
+        vi.mocked(Agent).mockClear();
+        const result = await session.compact();
+        expect(result.success).toBe(true);
+
+        const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+        // The summarizer ran on Mistral's FAST-tier model...
+        expect(constructedModels.some((m) => m === MISTRAL_MODEL_MAP.fast)).toBe(true); // 'ministral-8b-2512'
+        // ...and NOTHING in the compaction flow was a hardcoded Anthropic id.
+        expect(constructedModels.some((m) => m?.startsWith('claude-') === true)).toBe(false);
+        expect(session.getModelTier()).toBe('deep');
+      } finally {
+        // Restore the module-global provider + resolver so sibling tests (which
+        // rely on the Anthropic default) are unaffected.
+        setOpenAIModelResolver({ map: null, fallbackModelId: null });
+        await initLLMProvider('anthropic');
+      }
+    });
+  });
+
+  // -- _compactionInFlight: serialize user turns behind a background auto-compaction --
+
+  describe('_compactionInFlight serialization', () => {
+    type WithCompactionGate = { _compactionInFlight: Promise<void> | null };
+
+    it('a non-internal run() awaits an in-flight compaction at entry, then proceeds once it resolves', async () => {
+      const { session } = await createEngineAndSession();
+
+      // Control the "in-flight compaction" promise directly instead of relying
+      // on real auto-compaction timing — deterministic gate, not a sleep race.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = () => resolve(); });
+      (session as unknown as WithCompactionGate)._compactionInFlight = gate;
+
+      mockSend.mockClear();
+      mockSend.mockResolvedValueOnce('turn reply');
+
+      const p = session.run('user turn');
+
+      // Flush the FULL microtask queue AND two macrotask turns: an un-gated run
+      // reaches agent.send() within this window (its pre-send awaits — the
+      // dynamic import + KG retrieval — settle in ≤1 macrotask under the mocks),
+      // so mockSend STILL being uncalled discriminates the entry-await actually
+      // holding the turn from mere slowness (a plain microtask flush would pass
+      // even if the gate were removed, since the dynamic import outlives it).
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSend).not.toHaveBeenCalled();
+
+      release();
+      const result = await p;
+      expect(result).toBe('turn reply');
+      expect(mockSend).toHaveBeenCalled();
+    });
+
+    it('an internal:true run does NOT wait on an in-flight compaction (the summary run must not await itself)', async () => {
+      const { session } = await createEngineAndSession();
+
+      // Deliberately never released. If an internal run incorrectly awaited
+      // this gate, `session.run` below would hang and the test would fail on
+      // timeout — a deterministic failure mode, not a flake.
+      (session as unknown as WithCompactionGate)._compactionInFlight = new Promise<void>(() => {});
+
+      mockSend.mockClear();
+      mockSend.mockResolvedValueOnce('internal reply');
+
+      const result = await session.run('x', { internal: true, noTools: true });
+      expect(result).toBe('internal reply');
+      expect(mockSend).toHaveBeenCalled();
     });
   });
 
