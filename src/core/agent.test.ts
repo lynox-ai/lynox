@@ -61,6 +61,13 @@ import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as builtinTools from '../tools/builtin/index.js';
+import { GoogleAuth } from '../integrations/google/google-auth.js';
+import { createCalendarTool } from '../integrations/google/google-calendar.js';
+import { createDocsTool } from '../integrations/google/google-docs.js';
+import { createDriveTool } from '../integrations/google/google-drive.js';
+import { createSheetsTool } from '../integrations/google/google-sheets.js';
+import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -2725,4 +2732,113 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
       expect(req.tools.find((t) => t.name === n)?.defer_loading).toBe(true);
     }
   });
+
+  // === Slice 3: post-staging-gate curation regression guards ===
+  //
+  // The staging acceptance gate proved tools are reachable via tool-search but
+  // flagged one miss: a mail_search probe needed a retry before the model
+  // found it. The response was to curate the defer-set — keep proactive/
+  // subtle-invocation tools (the ones the model reaches for on its own, not
+  // in response to a user-named ask) EAGER regardless of size, and only defer
+  // big reactive integration tools the user names explicitly. These two tests
+  // freeze that curation decision and guard the mechanism that carries it.
+
+  it('LAZY_DEFERRED_TOOLS is the exact curated set (freezes the curation decision)', () => {
+    // A future change to this set must edit this expectation deliberately —
+    // it is the record of WHICH tools were judged safe to defer, not just
+    // that some N-sized set exists. Kept as an explicit member list (not a
+    // size check) so a silent swap (add X, drop Y) still fails loudly.
+    const expected = new Set<string>([
+      'google_calendar', 'google_docs', 'google_drive', 'google_sheets',
+      'mail_connect', 'mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage',
+      'artifact_save', 'artifact_list', 'artifact_delete', 'artifact_history', 'artifact_restore',
+      'run_workflow', 'save_workflow',
+      'data_store_create', 'data_store_insert', 'data_store_query', 'data_store_delete', 'data_store_list',
+      'contacts_search',
+      'media_process', 'api_setup',
+      'subjects_merge',
+    ]);
+    expect(LAZY_DEFERRED_TOOLS).toEqual(expected);
+    expect(LAZY_DEFERRED_TOOLS.size).toBe(26);
+    // The 7 tools curated OUT for proactive/subtle invocation must stay absent.
+    for (const eager of [
+      'recall_tool_result', 'memory_update', 'memory_delete', 'memory_promote',
+      'memory_list', 'plan_task', 'set_thread_context',
+    ]) {
+      expect(LAZY_DEFERRED_TOOLS.has(eager)).toBe(false);
+    }
+  });
+
+  it('flag ON + the FULL real tool registry (builtin barrel + google + mail) → every registered tool reaches the wire eager or deferred, none silently dropped', async () => {
+    // Real registry construction, not synthetic makeTool() stand-ins — this is
+    // the structural invariant the tool-search rewrite must never violate:
+    // eager ∪ deferred must equal the full set the engine actually registers.
+    // Factory tools (google_*, mail_*) need an auth/registry instance, but
+    // only their HANDLERS touch it — `definition` construction is pure, so a
+    // real-but-unconfigured instance (no vault, no accounts) is safe here and
+    // avoids `as any`/`as never` casts.
+    const googleAuth = new GoogleAuth({ clientId: 'test-client', clientSecret: 'test-secret' });
+    const mailRegistry = new InMemoryMailRegistry();
+
+    const staticEntries = Object.values(builtinTools).filter(
+      (v): v is ToolEntry =>
+        typeof v === 'object' && v !== null && 'definition' in v &&
+        typeof (v as { definition: unknown }).definition === 'object',
+    );
+    const factoryEntries: ToolEntry[] = [
+      createCalendarTool(googleAuth),
+      createDocsTool(googleAuth),
+      createDriveTool(googleAuth),
+      createSheetsTool(googleAuth),
+      ...createMailTools(mailRegistry),
+    ];
+    const allEntries = [...staticEntries, ...factoryEntries];
+    const registryNames = new Set(allEntries.map((e) => e.definition.name));
+    // Sanity: this really is the full 33-tool builtin+google+mail surface —
+    // a silent drop from the fixture itself would make the rest of the test
+    // vacuous.
+    expect(registryNames.size).toBe(allEntries.length);
+    for (const n of LAZY_DEFERRED_TOOLS) {
+      expect(registryNames.has(n)).toBe(true);
+    }
+
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: allEntries,
+      toolContext: createToolContext({ lazy_tools_enabled: true }),
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    const eagerNames = new Set(
+      req.tools
+        .filter((t) => t.defer_loading !== true && t.name !== undefined && registryNames.has(t.name))
+        .map((t) => t.name!),
+    );
+    const deferredNames = new Set(
+      req.tools
+        .filter((t) => t.defer_loading === true && t.name !== undefined)
+        .map((t) => t.name!),
+    );
+    // Eager and deferred are disjoint — a tool is never sent both ways.
+    for (const n of deferredNames) {
+      expect(eagerNames.has(n)).toBe(false);
+    }
+    // Union of eager ∪ deferred covers the FULL registry — the core assertion:
+    // no tool the engine registers goes missing from the wire when lazy is ON.
+    const union = new Set([...eagerNames, ...deferredNames]);
+    for (const name of registryNames) {
+      expect(union.has(name)).toBe(true);
+    }
+    expect(union.size).toBe(registryNames.size);
+  });
+
+  // Compliance invariant for non-Anthropic-direct providers (Vertex/custom
+  // proxies don't support defer_loading/tool-search) already covered above:
+  // 'flag ON + non-direct provider (custom) → full flat set, NO tool-search
+  // tool, NO defer_loading, NO advanced-tool-use beta' (~line 2596) — no
+  // duplicate needed.
 });

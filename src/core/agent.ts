@@ -76,7 +76,22 @@ export const IMAGE_TOKEN_ESTIMATE = 1600;
  *  Core interactive tools stay eagerly loaded; heavy/long-tail integration tools are
  *  discovered on demand — every tool stays reachable, only its schema is lazy.
  *  (Slice 1 verification dropped 4 spec names with no matching registry definition:
- *  list_workflows, delete_workflow, data_store_update, contacts_upsert.) */
+ *  list_workflows, delete_workflow, data_store_update, contacts_upsert.)
+ *
+ *  Curated (post-staging-gate) to exclude 7 tools the model invokes PROACTIVELY
+ *  or at a subtle moment rather than in response to an explicit user ask —
+ *  recall_tool_result (fires mid-context-compaction, not user-triggered),
+ *  memory_update/memory_delete/memory_promote/memory_list (self-initiated
+ *  knowledge upkeep the model decides to do on its own), plan_task (the model
+ *  chooses to present a plan, the user doesn't name the tool), and
+ *  set_thread_context (a scoping side-step the model takes mid-conversation).
+ *  A tool-search only fires when the model already suspects a matching tool
+ *  exists and phrases a query for it — reliable for reactive, user-named asks
+ *  ("check my calendar", "search my mail") but not for tools the model must
+ *  spontaneously recall without a user cue. All are also small schemas, so
+ *  deferring them buys little prefix savings for real reachability risk; they
+ *  stay eager. Everything else here is either a big schema, a reactive
+ *  integration tool the user names explicitly, or both — safe to defer. */
 export const LAZY_DEFERRED_TOOLS = new Set<string>([
   'google_calendar','google_docs','google_drive','google_sheets',
   'mail_connect','mail_read','mail_reply','mail_search','mail_send','mail_triage',
@@ -84,9 +99,8 @@ export const LAZY_DEFERRED_TOOLS = new Set<string>([
   'run_workflow','save_workflow',
   'data_store_create','data_store_insert','data_store_query','data_store_delete','data_store_list',
   'contacts_search',
-  'media_process','plan_task','api_setup','recall_tool_result',
-  'memory_update','memory_delete','memory_promote','memory_list',
-  'subjects_merge','set_thread_context',
+  'media_process','api_setup',
+  'subjects_merge',
 ]);
 
 /** The server-side tool-search tool (SDK union member) prepended to the tools
