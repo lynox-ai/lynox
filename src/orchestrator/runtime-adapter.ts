@@ -1,13 +1,14 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
 import { getRole, getRoleNames } from '../core/roles.js';
-import { resolveRunModel } from '../core/tier-resolver.js';
+import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
+import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
@@ -260,6 +261,34 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
 }
 
 /**
+ * Resolve the per-step Agent wire + creds for an already-resolved tier under the
+ * active routing mode. In STANDARD mode (no hybrid tier_set) the result is
+ * `crossProviderSlot:false` and the caller keeps its base `config.*` values, so
+ * the built Agent is BYTE-IDENTICAL to pre-hybrid behavior. Under a hybrid
+ * tier_set with a cross-provider slot for `tier`, the slot drives provider +
+ * model + creds so the step lands on the right wire instead of silently running
+ * on base (or 404-ing on a model/endpoint mismatch — the #66 pipeline gap).
+ *
+ * `resolveKey` reads the provider key from env + config (the orchestrator has no
+ * SecretStore in scope — unlike spawn.ts, which binds it to the parent agent's
+ * vault). It is consulted ONLY on the cross-provider path (`crossProviderSlot`),
+ * never in standard mode, so it can never perturb byte-parity. It matters only
+ * for a SAME-provider keyless cross slot (one that carries just an api_base_url):
+ * `enrichTierSetCreds` injects the key for cross-DIFFERENT-provider slots at
+ * config-load, so `hybrid.apiKey` is already populated there and the fallback
+ * short-circuits. In the same-provider case `config.api_key` IS the base key, so
+ * the fallback lends it only to the base provider — never to a different one.
+ */
+function resolveStepSlotCreds(config: LynoxUserConfig, tier: ModelTier): ReturnType<typeof resolveCrossProviderSlotCreds> {
+  const baseProvider = config.provider ?? getActiveProvider();
+  const resolveKey = (provider: LLMProvider): string | undefined => {
+    const resolved = resolveProviderApiKey({ provider, secretStore: undefined, userConfig: config });
+    return resolved ?? (provider === baseProvider ? config.api_key : undefined);
+  };
+  return resolveCrossProviderSlotCreds(tier, baseProvider, resolveKey);
+}
+
+/**
  * Spawn a real agent for a manifest step and capture token usage.
  */
 export async function spawnViaAgent(
@@ -276,6 +305,7 @@ export async function spawnViaAgent(
   capabilityContract?: CapabilityContract | undefined,
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -291,6 +321,12 @@ export async function spawnViaAgent(
     provider: getActiveProvider(),
   });
   const model = runModel.modelId;
+  // #66: steer this step by the hybrid tier_set. Standard mode (no tier_set) →
+  // crossProviderSlot=false → the base config.* values below are byte-identical
+  // to before; a cross-provider slot drives the wire + creds so the step lands
+  // on the right provider/model instead of running on base (or 404-ing).
+  const creds = resolveStepSlotCreds(config, runModel.tier);
+  const agentModel = creds.crossProviderSlot ? creds.model : model;
 
   let tools = convertAgentTools(agentDef.tools ?? []);
 
@@ -335,7 +371,7 @@ export async function spawnViaAgent(
 
   const agent = new Agent({
     name: step.agent,
-    model,
+    model: agentModel,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
     // agent definition's prompt (or use it standalone when none is defined).
     systemPrompt: agentDef.systemPrompt
@@ -352,15 +388,24 @@ export async function spawnViaAgent(
     excludeTools: disabledTools,
     maxContextWindowTokens: config.max_context_window_tokens,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: 10 },
-    apiKey: config.api_key,
-    apiBaseURL: config.api_base_url,
-    provider: config.provider,
+    // #66: a cross-provider hybrid slot drives creds from the slot; standard mode
+    // (crossProviderSlot=false) keeps the base config.* values → byte-parity.
+    apiKey: creds.crossProviderSlot ? creds.apiKey : config.api_key,
+    apiBaseURL: creds.crossProviderSlot ? creds.apiBaseURL : config.api_base_url,
+    provider: creds.crossProviderSlot ? creds.provider : config.provider,
     gcpProjectId: config.gcp_project_id,
     gcpRegion: config.gcp_region,
-    openaiModelId: config.openai_model_id,
+    openaiModelId: creds.crossProviderSlot ? creds.openaiModelId : config.openai_model_id,
     preApproval,
     autonomy,
     capabilityContract,
+    // Share the parent agent's SecretStore so this step's tools resolve
+    // `secret:NAME` refs against the vault AND the fail-loud unresolved-secret
+    // guard (agent.ts) fires. Without it the whole secret block is skipped: the
+    // literal `secret:NAME` is sent to the external service and the model then
+    // papers over the empty/4xx result. Mirrors spawn.ts threading it for
+    // `spawn_agent`. Undefined for callers that supply none → unchanged.
+    secretStore,
     // A2: the step's own run id (reuses the Agent's `currentRunId` attribution
     // tag), so an isDangerous guard decision during this step is stamped onto
     // the append-only audit with the run it occurred in.
@@ -449,6 +494,7 @@ export async function spawnInline(
   capabilityContract?: CapabilityContract | undefined,
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -473,6 +519,10 @@ export async function spawnInline(
     provider: getActiveProvider(),
   });
   const model = runModel.modelId;
+  // #66: steer this inline step by the hybrid tier_set (see spawnViaAgent).
+  // Standard mode → crossProviderSlot=false → byte-parity with the base config.*.
+  const creds = resolveStepSlotCreds(config, runModel.tier);
+  const agentModel = creds.crossProviderSlot ? creds.model : model;
   // A2: pipeline steps carry the grounding block too (they previously ran on a
   // bare task prompt with no provenance discipline).
   const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
@@ -496,8 +546,10 @@ export async function spawnInline(
   }
   // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
   // extended-thinking support — force disabled regardless of step hint to
-  // avoid Anthropic 400 "model does not support" errors.
-  const isHaikuStep = model.includes('haiku');
+  // avoid Anthropic 400 "model does not support" errors. Keyed on the EFFECTIVE
+  // model (agentModel): byte-identical to `model` in standard mode, and detects
+  // Haiku on the actual slot model under a cross-provider hybrid tier_set.
+  const isHaikuStep = agentModel.includes('haiku');
   let thinking: ThinkingMode;
   if (isHaikuStep) {
     thinking = { type: 'disabled' };
@@ -517,25 +569,33 @@ export async function spawnInline(
 
   const agent = new Agent({
     name: step.id,
-    model,
+    model: agentModel,
     systemPrompt,
     tools,
     thinking,
     effort,
     excludeTools: disabledToolsInline,
     maxContextWindowTokens: config.max_context_window_tokens,
-    apiKey: config.api_key,
-    apiBaseURL: config.api_base_url,
-    provider: config.provider,
+    // #66: cross-provider hybrid slot drives creds; standard mode keeps the base
+    // config.* values → byte-parity.
+    apiKey: creds.crossProviderSlot ? creds.apiKey : config.api_key,
+    apiBaseURL: creds.crossProviderSlot ? creds.apiBaseURL : config.api_base_url,
+    provider: creds.crossProviderSlot ? creds.provider : config.provider,
     gcpProjectId: config.gcp_project_id,
     gcpRegion: config.gcp_region,
-    openaiModelId: config.openai_model_id,
+    openaiModelId: creds.crossProviderSlot ? creds.openaiModelId : config.openai_model_id,
     preApproval,
     autonomy,
     capabilityContract,
     // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
     currentRunId: stepRunId,
     toolContext: parentToolContext,
+    // Share the parent agent's SecretStore so this inline step's tools resolve
+    // `secret:NAME` refs AND the fail-loud unresolved-secret guard (agent.ts)
+    // fires — instead of silently sending the literal `secret:NAME` to the
+    // external service. Mirrors spawn.ts for `spawn_agent`; undefined for
+    // callers that supply none → unchanged.
+    secretStore,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
@@ -629,6 +689,7 @@ export async function spawnPipeline(
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   capabilityContract?: CapabilityContract | undefined,
   runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -685,6 +746,10 @@ export async function spawnPipeline(
     // `pipeline_step` rows (under the sub-pipeline's run id) — observability at
     // every nesting depth, not just the top level.
     runHistory: runHistory ?? undefined,
+    // Carry the parent SecretStore into the nested pipeline so a
+    // `runtime:'pipeline'` step's inner inline/named steps also resolve secrets
+    // + fire the fail-loud guard, instead of dropping it one level down.
+    secretStore,
   });
 
   // Aggregate results

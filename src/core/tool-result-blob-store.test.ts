@@ -182,6 +182,42 @@ describe('ToolResultBlobStore — carry-forward across compactions (W5)', () => 
     expect(store.get(firstId)?.payload).toBe('A'.repeat(5_000));
   });
 
+  it('dedups an identical payload re-evicted across windows into ONE blob (amplifier fix)', () => {
+    const store = new ToolResultBlobStore();
+    const dump = 'X'.repeat(5_000);
+    // Same payload parked in two compaction windows — a file dump re-evicted, or
+    // a recalled payload re-parked. Pre-fix this minted tr-1 AND tr-2 for the
+    // same bytes (the cross-compaction duplicate-resident amplifier); now the
+    // second eviction reuses the first handle.
+    const h1 = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', dump)], T);
+    const h2 = store.evictFrom([toolUseMsg('tu-2', 'read_file'), toolResultMsg('tu-2', dump)], T);
+    expect(h2[0]!.id).toBe(h1[0]!.id); // same handle reused
+    expect(store.size).toBe(1); // one blob, not two
+    expect(store.bytes).toBe(5_000); // bytes counted once
+    expect(store.get(h1[0]!.id)?.payload).toBe(dump);
+  });
+
+  it('does NOT dedup distinct payloads (no false reuse)', () => {
+    const store = new ToolResultBlobStore();
+    const a = store.evictFrom([toolUseMsg('tu-1', 'http_request'), toolResultMsg('tu-1', 'A'.repeat(5_000))], T);
+    const b = store.evictFrom([toolUseMsg('tu-2', 'http_request'), toolResultMsg('tu-2', 'B'.repeat(5_000))], T);
+    expect(b[0]!.id).not.toBe(a[0]!.id);
+    expect(store.size).toBe(2);
+  });
+
+  it('re-mints identical content after its blob is pruned (dedup index stays consistent)', () => {
+    const store = new ToolResultBlobStore();
+    const dump = 'Y'.repeat(5_000);
+    const first = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', dump)], T)[0]!.id;
+    store.pruneToCap(0, 0); // drop everything + clear the dedup index entry
+    expect(store.get(first)).toBeUndefined();
+    // Same content again → a FRESH blob; the pruned index entry must not linger
+    // as a dangling reuse target pointing at the dropped id.
+    const second = store.evictFrom([toolUseMsg('tu-2', 'read_file'), toolResultMsg('tu-2', dump)], T)[0]!.id;
+    expect(store.get(second)?.payload).toBe(dump);
+    expect(store.size).toBe(1);
+  });
+
   it('lists carried-forward blobs in entries() so they stay discoverable', () => {
     const store = new ToolResultBlobStore();
     store.evictFrom([toolUseMsg('tu-1', 'http_request'), toolResultMsg('tu-1', 'A'.repeat(5_000))], T);
@@ -219,8 +255,10 @@ describe('ToolResultBlobStore — carry-forward across compactions (W5)', () => 
 
   it('pruneToCap enforces the byte cap (a few huge dumps)', () => {
     const store = new ToolResultBlobStore();
-    const tenKb = 'x'.repeat(10_000);
+    // Distinct payloads per blob — identical content would (correctly) dedup to
+    // a single blob now, defeating this test's byte-cap-with-3-blobs intent.
     for (let i = 1; i <= 3; i++) {
+      const tenKb = String.fromCharCode(64 + i).repeat(10_000); // 'A'/'B'/'C' dumps
       store.evictFrom([toolUseMsg(`tu-${i}`, 'http_request'), toolResultMsg(`tu-${i}`, tenKb)], T);
     }
     expect(store.bytes).toBe(30_000);

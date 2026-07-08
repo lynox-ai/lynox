@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, LynoxUserConfig } from '../types/index.js';
+import { getModelId } from '../types/index.js';
+import { setTierSetResolver } from '../core/tier-resolver.js';
 import type { RoleConfig } from '../core/roles.js';
 
 const mockSend = vi.fn().mockResolvedValue('mock result');
@@ -520,6 +522,75 @@ describe('spawnInline + parentMemory propagation (regression-gate for memory_* i
   });
 });
 
+describe('secretStore propagation into pipeline sub-agents (fail-loud secret resolution)', () => {
+  // The orchestrator pipeline path (run_workflow → spawnViaAgent / spawnInline)
+  // previously built each step Agent with NO secretStore. That skipped the whole
+  // secret block in agent.ts: `secret:NAME` refs were neither resolved NOR
+  // fail-loud-guarded, so the literal `secret:NAME` was sent to the external
+  // service (401/empty → model fabricates). These tests pin that the parent's
+  // SecretStore now threads into the built Agent — the precondition for
+  // agent.ts's fail-loud unresolved-secret guard to fire for a sub-agent.
+  // Mirrors spawn.ts threading `parentAgent.secretStore` for `spawn_agent`.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  // A minimal SecretStoreLike stand-in — identity is what we assert (toBe).
+  const mockSecretStore = {
+    getMasked: vi.fn(),
+    resolve: vi.fn(),
+    listNames: vi.fn(),
+    containsSecret: vi.fn(),
+    maskSecrets: vi.fn((t: string) => t),
+    recordConsent: vi.fn(),
+    hasConsent: vi.fn(),
+    isExpired: vi.fn(),
+    findUnresolvedSecretRefs: vi.fn(),
+    extractSecretNames: vi.fn(),
+    resolveSecretRefs: vi.fn(),
+  } as unknown as NonNullable<Parameters<typeof spawnInline>[13]>;
+
+  it('spawnInline threads the given secretStore into the built Agent', async () => {
+    const step: ManifestStep = { id: 'creds', agent: 'creds', runtime: 'inline', task: 'call api with secret' };
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      mockSecretStore,
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBe(mockSecretStore);
+  });
+
+  it('spawnViaAgent threads the given secretStore into the built Agent', async () => {
+    const step: ManifestStep = { id: 'n-creds', agent: 'n-creds', runtime: 'agent', model: 'balanced' };
+    const agentDef: AgentDef = { name: 'n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(
+      step, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      mockSecretStore,
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBe(mockSecretStore);
+  });
+
+  it('spawnInline leaves secretStore undefined when none supplied (backward-compat)', async () => {
+    const step: ManifestStep = { id: 'no-creds', agent: 'no-creds', runtime: 'inline', task: 'no secret' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // Pre-fix behaviour for non-run_workflow callers: no crash, secretStore stays undefined.
+    expect(agentConfig['secretStore']).toBeUndefined();
+  });
+
+  it('spawnViaAgent leaves secretStore undefined when none supplied (backward-compat)', async () => {
+    const step: ManifestStep = { id: 'no-n-creds', agent: 'no-n-creds', runtime: 'agent', model: 'balanced' };
+    const agentDef: AgentDef = { name: 'no-n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1');
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBeUndefined();
+  });
+});
+
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
   // Pins the inline-step sandbox allowlist so a future "let me trim a few
   // tools" refactor can't silently break workflows that depend on memory
@@ -738,5 +809,130 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     const h = createStepStreamHandler({ onTokens: (i) => { tin += i; } });
     expect(() => { h(toolCall('bash', {})); h(toolResult('bash', 'ok')); h(turnEnd(5, 5)); }).not.toThrow();
     expect(tin).toBe(5);
+  });
+});
+
+// #66: pipeline/workflow steps must follow the hybrid tier_set — the gap that
+// let a hybrid-mode step silently run on the BASE provider (or 404 on a
+// model/endpoint mismatch). The #1 requirement is BYTE-PARITY in standard mode:
+// with no tier_set the built Agent config must be identical to pre-hybrid.
+describe('#66 hybrid tier_set steers pipeline step provider/model (runtime-adapter)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+
+  const agentCfg = (): Record<string, unknown> =>
+    vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+
+  // getActiveProvider() defaults to 'anthropic' in this isolated test file (no
+  // initLLMProvider call), so a base-anthropic config resolves models on anthropic.
+  const BASE_ANTHROPIC = {
+    api_key: 'base-anthropic-key',
+    provider: 'anthropic',
+    api_base_url: 'https://base.anthropic.example/v1',
+    openai_model_id: 'base-openai-model',
+  } as unknown as LynoxUserConfig;
+
+  describe('STANDARD mode — byte-parity (Agent config identical to pre-hybrid)', () => {
+    it('spawnInline keeps the exact base wire + resolveRunModel model', async () => {
+      const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'balanced' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['apiKey']).toBe('base-anthropic-key');
+      expect(cfg['apiBaseURL']).toBe('https://base.anthropic.example/v1');
+      expect(cfg['openaiModelId']).toBe('base-openai-model');
+      // Model == getModelId(resolved tier, active provider) == the old runModel.modelId.
+      expect(cfg['model']).toBe(getModelId('balanced', 'anthropic'));
+    });
+
+    it('spawnViaAgent keeps the exact base wire + resolveRunModel model', async () => {
+      const step: ManifestStep = { id: 'a', agent: 'analyst', runtime: 'agent', model: 'balanced' };
+      const agentDef: AgentDef = { name: 'analyst', version: '1', defaultTier: 'balanced', systemPrompt: 'x', tools: [] };
+      await spawnViaAgent(step, agentDef, {}, BASE_ANTHROPIC, undefined, 'run-1');
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['apiKey']).toBe('base-anthropic-key');
+      expect(cfg['apiBaseURL']).toBe('https://base.anthropic.example/v1');
+      expect(cfg['openaiModelId']).toBe('base-openai-model');
+      expect(cfg['model']).toBe(getModelId('balanced', 'anthropic'));
+    });
+
+    it('a provider-LESS base config yields provider:undefined (NOT coerced to a default)', async () => {
+      // The strongest byte-parity proof: the old code passed `provider: config.provider`
+      // verbatim (undefined stays undefined). A naive `provider: creds.provider` would
+      // have silently coerced this to 'anthropic'. mockConfig.provider is undefined.
+      const step: ManifestStep = { id: 's2', agent: 's2', runtime: 'inline', model: 'fast' };
+      await spawnInline(step, {}, mockConfig, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBeUndefined();
+      expect(cfg['apiKey']).toBe('test-key');
+      expect(cfg['apiBaseURL']).toBeUndefined();
+      expect(cfg['openaiModelId']).toBeUndefined();
+    });
+
+    it('a genuine pinned model id survives (not overwritten by the tier→provider map)', async () => {
+      // resolveRunModel passes a real model id through verbatim; the non-cross
+      // branch must keep runModel.modelId, NOT snap.modelId (getModelId(tier,base)).
+      const step: ManifestStep = { id: 's3', agent: 's3', runtime: 'inline', model: 'claude-opus-4-7' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      expect(agentCfg()['model']).toBe('claude-opus-4-7');
+    });
+  });
+
+  describe('HYBRID mode — the step follows its cross-provider slot', () => {
+    it('spawnInline: a cross openai/Mistral slot drives provider + model + creds', async () => {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { balanced: { provider: 'openai', model_id: 'ministral-14b-2512', api_key: 'mistral-slot-key', api_base_url: 'https://api.mistral.ai/v1' } },
+      });
+      const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'balanced' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('openai');
+      expect(cfg['model']).toBe('ministral-14b-2512');
+      expect(cfg['apiKey']).toBe('mistral-slot-key');
+      expect(cfg['apiBaseURL']).toBe('https://api.mistral.ai/v1');
+      expect(cfg['openaiModelId']).toBe('ministral-14b-2512');
+    });
+
+    it('spawnViaAgent: a cross anthropic slot from a Mistral base drives the slot wire', async () => {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' } },
+      });
+      const config = {
+        api_key: 'base-mistral-key', provider: 'openai',
+        api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'ministral-8b-2512',
+      } as unknown as LynoxUserConfig;
+      const step: ManifestStep = { id: 'a', agent: 'analyst', runtime: 'agent', model: 'deep' };
+      const agentDef: AgentDef = { name: 'analyst', version: '1', defaultTier: 'deep', systemPrompt: 'x', tools: [] };
+      await spawnViaAgent(step, agentDef, {}, config, undefined, 'run-2');
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['model']).toBe('claude-sonnet-5');
+      expect(cfg['apiKey']).toBe('sk-ant-slot');
+      expect(cfg['apiBaseURL']).toBeUndefined();
+      expect(cfg['openaiModelId']).toBe('claude-sonnet-5');
+    });
+
+    it('a hybrid tier_set with NO slot for the step tier is byte-parity (base wire)', async () => {
+      // fast slot unset → crossProviderSlot=false → base anthropic values kept.
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' } },
+      });
+      const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['apiKey']).toBe('base-anthropic-key');
+      expect(cfg['model']).toBe(getModelId('fast', 'anthropic'));
+    });
   });
 });

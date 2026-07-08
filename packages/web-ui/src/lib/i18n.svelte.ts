@@ -47,8 +47,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.run_running': { de: 'Agent arbeitet', en: 'Agent working' },
 	'threads.run_awaiting': { de: 'Wartet auf deine Eingabe', en: 'Awaiting your input' },
 	'threads.run_interrupted': { de: 'Lauf unterbrochen — erneut starten', en: 'Run interrupted — retry' },
-	'threads.private_on': { de: 'Privater Chat — kein Wissen wird gespeichert', en: 'Private chat — no knowledge stored' },
-	'threads.private_off': { de: 'Wissen wird gespeichert', en: 'Knowledge is being stored' },
+	'threads.private_on': { de: 'Privat-Modus an — dieser Chat wird nicht ins Gedächtnis aufgenommen', en: 'Private mode on — this chat is kept out of memory' },
+	'threads.private_off': { de: 'Privat-Modus aus — klicken, um diesen Chat vom Gedächtnis auszunehmen', en: 'Private mode off — click to keep this chat out of memory' },
 	'threads.rename': { de: 'Umbenennen', en: 'Rename' },
 	'threads.delete': { de: 'Löschen', en: 'Delete' },
 	'threads.confirm_delete': { de: 'Thread endgültig löschen?', en: 'Permanently delete this thread?' },
@@ -562,6 +562,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.context_offer': { de: 'Der Verlauf wird lang — Zusammenfassen hält die nächsten Antworten schnell und günstig.', en: 'This conversation is getting long — summarizing keeps the next replies fast and low-cost.' },
 	'chat.compact_failed': { de: 'Komprimierung fehlgeschlagen', en: 'Compaction failed' },
 	'chat.compact_done': { de: 'Kontext komprimiert', en: 'Context compacted' },
+	// Footer clarity: the token count is a per-turn SUM over every internal
+	// tool-loop step, so it can exceed the context window. The tooltip + the
+	// adjacent occupancy chip make that distinction self-evident.
+	'chat.footer_tokens_tooltip': { de: 'Summe aller Tokens über sämtliche Schritte dieser Antwort — kann das Kontextfenster übersteigen. Wie voll das Fenster gerade wirklich ist, zeigt der Balken daneben.', en: 'Total tokens across every step of this answer — this can exceed the context window. The bar next to it shows how full the window actually is right now.' },
+	'chat.ctx_occupancy_label': { de: 'Kontext', en: 'Context' },
+	'chat.ctx_occupancy_tooltip': { de: 'Aktuelle Auslastung des Kontextfensters', en: 'How full the context window is right now' },
 	'status.panel_title': { de: 'Systemstatus', en: 'System Status' },
 	'status.connected': { de: 'Verbunden', en: 'Connected' },
 	'status.disconnected': { de: 'Nicht verbunden', en: 'Disconnected' },
@@ -1556,6 +1562,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.data_queried': { de: 'Daten abgefragt', en: 'Data queried' },
 	'tool.artifact_creating': { de: 'Artifact wird erstellt...', en: 'Creating artifact...' },
 	'markdown.mermaid_error': { de: 'Mermaid-Diagramm konnte nicht gerendert werden', en: 'Mermaid diagram could not be rendered' },
+	'markdown.mermaid_reloading': { de: 'Neue Version verfügbar — Seite wird neu geladen, um dieses Diagramm anzuzeigen…', en: 'A newer version is available — reloading to render this diagram…' },
 	'tool.command': { de: 'Befehl', en: 'Command' },
 	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
 	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },

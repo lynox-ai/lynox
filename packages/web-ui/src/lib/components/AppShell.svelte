@@ -846,10 +846,10 @@
 							title={getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
 						>
 							{#if getSkipExtraction()}
-								<Icon name="eye_off" size="xs" />
+								<Icon name="ghost" size="xs" />
 								<span class="hidden md:inline font-mono">{t('threads.private')}</span>
 							{:else}
-								<Icon name="eye" size="xs" />
+								<Icon name="ghost" size="xs" />
 							{/if}
 						</button>
 					{/if}

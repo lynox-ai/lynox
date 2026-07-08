@@ -1,4 +1,4 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike } from '../../types/index.js';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -420,6 +420,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
+      secretStore: deps.secretStore,
     }));
 
     persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
@@ -475,6 +476,18 @@ export interface PipelineDeps {
    * leniently to schema defaults).
    */
   params?: Record<string, unknown> | undefined;
+  /**
+   * Parent agent's SecretStore, threaded from the `run_workflow` tool
+   * (`agent.secretStore`) down into each step sub-agent so a workflow step's
+   * tools resolve `secret:NAME` refs against the vault AND the fail-loud
+   * unresolved-secret guard (agent.ts) fires — instead of silently sending the
+   * literal `secret:NAME` to an external service (which then 4xx/empties and the
+   * model papers over it). Mirrors how `spawn_agent` threads
+   * `parentAgent.secretStore`. Absent for headless callers (worker-loop
+   * saved-workflow runs, unit tests) → the step agent's `secretStore` stays
+   * undefined, i.e. unchanged pre-fix behaviour.
+   */
+  secretStore?: SecretStoreLike | undefined;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -746,6 +759,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
+      secretStore: deps.secretStore,
     }));
 
     recordExecutedState(planned.id, { manifest, state });
@@ -922,6 +936,11 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         autonomy: agent.autonomy,
         // Re-target values for a parametrised stored workflow (§4.5).
         params: input.params,
+        // Thread the parent agent's SecretStore so step sub-agents resolve
+        // `secret:NAME` refs + fire the fail-loud guard (mirrors spawn.ts for
+        // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
+        // parent → unchanged behaviour.
+        secretStore: agent.secretStore,
       });
     }
 
@@ -936,6 +955,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         userTimezone: agent.userTimezone,
         memory: agent.memory,
         autonomy: agent.autonomy,
+        // Thread the parent agent's SecretStore (see executePipelineById above).
+        secretStore: agent.secretStore,
       });
   },
 };

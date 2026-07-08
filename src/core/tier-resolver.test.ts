@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { resolveRunModel } from './tier-resolver.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { resolveRunModel, resolveCrossProviderSlotCreds, setTierSetResolver } from './tier-resolver.js';
 import { getModelId, type ModelTier, type LLMProvider } from '../types/index.js';
 
 type AccountTier = 'standard' | 'pro' | undefined;
@@ -90,5 +90,101 @@ describe('resolveRunModel — gate → clamp → provider, the single chokepoint
       const r = resolveRunModel({ requested: 'balanced', defaultTier: 'fast', accountTier: 'pro', maxTier: undefined, provider });
       expect(r.modelId).toBe(getModelId('balanced', provider));
     }
+  });
+});
+
+describe('resolveCrossProviderSlotCreds — the shared FRESH-Agent wire seam (#65)', () => {
+  // Every test toggles the process-global tier_set; reset so siblings (and other
+  // files) never inherit a hybrid resolver.
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+
+  // A resolveKey that must NEVER be consulted in standard mode (asserted below).
+  const KEYS: Record<string, string> = { openai: 'mistral-resolved-key', anthropic: 'sk-ant-resolved', custom: 'custom-key', vertex: '' };
+  const resolveKey = (p: LLMProvider): string | undefined => KEYS[p] || undefined;
+
+  describe('STANDARD mode — byte-parity (crossProviderSlot:false, base values, creds undefined)', () => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    for (const baseProvider of ['anthropic', 'openai'] as LLMProvider[]) {
+      for (const tier of ['fast', 'balanced', 'deep'] as ModelTier[]) {
+        it(`${baseProvider}/${tier}: base provider + base model id, no slot creds`, () => {
+          setTierSetResolver({ routingMode: 'standard', tierSet: null });
+          // resolveKey throws if ever called — proves standard mode never touches it.
+          const guardKey = (): string | undefined => { throw new Error('resolveKey must not be consulted in standard mode'); };
+          const creds = resolveCrossProviderSlotCreds(tier, baseProvider, guardKey);
+          expect(creds.crossProviderSlot).toBe(false);
+          expect(creds.provider).toBe(baseProvider);
+          expect(creds.model).toBe(getModelId(tier, baseProvider));
+          expect(creds.apiKey).toBeUndefined();
+          expect(creds.apiBaseURL).toBeUndefined();
+          expect(creds.openaiModelId).toBeUndefined();
+        });
+      }
+    }
+  });
+
+  it('a hybrid tier_set with NO slot for the tier still returns base (byte-parity)', () => {
+    // routing=hybrid but the requested tier has no slot → falls back to base.
+    setTierSetResolver({ routingMode: 'hybrid', tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk' } } });
+    const creds = resolveCrossProviderSlotCreds('fast', 'openai', resolveKey);
+    expect(creds.crossProviderSlot).toBe(false);
+    expect(creds.provider).toBe('openai');
+    expect(creds.model).toBe(getModelId('fast', 'openai'));
+    expect(creds.apiKey).toBeUndefined();
+  });
+
+  it('CROSS openai/Mistral slot from an anthropic base → openai wire + slot model + slot key', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'ministral-14b-2512', api_key: 'mistral-slot-key', api_base_url: 'https://api.mistral.ai/v1' } },
+    });
+    const creds = resolveCrossProviderSlotCreds('fast', 'anthropic', resolveKey);
+    expect(creds.crossProviderSlot).toBe(true);
+    expect(creds.provider).toBe('openai');
+    expect(creds.model).toBe('ministral-14b-2512');
+    expect(creds.openaiModelId).toBe('ministral-14b-2512');
+    expect(creds.apiKey).toBe('mistral-slot-key'); // slot key kept, resolveKey NOT consulted
+    expect(creds.apiBaseURL).toBe('https://api.mistral.ai/v1');
+  });
+
+  it('CROSS anthropic slot from an openai/Mistral base → anthropic wire + slot model + slot key', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' } },
+    });
+    const creds = resolveCrossProviderSlotCreds('deep', 'openai', resolveKey);
+    expect(creds.crossProviderSlot).toBe(true);
+    expect(creds.provider).toBe('anthropic');
+    expect(creds.model).toBe('claude-sonnet-5');
+    expect(creds.openaiModelId).toBe('claude-sonnet-5');
+    expect(creds.apiKey).toBe('sk-ant-slot');
+    expect(creds.apiBaseURL).toBeUndefined();
+  });
+
+  it('SAME-provider keyless cross slot (base_url only) → apiKey RESOLVED via resolveKey, not left empty', () => {
+    // enrichTierSetCreds leaves same-provider slots key-less; hybridSlotClientConfig
+    // still reports them cross (they carry an api_base_url), so a fresh Agent needs
+    // the provider key resolved or it 401s on an empty key.
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { balanced: { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://alt.mistral.example/v1' } },
+    });
+    const creds = resolveCrossProviderSlotCreds('balanced', 'openai', resolveKey);
+    expect(creds.crossProviderSlot).toBe(true);
+    expect(creds.provider).toBe('openai');
+    expect(creds.model).toBe('ministral-14b-2512');
+    expect(creds.apiKey).toBe('mistral-resolved-key'); // resolveKey('openai') filled the gap
+    expect(creds.apiBaseURL).toBe('https://alt.mistral.example/v1');
+  });
+
+  it('SAME-provider keyless cross slot with an UNRESOLVABLE key → apiKey undefined (clean 401, no mis-route)', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { balanced: { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://alt.mistral.example/v1' } },
+    });
+    const creds = resolveCrossProviderSlotCreds('balanced', 'openai', () => undefined);
+    expect(creds.crossProviderSlot).toBe(true);
+    expect(creds.apiKey).toBeUndefined(); // never a wrong key — a clean 401 surfaces at request time
   });
 });

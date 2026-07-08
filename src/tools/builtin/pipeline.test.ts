@@ -1179,6 +1179,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
+  'secretStore',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1259,6 +1260,34 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // Value assertion: the agent's tool context + tools actually flow through.
     expect(opts['parentToolContext']).toBe(agent.toolContext);
     expect(opts['parentTools']).toBe(agent.toolContext.tools);
+  });
+
+  it('threads the parent agent secretStore into the run options (value, not just key)', async () => {
+    // The security fix: run_workflow forwards agent.secretStore so each step
+    // sub-agent's tools resolve `secret:NAME` refs + fire the fail-loud guard —
+    // instead of sending the literal `secret:NAME` to the external service.
+    // Mirrors spawn.ts threading `parentAgent.secretStore` for spawn_agent.
+    const agent = makeAutonomyAgent('autonomous');
+    const secretStore = { maskSecrets: (t: string) => t } as unknown as IAgent['secretStore'];
+    (agent as unknown as { secretStore: unknown }).secretStore = secretStore;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'call api with secret')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['secretStore']).toBe(secretStore);
+  });
+
+  it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
+    const agent = makeAutonomyAgent(undefined); // no secretStore set
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'no secret')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['secretStore']).toBeUndefined();
   });
 
   it('in-session stored run inherits undefined autonomy from a normal chat agent', async () => {

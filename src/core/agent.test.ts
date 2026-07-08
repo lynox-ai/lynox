@@ -52,6 +52,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import { buildDedupReference } from './tool-result-hygiene.js';
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -488,6 +489,31 @@ describe('Agent', () => {
       expect(result).toBe('Done');
       expect(tool.handler).toHaveBeenCalledWith({ x: 1 }, agent);
       expect(mockProcess).toHaveBeenCalledTimes(2);
+    });
+
+    it('elides a large tool_result byte-identical to an earlier one (append-time dedup)', async () => {
+      // Same tool run twice returns the SAME large payload. The first copy stays
+      // verbatim resident; the second collapses to a compact reference so the
+      // duplicate bytes don't ride every subsequent turn's cached prefix.
+      const payload = 'x'.repeat(3_000); // > DEFAULT_DEDUP_MIN_CHARS (2048)
+      const tool = makeTool('big_tool', vi.fn().mockResolvedValue(payload));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'big_tool', input: {} }]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_2', name: 'big_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('Use the tool twice');
+
+      const toolResults = agent.getMessages().flatMap(m =>
+        Array.isArray(m.content)
+          ? m.content.filter((b): b is Extract<typeof b, { type: 'tool_result' }> => b.type === 'tool_result')
+          : [],
+      );
+      expect(toolResults).toHaveLength(2);
+      expect(toolResults[0]!.content).toBe(payload); // first verbatim
+      expect(toolResults[1]!.content).toBe(buildDedupReference('big_tool')); // second elided
+      expect(toolResults[1]!.content).not.toContain('xxxx');
     });
 
     // ENGINE-10 regression (rafael prod 2026-06-05): a dangling `tool_use`
@@ -1471,6 +1497,40 @@ describe('Agent', () => {
       const callArgs = (tool.handler as ReturnType<typeof vi.fn>).mock.calls[0]! as [unknown, unknown];
       const input = callArgs[0] as { headers: { Authorization: string } };
       expect(input.headers.Authorization).toBe('secret:MY_KEY');
+    });
+
+    it('fails loud (does NOT send the literal) when a referenced secret is not in the vault', async () => {
+      // Core regression: a tool that references `secret:DATAFORSEO` when the
+      // vault has no such secret must ERROR (fail-loud guard), NOT send the
+      // literal `secret:DATAFORSEO` to the external service. Before the
+      // orchestrator threaded the parent SecretStore into pipeline sub-agents,
+      // `this.secretStore` was undefined for a workflow step, the whole block
+      // was skipped, and the literal went out → 401/empty body → the model
+      // fabricated data. This test pins the fail-loud behaviour that a present
+      // (but missing-the-key) secretStore restores.
+      const store = makeSecretStore({ resolve: vi.fn().mockReturnValue(null) });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'http_request',
+          input: { url: 'https://api.dataforseo.com', headers: { Authorization: 'Bearer secret:DATAFORSEO' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6',
+        tools: [tool], secretStore: store,
+      });
+      await agent.send('Call API');
+
+      // The tool handler must NOT run — the literal never reaches the service.
+      expect(tool.handler).not.toHaveBeenCalled();
+      const messages = agent.getMessages();
+      const toolResults = messages[2] as { content: Array<{ content: string; is_error: boolean }> };
+      expect(toolResults.content[0]!.is_error).toBe(true);
+      expect(toolResults.content[0]!.content).toContain('DATAFORSEO');
+      expect(toolResults.content[0]!.content).toContain("vault doesn't have");
     });
   });
 
