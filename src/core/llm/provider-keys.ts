@@ -42,8 +42,12 @@ interface SecretStoreReader {
 export interface ResolveProviderApiKeyInput {
   provider: LLMProvider | undefined;
   secretStore: SecretStoreReader | null | undefined;
-  /** Used only for the Anthropic legacy `userConfig.api_key` fallback. */
-  userConfig?: { api_key?: string | undefined } | undefined;
+  /**
+   * Used only for the Anthropic legacy `userConfig.api_key` fallback. Carries
+   * the tenant's BASE `provider` so the fallback can confirm `api_key` really
+   * is an Anthropic key before lending it (undefined = legacy anthropic default).
+   */
+  userConfig?: { api_key?: string | undefined; provider?: LLMProvider | undefined } | undefined;
 }
 
 /**
@@ -79,7 +83,21 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
   // Legacy fallback: only Anthropic historically stored its key in
   // config.json. Honour it for back-compat but never for openai/custom —
   // those need a fresh vault entry, not a stale Anthropic value.
-  if (provider === 'anthropic' && userConfig?.api_key) return userConfig.api_key;
+  //
+  // Gate on the tenant's BASE provider, not just the requested `provider`:
+  // `config.api_key` is a legacy field with no schema guarantee it holds an
+  // Anthropic key. On a Mistral/openai/custom-base tenant it may hold THAT
+  // provider's key. A keyless cross-Anthropic hybrid slot requesting the
+  // anthropic key must NOT be handed that non-Anthropic value (it would be
+  // sent to the Anthropic wire endpoint = cross-provider credential leak).
+  // So only lend it when the base is anthropic — undefined = legacy default.
+  if (
+    provider === 'anthropic' &&
+    (userConfig?.provider === undefined || userConfig?.provider === 'anthropic') &&
+    userConfig?.api_key
+  ) {
+    return userConfig.api_key;
+  }
 
   return undefined;
 }

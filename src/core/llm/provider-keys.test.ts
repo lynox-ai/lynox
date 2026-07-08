@@ -175,6 +175,105 @@ describe('resolveProviderApiKey', () => {
   });
 });
 
+describe('resolveProviderApiKey — legacy config.api_key is base-provider gated', () => {
+  // The legacy `config.api_key` field has no schema guarantee that it holds an
+  // Anthropic key. On a non-Anthropic-base tenant it may hold that provider's
+  // key. A keyless cross-Anthropic hybrid slot asking for the anthropic key
+  // must NEVER be handed that value — it would go to the Anthropic wire =
+  // cross-provider credential leak. The fallback only fires when the tenant's
+  // BASE provider is anthropic (undefined = legacy anthropic default).
+  beforeEach(() => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('CUSTOM_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT lend config.api_key to an anthropic slot when the base is openai (leak closed)', () => {
+    const result = resolveProviderApiKey({
+      provider: 'anthropic',
+      secretStore: undefined,
+      userConfig: { provider: 'openai', api_key: 'mistral-base-key' },
+    });
+    // Must be undefined — NOT the Mistral base key. Sending it to the Anthropic
+    // endpoint would leak a non-Anthropic credential cross-provider.
+    expect(result).toBeUndefined();
+    expect(result).not.toBe('mistral-base-key');
+  });
+
+  it('does NOT lend config.api_key to an anthropic slot when the base is custom (leak closed)', () => {
+    const result = resolveProviderApiKey({
+      provider: 'anthropic',
+      secretStore: undefined,
+      userConfig: { provider: 'custom', api_key: 'custom-proxy-key' },
+    });
+    expect(result).toBeUndefined();
+    expect(result).not.toBe('custom-proxy-key');
+  });
+
+  it('DOES lend config.api_key when the base provider is explicitly anthropic (legacy preserved)', () => {
+    const result = resolveProviderApiKey({
+      provider: 'anthropic',
+      secretStore: null,
+      userConfig: { provider: 'anthropic', api_key: 'sk-ant' },
+    });
+    expect(result).toBe('sk-ant');
+  });
+
+  it('DOES lend config.api_key when userConfig.provider is undefined (legacy anthropic default preserved)', () => {
+    // Historically config.json omitted `provider` for the Anthropic default,
+    // so undefined must keep the legacy back-compat behaviour.
+    const result = resolveProviderApiKey({
+      provider: 'anthropic',
+      secretStore: null,
+      userConfig: { api_key: 'sk-ant' },
+    });
+    expect(result).toBe('sk-ant');
+  });
+
+  it('env/vault still win over the legacy fallback on an anthropic-base tenant', () => {
+    const savedEnv = process.env.ANTHROPIC_API_KEY;
+    try {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-from-env-wins';
+      const result = resolveProviderApiKey({
+        provider: 'anthropic',
+        secretStore: { resolve: (n) => (n === 'ANTHROPIC_API_KEY' ? 'sk-ant-from-vault' : null) },
+        userConfig: { provider: 'anthropic', api_key: 'sk-ant-legacy-should-lose' },
+      });
+      expect(result).toBe('sk-ant-from-env-wins');
+    } finally {
+      if (savedEnv === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedEnv;
+    }
+  });
+
+  it('vault wins over the legacy fallback even with a non-anthropic base (no leak into vault path)', () => {
+    // Vault ANTHROPIC_API_KEY is a genuine anthropic key regardless of base, so
+    // it is correctly returned; the base-gate only guards the config.api_key leg.
+    const result = resolveProviderApiKey({
+      provider: 'anthropic',
+      secretStore: { resolve: (n) => (n === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null) },
+      userConfig: { provider: 'openai', api_key: 'mistral-base-key' },
+    });
+    expect(result).toBe('sk-ant-vault');
+  });
+
+  it('non-anthropic providers never read config.api_key regardless of base (unchanged)', () => {
+    // A base-openai tenant asking for its openai key: config.api_key is not a
+    // fallback for openai at all — must resolve to undefined when no vault/env.
+    const result = resolveProviderApiKey({
+      provider: 'openai',
+      secretStore: { resolve: () => null },
+      userConfig: { provider: 'openai', api_key: 'some-key' },
+    });
+    expect(result).toBeUndefined();
+  });
+});
+
 describe('enrichTierSetCreds (hybrid per-slot vault-key injection)', () => {
   // resolveKey stub: a fixed provider→key table so the helper stays pure +
   // table-testable without a real SecretStore.
