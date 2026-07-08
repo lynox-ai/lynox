@@ -73,34 +73,50 @@ import { appendContextCostLog } from './context-cost-log.js';
 export const IMAGE_TOKEN_ESTIMATE = 1600;
 
 /** Tools deferred behind the tool-search tool when lazy_tools_enabled (Anthropic-direct).
- *  Core interactive tools stay eagerly loaded; heavy/long-tail integration tools are
- *  discovered on demand — every tool stays reachable, only its schema is lazy.
+ *  A deferred tool is excluded from the cached tool prefix; the model discovers it
+ *  via a tool-search when it's needed and the API appends the schema inline. Every
+ *  tool stays reachable — only its schema is lazy.
  *  (Slice 1 verification dropped 4 spec names with no matching registry definition:
  *  list_workflows, delete_workflow, data_store_update, contacts_upsert.)
  *
- *  Curated (post-staging-gate) to exclude 7 tools the model invokes PROACTIVELY
- *  or at a subtle moment rather than in response to an explicit user ask —
- *  recall_tool_result (fires mid-context-compaction, not user-triggered),
- *  memory_update/memory_delete/memory_promote/memory_list (self-initiated
- *  knowledge upkeep the model decides to do on its own), plan_task (the model
- *  chooses to present a plan, the user doesn't name the tool), and
- *  set_thread_context (a scoping side-step the model takes mid-conversation).
- *  A tool-search only fires when the model already suspects a matching tool
- *  exists and phrases a query for it — reliable for reactive, user-named asks
- *  ("check my calendar", "search my mail") but not for tools the model must
- *  spontaneously recall without a user cue. All are also small schemas, so
- *  deferring them buys little prefix savings for real reachability risk; they
- *  stay eager. Everything else here is either a big schema, a reactive
- *  integration tool the user names explicitly, or both — safe to defer. */
+ *  Curated by a HARD reachability rule + a proactive/reactive split, learned from a
+ *  local real-API discovery probe (2026-07-08):
+ *
+ *  1. ⭐ NEVER defer a tool that has an EAGER near-substitute — the model grabs the
+ *     eager cousin and never searches for the deferred one. PROVEN: deferred
+ *     `artifact_save` → the model used eager `write_file` and dumped a /workspace
+ *     file instead of a gallery artifact (0 tool-searches). The same trap applies to
+ *     every proactive-persistence tool whose cousin is `write_file`: `data_store_*`
+ *     (structured store vs. a dumped file) and `contacts_search` (loose cousins:
+ *     `memory_recall`, `data_store_query`). All stay EAGER.
+ *  2. Tools the model invokes PROACTIVELY / at a subtle moment (no user cue) can't be
+ *     discovered — a tool-search only fires when the model already suspects a named
+ *     tool exists. So recall_tool_result, memory_*, plan_task, set_thread_context,
+ *     data_store_* and contacts_search stay EAGER (also mostly small schemas → little
+ *     savings for real risk).
+ *  3. Safe to DEFER = REACTIVE, user-named, no-eager-substitute tools (discovery
+ *     proven: `mail_search` hits first-try with a keyword-rich description; `api_setup`
+ *     surfaces in the search result) PLUS rare setup/admin/lifecycle tools the user
+ *     invokes deliberately. These are also the FATTEST schemas (api_setup 1096,
+ *     google_* 2045, mail_* 1963 tokens) → deferring them is where the prefix win is.
+ *
+ *  NOTE for maintainers: a deferred tool's DESCRIPTION is what the tool-search matches
+ *  against — keep deferred descriptions keyword-rich (the mail_search "email inbox" fix);
+ *  only trim descriptions of EAGER tools (there the description drives correct use, not
+ *  discovery). */
 export const LAZY_DEFERRED_TOOLS = new Set<string>([
+  // Google Workspace — reactive, user-named ("check my calendar"), big schemas, no eager substitute.
   'google_calendar','google_docs','google_drive','google_sheets',
+  // Mail — reactive, user-named ("search my mail", "reply to this"); mail_search discovery proven first-try.
   'mail_connect','mail_read','mail_reply','mail_search','mail_send','mail_triage',
-  'artifact_save','artifact_list','artifact_delete','artifact_history','artifact_restore',
-  'run_workflow','save_workflow',
-  'data_store_create','data_store_insert','data_store_query','data_store_delete','data_store_list',
-  'contacts_search',
-  'media_process','api_setup',
-  'subjects_merge',
+  // Setup / rare / admin — deliberate user action or rare; no eager substitute.
+  // (run_workflow/save_workflow are EAGER: a local probe showed "run my workflow"
+  //  never triggered a search — the model used eager task_list/memory_recall to
+  //  "find" it instead — and the workflow family is split, update_workflow_steps +
+  //  diagnose_workflow_run being eager. Keep the whole family eager.)
+  'api_setup','media_process','subjects_merge',
+  // Artifact lifecycle (manage EXISTING artifacts by handle, in-context after artifact_save) — rare, no eager substitute.
+  'artifact_delete','artifact_history','artifact_restore','artifact_list',
 ]);
 
 /** The server-side tool-search tool (SDK union member) prepended to the tools
