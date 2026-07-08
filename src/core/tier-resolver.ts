@@ -194,3 +194,70 @@ export function hybridSlotClientConfig(
   const provider: LLMProvider = wire === 'openai' ? 'openai' : wire === 'vertex' ? 'vertex' : 'anthropic';
   return { crossProviderSlot: true, provider, apiKey: snap.apiKey, apiBaseURL: snap.apiBaseURL, openaiModelId: snap.modelId };
 }
+
+/**
+ * The full wire client config for a resolved tier under the active routing mode —
+ * the single seam every FRESH-Agent site (spawn sub-agents, orchestrator pipeline
+ * steps) shares so a hybrid tier_set slot steers a step the same way it steers the
+ * main session. It composes {@link resolveTierModel} + {@link hybridSlotClientConfig}
+ * into the union of what those sites each need: provider, model, and the per-slot
+ * creds (apiKey/apiBaseURL/openaiModelId).
+ *
+ * Two shapes, distinguished by `crossProviderSlot`:
+ *  - **cross** — a hybrid slot whose provider differs from base, or that carries
+ *    enriched creds (see `hybridSlotClientConfig`). The Agent's wire + creds come
+ *    from the slot; a same-provider slot that `enrichTierSetCreds` deliberately
+ *    left key-LESS gets `resolveKey(provider)` filled in so a fresh Agent (which
+ *    has no ambient client to borrow a key from) doesn't 401 with an empty key.
+ *  - **non-cross** (standard mode / same-provider) — returns the BASE provider +
+ *    the tier's base model id + undefined creds. A caller that keeps its base
+ *    values when `!crossProviderSlot` is byte-identical to pre-hybrid behavior.
+ *    (The genuine-model-id passthrough — a caller that resolved a pinned model id
+ *    via resolveRunModel — must keep its OWN model id in the non-cross branch,
+ *    since `snap.modelId` here is the tier→provider mapping, not the pin.)
+ *
+ * Pure + table-testable: `resolveKey` is passed in (bound to `resolveProviderApiKey`
+ * over the caller's secret store / env), so no SecretStore is needed in tests.
+ * Mirrors the already-correct + tested spawn.ts consumption exactly.
+ */
+export interface CrossProviderSlotCreds {
+  /** Wire-level provider the Agent client uses (mistral→openai already mapped). */
+  readonly provider: LLMProvider;
+  /** Concrete model id for a cross slot; the tier's base model id otherwise. */
+  readonly model: string;
+  /** Slot API key (or resolveKey fallback) for a cross slot; undefined otherwise. */
+  readonly apiKey: string | undefined;
+  /** Slot API base URL for a cross slot; undefined otherwise. */
+  readonly apiBaseURL: string | undefined;
+  /** OpenAI-compatible model id for a cross slot; undefined otherwise. */
+  readonly openaiModelId: string | undefined;
+  /** True when the resolved tier maps to a cross-provider hybrid slot. */
+  readonly crossProviderSlot: boolean;
+}
+
+export function resolveCrossProviderSlotCreds(
+  tier: ModelTier,
+  baseProvider: LLMProvider,
+  resolveKey: (provider: LLMProvider) => string | undefined,
+): CrossProviderSlotCreds {
+  const snap = resolveTierModel(tier, baseProvider);
+  const hybrid = hybridSlotClientConfig(snap, baseProvider);
+  if (hybrid.crossProviderSlot) {
+    return {
+      provider: hybrid.provider,
+      model: hybrid.openaiModelId,
+      apiKey: hybrid.apiKey ?? resolveKey(hybrid.provider),
+      apiBaseURL: hybrid.apiBaseURL,
+      openaiModelId: hybrid.openaiModelId,
+      crossProviderSlot: true,
+    };
+  }
+  return {
+    provider: baseProvider,
+    model: snap.modelId,
+    apiKey: undefined,
+    apiBaseURL: undefined,
+    openaiModelId: undefined,
+    crossProviderSlot: false,
+  };
+}
