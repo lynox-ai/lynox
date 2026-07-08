@@ -29,7 +29,7 @@ export function createMailSearchTool(registry: MailRegistry): ToolEntry<MailSear
     definition: {
       name: 'mail_search',
       description:
-        'Search the user\'s mail accounts via IMAP SEARCH. Returns up to N compact envelopes (subject, from, date, snippet, attachment hint) — never full bodies. Use mail_read for the full body of a specific message. Combine fields freely (e.g. from + subject + since).',
+        'Search the user\'s email inbox and mail accounts via IMAP SEARCH. Returns up to N compact envelopes (subject, from, date, snippet, attachment hint) — never full bodies. Use mail_read for the full body of a specific message. Combine fields freely (e.g. from + subject + since).',
       input_schema: {
         type: 'object' as const,
         properties: {
