@@ -51,3 +51,41 @@ export function parseActiveRuns(body: unknown): ActiveRun[] {
 export function countLiveRuns(runs: ActiveRun[]): number {
 	return runs.filter((r) => r.status === 'running' || r.status === 'awaiting_input').length;
 }
+
+/** A live run this client can re-attach to after its own `/run` SSE dropped
+ * mid-run: the run for THIS thread that is still running/awaiting the user.
+ * `interrupted` is excluded — there is no cross-restart resume, so it gets the
+ * Retry banner path, not a re-attach. */
+export interface ReattachTarget {
+	runId: string;
+	lastPersistedSeq: number;
+}
+
+/**
+ * Pick the re-attach target for `threadId` from the `/api/runs/active` body, or
+ * null if none. Same envelope tolerance as `parseActiveRuns` (null/missing
+ * `runs`/non-object rows degrade to null, never throw), but keeps `runId` +
+ * `lastPersistedSeq` (which `parseActiveRuns` drops) so the caller can open
+ * `GET /runs/:runId/stream?since=`. A non-numeric `lastPersistedSeq` falls back
+ * to 0 (replay from the durable start).
+ */
+export function selectReattachTarget(body: unknown, threadId: string): ReattachTarget | null {
+	if (typeof body !== 'object' || body === null) return null;
+	const runs = (body as { runs?: unknown }).runs;
+	if (!Array.isArray(runs)) return null;
+	for (const r of runs) {
+		if (typeof r !== 'object' || r === null) continue;
+		const { runId, threadId: tid, status, lastPersistedSeq } = r as {
+			runId?: unknown; threadId?: unknown; status?: unknown; lastPersistedSeq?: unknown;
+		};
+		if (tid === threadId && typeof runId === 'string' && runId.length > 0
+			&& (status === 'running' || status === 'awaiting_input')) {
+			return {
+				runId,
+				lastPersistedSeq: typeof lastPersistedSeq === 'number' && Number.isFinite(lastPersistedSeq)
+					? lastPersistedSeq : 0,
+			};
+		}
+	}
+	return null;
+}

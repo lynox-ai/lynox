@@ -8,6 +8,7 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
+import { selectReattachTarget, type ReattachTarget } from '../utils/active-runs.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
 // `import { UsageInfo } from './chat.svelte.js'` callers keep working.
@@ -682,6 +683,64 @@ function mapApiError(status: number, detail: string): string {
 	return t('chat.error_start');
 }
 
+/** True while ANY human prompt is awaiting an answer. Proof the run reached the
+ *  server and is parked — used to tell a mid-run drop from a pre-run failure. */
+function hasAnyPendingPrompt(): boolean {
+	return pendingPermission !== null || pendingTabsPrompt !== null
+		|| pendingSecretPrompt !== null || pendingMailConnect !== null;
+}
+
+/**
+ * Recover a live `/run` whose SSE stream dropped mid-run (mobile background,
+ * proxy idle, tab freeze) WITHOUT the user reloading the thread (the #83 bug:
+ * the answer to an ask_user prompt looked "not sent" and the continuation only
+ * appeared after a manual reload-from-history).
+ *
+ * If the run is still live server-side, restore any pending prompt (so the user
+ * answers INTO the prompt form = a `/reply`, not a normal message that hits the
+ * busy path) and re-attach to the run's resumable buffer stream via the SAME
+ * tested path a manual reload uses (`reattachRun`). Returns true only when the
+ * re-attach actually took over the stream.
+ */
+async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<boolean> {
+	let target: ReattachTarget | null = null;
+	try {
+		const res = await fetch(`${getApiBase()}/runs/active`);
+		if (!res.ok) return false;
+		target = selectReattachTarget(await res.json(), sid);
+	} catch {
+		return false; // no way to reach the registry — let the caller fall back
+	}
+	if (!target) return false; // run already finished/gone — nothing to re-attach to
+	// Restore a prompt that survived the disconnect so the reply routes correctly.
+	await checkPendingPrompt();
+	// Drop an empty in-progress assistant bubble so the re-attach's own lazily
+	// created bubble doesn't duplicate it.
+	const a = messages[assistantIdx];
+	if (a && a.role === 'assistant' && !a.content && !a.blocks?.length && !a.toolCalls?.length) {
+		messages.splice(assistantIdx, 1);
+	}
+	// `since` = what THIS client already rendered, so no event double-renders.
+	const since = lastAppliedSeq > 0 ? lastAppliedSeq : target.lastPersistedSeq;
+	const epochBefore = streamEpoch;
+	await reattachRun(sid, target.runId, since, _resumeGeneration);
+	if (streamEpoch !== epochBefore) return true; // reattachRun took over + owns teardown
+	// Non-takeover: the run finished in the tiny /runs/active → /stream gap
+	// (reattachRun 404'd before claiming the stream). We already spliced the empty
+	// bubble and may have restored a now-stale prompt, so reconcile to the
+	// authoritative persisted transcript instead of leaving the just-finished turn
+	// invisible until a manual reload. Return true so the caller skips its own
+	// (now stale-indexed) cleanup + tail.
+	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
+	streamingToolPhase = null;
+	pendingPermission = null;
+	pendingTabsPrompt = null;
+	await reconcileThread();
+	return true;
+}
+
 async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions, queueId?: string): Promise<void> {
 	chatError = null;
 	retryStatus = null;
@@ -814,7 +873,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		// the run will only progress once the user answers, and a bare
 		// "Agent arbeitet noch — wartet…" banner with the actual prompt
 		// hidden somewhere is exactly the dead-end the user reported.
-		if (pendingPermission || pendingSecretPrompt || pendingTabsPrompt || pendingMailConnect) {
+		if (hasAnyPendingPrompt()) {
 			// If a prior 409 poll loop is still running (re-entrant call before
 			// its finally block ran), cut it now so its tick doesn't flip
 			// `isStreaming` back on after we clear it below.
@@ -925,6 +984,10 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	const decoder = new TextDecoder();
 	let buffer = '';
 	lastAppliedSeq = 0; // fresh run → reset the resume checkpoint
+	// Set when a terminal `done`/`error` event arrives → the run reached a real
+	// end. If the stream instead ends WITHOUT one (EOF/throw), it dropped mid-run
+	// and we try to re-attach to the still-live run (#83) instead of ending blind.
+	let sawTerminal = false;
 
 	try {
 		while (true) {
@@ -948,6 +1011,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 				} else if (line.startsWith('data: ') && eventType) {
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+						if (eventType === 'done' || eventType === 'error') sawTerminal = true;
 						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx);
 						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed SSE events */ }
@@ -957,8 +1021,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			}
 		}
 	} catch {
-		// SSE connection error — retry once if not already retried
-		if (!retried) {
+		// SSE connection error. A MID-RUN drop (events streamed or a prompt is
+		// pending → the run is live server-side) must NOT re-POST /run — that
+		// collides with the parked run (409) and strands the user's answer as
+		// "not sent" (the #83 bug). Leave it to the re-attach recovery after the
+		// finally. Only a PRE-RUN failure (nothing streamed, no prompt) is retried.
+		if (lastAppliedSeq > 0 || hasAnyPendingPrompt()) {
+			// mid-run drop → recovered below via reattachToActiveRun()
+		} else if (!retried) {
 			retried = true;
 			try {
 				await new Promise(r => setTimeout(r, 2000));
@@ -1004,6 +1074,15 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		}
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
+	}
+
+	// Stream ended without a terminal done/error while still marked streaming (not
+	// a user stop): the transport dropped mid-run (mobile background, proxy idle, tab
+	// freeze) or the run aborted. If the run is still live server-side, re-attach to
+	// its resumable stream so the continuation AND any pending prompt recover live —
+	// the user never has to reload from history (the #83 bug).
+	if (!sawTerminal && isStreaming && await reattachToActiveRun(sid, assistantIdx)) {
+		return; // the re-attach owns streaming state + persistence + queue drain
 	}
 
 	isStreaming = false;
