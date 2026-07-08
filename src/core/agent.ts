@@ -1119,13 +1119,26 @@ export class Agent implements IAgent {
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !this._suppressTools
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
-    // Lazy-tools (Slice 1): Anthropic-direct only, flag-gated, never on the
-    // compaction (suppress) path. When active, heavy/long-tail tool schemas are
-    // deferred behind the native tool-search tool so the cached prefix shrinks —
+    // Lazy-tools (Slice 4 = default-ON): Anthropic-direct only, never on the
+    // compaction (suppress) path. Heavy/long-tail tool schemas are deferred behind
+    // the native tool-search tool so the cached prefix shrinks (~35% measured);
     // every tool stays reachable (discovered on demand), only its schema is lazy.
-    const lazyToolsActive = this.toolContext.userConfig?.lazy_tools_enabled === true
+    // DEFAULT-ON for Anthropic-direct — `lazy_tools_enabled` defaults to on; only
+    // an explicit `false` opts a tenant out (kill-switch = set false or code
+    // revert). The `!isNonDirectAnthropic` gate is a COMPLIANCE invariant: Mistral
+    // / any non-Anthropic-direct provider NEVER gets the tool-search / defer_loading
+    // / advanced-tool-use beta — it dominates the default-on and must never loosen.
+    const lazyEnabled = this.toolContext.userConfig?.lazy_tools_enabled !== false
       && !this.isNonDirectAnthropic
       && !this._suppressTools;
+    // Only engage the lazy machinery when at least one deferrable tool is actually
+    // present: with nothing to defer, the tool-search tool + advanced-tool-use beta
+    // are pure prefix overhead. This also makes default-ON a true no-op for
+    // minimal-tool agents (most sub-agents), so the flip only reshapes the prefix
+    // where it pays — full-tool tenants carrying mail_*/google_*/api_setup/etc.
+    const lazyToolsActive = lazyEnabled
+      && this.tools.some(t => !this._excludeSet.has(t.definition.name)
+        && LAZY_DEFERRED_TOOLS.has(t.definition.name));
     // Tenant tool definitions. Deterministically SORTED by name (code-point) — a
     // cheap cache-safety pin: order today is registration order, so a future
     // refactor that reorders registration would silently bust every tenant's

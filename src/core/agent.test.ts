@@ -2525,10 +2525,12 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
   const ADVANCED_TOOL_USE = 'advanced-tool-use-2025-11-20';
   const SEARCH_TOOL_TYPE = 'tool_search_tool_regex_20251119';
 
-  it('flag OFF → toolsDef byte-identical to today (no tool-search tool, no defer_loading, no advanced-tool-use beta)', async () => {
+  it('flag explicit false (opt-out) → toolsDef byte-identical to today (no tool-search tool, no defer_loading, no advanced-tool-use beta)', async () => {
     // Registered already name-sorted so the deterministic sort is a no-op and the
     // OFF output is byte-identical to today's registration-order assembly. (The
     // one-time sort re-write is exercised by the dedicated ordering test below.)
+    // Since Slice 4 the default is ON for anthropic-direct, so the opt-out path is
+    // now an EXPLICIT `false` — that is what must stay byte-identical to today.
     const toolEntries = [
       makeTool('artifact_save'), // eager (eager-substitute rule) — trivially eager when OFF
       makeTool('bash'),          // core
@@ -2541,7 +2543,7 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
       model: 'claude-sonnet-4-6',
       provider: 'anthropic',
       tools: toolEntries,
-      // lazy_tools_enabled unset (default OFF)
+      toolContext: createToolContext({ lazy_tools_enabled: false }), // explicit opt-out
     });
     await agent.send('hi');
 
@@ -2600,6 +2602,69 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
     for (const b of getBetasForProvider('anthropic')) {
       expect(req.betas).toContain(b);
     }
+  });
+
+  it('flag UNSET + anthropic-direct with a deferrable tool → DEFAULT ON (Slice 4): tool-search tool + defer markers + beta', async () => {
+    // The Slice-4 default flip: an unset `lazy_tools_enabled` now behaves as ON for
+    // anthropic-direct — no explicit opt-in required.
+    const toolEntries = ['bash', 'read_file', 'mail_send', 'api_setup'].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      // lazy_tools_enabled UNSET → default ON for anthropic-direct
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    expect(req.tools[0]!.type).toBe(SEARCH_TOOL_TYPE); // search tool present + first
+    expect(req.tools.find((t) => t.name === 'mail_send')?.defer_loading).toBe(true);
+    expect(req.tools.find((t) => t.name === 'api_setup')?.defer_loading).toBe(true);
+    expect(req.tools.find((t) => t.name === 'bash')?.defer_loading).toBeUndefined();
+    expect(req.betas).toContain(ADVANCED_TOOL_USE);
+  });
+
+  it('default-ON but NO deferrable tool present → lazy machinery stays OFF (byte-identical, no search tool / beta)', async () => {
+    // hasDeferrable gate: nothing in LAZY_DEFERRED_TOOLS is present, so the
+    // tool-search tool + beta would be pure overhead — the default-on must be a
+    // true no-op here (most minimal-tool sub-agents / tests hit this path).
+    const toolEntries = ['bash', 'read_file', 'write_file'].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: toolEntries,
+      // UNSET → default ON, but nothing to defer → machinery must NOT engage
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    expect(req.tools.some((t) => t.type === SEARCH_TOOL_TYPE)).toBe(false);
+    expect(req.tools.every((t) => t.defer_loading === undefined)).toBe(true);
+    expect(req.betas).not.toContain(ADVANCED_TOOL_USE);
+  });
+
+  it('non-direct provider + UNSET (default-ON path) → still OFF (compliance gate dominates the default)', async () => {
+    // COMPLIANCE invariant: even with the default flipped ON, a non-Anthropic-direct
+    // provider (Mistral/custom) NEVER gets the tool-search / defer_loading / beta.
+    const toolEntries = ['bash', 'mail_send', 'api_setup'].map((n) => makeTool(n));
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'custom',
+      tools: toolEntries,
+      // UNSET config — the default-on path — but isNonDirectAnthropic suppresses it
+    });
+    await agent.send('hi');
+
+    const req = streamRequestOf(agent);
+    expect(req.tools.some((t) => t.type === SEARCH_TOOL_TYPE)).toBe(false);
+    expect(req.tools.every((t) => t.defer_loading === undefined)).toBe(true);
+    expect(req.betas ?? []).not.toContain(ADVANCED_TOOL_USE); // custom omits betas → guard undefined
   });
 
   it('flag ON + non-direct provider (custom) → full flat set, NO tool-search tool, NO defer_loading, NO advanced-tool-use beta', async () => {
@@ -2677,7 +2742,7 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
       model: 'claude-sonnet-4-6',
       provider: 'anthropic',
       tools: toolEntries,
-      // lazy_tools_enabled unset (default OFF)
+      toolContext: createToolContext({ lazy_tools_enabled: false }), // explicit opt-out (default is ON since Slice 4)
     });
     await agent.send('hi');
 
