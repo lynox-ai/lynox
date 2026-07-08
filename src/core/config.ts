@@ -249,6 +249,14 @@ export function loadConfig(): LynoxUserConfig {
   // are clamped): `LYNOX_MAX_MODEL_TIER` (canonical) / legacy `LYNOX_MAX_TIER`.
   const maxTier = envTier('LYNOX_MAX_MODEL_TIER');
   if (maxTier) merged.max_tier = maxTier;
+  // Compaction summarizer tier (Slice A, issue #72 cost). A cost-control knob,
+  // not a user preference (no UI picker) — mirrors `max_tier` above: env WINS
+  // unconditionally rather than only seeding an unset value, so the CP can
+  // guarantee every tenant's compaction runs cheap regardless of a stale/
+  // hand-edited config.json. Default (when neither env nor config.json set it)
+  // is applied at the read site (session.ts), not here.
+  const compactionModel = envTier('LYNOX_COMPACTION_MODEL');
+  if (compactionModel) merged.compaction_model = compactionModel;
   // Account plan tier (separate from LLM model tier) — 'pro' unlocks
   // capabilities like the researcher-role Opus override. Defaults to
   // 'standard' when unset.

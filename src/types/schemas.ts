@@ -157,6 +157,11 @@ export const LynoxUserConfigSchema = z.object({
   // L1 cost-aware compaction budget (absolute carried-token offer point). Bounded
   // [32K, 1M]: below 32K would thrash compaction; 1M = the max window.
   compaction_token_budget: z.number().int().min(32_000).max(1_000_000).optional(),
+  // Compaction summarizer tier override (Slice A, issue #72 cost) — same tier
+  // union as every other model-tier field. The default (`'fast'`) is applied
+  // at the read site (session.ts), not here, mirroring compaction_token_budget's
+  // undefined-until-CP-set contract.
+  compaction_model: ModelTierSchema.optional(),
   max_http_requests_per_hour: z.number().optional(),
   max_http_requests_per_day:  z.number().optional(),
   max_mail_sends_per_hour:    z.number().optional(),

@@ -96,6 +96,13 @@ const COMPACT_PREPARE_PERCENT = 80;
  *  far below it, so they are untouched). CP-tunable via `compaction_token_budget`. */
 const DEFAULT_COMPACTION_TOKEN_BUDGET = 150_000;
 
+/** Slice A (issue #72, compaction cost): the compaction SUMMARIZER runs on this
+ *  tier by default — independent of the live session's own (often pricier)
+ *  tier — cutting the summary call's cost roughly 4x. CP-tunable via
+ *  `compaction_model`; provider-agnostic (resolved through `resolveTierModel`,
+ *  never a hard-coded model id). */
+const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
+
 /** Thrown by `run()` when an `internal: true` run (only compaction, today) is
  *  stopped by a pre-run GUARD (persistent budget, a tenant/budget `onBeforeRun`
  *  hook, or content policy) rather than genuinely executing. For a user run
@@ -122,6 +129,11 @@ export interface RunOptions {
    *  Skips the synchronous user-message persist so an internal prompt never
    *  lands in the visible thread as a user row. */
   internal?: boolean | undefined;
+  /** Resolve this run's model from the given tier instead of the session's
+   *  configured tier (e.g. the compaction summarizer running on `compaction_model`
+   *  / `fast`). Scoped to this ONE run — see `run()` for the swap-and-restore
+   *  seam; the live session's tier is unchanged once the run returns. */
+  modelTier?: ModelTier | undefined;
   /** Fired right after each eager-persist checkpoint. The HTTP layer uses it to
    *  stamp the run buffer's current seq as `last_persisted_seq` in the run
    *  registry, so a reconnecting client can replay-then-tail from exactly the
@@ -200,6 +212,11 @@ export class Session {
   private _changesetManager: ChangesetManager | null = null;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   private _isCompacting = false;
+  /** In-flight background auto-compaction (fire-and-forget from run()'s tail). A
+   *  non-internal run() awaits this at entry so a user turn never overlaps the
+   *  compaction's session-shared mutations — the cheap-tier `_model`/agent swap
+   *  AND the buffer reset+reload. Cleared when the compaction settles. */
+  private _compactionInFlight: Promise<void> | null = null;
   /** One-shot guard: the "prepare & compact" offer is streamed once per fill,
    *  reset when usage drops back below COMPACT_PREPARE_PERCENT or after a
    *  compaction, so it can re-offer on the next fill but doesn't nag every turn. */
@@ -427,6 +444,15 @@ export class Session {
   async run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
 
+    // Serialize user turns behind an in-flight background auto-compaction: it
+    // mutates session-shared state (the message buffer + the cheap-tier
+    // `_model`/agent swap), so a concurrent turn must wait rather than observe
+    // it half-applied or silently run on the compaction tier. The compaction's
+    // OWN summary run is `internal` and must not wait on itself.
+    if (!runOptions?.internal && this._compactionInFlight) {
+      await this._compactionInFlight.catch(() => {});
+    }
+
     // Hot-reload tools when registry changed (e.g. Google connected mid-session)
     if (this.engine.getRegistry().version !== this._registryVersion) {
       this._recreateAgent();
@@ -573,6 +599,50 @@ export class Session {
     // ("gemini und search") would wrongly run multi-step web research on Haiku.
     // Tier selection belongs in explicit config (default_tier / model profiles
     // / setModel), not a heuristic.
+
+    // Per-run model-TIER override (e.g. the compaction summarizer running on
+    // `compaction_model`/`fast` instead of this session's configured tier) —
+    // distinct from the no-heuristic-downgrade invariant above: this is an
+    // explicit, caller-requested override for ONE run, not input-based
+    // classification. Applied BEFORE the effort/thinking overrides below so
+    // those setters (if a caller ever combines both) land on the rebuilt
+    // agent, not one about to be discarded. Effort/thinking restore via plain
+    // Agent setters because those are mutable Agent fields; the model id is
+    // baked into a `readonly` Agent field at construction (agent.ts), so
+    // honoring the override — and restoring the session's real tier afterward
+    // — both require a scoped `_recreateAgent()` round-trip (byte-identical
+    // message-history preserve, same mechanism setModel/pendingHint.model use).
+    // Restored in the `finally` below so the override never outlives this run.
+    let restoreModelTierTo: ModelTier | null = null;
+    if (runOptions?.modelTier !== undefined) {
+      // Resolve through the same chokepoint the pendingHint.model path uses, so
+      // an operator-set compaction_model above the tenant's max_tier cost
+      // ceiling is still clamped (this override would otherwise bypass the cap).
+      const overrideTier = resolveRunModel({
+        requested: runOptions.modelTier,
+        defaultTier: runOptions.modelTier,
+        accountTier: toolCtx.userConfig.account_tier,
+        maxTier: toolCtx.userConfig.max_tier,
+        provider: toolCtx.userConfig.provider ?? 'anthropic',
+      }).tier;
+      if (overrideTier !== this._model) {
+        restoreModelTierTo = this._model;
+        this._model = overrideTier;
+        try {
+          this._recreateAgent();
+        } catch (err) {
+          // The swap runs BEFORE the main try/finally that restores the tier, so
+          // a throw here would otherwise strand the live session on the cheap
+          // compaction tier. Reset the tier field so "a failed compaction never
+          // strands the session on fast" holds unconditionally. this.agent stays
+          // the pre-swap agent (a failed _createAgent never reassigned it), so
+          // resetting _model alone keeps state consistent — no second recreate.
+          this._model = restoreModelTierTo;
+          restoreModelTierTo = null;
+          throw err;
+        }
+      }
+    }
 
     // Apply per-run overrides via agent setters (never mutate session state)
     const hasRunOverrides = runOptions?.effort !== undefined || runOptions?.thinking !== undefined;
@@ -897,9 +967,15 @@ export class Session {
       // Trigger engine-level GC counter
       this.engine.incrementRunCount();
 
-      // Auto-compact if context is filling up (soft compaction before hard truncation kicks in)
+      // Auto-compact if context is filling up (soft compaction before hard truncation kicks in).
+      // Track the fire-and-forget promise so the NEXT user turn serializes behind
+      // it (see run() entry) — the compaction mutates session-shared state a
+      // concurrent turn must not observe half-applied.
       if (!this._isCompacting) {
-        void this._autoCompactIfNeeded();
+        this._compactionInFlight = this._autoCompactIfNeeded().finally(() => {
+          this._compactionInFlight = null;
+        });
+        void this._compactionInFlight;
       }
 
       return result;
@@ -1059,6 +1135,17 @@ export class Session {
           this.agent.setThinking(this._thinking ?? { type: 'adaptive' });
         }
       }
+      // Restore the live session's real tier after a `modelTier` override (see
+      // above) — success or failure, so a thrown InternalRunBlockedError from a
+      // blocked compaction summary can never strand the session on the cheap
+      // tier. Runs even though `reset()`/`compact()` may rebuild messages again
+      // right after: `this._model`/`this.agent.model` are session state, not
+      // touched by `reset()`, so skipping this restore would leave every
+      // subsequent turn running on `fast` until the next explicit setModel.
+      if (restoreModelTierTo !== null) {
+        this._model = restoreModelTierTo;
+        this._recreateAgent();
+      }
     }
   }
 
@@ -1143,7 +1230,11 @@ export class Session {
       // agent would sometimes save the summary as an artifact and reply with a
       // useless pointer ("saved as artifact …"), so the injected context lost
       // the open task and continuity broke (observed live 2026-06-03).
-      summary = await this.run(prompt, { noTools: true, internal: true });
+      // modelTier: run the summarizer on the cheap tier (Slice A, issue #72) —
+      // a scoped override; `run()` restores the session's real configured tier
+      // once this call returns (see the `modelTier` handling in run()).
+      const compactionTier = this.engine.getUserConfig().compaction_model ?? DEFAULT_COMPACTION_MODEL;
+      summary = await this.run(prompt, { noTools: true, internal: true, modelTier: compactionTier });
     } catch {
       // The summary run was blocked by a pre-run guard (InternalRunBlockedError
       // is THROWN so a guard's block string can't masquerade as a summary) OR it

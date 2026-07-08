@@ -320,6 +320,18 @@ describe('Config', () => {
     expect(loadConfig().max_tier).toBe('fast');
   });
 
+  it('LYNOX_COMPACTION_MODEL sets compaction_model (canonical + legacy brand value)', async () => {
+    process.env['LYNOX_COMPACTION_MODEL'] = 'fast';
+    const canonical = (await import('./config.js')).loadConfig();
+    expect(canonical.compaction_model).toBe('fast');
+
+    vi.resetModules();
+    delete process.env['LYNOX_COMPACTION_MODEL'];
+    process.env['LYNOX_COMPACTION_MODEL'] = 'haiku'; // legacy brand value, normalized to fast
+    const legacy = (await import('./config.js')).loadConfig();
+    expect(legacy.compaction_model).toBe('fast');
+  });
+
   it('LYNOX_DEFAULT_MODEL_TIER (canonical) and the legacy LYNOX_DEFAULT_TIER both set default_tier', async () => {
     process.env['LYNOX_DEFAULT_MODEL_TIER'] = 'balanced';
     const canonical = (await import('./config.js')).loadConfig();
