@@ -361,6 +361,12 @@ export interface ContextBudget {
 	totalTokens: number;
 	maxTokens: number;
 	usagePercent: number;
+	// Cost-aware compaction-budget occupancy (Session._compactionUsagePercent),
+	// injected by the engine alongside the honest window-fill `usagePercent`
+	// above. Optional: absent on older engines / non-lazy paths. Consumers
+	// use it as a COLOR signal only — never render it as a second number,
+	// it can diverge from usagePercent on large-window models (#78b).
+	budgetPercent?: number | undefined;
 }
 
 export interface ChangesetFileInfo {
@@ -1519,8 +1525,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const total = data['totalTokens'] as number | undefined;
 			const max = data['maxTokens'] as number | undefined;
 			const pct = data['usagePercent'] as number | undefined;
+			const budgetPct = data['budgetPercent'] as number | undefined;
 			if (total != null && max != null && pct != null) {
-				contextBudget = { totalTokens: total, maxTokens: max, usagePercent: pct };
+				contextBudget = {
+					totalTokens: total,
+					maxTokens: max,
+					usagePercent: pct,
+					...(budgetPct != null ? { budgetPercent: budgetPct } : {}),
+				};
 				if (max) contextWindow = max;
 			}
 			break;
