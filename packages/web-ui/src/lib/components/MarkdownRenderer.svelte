@@ -10,6 +10,7 @@
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, computeFitZoom, clearArtifactFitStyles } from '../utils/artifact-frame.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
+	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 
 	interface Props {
 		content: string;
@@ -105,6 +106,19 @@
 			</div>
 			<div class="mermaid-error-message">${escapeHtml(message)}</div>
 			<pre class="mermaid-error-source"><code>${escapeHtml(code)}</code></pre>
+		</div>`;
+	}
+
+	// Shown when the lazy `import('mermaid')` chunk 404s after a deploy — a
+	// stale bundle, not a bad diagram. triggerStaleReload() normally navigates
+	// away immediately; this card is what the user sees if the reload is
+	// loop-guarded (chunk genuinely gone server-side).
+	function buildMermaidReloading(): string {
+		return `<div class="mermaid-error">
+			<div class="mermaid-error-header">
+				<span class="mermaid-error-icon">↻</span>
+				<span class="mermaid-error-title">${escapeHtml(t('markdown.mermaid_reloading'))}</span>
+			</div>
 		</div>`;
 	}
 
@@ -840,8 +854,18 @@
 					// uncached rich block. Cache an error block so the user
 					// sees what happened and can copy the source.
 					if (lang === 'mermaid') {
-						const message = err instanceof Error ? err.message : String(err);
-						richCache.set(raw, buildMermaidError(code, message));
+						if (isChunkLoadError(err)) {
+							// A stale `import('mermaid')` chunk 404'd after a
+							// deploy — recover by reloading onto the fresh bundle
+							// instead of masking it as a diagram error. The global
+							// vite:preloadError listener may already have fired;
+							// triggerStaleReload is idempotent + loop-guarded.
+							triggerStaleReload();
+							richCache.set(raw, buildMermaidReloading());
+						} else {
+							const message = err instanceof Error ? err.message : String(err);
+							richCache.set(raw, buildMermaidError(code, message));
+						}
 					}
 				}
 			}
