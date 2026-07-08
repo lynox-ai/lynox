@@ -209,7 +209,14 @@ function measureStaticPrefixTokens(): number {
 // Bumped 22150 → 23000 for the `media_process` tool definition (the 40th tool),
 // a deliberate, intended prefix growth. Keeps a modest headroom over the
 // measured ~22533 so the guard still fires on the next real regression.
-const STATIC_PREFIX_BUDGET = 23000;
+// 2026-07-08: bump 23000 → 23500 (measured 23037) for the ground-first +
+// no-fabrication-on-empty legs appended to GROUNDING_PROMPT_BLOCK (~164 tokens):
+// recommend only AFTER fetching+showing the real data, and say "I could not
+// retrieve X" plainly rather than inventing a figure on an empty/error tool
+// result. Rides the cached prefix (fires on the main agent AND every spawned /
+// pipeline step), a deliberate correctness edit — not accidental growth. Keeps
+// ~2% headroom over the measured value, matching the media_process precedent.
+const STATIC_PREFIX_BUDGET = 23500;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

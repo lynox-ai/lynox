@@ -23,6 +23,15 @@ describe('GROUNDING_PROMPT_BLOCK', () => {
     // must be reasoned FROM, not silently reasoned past.
     expect(GROUNDING_PROMPT_BLOCK).toContain('Reason FROM the facts');
   });
+
+  it('carries the ground-first + no-fabrication-on-empty legs (2026-07-08)', () => {
+    // Ordering leg: verify the real data BEFORE recommending, and show it as the
+    // basis — no advice built on guessed/assumed numbers.
+    expect(GROUNDING_PROMPT_BLOCK).toContain('verify the real data');
+    // Honesty-on-empty leg: an empty/error/no-result tool call must be said
+    // plainly, never papered over with an invented figure.
+    expect(GROUNDING_PROMPT_BLOCK).toContain('could not retrieve');
+  });
 });
 
 describe('currentDateContext', () => {
