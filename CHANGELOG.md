@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.4.0 — 2026-07-09
+
+This release cuts what long conversations cost and makes compaction something you can rely on rather than something that happens to you. The summarizer that condenses a long thread now runs on a cheaper model tier by default, which is roughly a four-fold cut in what each compaction costs. The summary it produces is now written down durably, so resuming a compacted thread rebuilds context from that summary plus every message since it, instead of a fixed window of the last 40. The "prepare & compact" offer no longer gets skipped when a single large turn vaults straight past the threshold. And the agent now checks that an integration actually exists before it asks you for that integration's credential. **No engine.db migration** — rollback to 2.3.1 is a clean image swap.
+
+### Changed
+- **The compaction summarizer runs on the `fast` tier by default.** Compacting a thread is one internal, tools-suppressed turn; running it on a cheap model cuts that cost about four-fold. The summary becomes a thread's long-term memory once older messages are evicted, so this trades some summary fidelity for cost. Set `compaction_model` (or `LYNOX_COMPACTION_MODEL`) to pin the summarizer to a different tier. (#72)
+- **Resuming a compacted thread loads more history.** When a durable summary exists, resume now loads every message recorded since that summary's coverage point, capped at 120, instead of always taking the last 40. Threads without a summary behave exactly as before. (#86, #80a)
+- **The context occupancy chip is coloured by cost budget.** Both the chat footer and the persistent status bar keep showing the same honest occupancy percentage; only the colour now reflects how much of the cost budget the thread has consumed, so a large-window model no longer looks green when it is expensive. (#78)
+
+### Added
+- **The compaction summary is persisted.** A live mid-session compaction now stores its summary on the thread rather than discarding it, so a later resume builds on that summary instead of re-summarizing from scratch. (#86)
+- **The compact offer fires on a leap past the threshold.** A single turn that jumps straight from below the offer point to past the auto-compaction point now still surfaces the "prepare & compact" offer once, rather than silently auto-compacting. (#78a)
+- **Credential requests check for the integration first.** Before opening an `ask_secret` prompt for a third-party API credential, the agent verifies the corresponding integration profile exists, so you are no longer asked for a key that nothing is yet wired to consume. Standalone LLM provider keys are unaffected. (#85)
+- **An online reachability matrix for lazy tool loading.** `tests/online/lazy-tool-reachability.test.ts` drives a real model against every deferred tool and asserts it is rediscovered and invoked. It runs only with an API key present.
+
+### Notes
+- **Lazy tool loading stays opt-in and dormant.** The defer-set was re-curated (#933), but the feature remains off unless `lazy_tools_enabled` is explicitly set to `true`. The new reachability matrix shows a model rediscovers only 9 of 17 deferred tools on the `balanced` tier and none on `fast`, and a tool that is never searched for is invisible with no error — so the default stays off until reachability is green on every tier. No behaviour change for any tenant.
+
 ## 2.3.1 — 2026-07-08
 
 A small reliability patch for the chat's live view. If the live connection drops mid-run — a mobile tab going to the background, a proxy idling the stream, a frozen tab — answering an `ask_user` prompt no longer strands you: the client detects the drop, re-attaches to the still-running turn, and streams the continuation live, instead of showing your answer as "not sent" and only recovering after a manual reload-from-history. Plus a "Compact context" entry in the thread menu so you can summarize the conversation on demand to keep context cost down. **No engine.db migration** — rollback to 2.3.0 is a clean image swap.

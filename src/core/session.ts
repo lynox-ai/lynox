@@ -1296,8 +1296,9 @@ export class Session {
       // Writing it here makes resume build on THIS (better, fact-tagged) summary
       // and suppresses the redundant re-summarize. summary_up_to = the api message
       // count now (the display-only marker just written is excluded) — the span
-      // the summary covers; currently write-only (future delta-resume), read by
-      // nothing yet. Best-effort — never block or fail the compaction.
+      // the summary covers, read back by `buildResumeContext` (session-store.ts)
+      // to load every message since it. Best-effort — never block or fail the
+      // compaction.
       if (threadStore) {
         try {
           threadStore.updateThread(this.sessionId, {
