@@ -64,6 +64,14 @@ export interface ImportVerification {
   configApplied: boolean;
 }
 
+/** `name` or `name:partN` → the part index; `0` when the payload was not split. */
+function partNumber(chunkName: string): number {
+  const idx = chunkName.indexOf(':part');
+  if (idx === -1) return 0;
+  const n = parseInt(chunkName.slice(idx + ':part'.length), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** State of an in-progress migration session. */
 interface MigrationSession {
   keypair: EphemeralKeypair;
@@ -339,10 +347,11 @@ export class MigrationImporter {
       verification.artifactsImported = this.restoreArtifacts(data);
     }
 
-    // 4. Memory (flat-file store)
-    for (const { meta, data } of chunksByType.memory) {
-      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
-      verification.memoryFilesImported = this.restoreMemory(data);
+    // 4. Memory (flat-file store) — one call for the whole set, so a split
+    // payload is reassembled once instead of last-write-wins per chunk.
+    if (chunksByType.memory.length > 0) {
+      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.memory[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
+      verification.memoryFilesImported = this.restoreMemory(chunksByType.memory);
     }
 
     // 5. Secrets (most sensitive — last)
@@ -548,7 +557,13 @@ export class MigrationImporter {
    *
    * @returns the number of files written
    */
-  private restoreMemory(data: Buffer): number {
+  private restoreMemory(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    // The exporter splits an oversized bundle into `memory:partN`. Reassemble in
+    // part order before parsing — a part boundary can fall mid-UTF-8-sequence,
+    // so the concatenation must happen on the Buffers, never on decoded strings.
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
     const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
     if (!bundle.files || typeof bundle.files !== 'object') return 0;
 

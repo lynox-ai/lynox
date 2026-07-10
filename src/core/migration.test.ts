@@ -754,4 +754,58 @@ describe('migration — flat-file memory tree', () => {
     expect(existsSync(join(dstDir, 'memory', 'global', 'nested'))).toBe(false);
     expect(existsSync(join(dstDir, 'memory', '.hidden'))).toBe(false);
   });
+
+  it('splits a memory tree past MAX_CHUNK_BYTES and reassembles it byte-exactly', () => {
+    // `Memory` trims each namespace file to 256 KiB, so ~9 scope dirs already
+    // pass the 8 MiB chunk ceiling that `encryptChunk` rejects by throwing.
+    // Without splitting, the whole migration aborts.
+    const big = 'x'.repeat(250 * 1024);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) {
+      for (const ns of ['knowledge', 'methods', 'status', 'learnings']) {
+        files[`ctx${String(i)}/${ns}.txt`] = `${big}${String(i)}${ns}`;
+      }
+    }
+    createTestMemory(srcDir, files);
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    const memoryChunks = manifest.chunks.filter(c => c.type === 'memory');
+    expect(memoryChunks.length).toBeGreaterThan(1);
+    expect(memoryChunks.every(c => c.name.startsWith('memory:part'))).toBe(true);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    const verification = importer.restore();
+
+    expect(verification.memoryFilesImported).toBe(40);
+    expect(readFileSync(join(dstDir, 'memory', 'ctx7', 'methods.txt'), 'utf-8'))
+      .toBe(`${big}7methods`);
+  });
+
+  it('keeps a multi-byte character intact across a part boundary', () => {
+    // A naive reassembly that concatenates DECODED strings corrupts any UTF-8
+    // sequence straddling the cut. Pad so the boundary lands inside one.
+    const filler = 'a'.repeat(MAX_CHUNK_BYTES - 40);
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': `${filler}${'ä'.repeat(64)}`,
+    });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    expect(manifest.chunks.filter(c => c.type === 'memory').length).toBeGreaterThan(1);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    importer.restore();
+
+    expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8'))
+      .toBe(`${filler}${'ä'.repeat(64)}`);
+  });
 });
