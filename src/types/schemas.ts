@@ -194,6 +194,11 @@ export const LynoxUserConfigSchema = z.object({
   // ~/.lynox/context-cost.jsonl (ground-truth context breakdown for the
   // cost-cut investigation). Off by default; zero overhead when unset.
   context_cost_log:        z.boolean().optional(),
+  // Memory Foundation Wave 0: opt-in retrieval shadow log to
+  // ~/.lynox/retrieval-shadow.jsonl (per-tier admission distribution for the
+  // Wave-2 floor). Off by default. The .strict() schema would otherwise reject
+  // this key from config.json (silently disabling the flag).
+  retrieval_shadow_log:    z.boolean().optional(),
   knowledge_graph_enabled: z.boolean().optional(),
   // Foundation Rework v2 (S1b): additively mirror extraction into the engine.db
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
@@ -209,6 +214,11 @@ export const LynoxUserConfigSchema = z.object({
   // at the read path. The .strict() schema would otherwise reject this key from
   // config.json (silently disabling the flag).
   memory_graph_reads:      z.boolean().optional(),
+  // Memory Foundation Wave 0 — the self-reinforcement emergency stop (drops
+  // confMult/confirmDecay from scoring, stops rendering confidence, halts every
+  // confirmation-count write). Default off; flipped per-tenant. The .strict()
+  // schema would otherwise reject this key from config.json (silently disabling it).
+  memory_scoring_v2:       z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one

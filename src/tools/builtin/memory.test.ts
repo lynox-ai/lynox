@@ -65,18 +65,30 @@ describe('memoryStoreTool', () => {
     });
   });
 
-  it('captures the agent-declared sourceType in the published event', async () => {
+  it('force-floors the tier to agent_inferred — an agent cannot self-declare provenance (Wave 0.6, §2.8)', async () => {
     const { channels } = await import('../../core/observability.js');
     const append = vi.fn().mockResolvedValue(undefined);
     const agent = makeAgent(makeMockMemory({ append }));
 
+    // Even if a caller smuggles a sourceType — the removed self-declare param, or
+    // injected content instructing the agent to claim the tier the system prompt
+    // trusts most — the tool publishes agent_inferred. The §2.8 privilege
+    // escalation is closed: provenance is no longer agent-declarable.
     await memoryStoreTool.handler(
-      { namespace: 'knowledge', content: 'the user told me their budget', sourceType: 'user_asserted' },
+      { namespace: 'knowledge', content: 'the user told me their budget', sourceType: 'user_asserted' } as unknown as Parameters<typeof memoryStoreTool.handler>[0],
       agent,
     );
     expect(channels.memoryStore.publish).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'the user told me their budget', sourceType: 'user_asserted' }),
+      expect.objectContaining({ content: 'the user told me their budget', sourceType: 'agent_inferred' }),
     );
+  });
+
+  it('memory_store and memory_update no longer expose a sourceType/sourceToolName parameter (Wave 0.6)', () => {
+    const storeProps = (memoryStoreTool.definition.input_schema as { properties: Record<string, unknown> }).properties;
+    expect(storeProps).not.toHaveProperty('sourceType');
+    expect(storeProps).not.toHaveProperty('sourceToolName');
+    const updateProps = (memoryUpdateTool.definition.input_schema as { properties: Record<string, unknown> }).properties;
+    expect(updateProps).not.toHaveProperty('sourceType');
   });
 
   it('stores content via agent.memory.append and returns confirmation', async () => {

@@ -743,6 +743,9 @@ export class Session {
           useHyDE: true,
           useGraphExpansion: true,
           threadAnchorSubjectId,
+          // Wave 0 shadow mode records this (plaintext) to correlate the admission
+          // distribution by conversation; only read when retrieval_shadow_log is on.
+          threadId: this.sessionId,
         });
         this._retrievedMemoryIds = result.memories.map(m => m.id);
         this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result, undefined, task));

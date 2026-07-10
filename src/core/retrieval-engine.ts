@@ -11,7 +11,7 @@ import { NAMESPACE_HALF_LIFE } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { calculateCost } from './pricing.js';
 import { reportMeteredCost, type HookHost } from './metered-request.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
@@ -27,6 +27,7 @@ import type { DataStoreBridge } from './datastore-bridge.js';
 import type { RunHistory } from './run-history.js';
 import { escapeXml, renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
 import { channels } from './observability.js';
+import { appendRetrievalShadowLog } from './retrieval-shadow-log.js';
 
 /** Default retrieval options. */
 const DEFAULT_TOP_K = 10;
@@ -95,6 +96,12 @@ export interface RetrievalOptions {
    * or a candidate with no subject → the flat `scopeWeight(scope_type)` (back-compat).
    */
   threadAnchorSubjectId?: string | null | undefined;
+  /**
+   * The active thread id — recorded (plaintext) in the Wave-0 retrieval shadow log
+   * so an operator can correlate the admission distribution by conversation. Only
+   * read when `retrieval_shadow_log` is on; absent otherwise.
+   */
+  threadId?: string | undefined;
 }
 
 interface ScoredCandidate {
@@ -171,6 +178,21 @@ export class RetrievalEngine {
     private readonly entityResolver: EntityResolver,
     private anthropicClient?: Anthropic | undefined,
     private readonly runHistory?: RunHistory | undefined,
+    /**
+     * Memory Foundation Wave 0. When true, `retrieve` scores WITHOUT the
+     * `confMult`/`confirmDecay` terms (the laundered retrieval-tally that gated
+     * admission) and `formatContext` omits the `confidence=` attribute from the
+     * `<fact>` the model reads. Default false — the legacy scoring path, retained
+     * until the flag soaks fleet-wide.
+     */
+    private readonly scoringV2: boolean = false,
+    /**
+     * Memory Foundation Wave 0 — shadow mode. When true, each `retrieve` appends
+     * one record per call to `~/.lynox/retrieval-shadow.jsonl` (raw cosine + tier +
+     * subject + would-pass per scored candidate) for the Wave-2 floor measurement.
+     * Filters nothing. Default false.
+     */
+    private readonly shadowLog: boolean = false,
   ) {}
 
   setDataStoreBridge(bridge: DataStoreBridge): void {
@@ -350,16 +372,31 @@ export class RetrievalEngine {
         }
       }
 
-      // Confidence multiplier: confirmed memories score higher, unconfirmed decay over time
-      const ageDays = (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-      const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
-      const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
-
-      c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost)
-        * sw * decay * confMult;
+      // Confidence multiplier (legacy path): confirmed memories score higher, and
+      // `confirmDecay` goes STICKY at 1.0 after the first retrieval — permanently
+      // disabling age decay for that row, which turns ranking into an admission
+      // gate (PRD §2.2/§2.5: one retrieval drops the effective cosine bar from ~0.86
+      // to 0.44). Wave 0 (memory_scoring_v2) drops `confMult`/`confirmDecay`
+      // entirely; the legitimate `decay` term survives in BOTH branches.
+      if (this.scoringV2) {
+        c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost) * sw * decay;
+      } else {
+        const ageDays = (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+        const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
+        const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
+        c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost) * sw * decay * confMult;
+      }
     }
 
     const aboveThreshold = candidates.filter(c => c.finalScore > threshold * 0.3);
+
+    // Memory Foundation Wave 0 — shadow mode: record the full scored candidate
+    // distribution (raw cosine + tier + subject + would-pass) so the Wave-2 FLOOR
+    // is measured on the real corpus, never guessed. Filters nothing; captured over
+    // the pre-gate candidate set so sub-gate rows are visible to the operator.
+    if (this.shadowLog) {
+      this._emitRetrievalShadow(query, candidates, threshold, options?.threadId);
+    }
 
     // === Step 7: MMR Re-Ranking ===
     const selected = this._mmrRerank(aboveThreshold, queryEmbedding, topK);
@@ -464,7 +501,10 @@ export class RetrievalEngine {
         text: m.text,
         kind: m.sourceType,
         tool: m.sourceToolName,
-        confidence: m.confidence,
+        // Wave 0 (memory_scoring_v2): stop asserting a laundered confidence to the
+        // model. 127 active rows sit pinned at 1.00 from the retrieval-tally loop;
+        // omit the attribute entirely rather than teach the model to trust them.
+        confidence: this.scoringV2 ? undefined : m.confidence,
         attrs: {
           ns: m.namespace,
           relevance: `${(m.finalScore * 100).toFixed(0)}%`,
@@ -481,6 +521,46 @@ export class RetrievalEngine {
   }
 
   // === Private Methods ===
+
+  /**
+   * Memory Foundation Wave 0 — emit one shadow-log record for a retrieval (§5.1).
+   * Records the raw cosine, tier, subject and current-gate verdict of every scored
+   * candidate so an operator can pick the Wave-2 per-tier FLOOR from the real
+   * distribution. Writes the JSONL sink AND publishes `channels.retrievalGate` for
+   * live subscribers. Fire-and-forget; the query is stored only as a hashed prefix,
+   * and any error is swallowed so telemetry never affects the retrieval.
+   */
+  private _emitRetrievalShadow(
+    query: string,
+    candidates: ScoredCandidate[],
+    threshold: number,
+    threadId: string | undefined,
+  ): void {
+    try {
+      const gate = threshold * 0.3;
+      const queryHash = createHash('sha256').update(query).digest('hex').slice(0, 16);
+      const entry = {
+        ts: Date.now(),
+        threadId,
+        queryHash,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        embeddingProvider: this.embeddingProvider.name,
+        candidates: candidates.map(c => ({
+          id: c.id,
+          // Raw cosine — unscale VECTOR_WEIGHT so the operator reads the true
+          // similarity the FLOOR will be expressed in (0 for a graph-only candidate).
+          rawCosine: c.vectorScore / VECTOR_WEIGHT,
+          sourceType: c.sourceType,
+          subjectId: c.subjectId,
+          wouldPass: c.finalScore > gate,
+        })),
+      };
+      void appendRetrievalShadowLog(entry);
+      if (channels.retrievalGate.hasSubscribers) channels.retrievalGate.publish(entry);
+    } catch {
+      // Best-effort telemetry — never affect the retrieval.
+    }
+  }
 
   private async _generateHyDE(query: string): Promise<string | null> {
     if (!this.anthropicClient) return null;

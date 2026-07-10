@@ -677,9 +677,15 @@ export async function initKnowledgeLayer(
     // flag is on. Co-gated on subjectGraphEnabled inside the layer (the store is
     // only populated when the mirror is on).
     const memoryGraphReads = userConfig.memory_graph_reads === true;
+    // Memory Foundation Wave 0: the self-reinforcement emergency-stop flag (drops
+    // confMult/confirmDecay from scoring + halts confirmation writes) and the
+    // opt-in retrieval shadow log. Both per-tenant, default off.
+    const memoryScoringV2 = userConfig.memory_scoring_v2 === true;
+    const retrievalShadowLog = userConfig.retrieval_shadow_log === true;
     const layer = new KnowledgeLayer(
       dbPath, embeddingProvider, client, runHistory ?? undefined,
       engineDb ?? undefined, subjectGraphEnabled, memoryGraphReads,
+      memoryScoringV2, retrievalShadowLog,
     );
     await layer.init();
     return layer;
