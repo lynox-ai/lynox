@@ -348,10 +348,29 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // DROP. The stub always lands (even when the extractor is gated); createdAt carries
       // the legacy row's creation time so the stub time-decays correctly.
       const createdAt = this.db.getMemoryCreatedAt(memoryId);
-      extracted = await this._extractAndPersistToSubjects(
-        trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
-        threadAnchorSubjectId,
-      );
+      // §0.1 (mirror P0): under memoryReadsActive the engine.db stub written here is
+      // the recall-AUTHORITATIVE row — recall reads engine.db primary, and the legacy
+      // fallback (`retrieval-engine.ts`) fires only on a `throw`, never on a row that
+      // was simply never mirrored. A silent failure = a store the fleet can never
+      // recall. Preserve the legacy row (already committed above — no data loss; it
+      // rides backup/export) and surface a HARD, monitorable parity-loss signal so the
+      // Adapter-PR reconcile can repair engine.db. This is NOT the routine best-effort
+      // mirror swallow (that is correct only while legacy is the read authority).
+      try {
+        extracted = await this._extractAndPersistToSubjects(
+          trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
+          threadAnchorSubjectId,
+        );
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('store', memoryId, err);
+        extracted = { resolvedEntities: [], resolvedRelations: [] };
+      }
+      // Read-back parity: even without a throw, the stub MUST be present in engine.db
+      // (it always lands on a successful write, even when the extractor is gated). Its
+      // absence is the exact silent-loss the old swallow hid — verify and surface.
+      if (!this.memoryGraphStore.getStub(memoryId)) {
+        this._reportMirrorParityLoss('store', memoryId, new Error('stub absent in engine.db after write'));
+      }
     } else {
       // Pre-cutover (every current tenant): legacy persist is authoritative (gated), and
       // the engine.db mirror below is an additive dual-write that runs REGARDLESS of the
@@ -1110,6 +1129,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * §0.1 — surface an engine.db recall-parity LOSS as a HARD, monitorable signal,
+   * deliberately distinct from the routine `[lynox:subject-graph] … failed` best-effort
+   * logs (which are correct to swallow only while legacy is the read authority). Under
+   * `memoryReadsActive` recall reads engine.db PRIMARY, so a stub that was never written
+   * (store) or never reaped (deactivate) diverges silently from legacy: silent memory
+   * loss one way, silent erasure failure the other, neither self-healing. The distinct
+   * `mirror-parity` marker is greppable for alerting; the caller decides the recovery
+   * posture — store PRESERVES the legacy row and continues; deactivate RE-THROWS so a
+   * half-completed erasure is never reported as done.
+   */
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate', ref: string, err: unknown): void {
+    process.stderr.write(
+      `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+
+  /**
    * The subject-graph read of the entity list: maps Subjects back to the stable
    * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
    * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
@@ -1238,19 +1274,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on
     // subjectGraphEnabled (NOT reads) — the mirror WRITES stubs whenever it's on,
     // so a delete must reap them whenever it's on (matching purgeThread /
-    // _mirrorConfidence). Isolated: an engine.db failure is logged + swallowed so
-    // the legacy deactivation above still stands. Residual (tracked for the
-    // reads-flip reconcile, like purgeThread): once memoryGraphReads is on, a
-    // swallowed reap leaves the deleted content recallable in engine.db — and a
-    // re-run finds ids=[] (the legacy rows are already inactive), so it is not
-    // self-healing. No live tenant has reads on yet.
+    // _mirrorConfidence).
+    //
+    // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
+    // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
+    // leaves the "deleted" content still recallable from engine.db — a silent erasure
+    // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
+    // → ids=[] → the stub is never revisited). Deletion must be loud: surface a hard
+    // parity-loss signal AND re-throw so the caller (memory_delete / the erasure PR)
+    // cannot report success on a half-completed erasure. The legacy deactivation above
+    // already stands; the throw says "engine.db reap did not complete".
     if (this.subjectGraphEnabled && this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
       } catch (err: unknown) {
-        process.stderr.write(
-          `[lynox:subject-graph] deactivate mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        this._reportMirrorParityLoss('deactivate', `${ids.length} id(s) for pattern`, err);
+        throw err;
       }
     }
     return ids.length;

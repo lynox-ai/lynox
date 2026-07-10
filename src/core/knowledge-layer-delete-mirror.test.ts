@@ -95,7 +95,7 @@ describe('KnowledgeLayer delete mirror (S5b\'-c)', () => {
     expect(new MemoryGraphStore(engine).getStub(stored.memoryId)!.is_active).toBe(0);
   });
 
-  it('isolates an engine.db mirror failure: legacy still deactivated, no throw', async () => {
+  it('§0.1: a failed engine.db reap THROWS (erasure must be loud), legacy still deactivated', async () => {
     const { layer } = newLayer({ subjectGraph: true, memReads: true });
     await layer.init();
     const stored = await layer.store('Fact whose mirror reap will fail', 'knowledge', scope);
@@ -105,11 +105,46 @@ describe('KnowledgeLayer delete mirror (S5b\'-c)', () => {
     const spy = vi.spyOn(MemoryGraphStore.prototype, 'deactivateByIds').mockImplementationOnce(() => {
       throw new Error('engine.db locked');
     });
-    // Must NOT throw (the failure is swallowed) and must still report the legacy count.
-    const count = await layer.deactivateByPattern('Fact whose mirror reap will fail');
-    expect(count).toBe(1);
+    // §0.1 (was: swallowed + returned the legacy count). The fleet reads engine.db
+    // primary, so a swallowed reap leaves the "deleted" content recallable — a silent
+    // erasure failure. Deletion must be loud: the mirror failure now RE-THROWS so the
+    // caller cannot report a half-completed erasure as done.
+    await expect(layer.deactivateByPattern('Fact whose mirror reap will fail')).rejects.toThrow('engine.db locked');
     expect(spy).toHaveBeenCalledOnce();
     spy.mockRestore();
+    // The legacy deactivation ran BEFORE the mirror reap (deactivateMemoriesByPattern
+    // at the top of deactivateByPattern), so it still stands — the throw signals only
+    // that the engine.db half did not complete, which is the point.
+  });
+
+  it('§0.1: a failed engine.db stub write surfaces a HARD parity-loss + preserves the legacy row', async () => {
+    const { layer, engine } = newLayer({ subjectGraph: true, memReads: true });
+    await layer.init();
+
+    // Capture stderr to assert the distinct, monitorable parity marker.
+    const lines: string[] = [];
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    });
+    // Force the recall-authoritative stub write to fail on the reads-active path.
+    const stubSpy = vi.spyOn(MemoryGraphStore.prototype, 'upsertStub').mockImplementationOnce(() => {
+      throw new Error('engine.db disk full');
+    });
+
+    const stored = await layer.store('A fact whose engine.db stub write will fail', 'knowledge', scope);
+    errSpy.mockRestore();
+    stubSpy.mockRestore();
+
+    // Preserve: the legacy row still lands (no data loss — it rides backup/export).
+    expect(stored.stored).toBe(true);
+    expect(stored.memoryId).toBeTruthy();
+    // Surface: a distinct CRITICAL mirror-parity line was emitted (NOT the routine
+    // best-effort swallow), so monitoring can alert + the Adapter-PR reconcile can act.
+    expect(lines.some(l => l.includes('[lynox:mirror-parity] CRITICAL store'))).toBe(true);
+    // And the stub genuinely never landed in engine.db (the silent-loss the old
+    // swallow hid) — which is exactly why the read-back parity check fired.
+    expect(new MemoryGraphStore(engine).getStub(stored.memoryId)).toBeNull();
   });
 
   it('flag-off: deactivates legacy only, returns the count, never touches engine.db', async () => {
