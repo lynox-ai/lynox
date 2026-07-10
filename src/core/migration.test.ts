@@ -787,12 +787,23 @@ describe('migration — flat-file memory tree', () => {
   });
 
   it('keeps a multi-byte character intact across a part boundary', () => {
-    // A naive reassembly that concatenates DECODED strings corrupts any UTF-8
-    // sequence straddling the cut. Pad so the boundary lands inside one.
-    const filler = 'a'.repeat(MAX_CHUNK_BYTES - 40);
-    createTestMemory(srcDir, {
-      'global/knowledge.txt': `${filler}${'ä'.repeat(64)}`,
-    });
+    // A reassembly that concatenates DECODED strings corrupts any UTF-8 sequence
+    // straddling the cut. Place the boundary INSIDE one, deterministically: the
+    // exporter serializes `{"files":{"<key>":"<content>"}}`, so pad the content
+    // until the two bytes of an `ä` (0xC3 0xA4) fall either side of the cut.
+    const KEY = 'global/knowledge.txt';
+    const prefixBytes = Buffer.byteLength(`{"files":{"${KEY}":"`, 'utf-8');
+    const filler = 'a'.repeat(MAX_CHUNK_BYTES - 1 - prefixBytes);
+    const content = `${filler}${'ä'.repeat(32)}`;
+
+    // Pin the precondition: if serialization ever shifts, this fails loudly
+    // instead of the test silently going vacuous.
+    const bundle = Buffer.from(JSON.stringify({ files: { [KEY]: content } }), 'utf-8');
+    expect(bundle.length).toBeGreaterThan(MAX_CHUNK_BYTES);
+    expect(bundle[MAX_CHUNK_BYTES - 1]).toBe(0xc3); // lead byte of 'ä'
+    expect(bundle[MAX_CHUNK_BYTES]).toBe(0xa4);     // continuation byte
+
+    createTestMemory(srcDir, { [KEY]: content });
 
     const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
     const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
@@ -806,6 +817,6 @@ describe('migration — flat-file memory tree', () => {
     importer.restore();
 
     expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8'))
-      .toBe(`${filler}${'ä'.repeat(64)}`);
+      .toBe(content);
   });
 });
