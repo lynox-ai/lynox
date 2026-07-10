@@ -355,11 +355,19 @@ export class MemoryGraphStore {
   // not a mechanical port of the legacy orphan-entity delete.
 
   /**
-   * Delete memory stubs by id — the S5b'-c thread-purge via id-parity (a stub shares
-   * the legacy memory id). The caller passes the thread's ids read from the legacy
-   * store (which owns `source_thread_id`; engine.db's column is NULL-by-design until
-   * the S5b'-d thread-spine cutover). Chunked under SQLite's 999-variable limit; one
-   * transaction (atomic per purge). Returns the number of stubs deleted.
+   * Hard-delete memory stubs by id — the id-parity reap behind both the S5b'-c
+   * thread-purge and the erasure path (a stub shares the legacy memory id). The caller
+   * passes ids read from the legacy store (which owns the plaintext / `source_thread_id`;
+   * engine.db text is encrypted, its `source_thread_id` NULL-by-design until the S5b'-d
+   * thread-spine cutover). Chunked under SQLite's 999-variable limit; one transaction.
+   *
+   * Reaps relationships SOURCED from the erased memories in the SAME step — legacy parity
+   * (`AgentMemoryDb` deletes `relations WHERE source_memory_id IN (…)`). The FK is
+   * ON DELETE SET NULL, so without this the relationship row would SURVIVE the memory
+   * delete carrying its `description`/`notes` text — derived content a hard delete must
+   * remove too. memory_subjects / supersedes / conflicts still ride their ON DELETE
+   * CASCADE. Orphaned SUBJECTS (durable cross-verb-layer substrate) are a deferred
+   * lifecycle slice — see the header note above. Returns the number of stubs deleted.
    */
   purgeMemories(ids: string[]): number {
     if (ids.length === 0) return 0;
@@ -369,6 +377,9 @@ export class MemoryGraphStore {
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
         const placeholders = chunk.map(() => '?').join(',');
+        this.db.prepare(
+          `DELETE FROM relationships WHERE source_memory_id IN (${placeholders})`,
+        ).run(...chunk);
         deleted += this.db.prepare(
           `DELETE FROM memories WHERE id IN (${placeholders})`,
         ).run(...chunk).changes;

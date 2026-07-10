@@ -264,6 +264,7 @@ export interface IKnowledgeLayer {
   ): Promise<ContradictionInfo[]>;
 
   deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
+  eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,
     newText: string,

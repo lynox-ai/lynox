@@ -109,7 +109,33 @@
 		saving = false;
 	}
 
+	async function erasePattern() {
+		const pattern = deletePattern.trim();
+		if (!pattern) return;
+		// Hard erase by substring (GDPR Art. 17). This is the ONLY user path that reaches
+		// content with no visible notebook line — e.g. rows ingested from documents — which
+		// the per-entry delete button (bound to rendered lines) cannot target.
+		if (!confirm(t('memory.erase_pattern_confirm').replace('{pattern}', pattern))) return;
+		saving = true;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(pattern)}`, {
+				method: 'DELETE'
+			});
+			if (!res.ok) throw new Error();
+			deletePattern = '';
+			await loadNamespace();
+		} catch {
+			error = t('common.save_failed');
+		}
+		saving = false;
+	}
+
 	async function deleteEntry(line: string) {
+		// Erasure is permanent (hard-delete in both stores) and MemoryView was the only
+		// destructive action without a confirm. Native confirm matches the rest of the
+		// app's destructive-action UX (ApiStoreView, WorkflowLibraryView).
+		if (!confirm(t('memory.delete_confirm'))) return;
 		saving = true;
 		error = '';
 		try {
@@ -264,6 +290,25 @@
 					class="shrink-0 rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 				>
 					{t('memory.add_button')}
+				</button>
+			</div>
+		</div>
+
+		<div class="rounded-[var(--radius-md)] border border-danger/20 bg-danger/5 p-4 space-y-2">
+			<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{t('memory.erase_pattern_label')}</p>
+			<p class="text-xs text-text-muted">{t('memory.erase_pattern_hint')}</p>
+			<div class="flex gap-2">
+				<input
+					bind:value={deletePattern}
+					placeholder={t('memory.erase_pattern_placeholder')}
+					class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-danger/40"
+				/>
+				<button
+					onclick={erasePattern}
+					disabled={!deletePattern.trim() || saving}
+					class="shrink-0 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-4 py-2 text-sm text-danger hover:bg-danger/20 disabled:opacity-50"
+				>
+					{t('memory.erase_pattern_button')}
 				</button>
 			</div>
 		</div>

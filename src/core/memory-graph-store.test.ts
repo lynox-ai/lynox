@@ -131,6 +131,26 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
+  it('purgeMemories hard-reaps relationships SOURCED from the erased memory (legacy parity), keeps others', () => {
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    mem.upsertStub({ id: 'm1', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'm2', text: 'unrelated fact', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    // r1 sourced from m1 (the erased memory) carries derived text; r2 sourced from m2 must survive.
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('r1','s1','s2','works_at','Alice works at Acme','m1')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, source_memory_id) VALUES ('r2','s1','s2','knows','m2')").run();
+
+    expect(mem.purgeMemories(['m1'])).toBe(1);
+
+    // Without the reap the FK would only SET NULL on r1, leaving its description text behind.
+    const rels = (db.prepare('SELECT id FROM relationships ORDER BY id').all() as { id: string }[]).map(r => r.id);
+    expect(rels).toEqual(['r2']);           // r1 hard-deleted, r2 (sourced elsewhere) kept
+    expect(mem.getStub('m1')).toBeNull();
+    expect(mem.getStub('m2')).not.toBeNull();
+    engine.close();
+  });
+
   it('addConfirmations transfers count WITHOUT changing confidence, and no-ops on delta<=0/missing', () => {
     const { engine, mem } = make();
     mem.upsertStub({ id: 'k', text: 'keeper', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });

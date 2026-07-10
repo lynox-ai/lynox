@@ -1147,10 +1147,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * (store) or never reaped (deactivate) diverges silently from legacy: silent memory
    * loss one way, silent erasure failure the other, neither self-healing. The distinct
    * `mirror-parity` marker is greppable for alerting; the caller decides the recovery
-   * posture — store PRESERVES the legacy row and continues; deactivate RE-THROWS so a
-   * half-completed erasure is never reported as done.
+   * posture — store PRESERVES the legacy row and continues; deactivate and erase
+   * RE-THROW so a half-completed erasure is never reported as done.
    */
-  private _reportMirrorParityLoss(op: 'store' | 'deactivate', ref: string, err: unknown): void {
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase', ref: string, err: unknown): void {
     process.stderr.write(
       `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1295,14 +1295,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // monitorable [lynox:mirror-parity] CRITICAL marker (ops can alert on a silent
     // reap NOW), and (2) RE-THROWS so a caller that awaits can surface it.
     //
-    // NOTE — this makes the erasure loud only for a caller that AWAITS + propagates.
-    // Today's callers still swallow it: memory_delete / memory_promote use
-    // `void deactivateByPattern(…).catch(() => {})` and MemoryFacade.delete catches +
-    // warns, so the user-facing tool/UI still reports success. Closing that
-    // user-facing half — await the reap, fail the delete on a rejected reap — is the
-    // ERASURE PR's job (it redesigns the delete path). This PR provides the throw +
-    // marker it depends on; it is deliberately NOT a standalone user-facing fix, and
-    // it is no regression (those callers already swallowed the old resolved path).
+    // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
+    // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
+    // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
+    // this method. The one remaining swallower is `memory_promote` (`void …catch(()=>{})`)
+    // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
+    // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
+    // is falsely reported as done.
     if (this.subjectGraphEnabled && this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
@@ -1311,6 +1310,63 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         throw err;
       }
     }
+    return ids.length;
+  }
+
+  /**
+   * Erasure PR — PHYSICALLY delete every memory whose text matches `pattern`, in
+   * BOTH stores (GDPR Art. 17 hard-delete). This is the terminal end of the Validity
+   * axis: {@link deactivateByPattern} is the SOFT state (`is_active = 0` — the row,
+   * its text and embedding persist and ride backup/migration-export); erase is the
+   * TERMINAL state (the row is gone). `memory_delete` and the UI delete route here;
+   * a supersede/re-scope (memory_update, memory_promote, a bulk-doc reconcile) stays
+   * soft.
+   *
+   * Matching is by pattern + namespace ONLY — deliberately NOT scope-filtered. On the
+   * live corpus 863/893 rows sit under the degenerate `context:http-api` transport
+   * scope, so a scope-filtered erase would match zero rows and silently fail to forget
+   * exactly the content it must (scope-aware erase waits on the Wave-3 namespace fix).
+   * {@link AgentMemoryDb.findMemoryIdsByPattern} also matches `is_active = 0` rows, so a
+   * previously soft-deleted fact's residue is caught too.
+   *
+   * The engine.db recall mirror is reaped FIRST, legacy (the plaintext id source) LAST —
+   * the order is load-bearing for recoverability. The ids can only be re-derived from
+   * the legacy PLAINTEXT (`findMemoryIdsByPattern` LIKE-matches text; engine.db text is
+   * encrypted). If legacy were purged first and the engine.db reap then threw, a retry's
+   * pattern match would find the legacy rows already gone (ids=[]) and NEVER revisit the
+   * surviving — still recallable, on the read-flipped fleet — engine.db stub: a permanent,
+   * silent GDPR failure. Reaping engine.db first means a failure leaves legacy intact, so
+   * a retry re-derives the same ids and self-heals; it also clears the recall-authoritative
+   * store (what `memory_graph_reads=true` reads) before the backup-only legacy store. On a
+   * failed engine.db reap it reuses §0.1's loud contract — a monitorable
+   * `[lynox:mirror-parity] CRITICAL` marker (with the ids, for reconciliation) + a
+   * RE-THROW, so an awaiting caller fails the delete instead of reporting a false success.
+   * The legacy purge cascade reaps mentions, relations, supersedes and orphan entities.
+   *
+   * KNOWN residue (engine.db): `purgeMemories` deletes `memories` only; the schema's
+   * ON DELETE CASCADE reaps memory_subjects/supersedes/conflicts, but an orphaned SUBJECT
+   * (plaintext `name`) and a relationship whose source was the erased memory
+   * (`source_memory_id` ON DELETE SET NULL, keeps its `description`) are NOT reaped — the
+   * orphan-subject sweep is deferred to the subject-lifecycle design (memory-graph-store.ts).
+   * The memory TEXT is erased from both stores; that derived residue is a tracked follow-up.
+   *
+   * Returns the number of memories matched + erased.
+   */
+  async eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
+    const ids = this.db.findMemoryIdsByPattern(pattern, namespace);
+    if (ids.length === 0) return 0;
+
+    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.purgeMemories(ids);
+      } catch (err: unknown) {
+        // Legacy is still intact here (not yet purged), so this is fully retryable.
+        const sample = ids.slice(0, 20).join(',');
+        this._reportMirrorParityLoss('erase', `${ids.length} id(s): ${sample}${ids.length > 20 ? ',…' : ''}`, err);
+        throw err;
+      }
+    }
+    this.db.purgeMemoriesByIds(ids);
     return ids.length;
   }
 

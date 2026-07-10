@@ -537,4 +537,80 @@ describe('AgentMemoryDb', () => {
       expect(db.getEntityCount()).toBe(countBefore);
     });
   });
+
+  // ── Erasure (hard-delete by id-set) ───────────────────────────
+  // The physical-delete cascade behind memory_delete / the UI delete (GDPR Art. 17).
+  describe('purgeMemoriesByIds', () => {
+    it('physically deletes the memories, reaps ORPHAN entities, keeps SHARED ones, and drops relations by source', () => {
+      const m1 = db.createMemory({ text: 'launch code for Titan', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const m2 = db.createMemory({ text: 'public fact about Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      const titan = db.createEntity({ canonicalName: 'Titan', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      const acme = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+      const beta = db.createEntity({ canonicalName: 'Beta', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+      // titan is mentioned ONLY by m1 (→ orphaned when m1 is erased);
+      // acme + beta are BOTH mentioned by m2 (→ survive, still referenced).
+      db.createMention(m1, titan);
+      db.createMention(m1, acme);
+      db.createMention(m2, acme);
+      db.createMention(m2, beta);
+      // acme→beta is between two SURVIVING entities but SOURCED from m1 — so only the
+      // `source_memory_id` cascade (step 3) can reap it, not the orphan deleteEntity.
+      db.createRelation(acme, beta, 'partners_with', '', m1);
+
+      const deleted = db.purgeMemoriesByIds([m1]);
+
+      expect(deleted).toBe(1);
+      expect(db.getMemory(m1)).toBeNull();          // erased
+      expect(db.getMemory(m2)).not.toBeNull();      // untouched
+      expect(db.getEntity(titan)).toBeNull();       // orphan reaped
+      expect(db.getEntity(acme)).not.toBeNull();    // shared subject survives
+      expect(db.getEntity(beta)).not.toBeNull();    // shared subject survives
+      expect(db.getRelationCount()).toBe(0);        // relation dropped by source_memory_id
+      expect(db.getMemoryCount()).toBe(1);
+    });
+
+    it('clears a dangling superseded_by pointer on a surviving memory', () => {
+      const oldM = db.createMemory({ text: 'old fact', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const newM = db.createMemory({ text: 'new fact', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      // oldM was superseded BY newM; erasing newM must NULL oldM.superseded_by so it
+      // doesn't dangle to a deleted row.
+      db.supersedMemory(oldM, newM);
+      db.createSupersedes(newM, oldM, 'contradiction');
+      expect(db.getMemory(oldM)!.superseded_by).toBe(newM);
+
+      db.purgeMemoriesByIds([newM]);
+
+      expect(db.getMemory(newM)).toBeNull();
+      expect(db.getMemory(oldM)!.superseded_by).toBeNull();
+      expect(db.listAllSupersedes()).toHaveLength(0); // lineage junction reaped too
+    });
+
+    it('is a no-op for an empty id-set and idempotent on a second run', () => {
+      const m = db.createMemory({ text: 'once', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      expect(db.purgeMemoriesByIds([])).toBe(0);
+      expect(db.purgeMemoriesByIds([m])).toBe(1);
+      expect(db.purgeMemoriesByIds([m])).toBe(0); // already gone; temp table left no residue
+      expect(db.getMemory(m)).toBeNull();
+    });
+
+    it('findMemoryIdsByPattern matches active AND soft-deactivated rows (erasure reaps residue)', () => {
+      const active = db.createMemory({ text: 'Titan secret alpha', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const soft = db.createMemory({ text: 'Titan secret beta', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      db.deactivateMemoriesByPattern('Titan secret beta'); // soft-delete one (is_active = 0)
+
+      // A GDPR erasure must catch the soft-deleted residue too — its text/embedding
+      // otherwise ride every backup/export.
+      const ids = db.findMemoryIdsByPattern('Titan secret');
+      expect(ids.sort()).toEqual([active, soft].sort());
+    });
+
+    it('findMemoryIdsByPattern honours the namespace filter (no cross-namespace erase)', () => {
+      const inK = db.createMemory({ text: 'shared token here', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      db.createMemory({ text: 'shared token here', namespace: 'methods', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      // Same text in two namespaces — a namespaced match must return ONLY the one.
+      expect(db.findMemoryIdsByPattern('shared token', 'knowledge')).toEqual([inK]);
+      // Unfiltered, it returns both.
+      expect(db.findMemoryIdsByPattern('shared token')).toHaveLength(2);
+    });
+  });
 });
