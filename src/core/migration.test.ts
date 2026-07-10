@@ -810,6 +810,30 @@ describe('migration — flat-file memory tree', () => {
     expect(restored.startsWith('FIRST')).toBe(false); // oldest dropped
   });
 
+  it('refuses a memory bundle above the reassembly ceiling instead of exhausting the heap', () => {
+    // 65 scopes x 4 namespaces x ~258 KiB > MAX_MEMORY_BUNDLE_BYTES (64 MiB).
+    // The importer must fail closed rather than concat + parse several copies.
+    const file = 'z'.repeat(258 * 1024);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 65; i++) {
+      for (const ns of ['knowledge', 'methods', 'status', 'learnings']) {
+        files[`ctx${String(i)}/${ns}.txt`] = file;
+      }
+    }
+    createTestMemory(srcDir, files);
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+
+    expect(() => importer.restore()).toThrow(/Memory bundle too large/);
+    expect(existsSync(join(dstDir, 'memory'))).toBe(false);
+  });
+
   it('keeps a multi-byte character intact across a part boundary', () => {
     // A reassembly that concatenates DECODED strings corrupts any UTF-8 sequence
     // straddling the cut. Place the boundary INSIDE one, deterministically: the
