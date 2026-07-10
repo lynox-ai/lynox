@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
@@ -280,7 +280,7 @@ describe('Wave 0 — §5.1 shadow mode: measured distribution, filters nothing',
     expect(c).toBeDefined();
     expect(c.rawCosine).toBeGreaterThan(0.9); // exact-text self-match
     expect(c.sourceType).toBe('user_asserted'); // the row's real tier, verbatim
-    expect(typeof c.wouldPass).toBe('boolean');
+    expect(c.wouldPass).toBe(true); // a >0.9-cosine self-match clears threshold*0.3
   });
 
   it('emits nothing when the flag is OFF', async () => {
@@ -315,5 +315,91 @@ describe('Wave 0 — §5.1 shadow mode: measured distribution, filters nothing',
     const parsed = JSON.parse(raw.trim()) as { queryHash: string; candidates: Array<{ rawCosine: number }> };
     expect(parsed.queryHash).toBe('deadbeefdeadbeef');
     expect(parsed.candidates[0]!.rawCosine).toBeCloseTo(0.73, 5);
+  });
+
+  it('the sink swallows a write failure — a telemetry error never surfaces (fire-and-forget)', async () => {
+    // Point the data dir at a FILE, so appendFile(join(file, sink)) fails ENOTDIR.
+    const notADir = join(tempDir, 'not-a-dir');
+    await writeFile(notADir, 'x');
+    process.env['LYNOX_DATA_DIR'] = notADir;
+    await expect(appendRetrievalShadowLog({
+      ts: 1, threadId: undefined, queryHash: 'x', embeddingModel: 'm', embeddingProvider: 'p', candidates: [],
+    })).resolves.toBeUndefined(); // never throws, never rejects
+  });
+});
+
+describe('Wave 0 — KnowledgeLayer integration wiring (shipped path, not just the DB layer)', () => {
+  let tempDir: string;
+  let prevDataDir: string | undefined;
+  const scope: MemoryScopeRef = { type: 'context', id: 'kl-wiring' };
+
+  const layer = (scoringV2: boolean, shadowLog: boolean, tag: string): Promise<KnowledgeLayer> => {
+    const l = new KnowledgeLayer(
+      join(tempDir, `${tag}.db`), new LocalProvider(),
+      undefined, undefined, undefined, false, false, scoringV2, shadowLog,
+    );
+    return l.init().then(() => l);
+  };
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-wave0-kl-'));
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = tempDir; // contain any shadow JSONL writes
+  });
+
+  afterEach(async () => {
+    if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('0.5: KnowledgeLayer.consolidateMemories suppresses the transfer when ON (exercises the !memoryScoringV2 negation)', async () => {
+    const text = 'The release train ships every second Thursday afternoon.';
+    const emb = await new LocalProvider().embed(text); // deterministic — matches the layer provider
+
+    const v2 = await layer(true, false, 'consol-v2');
+    const kV = v2.getDb().createMemory({ text, namespace: NS, scopeType: 'context', scopeId: 'kl', embedding: emb });
+    const vV = v2.getDb().createMemory({ text, namespace: NS, scopeType: 'context', scopeId: 'kl', embedding: emb });
+    for (let i = 0; i < 5; i++) v2.getDb().confirmMemory(kV);
+    for (let i = 0; i < 3; i++) v2.getDb().confirmMemory(vV);
+    expect(v2.consolidateMemories(NS, 'context', 'kl')).toBe(1);
+    expect(v2.getDb().getMemory(kV)!.confirmation_count).toBe(5); // NOT 8 — layer passed !scoringV2 = false
+    await v2.close();
+
+    const legacy = await layer(false, false, 'consol-legacy');
+    const kL = legacy.getDb().createMemory({ text, namespace: NS, scopeType: 'context', scopeId: 'kl', embedding: emb });
+    const vL = legacy.getDb().createMemory({ text, namespace: NS, scopeType: 'context', scopeId: 'kl', embedding: emb });
+    for (let i = 0; i < 5; i++) legacy.getDb().confirmMemory(kL);
+    for (let i = 0; i < 3; i++) legacy.getDb().confirmMemory(vL);
+    expect(legacy.consolidateMemories(NS, 'context', 'kl')).toBe(1);
+    expect(legacy.getDb().getMemory(kL)!.confirmation_count).toBe(8); // 5 + 3 transferred
+    await legacy.close();
+  });
+
+  it('wires scoringV2 and retrievalShadowLog INDEPENDENTLY (guards the ctor arg order)', async () => {
+    const opts = { topK: 5, threshold: 0.1, useHyDE: false, useGraphExpansion: false };
+    const drain = async (l: KnowledgeLayer, q: string): Promise<number> => {
+      const captured: unknown[] = [];
+      const handler = (m: unknown): void => { captured.push(m); };
+      subscribe('lynox:retrieval:gate', handler);
+      try { await l.retrieve(q, [scope], opts); } finally { unsubscribe('lynox:retrieval:gate', handler); }
+      return captured.length;
+    };
+
+    // scoringV2 ON, shadowLog OFF.
+    const a = await layer(true, false, 'iso-a');
+    const rA = await a.store('Widget X runs on the blue pipeline.', NS, scope);
+    a.feedbackOnRetrieval([rA.memoryId], 'useful');
+    expect(a.getDb().getMemory(rA.memoryId)!.confirmation_count).toBe(0); // scoringV2 ON → no confirm
+    expect(await drain(a, 'Widget X runs on the blue pipeline.')).toBe(0); // shadowLog OFF → no emit
+    await a.close();
+
+    // The mirror image: scoringV2 OFF, shadowLog ON. A swapped ctor would flip both.
+    const b = await layer(false, true, 'iso-b');
+    const rB = await b.store('Widget Y runs on the green pipeline.', NS, scope);
+    b.feedbackOnRetrieval([rB.memoryId], 'useful');
+    expect(b.getDb().getMemory(rB.memoryId)!.confirmation_count).toBe(1); // scoringV2 OFF → confirm
+    expect(await drain(b, 'Widget Y runs on the green pipeline.')).toBeGreaterThan(0); // shadowLog ON → emit
+    await b.close();
   });
 });

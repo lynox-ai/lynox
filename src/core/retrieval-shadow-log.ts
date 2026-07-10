@@ -56,7 +56,13 @@ export interface RetrievalShadowLogEntry {
   readonly ts: number;
   /** Thread id the retrieval belongs to, if known. */
   readonly threadId: string | undefined;
-  /** 16-char sha256 prefix of the query — groups repeat queries without recovering content. */
+  /**
+   * 16-char sha256 prefix of the query — a GROUPING key to correlate repeat
+   * queries, NOT a privacy boundary: it is unsalted, so a low-entropy query is
+   * dictionary-reversible and collides identically across containers. That is
+   * strictly less identifying than the threadId/subjectId this record already
+   * carries in plaintext; the retention bound (not the hash) is the control.
+   */
   readonly queryHash: string;
   /** Embedding model identity — the FLOOR binds to it (§1.7), so the distribution must record it. */
   readonly embeddingModel: string;
