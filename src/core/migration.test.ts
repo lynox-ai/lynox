@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -808,6 +808,24 @@ describe('migration — flat-file memory tree', () => {
     expect(Buffer.byteLength(restored, 'utf-8')).toBeLessThanOrEqual(MAX_MEMORY_FILE_BYTES);
     expect(restored.endsWith('LAST')).toBe(true);   // newest lines survive
     expect(restored.startsWith('FIRST')).toBe(false); // oldest dropped
+  });
+
+  it('skips a broken symlink instead of dropping the whole tree', () => {
+    // A catch-all around the walk would report a successful migration that
+    // silently carried no memory at all — the exact failure this PR removes.
+    createTestMemory(srcDir, { 'global/knowledge.txt': 'survives' });
+    symlinkSync(join(srcDir, 'memory', 'does-not-exist'), join(srcDir, 'memory', 'dangling'));
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+
+    expect(importer.restore().memoryFilesImported).toBe(1);
+    expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8')).toBe('survives');
   });
 
   it('refuses a memory bundle above the reassembly ceiling instead of exhausting the heap', () => {

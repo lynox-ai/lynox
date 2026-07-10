@@ -543,7 +543,10 @@ describe('parsePortableMemoryKey', () => {
   it('accepts a max-length user scope dir (the user- prefix must still fit)', () => {
     const maxId = 'u'.repeat(128);
     const dir = scopeToDir({ type: 'user', id: maxId });
-    expect(parsePortableMemoryKey(`${dir}/methods.txt`)).not.toBeNull();
+    expect(parsePortableMemoryKey(`${dir}/methods.txt`)).toEqual({
+      scopeDir: dir,
+      fileName: 'methods.txt',
+    });
   });
 });
 
