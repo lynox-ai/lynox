@@ -6,17 +6,26 @@
  *  - Secrets (decrypted from local vault, re-encrypted in transit)
  *  - SQLite databases (crash-safe VACUUM INTO copies)
  *  - Artifacts (index + content files)
+ *  - Memory (the flat-file `memory/<scope>/<namespace>.txt` tree)
  *  - Config (sanitized — no secrets, no provider credentials)
  *
  * All data is encrypted per-chunk with AES-256-GCM using an ECDH-derived key.
  * The control plane never sees any plaintext.
+ *
+ * The memory tree is the PRIMARY store the `memory_*` tools read and write
+ * (`Memory` in memory.ts, reached via `agent.memory`); the agent-memory DB is a
+ * mirror populated through `channels.memoryStore`. Omitting it — as this
+ * exporter did until now, while backup.ts:COPY_DIRS always carried it — left a
+ * migrated tenant with an agent that still recalls facts ambiently but reports
+ * an empty `memory_recall`/`memory_list`.
  */
 
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
+import { parsePortableMemoryKey } from './memory-file.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -65,6 +74,47 @@ interface PlaintextChunk {
 // skips any DB that doesn't exist (existsSync guard below), so a pre-S0 or
 // flag-off (empty/absent engine.db) instance migrates it harmlessly.
 const SQLITE_DBS = ['history.db', 'agent-memory.db', 'datastore.db', 'engine.db'] as const;
+
+/**
+ * Split a payload into `MAX_CHUNK_BYTES`-bounded chunks. `encryptChunk` throws
+ * above that ceiling, so every collector whose payload can grow past it must
+ * route through here — a single oversized chunk aborts the whole migration.
+ * A payload that fits keeps its bare `name`; a larger one becomes `name:partN`,
+ * which the importer reassembles at `part0`.
+ */
+function splitIntoChunks(
+  data: Buffer,
+  type: MigrationChunkMeta['type'],
+  name: string,
+): PlaintextChunk[] {
+  if (data.length <= MAX_CHUNK_BYTES) {
+    return [{
+      meta: { seq: 0, type, name, originalSize: data.length, checksum: sha256(data) },
+      data,
+    }];
+  }
+
+  const parts: PlaintextChunk[] = [];
+  let offset = 0;
+  let partNum = 0;
+  while (offset < data.length) {
+    const end = Math.min(offset + MAX_CHUNK_BYTES, data.length);
+    const part = data.subarray(offset, end);
+    parts.push({
+      meta: {
+        seq: 0,
+        type,
+        name: `${name}:part${String(partNum)}`,
+        originalSize: part.length,
+        checksum: sha256(part),
+      },
+      data: Buffer.from(part), // copy to detach from the source buffer
+    });
+    offset = end;
+    partNum++;
+  }
+  return parts;
+}
 
 /** Config fields that are safe to migrate (no credentials, no paths). */
 const SAFE_CONFIG_FIELDS = [
@@ -118,7 +168,11 @@ export class MigrationExporter {
     const artifactChunk = this.collectArtifacts();
     if (artifactChunk) plaintextChunks.push(artifactChunk);
 
-    // 4. Config (sanitized)
+    // 4. Memory — the flat-file store the memory_* tools actually read
+    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
+    plaintextChunks.push(...this.collectMemory());
+
+    // 5. Config (sanitized)
     const configChunk = this.collectConfig();
     if (configChunk) plaintextChunks.push(configChunk);
 
@@ -175,7 +229,7 @@ export class MigrationExporter {
    * Get a summary of what will be exported (without actually exporting).
    * Useful for the wizard UI to show the user what data will be migrated.
    */
-  preview(): { secrets: number; databases: string[]; artifacts: number; hasConfig: boolean } {
+  preview(): { secrets: number; databases: string[]; artifacts: number; memoryFiles: number; hasConfig: boolean } {
     let secrets = 0;
     try {
       const vault = new SecretVault({ path: join(this.lynoxDir, 'vault.db'), masterKey: this.vaultKey });
@@ -199,9 +253,23 @@ export class MigrationExporter {
       }
     } catch { /* ok */ }
 
+    let memoryFiles = 0;
+    try {
+      const memoryDir = join(this.lynoxDir, 'memory');
+      if (existsSync(memoryDir)) {
+        for (const scopeDir of readdirSync(memoryDir)) {
+          const scopePath = join(memoryDir, scopeDir);
+          if (!statSync(scopePath).isDirectory()) continue;
+          for (const fileName of readdirSync(scopePath)) {
+            if (parsePortableMemoryKey(`${scopeDir}/${fileName}`)) memoryFiles++;
+          }
+        }
+      }
+    } catch { /* ok */ }
+
     const hasConfig = existsSync(join(this.lynoxDir, 'config.json'));
 
-    return { secrets, databases, artifacts, hasConfig };
+    return { secrets, databases, artifacts, memoryFiles, hasConfig };
   }
 
   // ── Private collectors ──
@@ -263,43 +331,7 @@ export class MigrationExporter {
     }
 
     try {
-      const data = readFileSync(tmpPath);
-
-      // Split into chunks if larger than MAX_CHUNK_BYTES
-      if (data.length <= MAX_CHUNK_BYTES) {
-        return [{
-          meta: {
-            seq: 0,
-            type: 'sqlite_db',
-            name: dbName,
-            originalSize: data.length,
-            checksum: sha256(data),
-          },
-          data,
-        }];
-      }
-
-      // Large DB — split into numbered parts
-      const parts: PlaintextChunk[] = [];
-      let offset = 0;
-      let partNum = 0;
-      while (offset < data.length) {
-        const end = Math.min(offset + MAX_CHUNK_BYTES, data.length);
-        const part = data.subarray(offset, end);
-        parts.push({
-          meta: {
-            seq: 0,
-            type: 'sqlite_db',
-            name: `${dbName}:part${String(partNum)}`,
-            originalSize: part.length,
-            checksum: sha256(part),
-          },
-          data: Buffer.from(part), // copy to detach from source buffer
-        });
-        offset = end;
-        partNum++;
-      }
-      return parts;
+      return splitIntoChunks(readFileSync(tmpPath), 'sqlite_db', dbName);
     } finally {
       try { unlinkSync(tmpPath); } catch { /* ok */ }
     }
@@ -345,6 +377,53 @@ export class MigrationExporter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Bundle the flat-file memory tree.
+   *
+   * Layout is `memory/<scopeDir>/<namespace>.txt` (see `Memory._scopeFilePath`).
+   * Keys are the relative `<scopeDir>/<namespace>.txt` paths, validated by the
+   * same predicate the importer applies. Unknown files and nested directories
+   * are skipped — the importer reconstructs only what it recognises.
+   *
+   * `Memory` trims each namespace file to MAX_MEMORY_FILE_BYTES (256 KiB), so a
+   * scope holds at most ~1 MiB — but a tenant with enough contexts still passes
+   * MAX_CHUNK_BYTES, which `encryptChunk` rejects by throwing. Hence the split.
+   *
+   * Deliberately NOT wrapped in a catch-all: an unreadable `memory/` must fail
+   * the migration loudly rather than hand the user a "success" that quietly
+   * dropped the store their memory_* tools read. Only per-entry races and
+   * broken symlinks are skipped.
+   */
+  private collectMemory(): PlaintextChunk[] {
+    const memoryDir = join(this.lynoxDir, 'memory');
+    if (!existsSync(memoryDir)) return [];
+
+    const files: Record<string, string> = {};
+
+    for (const scopeDir of readdirSync(memoryDir)) {
+      const scopePath = join(memoryDir, scopeDir);
+      try {
+        if (!statSync(scopePath).isDirectory()) continue;
+      } catch { continue; } // broken symlink — not a scope we can carry
+
+      for (const fileName of readdirSync(scopePath)) {
+        const key = `${scopeDir}/${fileName}`;
+        // Same predicate the importer applies — one source of truth, so the two
+        // sides cannot drift into exporting what cannot be restored.
+        if (!parsePortableMemoryKey(key)) continue;
+        const filePath = join(scopePath, fileName);
+        try {
+          if (!statSync(filePath).isFile()) continue;
+          files[key] = readFileSync(filePath, 'utf-8');
+        } catch { continue; } // vanished between readdir and read
+      }
+    }
+
+    if (Object.keys(files).length === 0) return [];
+
+    return splitIntoChunks(Buffer.from(JSON.stringify({ files }), 'utf-8'), 'memory', 'memory');
   }
 
   private collectConfig(): PlaintextChunk | null {

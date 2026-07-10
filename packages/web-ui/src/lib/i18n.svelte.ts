@@ -1586,6 +1586,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.secrets': { de: 'Secrets', en: 'Secrets' },
 	'migration.databases': { de: 'Datenbanken', en: 'Databases' },
 	'migration.artifacts': { de: 'Artefakte', en: 'Artifacts' },
+	'migration.memory': { de: 'Erinnerung', en: 'Memory' },
 	'migration.config': { de: 'Konfiguration', en: 'Configuration' },
 	'migration.no_data': { de: 'Keine Daten zum Migrieren gefunden.', en: 'No data found to migrate.' },
 	'migration.plan_title': { de: 'Plan wählen', en: 'Choose a Plan' },

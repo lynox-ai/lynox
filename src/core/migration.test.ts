@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, symlinkSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -18,6 +18,7 @@ import {
   sha256,
   MAX_CHUNK_BYTES,
 } from './migration-crypto.js';
+import { MAX_MEMORY_FILE_BYTES } from './memory-file.js';
 
 // ── Test helpers ──
 
@@ -637,5 +638,281 @@ describe('migration E2E', () => {
 
       importer.cleanup();
     });
+  });
+});
+
+// ── Flat-file memory tree ──
+//
+// Regression guard for the export/backup asymmetry: backup.ts:COPY_DIRS has
+// always carried `memory/`, migration-export never did. The memory_* tools read
+// that tree (`agent.memory` is the flat-file `Memory`), so a migrated tenant kept
+// ambient recall (the DB mirror rode along) while `memory_recall`/`memory_list`
+// silently returned nothing.
+
+function createTestMemory(dir: string, files: Record<string, string>): void {
+  for (const [relPath, content] of Object.entries(files)) {
+    const full = join(dir, 'memory', relPath);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content, 'utf-8');
+  }
+}
+
+describe('migration — flat-file memory tree', () => {
+  let srcDir: string;
+  let dstDir: string;
+
+  beforeEach(() => {
+    srcDir = createTmpDir();
+    dstDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(srcDir, { recursive: true, force: true });
+    rmSync(dstDir, { recursive: true, force: true });
+  });
+
+  it('preview reports zero memory files on an empty installation', () => {
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    expect(exporter.preview().memoryFiles).toBe(0);
+  });
+
+  it('preview counts only portable namespace files', () => {
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': 'a',
+      'http-api/methods.txt': 'b',
+      'http-api/status.txt': 'c',
+      'http-api/README.md': 'not a namespace',
+      'http-api/knowledge.txt.bak': 'lookalike',
+    });
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    expect(exporter.preview().memoryFiles).toBe(3);
+  });
+
+  it('round-trips every scope and namespace, byte for byte', () => {
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': 'lynox is a business runtime\n',
+      'global/learnings.txt': 'never trust an aggregator score\n',
+      'http-api/knowledge.txt': 'the client is Meridian\n',
+      'http-api/methods.txt': 'validate before building\n',
+      'http-api/status.txt': 'shipping the memory foundation\n',
+      'user-rafael/learnings.txt': 'measure before dispatching\n',
+    });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    expect(manifest.chunks.some(c => c.type === 'memory')).toBe(true);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    const verification = importer.restore();
+
+    expect(verification.memoryFilesImported).toBe(6);
+    expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8'))
+      .toBe('lynox is a business runtime\n');
+    expect(readFileSync(join(dstDir, 'memory', 'http-api', 'status.txt'), 'utf-8'))
+      .toBe('shipping the memory foundation\n');
+    expect(readFileSync(join(dstDir, 'memory', 'user-rafael', 'learnings.txt'), 'utf-8'))
+      .toBe('measure before dispatching\n');
+  });
+
+  it('does not emit a memory chunk when the tree is absent', () => {
+    createTestConfig(srcDir, { default_tier: 'balanced' });
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    expect(manifest.chunks.some(c => c.type === 'memory')).toBe(false);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    expect(importer.restore().memoryFilesImported).toBe(0);
+  });
+
+  it('skips unknown files, nested directories and unsafe scope dirs on export', () => {
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': 'kept',
+      'global/secrets.env': 'dropped — not a namespace',
+      'global/nested/knowledge.txt': 'dropped — nested',
+      '.hidden/knowledge.txt': 'dropped — dot-prefixed scope dir',
+    });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    const verification = importer.restore();
+
+    expect(verification.memoryFilesImported).toBe(1);
+    expect(existsSync(join(dstDir, 'memory', 'global', 'knowledge.txt'))).toBe(true);
+    expect(existsSync(join(dstDir, 'memory', 'global', 'secrets.env'))).toBe(false);
+    expect(existsSync(join(dstDir, 'memory', 'global', 'nested'))).toBe(false);
+    expect(existsSync(join(dstDir, 'memory', '.hidden'))).toBe(false);
+  });
+
+  it('round-trips a database larger than MAX_CHUNK_BYTES through its :partN chunks', () => {
+    // Pre-existing coverage gap: no test exercised `restoreDatabase`'s multi-part
+    // reassembly, the path that reorders chunks by part number before writing.
+    const db = new Database(join(srcDir, 'history.db'));
+    db.exec('CREATE TABLE blobs (id INTEGER PRIMARY KEY, payload BLOB)');
+    const insert = db.prepare('INSERT INTO blobs (id, payload) VALUES (?, ?)');
+    for (let i = 0; i < 10; i++) insert.run(i, Buffer.alloc(1024 * 1024, i)); // ~10 MB
+    db.close();
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    const dbChunks = manifest.chunks.filter(c => c.name.startsWith('history.db'));
+    expect(dbChunks.length).toBeGreaterThan(1);
+    expect(dbChunks.every(c => c.name.includes(':part'))).toBe(true);
+
+    importer.setManifest(manifest);
+    // Deliver out of order — the importer must sort by part number, not arrival.
+    for (const chunk of [...chunks].reverse()) importer.receiveChunk(chunk);
+    expect(importer.restore().databasesRestored).toContain('history.db');
+
+    const restored = new Database(join(dstDir, 'history.db'), { readonly: true });
+    const row = restored.prepare('SELECT payload FROM blobs WHERE id = 7').get() as { payload: Buffer };
+    expect(row.payload.length).toBe(1024 * 1024);
+    expect(row.payload[0]).toBe(7);
+    restored.close();
+  });
+
+  it('splits a memory tree past MAX_CHUNK_BYTES and reassembles it byte-exactly', () => {
+    // `Memory` trims each namespace file to 256 KiB, so ~9 scope dirs already
+    // pass the 8 MiB chunk ceiling that `encryptChunk` rejects by throwing.
+    // Without splitting, the whole migration aborts.
+    const big = 'x'.repeat(250 * 1024);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) {
+      for (const ns of ['knowledge', 'methods', 'status', 'learnings']) {
+        files[`ctx${String(i)}/${ns}.txt`] = `${big}${String(i)}${ns}`;
+      }
+    }
+    createTestMemory(srcDir, files);
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    const memoryChunks = manifest.chunks.filter(c => c.type === 'memory');
+    expect(memoryChunks.length).toBeGreaterThan(1);
+    expect(memoryChunks.every(c => c.name.startsWith('memory:part'))).toBe(true);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    const verification = importer.restore();
+
+    expect(verification.memoryFilesImported).toBe(40);
+    expect(readFileSync(join(dstDir, 'memory', 'ctx7', 'methods.txt'), 'utf-8'))
+      .toBe(`${big}7methods`);
+  });
+
+  it('trims an oversized multi-line file to the store\'s own ceiling on import', () => {
+    // A bundle can carry a file larger than `Memory` would ever write. Restoring
+    // it verbatim would put more into the model's context than the store itself
+    // can produce, since `loadScoped` reads the whole file.
+    const line = `${'z'.repeat(199)}\n`;
+    const oversized = `FIRST\n${line.repeat(3000)}LAST`;
+    expect(Buffer.byteLength(oversized, 'utf-8')).toBeGreaterThan(MAX_MEMORY_FILE_BYTES);
+    createTestMemory(srcDir, { 'global/knowledge.txt': oversized });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    importer.restore();
+
+    const restored = readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8');
+    expect(Buffer.byteLength(restored, 'utf-8')).toBeLessThanOrEqual(MAX_MEMORY_FILE_BYTES);
+    expect(restored.endsWith('LAST')).toBe(true);   // newest lines survive
+    expect(restored.startsWith('FIRST')).toBe(false); // oldest dropped
+  });
+
+  it('skips a broken symlink instead of dropping the whole tree', () => {
+    // A catch-all around the walk would report a successful migration that
+    // silently carried no memory at all — the exact failure this PR removes.
+    createTestMemory(srcDir, { 'global/knowledge.txt': 'survives' });
+    symlinkSync(join(srcDir, 'memory', 'does-not-exist'), join(srcDir, 'memory', 'dangling'));
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+
+    expect(importer.restore().memoryFilesImported).toBe(1);
+    expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8')).toBe('survives');
+  });
+
+  it('refuses a memory bundle above the reassembly ceiling instead of exhausting the heap', () => {
+    // 65 scopes x 4 namespaces x ~258 KiB > MAX_MEMORY_BUNDLE_BYTES (64 MiB).
+    // The importer must fail closed rather than concat + parse several copies.
+    const file = 'z'.repeat(258 * 1024);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 65; i++) {
+      for (const ns of ['knowledge', 'methods', 'status', 'learnings']) {
+        files[`ctx${String(i)}/${ns}.txt`] = file;
+      }
+    }
+    createTestMemory(srcDir, files);
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+
+    expect(() => importer.restore()).toThrow(/Memory bundle too large/);
+    expect(existsSync(join(dstDir, 'memory'))).toBe(false);
+  });
+
+  it('keeps a multi-byte character intact across a part boundary', () => {
+    // A reassembly that concatenates DECODED strings corrupts any UTF-8 sequence
+    // straddling the cut. Place the boundary INSIDE one, deterministically: the
+    // exporter serializes `{"files":{"<key>":"<content>"}}`, so pad the content
+    // until the two bytes of an `ä` (0xC3 0xA4) fall either side of the cut.
+    const KEY = 'global/knowledge.txt';
+    const prefixBytes = Buffer.byteLength(`{"files":{"${KEY}":"`, 'utf-8');
+    const filler = 'a'.repeat(MAX_CHUNK_BYTES - 1 - prefixBytes);
+    const content = `${filler}${'ä'.repeat(32)}`;
+
+    // Pin the precondition: if serialization ever shifts, this fails loudly
+    // instead of the test silently going vacuous.
+    const bundle = Buffer.from(JSON.stringify({ files: { [KEY]: content } }), 'utf-8');
+    expect(bundle.length).toBeGreaterThan(MAX_CHUNK_BYTES);
+    expect(bundle[MAX_CHUNK_BYTES - 1]).toBe(0xc3); // lead byte of 'ä'
+    expect(bundle[MAX_CHUNK_BYTES]).toBe(0xa4);     // continuation byte
+
+    createTestMemory(srcDir, { [KEY]: content });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    expect(manifest.chunks.filter(c => c.type === 'memory').length).toBeGreaterThan(1);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    importer.restore();
+
+    expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8'))
+      .toBe(content);
   });
 });

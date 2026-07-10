@@ -31,6 +31,7 @@ export interface MigrationVerification {
 	secretsImported: number;
 	databasesRestored: string[];
 	artifactsImported: number;
+	memoryFilesImported: number;
 	configApplied: boolean;
 }
 

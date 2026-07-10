@@ -8,6 +8,7 @@ import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { scopeToDir } from './scope-resolver.js';
+import { trimMemoryContent } from './memory-file.js';
 import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
 import { ensureDir } from './atomic-write.js';
@@ -18,7 +19,6 @@ import { calculateCost } from './pricing.js';
 const DEFAULT_DIR = 'memory';
 const CONTEXT_TTL_DAYS = 30;
 const GLOBAL_SCOPE: MemoryScopeRef = { type: 'global', id: 'global' };
-const MAX_MEMORY_FILE_BYTES = 256 * 1024;
 
 /** Max length of agent output passed to extraction (prevents token waste and injection surface). */
 const MAX_EXTRACTION_INPUT = 16_000;
@@ -211,18 +211,6 @@ export class Memory implements IMemory {
     return this._defaultScope();
   }
 
-  /** Trim content to MAX_MEMORY_FILE_BYTES by removing oldest lines. */
-  private _trimToLimit(content: string): string {
-    let result = content;
-    while (Buffer.byteLength(result, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
-      const lines = result.split('\n');
-      if (lines.length <= 1) break;
-      lines.shift();
-      result = lines.join('\n');
-    }
-    return result;
-  }
-
   // === Core CRUD — delegate to scoped methods ===
 
   async load(ns: MemoryNamespace): Promise<string | null> {
@@ -231,7 +219,7 @@ export class Memory implements IMemory {
 
   async save(ns: MemoryNamespace, content: string): Promise<void> {
     const scope = this._defaultScope();
-    const trimmed = this._trimToLimit(content);
+    const trimmed = trimMemoryContent(content);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -394,7 +382,7 @@ export class Memory implements IMemory {
     if (content?.includes(safeText)) return;
 
     const raw = content ? `${content}\n${entry}` : entry;
-    const updated = this._trimToLimit(raw);
+    const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -466,7 +454,7 @@ export class Memory implements IMemory {
     if (!oldText || !current || !current.includes(oldText)) return false;
 
     const raw = current.replace(oldText, newText);
-    const updated = this._trimToLimit(raw);
+    const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
