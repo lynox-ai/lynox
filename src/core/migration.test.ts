@@ -18,6 +18,7 @@ import {
   sha256,
   MAX_CHUNK_BYTES,
 } from './migration-crypto.js';
+import { MAX_MEMORY_FILE_BYTES } from './scope-resolver.js';
 
 // ── Test helpers ──
 
@@ -784,6 +785,29 @@ describe('migration — flat-file memory tree', () => {
     expect(verification.memoryFilesImported).toBe(40);
     expect(readFileSync(join(dstDir, 'memory', 'ctx7', 'methods.txt'), 'utf-8'))
       .toBe(`${big}7methods`);
+  });
+
+  it('trims an oversized multi-line file to the store\'s own ceiling on import', () => {
+    // A bundle can carry a file larger than `Memory` would ever write. Restoring
+    // it verbatim would put more into the model's context than the store itself
+    // can produce, since `loadScoped` reads the whole file.
+    const line = `${'z'.repeat(199)}\n`;
+    const oversized = `FIRST\n${line.repeat(3000)}LAST`;
+    expect(Buffer.byteLength(oversized, 'utf-8')).toBeGreaterThan(MAX_MEMORY_FILE_BYTES);
+    createTestMemory(srcDir, { 'global/knowledge.txt': oversized });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    importer.restore();
+
+    const restored = readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8');
+    expect(Buffer.byteLength(restored, 'utf-8')).toBeLessThanOrEqual(MAX_MEMORY_FILE_BYTES);
+    expect(restored.endsWith('LAST')).toBe(true);   // newest lines survive
+    expect(restored.startsWith('FIRST')).toBe(false); // oldest dropped
   });
 
   it('keeps a multi-byte character intact across a part boundary', () => {

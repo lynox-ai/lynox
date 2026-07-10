@@ -46,6 +46,27 @@ export function parsePortableMemoryKey(key: string): { scopeDir: string; fileNam
   return { scopeDir, fileName };
 }
 
+/** Byte ceiling for a single namespace file. `Memory` enforces it on every write. */
+export const MAX_MEMORY_FILE_BYTES = 256 * 1024;
+
+/**
+ * Trim a namespace file to {@link MAX_MEMORY_FILE_BYTES} by dropping the oldest
+ * lines. Every writer of the flat-file store must route through this, including
+ * the migration importer — a restored file that skipped it would exceed a bound
+ * `Memory` itself can never produce, and `loadScoped` reads the whole file into
+ * the model's context.
+ */
+export function trimMemoryContent(content: string): string {
+  let result = content;
+  while (Buffer.byteLength(result, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
+    const lines = result.split('\n');
+    if (lines.length <= 1) break;
+    lines.shift();
+    result = lines.join('\n');
+  }
+  return result;
+}
+
 /**
  * Resolve which scopes are active for a given context.
  * Always includes global. Adds context/user if IDs are present.

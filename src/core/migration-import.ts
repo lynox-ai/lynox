@@ -22,7 +22,7 @@ import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
-import { parsePortableMemoryKey } from './scope-resolver.js';
+import { parsePortableMemoryKey, trimMemoryContent } from './scope-resolver.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -585,7 +585,12 @@ export class MigrationImporter {
       if (!filePath.startsWith(memoryPrefix)) continue;
 
       mkdirSync(scopePath, { recursive: true, mode: DIR_MODE_PRIVATE });
-      writeFileSync(filePath, content, { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
+      // Route through the same trim every `Memory` write uses, so a restored file
+      // is never larger than one the store could have produced itself —
+      // `loadScoped` reads it whole into the model's context. Parity, not a hard
+      // cap: `trimMemoryContent` cannot shrink a single line, and neither can
+      // `Memory`, so a one-line giant stays possible on both paths.
+      writeFileSync(filePath, trimMemoryContent(content), { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
       written++;
     }
 
