@@ -356,6 +356,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // rides backup/export) and surface a HARD, monitorable parity-loss signal so the
       // Adapter-PR reconcile can repair engine.db. This is NOT the routine best-effort
       // mirror swallow (that is correct only while legacy is the read authority).
+      let stubWritten = true;
       try {
         extracted = await this._extractAndPersistToSubjects(
           trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
@@ -364,12 +365,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       } catch (err: unknown) {
         this._reportMirrorParityLoss('store', memoryId, err);
         extracted = { resolvedEntities: [], resolvedRelations: [] };
+        stubWritten = false;
       }
       // Read-back parity: even without a throw, the stub MUST be present in engine.db
       // (it always lands on a successful write, even when the extractor is gated). Its
-      // absence is the exact silent-loss the old swallow hid — verify and surface.
-      if (!this.memoryGraphStore.getStub(memoryId)) {
-        this._reportMirrorParityLoss('store', memoryId, new Error('stub absent in engine.db after write'));
+      // absence is the exact silent-loss the old swallow hid. Only checked when the
+      // write did not already report a loss above (no double signal for one memory),
+      // and the read-back itself is tolerated — a getStub throw must NOT escape store()
+      // and defeat the preserve-and-continue intent.
+      if (stubWritten) {
+        try {
+          if (!this.memoryGraphStore.getStub(memoryId)) {
+            this._reportMirrorParityLoss('store', memoryId, new Error('stub absent in engine.db after write'));
+          }
+        } catch (err: unknown) {
+          this._reportMirrorParityLoss('store', memoryId, err);
+        }
       }
     } else {
       // Pre-cutover (every current tenant): legacy persist is authoritative (gated), and
@@ -1280,10 +1291,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
     // leaves the "deleted" content still recallable from engine.db — a silent erasure
     // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
-    // → ids=[] → the stub is never revisited). Deletion must be loud: surface a hard
-    // parity-loss signal AND re-throw so the caller (memory_delete / the erasure PR)
-    // cannot report success on a half-completed erasure. The legacy deactivation above
-    // already stands; the throw says "engine.db reap did not complete".
+    // → ids=[] → the stub is never revisited). So a failed reap: (1) emits a hard,
+    // monitorable [lynox:mirror-parity] CRITICAL marker (ops can alert on a silent
+    // reap NOW), and (2) RE-THROWS so a caller that awaits can surface it.
+    //
+    // NOTE — this makes the erasure loud only for a caller that AWAITS + propagates.
+    // Today's callers still swallow it: memory_delete / memory_promote use
+    // `void deactivateByPattern(…).catch(() => {})` and MemoryFacade.delete catches +
+    // warns, so the user-facing tool/UI still reports success. Closing that
+    // user-facing half — await the reap, fail the delete on a rejected reap — is the
+    // ERASURE PR's job (it redesigns the delete path). This PR provides the throw +
+    // marker it depends on; it is deliberately NOT a standalone user-facing fix, and
+    // it is no regression (those callers already swallowed the old resolved path).
     if (this.subjectGraphEnabled && this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
