@@ -6,6 +6,8 @@ import {
   scopeToDir,
   parseScopeString,
   formatScopeRef,
+  parsePortableMemoryKey,
+  MEMORY_NAMESPACE_FILES,
   isMoreSpecific,
   inferScopeFromContext,
   buildEmbeddingsMap,
@@ -489,5 +491,56 @@ describe('buildEmbeddingsMap', () => {
 
     expect(map.size).toBe(0);
     expect(mockProvider.embed).not.toHaveBeenCalled();
+  });
+});
+
+describe('parsePortableMemoryKey', () => {
+  it('derives namespace file names from the namespace enum, not a hand-written list', () => {
+    expect([...MEMORY_NAMESPACE_FILES].sort()).toEqual([
+      'knowledge.txt', 'learnings.txt', 'methods.txt', 'status.txt',
+    ]);
+  });
+
+  it('accepts every directory shape scopeToDir can produce', () => {
+    const dirs = [
+      scopeToDir({ type: 'global', id: 'global' }),
+      scopeToDir({ type: 'context', id: 'http-api' }),
+      scopeToDir({ type: 'user', id: 'rafael' }),
+    ];
+    for (const dir of dirs) {
+      expect(parsePortableMemoryKey(`${dir}/knowledge.txt`)).toEqual({
+        scopeDir: dir,
+        fileName: 'knowledge.txt',
+      });
+    }
+  });
+
+  it.each([
+    ['../../etc/passwd', 'parent traversal'],
+    ['../knowledge.txt', 'parent segment'],
+    ['..%2fknowledge.txt', 'encoded traversal is not decoded, but the dot prefix is rejected'],
+    ['./knowledge.txt', 'current-dir segment'],
+    ['.hidden/knowledge.txt', 'dot-prefixed directory'],
+    ['/etc/knowledge.txt', 'absolute path'],
+    ['a/b/knowledge.txt', 'nested directory'],
+    ['global', 'no file segment'],
+    ['global/', 'empty file segment'],
+    ['global/passwd', 'unknown namespace file'],
+    ['global/knowledge.txt.bak', 'namespace lookalike'],
+    ['global/preferences.txt', 'namespace that the enum does not contain'],
+    ['gl obal/knowledge.txt', 'space in scope dir'],
+  ])('rejects %s (%s)', (key) => {
+    expect(parsePortableMemoryKey(key)).toBeNull();
+  });
+
+  it('rejects a scope directory that exceeds the length ceiling', () => {
+    const tooLong = 'a'.repeat(161);
+    expect(parsePortableMemoryKey(`${tooLong}/knowledge.txt`)).toBeNull();
+  });
+
+  it('accepts a max-length user scope dir (the user- prefix must still fit)', () => {
+    const maxId = 'u'.repeat(128);
+    const dir = scopeToDir({ type: 'user', id: maxId });
+    expect(parsePortableMemoryKey(`${dir}/methods.txt`)).not.toBeNull();
   });
 });

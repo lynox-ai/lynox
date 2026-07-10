@@ -16,12 +16,13 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
+import { parsePortableMemoryKey } from './scope-resolver.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -59,6 +60,7 @@ export interface ImportVerification {
   secretsImported: number;
   databasesRestored: string[];
   artifactsImported: number;
+  memoryFilesImported: number;
   configApplied: boolean;
 }
 
@@ -302,6 +304,7 @@ export class MigrationImporter {
       secretsImported: 0,
       databasesRestored: [],
       artifactsImported: 0,
+      memoryFilesImported: 0,
       configApplied: false,
     };
 
@@ -309,7 +312,8 @@ export class MigrationImporter {
     // 1. Config (least critical, applied first)
     // 2. SQLite databases (core data)
     // 3. Artifacts (supplementary)
-    // 4. Secrets (most sensitive — last, so we can abort without partial secret state)
+    // 4. Memory (the flat-file store the memory_* tools read)
+    // 5. Secrets (most sensitive — last, so we can abort without partial secret state)
 
     const chunksByType = this.groupChunksByType(manifest.chunks, receivedChunks);
 
@@ -335,13 +339,19 @@ export class MigrationImporter {
       verification.artifactsImported = this.restoreArtifacts(data);
     }
 
-    // 4. Secrets (most sensitive — last)
+    // 4. Memory (flat-file store)
+    for (const { meta, data } of chunksByType.memory) {
+      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
+      verification.memoryFilesImported = this.restoreMemory(data);
+    }
+
+    // 5. Secrets (most sensitive — last)
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
       verification.secretsImported = this.restoreSecrets(data);
     }
 
-    // 5. Re-gate (MANAGED destination only): a migrated api connection's
+    // 6. Re-gate (MANAGED destination only): a migrated api connection's
     // custom_endpoint_ack is a per-instance BYOK-endpoint acceptance that must
     // NOT be inherited — strip it so any custom endpoint re-triggers the
     // disclosure gate before reuse (the engine.db analog of restoreConfig's
@@ -394,6 +404,7 @@ export class MigrationImporter {
       secrets: [],
       sqlite_db: [],
       artifacts: [],
+      memory: [],
       config: [],
     };
 
@@ -525,6 +536,45 @@ export class MigrationImporter {
     }
 
     return bundle.index.length;
+  }
+
+  /**
+   * Restore the flat-file memory tree (`memory/<scopeDir>/<namespace>.txt`).
+   *
+   * Both path segments are validated independently against the shapes the
+   * exporter can produce, so a hand-crafted bundle cannot write outside the
+   * memory directory even before the resolved-path check below. Unrecognised
+   * keys are skipped, never coerced.
+   *
+   * @returns the number of files written
+   */
+  private restoreMemory(data: Buffer): number {
+    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const memoryDir = join(this.lynoxDir, 'memory');
+    const memoryPrefix = memoryDir + sep;
+    let written = 0;
+
+    for (const [key, content] of Object.entries(bundle.files)) {
+      if (typeof content !== 'string') continue;
+
+      const parsed = parsePortableMemoryKey(key);
+      if (!parsed) continue;
+      const { scopeDir, fileName } = parsed;
+
+      const scopePath = resolve(memoryDir, scopeDir);
+      const filePath = resolve(scopePath, fileName);
+      // Defense-in-depth: the resolved path must sit strictly inside memory/.
+      // A bare startsWith(memoryDir) would also accept a sibling `memoryEVIL/`.
+      if (!filePath.startsWith(memoryPrefix)) continue;
+
+      mkdirSync(scopePath, { recursive: true, mode: DIR_MODE_PRIVATE });
+      writeFileSync(filePath, content, { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
+      written++;
+    }
+
+    return written;
   }
 
   /**

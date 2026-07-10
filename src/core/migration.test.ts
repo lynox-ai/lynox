@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -637,5 +637,121 @@ describe('migration E2E', () => {
 
       importer.cleanup();
     });
+  });
+});
+
+// ── Flat-file memory tree ──
+//
+// Regression guard for the export/backup asymmetry: backup.ts:COPY_DIRS has
+// always carried `memory/`, migration-export never did. The memory_* tools read
+// that tree (`agent.memory` is the flat-file `Memory`), so a migrated tenant kept
+// ambient recall (the DB mirror rode along) while `memory_recall`/`memory_list`
+// silently returned nothing.
+
+function createTestMemory(dir: string, files: Record<string, string>): void {
+  for (const [relPath, content] of Object.entries(files)) {
+    const full = join(dir, 'memory', relPath);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content, 'utf-8');
+  }
+}
+
+describe('migration — flat-file memory tree', () => {
+  let srcDir: string;
+  let dstDir: string;
+
+  beforeEach(() => {
+    srcDir = createTmpDir();
+    dstDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(srcDir, { recursive: true, force: true });
+    rmSync(dstDir, { recursive: true, force: true });
+  });
+
+  it('preview reports zero memory files on an empty installation', () => {
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    expect(exporter.preview().memoryFiles).toBe(0);
+  });
+
+  it('preview counts only portable namespace files', () => {
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': 'a',
+      'http-api/methods.txt': 'b',
+      'http-api/status.txt': 'c',
+      'http-api/README.md': 'not a namespace',
+      'http-api/knowledge.txt.bak': 'lookalike',
+    });
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    expect(exporter.preview().memoryFiles).toBe(3);
+  });
+
+  it('round-trips every scope and namespace, byte for byte', () => {
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': 'lynox is a business runtime\n',
+      'global/learnings.txt': 'never trust an aggregator score\n',
+      'http-api/knowledge.txt': 'the client is Meridian\n',
+      'http-api/methods.txt': 'validate before building\n',
+      'http-api/status.txt': 'shipping the memory foundation\n',
+      'user-rafael/learnings.txt': 'measure before dispatching\n',
+    });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    expect(manifest.chunks.some(c => c.type === 'memory')).toBe(true);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    const verification = importer.restore();
+
+    expect(verification.memoryFilesImported).toBe(6);
+    expect(readFileSync(join(dstDir, 'memory', 'global', 'knowledge.txt'), 'utf-8'))
+      .toBe('lynox is a business runtime\n');
+    expect(readFileSync(join(dstDir, 'memory', 'http-api', 'status.txt'), 'utf-8'))
+      .toBe('shipping the memory foundation\n');
+    expect(readFileSync(join(dstDir, 'memory', 'user-rafael', 'learnings.txt'), 'utf-8'))
+      .toBe('measure before dispatching\n');
+  });
+
+  it('does not emit a memory chunk when the tree is absent', () => {
+    createTestConfig(srcDir, { default_tier: 'balanced' });
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    expect(manifest.chunks.some(c => c.type === 'memory')).toBe(false);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    expect(importer.restore().memoryFilesImported).toBe(0);
+  });
+
+  it('skips unknown files, nested directories and unsafe scope dirs on export', () => {
+    createTestMemory(srcDir, {
+      'global/knowledge.txt': 'kept',
+      'global/secrets.env': 'dropped — not a namespace',
+      'global/nested/knowledge.txt': 'dropped — nested',
+      '.hidden/knowledge.txt': 'dropped — dot-prefixed scope dir',
+    });
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    importer.setManifest(manifest);
+    for (const chunk of chunks) importer.receiveChunk(chunk);
+    const verification = importer.restore();
+
+    expect(verification.memoryFilesImported).toBe(1);
+    expect(existsSync(join(dstDir, 'memory', 'global', 'knowledge.txt'))).toBe(true);
+    expect(existsSync(join(dstDir, 'memory', 'global', 'secrets.env'))).toBe(false);
+    expect(existsSync(join(dstDir, 'memory', 'global', 'nested'))).toBe(false);
+    expect(existsSync(join(dstDir, 'memory', '.hidden'))).toBe(false);
   });
 });

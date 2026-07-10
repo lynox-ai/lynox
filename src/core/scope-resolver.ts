@@ -1,5 +1,5 @@
 import type { MemoryScopeType, MemoryScopeRef, MemoryNamespace } from '../types/index.js';
-import { SCOPE_WEIGHTS } from '../types/index.js';
+import { SCOPE_WEIGHTS, ALL_NAMESPACES } from '../types/index.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { cosineSimilarity } from './embedding.js';
 
@@ -10,6 +10,41 @@ export interface ScopeContext {
 
 /** Hierarchy order from broadest to most specific. */
 export const SCOPE_ORDER: MemoryScopeType[] = ['global', 'context', 'user'];
+
+/**
+ * Directory-name shape {@link scopeToDir} produces: `global`, a bare context id,
+ * or `user-<id>`. The length ceiling is above SAFE_SCOPE_ID's so a max-length
+ * user id survives its `user-` prefix. Consumed by the migration exporter and
+ * importer, which must agree on exactly which directories are portable.
+ */
+export const SAFE_SCOPE_DIR = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,159}$/;
+
+/**
+ * Namespace file names inside a scope directory, DERIVED from the namespace
+ * enum rather than restated — a hand-written list is how a description drifts
+ * away from the values its parser accepts.
+ */
+export const MEMORY_NAMESPACE_FILES: ReadonlySet<string> =
+  new Set(ALL_NAMESPACES.map(ns => `${ns}.txt`));
+
+/**
+ * Validate a `<scopeDir>/<namespace>.txt` key from a migration memory bundle.
+ *
+ * The single source of truth for which memory files are portable — the exporter
+ * emits only keys this accepts, and the importer writes only keys this accepts.
+ * `SAFE_SCOPE_DIR` requires an alphanumeric first character, so `.`, `..` and
+ * absolute paths are rejected before any filesystem call.
+ *
+ * @returns the split segments, or `null` if the key is not portable
+ */
+export function parsePortableMemoryKey(key: string): { scopeDir: string; fileName: string } | null {
+  const parts = key.split('/');
+  if (parts.length !== 2) return null;
+  const [scopeDir, fileName] = parts as [string, string];
+  if (!SAFE_SCOPE_DIR.test(scopeDir)) return null;
+  if (!MEMORY_NAMESPACE_FILES.has(fileName)) return null;
+  return { scopeDir, fileName };
+}
 
 /**
  * Resolve which scopes are active for a given context.

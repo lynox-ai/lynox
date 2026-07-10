@@ -6,17 +6,26 @@
  *  - Secrets (decrypted from local vault, re-encrypted in transit)
  *  - SQLite databases (crash-safe VACUUM INTO copies)
  *  - Artifacts (index + content files)
+ *  - Memory (the flat-file `memory/<scope>/<namespace>.txt` tree)
  *  - Config (sanitized — no secrets, no provider credentials)
  *
  * All data is encrypted per-chunk with AES-256-GCM using an ECDH-derived key.
  * The control plane never sees any plaintext.
+ *
+ * The memory tree is the PRIMARY store the `memory_*` tools read and write
+ * (`Memory` in memory.ts, reached via `agent.memory`); the agent-memory DB is a
+ * mirror populated through `channels.memoryStore`. Omitting it — as this
+ * exporter did until now, while backup.ts:COPY_DIRS always carried it — left a
+ * migrated tenant with an agent that still recalls facts ambiently but reports
+ * an empty `memory_recall`/`memory_list`.
  */
 
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
+import { parsePortableMemoryKey } from './scope-resolver.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -118,7 +127,12 @@ export class MigrationExporter {
     const artifactChunk = this.collectArtifacts();
     if (artifactChunk) plaintextChunks.push(artifactChunk);
 
-    // 4. Config (sanitized)
+    // 4. Memory — the flat-file store the memory_* tools actually read
+    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
+    const memoryChunk = this.collectMemory();
+    if (memoryChunk) plaintextChunks.push(memoryChunk);
+
+    // 5. Config (sanitized)
     const configChunk = this.collectConfig();
     if (configChunk) plaintextChunks.push(configChunk);
 
@@ -175,7 +189,7 @@ export class MigrationExporter {
    * Get a summary of what will be exported (without actually exporting).
    * Useful for the wizard UI to show the user what data will be migrated.
    */
-  preview(): { secrets: number; databases: string[]; artifacts: number; hasConfig: boolean } {
+  preview(): { secrets: number; databases: string[]; artifacts: number; memoryFiles: number; hasConfig: boolean } {
     let secrets = 0;
     try {
       const vault = new SecretVault({ path: join(this.lynoxDir, 'vault.db'), masterKey: this.vaultKey });
@@ -199,9 +213,23 @@ export class MigrationExporter {
       }
     } catch { /* ok */ }
 
+    let memoryFiles = 0;
+    try {
+      const memoryDir = join(this.lynoxDir, 'memory');
+      if (existsSync(memoryDir)) {
+        for (const scopeDir of readdirSync(memoryDir)) {
+          const scopePath = join(memoryDir, scopeDir);
+          if (!statSync(scopePath).isDirectory()) continue;
+          for (const fileName of readdirSync(scopePath)) {
+            if (parsePortableMemoryKey(`${scopeDir}/${fileName}`)) memoryFiles++;
+          }
+        }
+      }
+    } catch { /* ok */ }
+
     const hasConfig = existsSync(join(this.lynoxDir, 'config.json'));
 
-    return { secrets, databases, artifacts, hasConfig };
+    return { secrets, databases, artifacts, memoryFiles, hasConfig };
   }
 
   // ── Private collectors ──
@@ -337,6 +365,56 @@ export class MigrationExporter {
           seq: 0,
           type: 'artifacts',
           name: 'artifacts',
+          originalSize: data.length,
+          checksum: sha256(data),
+        },
+        data,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Bundle the flat-file memory tree into one chunk.
+   *
+   * Layout is `memory/<scopeDir>/<namespace>.txt` (see `Memory._scopeFilePath`).
+   * Keys in the bundle are the relative `<scopeDir>/<namespace>.txt` paths; both
+   * segments are validated here so a hand-crafted directory can never widen the
+   * import's write surface. Unknown files and nested directories are skipped
+   * rather than carried — the importer reconstructs only what it recognises.
+   */
+  private collectMemory(): PlaintextChunk | null {
+    const memoryDir = join(this.lynoxDir, 'memory');
+    if (!existsSync(memoryDir)) return null;
+
+    try {
+      const files: Record<string, string> = {};
+
+      for (const scopeDir of readdirSync(memoryDir)) {
+        const scopePath = join(memoryDir, scopeDir);
+        if (!statSync(scopePath).isDirectory()) continue;
+
+        for (const fileName of readdirSync(scopePath)) {
+          const key = `${scopeDir}/${fileName}`;
+          // Same predicate the importer applies — one source of truth, so the
+          // two sides cannot drift into exporting what cannot be restored.
+          if (!parsePortableMemoryKey(key)) continue;
+          const filePath = join(scopePath, fileName);
+          if (!statSync(filePath).isFile()) continue;
+          files[key] = readFileSync(filePath, 'utf-8');
+        }
+      }
+
+      if (Object.keys(files).length === 0) return null;
+
+      const data = Buffer.from(JSON.stringify({ files }), 'utf-8');
+
+      return {
+        meta: {
+          seq: 0,
+          type: 'memory',
+          name: 'memory',
           originalSize: data.length,
           checksum: sha256(data),
         },
