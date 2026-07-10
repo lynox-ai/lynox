@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
-import { parsePortableMemoryKey } from './scope-resolver.js';
+import { parsePortableMemoryKey } from './memory-file.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,

@@ -7,7 +7,8 @@ import { channels } from './observability.js';
 import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { scopeToDir, trimMemoryContent } from './scope-resolver.js';
+import { scopeToDir } from './scope-resolver.js';
+import { trimMemoryContent } from './memory-file.js';
 import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
 import { ensureDir } from './atomic-write.js';
@@ -210,11 +211,6 @@ export class Memory implements IMemory {
     return this._defaultScope();
   }
 
-  /** Trim content to the shared namespace-file byte ceiling. */
-  private _trimToLimit(content: string): string {
-    return trimMemoryContent(content);
-  }
-
   // === Core CRUD — delegate to scoped methods ===
 
   async load(ns: MemoryNamespace): Promise<string | null> {
@@ -223,7 +219,7 @@ export class Memory implements IMemory {
 
   async save(ns: MemoryNamespace, content: string): Promise<void> {
     const scope = this._defaultScope();
-    const trimmed = this._trimToLimit(content);
+    const trimmed = trimMemoryContent(content);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -386,7 +382,7 @@ export class Memory implements IMemory {
     if (content?.includes(safeText)) return;
 
     const raw = content ? `${content}\n${entry}` : entry;
-    const updated = this._trimToLimit(raw);
+    const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -458,7 +454,7 @@ export class Memory implements IMemory {
     if (!oldText || !current || !current.includes(oldText)) return false;
 
     const raw = current.replace(oldText, newText);
-    const updated = this._trimToLimit(raw);
+    const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);

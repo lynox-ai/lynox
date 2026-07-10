@@ -18,7 +18,7 @@ import {
   sha256,
   MAX_CHUNK_BYTES,
 } from './migration-crypto.js';
-import { MAX_MEMORY_FILE_BYTES } from './scope-resolver.js';
+import { MAX_MEMORY_FILE_BYTES } from './memory-file.js';
 
 // ── Test helpers ──
 
@@ -754,6 +754,36 @@ describe('migration — flat-file memory tree', () => {
     expect(existsSync(join(dstDir, 'memory', 'global', 'secrets.env'))).toBe(false);
     expect(existsSync(join(dstDir, 'memory', 'global', 'nested'))).toBe(false);
     expect(existsSync(join(dstDir, 'memory', '.hidden'))).toBe(false);
+  });
+
+  it('round-trips a database larger than MAX_CHUNK_BYTES through its :partN chunks', () => {
+    // Pre-existing coverage gap: no test exercised `restoreDatabase`'s multi-part
+    // reassembly, the path that reorders chunks by part number before writing.
+    const db = new Database(join(srcDir, 'history.db'));
+    db.exec('CREATE TABLE blobs (id INTEGER PRIMARY KEY, payload BLOB)');
+    const insert = db.prepare('INSERT INTO blobs (id, payload) VALUES (?, ?)');
+    for (let i = 0; i < 10; i++) insert.run(i, Buffer.alloc(1024 * 1024, i)); // ~10 MB
+    db.close();
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const { clientTransferKey } = performHandshake(importer);
+    const { manifest, chunks } = exporter.export(clientTransferKey);
+
+    const dbChunks = manifest.chunks.filter(c => c.name.startsWith('history.db'));
+    expect(dbChunks.length).toBeGreaterThan(1);
+    expect(dbChunks.every(c => c.name.includes(':part'))).toBe(true);
+
+    importer.setManifest(manifest);
+    // Deliver out of order — the importer must sort by part number, not arrival.
+    for (const chunk of [...chunks].reverse()) importer.receiveChunk(chunk);
+    expect(importer.restore().databasesRestored).toContain('history.db');
+
+    const restored = new Database(join(dstDir, 'history.db'), { readonly: true });
+    const row = restored.prepare('SELECT payload FROM blobs WHERE id = 7').get() as { payload: Buffer };
+    expect(row.payload.length).toBe(1024 * 1024);
+    expect(row.payload[0]).toBe(7);
+    restored.close();
   });
 
   it('splits a memory tree past MAX_CHUNK_BYTES and reassembles it byte-exactly', () => {

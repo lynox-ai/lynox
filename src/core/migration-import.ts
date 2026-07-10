@@ -22,7 +22,7 @@ import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
-import { parsePortableMemoryKey, trimMemoryContent } from './scope-resolver.js';
+import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -490,11 +490,7 @@ export class MigrationImporter {
       // Collect all parts for this database, sorted by part number
       const parts = allDbChunks
         .filter(c => c.meta.name.startsWith(`${baseName}:part`))
-        .sort((a, b) => {
-          const aPart = parseInt(a.meta.name.split(':part')[1]!, 10);
-          const bPart = parseInt(b.meta.name.split(':part')[1]!, 10);
-          return aPart - bPart;
-        });
+        .sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
 
       finalData = Buffer.concat(parts.map(p => p.data));
     } else {
