@@ -94,6 +94,12 @@ const MAX_CHUNKS = 64;
 /** Maximum total plaintext size across all chunks (500 MB). */
 const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
 
+/**
+ * Ceiling for the reassembled flat-file memory bundle. A legitimate tree is
+ * `scopeDirs × 4 namespaces × MAX_MEMORY_FILE_BYTES`, so this allows 64 scopes.
+ */
+const MAX_MEMORY_BUNDLE_BYTES = 64 * 1024 * 1024;
+
 /** Whitelist of allowed database file names — prevents path traversal via crafted manifests.
  *  engine.db (Foundation Rework v2 subject-graph) is portable user data — mirrors the export set. */
 const ALLOWED_DB_NAMES = new Set(['history.db', 'agent-memory.db', 'datastore.db', 'engine.db']);
@@ -558,6 +564,18 @@ export class MigrationImporter {
    * @returns the number of files written
    */
   private restoreMemory(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    // Reassembly + decode + parse holds several copies of the payload at once.
+    // MAX_TOTAL_BYTES (500 MiB) bounds the whole transfer, not this one bundle,
+    // so bound it here: a real memory tree is scopes × 4 × MAX_MEMORY_FILE_BYTES,
+    // i.e. 64 MiB already allows 64 scope directories. Fail closed and loud —
+    // an import that would exhaust the heap must not half-write the tree.
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(
+        `Memory bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
+      );
+    }
+
     // The exporter splits an oversized bundle into `memory:partN`. Reassemble in
     // part order before parsing — a part boundary can fall mid-UTF-8-sequence,
     // so the concatenation must happen on the Buffers, never on decoded strings.

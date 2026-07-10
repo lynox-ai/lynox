@@ -55,16 +55,30 @@ export const MAX_MEMORY_FILE_BYTES = 256 * 1024;
  * the migration importer — a restored file that skipped it would exceed a bound
  * `Memory` itself can never produce, and `loadScoped` reads the whole file into
  * the model's context.
+ *
+ * Linear in the input. The obvious shift-one-line-and-rejoin loop is quadratic,
+ * which is harmless for `Memory` (it trims after each append, so at most a line
+ * or two comes off) and a synchronous denial of service for the importer, whose
+ * input is a bundle the source instance controls: a 20 MB file needed >20k full
+ * re-splits — minutes of uninterruptible CPU on the request thread.
  */
 export function trimMemoryContent(content: string): string {
-  let result = content;
-  while (Buffer.byteLength(result, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
-    const lines = result.split('\n');
-    if (lines.length <= 1) break;
-    lines.shift();
-    result = lines.join('\n');
-  }
-  return result;
+  const buf = Buffer.from(content, 'utf-8');
+  if (buf.length <= MAX_MEMORY_FILE_BYTES) return content;
+
+  // Keep the largest suffix of whole lines that fits: the smallest newline index
+  // `p` with `len - p - 1 <= cap`. `\n` (0x0a) never occurs inside a multi-byte
+  // UTF-8 sequence, so scanning bytes cannot cut a character in half.
+  const from = Math.max(0, buf.length - MAX_MEMORY_FILE_BYTES - 1);
+  const p = buf.indexOf(0x0a, from);
+  if (p !== -1) return buf.subarray(p + 1).toString('utf-8');
+
+  // No newline in the tail — the final line alone exceeds the ceiling. Keep just
+  // it, or the whole content when there is no newline at all. Both match the
+  // previous "shift until one line remains" behaviour, which likewise could not
+  // shrink a single line below the ceiling.
+  const last = buf.lastIndexOf(0x0a);
+  return last === -1 ? content : buf.subarray(last + 1).toString('utf-8');
 }
 
 /**
