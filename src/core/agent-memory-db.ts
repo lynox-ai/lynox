@@ -1202,6 +1202,12 @@ export class AgentMemoryDb {
       tokenize: (text: string) => ReadonlySet<string>;
       disagree: (a: ReadonlySet<string>, b: ReadonlySet<string>) => boolean;
     },
+    // Memory Foundation Wave 0 (memory_scoring_v2): when false, the merge still
+    // supersedes duplicates but does NOT transfer the victims' confirmation counts
+    // to the keeper (the third self-reinforcement feeder — PRD §2.2). The inline
+    // UPDATE is skipped and each pair's `victimConfirmations` is zeroed so the
+    // caller's engine.db mirror transfers nothing either. Default true (legacy).
+    transferConfirmations = true,
   ): ConsolidationPair[] {
     // scopeId='*' means all scopes of this type
     const rows = scopeId === '*'
@@ -1276,7 +1282,7 @@ export class AgentMemoryDb {
         const victim = rows[cluster[k]!]!;
         this.supersedMemory(victim.id, keeper.id);
         this.createSupersedes(keeper.id, victim.id, 'consolidation');
-        if (victim.confirmation_count > 0) {
+        if (transferConfirmations && victim.confirmation_count > 0) {
           this.db.prepare(`
             UPDATE memories SET confirmation_count = confirmation_count + ?, updated_at = ? WHERE id = ?
           `).run(victim.confirmation_count, now, keeper.id);
@@ -1284,7 +1290,8 @@ export class AgentMemoryDb {
         merged.add(cluster[k]!);
         // Return the victim→keeper pair so KnowledgeLayer can mirror the supersede
         // + confirmation transfer onto the engine.db stubs (recall-parity cutover).
-        pairs.push({ victimId: victim.id, keeperId: keeper.id, victimConfirmations: victim.confirmation_count });
+        // Wave 0: `victimConfirmations` is zeroed when the transfer is suppressed.
+        pairs.push({ victimId: victim.id, keeperId: keeper.id, victimConfirmations: transferConfirmations ? victim.confirmation_count : 0 });
       }
     }
 

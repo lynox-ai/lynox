@@ -1,6 +1,13 @@
 export interface EmbeddingProvider {
   readonly name: string;
   readonly dimensions: number;
+  /**
+   * The concrete embedding-model identity (e.g. 'multilingual-e5-small'). Optional —
+   * a stub provider may omit it. The Wave-0 retrieval shadow log records it because
+   * the Wave-2 FLOOR binds to the embedding space (§1.7): a model change invalidates
+   * the stored vectors and the floor together.
+   */
+  readonly model?: string | undefined;
   embed(text: string): Promise<number[]>;
 }
 
@@ -10,6 +17,7 @@ export interface EmbeddingProvider {
  */
 export class LocalProvider implements EmbeddingProvider {
   readonly name = 'local';
+  readonly model = 'local';
   readonly dimensions = 384;
 
   async embed(text: string): Promise<number[]> {
@@ -88,6 +96,9 @@ export class OnnxProvider implements EmbeddingProvider {
     this.dimensions = config.dimensions;
     this.huggingFaceId = config.huggingFaceId;
   }
+
+  /** The concrete ONNX model id — recorded by the Wave-0 retrieval shadow log. */
+  get model(): string { return this.modelId; }
 
   private async _getPipeline(): Promise<unknown> {
     if (this.pipeline) return this.pipeline;

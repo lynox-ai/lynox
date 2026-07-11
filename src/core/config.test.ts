@@ -38,6 +38,8 @@ describe('Config', () => {
     delete process.env['LYNOX_LLM_PROVIDER'];
     delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
     delete process.env['LYNOX_MEMORY_GRAPH_READS'];
+    delete process.env['LYNOX_MEMORY_SCORING_V2'];
+    delete process.env['LYNOX_RETRIEVAL_SHADOW_LOG'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
@@ -222,6 +224,60 @@ describe('Config', () => {
     process.env['LYNOX_MEMORY_GRAPH_READS'] = 'yes';
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().memory_graph_reads).toBeUndefined();
+  });
+
+  it('keeps memory_scoring_v2 + retrieval_shadow_log from config.json (Wave 0 — not stripped by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      memory_scoring_v2: true,
+      retrieval_shadow_log: true,
+    }));
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.memory_scoring_v2).toBe(true);
+    expect(config.retrieval_shadow_log).toBe(true);
+    expect(config.default_tier).toBe('balanced'); // config not nulled by an unknown key
+  });
+
+  it('reads memory_scoring_v2 from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_SCORING_V2'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_scoring_v2).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_SCORING_V2'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_scoring_v2).toBe(false);
+    }
+    vi.resetModules();
+    process.env['LYNOX_MEMORY_SCORING_V2'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().memory_scoring_v2).toBeUndefined(); // non-enum ignored, never coerced
+  });
+
+  it('reads retrieval_shadow_log from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().retrieval_shadow_log).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().retrieval_shadow_log).toBe(false);
+    }
+    vi.resetModules();
+    process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = 'on';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().retrieval_shadow_log).toBeUndefined();
   });
 
   it('ignores an unrecognised LYNOX_NETWORK_POLICY value', async () => {

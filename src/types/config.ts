@@ -407,6 +407,19 @@ export interface LynoxUserConfig {
    * Default: false — zero overhead when unset.
    */
   context_cost_log?: boolean | undefined;
+  /**
+   * Memory Foundation Wave 0 — retrieval shadow mode. When true, each retrieve()
+   * appends one JSONL record per call to `~/.lynox/retrieval-shadow.jsonl` (the raw
+   * cosine, tier, subject and would-pass verdict of every scored candidate) so an
+   * operator can measure the per-tier admission distribution on the real corpus and
+   * pick the Wave-2 FLOOR from data, never a guess. Filters NOTHING — pure
+   * telemetry. Ships WITH Wave 0 because Wave 0 widens admission, so the floor must
+   * be measured on the corpus customers actually generate. The sink records
+   * threadId/subjectId in plaintext (per-container, outside backups/export): bound
+   * its retention before enabling fleet-wide on customer data. Default: false — zero
+   * overhead when unset.
+   */
+  retrieval_shadow_log?: boolean | undefined;
   /** Enable Knowledge Graph for entity-aware memory. Default: true */
   knowledge_graph_enabled?: boolean | undefined;
   /**
@@ -439,6 +452,18 @@ export interface LynoxUserConfig {
    * recall. Requires the s5-backfill to have run on the tenant first.
    */
   memory_graph_reads?: boolean | undefined;
+  /**
+   * Memory Foundation Wave 0 — the self-reinforcement "emergency stop". When true,
+   * retrieval scoring drops the `confMult`/`confirmDecay` terms (the laundered
+   * retrieval-tally that gated admission), stops rendering `confidence=` into the
+   * `<fact>` the model reads, and stops every confirmation-count WRITE (the
+   * auto-confirm-on-success loop, the write-time dedup confirm, and consolidation's
+   * confirmation transfer). Zero rows are mutated — the columns go inert, not
+   * corrected. Default: false — a tenant stays on the legacy scoring/write path
+   * until a per-tenant flip. Both scoring branches are retained until the flag is
+   * soaked fleet-wide (dual-scorer sunset: rafael, 2026-08-31).
+   */
+  memory_scoring_v2?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

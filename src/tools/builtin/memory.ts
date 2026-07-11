@@ -1,5 +1,5 @@
-import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef, ProvenanceKind } from '../../types/index.js';
-import { ALL_NAMESPACES, ALL_PROVENANCE_KINDS } from '../../types/index.js';
+import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
+import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
@@ -27,8 +27,6 @@ interface MemoryStoreInput {
   namespace: MemoryNamespace;
   content: string;
   scope?: string | undefined;
-  sourceType?: ProvenanceKind | undefined;
-  sourceToolName?: string | undefined;
 }
 
 interface MemoryRecallInput {
@@ -219,7 +217,6 @@ interface MemoryUpdateInput {
   old_content: string;
   new_content: string;
   scope?: string | undefined;
-  sourceType?: ProvenanceKind | undefined;
 }
 
 function resolveScope(scopeStr: string | undefined, agent: IAgent): MemoryScopeRef | undefined {
@@ -252,15 +249,6 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
           type: 'string',
           description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
         },
-        sourceType: {
-          type: 'string',
-          enum: [...ALL_PROVENANCE_KINDS],
-          description: 'Provenance — declare honestly: user_asserted (user stated it), tool_verified (from a tool result this session), agent_inferred (you derived it), external_unverified (untrusted external content). Omit → agent_inferred.',
-        },
-        sourceToolName: {
-          type: 'string',
-          description: 'When sourceType is tool_verified, the tool that produced it (e.g. "web_search", "http_request"). Optional.',
-        },
       },
       required: ['namespace', 'content'],
     },
@@ -278,17 +266,20 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
       return `Invalid or unauthorized scope: "${input.scope}". Active scopes: ${(agent.activeScopes ?? []).map(s => s.type === 'global' ? 'global' : `${s.type}:${s.id}`).join(', ') || 'none'}.`;
     }
 
-    const sourceType: ProvenanceKind = input.sourceType ?? 'agent_inferred';
-    const sourceToolName = input.sourceToolName;
-
+    // Memory Foundation Wave 0.6: the tier is FORCE-FLOORED to agent_inferred. The
+    // agent can no longer self-declare provenance (the removed `sourceType` param
+    // was a live privilege escalation — injected content could instruct the agent
+    // to store its own text as `user_asserted`, the tier the system prompt trusts
+    // most; PRD §2.8). A genuine user fact still lands, honestly as agent_inferred;
+    // Wave 1.3 re-derives the tier from the write-boundary channel, not the agent.
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceType, sourceToolName });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceType: 'agent_inferred' });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceType, sourceToolName });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceType: 'agent_inferred' });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };
@@ -447,11 +438,6 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           type: 'string',
           description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
         },
-        sourceType: {
-          type: 'string',
-          enum: [...ALL_PROVENANCE_KINDS],
-          description: 'Provenance of the replacement — declare honestly: user_asserted (user corrected it), tool_verified (a tool confirmed it), agent_inferred (you derived it), external_unverified (untrusted external content). Omit → agent_inferred.',
-        },
       },
       required: ['namespace', 'old_content', 'new_content'],
     },
@@ -552,7 +538,8 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         scopeType: defaultScope.type,
         scopeId: defaultScope.id,
         sourceThreadId: agent.currentThreadId,
-        sourceType: input.sourceType ?? 'agent_inferred',
+        // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
+        sourceType: 'agent_inferred',
       });
     }
 

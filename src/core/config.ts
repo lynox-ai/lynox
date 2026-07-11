@@ -177,6 +177,26 @@ export function loadConfig(): LynoxUserConfig {
   } else if (memoryReads === 'false' || memoryReads === '0') {
     merged.memory_graph_reads = false;
   }
+  // Memory Foundation Wave 0: the self-reinforcement emergency-stop flag. The CP
+  // flips it per-tenant via env (rafael canary first) without editing config.json.
+  // Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a
+  // project config must not alter the user's memory scoring/write behaviour.
+  const memScoringV2 = process.env['LYNOX_MEMORY_SCORING_V2'];
+  if (memScoringV2 === 'true' || memScoringV2 === '1') {
+    merged.memory_scoring_v2 = true;
+  } else if (memScoringV2 === 'false' || memScoringV2 === '0') {
+    merged.memory_scoring_v2 = false;
+  }
+  // Memory Foundation Wave 0: retrieval shadow-log flag. The CP enables it
+  // per-tenant via env to gather the Wave-2 floor distribution on the real corpus.
+  // Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a
+  // project config must not turn on plaintext retrieval telemetry.
+  const retrievalShadow = process.env['LYNOX_RETRIEVAL_SHADOW_LOG'];
+  if (retrievalShadow === 'true' || retrievalShadow === '1') {
+    merged.retrieval_shadow_log = true;
+  } else if (retrievalShadow === 'false' || retrievalShadow === '0') {
+    merged.retrieval_shadow_log = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default

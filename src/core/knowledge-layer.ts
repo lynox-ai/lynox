@@ -80,6 +80,16 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * what RECALL surfaces. False → both stay on legacy. Also gates `setMemoryGraphReads`.
    */
   private readonly memoryReadsActive: boolean;
+  /**
+   * Memory Foundation Wave 0 — the self-reinforcement emergency stop. When true,
+   * every confirmation-count WRITE this layer owns is suppressed: the auto-confirm
+   * feedback loop ({@link feedbackOnRetrieval}), the write-time dedup confirm
+   * ({@link store}), and consolidation's confirmation transfer
+   * ({@link consolidateMemories}). The read-side halves (dropping confMult and the
+   * rendered `confidence=`) live on the RetrievalEngine, which is constructed with
+   * the same flag. Default false (legacy path); flipped per-tenant.
+   */
+  private readonly memoryScoringV2: boolean;
   private readonly subjectStore: SubjectStore | null;
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
@@ -111,13 +121,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     engineDb?: EngineDb | undefined,
     subjectGraphEnabled?: boolean | undefined,
     memoryGraphReads?: boolean | undefined,
+    memoryScoringV2?: boolean | undefined,
+    retrievalShadowLog?: boolean | undefined,
   ) {
     this.db = new AgentMemoryDb(dbPath);
     this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
     this.embeddingProvider = embeddingProvider;
     this.entityResolver = new EntityResolver(this.db, embeddingProvider);
+    this.memoryScoringV2 = memoryScoringV2 ?? false;
     this.retrievalEngine = new RetrievalEngine(
       this.db, embeddingProvider, this.entityResolver, anthropicClient, runHistory,
+      this.memoryScoringV2, retrievalShadowLog ?? false,
     );
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
@@ -271,12 +285,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // silently absorbed as a confirmation of the wrong project's fact — the same
       // subject-blind data-loss class the supersede veto guards, at the dedup gate.
       if (!hasHeuristicContradiction(trimmedText, candidate.text) && !subjectsDisagree(trimmedText, candidate.text)) {
-        this.db.confirmMemory(candidate.id);
-        // S5b recall parity: mirror the confirmation onto the engine.db stub so its
-        // confirmation_count/confidence don't go stale under the read cutover. Dual-
-        // write gate (subject_graph_enabled), isolated — a mirror failure never
-        // affects the authoritative legacy confirm above.
-        this._mirrorConfidence(candidate.id, 'confirm');
+        // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
+        // The write-time confirm was a second feeder of the self-reinforcement loop
+        // (PRD §2.2). No new row is stored either way; the existing fact stands
+        // unchanged (its tier is untouched — dedup never upgrades provenance).
+        if (!this.memoryScoringV2) {
+          this.db.confirmMemory(candidate.id);
+          // S5b recall parity: mirror the confirmation onto the engine.db stub so its
+          // confirmation_count/confidence don't go stale under the read cutover. Dual-
+          // write gate (subject_graph_enabled), isolated — a mirror failure never
+          // affects the authoritative legacy confirm above.
+          this._mirrorConfidence(candidate.id, 'confirm');
+        }
         return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
       }
       // Fall through to contradiction detection
@@ -1376,6 +1396,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /** Provide feedback on retrieved memories. */
   feedbackOnRetrieval(memoryIds: string[], signal: 'useful' | 'wrong'): void {
+    // Wave 0 (memory_scoring_v2): the auto-confirm loop is the self-reinforcement
+    // engine — session.ts fires this with a hard-coded 'useful' on every run
+    // success, relevance-blind (PRD §2.2). Suppress the confirm side entirely; the
+    // 'wrong'/penalize side (a genuine correction, which only lowers) stays live.
+    if (this.memoryScoringV2 && signal === 'useful') return;
     for (const id of memoryIds) {
       if (signal === 'useful') this.db.confirmMemory(id);
       else this.db.penalizeMemory(id);
@@ -1410,9 +1435,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // facts (cross-subject data loss — the same guard M1 added to supersede/dedup).
     // Pass the set-level primitives so each row is tokenized once, not per pair;
     // `undefined` keeps the DB method's default threshold.
+    // Wave 0 (memory_scoring_v2): consolidation still MERGES duplicates (supersede),
+    // but stops TRANSFERRING the victims' confirmation counts to the keeper — the
+    // third confirmation-count feeder (PRD §2.2). `transferConfirmations=false`
+    // skips the inline UPDATE and zeroes `victimConfirmations`, so the engine.db
+    // `addConfirmations` mirror below is a natural no-op.
     const pairs = this.db.consolidateMemories(
       namespace, scopeType, scopeId, undefined,
       { tokenize: properNounTokens, disagree: subjectTokensDisagree },
+      !this.memoryScoringV2,
     );
     // S5b'-c: mirror every consolidation supersede + confirmation transfer onto the
     // engine.db stubs (the authoritative recall store under the cutover), else the
