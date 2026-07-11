@@ -3212,17 +3212,52 @@ export class LynoxHTTPApi {
         };
       })();
 
+      // Memory snapshot (retention-safe): the tenant's OWN stored facts + KG stats, so a
+      // debugger can see cross-subject bleed / poisoning directly — the runtime <fact>
+      // injection the agent reacts to is derived from exactly this. Reads ALREADY-persisted
+      // memory (the legacy write-authoritative store, complete regardless of the read-cutover
+      // flag) — NO new always-on retention. Capped, and secret-scrubbed with the rest of the
+      // bundle below; PII is kept (the user's own data, exported by their own action — see
+      // sharing_notice). Best-effort: a KG hiccup must not fail the whole export.
+      const MEMORY_SNAPSHOT_CAP = 200;
+      const knowledgeLayer = engine.getKnowledgeLayer();
+      let memory: unknown = null;
+      if (knowledgeLayer) {
+        try {
+          memory = {
+            kg_stats: await knowledgeLayer.stats(),
+            active_memories_shown: 0,
+            active_memories: knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP).map((m) => ({
+              text: m.text,
+              namespace: m.namespace,
+              scope: `${m.scope_type}:${m.scope_id}`,
+              source_type: m.source_type,
+              source_tool_name: m.source_tool_name,
+              confidence: m.confidence,
+              confirmation_count: m.confirmation_count,
+              created_at: m.created_at,
+            })),
+          };
+          (memory as { active_memories_shown: number; active_memories: unknown[] }).active_memories_shown =
+            (memory as { active_memories: unknown[] }).active_memories.length;
+        } catch { memory = { error: 'memory snapshot unavailable' }; }
+      }
+
       const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
       const bundle = {
         exported_at: new Date().toISOString(),
         exported_by: 'lynox debug-export',
         schema: 'thread-debug-export/v2',
         engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
+        // The export is the user's own data, exported by their own action; it contains PII
+        // (kept — scrubbing it would destroy the diagnostic value) with SECRETS masked below.
+        sharing_notice: 'This export contains your own conversation data — including personal information and stored memories — with secrets masked. Share it only with recipients you trust.',
         thread,
         debug_summary: debugSummary,
         messages,
         runs,
         compaction_events: compactionEvents,
+        memory,
       };
       // Secret-scrub the WHOLE bundle in one pass — messages AND runs AND tool
       // I/O AND prompt snapshots — so a credential pasted in chat or passed as a

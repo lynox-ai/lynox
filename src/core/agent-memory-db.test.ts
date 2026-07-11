@@ -613,4 +613,27 @@ describe('AgentMemoryDb', () => {
       expect(db.findMemoryIdsByPattern('shared token')).toHaveLength(2);
     });
   });
+
+  // The debug-export memory snapshot (scope-independent, active-only, newest-first, capped).
+  describe('listAllActiveMemories', () => {
+    it('returns active memories only, newest first, across scopes, honouring the limit clamp', () => {
+      const a = db.createMemory({ text: 'first', namespace: 'knowledge', scopeType: 'context', scopeId: 'p1', embedding: [1, 0, 0] });
+      const b = db.createMemory({ text: 'second', namespace: 'methods', scopeType: 'user', scopeId: 'u1', embedding: [0, 1, 0] });
+      const gone = db.createMemory({ text: 'soft-deleted', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 0, 1] });
+      db.deactivateMemoriesByPattern('soft-deleted'); // is_active = 0 → must be excluded
+
+      const all = db.listAllActiveMemories();
+      const ids = all.map(m => m.id);
+      expect(ids).not.toContain(gone);          // inactive excluded
+      expect(ids).toContain(a);
+      expect(ids).toContain(b);                  // spans scopes (context + user)
+      // Newest first (b created after a).
+      expect(ids.indexOf(b)).toBeLessThan(ids.indexOf(a));
+
+      // Limit clamp: <1 → 1; a huge/NaN value is clamped, never throws.
+      expect(db.listAllActiveMemories(0)).toHaveLength(1);
+      expect(db.listAllActiveMemories(Number.NaN).length).toBeGreaterThan(0);
+      expect(() => db.listAllActiveMemories(10 ** 9)).not.toThrow();
+    });
+  });
 });

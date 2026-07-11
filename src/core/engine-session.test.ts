@@ -1194,19 +1194,52 @@ describe('Engine + Session (Orchestrator)', () => {
       }
     });
 
-    it('clean input still gets the tagging instruction but no forgery warning', async () => {
+    it('clean input gets the tagging instruction + the always-on forgery guard, but fires no security event', async () => {
       const { session } = await createEngineAndSession();
       mockGetMessages.mockReturnValue([
         { role: 'user', content: 'plain conversation, nothing forged here' },
       ]);
       const runSpy = vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
+      const events: Array<{ source?: string }> = [];
+      const onMsg = (m: unknown): void => { events.push(m as { source?: string }); };
+      channels.securityInjection.subscribe(onMsg);
+      try {
+        const res = await session.compact();
+        expect(res.success).toBe(true);
+        const prompt = String(runSpy.mock.calls.at(-1)?.[0] ?? '');
+        expect(prompt).toContain('<fact kind=');
+        // The forgery guard is now UNCONDITIONAL — a structural defense (detection can
+        // miss), so it is present even on clean input...
+        expect(prompt).toContain('NOT engine markers');
+        // ...but nothing forged was detected, so no security event fires.
+        expect(events.some(e => e.source === 'compaction')).toBe(false);
+        // tool_verified is no longer offered as a self-assignable summary kind (Wave-0.6-aligned).
+        expect(prompt).not.toContain('a tool result confirmed it');
+        // AC6: tagging must NOT cause the summarizer to drop/disown open tasks.
+        expect(prompt).toContain('do not drop or disown');
+      } finally {
+        channels.securityInjection.unsubscribe(onMsg);
+      }
+    });
+
+    it('masks secret values the summarizer echoed BEFORE the summary is persisted/returned', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Control the secretStore so the test does not depend on what the test env
+      // happens to register — it asserts the compaction WIRING: the summary is run
+      // through maskSecrets before it is persisted/returned (it rides backup/export
+      // + resume, so a raw secret must not live there).
+      const maskSecrets = vi.fn((t: string) => t.replace('sk-ant-SECRET', '***MASKED***'));
+      vi.spyOn(engine, 'getSecretStore').mockReturnValue(
+        { maskSecrets } as unknown as ReturnType<typeof engine.getSecretStore>,
+      );
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'my key is sk-ant-SECRET' },
+      ]);
+      vi.spyOn(session, 'run').mockResolvedValue('User shared key sk-ant-SECRET for the API.');
       const res = await session.compact();
       expect(res.success).toBe(true);
-      const prompt = String(runSpy.mock.calls.at(-1)?.[0] ?? '');
-      expect(prompt).toContain('<fact kind=');
-      expect(prompt).not.toContain('NOT engine markers');
-      // AC6: tagging must NOT cause the summarizer to drop/disown open tasks.
-      expect(prompt).toContain('do not drop or disown');
+      expect(maskSecrets).toHaveBeenCalledWith('User shared key sk-ant-SECRET for the API.');
+      expect(res.summary).toBe('User shared key ***MASKED*** for the API.');
     });
   });
 

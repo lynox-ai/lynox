@@ -793,6 +793,20 @@ export class AgentMemoryDb {
     return rows.map(r => r.id);
   }
 
+  /**
+   * All active memories, newest first, across every scope (capped). The debug-export
+   * snapshot: it answers "what facts does this tenant's memory hold" for diagnosing
+   * cross-subject bleed / poisoning, so it is deliberately scope-INDEPENDENT (unlike
+   * {@link listActiveMemories}, which the recall path scopes). Reads the legacy store —
+   * write-authoritative and complete regardless of the read-cutover flag.
+   */
+  listAllActiveMemories(limit = 200): MemoryRow[] {
+    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), 1000) : 200;
+    return this.db.prepare(
+      'SELECT * FROM memories WHERE is_active = 1 ORDER BY created_at DESC LIMIT ?',
+    ).all(safeLimit) as MemoryRow[];
+  }
+
   updateMemoryText(
     oldText: string,
     newText: string,
