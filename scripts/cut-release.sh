@@ -431,6 +431,14 @@ DRAFT
   grep -qE "^## v?\[?${VERSION//./\\.}" "$changelog" || die "CHANGELOG no longer contains $VERSION section after edit (aborting)"
 
   c_green "  CHANGELOG updated"
+
+  # Website changelog reminder (belt to the release-web.yml guard). The public
+  # /changelog page (pro/packages/web/src/data/changelog.ts) is curated separately
+  # and does NOT auto-derive from this file. release-web.yml FAILS the production
+  # web deploy if changelog.ts omits this release, so add the entry before
+  # publishing — the /release-cut skill §5b does this. (Engine-only cut: a
+  # standalone pro web PR for just the changelog.ts entry.)
+  c_yellow "  ↳ REMINDER: add the v$VERSION entry to pro/packages/web/src/data/changelog.ts (bilingual, jargon-light) — release-web.yml blocks the web deploy without it."
 }
 
 # ─────────────────────────────────────────────────────────────────────
