@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.5.0 — 2026-07-11
+
+This release makes the agent's long-term memory trustworthy. You can now permanently delete what it remembers; its recall on hosted instances no longer silently loses a new memory or fails to erase a deleted one; and an instance migrated from self-hosting keeps the memories it recalls from. Compaction is hardened — a summary can no longer smuggle a tool result in as a verified fact, and secrets are masked before a summary is stored — and the debug export now carries a privacy-safe snapshot of memory state so recall issues can actually be diagnosed. Groundwork for a larger memory-quality rework ships behind a default-off flag with no behaviour change. **No engine.db migration** — rollback to 2.4.0 is a clean image swap.
+
+### Added
+- **Permanent memory deletion (GDPR Art. 17).** Deleting a memory from the UI now physically erases its text and embedding from every store behind a confirmation — not just a soft hide — and reaches document-ingested entries that previously had no delete path at all. The agent's own `memory_delete` stays a recoverable soft-delete for curation, so a stray tool call can never hard-wipe a namespace. (#938)
+- **A memory snapshot in the debug export.** The thread debug export now carries knowledge-graph stats and a capped set of active memories with their provenance, plus a sharing notice. Secrets are masked; it is your own data, exported by you. (#940)
+
+### Fixed
+- **Hosted recall no longer drifts silently.** On hosted instances that read from the mirrored graph store, a write that failed to mirror (leaving a memory that could never be recalled) and a delete that failed to mirror (leaving one that could never be erased) were both swallowed and reported as success. They now surface loudly, and an erase fails closed rather than half-completing. (#938)
+- **Migrated instances keep their recall memory.** The migration export now includes the flat-file memory tree, so a self-hosted → managed transfer no longer arrives with `memory_recall` / `memory_list` empty. (#936)
+- **Compaction can't launder a tool result into a verified fact.** The summarizer no longer tags recalled facts as tool-verified, its forgery guard is always on, and secrets are masked before the summary is written. (#940)
+
+### Notes
+- **Memory self-reinforcement emergency-stop ships dormant.** The groundwork that stops the retrieval loop from endlessly re-confirming its own recalls is present behind `memory_scoring_v2` (default off) — no behaviour change until a tenant is opted in. (#937)
+
 ## 2.4.0 — 2026-07-09
 
 This release cuts what long conversations cost and makes compaction something you can rely on rather than something that happens to you. The summarizer that condenses a long thread now runs on a cheaper model tier by default, which is roughly a four-fold cut in what each compaction costs. The summary it produces is now written down durably, so resuming a compacted thread rebuilds context from that summary plus every message since it, instead of a fixed window of the last 40. The "prepare & compact" offer no longer gets skipped when a single large turn vaults straight past the threshold. And the agent now checks that an integration actually exists before it asks you for that integration's credential. **No engine.db migration** — rollback to 2.3.1 is a clean image swap.
