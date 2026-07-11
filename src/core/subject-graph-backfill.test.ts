@@ -202,4 +202,29 @@ describe('SubjectGraphBackfill (Foundation Rework v2 — S2 Template A)', () => 
     expect((engineDb.getDb().prepare('SELECT COUNT(*) n FROM memories').get() as { n: number }).n).toBe(0);
     engineDb.close(); memoryDb.close();
   });
+
+  it('carries Wave-1 evidence columns from legacy through the backfill into the engine.db stub (§6b GO-cond 3)', () => {
+    // The read-primary trap §1 names: if the backfill did not thread the evidence, the
+    // engine.db-primary fleet (and the post-DROP re-derive) would never see it. Assert the
+    // carry-through end-to-end on a POPULATED legacy row.
+    const { engineDb, memoryDb } = setup();
+    const mem = memoryDb.createMemory({
+      text: 'The board approved the Helsinki datacenter build.',
+      namespace: 'business', scopeType: 'global', scopeId: 'g',
+      sourceType: 'user_asserted', sourceChannel: 'ui', sourceUntrusted: false,
+      embeddingModel: 'multilingual-e5-small', embedding: [0.1, 0.2, 0.3],
+    });
+    memoryDb.createMention(mem, entity(memoryDb, 'Helsinki', 'organization'));
+
+    new SubjectGraphBackfill(engineDb, memoryDb).run({ includeMemories: true });
+
+    const raw = engineDb.getDb()
+      .prepare('SELECT source_channel, source_untrusted, embedding_model, source_type FROM memories WHERE id = ?')
+      .get(mem) as { source_channel: string | null; source_untrusted: number; embedding_model: string | null; source_type: string };
+    expect(raw).toEqual({
+      source_channel: 'ui', source_untrusted: 0,
+      embedding_model: 'multilingual-e5-small', source_type: 'user_asserted',
+    });
+    engineDb.close(); memoryDb.close();
+  });
 });

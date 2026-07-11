@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent } from '../types/index.js';
+import { wrapUntrustedData } from './data-boundary.js';
 
 // === Mocks ===
 
@@ -47,6 +48,10 @@ vi.mock('./observability.js', () => ({
     // H-024 shadow mode: ToolCallTracker.checkAnomaly publishes here on
     // detection. `hasSubscribers: true` so the gate inside checkAnomaly fires.
     securityFlagged: { hasSubscribers: true, publish: vi.fn() },
+    // scanToolResult publishes here when a tool result trips injection detection —
+    // which a wrapUntrustedData-wrapped result does (its closing tag reads as a
+    // boundary-escape). Must exist so scanning a wrapped result doesn't throw.
+    securityInjection: { hasSubscribers: false, publish: vi.fn() },
   },
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
@@ -383,7 +388,7 @@ describe('Agent', () => {
       });
       const result = await agent.send('Question');
       expect(result).toBe('The answer is 42');
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined);
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined);
     });
 
     it('max_tokens with continuationPrompt: continues the loop', async () => {
@@ -2913,4 +2918,64 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
   // 'flag ON + non-direct provider (custom) → full flat set, NO tool-search
   // tool, NO defer_loading, NO advanced-tool-use beta' (~line 2596) — no
   // duplicate needed.
+});
+
+describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('sets sawUntrustedData when a tool result carries the untrusted marker, and LATCHES it past the run', async () => {
+    // Regression guard: the flag is a RUN-SCOPED LATCH that spawn.ts reads AFTER
+    // `await child.send()` resolves. Resetting it in send()'s finally (the original
+    // bug) made the spawn child→parent taint propagation dead code (fail-open).
+    // Benign content: the marker (not injection heuristics) is what sets the latch, and
+    // benign text keeps scanToolResult off its injection branch (which would hit an
+    // observability channel this suite's partial mock omits — a test-harness quirk, not
+    // a prod path). The marker→latch mechanism is the same for benign or hostile content.
+    const fetchTool = makeTool('fetch_page', vi.fn().mockResolvedValue(
+      wrapUntrustedData('The datacenter migration is scheduled for next Tuesday.', 'http'),
+    ));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'fetch_page', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [fetchTool] });
+    expect(agent.sawUntrustedData).toBe(false);
+    await agent.send('fetch that page');
+    // Survives the finally — this is what spawn.ts:532 depends on.
+    expect(agent.sawUntrustedData).toBe(true);
+  });
+
+  it('re-arms (resets to false) at the next run entry — a clean run is not tainted by a prior one', async () => {
+    const fetchTool = makeTool('fetch_page', vi.fn().mockResolvedValue(
+      wrapUntrustedData('The datacenter migration is scheduled for next Tuesday.', 'http'),
+    ));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'fetch_page', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [fetchTool] });
+    await agent.send('fetch');
+    expect(agent.sawUntrustedData).toBe(true);
+
+    // A fresh, clean run re-arms the latch at entry.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('clean answer'));
+    await agent.send('just say hi');
+    expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('stays clean when a tool result carries NO untrusted marker', async () => {
+    const plainTool = makeTool('calc', vi.fn().mockResolvedValue('the answer is 42'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'calc', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [plainTool] });
+    await agent.send('do math');
+    expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('noteUntrustedData() latches the flag (spawn propagates a shared-Memory child\'s taint here)', () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    expect(agent.sawUntrustedData).toBe(false);
+    agent.noteUntrustedData();
+    expect(agent.sawUntrustedData).toBe(true);
+  });
 });

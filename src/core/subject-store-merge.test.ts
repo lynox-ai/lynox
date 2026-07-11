@@ -32,10 +32,10 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
 
   // ── migration v7 ────────────────────────────────────────────────
 
-  it('migration v7 adds merged_into (schema at version 7)', () => {
+  it('migration v7 adds merged_into (schema at latest version)', () => {
     const { db, engine } = makeStore();
     const v = (db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
-    expect(v).toBe(7);
+    expect(v).toBe(8); // v8 (memories evidence columns) is the latest migration
     const cols = (db.prepare("PRAGMA table_info('subjects')").all() as Array<{ name: string }>).map(c => c.name);
     expect(cols).toContain('merged_into');
     engine.close();

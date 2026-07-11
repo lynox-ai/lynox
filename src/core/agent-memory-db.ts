@@ -46,6 +46,13 @@ export interface MemoryRow {
   // v5 provenance lifecycle — present on every row (NOT NULL DEFAULT backfill).
   source_type: string;
   source_tool_name: string | null;
+  // v6 Wave 1 evidence — the derivation inputs for source_type. Optional on the row
+  // type (like `subject_id`): the write path always sets them, but not every recall
+  // SELECT projects them. `source_channel` is NULL on pre-evidence (v5-era) rows;
+  // `source_untrusted` DEFAULT 0. `embedding_model` (§1.7) is the vector-space identity.
+  source_channel?: string | null | undefined;
+  source_untrusted?: number | undefined;
+  embedding_model?: string | null | undefined;
   // Foundation Rework v2 — Context-Hierarchy Scoping (Slice C). The engine.db recall
   // path (MemoryGraphStore) projects the memory's PRIMARY subject (the thread anchor
   // it inherited in Slice B, or the person/org heuristic pick) so retrieval can weight
@@ -267,6 +274,24 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
    ALTER TABLE memories ADD COLUMN source_type TEXT NOT NULL DEFAULT 'agent_inferred';
    ALTER TABLE memories ADD COLUMN source_tool_name TEXT;`,
+
+  // v6 (Memory Wave 1 — evidence): the write channel + the untrusted signal. Both are
+  // DERIVATION INPUTS (PRD §1/§3): `source_type` becomes a pure function of them at the
+  // store boundary, so the tier is re-derivable and never the only thing stored. Additive
+  // ALTER (never edit the applied v1 CREATE — migrations track by version and a column
+  // added to v1 would collide with this ALTER on a fresh DB). `source_channel` is
+  // NULLABLE: pre-evidence rows keep NULL and their v5-stamped `source_type` — they are
+  // NOT retroactively re-derived (a batch re-derive floors NULL-channel rows per §3 rule 5,
+  // so it must skip them). `source_untrusted` DEFAULT 0 — a pre-existing row is not marked
+  // untrusted. `embedding_model` records WHICH model produced this row's vector (§1.7):
+  // there is no re-embed path, so a silent embedding-default change would otherwise
+  // orphan row↔vector-space identity irreversibly — the Wave-2 floor binds to it. NULL on
+  // pre-evidence rows (their model is reconstructible from the then-current config).
+  // Mirrors engine.db v8.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+   ALTER TABLE memories ADD COLUMN source_channel TEXT;
+   ALTER TABLE memories ADD COLUMN source_untrusted INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE memories ADD COLUMN embedding_model TEXT;`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -618,6 +643,11 @@ export class AgentMemoryDb {
     sourceThreadId?: string | undefined;
     sourceType?: ProvenanceKind | undefined;
     sourceToolName?: string | undefined;
+    // Wave 1 evidence (persisted so `source_type` stays a re-derivable pure function).
+    sourceChannel?: string | undefined;
+    sourceUntrusted?: boolean | undefined;
+    // Wave 1.7: the embedding model identity this row's vector lives in (no re-embed path).
+    embeddingModel?: string | undefined;
     provider?: string | undefined;
     embedding: number[];
   }): string {
@@ -627,13 +657,16 @@ export class AgentMemoryDb {
 
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_run_id,
-        source_thread_id, source_type, source_tool_name, provider, embedding, confidence,
+        source_thread_id, source_type, source_tool_name, source_channel, source_untrusted,
+        embedding_model, provider, embedding, confidence,
         is_active, retrieval_count, confirmation_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
     `).run(
       id, props.text, props.namespace, props.scopeType, props.scopeId,
       props.sourceRunId ?? null, props.sourceThreadId ?? null,
       props.sourceType ?? DEFAULT_PROVENANCE_KIND, props.sourceToolName ?? null,
+      props.sourceChannel ?? null, props.sourceUntrusted ? 1 : 0,
+      props.embeddingModel ?? null,
       props.provider ?? 'onnx', embBlob, now, now,
     );
 

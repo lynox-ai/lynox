@@ -177,6 +177,23 @@ ${safe}
 }
 
 /**
+ * The opening marker of a {@link wrapUntrustedData} / {@link wrapChannelMessage} block.
+ * A tool result carrying it came from wrapped, untrusted external content.
+ */
+export const UNTRUSTED_DATA_MARKER = '<untrusted_data';
+
+/**
+ * Does a (masked, scanned) tool result contain the untrusted-data boundary marker?
+ * The Wave-1.2 write-side untrusted signal (PRD §1.2) is set on this CONTENT predicate —
+ * not a tool-name allowlist — so any wrapped external content taints the turn's extracted
+ * memory, and a future untrusted-emitting tool needs no separate registration. The marker
+ * survives secret-masking and `scanToolResult` (both preserve the wrapped body).
+ */
+export function containsUntrustedMarker(toolResult: string): boolean {
+  return toolResult.includes(UNTRUSTED_DATA_MARKER);
+}
+
+/**
  * Wrap a channel message (mail/google) as a single
  * `<untrusted_data>` block. Use this when there are multiple
  * attacker-controllable fields (subject, sender, body, caption, title) —

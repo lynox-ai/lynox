@@ -11,7 +11,7 @@
  * Must run OFF the request path (fire-and-forget): each `store()` embeds and may
  * entity-extract, which must not block the chat turn.
  */
-import type { MemoryNamespace, MemoryScopeRef, ProvenanceKind } from '../types/memory.js';
+import type { MemoryNamespace, MemoryScopeRef } from '../types/memory.js';
 
 /** The minimal slice of KnowledgeLayer this module needs (keeps it testable). */
 export interface DocumentMemorySink {
@@ -21,7 +21,9 @@ export interface DocumentMemorySink {
 		scope: MemoryScopeRef,
 		options?: {
 			sourceThreadId?: string | undefined;
-			sourceType?: ProvenanceKind | undefined;
+			// Wave 1.3: report the write channel; the tier is derived at the store boundary.
+			sourceChannel?: string | undefined;
+			sourceUntrusted?: boolean | undefined;
 			sourceToolName?: string | undefined;
 		},
 	): Promise<unknown>;
@@ -98,7 +100,10 @@ export async function ingestDocumentText(
 	for (const chunk of chunks) {
 		await sink.store(`[Document: ${params.fileName}]\n${chunk}`, 'knowledge', params.scope, {
 			sourceThreadId: params.threadId,
-			sourceType: 'external_unverified',
+			// An uploaded document is untrusted external content → `upload` channel +
+			// untrusted → external_unverified (Wave 1.3 §3; rule 1 and rule 3 agree here).
+			sourceChannel: 'upload',
+			sourceUntrusted: true,
 			sourceToolName: 'document_upload',
 		});
 		stored++;

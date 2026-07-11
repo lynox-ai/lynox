@@ -246,18 +246,20 @@ describe('KnowledgeLayer', () => {
     expect(ctx).not.toContain('<fact kind="tool_verified">wired');
   });
 
-  it('round-trips a stored sourceType through retrieve → <fact> marker (DB→candidate→marker)', async () => {
+  it('round-trips a DERIVED sourceType through retrieve → <fact> marker (evidence→DB→candidate→marker)', async () => {
     // Self-contained layer (1 memory, threshold 0) so the assertion is
     // deterministic — independent of the shared layer's accumulated memories
     // and retrieve ranking. Exercises the real `row.source_type as
-    // ProvenanceKind` → ScoredCandidate.sourceType plumbing, not a hand-fed kind.
+    // ProvenanceKind` → ScoredCandidate.sourceType plumbing — and now also that the
+    // tier is DERIVED from the write-boundary channel (Wave 1.3), not caller-declared:
+    // sourceChannel:'ui' → user_asserted.
     const rtDir = await mkdtemp(join(tmpdir(), 'lynox-kl-rt-'));
     const rt = new KnowledgeLayer(join(rtDir, 'rt.db'), new LocalProvider());
     await rt.init();
     try {
       await rt.store(
         'The Helsinki datacenter contract was signed by the user on a sales call.',
-        'knowledge', scope, { sourceType: 'user_asserted' },
+        'knowledge', scope, { sourceChannel: 'ui' },
       );
       const result = await rt.retrieve('Helsinki datacenter contract signed', [scope], {
         topK: 10, threshold: 0, useHyDE: false, useGraphExpansion: false,

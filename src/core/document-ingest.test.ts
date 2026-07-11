@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { chunkDocumentText, ingestDocumentText, pickDocumentScope, type DocumentMemorySink } from './document-ingest.js';
-import type { MemoryNamespace, MemoryScopeRef, ProvenanceKind } from '../types/memory.js';
+import type { MemoryNamespace, MemoryScopeRef } from '../types/memory.js';
 
 describe('chunkDocumentText', () => {
 	it('returns [] for empty / whitespace-only text', () => {
@@ -34,7 +34,7 @@ interface RecordedCall {
 	text: string;
 	namespace: MemoryNamespace;
 	scope: MemoryScopeRef;
-	options?: { sourceThreadId?: string; sourceType?: ProvenanceKind; sourceToolName?: string };
+	options?: { sourceThreadId?: string; sourceChannel?: string; sourceUntrusted?: boolean; sourceToolName?: string };
 }
 
 function fakeSink(): { sink: DocumentMemorySink; calls: RecordedCall[] } {
@@ -81,7 +81,10 @@ describe('ingestDocumentText', () => {
 			expect(c.namespace).toBe('knowledge');
 			expect(c.scope).toBe(scope);
 			expect(c.text.startsWith('[Document: report.pdf]\n')).toBe(true);
-			expect(c.options?.sourceType).toBe('external_unverified');
+			// Wave 1.3: the sink reports EVIDENCE (upload channel + untrusted), and the tier
+			// is derived downstream at the store boundary (→ external_unverified).
+			expect(c.options?.sourceChannel).toBe('upload');
+			expect(c.options?.sourceUntrusted).toBe(true);
 			expect(c.options?.sourceToolName).toBe('document_upload');
 			expect(c.options?.sourceThreadId).toBe('th-9');
 		}

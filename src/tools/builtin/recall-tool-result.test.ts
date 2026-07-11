@@ -28,10 +28,15 @@ function storeWithOneBlob(): { store: ToolResultBlobStore; id: string; payload: 
 }
 
 describe('recallToolResultTool', () => {
-  it('returns the payload for a retained id', async () => {
+  it('returns the retained payload, re-marked untrusted (Wave 1.2 replay a)', async () => {
     const { store, id, payload } = storeWithOneBlob();
     const result = await recallToolResultTool.handler({ id }, makeAgent(store));
-    expect(result).toBe(payload);
+    // The raw evicted payload carried no untrusted marker (a real fetch tool would have
+    // wrapped it before returning); recall re-marks it so replaying the blob on a later
+    // turn re-taints that turn — a memory extracted after a recall must not look clean.
+    expect(result).toContain(payload);
+    expect(result).toContain('<untrusted_data');
+    expect(result).toContain('recalled:http_request');
   });
 
   it('returns a clear re-run message for an unknown id (not an error)', async () => {

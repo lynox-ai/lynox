@@ -183,6 +183,13 @@ export interface IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
+   *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
+   *  that shares its Memory. */
+  readonly sawUntrustedData?: boolean | undefined;
+  /** Wave 1.2: mark this run as having seen untrusted content — used by spawn to
+   *  propagate a shared-Memory child's taint onto the parent. */
+  noteUntrustedData?(): void;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
   readonly userId?: string | undefined;

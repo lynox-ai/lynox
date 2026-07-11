@@ -523,6 +523,16 @@ async function executeThinker(
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
 
+    // Wave 1.2 replay (b): a spawned child shares the parent's Memory by default
+    // (`memory` above resolves to `parentAgent.memory` unless `isolated_memory`). If the
+    // child read untrusted content, the SHARED Memory is now tainted for the parent too —
+    // propagate the flag so the parent's own end-of-run extraction abstains. Without this
+    // the child's untrusted read is a fail-open hole in the parent's memory. No-op when
+    // the child ran with isolated memory (`memory === undefined`).
+    if (memory !== undefined && childAgent.sawUntrustedData) {
+      parentAgent.noteUntrustedData?.();
+    }
+
     // T2-X1 part 5: record the child's actual LLM spend into the same
     // `runs` table the daily/monthly cost-cap aggregator reads. The
     // session-budget pre-flight already reserved an *estimate* (see

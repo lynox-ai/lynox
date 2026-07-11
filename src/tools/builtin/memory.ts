@@ -1,7 +1,7 @@
 import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
-import { parseScopeString, formatScopeRef, isMoreSpecific } from '../../core/scope-resolver.js';
+import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
@@ -247,7 +247,7 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
         content: { type: 'string', description: 'Content to store' },
         scope: {
           type: 'string',
-          description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
+          description: SCOPE_PARAM_DESCRIPTION,
         },
       },
       required: ['namespace', 'content'],
@@ -274,12 +274,12 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     // Wave 1.3 re-derives the tier from the write-boundary channel, not the agent.
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceType: 'agent_inferred' });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceType: 'agent_inferred' });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };
@@ -303,7 +303,7 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         },
         scope: {
           type: 'string',
-          description: 'Scope to recall from. Format: "type:id" (e.g., "user:alex", "global"). Default: current project scope.',
+          description: `Scope to recall from. ${SCOPE_PARAM_DESCRIPTION}`,
         },
       },
       required: ['namespace'],
@@ -378,7 +378,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
         pattern: { type: 'string', description: 'Text pattern — lines containing this will be removed' },
         scope: {
           type: 'string',
-          description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
+          description: SCOPE_PARAM_DESCRIPTION,
         },
       },
       required: ['namespace', 'pattern'],
@@ -454,7 +454,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         new_content: { type: 'string', description: 'Replacement text' },
         scope: {
           type: 'string',
-          description: 'Scope: "organization" (all projects), "user:name" (personal), or omit for current project.',
+          description: SCOPE_PARAM_DESCRIPTION,
         },
       },
       required: ['namespace', 'old_content', 'new_content'],
@@ -557,7 +557,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         scopeId: defaultScope.id,
         sourceThreadId: agent.currentThreadId,
         // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
-        sourceType: 'agent_inferred',
+        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
       });
     }
 
@@ -599,7 +599,7 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
         },
         scope: {
           type: 'string',
-          description: 'Filter by scope. Format: "type:id" (e.g., "user:alex", "global"). Omit to list all active scopes.',
+          description: 'Filter by scope. Format: "context:<id>" (a project), "user:<name>", or "global". Omit to list all active scopes.',
         },
         pattern: {
           type: 'string',
@@ -690,11 +690,11 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         },
         from_scope: {
           type: 'string',
-          description: 'Source scope. Format: "type:id" (e.g., "project:abc123").',
+          description: 'Source scope to promote FROM (the narrower one). Format: "context:<id>" (a project) or "user:<name>".',
         },
         to_scope: {
           type: 'string',
-          description: 'Target scope (must be broader). Format: "type:id" (e.g., "organization:acme").',
+          description: 'Target scope to promote TO (must be broader). Format: "global" (all projects) or "context:<id>".',
         },
       },
       required: ['namespace', 'content_pattern', 'from_scope', 'to_scope'],
@@ -746,7 +746,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       // isn't available from the flat-file line without a KG lookup, so the
       // re-embedded copy lands at the conservative default — never falsely
       // elevated to tool_verified.
-      sourceType: 'agent_inferred',
+      sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
     });
 
     // Remove from source scope + sync graph
