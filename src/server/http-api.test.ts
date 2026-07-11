@@ -3013,6 +3013,39 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('includes a retention-safe memory snapshot (KG stats + active memories) + sharing notice, secret-scrubbed', async () => {
+      const KEY = 'sk-ant-api03-ZYXWVUTSRQPONMLKJIHGFEDCBA'; // matches a SECRET_PATTERN
+      const kg = {
+        stats: async () => ({ memoryCount: 2, entityCount: 1, relationCount: 0, communityCount: 0 }),
+        getDb: () => ({
+          listAllActiveMemories: () => [
+            { text: `client fact with ${KEY}`, namespace: 'knowledge', scope_type: 'context', scope_id: 'http-api', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.75, confirmation_count: 3, created_at: '2026-07-10T00:00:00Z' },
+          ],
+        }),
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [] }),
+        getKnowledgeLayer: () => kg,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          sharing_notice: string;
+          memory: { kg_stats: { memoryCount: number }; active_memories_shown: number; active_memories: Array<{ source_type: string; scope: string }> };
+        };
+        // The poisoning-diagnostic snapshot: what facts memory holds + how they're classified.
+        expect(body.memory.kg_stats.memoryCount).toBe(2);
+        expect(body.memory.active_memories_shown).toBe(1);
+        expect(body.memory.active_memories[0]!.source_type).toBe('agent_inferred');
+        expect(body.memory.active_memories[0]!.scope).toBe('context:http-api');
+        // Consent notice present (the PII policy: user's own data, share with care).
+        expect(body.sharing_notice).toContain('Share it only with recipients you trust');
+        // Secrets in the memory text are still scrubbed by the whole-bundle pass.
+        expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+
     it('Tier 2: parses composition, derives cache-hit, surfaces compaction events + cost rollup', async () => {
       const composition = { messageCount: 12, totalBytes: 480_000, categories: { toolResult: 400_000 } };
       const runHistory = {
