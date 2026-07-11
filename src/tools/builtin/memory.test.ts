@@ -1,7 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, memoryListTool, memoryPromoteTool } from './memory.js';
-import type { IAgent } from '../../types/index.js';
+import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
+
+/** A KG stub exposing only the two delete-path methods the memory tools call. */
+function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'deactivateByPattern'>> = {}): IKnowledgeLayer {
+  return {
+    eraseByPattern: vi.fn(async () => 0),
+    deactivateByPattern: vi.fn(async () => 0),
+    ...overrides,
+  } as unknown as IKnowledgeLayer;
+}
 
 vi.mock('../../core/observability.js', () => ({
   channels: {
@@ -347,6 +356,92 @@ describe('memoryDeleteTool', () => {
       agent,
     );
     expect(result).toBe('Memory is not configured for this agent.');
+  });
+
+  it('SOFT-deactivates the KG (curation, recoverable) — never the hard erase', async () => {
+    // The agent tool is least-privilege: it deactivates (is_active = 0), it must NOT
+    // call the irreversible eraseByPattern — that is the human-gated UI path only.
+    const deactivate = vi.fn().mockResolvedValue(2);
+    const erase = vi.fn();
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(2) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: deactivate, eraseByPattern: erase });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'old stuff' },
+      agent,
+    );
+    expect(deactivate).toHaveBeenCalledWith('old stuff', 'knowledge');
+    expect(erase).not.toHaveBeenCalled();
+    expect(result).toBe('Removed 2 entries matching "old stuff" from knowledge.');
+  });
+
+  it('deactivates the KG UNCONDITIONALLY — even when the flat-file matched 0 lines (document-ingest rows)', async () => {
+    const deactivate = vi.fn().mockResolvedValue(2);
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(0) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: deactivate });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'ingested doc fact' },
+      agent,
+    );
+    // The old `if (count > 0)` gate skipped the KG for these rows; now it runs on a
+    // 0-line flat-file match and the count falls back to the KG (not "nothing found").
+    expect(deactivate).toHaveBeenCalledWith('ingested doc fact', 'knowledge');
+    expect(result).toBe('Removed 2 entries matching "ingested doc fact" from knowledge.');
+  });
+
+  it('uses the singular "entry" for a single removed memory', async () => {
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(1) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: vi.fn().mockResolvedValue(1) });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'one thing' },
+      agent,
+    );
+    expect(result).toBe('Removed 1 entry matching "one thing" from knowledge.');
+  });
+
+  it('passes the scope through to the flat-file delete and labels the message', async () => {
+    const deleteScoped = vi.fn().mockResolvedValue(1);
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ deleteScoped })),
+      activeScopes: [{ type: 'user', id: 'alex' }],
+    };
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: vi.fn().mockResolvedValue(1) });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'personal fact', scope: 'user:alex' },
+      agent,
+    );
+    expect(deleteScoped).toHaveBeenCalledWith('knowledge', 'personal fact', { type: 'user', id: 'alex' });
+    expect(result).toBe('Removed 1 entry matching "personal fact" from knowledge (scope: user:alex).');
+  });
+
+  it('refuses an empty/whitespace pattern (would substring-match every line)', async () => {
+    const deleteFn = vi.fn();
+    const agent = makeAgent(makeMockMemory({ delete: deleteFn }));
+    agent.toolContext.knowledgeLayer = makeKg();
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: '   ' },
+      agent,
+    );
+    expect(result).toBe('A non-empty pattern is required to delete.');
+    expect(deleteFn).not.toHaveBeenCalled(); // never reached the store
+  });
+
+  it('reports a partial failure (NOT success) when the recall-mirror reap throws', async () => {
+    const deactivate = vi.fn().mockRejectedValue(new Error('engine.db locked'));
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(1) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: deactivate });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'stubborn fact' },
+      agent,
+    );
+    // A swallowed reap failure would leave the content recallable — the tool must own up.
+    expect(result).toContain('recall mirror could not be updated');
+    expect(result).not.toContain('Removed 1');
   });
 });
 

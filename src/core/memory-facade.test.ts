@@ -11,12 +11,13 @@ import type { KnowledgeLayer } from './knowledge-layer.js';
  * knowledge layer (the recall authority), so a UI edit/delete actually changes what
  * the agent recalls. These pin the sync matrix + the empty-oldText guard (the T1 bug).
  */
-interface KgCalls { store: string[]; deactivate: string[]; update: Array<[string, string]> }
+interface KgCalls { store: string[]; deactivate: string[]; erase: string[]; update: Array<[string, string]> }
 function spyKg(opts: { throws?: boolean } = {}): { kg: KnowledgeLayer; calls: KgCalls } {
-  const calls: KgCalls = { store: [], deactivate: [], update: [] };
+  const calls: KgCalls = { store: [], deactivate: [], erase: [], update: [] };
   const kg = {
     store: async (text: string): Promise<unknown> => { if (opts.throws) throw new Error('kg down'); calls.store.push(text); return {}; },
     deactivateByPattern: async (pattern: string): Promise<number> => { if (opts.throws) throw new Error('kg down'); calls.deactivate.push(pattern); return 1; },
+    eraseByPattern: async (pattern: string): Promise<number> => { if (opts.throws) throw new Error('kg down'); calls.erase.push(pattern); return 1; },
     updateMemoryText: async (o: string, n: string): Promise<boolean> => { if (opts.throws) throw new Error('kg down'); calls.update.push([o, n]); return true; },
   } as unknown as KnowledgeLayer;
   return { kg, calls };
@@ -35,17 +36,27 @@ describe('MemoryFacade — doc↔KG mutation sync', () => {
     expect(calls.store).toEqual(['user prefers TypeScript']);
   });
 
-  it('delete removes matching doc lines AND deactivates the KG twins (only when a line matched)', async () => {
+  it('delete removes matching doc lines AND hard-erases the KG twins (unconditionally — even with no doc match)', async () => {
     await memory.append('knowledge', 'fact about Acme');
     const { kg, calls } = spyKg();
     const facade = new MemoryFacade(memory, kg);
     const n = await facade.delete('knowledge', 'Acme');
     expect(n).toBe(1);
     expect(await memory.load('knowledge') ?? '').not.toContain('Acme');
-    expect(calls.deactivate).toEqual(['Acme']);
-    // no doc match → no KG deactivation
+    expect(calls.erase).toEqual(['Acme']);
+    // No flat-file match STILL erases the KG: a document-ingest row has no flat-file
+    // twin, so the old `if (count > 0)` gate is exactly what left it unforgettable.
     await facade.delete('knowledge', 'nonexistent');
-    expect(calls.deactivate).toEqual(['Acme']);
+    expect(calls.erase).toEqual(['Acme', 'nonexistent']);
+  });
+
+  it('delete refuses an empty/whitespace pattern — no doc wipe, no KG erase', async () => {
+    await memory.append('knowledge', 'keep me safe');
+    const { kg, calls } = spyKg();
+    const n = await new MemoryFacade(memory, kg).delete('knowledge', '   ');
+    expect(n).toBe(0);
+    expect(await memory.load('knowledge')).toContain('keep me safe'); // NOT wiped
+    expect(calls.erase).toEqual([]);
   });
 
   it('update rewrites the doc AND the KG when the old text exists', async () => {
@@ -89,12 +100,16 @@ describe('MemoryFacade — doc↔KG mutation sync', () => {
     expect(calls.store).toEqual(['fresh fact']);
   });
 
-  it('a KG failure never fails delete or update either (all mirror paths best-effort)', async () => {
+  it('a KG erase failure FAILS the delete (erasure is not best-effort) — update stays best-effort', async () => {
     await memory.append('knowledge', 'budget is 5000');
     const { kg } = spyKg({ throws: true });
     const facade = new MemoryFacade(memory, kg);
+    // update is a soft mirror → a KG hiccup must not fail the user's edit.
     await expect(facade.update('knowledge', 'budget is 5000', 'budget is 8000')).resolves.toBe(true);
-    await expect(facade.delete('knowledge', 'budget')).resolves.toBe(1);
+    // delete is erasure → a swallowed reap leaves content recallable, so it MUST surface.
+    await expect(facade.delete('knowledge', 'budget')).rejects.toThrow('kg down');
+    // The flat-file line was still removed BEFORE the KG reap threw (the doc is the
+    // source of truth); the rejection is the recall-mirror half, which the caller sees.
     expect(await memory.load('knowledge') ?? '').not.toContain('budget');
   });
 

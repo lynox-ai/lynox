@@ -389,30 +389,48 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
       return 'Memory is not configured for this agent.';
     }
 
+    // An empty/whitespace pattern would substring-match (and thus remove) EVERYTHING —
+    // never the intent, and a prompt-injected empty pattern must not wipe the notebook.
+    if (!input.pattern.trim()) {
+      return 'A non-empty pattern is required to delete.';
+    }
+
     const scopeRef = resolveScope(input.scope, agent);
     if (input.scope && !scopeRef) {
       return `Invalid or unauthorized scope: "${input.scope}".`;
     }
 
-    if (scopeRef) {
-      const count = await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef);
-      // Sync: deactivate matching memories in Knowledge Graph
-      if (count > 0 && agent.toolContext.knowledgeLayer) {
-        void agent.toolContext.knowledgeLayer.deactivateByPattern(input.pattern, input.namespace).catch(() => {});
-      }
-      return count > 0
-        ? `Removed ${count} line(s) matching "${input.pattern}" from ${input.namespace} (scope: ${input.scope}).`
-        : `No lines matching "${input.pattern}" found in ${input.namespace} (scope: ${input.scope}).`;
-    }
+    const scopeSuffix = input.scope ? ` (scope: ${input.scope})` : '';
+    const flatCount = scopeRef
+      ? await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef)
+      : await agent.memory.delete(input.namespace, input.pattern);
 
-    const count = await agent.memory.delete(input.namespace, input.pattern);
-    // Sync: deactivate matching memories in Knowledge Graph
-    if (count > 0 && agent.toolContext.knowledgeLayer) {
-      void agent.toolContext.knowledgeLayer.deactivateByPattern(input.pattern, input.namespace).catch(() => {});
+    // This is the agent's CURATION path ("remove outdated information"), so it SOFT-
+    // deactivates the knowledge-graph twins (is_active = 0, recoverable) — deliberately
+    // NOT the hard erase. Hard, physical erasure (GDPR Art. 17, irreversible) is a
+    // human-gated action behind the UI confirm dialog (MemoryFacade.delete); routing an
+    // agent-callable tool there would make one prompt-injected call an irreversible
+    // namespace wipe. Run UNCONDITIONALLY (not gated on the flat-file count) so a
+    // document-ingest row with no flat-file twin is deactivated too; awaited + surfaced
+    // so a failed reap does not report a clean success (§0.1 loud contract).
+    const kg = agent.toolContext.knowledgeLayer;
+    if (!kg) {
+      return flatCount > 0
+        ? `Removed ${flatCount} line(s) matching "${input.pattern}" from ${input.namespace}${scopeSuffix}.`
+        : `No lines matching "${input.pattern}" found in ${input.namespace}${scopeSuffix}.`;
     }
-    return count > 0
-      ? `Removed ${count} line(s) matching "${input.pattern}" from ${input.namespace}.`
-      : `No lines matching "${input.pattern}" found in ${input.namespace}.`;
+    try {
+      const deactivated = await kg.deactivateByPattern(input.pattern, input.namespace);
+      // Prefer the flat-file line count (what the agent sees in memory_list), but fall
+      // back to the KG count so a document-ingest row (0 flat-file lines, live KG rows)
+      // is not falsely reported as "nothing found".
+      const total = flatCount > 0 ? flatCount : deactivated;
+      return total > 0
+        ? `Removed ${total} entr${total === 1 ? 'y' : 'ies'} matching "${input.pattern}" from ${input.namespace}${scopeSuffix}.`
+        : `No entries matching "${input.pattern}" found in ${input.namespace}${scopeSuffix}.`;
+    } catch {
+      return `Removed "${input.pattern}" from ${input.namespace}${scopeSuffix}, but the recall mirror could not be updated — it may still surface until it is reconciled. This has been logged.`;
+    }
   },
 };
 

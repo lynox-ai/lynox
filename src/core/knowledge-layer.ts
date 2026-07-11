@@ -368,10 +368,40 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // DROP. The stub always lands (even when the extractor is gated); createdAt carries
       // the legacy row's creation time so the stub time-decays correctly.
       const createdAt = this.db.getMemoryCreatedAt(memoryId);
-      extracted = await this._extractAndPersistToSubjects(
-        trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
-        threadAnchorSubjectId,
-      );
+      // §0.1 (mirror P0): under memoryReadsActive the engine.db stub written here is
+      // the recall-AUTHORITATIVE row — recall reads engine.db primary, and the legacy
+      // fallback (`retrieval-engine.ts`) fires only on a `throw`, never on a row that
+      // was simply never mirrored. A silent failure = a store the fleet can never
+      // recall. Preserve the legacy row (already committed above — no data loss; it
+      // rides backup/export) and surface a HARD, monitorable parity-loss signal so the
+      // Adapter-PR reconcile can repair engine.db. This is NOT the routine best-effort
+      // mirror swallow (that is correct only while legacy is the read authority).
+      let stubWritten = true;
+      try {
+        extracted = await this._extractAndPersistToSubjects(
+          trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
+          threadAnchorSubjectId,
+        );
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('store', memoryId, err);
+        extracted = { resolvedEntities: [], resolvedRelations: [] };
+        stubWritten = false;
+      }
+      // Read-back parity: even without a throw, the stub MUST be present in engine.db
+      // (it always lands on a successful write, even when the extractor is gated). Its
+      // absence is the exact silent-loss the old swallow hid. Only checked when the
+      // write did not already report a loss above (no double signal for one memory),
+      // and the read-back itself is tolerated — a getStub throw must NOT escape store()
+      // and defeat the preserve-and-continue intent.
+      if (stubWritten) {
+        try {
+          if (!this.memoryGraphStore.getStub(memoryId)) {
+            this._reportMirrorParityLoss('store', memoryId, new Error('stub absent in engine.db after write'));
+          }
+        } catch (err: unknown) {
+          this._reportMirrorParityLoss('store', memoryId, err);
+        }
+      }
     } else {
       // Pre-cutover (every current tenant): legacy persist is authoritative (gated), and
       // the engine.db mirror below is an additive dual-write that runs REGARDLESS of the
@@ -1130,6 +1160,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * §0.1 — surface an engine.db recall-parity LOSS as a HARD, monitorable signal,
+   * deliberately distinct from the routine `[lynox:subject-graph] … failed` best-effort
+   * logs (which are correct to swallow only while legacy is the read authority). Under
+   * `memoryReadsActive` recall reads engine.db PRIMARY, so a stub that was never written
+   * (store) or never reaped (deactivate) diverges silently from legacy: silent memory
+   * loss one way, silent erasure failure the other, neither self-healing. The distinct
+   * `mirror-parity` marker is greppable for alerting; the caller decides the recovery
+   * posture — store PRESERVES the legacy row and continues; deactivate and erase
+   * RE-THROW so a half-completed erasure is never reported as done.
+   */
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase', ref: string, err: unknown): void {
+    process.stderr.write(
+      `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+
+  /**
    * The subject-graph read of the entity list: maps Subjects back to the stable
    * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
    * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
@@ -1258,21 +1305,88 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on
     // subjectGraphEnabled (NOT reads) — the mirror WRITES stubs whenever it's on,
     // so a delete must reap them whenever it's on (matching purgeThread /
-    // _mirrorConfidence). Isolated: an engine.db failure is logged + swallowed so
-    // the legacy deactivation above still stands. Residual (tracked for the
-    // reads-flip reconcile, like purgeThread): once memoryGraphReads is on, a
-    // swallowed reap leaves the deleted content recallable in engine.db — and a
-    // re-run finds ids=[] (the legacy rows are already inactive), so it is not
-    // self-healing. No live tenant has reads on yet.
+    // _mirrorConfidence).
+    //
+    // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
+    // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
+    // leaves the "deleted" content still recallable from engine.db — a silent erasure
+    // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
+    // → ids=[] → the stub is never revisited). So a failed reap: (1) emits a hard,
+    // monitorable [lynox:mirror-parity] CRITICAL marker (ops can alert on a silent
+    // reap NOW), and (2) RE-THROWS so a caller that awaits can surface it.
+    //
+    // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
+    // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
+    // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
+    // this method. The one remaining swallower is `memory_promote` (`void …catch(()=>{})`)
+    // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
+    // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
+    // is falsely reported as done.
     if (this.subjectGraphEnabled && this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
       } catch (err: unknown) {
-        process.stderr.write(
-          `[lynox:subject-graph] deactivate mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        this._reportMirrorParityLoss('deactivate', `${ids.length} id(s) for pattern`, err);
+        throw err;
       }
     }
+    return ids.length;
+  }
+
+  /**
+   * Erasure PR — PHYSICALLY delete every memory whose text matches `pattern`, in
+   * BOTH stores (GDPR Art. 17 hard-delete). This is the terminal end of the Validity
+   * axis: {@link deactivateByPattern} is the SOFT state (`is_active = 0` — the row,
+   * its text and embedding persist and ride backup/migration-export); erase is the
+   * TERMINAL state (the row is gone). `memory_delete` and the UI delete route here;
+   * a supersede/re-scope (memory_update, memory_promote, a bulk-doc reconcile) stays
+   * soft.
+   *
+   * Matching is by pattern + namespace ONLY — deliberately NOT scope-filtered. On the
+   * live corpus 863/893 rows sit under the degenerate `context:http-api` transport
+   * scope, so a scope-filtered erase would match zero rows and silently fail to forget
+   * exactly the content it must (scope-aware erase waits on the Wave-3 namespace fix).
+   * {@link AgentMemoryDb.findMemoryIdsByPattern} also matches `is_active = 0` rows, so a
+   * previously soft-deleted fact's residue is caught too.
+   *
+   * The engine.db recall mirror is reaped FIRST, legacy (the plaintext id source) LAST —
+   * the order is load-bearing for recoverability. The ids can only be re-derived from
+   * the legacy PLAINTEXT (`findMemoryIdsByPattern` LIKE-matches text; engine.db text is
+   * encrypted). If legacy were purged first and the engine.db reap then threw, a retry's
+   * pattern match would find the legacy rows already gone (ids=[]) and NEVER revisit the
+   * surviving — still recallable, on the read-flipped fleet — engine.db stub: a permanent,
+   * silent GDPR failure. Reaping engine.db first means a failure leaves legacy intact, so
+   * a retry re-derives the same ids and self-heals; it also clears the recall-authoritative
+   * store (what `memory_graph_reads=true` reads) before the backup-only legacy store. On a
+   * failed engine.db reap it reuses §0.1's loud contract — a monitorable
+   * `[lynox:mirror-parity] CRITICAL` marker (with the ids, for reconciliation) + a
+   * RE-THROW, so an awaiting caller fails the delete instead of reporting a false success.
+   * The legacy purge cascade reaps mentions, relations, supersedes and orphan entities.
+   *
+   * KNOWN residue (engine.db): `purgeMemories` deletes `memories` only; the schema's
+   * ON DELETE CASCADE reaps memory_subjects/supersedes/conflicts, but an orphaned SUBJECT
+   * (plaintext `name`) and a relationship whose source was the erased memory
+   * (`source_memory_id` ON DELETE SET NULL, keeps its `description`) are NOT reaped — the
+   * orphan-subject sweep is deferred to the subject-lifecycle design (memory-graph-store.ts).
+   * The memory TEXT is erased from both stores; that derived residue is a tracked follow-up.
+   *
+   * Returns the number of memories matched + erased.
+   */
+  async eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
+    const ids = this.db.findMemoryIdsByPattern(pattern, namespace);
+    if (ids.length === 0) return 0;
+
+    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.purgeMemories(ids);
+      } catch (err: unknown) {
+        // Legacy is still intact here (not yet purged), so this is fully retryable.
+        const sample = ids.slice(0, 20).join(',');
+        this._reportMirrorParityLoss('erase', `${ids.length} id(s): ${sample}${ids.length > 20 ? ',…' : ''}`, err);
+        throw err;
+      }
+    }
+    this.db.purgeMemoriesByIds(ids);
     return ids.length;
   }
 

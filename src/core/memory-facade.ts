@@ -19,10 +19,13 @@ const DATE_PREFIX_RE = /^\[\d{4}-\d{2}-\d{2}\]\s*/;
  *
  * Scope: the facade mirrors under the document store's own default scope
  * (`memory.currentScope()`), which is exactly the scope the bare `/api/memory` routes
- * write to. The KG mirror is best-effort — the document is the source of truth, so a
- * KG hiccup must not fail the user's edit — but it is AWAITED (not fire-and-forget) so
- * the next recall is already consistent when the HTTP response returns, and a failure
- * is logged (a silently-broken privacy promise is worse than a noisy one).
+ * write to. For append/update/replace the KG mirror is best-effort — the document is
+ * the source of truth, so a KG hiccup must not fail the user's edit — but it is AWAITED
+ * (not fire-and-forget) so the next recall is already consistent when the HTTP response
+ * returns, and a failure is logged (a silently-broken privacy promise is worse than a
+ * noisy one). `delete` is the DELIBERATE exception: it is a hard erasure (GDPR Art. 17),
+ * so a failed KG reap must NOT be swallowed — it propagates, and the HTTP route surfaces
+ * the failure (a silently-failed erasure leaves "deleted" content recallable).
  */
 export class MemoryFacade {
   constructor(
@@ -58,10 +61,21 @@ export class MemoryFacade {
     }
   }
 
-  /** Delete every document line matching `pattern` AND deactivate the KG twins. */
+  /**
+   * Delete every document line matching `pattern` AND hard-erase the KG twins.
+   * Erasure (GDPR Art. 17) is deliberately NOT best-effort like the other mirrors:
+   * the KG erase runs UNCONDITIONALLY — not gated on the flat-file line count, so a
+   * document-ingest row with no flat-file twin is still forgotten — and a failure
+   * PROPAGATES (the HTTP route returns an error) rather than being swallowed, because
+   * a silently-failed erasure leaves "deleted" content recallable.
+   */
   async delete(ns: MemoryNamespace, pattern: string): Promise<number> {
+    // An empty/whitespace pattern substring-matches every line — refuse it so a
+    // malformed request can't wipe the whole notebook (the KG side already guards
+    // empty in _eraseInKg; this guards the flat-file delete too).
+    if (!pattern.trim()) return 0;
     const count = await this.memory.delete(ns, pattern);
-    if (count > 0) await this._deactivateInKg(pattern, ns);
+    await this._eraseInKg(pattern, ns);
     return count;
   }
 
@@ -100,6 +114,19 @@ export class MemoryFacade {
     const body = pattern.replace(DATE_PREFIX_RE, '').trim();
     if (!body) return;
     try { await this.knowledgeLayer.deactivateByPattern(body, ns); } catch (err) { this._warnMirror('deactivate', err); }
+  }
+
+  /**
+   * Hard-erase the KG twins of a deleted line. Unlike {@link _deactivateInKg} this is
+   * NOT wrapped in a swallow — an erasure that fails to reap the recall mirror must
+   * surface (privacy: a swallowed failure leaves the content recallable), so the
+   * rejection propagates to the caller.
+   */
+  private async _eraseInKg(pattern: string, ns: MemoryNamespace): Promise<void> {
+    if (!this.knowledgeLayer) return;
+    const body = pattern.replace(DATE_PREFIX_RE, '').trim();
+    if (!body) return;
+    await this.knowledgeLayer.eraseByPattern(body, ns);
   }
 
   private async _updateInKg(oldBody: string, newBody: string, ns: MemoryNamespace): Promise<void> {

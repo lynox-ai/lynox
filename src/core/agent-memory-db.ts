@@ -548,6 +548,64 @@ export class AgentMemoryDb {
     });
   }
 
+  /**
+   * Physically erase a set of memories by id — the hard-delete cascade behind
+   * `memory_delete` / the UI delete (GDPR Art. 17). {@link purgeByThread} keys on
+   * `source_thread_id`; erasure keys on an arbitrary id-set (matched by pattern via
+   * {@link findMemoryIdsByPattern}), so the ids are staged in a TEMP table and every
+   * downstream query references them by subquery. That does two things a chunked
+   * IN-list cannot: it sidesteps SQLite's 999-variable limit AND keeps the
+   * orphan-entity NOT EXISTS correct across the WHOLE set — chunking the IN-list
+   * would falsely spare an entity mentioned by two erased memories that fell in
+   * different chunks. Deletes memories + mentions + relations(source_memory_id) +
+   * supersedes (+ clears dangling `superseded_by` pointers) + reference-counted
+   * orphan entities (an entity still mentioned by a SURVIVING memory is kept — a
+   * shared subject is never over-erased). One transaction (atomic per erase).
+   * Returns the number of memories deleted.
+   */
+  purgeMemoriesByIds(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    return this.transaction(() => {
+      // A leftover temp table from an aborted prior call (temp tables are
+      // connection-scoped) would carry stale ids — drop before (re)create.
+      this.db.exec('DROP TABLE IF EXISTS _erase_ids');
+      this.db.exec('CREATE TEMP TABLE _erase_ids (id TEXT PRIMARY KEY)');
+      try {
+        const ins = this.db.prepare('INSERT OR IGNORE INTO _erase_ids (id) VALUES (?)');
+        for (const id of ids) ins.run(id);
+
+        const memSub = 'SELECT id FROM _erase_ids';
+
+        // 1. Orphan entities: mentioned by an erased memory and by NO surviving one.
+        const orphanEntities = this.db.prepare(`
+          SELECT DISTINCT m.entity_id FROM mentions m
+          WHERE m.memory_id IN (${memSub})
+          AND NOT EXISTS (
+            SELECT 1 FROM mentions m2
+            WHERE m2.entity_id = m.entity_id
+            AND m2.memory_id NOT IN (${memSub})
+          )
+        `).all() as Array<{ entity_id: string }>;
+
+        // 2. Mentions of the erased memories.
+        this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run();
+        // 3. Relations sourced from the erased memories.
+        this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run();
+        // 4. Supersedes: clear dangling pointers, then drop the lineage records.
+        this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run();
+        this.db.prepare(`DELETE FROM supersedes WHERE new_memory_id IN (${memSub}) OR old_memory_id IN (${memSub})`).run();
+        // 5. Orphan entities (and their cooccurrences/relations) — reuses deleteEntity.
+        for (const oe of orphanEntities) this.deleteEntity(oe.entity_id);
+        // 6. The memories themselves.
+        const deleted = this.db.prepare(`DELETE FROM memories WHERE id IN (${memSub})`).run().changes;
+
+        return deleted;
+      } finally {
+        this.db.exec('DROP TABLE IF EXISTS _erase_ids');
+      }
+    });
+  }
+
   // ── Memory Operations ─────────────────────────────────────────
 
   createMemory(props: {
@@ -713,6 +771,24 @@ export class AgentMemoryDb {
     const rows = (namespace
       ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? AND namespace = ? RETURNING id').all(now, like, namespace)
       : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? RETURNING id').all(now, like)
+    ) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * The ids of every memory whose text matches `pattern` (LIKE) — the read half of
+   * the erasure path. Unlike {@link deactivateMemoriesByPattern} this does NOT filter
+   * on `is_active`: a GDPR erasure must also reap rows a prior soft-delete left as
+   * `is_active = 0` (their text + embedding still ride backups/exports — exactly the
+   * residue erasure exists to remove). Pure read; the caller ({@link KnowledgeLayer.eraseByPattern})
+   * feeds the ids to {@link purgeMemoriesByIds} (legacy) and the engine.db mirror.
+   * The match runs HERE because engine.db text is encrypted and cannot be LIKE-matched.
+   */
+  findMemoryIdsByPattern(pattern: string, namespace?: string | undefined): string[] {
+    const like = `%${pattern}%`;
+    const rows = (namespace
+      ? this.db.prepare('SELECT id FROM memories WHERE text LIKE ? AND namespace = ?').all(like, namespace)
+      : this.db.prepare('SELECT id FROM memories WHERE text LIKE ?').all(like)
     ) as { id: string }[];
     return rows.map(r => r.id);
   }
