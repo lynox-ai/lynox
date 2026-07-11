@@ -47,7 +47,7 @@ export interface IMemory {
   render():                                                     string;
   hasContent():                                                 boolean;
   loadAll():                                                    Promise<void>;
-  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined): Promise<void>;
+  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
@@ -219,7 +219,10 @@ export interface IKnowledgeLayer {
       // Interface had drifted: the impl already accepts (and persists)
       // sourceThreadId — declare it so callers are typed against reality.
       sourceThreadId?: string | undefined;
-      sourceType?: ProvenanceKind | undefined;
+      // Wave 1.3: callers supply EVIDENCE (channel + untrusted signal), never a tier.
+      // The tier is derived at the store boundary (§3). `sourceType` is intentionally gone.
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;

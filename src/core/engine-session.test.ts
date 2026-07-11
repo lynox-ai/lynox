@@ -1110,7 +1110,9 @@ describe('Engine + Session (Orchestrator)', () => {
         { id: 'tr-1' },
         { toolResultBlobStore: store } as unknown as import('../types/index.js').IAgent,
       );
-      expect(recalled).toBe(payload);
+      // The payload round-trips intact; recall now also re-marks it untrusted (Wave 1.2
+      // replay a) since the evicted content carried no marker, so assert containment.
+      expect(recalled).toContain(payload);
     });
 
     it('carries a blob forward across a second compaction so recall still works', async () => {

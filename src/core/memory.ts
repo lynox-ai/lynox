@@ -464,7 +464,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -591,9 +591,11 @@ export class Memory implements IMemory {
               scopeType: classification.scope.type,
               scopeId: classification.scope.id,
               sourceThreadId,
-              // Auto-extraction from the agent's own final answer — no tool call,
-              // so the "agent declares" path can't apply. Hardcode agent_inferred.
-              sourceType: 'agent_inferred',
+              sourceRunId,
+              // Auto-extraction from the agent's own final answer — the `agent` channel
+              // (Wave 1.3 derives agent_inferred from it). The turn is clean by construction:
+              // the extraction call is gated off on an untrusted turn (Wave 1.5 abstinence).
+              sourceChannel: 'agent',
             });
           }),
         );
@@ -601,8 +603,8 @@ export class Memory implements IMemory {
         await Promise.all(
           entries.map(async ([ns, text]) => {
             await this.append(ns as MemoryNamespace, text);
-            // Auto-extraction (no tool call) → conservative agent_inferred tier.
-            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceType: 'agent_inferred' });
+            // Auto-extraction (no tool call) → `agent` channel → agent_inferred (Wave 1.3).
+            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceRunId, sourceChannel: 'agent' });
           }),
         );
       }

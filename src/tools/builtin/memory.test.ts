@@ -70,7 +70,7 @@ describe('memoryStoreTool', () => {
     expect(channels.memoryStore.publish).toHaveBeenCalledWith({
       namespace: 'knowledge',
       content: 'channel test',
-      sourceType: 'agent_inferred',
+      sourceChannel: 'agent',
     });
   });
 
@@ -88,7 +88,7 @@ describe('memoryStoreTool', () => {
       agent,
     );
     expect(channels.memoryStore.publish).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'the user told me their budget', sourceType: 'agent_inferred' }),
+      expect.objectContaining({ content: 'the user told me their budget', sourceChannel: 'agent' }),
     );
   });
 
@@ -777,7 +777,7 @@ describe('memoryPromoteTool', () => {
       content: 'User pattern B',
       scopeType: 'context',
       scopeId: 'proj1',
-      sourceType: 'agent_inferred',
+      sourceChannel: 'agent',
     });
   });
 

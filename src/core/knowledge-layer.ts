@@ -37,6 +37,8 @@ import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
+import { deriveProvenanceTier } from './provenance.js';
+import { appendMemoryWriteLog } from './memory-write-log.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
 const DEDUP_THRESHOLD = 0.95;
@@ -90,6 +92,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * the same flag. Default false (legacy path); flipped per-tenant.
    */
   private readonly memoryScoringV2: boolean;
+  /** Wave 1.3b: gate the write-side tier telemetry on the SAME measurement flag as the
+   *  retrieval shadow log (one flag, one retention story). Default off. */
+  private readonly retrievalShadowLog: boolean;
   private readonly subjectStore: SubjectStore | null;
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
@@ -129,6 +134,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.embeddingProvider = embeddingProvider;
     this.entityResolver = new EntityResolver(this.db, embeddingProvider);
     this.memoryScoringV2 = memoryScoringV2 ?? false;
+    this.retrievalShadowLog = retrievalShadowLog ?? false;
     this.retrievalEngine = new RetrievalEngine(
       this.db, embeddingProvider, this.entityResolver, anthropicClient, runHistory,
       this.memoryScoringV2, retrievalShadowLog ?? false,
@@ -249,7 +255,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     options?: {
       sourceRunId?: string | undefined;
       sourceThreadId?: string | undefined;
-      sourceType?: ProvenanceKind | undefined;
+      // Wave 1.3: the caller supplies EVIDENCE (the write channel + the untrusted
+      // signal), never a tier. `store()` derives the tier here at the boundary (§3);
+      // the old `sourceType` parameter — a live privilege-escalation surface — is gone.
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
@@ -259,6 +269,25 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (trimmedText.length < 5) {
       return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
     }
+
+    // Provenance is DERIVED from evidence at the store boundary and persisted alongside
+    // its inputs, so the tier stays a re-derivable pure function (§3). `stubEvidence`
+    // threads the derived tier + its evidence into the subject-graph writers below.
+    const derivedTier = deriveProvenanceTier({
+      sourceChannel: options?.sourceChannel,
+      sourceUntrusted: options?.sourceUntrusted,
+    });
+    // §1.7: the model that produced this row's vector — there is no re-embed path, so a
+    // silent embedding-default change would otherwise orphan row↔space identity.
+    const embeddingModel = this.embeddingProvider.model ?? this.embeddingProvider.name;
+    const stubEvidence = {
+      sourceRunId: options?.sourceRunId,
+      sourceType: derivedTier,
+      sourceToolName: options?.sourceToolName,
+      sourceChannel: options?.sourceChannel,
+      sourceUntrusted: options?.sourceUntrusted,
+      embeddingModel,
+    };
 
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
@@ -288,7 +317,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
         // The write-time confirm was a second feeder of the self-reinforcement loop
         // (PRD §2.2). No new row is stored either way; the existing fact stands
-        // unchanged (its tier is untouched — dedup never upgrades provenance).
+        // unchanged (its tier is untouched here).
+        // Wave 1 scope note: PRD §5.4-rung-3 amends this to "record the incoming evidence
+        // and re-derive the stored tier (raise ONLY from first-party high-trust)". That
+        // recompute has NO consumer until the Wave-2 read gate exists — a stale tier on a
+        // dedup'd row has no read effect yet — so it is deliberately deferred to Wave 2,
+        // not built here (reine Evidenz-Welle). Until then a re-asserted fact keeps its
+        // original tier; the deterministic batch re-derive (§5.6) repairs it when the gate lands.
         if (!this.memoryScoringV2) {
           this.db.confirmMemory(candidate.id);
           // S5b recall parity: mirror the confirmation onto the engine.db stub so its
@@ -317,7 +352,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
         sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
-        sourceType: options?.sourceType, sourceToolName: options?.sourceToolName,
+        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel,
         provider: this.embeddingProvider.name, embedding,
       });
       for (const c of contradictions) {
@@ -328,6 +365,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
       return id;
     });
+
+    // Wave 1.3b: write-side tier telemetry — one JSONL line per STORED row (post-dedup),
+    // gated on the measurement flag. Lets the write distribution be tracked over time
+    // (does external_unverified spike? does tool_verified ever fire?) — a retrieval-only
+    // shadow log cannot see a tier that is never written. Fire-and-forget, best-effort.
+    if (this.retrievalShadowLog) {
+      void appendMemoryWriteLog({
+        ts: Date.now(),
+        sourceChannel: options?.sourceChannel ?? null,
+        sourceUntrusted: options?.sourceUntrusted === true,
+        sourceType: derivedTier,
+        namespace,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+      });
+    }
 
     // 6. Extract entities and relations (async LLM call — outside transaction).
     // Managed credit lifecycle for the pool-key extraction call: gate BEFORE the
@@ -379,7 +431,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       let stubWritten = true;
       try {
         extracted = await this._extractAndPersistToSubjects(
-          trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
+          trimmedText, namespace, scope, memoryId, embedding, stubEvidence, contradictions, createdAt, extractionAllowed,
           threadAnchorSubjectId,
         );
       } catch (err: unknown) {
@@ -428,7 +480,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         try {
           const createdAt = this.db.getMemoryCreatedAt(memoryId);
           this._mirrorToSubjectGraph(
-            memoryId, trimmedText, namespace, scope, options,
+            memoryId, trimmedText, namespace, scope, stubEvidence,
             resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
             threadAnchorSubjectId,
           );
@@ -660,8 +712,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     scope: MemoryScopeRef,
     options: {
       sourceRunId?: string | undefined;
+      // `sourceType` here is the DERIVED tier (store() computed it); the evidence
+      // columns ride alongside so the stub persists them too (§1/§3).
       sourceType?: ProvenanceKind | undefined;
       sourceToolName?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      embeddingModel?: string | undefined;
     } | undefined,
     entities: EntityRecord[],
     relations: RelationRecord[],
@@ -736,6 +793,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         sourceRunId: options?.sourceRunId ?? null,
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
+        sourceChannel: options?.sourceChannel ?? null,
+        sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel: options?.embeddingModel,
         provider: this.embeddingProvider.name,
         embedding: embedToBlob(embedding),
         createdAt,
@@ -783,8 +843,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     embedding: number[],
     options: {
       sourceRunId?: string | undefined;
+      // `sourceType` here is the DERIVED tier (store() computed it); the evidence
+      // columns ride alongside so the stub persists them too (§1/§3).
       sourceType?: ProvenanceKind | undefined;
       sourceToolName?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      embeddingModel?: string | undefined;
     } | undefined,
     contradictions: ContradictionInfo[],
     createdAt: string | undefined,
@@ -840,8 +905,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     scope: MemoryScopeRef,
     options: {
       sourceRunId?: string | undefined;
+      // `sourceType` here is the DERIVED tier (store() computed it); the evidence
+      // columns ride alongside so the stub persists them too (§1/§3).
       sourceType?: ProvenanceKind | undefined;
       sourceToolName?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      embeddingModel?: string | undefined;
     } | undefined,
     entities: Array<{ name: string; type: EntityType; aliases: string[] }>,
     relations: Array<{ from: string; to: string; kind: string; description: string; confidence: number }>,
@@ -906,6 +976,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         sourceRunId: options?.sourceRunId ?? null,
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
+        sourceChannel: options?.sourceChannel ?? null,
+        sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel: options?.embeddingModel,
         provider: this.embeddingProvider.name,
         embedding: embedToBlob(embedding),
         createdAt,

@@ -712,6 +712,11 @@ export class Session {
     // Thread run ID and session ID to agent so spawn tool and memory extraction can use them
     this.agent.currentRunId = this.currentRunId ?? undefined;
     this.agent.currentThreadId = this.sessionId;
+    // Wave 1.2 replay (c): mark an internal (compaction summary) run so its end-of-run
+    // extraction abstains — the summary is machinery, not user knowledge. Threaded HERE,
+    // after every `_recreateAgent` above, so a rebuilt agent still carries it (mirrors
+    // currentRunId); reset in the finally.
+    this.agent.isInternalRun = runOptions?.internal === true;
 
     const usageBefore = { ...this.usage };
 
@@ -1132,6 +1137,7 @@ export class Session {
       this._onPersistCheckpoint = null;
       if (this.agent) {
         this.agent.currentRunId = undefined;
+        this.agent.isInternalRun = false;
         // Restore per-run overrides to session defaults
         if (hasRunOverrides) {
           this.agent.setEffort(this._effort);

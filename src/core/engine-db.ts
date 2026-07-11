@@ -527,6 +527,21 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
    ALTER TABLE subjects ADD COLUMN merged_into TEXT REFERENCES subjects(id) ON DELETE SET NULL;
    CREATE INDEX IF NOT EXISTS idx_subjects_merged_into ON subjects(merged_into);`,
+
+  // v8 (Memory Wave 1 — evidence): the untrusted signal + the write channel, the two
+  // DERIVATION INPUTS (PRD §1/§3) that make `source_type` a re-derivable pure function
+  // instead of the only thing stored. Additive ALTER — NEVER edit the v1 CREATE (a column
+  // there would collide with this ALTER on a fresh DB; SQLite ADD COLUMN has no IF NOT
+  // EXISTS). `source_channel` NULLABLE (pre-evidence rows keep NULL + their stamped
+  // source_type; a batch re-derive skips NULL-channel rows per §3 rule 5). `source_untrusted`
+  // DEFAULT 0. `embedding_model` (§1.7) records the vector-space identity so a silent
+  // embedding-default change (no re-embed path) is detectable per row — the Wave-2 floor
+  // binds to it. Mirrors agent-memory.db v6 so the two stores stay column-symmetric — the
+  // trap §1 names is a legacy-only evidence column the engine.db-primary fleet would never see.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (8);
+   ALTER TABLE memories ADD COLUMN source_channel TEXT;
+   ALTER TABLE memories ADD COLUMN source_untrusted INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE memories ADD COLUMN embedding_model TEXT;`,
 ];
 
 /**

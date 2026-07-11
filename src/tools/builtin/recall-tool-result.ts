@@ -14,6 +14,7 @@
  */
 
 import type { ToolEntry, IAgent } from '../../types/index.js';
+import { containsUntrustedMarker, wrapUntrustedData } from '../../core/data-boundary.js';
 
 interface RecallToolResultInput {
   /** The recall handle id, e.g. `tr-3`, from the post-compaction context. */
@@ -52,6 +53,14 @@ export const recallToolResultTool: ToolEntry<RecallToolResultInput> = {
       // blob has been hard-dropped past a compaction reset.
       return `Tool result ${id} is no longer available — re-run the original tool call to get this data again.`;
     }
-    return blob.payload;
+    // Wave 1.2 replay (a): a recalled tool result is external content re-injected on a
+    // LATER turn. Its trust boundary must ride with it — the untrusted-data marker set at
+    // the original fetch must be present so the dispatcher re-flags this turn (else the
+    // replay is a fail-open hole: memory extracted after a recall would look clean). Most
+    // wrapping tools' markers survive eviction verbatim; re-wrap only when absent so the
+    // signal is guaranteed without double-wrapping an already-marked payload.
+    return containsUntrustedMarker(blob.payload)
+      ? blob.payload
+      : wrapUntrustedData(blob.payload, `recalled:${blob.tool}`);
   },
 };

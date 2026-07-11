@@ -17,10 +17,8 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
-  ProvenanceKind,
   DataStoreColumnDef,
 } from '../types/index.js';
-import { DEFAULT_PROVENANCE_KIND } from '../types/index.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -738,7 +736,6 @@ export function setupMemoryStoreSubscription(
   _embeddingProvider: EmbeddingProvider | null,
   _runHistory: RunHistory | null,
   contextId: string,
-  getCurrentRunId: () => string | null,
 ): void {
   if (!knowledgeLayer) return;
 
@@ -750,7 +747,12 @@ export function setupMemoryStoreSubscription(
       namespace: string; content: string;
       scopeType?: string | undefined; scopeId?: string | undefined;
       sourceThreadId?: string | undefined;
-      sourceType?: ProvenanceKind | undefined; sourceToolName?: string | undefined;
+      // Wave 1: publishers carry EVIDENCE. `sourceRunId` is captured by value at the
+      // publish call site (§1.1 — the engine-level subscription cannot read a session's
+      // run), `sourceChannel` + `sourceUntrusted` are the derivation inputs (§1.2/§3).
+      sourceRunId?: string | undefined;
+      sourceChannel?: string | undefined; sourceUntrusted?: boolean | undefined;
+      sourceToolName?: string | undefined;
     };
 
     const run = async (): Promise<void> => {
@@ -768,11 +770,15 @@ export function setupMemoryStoreSubscription(
             data.namespace as MemoryNamespace,
             scope,
             {
-              sourceRunId: getCurrentRunId() ?? undefined,
+              // §1.1: the run id rides the message (captured by value at publish time),
+              // not an engine-level getter that would always be null here.
+              sourceRunId: data.sourceRunId,
               sourceThreadId: data.sourceThreadId,
-              // Conservative default: events without a declared tier (e.g. the
-              // maybeUpdate auto-extraction path) land as agent_inferred.
-              sourceType: data.sourceType ?? DEFAULT_PROVENANCE_KIND,
+              // §1.3: the tier is DERIVED at the store boundary from this evidence — the
+              // subscriber no longer forwards a self-declared tier. A publisher that omits
+              // a channel floors to external_unverified (rule 5), not a silent agent_inferred.
+              sourceChannel: data.sourceChannel,
+              sourceUntrusted: data.sourceUntrusted,
               sourceToolName: data.sourceToolName,
             },
           );

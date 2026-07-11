@@ -1104,7 +1104,7 @@ export class Engine {
     // Subscribe to memory:store for automatic knowledge graph storage
     setupMemoryStoreSubscription(
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
-      this.context?.id ?? '', () => null,
+      this.context?.id ?? '',
     );
   }
 

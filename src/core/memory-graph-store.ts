@@ -38,7 +38,8 @@ const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
 const RECALL_COLS =
   'id, text, namespace, subject_id, scope_type, scope_id, source_run_id, provider, embedding, ' +
   'confidence, is_active, superseded_by, retrieval_count, confirmation_count, ' +
-  'last_retrieved_at, created_at, updated_at, source_type, source_tool_name';
+  'last_retrieved_at, created_at, updated_at, source_type, source_tool_name, ' +
+  'source_channel, source_untrusted, embedding_model';
 
 /** Same column list, `m.`-qualified for the graph-expand JOINs. */
 const RECALL_COLS_M = RECALL_COLS.split(', ').map(c => `m.${c}`).join(', ');
@@ -64,6 +65,11 @@ interface EngineMemoryRaw {
   updated_at: string;
   source_type: string;
   source_tool_name: string | null;
+  // v8 Wave 1 evidence — the derivation inputs for source_type (nullable channel on
+  // pre-evidence rows; untrusted default 0) + the embedding-model identity (§1.7).
+  source_channel: string | null;
+  source_untrusted: number;
+  embedding_model: string | null;
 }
 
 /**
@@ -113,6 +119,12 @@ export class MemoryGraphStore {
     sourceRunId?: string | null | undefined;
     sourceType?: string | undefined;
     sourceToolName?: string | null | undefined;
+    // v8 Wave 1 evidence. Like `source_type`: written on the fresh insert and PRESERVED
+    // on a re-upsert (absent from the ON CONFLICT SET) — the write-boundary evidence is
+    // set at creation, not silently reset by a bare re-store.
+    sourceChannel?: string | null | undefined;
+    sourceUntrusted?: boolean | undefined;
+    embeddingModel?: string | null | undefined;
     provider?: string | null | undefined;
     // S5a memory-consolidation additions. The live mirror passes `embedding` (so
     // engine.db carries the vector for the S5b recall cutover); the backfill also
@@ -150,9 +162,9 @@ export class MemoryGraphStore {
     // raw in ON CONFLICT to preserve-on-omit.
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, subject_id, scope_type, scope_id,
-        source_run_id, source_type, source_tool_name, provider,
+        source_run_id, source_type, source_tool_name, source_channel, source_untrusted, embedding_model, provider,
         embedding, is_active, superseded_by, confidence, confirmation_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1), ?, COALESCE(?, 0.75),
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?, COALESCE(?, 1), ?, COALESCE(?, 0.75),
         COALESCE(?, 0), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         text = excluded.text,
@@ -169,6 +181,9 @@ export class MemoryGraphStore {
       params.sourceRunId ?? null,
       params.sourceType ?? 'agent_inferred',
       params.sourceToolName ?? null,
+      params.sourceChannel ?? null,
+      params.sourceUntrusted === undefined ? null : (params.sourceUntrusted ? 1 : 0),
+      params.embeddingModel ?? null,
       params.provider ?? null,
       params.embedding ?? null,
       params.isActive ?? null,
@@ -461,6 +476,8 @@ export class MemoryGraphStore {
       last_retrieved_at: raw.last_retrieved_at,
       created_at: raw.created_at, updated_at: raw.updated_at,
       source_type: raw.source_type, source_tool_name: raw.source_tool_name,
+      source_channel: raw.source_channel, source_untrusted: raw.source_untrusted,
+      embedding_model: raw.embedding_model,
     };
   }
 

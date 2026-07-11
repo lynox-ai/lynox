@@ -57,6 +57,34 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
+  it('persists Wave 1 evidence (source_channel + source_untrusted) and preserves it on a bare re-upsert', () => {
+    const { engine, mem } = make();
+    const read = () => engine.getDb()
+      .prepare('SELECT source_channel, source_untrusted FROM memories WHERE id = ?')
+      .get('m1') as { source_channel: string | null; source_untrusted: number };
+
+    mem.upsertStub({
+      id: 'm1', text: 'from a fetched page', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1',
+      sourceType: 'external_unverified', sourceChannel: 'upload', sourceUntrusted: true,
+    });
+    expect(read()).toEqual({ source_channel: 'upload', source_untrusted: 1 });
+
+    // A bare re-store (evidence omitted) must PRESERVE the recorded evidence — like
+    // source_type, it is set at creation, not silently reset by a later re-upsert.
+    mem.upsertStub({ id: 'm1', text: 'from a fetched page v2', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    expect(read()).toEqual({ source_channel: 'upload', source_untrusted: 1 });
+    engine.close();
+  });
+
+  it('defaults source_untrusted to 0 and source_channel to NULL when evidence is omitted', () => {
+    const { engine, mem } = make();
+    mem.upsertStub({ id: 'm1', text: 'legacy-style', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    expect(
+      engine.getDb().prepare('SELECT source_channel, source_untrusted FROM memories WHERE id = ?').get('m1'),
+    ).toEqual({ source_channel: null, source_untrusted: 0 });
+    engine.close();
+  });
+
   it('encrypts the stub text at rest (S0 boundary: memories.text is PII-bearing)', () => {
     const { engine, mem } = make('vault-key-for-memgraph-1');
     mem.upsertStub({ id: 'm1', text: 'Customer Jane Roe owes CHF 4200', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });

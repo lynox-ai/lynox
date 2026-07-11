@@ -32,7 +32,7 @@ import { channels, measureTool } from './observability.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
-import { detectInjectionAttempt } from './data-boundary.js';
+import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
@@ -389,6 +389,25 @@ export class Agent implements IAgent {
   private _settledMemory = new WeakSet<Promise<void>>();
   private static readonly MAX_PENDING_MEMORY = 10;
   skipMemoryExtraction = false;
+  /**
+   * Wave 1.2: did any tool result on this run carry the untrusted-data boundary marker?
+   * Set in the tool-result dispatcher (content signal, not a tool-name list), reset at
+   * run entry + teardown. Two consumers: extraction abstinence (Wave 1.5 — do not extract
+   * memory from an answer that read untrusted content) and the `memory_store` tool's
+   * `sourceUntrusted` evidence (Wave 2.8 escalation defence). Read via {@link sawUntrustedData}.
+   */
+  private _sawUntrustedData = false;
+  /** Whether this run has seen wrapped untrusted content (Wave 1.2). */
+  get sawUntrustedData(): boolean { return this._sawUntrustedData; }
+  /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here). */
+  noteUntrustedData(): void { this._sawUntrustedData = true; }
+  /**
+   * Wave 1.2 replay (c): set by Session for an INTERNAL run (compaction summary today).
+   * An internal run's "answer" is machinery, not user knowledge, so it must not feed the
+   * extractor. Threaded per run by Session AFTER any `_recreateAgent` (which would wipe a
+   * value set earlier), mirroring `currentRunId`; reset at run teardown.
+   */
+  isInternalRun = false;
 
   /** Override effort for the next run without recreating the agent. */
   setEffort(level: EffortLevel | undefined): void { this.effort = level; }
@@ -738,6 +757,7 @@ export class Agent implements IAgent {
     this.abortController = new AbortController();
     this.continuationCount = 0;
     this._loopToolCount = 0;
+    this._sawUntrustedData = false;
     this._suppressTools = opts?.suppressTools === true;
     try {
       return await this._loop();
@@ -794,6 +814,12 @@ export class Agent implements IAgent {
       }
       this.abortController = null;
       this._suppressTools = false;
+      // NB: _sawUntrustedData is deliberately NOT reset here. It is a run-scoped LATCH,
+      // armed (→false) at run entry and set on an untrusted tool result; spawn.ts reads
+      // it AFTER `await child.send()` resolves to propagate a shared-Memory child's taint
+      // to the parent, so resetting it in this finally (before send() returns) would make
+      // that read always false — a fail-open hole (Wave 1.2 replay b). The entry reset
+      // re-arms it every run; a stale-true value between runs is read by nothing.
     }
   }
 
@@ -916,9 +942,9 @@ export class Agent implements IAgent {
             await this.onStream({ type: 'cost_warning', snapshot: this.costGuard.snapshot(), agent: this.name });
           }
           const text = extractText(response.content);
-          if (this.memory && !this.skipMemoryExtraction) {
+          if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun) {
             const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
+            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
           }
           return text;
         }
@@ -926,9 +952,9 @@ export class Agent implements IAgent {
 
       if (response.stop_reason === 'end_turn') {
         const text = extractText(response.content);
-        if (this.memory && !this.skipMemoryExtraction) {
+        if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
+          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
         }
         return text;
       }
@@ -950,9 +976,9 @@ export class Agent implements IAgent {
         // Continuation cap exhausted — surface a clear notice rather than an
         // empty bubble when the truncated turn produced no visible text.
         const text = extractText(response.content);
-        if (this.memory && !this.skipMemoryExtraction) {
+        if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun) {
           const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId));
+          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
         }
         return text.trim().length > 0
           ? text
@@ -1752,6 +1778,16 @@ export class Agent implements IAgent {
         masked = maskSecretPatterns(masked);
       }
       const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name);
+
+      // Wave 1.2: seat the per-run untrusted signal here — on the PRESENCE of the
+      // wrapped-untrusted-data marker in the tool result (a content signal), not a
+      // tool-name allowlist. Sticky for the run: once a turn reads untrusted external
+      // content, any memory extracted from the resulting answer is tainted (§1.2/§1.5),
+      // and a `memory_store` on this run is flagged untrusted (§2.8). Deliberately NOT
+      // in wrapUntrustedData (a pure fn also run outside any agent turn).
+      if (!this._sawUntrustedData && containsUntrustedMarker(scanned)) {
+        this._sawUntrustedData = true;
+      }
 
       // H-024 shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard

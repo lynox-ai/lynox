@@ -105,7 +105,9 @@ export class MemoryFacade {
     const body = text.replace(DATE_PREFIX_RE, '').trim();
     if (!body) return;
     try {
-      await this.knowledgeLayer.store(body, ns, this.memory.currentScope(), { sourceType: 'user_asserted' });
+      // UI-entered memory (the human typed it in the memory editor) → `ui` channel →
+      // user_asserted (Wave 1.3 derives the tier; the facade reports the channel, §3).
+      await this.knowledgeLayer.store(body, ns, this.memory.currentScope(), { sourceChannel: 'ui' });
     } catch (err) { this._warnMirror('store', err); }
   }
 

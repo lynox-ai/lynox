@@ -66,6 +66,23 @@ export function scopeToDir(scope: MemoryScopeRef): string {
 }
 
 /**
+ * The scope types `parseScopeString` accepts — the single source of truth (Wave 1.8,
+ * PRD §2.12). Tool descriptions render their scope guidance FROM this list rather than
+ * hand-writing it next to the parser, so a description can never advertise a value the
+ * parser rejects (the "organization" drift that burned a turn). A test asserts the two
+ * stay in lockstep.
+ */
+export const ACCEPTED_SCOPE_TYPES = ['global', 'user', 'context'] as const;
+
+/**
+ * Human-readable scope guidance for tool parameter descriptions — derived from
+ * {@link ACCEPTED_SCOPE_TYPES} so it cannot drift from the parser.
+ */
+export const SCOPE_PARAM_DESCRIPTION =
+  'Scope: "global" (all projects), "user:<name>" (personal), "context:<id>" (a specific project), ' +
+  'or omit for the current project.';
+
+/**
  * Parse a scope string (e.g. "user:alex", "global", "context:abc123") into a MemoryScopeRef.
  * Returns undefined if the string is invalid.
  */
@@ -80,8 +97,8 @@ export function parseScopeString(scopeStr: string): MemoryScopeRef | undefined {
   const id = scopeStr.slice(colonIdx + 1);
   if (!id) return undefined;
 
-  if (type === 'user' || type === 'context' || type === 'global') {
-    return { type, id };
+  if ((ACCEPTED_SCOPE_TYPES as readonly string[]).includes(type)) {
+    return { type: type as MemoryScopeRef['type'], id };
   }
   return undefined;
 }
