@@ -102,7 +102,14 @@ export class MemoryFacade {
 
   private async _storeToKg(text: string, ns: MemoryNamespace): Promise<void> {
     if (!this.knowledgeLayer) return;
-    const body = text.replace(DATE_PREFIX_RE, '').trim();
+    // Mask secrets with the SAME maskFn the flat-file store uses (memory.append):
+    // the KG is the recall authority (ambient context injection reads it), so a raw
+    // secret here would be re-injected into the agent's context AND survive a delete
+    // (the user deletes the MASKED line they see → the pattern can't match a raw
+    // twin). Identity no-op for non-secret content, so the flat/KG copies stay in
+    // lockstep. (The append path's flat file is already masked; replaceDocument's
+    // secrets are refused up front by the HTTP route's containsSecret guard.)
+    const body = this.memory.maskText(text.replace(DATE_PREFIX_RE, '').trim());
     if (!body) return;
     try {
       // UI-entered memory (the human typed it in the memory editor) → `ui` channel →
@@ -133,7 +140,12 @@ export class MemoryFacade {
 
   private async _updateInKg(oldBody: string, newBody: string, ns: MemoryNamespace): Promise<void> {
     if (!this.knowledgeLayer) return;
-    try { await this.knowledgeLayer.updateMemoryText(oldBody, newBody, ns, this.memory.currentScope()); } catch (err) { this._warnMirror('update', err); }
+    // Mask both: the new text must not enter the KG raw (recall authority), and the
+    // match key must equal the MASKED twin already stored (the flat file the user
+    // edits from is masked). Identity no-op for non-secret text.
+    const maskedOld = this.memory.maskText(oldBody);
+    const maskedNew = this.memory.maskText(newBody);
+    try { await this.knowledgeLayer.updateMemoryText(maskedOld, maskedNew, ns, this.memory.currentScope()); } catch (err) { this._warnMirror('update', err); }
   }
 
   /** A swallowed KG-mirror failure must leave a trace — else the privacy/recall promise breaks invisibly. */

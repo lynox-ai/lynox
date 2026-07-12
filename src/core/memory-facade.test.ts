@@ -36,6 +36,27 @@ describe('MemoryFacade — doc↔KG mutation sync', () => {
     expect(calls.store).toEqual(['user prefers TypeScript']);
   });
 
+  it('CORE-4: masks a secret in the KG mirror identically to the flat file (recall authority never stores raw)', async () => {
+    const maskFn = (t: string): string => t.replace(/sk-[A-Za-z0-9]+/g, '«secret»');
+    const maskedMemory = new Memory(dir, undefined, undefined, undefined, maskFn);
+    const { kg, calls } = spyKg();
+    await new MemoryFacade(maskedMemory, kg).append('knowledge', 'the api key is sk-ABC123xyz for prod');
+    // Flat file masked…
+    expect(await maskedMemory.load('knowledge')).toContain('«secret»');
+    expect(await maskedMemory.load('knowledge')).not.toContain('sk-ABC123xyz');
+    // …and the KG mirror (the recall authority) gets the SAME masked text, never the raw secret.
+    expect(calls.store).toEqual(['the api key is «secret» for prod']);
+  });
+
+  it('CORE-4: update masks the new text before mirroring it into the KG', async () => {
+    const maskFn = (t: string): string => t.replace(/sk-[A-Za-z0-9]+/g, '«secret»');
+    const maskedMemory = new Memory(dir, undefined, undefined, undefined, maskFn);
+    await maskedMemory.append('knowledge', 'old note');
+    const { kg, calls } = spyKg();
+    await new MemoryFacade(maskedMemory, kg).update('knowledge', 'old note', 'new key sk-DEF456');
+    expect(calls.update).toEqual([['old note', 'new key «secret»']]);
+  });
+
   it('delete removes matching doc lines AND hard-erases the KG twins (unconditionally — even with no doc match)', async () => {
     await memory.append('knowledge', 'fact about Acme');
     const { kg, calls } = spyKg();

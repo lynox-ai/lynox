@@ -38,6 +38,9 @@ const mockMemoryDelete = vi.fn().mockResolvedValue(2);
 const mockSecretListNames = vi.fn().mockReturnValue(['ANTHROPIC_API_KEY']);
 const mockSecretSet = vi.fn();
 const mockSecretDelete = vi.fn().mockReturnValue(true);
+// Memory routes reject content containing a secret (parity with the memory_store
+// tool). Default: no secret detected; a case can flip it to assert the 400 guard.
+const mockSecretContains = vi.fn().mockReturnValue(false);
 // Hoisted so /api/secrets/status regression tests can swap userConfig per-case
 // (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
 // returned config to vary without re-instantiating the Engine mock).
@@ -130,6 +133,7 @@ vi.mock('../core/engine.js', () => ({
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
+      containsSecret: mockSecretContains,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -1939,6 +1943,16 @@ describe('LynoxHTTPApi', () => {
       });
       expect(res.status).toBe(200);
       expect(mockMemoryAppend).toHaveBeenCalledWith('knowledge', 'appended');
+    });
+
+    it('CORE-4: rejects a memory write whose content contains a secret (400, parity with memory_store)', async () => {
+      mockSecretContains.mockReturnValueOnce(true);
+      const res = await jsonFetch('/api/memory/knowledge/append', {
+        method: 'POST',
+        body: JSON.stringify({ text: 'my key is sk-LEAK' }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockMemoryAppend).not.toHaveBeenCalled(); // never reaches the store
     });
 
     it('PATCH updates namespace', async () => {

@@ -240,6 +240,17 @@ export class Memory implements IMemory {
     return this.updateScoped(ns, oldText, newText, this._defaultScope());
   }
 
+  /**
+   * Apply the configured secret-masking to arbitrary text — the SAME maskFn the
+   * flat-file append path uses (`appendScoped`) — so a caller persisting a parallel
+   * copy (the KG recall mirror in MemoryFacade) masks it identically. Without this,
+   * the flat file stores the masked line while the KG (the recall authority) stores
+   * the raw secret. Identity no-op when no maskFn is wired or the text has no secret.
+   */
+  maskText(text: string): string {
+    return this.maskFn ? this.maskFn(text) : text;
+  }
+
   hasContent(): boolean {
     const defaultScope = this._defaultScope();
     for (const ns of ALL_NAMESPACES) {
