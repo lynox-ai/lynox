@@ -885,7 +885,11 @@ export class Session {
           // post-resume assistant turns (data-loss in long chats). New seqs
           // start at MAX(seq)+1 so they sort after the full on-disk history that
           // compaction keeps. See eager-persist.ts for the rationale.
-          const newMessages = agent.getUnpersistedTail();
+          // CORE-5: an internal (compaction) run persists NO message rows (the eager
+          // checkpoint already skipped them) — take the rollup-only branch so the
+          // summarizer prompt/summary never become thread history, while the token/
+          // cost rollup below still accounts for the compaction spend.
+          const newMessages = agent.isInternalRun ? [] : agent.getUnpersistedTail();
           const totalCount = threadStore.getMessageCount(this.sessionId);
           // Per-thread cost/tokens = SUM over run_history for this session (the
           // single source of truth), NOT this run's cost. The column used to be
@@ -928,8 +932,10 @@ export class Session {
             }
           }
           // Stamp this run's token/cost totals onto its final assistant
-          // message so the per-message footer survives a thread resume.
-          threadStore.setMessageUsage(this.sessionId, JSON.stringify(runUsage));
+          // message so the per-message footer survives a thread resume. Skip for an
+          // internal run — it persisted no message to stamp, so this would clobber
+          // the last real message's footer with the compaction run's usage.
+          if (!agent.isInternalRun) threadStore.setMessageUsage(this.sessionId, JSON.stringify(runUsage));
         } catch { /* fire-and-forget */ }
       }
 
@@ -1125,9 +1131,11 @@ export class Session {
         // provider-error banner + sanitized detail.
         noteCode: isAbort ? 'run_interrupted' : 'provider_error',
         // An internal (compaction) run must NOT surface a visible note — the
-        // success path (line ~707) already skips its display persist, so mirror
-        // that here or an aborted/errored compaction leaks its internal prompt
-        // into the user's thread. Rows are still flipped display-only inside.
+        // success path skips persisting its messages entirely (_persistMessages +
+        // the end-of-run append both no-op for an internal run), so mirror that
+        // here or an aborted/errored compaction leaks its internal prompt into the
+        // user's thread. Any rows a prior eager checkpoint wrote are flipped
+        // display-only inside.
         internal: runOptions?.internal === true,
       });
 
@@ -1512,6 +1520,14 @@ export class Session {
    */
   private _persistMessages(): void {
     if (!this.agent) return;
+    // CORE-5: an internal (compaction) run has no user-facing turn — its
+    // summarizer prompt + raw summary are machinery, not thread history. Skip the
+    // eager checkpoint so they never land as visible (display_only=0) rows that
+    // render as spurious "Summarize the conversation…" bubbles and re-enter the
+    // model context on reload (they were also unmasked on disk). compact() consumes
+    // the returned summary string directly; the full pre-compaction history stays
+    // on disk and a separate display-only compaction marker records the event.
+    if (this.agent.isInternalRun) return;
     const agent = this.agent;
     // Outcome is intentionally ignored — fire-and-forget contract; helper
     // catches its own errors and returns an outcome enum for tests only.

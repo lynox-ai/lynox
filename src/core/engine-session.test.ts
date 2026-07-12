@@ -23,6 +23,9 @@ const mockSend = vi.fn().mockResolvedValue('response');
 const mockReset = vi.fn();
 const mockAbort = vi.fn();
 const mockGetMessages = vi.fn().mockReturnValue([]);
+// Shared so an override survives the compaction-tier `_recreateAgent` swap (the
+// summarizer runs on the RE-created agent, not the one present when the test set up).
+const mockGetUnpersistedTail = vi.fn().mockReturnValue([]);
 const mockLoadMessages = vi.fn();
 const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
@@ -54,7 +57,8 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor — identity-based persist seam. The mock
     // never appends in-loop, so the unpersisted tail is empty (nothing new to
     // write) and markPersisted is a no-op; mirrors a fully-checkpointed buffer.
-    this.getUnpersistedTail = vi.fn().mockReturnValue([]);
+    // Shared fn so a per-test override survives `_recreateAgent` (see decl).
+    this.getUnpersistedTail = mockGetUnpersistedTail;
     // @ts-expect-error mock constructor
     this.markPersisted = vi.fn();
     // @ts-expect-error mock constructor — mirrors the pre-PR1 char-estimate so
@@ -379,6 +383,7 @@ describe('Engine + Session (Orchestrator)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetMessages.mockReturnValue([]);
+    mockGetUnpersistedTail.mockReturnValue([]);
     mockRegister.mockReturnThis();
     // Enable feature flags for tests
     process.env['LYNOX_FEATURE_PLUGINS'] = '1';
@@ -507,6 +512,25 @@ describe('Engine + Session (Orchestrator)', () => {
           summaryChars: 'summary text'.length,
         }),
       );
+    });
+
+    it('CORE-5: an internal (compaction) run does NOT persist its summarizer prompt/summary as visible thread rows', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const threadStore = engine.getThreadStore()!;
+      const appendSpy = vi.spyOn(threadStore, 'appendMessages');
+      // The summarizer run leaves a non-empty unpersisted tail (the "Summarize the
+      // conversation…" user turn + the raw summary reply). Pre-fix these leaked to
+      // disk as display_only=0 rows and rendered as spurious bubbles on reload (and
+      // rode backup/export unmasked). The internal-run guards must skip persisting them.
+      mockGetUnpersistedTail.mockReturnValue([
+        { role: 'user', content: 'Summarize the conversation so far' },
+        { role: 'assistant', content: 'a raw internal summary' },
+      ]);
+      mockSend.mockResolvedValueOnce('summary text'); // the internal summary run
+      const result = await session.compact('keep the goal');
+      expect(result.success).toBe(true);
+      // The internal run's messages are machinery — never appended as thread rows.
+      expect(appendSpy).not.toHaveBeenCalled();
     });
 
     it('#4: preserves the most-recent user image across a compaction (re-attached inline)', async () => {

@@ -66,7 +66,9 @@ function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: Too
     (ctx as Record<string, unknown>)['userConfig'] = null;
   }
   ctx.tools = opts?.tools ?? mockTools;
-  return { toolContext: ctx } as unknown as IAgent;
+  // noteUntrustedData: the parent-taint seam (CORE-9) — a workflow run must latch
+  // the parent's untrusted signal so its end-of-run memory extraction abstains.
+  return { toolContext: ctx, noteUntrustedData: vi.fn() } as unknown as IAgent;
 }
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
@@ -203,6 +205,20 @@ describe('run_workflow — inline steps', () => {
     expect(parsed['pipelineId']).toBe('test-run-id');
     expect(mockValidateManifest).toHaveBeenCalledTimes(1);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('CORE-9: seats the parent untrusted latch after a workflow runs (delegated output not persisted as trusted)', async () => {
+    const agent = makePipelineAgent();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler(
+      { name: 'single', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    // Result shape preserved (structured JSON, NOT wrapped) so callers still read it…
+    expect((JSON.parse(result) as Record<string, unknown>)['status']).toBe('completed');
+    // …and the parent's untrusted latch is seated so end-of-run extraction abstains,
+    // exactly as spawn_agent propagates a sub-agent's taint.
+    expect(agent.noteUntrustedData).toHaveBeenCalledTimes(1);
   });
 
   it('successfully executes multi-step pipeline with input_from', async () => {

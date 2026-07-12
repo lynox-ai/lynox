@@ -3292,6 +3292,7 @@ export class LynoxHTTPApi {
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
+      if (engine.getSecretStore()?.containsSecret(content)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       await new MemoryFacade(memory, engine.getKnowledgeLayer()).replaceDocument(ns, content);
       jsonResponse(res, 200, { ok: true });
     }));
@@ -3303,6 +3304,7 @@ export class LynoxHTTPApi {
       const ns = params['ns'] as MemoryNs;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
       if (!text) { errorResponse(res, 400, 'Missing text'); return; }
+      if (engine.getSecretStore()?.containsSecret(text)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       await new MemoryFacade(memory, engine.getKnowledgeLayer()).append(ns, text);
       jsonResponse(res, 200, { ok: true });
     }));
@@ -3333,6 +3335,7 @@ export class LynoxHTTPApi {
       };
       const oldText = pick('old', 'old_content');
       const newText = pick('new', 'new_content');
+      if (engine.getSecretStore()?.containsSecret(newText)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       const updated = await new MemoryFacade(memory, engine.getKnowledgeLayer()).update(ns, oldText, newText);
       jsonResponse(res, 200, { updated });
     }));
@@ -6329,7 +6332,7 @@ export class LynoxHTTPApi {
             entities = db.listEntities({ limit: 200 });
           }
           // Also deactivate all memories
-          db.deactivateMemoriesByPattern('%');
+          db.deactivateAllMemories();
         } catch { /* best effort */ }
       }
 
