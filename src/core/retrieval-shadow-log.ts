@@ -1,6 +1,4 @@
-import { appendFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import path from 'node:path';
+import { appendBoundedJsonl } from './bounded-jsonl-log.js';
 import type { ProvenanceKind } from '../types/index.js';
 
 /**
@@ -24,17 +22,12 @@ import type { ProvenanceKind } from '../types/index.js';
  *    read-only container.
  *  - Privacy: the query is stored only as a 16-char sha256 prefix (never raw text),
  *    but `threadId`/`subjectId` are plaintext. The sink is per-container, OUTSIDE
- *    backups and the migration export — bound its retention before enabling it
- *    fleet-wide on customer data.
+ *    backups and the migration export. Its retention is bounded by the shared
+ *    size-rotation in `bounded-jsonl-log.ts` (≤ 2× cap on disk), so enabling it
+ *    fleet-wide on customer data cannot grow an unbounded plaintext file.
  */
 
 export const RETRIEVAL_SHADOW_LOG_FILE = 'retrieval-shadow.jsonl';
-
-/** Resolve the data dir the same way the rest of the engine does. */
-function dataDir(): string {
-  const fromEnv = process.env['LYNOX_DATA_DIR'] ?? process.env['LYNOX_DIR'];
-  return fromEnv && fromEnv.length > 0 ? fromEnv : path.join(homedir(), '.lynox');
-}
 
 /** One scored candidate as seen by the admission gate. */
 export interface RetrievalShadowCandidate {
@@ -73,15 +66,10 @@ export interface RetrievalShadowLogEntry {
 }
 
 /**
- * Append one retrieval record as a JSON line. Fire-and-forget: the caller does
- * `void appendRetrievalShadowLog(...)` and never awaits. Any error (read-only FS,
- * permission, disk full) is swallowed so the retrieval is untouched.
+ * Append one retrieval record as a JSON line to the size-bounded sink. Fire-and-forget:
+ * the caller does `void appendRetrievalShadowLog(...)` and never awaits. Best-effort —
+ * any FS error is swallowed so the retrieval is untouched.
  */
-export async function appendRetrievalShadowLog(entry: RetrievalShadowLogEntry): Promise<void> {
-  try {
-    const file = path.join(dataDir(), RETRIEVAL_SHADOW_LOG_FILE);
-    await appendFile(file, JSON.stringify(entry) + '\n', 'utf8');
-  } catch {
-    // Best-effort telemetry — never propagate.
-  }
+export function appendRetrievalShadowLog(entry: RetrievalShadowLogEntry): Promise<void> {
+  return appendBoundedJsonl(RETRIEVAL_SHADOW_LOG_FILE, entry);
 }

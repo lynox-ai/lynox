@@ -1,6 +1,4 @@
-import { appendFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import path from 'node:path';
+import { appendBoundedJsonl } from './bounded-jsonl-log.js';
 import type { ProvenanceKind } from '../types/index.js';
 
 /**
@@ -15,18 +13,13 @@ import type { ProvenanceKind } from '../types/index.js';
  * `GROUP BY` (which the persisted `source_channel`/`source_type` columns also allow).
  *
  * Mirrors `retrieval-shadow-log.ts` exactly: default OFF (gated on the same
- * `retrieval_shadow_log` flag → one flag, one retention story), filters NOTHING,
- * best-effort (a logging failure never surfaces into the store), written next to
- * `agent-memory.db` in the persistent data dir, OUTSIDE backups and the migration export.
+ * `retrieval_shadow_log` flag → one flag, one retention story — both sinks share the
+ * size-rotation in `bounded-jsonl-log.ts`), filters NOTHING, best-effort (a logging
+ * failure never surfaces into the store), written next to `agent-memory.db` in the
+ * persistent data dir, OUTSIDE backups and the migration export.
  */
 
 export const MEMORY_WRITE_LOG_FILE = 'memory-write.jsonl';
-
-/** Resolve the data dir the same way the rest of the engine does. */
-function dataDir(): string {
-  const fromEnv = process.env['LYNOX_DATA_DIR'] ?? process.env['LYNOX_DIR'];
-  return fromEnv && fromEnv.length > 0 ? fromEnv : path.join(homedir(), '.lynox');
-}
 
 /** One persisted line: the evidence + derived tier for a single store() call. */
 export interface MemoryWriteLogEntry {
@@ -45,15 +38,10 @@ export interface MemoryWriteLogEntry {
 }
 
 /**
- * Append one write-telemetry record as a JSON line. Fire-and-forget: the caller does
- * `void appendMemoryWriteLog(...)` and never awaits. Any error is swallowed so the
- * store is untouched.
+ * Append one write-telemetry record as a JSON line to the size-bounded sink.
+ * Fire-and-forget: the caller does `void appendMemoryWriteLog(...)` and never awaits.
+ * Best-effort — any FS error is swallowed so the store is untouched.
  */
-export async function appendMemoryWriteLog(entry: MemoryWriteLogEntry): Promise<void> {
-  try {
-    const file = path.join(dataDir(), MEMORY_WRITE_LOG_FILE);
-    await appendFile(file, JSON.stringify(entry) + '\n', 'utf8');
-  } catch {
-    // Best-effort telemetry — never propagate.
-  }
+export function appendMemoryWriteLog(entry: MemoryWriteLogEntry): Promise<void> {
+  return appendBoundedJsonl(MEMORY_WRITE_LOG_FILE, entry);
 }
