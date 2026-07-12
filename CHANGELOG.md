@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.6.1 — 2026-07-12
+
+A small hardening release. Saving an API integration that sends data to a host outside lynox's vetted list now asks you to confirm out-of-band before it is saved, so a custom endpoint is only ever trusted after a real person approves it — never automatically, and the save fails closed in autonomous/background mode. Separately, the opt-in diagnostic log sinks now have a bounded retention, so enabling them can no longer let a log file grow without limit. Engine-only release; no migration — rollback to 2.6.0 is a clean image swap.
+
+### Fixed
+- **Custom API endpoints require your explicit confirmation.** Saving an `api_setup` profile that egresses to a host outside lynox's vetted sub-processor list now prompts you out-of-band to accept controller-responsibility before the profile is saved, and fails closed when no interactive prompt is available. (#945)
+- **Opt-in diagnostic logs have bounded retention.** The optional telemetry log sinks now cap their on-disk size, so an enabled sink can no longer grow without limit. (#944)
+
 ## 2.6.0 — 2026-07-12
 
 This release lands the first half of a memory-quality rework and hardens the memory foundation 2.5.0 shipped. Memories now record where each fact came from — the channel it arrived on, whether it originated in untrusted content, the embedding model used — and derive a provenance tier from that evidence: the groundwork for trust-aware recall, default-off with no behaviour change. On top of that, several correctness and privacy gaps in the erasure, masking, and compaction paths are closed: a stored memory whose text contains a wildcard character can no longer over-match and remove unrelated memories on delete; a recall-mirror reap that fails now surfaces loudly instead of silently leaving "deleted" content recallable; secrets are masked in the knowledge-graph recall mirror, not just the flat store; and compaction's internal summarizer turns no longer surface as visible thread history. **Additive engine.db migration** (three new nullable/defaulted columns on `memories`) — rollback to 2.5.0 is a clean image swap; the older build simply ignores the added columns.
