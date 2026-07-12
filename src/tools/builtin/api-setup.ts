@@ -77,14 +77,6 @@ interface ApiSetupInput {
   docs_url?: string | undefined;
   /** Additive patch (required for refine). */
   refine?: RefinePatch | undefined;
-  /**
-   * Wave 5d BYOK liability gate: when `profile.base_url` is not on lynox's
-   * vetted sub-processor allowlist (see `core/llm/endpoint-allowlist.ts`),
-   * create/update returns a REQUIRES_USER_CONFIRMATION sentinel. The agent
-   * must surface the disclosure via `ask_user`, then re-call api_setup with
-   * `confirm_custom_endpoint: true` to capture user acceptance and proceed.
-   */
-  confirm_custom_endpoint?: boolean | undefined;
 }
 
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
@@ -941,10 +933,6 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
           type: 'string',
           description: 'For fetch_token action: vault key name to store the resulting access_token under. UPPER_SNAKE_CASE. Default: `${id.toUpperCase()}_ACCESS_TOKEN`.',
         },
-        confirm_custom_endpoint: {
-          type: 'boolean',
-          description: 'Required when `profile.base_url` points at a host outside lynox\'s vetted sub-processor allowlist. First call returns `REQUIRES_USER_CONFIRMATION` with a disclosure text; surface that to the user via `ask_user`, then re-call this tool with `confirm_custom_endpoint: true` to record acceptance and proceed.',
-        },
       },
       required: ['action'],
     },
@@ -1115,27 +1103,39 @@ Next steps before calling create:
         egressUrls.push(profile.auth.oauth.token_url);
       }
       const nonAllowlisted = egressUrls.filter((u) => !isAllowlistedEndpoint(u));
-      if (nonAllowlisted.length > 0 && input.confirm_custom_endpoint !== true) {
-        // Disclose EVERY non-allowlisted egress host — a single confirm accepts
-        // all of them, so the user must see all (not just the first).
+      if (nonAllowlisted.length > 0) {
+        // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
+        // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
+        // agent (malicious mail/page/doc) that could self-approve would repoint an
+        // existing oauth2 profile's base_url at an attacker host, accept, and then
+        // exfiltrate the managed access_token via a later http_request (the token
+        // auto-attaches by hostname). So we ask the human out-of-band via
+        // `promptUser` (PromptStore ask_user) — the agent cannot supply this
+        // answer — and fail CLOSED when no interactive prompt exists. Disclose
+        // EVERY non-allowlisted egress host so the single accept is informed.
         const disclosure = nonAllowlisted.map((u) => describeDisclosure(u)).join('\n\n');
-        return JSON.stringify({
-          status: 'REQUIRES_USER_CONFIRMATION',
-          disclosure,
-          hint: 'Surface the `disclosure` text to the user via `ask_user`. Once they accept, re-call `api_setup` with the same `profile` plus `confirm_custom_endpoint: true` to record acceptance and persist the profile.',
-        }, null, 2);
+        if (!agent.promptUser) {
+          return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
+        }
+        const answer = await agent.promptUser(
+          `⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
+          ['Allow', 'Deny', '\x00'],
+        );
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return `Blocked: profile "${profile.id}" not saved — user declined controller-responsibility for the non-vetted host(s).`;
+        }
       }
 
       // Persist the acceptance onto the profile so the RUNTIME egress paths
       // (fetch_token, http_request OAuth2 attach) can re-verify it fail-closed
-      // after a reload/migration — where the transient `confirm_custom_endpoint`
-      // tool signal is long gone. Set server-side ONLY; an ack carried in the
-      // incoming `profile` object is never trusted (that would forge the gate),
-      // so we overwrite it unconditionally here. Bound to the specific hosts so
-      // a later `token_url`/`base_url` swap to a different non-vetted host does
+      // after a reload/migration — where the transient in-run confirmation is
+      // long gone. Set server-side ONLY; an ack carried in the incoming
+      // `profile` object is never trusted (that would forge the gate), so we
+      // overwrite it unconditionally here. Bound to the specific hosts so a
+      // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
       if (nonAllowlisted.length > 0) {
-        // Reachable only with confirm_custom_endpoint === true (else returned above).
+        // Reachable only after the human accepted above (else returned).
         const ackHosts = Array.from(new Set(
           nonAllowlisted
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
@@ -1247,7 +1247,7 @@ Next steps before calling create:
       if (!isAllowlistedEndpoint(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
         let host = oauth.token_url;
         try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
-        return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility (re-call with confirm_custom_endpoint: true), which records the acceptance and unblocks fetch_token.`;
+        return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';
       const bodyFormat = oauth.body_format ?? 'form';

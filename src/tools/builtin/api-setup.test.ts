@@ -66,7 +66,11 @@ const SAMPLE_PROFILE: ApiProfile = {
   avoid: ['No GET for mutations'],
 };
 
-function createMockAgent(apiStore?: ApiStore | null, secretStore?: unknown) {
+function createMockAgent(
+  apiStore?: ApiStore | null,
+  secretStore?: unknown,
+  promptUser?: (question: string, options?: string[]) => Promise<string>,
+) {
   return {
     // Bootstrap fetches now charge against sessionCounters.httpRequests
     // (matches http.ts). The stub just provides a writable counter; tests
@@ -77,6 +81,10 @@ function createMockAgent(apiStore?: ApiStore | null, secretStore?: unknown) {
       pendingOutboundPrompts: new Map<string, unknown>(),
     },
     secretStore: secretStore ?? undefined,
+    // Out-of-band human confirmation for the custom-endpoint acceptance gate.
+    // Undefined by default = headless / no interactive prompt = fail closed
+    // (a non-allowlisted egress host cannot be saved without a real human).
+    promptUser,
     toolContext: {
       apiStore: apiStore ?? null,
       dataStore: null,
@@ -214,48 +222,105 @@ describe('api_setup tool', () => {
   // Wave 5d — BYOK custom-endpoint disclosure gate. Paired security-block +
   // legitimate-use coverage per the sprint convention.
   describe('custom-endpoint disclosure gate', () => {
-    it('allowlisted base_url + no confirm_custom_endpoint → proceeds without REQUIRES_USER_CONFIRMATION', async () => {
+    it('allowlisted base_url → proceeds without a confirmation prompt', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store);
       // SAMPLE_PROFILE points at api.openai.com (allowlisted host).
       const result = await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
       expect(result).toContain('Created API profile');
-      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).not.toContain('Blocked');
       expect(store.get('test-api')).toBeDefined();
     });
 
-    it('non-allowlisted base_url + no confirm_custom_endpoint → returns REQUIRES_USER_CONFIRMATION with disclosure', async () => {
+    it('non-allowlisted base_url, headless (no promptUser) → fails CLOSED, discloses the host, not persisted', async () => {
       const store = new ApiStore();
-      const agent = createMockAgent(store);
+      const agent = createMockAgent(store); // no promptUser = headless/background
       const customProfile: ApiProfile = {
         ...SAMPLE_PROFILE,
         id: 'custom-proxy',
         base_url: 'https://my-litellm-proxy.example.com/v1',
       };
       const result = await apiSetupTool.handler({ action: 'create', profile: customProfile }, agent);
-      expect(result).toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).toContain('Blocked');
       expect(result).toContain('my-litellm-proxy.example.com');
-      expect(result).toContain('controller responsibility');
       // Profile must NOT be persisted on the gated path.
       expect(store.get('custom-proxy')).toBeUndefined();
     });
 
-    it('non-allowlisted base_url + confirm_custom_endpoint=true → proceeds', async () => {
+    it('non-allowlisted base_url + user accepts (promptUser → Allow) → proceeds', async () => {
       const store = new ApiStore();
-      const agent = createMockAgent(store);
+      const promptUser = vi.fn(async () => 'Allow');
+      const agent = createMockAgent(store, undefined, promptUser);
       const customProfile: ApiProfile = {
         ...SAMPLE_PROFILE,
         id: 'custom-proxy-confirmed',
         base_url: 'https://my-litellm-proxy.example.com/v1',
       };
-      const result = await apiSetupTool.handler({
-        action: 'create',
-        profile: customProfile,
-        confirm_custom_endpoint: true,
-      }, agent);
+      const result = await apiSetupTool.handler({ action: 'create', profile: customProfile }, agent);
+      // The acceptance is an OUT-OF-BAND human answer, surfaced with the host.
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(String(promptUser.mock.calls[0]?.[0])).toContain('my-litellm-proxy.example.com');
       expect(result).toContain('Created API profile');
-      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
       expect(store.get('custom-proxy-confirmed')).toBeDefined();
+    });
+
+    it('non-allowlisted base_url + user declines (promptUser → Deny) → blocked, not persisted', async () => {
+      const store = new ApiStore();
+      const promptUser = vi.fn(async () => 'Deny');
+      const agent = createMockAgent(store, undefined, promptUser);
+      const customProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'custom-proxy-declined',
+        base_url: 'https://my-litellm-proxy.example.com/v1',
+      };
+      const result = await apiSetupTool.handler({ action: 'create', profile: customProfile }, agent);
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(result).toContain('Blocked');
+      expect(result).toContain('declined');
+      expect(store.get('custom-proxy-declined')).toBeUndefined();
+    });
+
+    // SECURITY (api_setup self-approval fix): the acceptance is an out-of-band
+    // HUMAN answer, never a tool argument. A prompt-injected agent that
+    // hand-carries the removed `confirm_custom_endpoint: true` flag must NOT
+    // bypass the human — the flag is gone from the schema and ignored, so a
+    // headless run still fails closed and nothing is persisted.
+    it('SECURITY: a forged confirm_custom_endpoint arg does NOT self-approve (headless still blocked)', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store); // headless: no human present
+      const customProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'inject-selfapprove',
+        base_url: 'https://attacker.example.com/v1',
+      };
+      const result = await apiSetupTool.handler(
+        // cast: confirm_custom_endpoint is no longer part of ApiSetupInput —
+        // this simulates a malicious agent still attempting to pass it.
+        { action: 'create', profile: customProfile, confirm_custom_endpoint: true } as never,
+        agent,
+      );
+      expect(result).toContain('Blocked');
+      expect(store.get('inject-selfapprove')).toBeUndefined();
+    });
+
+    it('SECURITY: a forged confirm_custom_endpoint arg cannot pre-satisfy a PRESENT human — they are still asked, and Deny blocks', async () => {
+      const store = new ApiStore();
+      const promptUser = vi.fn(async () => 'Deny');
+      const agent = createMockAgent(store, undefined, promptUser);
+      const customProfile: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'inject-preselfapprove',
+        base_url: 'https://attacker.example.com/v1',
+      };
+      const result = await apiSetupTool.handler(
+        { action: 'create', profile: customProfile, confirm_custom_endpoint: true } as never,
+        agent,
+      );
+      // The forged flag does NOT skip the human: promptUser is still invoked,
+      // and the human's Deny still blocks + nothing is persisted.
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(result).toContain('Blocked');
+      expect(store.get('inject-preselfapprove')).toBeUndefined();
     });
 
     it('malformed base_url → rejected by existing validator BEFORE the disclosure gate fires', async () => {
@@ -268,10 +333,10 @@ describe('api_setup tool', () => {
         profile: { ...SAMPLE_PROFILE, base_url: 'not-a-url' },
       }, agent);
       expect(result).toContain('Invalid base_url');
-      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).not.toContain('Blocked');
     });
 
-    it('allowlisted base_url but non-allowlisted OAuth token_url + no confirm → REQUIRES_USER_CONFIRMATION disclosing the token host', async () => {
+    it('allowlisted base_url but non-allowlisted OAuth token_url, headless → fails closed disclosing the token host', async () => {
       // fetch_token POSTs the vault client_secret to token_url, so token_url is
       // an egress host and must clear the same allowlist as base_url — an
       // allowlisted base_url must not smuggle an arbitrary token_url past it.
@@ -288,14 +353,14 @@ describe('api_setup tool', () => {
         },
       };
       const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
-      expect(result).toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).toContain('Blocked');
       expect(result).toContain('token-thief.example.com'); // disclosure names the offending egress host
       expect(store.get('oauth-split-host')).toBeUndefined(); // not persisted on the gated path
     });
 
-    it('allowlisted base_url + non-allowlisted token_url + confirm_custom_endpoint=true → proceeds', async () => {
+    it('allowlisted base_url + non-allowlisted token_url + user accepts → proceeds', async () => {
       const store = new ApiStore();
-      const agent = createMockAgent(store);
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
       const oauthProfile: ApiProfile = {
         ...SAMPLE_PROFILE,
         id: 'oauth-split-confirmed',
@@ -306,13 +371,8 @@ describe('api_setup tool', () => {
           oauth: { token_url: 'https://token-thief.example.com/oauth/token' },
         },
       };
-      const result = await apiSetupTool.handler({
-        action: 'create',
-        profile: oauthProfile,
-        confirm_custom_endpoint: true,
-      }, agent);
+      const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
       expect(result).toContain('Created API profile');
-      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
       expect(store.get('oauth-split-confirmed')).toBeDefined();
     });
 
@@ -331,11 +391,11 @@ describe('api_setup tool', () => {
       };
       const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
       expect(result).toContain('Created API profile');
-      expect(result).not.toContain('REQUIRES_USER_CONFIRMATION');
+      expect(result).not.toContain('Blocked');
       expect(store.get('oauth-both-allowlisted')).toBeDefined();
     });
 
-    it('non-allowlisted base_url AND token_url → discloses BOTH offending hosts', async () => {
+    it('non-allowlisted base_url AND token_url, headless → discloses BOTH offending hosts', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store);
       const oauthProfile: ApiProfile = {
@@ -349,26 +409,26 @@ describe('api_setup tool', () => {
         },
       };
       const result = await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
-      expect(result).toContain('REQUIRES_USER_CONFIRMATION');
-      // A single confirm accepts both hosts, so the disclosure must name both.
+      expect(result).toContain('Blocked');
+      // A single accept covers both hosts, so the disclosure must name both.
       expect(result).toContain('my-proxy.example.com');
       expect(result).toContain('token-thief.example.com');
       expect(store.get('oauth-both-custom')).toBeUndefined();
     });
 
-    // The confirm_custom_endpoint acceptance must be PERSISTED onto the profile
+    // The custom-endpoint acceptance must be PERSISTED onto the profile
     // (store + disk), not just consumed at save — otherwise a reload / migration
     // would strand the acceptance and the runtime egress gate could never tell a
     // confirmed profile from a smuggled one.
-    it('persists custom_endpoint_ack (hosts + accepted_at) on a confirmed non-allowlisted create — in store AND on disk', async () => {
+    it('persists custom_endpoint_ack (hosts + accepted_at) on an accepted non-allowlisted create — in store AND on disk', async () => {
       const store = new ApiStore();
-      const agent = createMockAgent(store);
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
       const customProfile: ApiProfile = {
         ...SAMPLE_PROFILE,
         id: 'ack-persist',
         base_url: 'https://my-litellm-proxy.example.com/v1',
       };
-      await apiSetupTool.handler({ action: 'create', profile: customProfile, confirm_custom_endpoint: true }, agent);
+      await apiSetupTool.handler({ action: 'create', profile: customProfile }, agent);
 
       const stored = store.get('ack-persist');
       expect(stored?.custom_endpoint_ack?.accepted).toBe(true);
@@ -384,7 +444,7 @@ describe('api_setup tool', () => {
 
     it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
       const store = new ApiStore();
-      const agent = createMockAgent(store);
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
       const oauthProfile: ApiProfile = {
         ...SAMPLE_PROFILE,
         id: 'ack-split',
@@ -395,7 +455,7 @@ describe('api_setup tool', () => {
           oauth: { token_url: 'https://token-thief.example.com/oauth/token' }, // not allowlisted → in the ack
         },
       };
-      await apiSetupTool.handler({ action: 'create', profile: oauthProfile, confirm_custom_endpoint: true }, agent);
+      await apiSetupTool.handler({ action: 'create', profile: oauthProfile }, agent);
       expect(store.get('ack-split')?.custom_endpoint_ack?.hosts).toEqual(['token-thief.example.com']);
     });
 
@@ -1821,7 +1881,11 @@ describe('api_setup tool', () => {
     it('refuses fetch_token when vault is missing client_id / client_secret', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, makeMockSecretStore({})); // empty vault
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Seed the profile directly with a persisted acceptance (mirrors a saved
+      // profile). These tests exercise fetch_token, not the create gate — which
+      // now requires a real out-of-band human accept (see the disclosure-gate
+      // block), so we don't route setup through it.
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
       expect(result).toMatch(/missing the OAuth credentials/i);
       expect(result).toContain('SHOPIFY_CLIENT_ID');
@@ -1835,7 +1899,11 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
       });
       const agent = createMockAgent(store, vaultMock);
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Seed the profile directly with a persisted acceptance (mirrors a saved
+      // profile). These tests exercise fetch_token, not the create gate — which
+      // now requires a real out-of-band human accept (see the disclosure-gate
+      // block), so we don't route setup through it.
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -1959,7 +2027,11 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
       }) as { _peek: (n: string) => string | undefined };
       const agent = createMockAgent(store, vaultMock);
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Seed the profile directly with a persisted acceptance (mirrors a saved
+      // profile). These tests exercise fetch_token, not the create gate — which
+      // now requires a real out-of-band human accept (see the disclosure-gate
+      // block), so we don't route setup through it.
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_returned_token_abc', expires_in: 86400 }), {
@@ -1994,7 +2066,11 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_ID: 'client-id-xyz',
         SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
       }));
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Seed the profile directly with a persisted acceptance (mirrors a saved
+      // profile). These tests exercise fetch_token, not the create gate — which
+      // now requires a real out-of-band human accept (see the disclosure-gate
+      // block), so we don't route setup through it.
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       // Lock the tenant to deny-all. The token POST carries client_secret — it
       // must be blocked by the same egress policy http_request obeys, proving
       // agent.toolContext is now threaded into the token fetch (before the fix
@@ -2015,7 +2091,11 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_ID: 'client-id-xyz',
         SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
       }));
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Seed the profile directly with a persisted acceptance (mirrors a saved
+      // profile). These tests exercise fetch_token, not the create gate — which
+      // now requires a real out-of-band human accept (see the disclosure-gate
+      // block), so we don't route setup through it.
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       const counters = (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters;
       const before = counters.httpRequests;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
@@ -2037,7 +2117,11 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_ID: 'id',
         SHOPIFY_CLIENT_SECRET: 'sec',
       }));
-      await apiSetupTool.handler({ action: 'create', profile: SHOPIFY_PROFILE, confirm_custom_endpoint: true }, agent);
+      // Seed the profile directly with a persisted acceptance (mirrors a saved
+      // profile). These tests exercise fetch_token, not the create gate — which
+      // now requires a real out-of-band human accept (see the disclosure-gate
+      // block), so we don't route setup through it.
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response('<!DOCTYPE html><html><body>app_not_installed</body></html>', {

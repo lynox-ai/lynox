@@ -216,9 +216,10 @@ export interface ApiProfile {
   /**
    * Wave 5d BYOK liability gate — persisted user acceptance for the profile's
    * non-allowlisted egress hosts (`base_url` / OAuth `token_url` outside the
-   * vetted sub-processor list). Set server-side ONLY at save-time from a
-   * `confirm_custom_endpoint: true` signal; never trusted from the incoming
-   * profile object (that would forge the gate). Absence on a profile with a
+   * vetted sub-processor list). Set server-side ONLY at save-time from an
+   * out-of-band user confirmation (`promptUser`/`ask_user`); never trusted from
+   * the incoming profile object nor from an agent-supplied tool argument (either
+   * would forge the gate). Absence on a profile with a
    * non-allowlisted egress host = never-accepted → the runtime egress paths
    * (`fetch_token`, `http_request` OAuth2 attach) refuse fail-closed until the
    * profile is re-saved through the disclosure. See `CustomEndpointAck`.

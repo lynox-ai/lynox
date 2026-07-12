@@ -544,7 +544,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             !isAllowlistedEndpoint(input.url) &&
             !isEndpointAcked(oauthProfile.custom_endpoint_ack, input.url)
           ) {
-            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility (confirm_custom_endpoint: true) to unblock.`;
+            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
           }
           const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
           const resolvedToken = agent.secretStore.resolve(tokenKey);
