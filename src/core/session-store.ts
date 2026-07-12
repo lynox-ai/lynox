@@ -81,7 +81,20 @@ async function generateThreadSummary(
     const summarySession = engine.createSession({ model: 'fast' });
     const formatted = formatMessagesForSummary(messages.slice(0, -RECENT_COUNT));
     const prompt = `Summarize this conversation concisely in 3-5 paragraphs. Focus on: what was discussed, decisions made, current state of work, and any pending items.\n\n${formatted.slice(0, 30_000)}`;
-    const summary = await summarySession.run(prompt);
+    // Run as an INTERNAL summary (mirror compact()): a budget/credit guard block is
+    // then THROWN (InternalRunBlockedError) instead of RETURNED as a string, so a
+    // guard block ("Daily spending cap reached…") can never be persisted as the
+    // thread's authoritative summary — which would replace the real conversation
+    // summary on every future resume (permanent context loss). A throw lands in the
+    // catch → nothing persisted → retried on the next resume.
+    let summary = await summarySession.run(prompt, { noTools: true, internal: true });
+    if (!summary) return; // empty reply / provider blip — leave prior summary, retry next resume
+
+    // Mask any secret the summarizer echoed from the conversation BEFORE persisting:
+    // threads.summary rides backup / migration-export / debug-export and is read back
+    // on resume, so a raw secret must not live there (mirror compact()'s pre-persist mask).
+    const secretStore = engine.getSecretStore();
+    if (secretStore) summary = secretStore.maskSecrets(summary);
 
     const threadStore = engine.getThreadStore();
     if (threadStore) {
