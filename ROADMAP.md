@@ -2,28 +2,30 @@
 
 The public-facing slice of what's next for lynox. Strategic details (pricing, business model, go-to-market) live in the private Pro repo; this page is the engineering-and-feature view that an evaluator or contributor needs.
 
-This roadmap is intentionally short. The Managed-hosting tier funds the project, so engineering capacity is one full-time maintainer plus occasional help — multi-year speculative roadmaps would be theatre.
+This roadmap is intentionally short and **directional, not a set of dated commitments** — priorities shift as customers and contributors weigh in. The Managed-hosting tier funds the project, so engineering capacity is one full-time maintainer plus occasional help; multi-year speculative roadmaps would be theatre.
 
 ---
 
 ## next
+- Event-driven automation — triggers that fire a workflow on a schedule or when something changes ("when X happens, do Y")
+- Connect any API — teach lynox a service once, reuse it everywhere
 - Calendar Integration (CalDAV + ICS imports, then create)
 - OpenAI Native Provider (first-class, alongside Anthropic + Mistral)
 - MCP Client (connect to Smithery catalog + custom servers)
 - STT Provider Multiplexing (Whisper / Voxtral / Gladia.io in evaluation)
-- OAuth Authorization-Code Callbacks (closes api_setup OAuth gap)
-- Cross-thread Memory Unification (memory compounds across every conversation)
+- OAuth Authorization-Code Callbacks (one-click connect for services that sign in with OAuth)
+- Memory that compounds — knowledge carries across every conversation, and stays trustworthy as it grows
 
 ## later
+- Inbound Webhook Receivers (external events — e.g. Stripe / GitHub / Twilio — trigger workflows)
 - Browser Use / Playwright Tool (automate sites without APIs)
 - PDF / Image Multimodal first-class (drag-and-drop document understanding)
-- Inbound Webhook Receivers (Stripe / GitHub / Twilio events trigger workflows)
 
 ## under evaluation
 - iOS / Android native apps (PWA exists today — gauging demand)
 
 ## beyond
-(focus is on items above)
+(focus is on the items above)
 
 ---
 
