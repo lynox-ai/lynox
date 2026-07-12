@@ -131,7 +131,7 @@ describe('KnowledgeLayer.eraseByPattern (Erasure — hard delete)', () => {
     expect(new MemoryGraphStore(engine).getStub(stored.memoryId)).toBeNull();
   });
 
-  it('flag-off (subjectGraph off): erases legacy only, never touches engine.db', async () => {
+  it('flag-off (subjectGraph off): erases legacy + runs a (no-op) engine.db reap since the store exists', async () => {
     const { layer, engine } = newLayer({ subjectGraph: false, memReads: false });
     await layer.init();
     const stored = await layer.store('Ephemeral note to erase later', 'knowledge', scope);
@@ -140,7 +140,10 @@ describe('KnowledgeLayer.eraseByPattern (Erasure — hard delete)', () => {
     try {
       const erased = await layer.eraseByPattern('Ephemeral note');
       expect(erased).toBe(1);
-      expect(purgeSpy).not.toHaveBeenCalled(); // no engine.db mirror when the flag is off
+      // Durable-reap: the reap is gated on the store existing, NOT the reversible
+      // flag — so it fires with the matched ids (a no-op here, no stub was mirrored),
+      // ensuring a stub from a prior flag-ON window can never survive a flag-OFF erase.
+      expect(purgeSpy).toHaveBeenCalledWith([stored.memoryId]);
     } finally {
       purgeSpy.mockRestore();
     }

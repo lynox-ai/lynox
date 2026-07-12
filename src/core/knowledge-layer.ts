@@ -1016,28 +1016,32 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * Deletes memories and orphaned entities (reference-counted).
    */
   purgeThread(threadId: string): number {
-    // S5b'-c: under the MIRROR flag, ALSO reap the thread's engine.db stubs — the
-    // authoritative recall store — else the purged (privacy) statement text lingers
-    // there. id-parity bridge: read the thread's ids from legacy (which owns
-    // source_thread_id) BEFORE the legacy purge deletes them, then delete the same
-    // stub ids from engine.db (cascades reap the junction; durable subjects survive).
-    // Gated on `subjectGraphEnabled`, NOT reads — the mirror WRITES stubs whenever it's
-    // on, so a purge must reap them whenever it's on (matching _mirrorConfidence).
-    // Isolated: an engine.db failure is logged + swallowed so the legacy purge below
-    // still runs. Residual gap (tracked for the reads-flip reconcile, NOT this slice):
-    // once `memoryGraphReads` is on, a swallowed reap leaves the stub recallable AND
-    // unrecoverable (the legacy ids vanish once the legacy purge runs). Surfacing that
-    // end-to-end is a route change — the caller (http-api private-mode purge) already
-    // treats purge as best-effort-logged — so hardening it here alone wouldn't reach
-    // the user. No live tenant has reads on yet.
-    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+    // S5b'-c: ALSO reap the thread's engine.db stubs — the authoritative recall
+    // store — else the purged (privacy) statement text lingers there. id-parity
+    // bridge: read the thread's ids from legacy (which owns source_thread_id)
+    // BEFORE the legacy purge deletes them, then delete the same stub ids from
+    // engine.db (cascades reap the junction; durable subjects survive).
+    //
+    // Gated on the STORE existing, NOT the reversible `subjectGraphEnabled` write
+    // flag: stubs are durable rows, so a stub written during a flag-ON window must
+    // be reaped on purge even if the flag was since toggled OFF — else it resurrects
+    // on re-flip. A no-op reap (no matching stubs) is cheap.
+    //
+    // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
+    // memory_graph_reads=true, so a swallowed reap would leave the purged content
+    // still recallable from engine.db — a silent privacy FAILURE. engine.db is reaped
+    // FIRST, legacy LAST: on a reap failure RE-THROW before the legacy purge, so the
+    // legacy ids survive and a retry re-derives them + self-heals (mirror
+    // eraseByPattern), instead of the old swallow-then-purge-legacy-anyway that left
+    // an orphaned, unrecoverable, still-recallable engine.db stub. Emits the
+    // monitorable [lynox:mirror-parity] CRITICAL marker.
+    if (this.memoryGraphStore) {
       try {
         const ids = this.db.getMemoryIdsByThread(threadId);
         this.memoryGraphStore.purgeMemories(ids);
       } catch (err: unknown) {
-        process.stderr.write(
-          `[lynox:subject-graph] purge mirror failed for thread ${threadId}: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        this._reportMirrorParityLoss('purge', `thread ${threadId}`, err);
+        throw err;
       }
     }
     return this.db.purgeByThread(threadId);
@@ -1243,7 +1247,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * posture — store PRESERVES the legacy row and continues; deactivate and erase
    * RE-THROW so a half-completed erasure is never reported as done.
    */
-  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase', ref: string, err: unknown): void {
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase' | 'purge', ref: string, err: unknown): void {
     process.stderr.write(
       `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1375,10 +1379,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // there too — else `memory_delete` leaves the statement recallable via
     // engine.db, breaking the "deleted means gone" privacy promise. id-parity
     // bridge: the pattern is matched on legacy (plaintext), then the SAME ids are
-    // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on
-    // subjectGraphEnabled (NOT reads) — the mirror WRITES stubs whenever it's on,
-    // so a delete must reap them whenever it's on (matching purgeThread /
-    // _mirrorConfidence).
+    // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on the
+    // STORE existing (NOT the reversible subjectGraphEnabled write flag) — stubs are
+    // durable, so a soft-delete must reap them whenever the store exists, else a stub
+    // written during a flag-ON window resurrects on re-flip (matching purgeThread /
+    // eraseByPattern).
     //
     // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
     // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
@@ -1395,7 +1400,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
     // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
     // is falsely reported as done.
-    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+    if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
       } catch (err: unknown) {
@@ -1449,7 +1454,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const ids = this.db.findMemoryIdsByPattern(pattern, namespace);
     if (ids.length === 0) return 0;
 
-    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+    if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.purgeMemories(ids);
       } catch (err: unknown) {
