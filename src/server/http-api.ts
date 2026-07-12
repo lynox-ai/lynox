@@ -6329,7 +6329,7 @@ export class LynoxHTTPApi {
             entities = db.listEntities({ limit: 200 });
           }
           // Also deactivate all memories
-          db.deactivateMemoriesByPattern('%');
+          db.deactivateAllMemories();
         } catch { /* best effort */ }
       }
 

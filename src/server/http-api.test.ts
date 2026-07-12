@@ -5015,7 +5015,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           getDb: () => ({
             listEntities: () => [],
             deleteEntity: () => undefined,
-            deactivateMemoriesByPattern: () => [],
+            deactivateAllMemories: () => [],
           }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
@@ -5034,7 +5034,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => [] }),
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -5049,7 +5049,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => [] }),
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -5063,7 +5063,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => [] }),
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {

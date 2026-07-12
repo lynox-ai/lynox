@@ -215,6 +215,34 @@ describe('AgentMemoryDb', () => {
       const mem = db.getMemory(id!);
       expect(mem!.text).toBe('new text here');
     });
+
+    it('escapes LIKE metachars — a literal %/_ matches only the literal row (no wildcard over-erase)', () => {
+      // Business memory routinely contains % ("20% Rabatt") and _; an unescaped
+      // metachar turns a targeted erase into a wildcard over-match (GDPR data loss).
+      const literal = db.createMemory({ text: 'discount is a%b today', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      db.createMemory({ text: 'unrelated aZZZb entry', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      const under = db.createMemory({ text: 'key is sec_ret here', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 0, 1] });
+      db.createMemory({ text: 'noise secXret line', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0.5, 0.5, 0] });
+
+      // erase read-half (GDPR Art.17): % must NOT bridge a%…b as a wildcard
+      expect(db.findMemoryIdsByPattern('a%b')).toEqual([literal]);
+      // _ must NOT act as a single-char wildcard (would also match "secXret")
+      expect(db.findMemoryIdsByPattern('sec_ret')).toEqual([under]);
+      // substring find escapes identically
+      expect(db.findMemoriesByTextPattern('a%b').map(m => m.id)).toEqual([literal]);
+
+      // soft-delete path escapes identically
+      expect(db.deactivateMemoriesByPattern('a%b')).toEqual([literal]);
+      expect(db.getActiveMemoryCount()).toBe(3);
+    });
+
+    it('deactivateAllMemories soft-deletes every active row (wipe-all primitive, not a % wildcard)', () => {
+      db.createMemory({ text: 'one', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      db.createMemory({ text: 'two', namespace: 'methods', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      const ids = db.deactivateAllMemories();
+      expect(ids).toHaveLength(2);
+      expect(db.getActiveMemoryCount()).toBe(0);
+    });
   });
 
   // ── Vector Search ────────────────────────────────────────────

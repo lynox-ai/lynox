@@ -23,6 +23,16 @@ import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js
  *  realistically stays well under this because dedup + GC keep it bounded. */
 const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
 
+/** Escape SQLite LIKE metacharacters so a literal user string matches literally.
+ *  The backslash MUST be escaped FIRST (it is the ESCAPE char), then `%` and `_`.
+ *  Every call site that feeds literal user memory text into `text LIKE ?` MUST
+ *  pair this with `ESCAPE '\'` — business memory routinely contains `%` ("20%
+ *  Rabatt") / `_`, and an unescaped metachar turns a targeted match into a
+ *  wildcard over-match (a GDPR over-deletion on the erase path). */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, c => `\\${c}`);
+}
+
 // ── Row Types (internal, not exported) ──────────────────────────
 
 export interface MemoryRow {
@@ -411,7 +421,7 @@ export class AgentMemoryDb {
 
   findEntityByAlias(alias: string): EntityRow | null {
     // JSON array search: look for the alias string within the JSON aliases column
-    const escaped = alias.replace(/[%_]/g, c => `\\${c}`);
+    const escaped = escapeLike(alias);
     return this.db.prepare(`
       SELECT * FROM entities
       WHERE aliases LIKE ? ESCAPE '\\'
@@ -723,14 +733,15 @@ export class AgentMemoryDb {
   }
 
   findMemoriesByTextPattern(pattern: string, namespace?: string | undefined): MemoryRow[] {
+    const like = `%${escapeLike(pattern)}%`;
     if (namespace) {
       return this.db.prepare(`
-        SELECT * FROM memories WHERE is_active = 1 AND text LIKE ? AND namespace = ?
-      `).all(`%${pattern}%`, namespace) as MemoryRow[];
+        SELECT * FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ?
+      `).all(like, namespace) as MemoryRow[];
     }
     return this.db.prepare(`
-      SELECT * FROM memories WHERE is_active = 1 AND text LIKE ?
-    `).all(`%${pattern}%`) as MemoryRow[];
+      SELECT * FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\'
+    `).all(like) as MemoryRow[];
   }
 
   /**
@@ -799,11 +810,27 @@ export class AgentMemoryDb {
    * (a single LIKE scan; see the same idiom in mail/state.ts `bumpScheduledAttempt`).
    */
   deactivateMemoriesByPattern(pattern: string, namespace?: string | undefined): string[] {
-    const like = `%${pattern}%`;
+    const like = `%${escapeLike(pattern)}%`;
     const now = new Date().toISOString();
     const rows = (namespace
-      ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? AND namespace = ? RETURNING id').all(now, like, namespace)
-      : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? RETURNING id').all(now, like)
+      ? this.db.prepare("UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? RETURNING id").all(now, like, namespace)
+      : this.db.prepare("UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' RETURNING id").all(now, like)
+    ) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * Soft-delete EVERY active memory (optionally within a namespace) — the wipe-all
+   * primitive for the Right-to-Erasure route (`DELETE /api/data`). Distinct from
+   * {@link deactivateMemoriesByPattern}, which now LIKE-escapes its argument as a
+   * LITERAL match: a `'%'` passed there no longer means "match everything", so the
+   * "deactivate all" intent needs its own predicate-free statement.
+   */
+  deactivateAllMemories(namespace?: string | undefined): string[] {
+    const now = new Date().toISOString();
+    const rows = (namespace
+      ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND namespace = ? RETURNING id').all(now, namespace)
+      : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 RETURNING id').all(now)
     ) as { id: string }[];
     return rows.map(r => r.id);
   }
@@ -818,10 +845,10 @@ export class AgentMemoryDb {
    * The match runs HERE because engine.db text is encrypted and cannot be LIKE-matched.
    */
   findMemoryIdsByPattern(pattern: string, namespace?: string | undefined): string[] {
-    const like = `%${pattern}%`;
+    const like = `%${escapeLike(pattern)}%`;
     const rows = (namespace
-      ? this.db.prepare('SELECT id FROM memories WHERE text LIKE ? AND namespace = ?').all(like, namespace)
-      : this.db.prepare('SELECT id FROM memories WHERE text LIKE ?').all(like)
+      ? this.db.prepare("SELECT id FROM memories WHERE text LIKE ? ESCAPE '\\' AND namespace = ?").all(like, namespace)
+      : this.db.prepare("SELECT id FROM memories WHERE text LIKE ? ESCAPE '\\'").all(like)
     ) as { id: string }[];
     return rows.map(r => r.id);
   }
@@ -846,13 +873,14 @@ export class AgentMemoryDb {
     namespace?: string | undefined,
     embedding?: number[] | undefined,
   ): string | null {
+    const like = `%${escapeLike(oldText)}%`;
     const row = namespace
       ? this.db.prepare(`
-          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? AND namespace = ? LIMIT 1
-        `).get(`%${oldText}%`, namespace) as { id: string } | undefined
+          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? LIMIT 1
+        `).get(like, namespace) as { id: string } | undefined
       : this.db.prepare(`
-          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? LIMIT 1
-        `).get(`%${oldText}%`) as { id: string } | undefined;
+          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' LIMIT 1
+        `).get(like) as { id: string } | undefined;
 
     if (!row) return null;
     // Update the embedding in the SAME statement when the caller supplies one,
