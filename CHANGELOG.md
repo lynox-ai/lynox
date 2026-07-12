@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.6.0 — 2026-07-12
+
+This release lands the first half of a memory-quality rework and hardens the memory foundation 2.5.0 shipped. Memories now record where each fact came from — the channel it arrived on, whether it originated in untrusted content, the embedding model used — and derive a provenance tier from that evidence: the groundwork for trust-aware recall, default-off with no behaviour change. On top of that, several correctness and privacy gaps in the erasure, masking, and compaction paths are closed: a stored memory whose text contains a wildcard character can no longer over-match and remove unrelated memories on delete; a recall-mirror reap that fails now surfaces loudly instead of silently leaving "deleted" content recallable; secrets are masked in the knowledge-graph recall mirror, not just the flat store; and compaction's internal summarizer turns no longer surface as visible thread history. **Additive engine.db migration** (three new nullable/defaulted columns on `memories`) — rollback to 2.5.0 is a clean image swap; the older build simply ignores the added columns.
+
+### Added
+- **Memory provenance evidence.** Every stored memory now carries its source channel, an untrusted-origin flag, and the embedding model used, and a provenance tier is derived from that evidence. Default-off groundwork for trust-aware recall — no behaviour change until enabled. (#942)
+
+### Fixed
+- **Erasure no longer over-matches or half-completes silently.** A stored memory whose text contains a `%` or `_` can no longer cause a delete/erase to remove unrelated memories, and a knowledge-graph reap that fails during a delete/erase/purge now surfaces instead of leaving "deleted" content recallable. (#943)
+- **Secrets are masked in the recall mirror.** The knowledge-graph store — which ambient context injection reads from — now masks secrets the same way the flat store does, so a secret can't be re-injected into context or survive a delete, and the memory HTTP routes refuse content containing secret values. (#943)
+- **Compaction internals stay out of thread history.** The summarizer's internal turns no longer persist as visible thread messages, and a resume summary can no longer be overwritten by an internal budget-guard message. (#943)
+- **`memory_promote` removes only the promoted line.** Promotion now deletes exactly the matched line and refuses an empty pattern, mirroring `memory_delete`'s protections. (#943)
+
+### Notes
+- **Defense-in-depth on tool output.** Output from the workflow runner now passes through the same untrusted-data guard as other tool results, and the pattern scan is bounded so pathological input can't degrade it. (#943)
+
 ## 2.5.0 — 2026-07-11
 
 This release makes the agent's long-term memory trustworthy. You can now permanently delete what it remembers; its recall on hosted instances no longer silently loses a new memory or fails to erase a deleted one; and an instance migrated from self-hosting keeps the memories it recalls from. Compaction is hardened — a summary can no longer smuggle a tool result in as a verified fact, and secrets are masked before a summary is stored — and the debug export now carries a privacy-safe snapshot of memory state so recall issues can actually be diagnosed. Groundwork for a larger memory-quality rework ships behind a default-off flag with no behaviour change. **No engine.db migration** — rollback to 2.4.0 is a clean image swap.
