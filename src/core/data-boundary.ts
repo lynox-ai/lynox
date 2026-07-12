@@ -10,7 +10,12 @@ interface InjectionResult {
  * Patterns that indicate an indirect prompt injection attempt.
  * These detect text in external data that tries to manipulate the agent.
  */
-const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+// `requires` (optional) is a CHEAP, backtracking-free necessary-condition gate:
+// the expensive multi-anchor pattern below only runs when its terminal token is
+// actually present. This is the primary ReDoS defence for the exfiltration
+// patterns — the classic attack shape is a leading token repeated N times with NO
+// terminal (so the match keeps FAILING expensively); the gate makes that O(n).
+const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: RegExp }> = [
   // Tool invocation language
   { pattern: /\b(use|call|execute|invoke|run)\s+(the\s+)?(bash|write_file|http_request|spawn_agent|read_file|memory_store)\s+tool\b/i, label: 'tool invocation' },
   { pattern: /\b(use|call|execute|invoke|run)\s+(the\s+)?(google_gmail|google_drive|google_sheets|google_calendar|google_docs)\s+tool\b/i, label: 'tool invocation' },
@@ -37,11 +42,17 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^(system|user):\s*(?:you\b|I\b|we\b|ignore\b|forget\b|disregard\b|override\b|please\b|must\b|should\b|always\b|never\b|don'?t\b|do not\b|now\b|from now\b|let'?s\b|pretend\b|act as\b)/im, label: 'role impersonation' },
   { pattern: /\bas\s+the\s+(assistant|system|AI|model)\b/i, label: 'role impersonation' },
 
-  // Data exfiltration instructions
-  { pattern: /\b(send|post|upload|exfiltrate|transmit)\b.*\b(to|via)\b.*\b(http|https|url|server|endpoint)\b/i, label: 'exfiltration instruction' },
+  // Data exfiltration instructions. Two ReDoS defences on these multi-anchor
+  // patterns: (1) `requires` gates each on its terminal token (URL keyword / `@`)
+  // so the no-terminal attack shape is skipped in O(n); (2) the wildcard gaps are
+  // BOUNDED (`.{0,120}`, not `.*`) — an unbounded chain of `.*` backtracks
+  // super-linearly and freezes the event loop on long attacker content. A real
+  // exfil instruction keeps its verb/target/URL inside one clause, so a bounded
+  // gap preserves detection.
+  { pattern: /\b(send|post|upload|exfiltrate|transmit)\b.{0,120}\b(to|via)\b.{0,120}\b(http|https|url|server|endpoint)\b/i, label: 'exfiltration instruction', requires: /\b(?:https?|url|server|endpoint)\b/i },
 
   // Email/messaging exfiltration — attacker instructs agent to forward data via email or messaging
-  { pattern: /\b(forward|send|reply|email|mail)\b.*\b(this|the|all|my|these)\b.*\b(to|at)\b.*@/i, label: 'email exfiltration instruction' },
+  { pattern: /\b(forward|send|reply|email|mail)\b.{0,120}\b(this|the|all|my|these)\b.{0,120}\b(to|at)\b.{0,120}@/i, label: 'email exfiltration instruction', requires: /@/ },
 
   // Provenance-marker forgery (PRD v3 / INV-1) — untrusted content trying to
   // impersonate an engine-emitted trust marker (credibility laundering). The
@@ -55,17 +66,41 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bkind\s*=\s*["']?(?:tool_verified|user_asserted|agent_inferred|external_unverified)\b/i, label: 'provenance marker forgery (attribute)' },
 ];
 
+// Overlapping scan window (mirrors output-guard's checkWriteContent): bounds the
+// per-pass cost of the wildcard patterns regardless of total input size, so a
+// multi-MB tool result / web page can't turn a linear-per-window scan into an
+// event-loop stall. The overlap (> any realistic injection payload) keeps a match
+// straddling a window boundary catchable.
+const SCAN_WINDOW = 64 * 1024;
+const SCAN_OVERLAP = 4 * 1024;
+
+function scanWindowForInjection(content: string): string[] {
+  const patterns: string[] = [];
+  for (const { pattern, label, requires } of INJECTION_PATTERNS) {
+    // Cheap necessary-condition gate: skip the backtracking multi-anchor pattern
+    // when its terminal token is absent (kills the no-terminal ReDoS shape).
+    if (requires && !requires.test(content)) continue;
+    if (pattern.test(content)) patterns.push(label);
+  }
+  return patterns;
+}
+
 /**
- * Scan content for indirect prompt injection attempts.
+ * Scan content for indirect prompt injection attempts. Windowed so the bounded
+ * wildcard patterns stay cheap on arbitrarily long attacker-controlled content.
  */
 export function detectInjectionAttempt(content: string): InjectionResult {
-  const patterns: string[] = [];
-  for (const { pattern, label } of INJECTION_PATTERNS) {
-    if (pattern.test(content)) {
-      patterns.push(label);
+  if (content.length <= SCAN_WINDOW) {
+    const patterns = scanWindowForInjection(content);
+    return { detected: patterns.length > 0, patterns };
+  }
+  const found = new Set<string>();
+  for (let start = 0; start < content.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
+    for (const label of scanWindowForInjection(content.slice(start, start + SCAN_WINDOW))) {
+      found.add(label);
     }
   }
-  return { detected: patterns.length > 0, patterns };
+  return { detected: found.size > 0, patterns: [...found] };
 }
 
 /**

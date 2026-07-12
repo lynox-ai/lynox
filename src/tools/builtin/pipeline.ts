@@ -919,45 +919,57 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         }
       : undefined;
 
-    if (input.workflow_id) {
-      return executePipelineById(input, {
-        config: pipelineConfig,
-        tools: pipelineTools,
-        streamHandler: pipelineStreamHandler,
-        runHistory: pipelineRunHistory,
-        toolContext: pipelineToolContext,
-        parentPrompt,
-        userTimezone: agent.userTimezone,
-        sessionCounters: agent.sessionCounters,
-        memory: agent.memory,
-        // Inherit the calling agent's posture: a normal chat (undefined) keeps
-        // interactive prompting; a worker-session run propagates 'autonomous'
-        // so its steps don't silently fail on a benign DANGEROUS_BASH op (C1).
-        autonomy: agent.autonomy,
-        // Re-target values for a parametrised stored workflow (§4.5).
-        params: input.params,
-        // Thread the parent agent's SecretStore so step sub-agents resolve
-        // `secret:NAME` refs + fire the fail-loud guard (mirrors spawn.ts for
-        // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
-        // parent → unchanged behaviour.
-        secretStore: agent.secretStore,
-      });
-    }
+    const workflowResult = input.workflow_id
+      ? await executePipelineById(input, {
+          config: pipelineConfig,
+          tools: pipelineTools,
+          streamHandler: pipelineStreamHandler,
+          runHistory: pipelineRunHistory,
+          toolContext: pipelineToolContext,
+          parentPrompt,
+          userTimezone: agent.userTimezone,
+          sessionCounters: agent.sessionCounters,
+          memory: agent.memory,
+          // Inherit the calling agent's posture: a normal chat (undefined) keeps
+          // interactive prompting; a worker-session run propagates 'autonomous'
+          // so its steps don't silently fail on a benign DANGEROUS_BASH op (C1).
+          autonomy: agent.autonomy,
+          // Re-target values for a parametrised stored workflow (§4.5).
+          params: input.params,
+          // Thread the parent agent's SecretStore so step sub-agents resolve
+          // `secret:NAME` refs + fire the fail-loud guard (mirrors spawn.ts for
+          // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
+          // parent → unchanged behaviour.
+          secretStore: agent.secretStore,
+        })
+      : await executeInlineSteps(input, {
+          config: pipelineConfig,
+          tools: pipelineTools,
+          streamHandler: pipelineStreamHandler,
+          sessionCounters: agent.sessionCounters,
+          runHistory: pipelineRunHistory,
+          toolContext: pipelineToolContext,
+          parentPrompt,
+          userTimezone: agent.userTimezone,
+          memory: agent.memory,
+          autonomy: agent.autonomy,
+          // Thread the parent agent's SecretStore (see executePipelineById above).
+          secretStore: agent.secretStore,
+        });
 
-    return executeInlineSteps(input, {
-        config: pipelineConfig,
-        tools: pipelineTools,
-        streamHandler: pipelineStreamHandler,
-        sessionCounters: agent.sessionCounters,
-        runHistory: pipelineRunHistory,
-        toolContext: pipelineToolContext,
-        parentPrompt,
-        userTimezone: agent.userTimezone,
-        memory: agent.memory,
-        autonomy: agent.autonomy,
-        // Thread the parent agent's SecretStore (see executePipelineById above).
-        secretStore: agent.secretStore,
-      });
+    // H-002 parity (CORE-9): a workflow's steps run sub-agents with web/http/
+    // read_file access, so its aggregated output can carry attacker-derived content
+    // back into the PARENT agent's context. Seat the parent's per-run untrusted
+    // latch — the same propagation spawn_agent does (spawn.ts) — so the parent's
+    // end-of-run memory extraction ABSTAINS instead of persisting that content as
+    // trusted (source_untrusted=0). Conservative-by-default like spawn: any
+    // delegated run taints. We seat the latch directly rather than wrapping the
+    // result, because a workflow result is structured JSON a caller reads
+    // field-wise (status/runId/stepErrors) — wrapping it would corrupt that
+    // contract. Paired with run_workflow's removal from INTERNAL_TOOLS so the
+    // output is ALSO injection-scanned by scanToolResult (defence-in-depth).
+    agent.noteUntrustedData?.();
+    return workflowResult;
   },
 };
 
