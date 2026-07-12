@@ -672,6 +672,10 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
 };
 
 export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
+  // Promotion deletes from the source scope, so it is a data-destructive op — gate
+  // it in autonomous mode exactly like memory_delete (an injected promote must not
+  // silently move/erase knowledge without the destructive-op check).
+  destructive: { mode: 'data' },
   definition: {
     name: 'memory_promote',
     description: 'Make knowledge available across all projects instead of just this one.',
@@ -703,6 +707,13 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
   handler: async (input: MemoryPromoteInput, agent: IAgent): Promise<string> => {
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
+    }
+
+    // An empty/whitespace pattern substring-matches (and would then delete) EVERY
+    // line — an injected empty promote must not wipe the source namespace. Mirror
+    // memory_delete's guard.
+    if (!input.content_pattern.trim()) {
+      return 'A non-empty content_pattern is required to promote.';
     }
 
     const fromRef = resolveScope(input.from_scope, agent);
@@ -749,10 +760,16 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
     });
 
-    // Remove from source scope + sync graph
-    await agent.memory.deleteScoped(input.namespace, input.content_pattern, fromRef);
-    if (agent.toolContext.knowledgeLayer) {
-      void agent.toolContext.knowledgeLayer.deactivateByPattern(input.content_pattern, input.namespace).catch(() => {});
+    // Remove from source scope + sync graph. Delete EXACTLY the one line we
+    // promoted (`{exact:true}`), NOT every line containing content_pattern — a
+    // substring delete erased sibling lines that were never promoted (silent data
+    // loss; the tool copies ONE match but used to delete ALL). The KG twin is
+    // deactivated by the promoted line's body (date prefix stripped to match the
+    // stored statement text), same single-line scope.
+    await agent.memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true });
+    const matchedBody = matchedLine.replace(/^\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim();
+    if (agent.toolContext.knowledgeLayer && matchedBody) {
+      void agent.toolContext.knowledgeLayer.deactivateByPattern(matchedBody, input.namespace).catch(() => {});
     }
 
     return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;

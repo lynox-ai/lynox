@@ -771,7 +771,9 @@ describe('memoryPromoteTool', () => {
     expect(result).toContain('Promoted entry from user:alex to context:proj1');
     expect(result).toContain('User pattern B');
     expect(appendScoped).toHaveBeenCalledWith('methods', 'User pattern B', { type: 'context', id: 'proj1' });
-    expect(deleteScoped).toHaveBeenCalledWith('methods', 'pattern B', { type: 'user', id: 'alex' });
+    // F4: deletes EXACTLY the promoted line ({exact:true}), not the substring pattern
+    // (which would also erase sibling matches that were never promoted).
+    expect(deleteScoped).toHaveBeenCalledWith('methods', 'User pattern B', { type: 'user', id: 'alex' }, { exact: true });
     expect(channels.memoryStore.publish).toHaveBeenCalledWith({
       namespace: 'methods',
       content: 'User pattern B',
@@ -779,6 +781,42 @@ describe('memoryPromoteTool', () => {
       scopeId: 'proj1',
       sourceChannel: 'agent',
     });
+  });
+
+  it('F4: promotes ONE line but does not substring-delete sibling matches from the source', async () => {
+    // Two lines both contain the pattern "secret"; only the first-matched line is
+    // promoted, so only IT may be removed from the source (the old substring delete
+    // erased both — silent data loss of the un-promoted sibling).
+    const loadScoped = vi.fn().mockResolvedValue('secret alpha\nsecret beta');
+    const appendScoped = vi.fn().mockResolvedValue(undefined);
+    const deleteScoped = vi.fn().mockResolvedValue(1);
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ loadScoped, appendScoped, deleteScoped })),
+      activeScopes: allScopes,
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'knowledge', content_pattern: 'secret', from_scope: 'user:alex', to_scope: 'global' },
+      agent,
+    );
+    expect(appendScoped).toHaveBeenCalledWith('knowledge', 'secret alpha', { type: 'global', id: 'global' });
+    expect(deleteScoped).toHaveBeenCalledTimes(1);
+    expect(deleteScoped).toHaveBeenCalledWith('knowledge', 'secret alpha', { type: 'user', id: 'alex' }, { exact: true });
+  });
+
+  it('F4: rejects an empty/whitespace content_pattern (would wipe the namespace)', async () => {
+    const loadScoped = vi.fn().mockResolvedValue('a\nb\nc');
+    const deleteScoped = vi.fn();
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ loadScoped, deleteScoped })),
+      activeScopes: allScopes,
+    };
+    const result = await memoryPromoteTool.handler(
+      { namespace: 'knowledge', content_pattern: '   ', from_scope: 'user:alex', to_scope: 'global' },
+      agent,
+    );
+    expect(result).toContain('non-empty content_pattern');
+    expect(deleteScoped).not.toHaveBeenCalled();
+    expect(loadScoped).not.toHaveBeenCalled();
   });
 
   it('rejects when from_scope is not more specific than to_scope', async () => {
