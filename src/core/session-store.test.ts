@@ -109,6 +109,60 @@ describe('SessionStore', () => {
     });
   });
 
+  describe('resume summary (F5/F6)', () => {
+    // Resume of a long thread (> VERBATIM_THRESHOLD=80, no stored summary) fires
+    // the fire-and-forget generateThreadSummary. Build an engine whose
+    // createSession returns a session with a controllable `run` (the summary run)
+    // + a `loadMessages` (the resumed session), and a threadStore we can inspect.
+    function longThreadEngine(runImpl: () => Promise<string>): {
+      engine: Engine;
+      updateThread: ReturnType<typeof vi.fn>;
+    } {
+      const updateThread = vi.fn();
+      const records = Array.from({ length: 90 }, (_, i) => ({
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        content_json: JSON.stringify(`msg ${i}`),
+      }));
+      const threadStore = {
+        getThread: vi.fn().mockReturnValue({
+          id: 'long', title: 't', model_tier: 'balanced', context_id: null,
+          summary: null, skip_extraction: 0,
+        }),
+        getMessages: vi.fn().mockReturnValue(records),
+        updateThread,
+      };
+      const engine = {
+        createSession: vi.fn().mockImplementation(() => ({
+          loadMessages: vi.fn(),
+          run: vi.fn().mockImplementation(runImpl),
+        })),
+        getThreadStore: vi.fn().mockReturnValue(threadStore),
+        getSecretStore: vi.fn().mockReturnValue({
+          maskSecrets: (s: string) => s.replace(/sk-\w+/g, '«masked»'),
+        }),
+      } as unknown as Engine;
+      return { engine, updateThread };
+    }
+
+    it('F6: masks a secret the summarizer echoed before persisting threads.summary', async () => {
+      const { engine, updateThread } = longThreadEngine(async () => 'recap: the key is sk-LEAK42 and we shipped');
+      new SessionStore().getOrCreate('long', engine);
+      await vi.waitFor(() => expect(updateThread).toHaveBeenCalled());
+      const summaryArg = (updateThread.mock.calls.at(-1)?.[1] as { summary?: string })?.summary ?? '';
+      expect(summaryArg).toContain('«masked»');
+      expect(summaryArg).not.toContain('sk-LEAK42');
+    });
+
+    it('F5: does NOT persist an empty/blocked summary (guard-block string never becomes the authoritative summary)', async () => {
+      // An internal-run budget block THROWS (mirrored here as a rejection); the
+      // outer try/catch swallows it → nothing persisted, retried next resume.
+      const { engine, updateThread } = longThreadEngine(async () => { throw new Error('Daily spending cap reached'); });
+      new SessionStore().getOrCreate('long', engine);
+      await new Promise(r => setTimeout(r, 20)); // let the fire-and-forget settle
+      expect(updateThread).not.toHaveBeenCalled();
+    });
+  });
+
   describe('reset', () => {
     it('removes session so next getOrCreate creates fresh session', () => {
       const store = new SessionStore();

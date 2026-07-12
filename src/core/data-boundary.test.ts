@@ -67,7 +67,9 @@ describe('detectInjectionAttempt', () => {
       const result = detectInjectionAttempt(evil);
       const elapsed = performance.now() - start;
       expect(elapsed).toBeLessThan(2000);
-      expect(result).toBeDefined();
+      // No terminal token (no URL / no `@`) → the gated exfil patterns are skipped
+      // and nothing else matches, so this is a true negative (not just "returned").
+      expect(result.detected).toBe(false);
     });
 
     it('still detects a real exfil instruction after bounding the wildcard gaps', () => {

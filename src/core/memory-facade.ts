@@ -3,7 +3,7 @@ import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { MemoryNamespace } from '../types/index.js';
 
 /** A memory doc line's date stamp — stripped so the KG mirror matches the stored statement text. */
-const DATE_PREFIX_RE = /^\[\d{4}-\d{2}-\d{2}\]\s*/;
+export const DATE_PREFIX_RE = /^\[\d{4}-\d{2}-\d{2}\]\s*/;
 
 /**
  * Single choke point for memory MUTATIONS so the flat-file document store and the

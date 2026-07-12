@@ -1,6 +1,7 @@
 import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { channels } from '../../core/observability.js';
+import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
 
@@ -767,7 +768,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     // deactivated by the promoted line's body (date prefix stripped to match the
     // stored statement text), same single-line scope.
     await agent.memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true });
-    const matchedBody = matchedLine.replace(/^\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim();
+    const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
     if (agent.toolContext.knowledgeLayer && matchedBody) {
       void agent.toolContext.knowledgeLayer.deactivateByPattern(matchedBody, input.namespace).catch(() => {});
     }
