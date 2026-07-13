@@ -652,6 +652,18 @@ describe('Config', () => {
     expect(loadConfig().api_key).toBe('sk-ant-xxx');
   });
 
+  // The guard shared by BOTH assignment paths — the env one here and the vault
+  // one in engine-init.ts. Keeping them on one predicate is the point: the leak
+  // survived three review rounds because each path was patched separately.
+  it('anthropicKeyMayHoldApiKey: blocks only the openai wire', async () => {
+    const { anthropicKeyMayHoldApiKey } = await import('./config.js');
+    expect(anthropicKeyMayHoldApiKey('openai')).toBe(false);   // Mistral/Groq/Ollama — leak
+    expect(anthropicKeyMayHoldApiKey('anthropic')).toBe(true);
+    expect(anthropicKeyMayHoldApiKey('custom')).toBe(true);    // Anthropic-wire proxy — legit
+    expect(anthropicKeyMayHoldApiKey('vertex')).toBe(true);    // ignores api_key anyway
+    expect(anthropicKeyMayHoldApiKey(undefined)).toBe(true);   // legacy default
+  });
+
   it('leaves an anthropic-provider config untouched even with MISTRAL_API_KEY present', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';

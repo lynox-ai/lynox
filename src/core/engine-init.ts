@@ -25,7 +25,7 @@ import { Memory } from './memory.js';
 import { resolveProviderApiKey, migrateLegacyEndpointKey } from './llm/provider-keys.js';
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
-import { setVaultApiKeyExists } from './config.js';
+import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget } from './session-budget.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
@@ -427,7 +427,17 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       // always override vault (so users can fix stale vault entries without Web UI).
       const vaultApiKey = vault.get('ANTHROPIC_API_KEY');
       if (vaultApiKey && !process.env['ANTHROPIC_API_KEY']) {
-        userConfig.api_key = vaultApiKey;
+        // Mirror the Anthropic-wire vault key into the legacy `api_key` field —
+        // but NEVER onto a `provider:'openai'` box, whose api_base_url points at
+        // Mistral / Groq / a local Ollama. The raw config.api_key consumers
+        // (spawn/pipeline/plan-task/process/orchestrator) pair this field directly
+        // with api_base_url, so mirroring it there is the cross-vendor leak this
+        // change closes — and the vault is the SECOND door to it: loadConfig only
+        // scoped the ENV path, and never sees this vault value. Same guard, shared
+        // from config.ts, so the two paths cannot drift again.
+        if (anthropicKeyMayHoldApiKey(userConfig.provider)) {
+          userConfig.api_key = vaultApiKey;
+        }
       } else if (vaultApiKey && process.env['ANTHROPIC_API_KEY']) {
         process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
       }

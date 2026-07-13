@@ -164,6 +164,8 @@ const LEGACY_OPENAI_SLOTS = ['MISTRAL_API_KEY', 'OPENAI_API_KEY'] as const;
 
 interface SecretStoreReadWrite extends SecretStoreReader {
   set(name: string, value: string): void;
+  /** Optional: false ⇒ a vault-less store where `set()` would throw. */
+  canPersist?(): boolean;
 }
 
 /**
@@ -199,6 +201,14 @@ export function migrateLegacyEndpointKey(input: {
   const { provider, apiBaseURL, secretStore } = input;
   if (!secretStore) return null;
 
+  // A vault-less store cannot persist anything — and it has nothing to migrate,
+  // because the legacy keys it would carry forward live in that same vault. Bail
+  // BEFORE any `set()`, or the throw ("Cannot set secrets without a vault")
+  // propagates out of engine-init's secret try/catch and nulls the ENTIRE secret
+  // store on an otherwise-fine vault-less boot (read-only `~/.lynox`, k8s
+  // readOnlyRootFilesystem, a lost LYNOX_VAULT_KEY beside an existing vault.db).
+  if (secretStore.canPersist && !secretStore.canPersist()) return null;
+
   // Already run once — never again, or the leak walks back in through the door
   // this migration opened.
   if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;
@@ -213,7 +223,11 @@ export function migrateLegacyEndpointKey(input: {
   // into the Ollama slot. That is precisely the leak the marker exists to prevent.
   secretStore.set(SLOT_MIGRATION_MARKER, new Date().toISOString());
 
-  if (!provider || !apiBaseURL) return null;
+  // Only the OpenAI-wire family ever shared MISTRAL_API_KEY. `custom`
+  // (Anthropic-wire proxy) stores its key in CUSTOM_API_KEY, `anthropic` in
+  // ANTHROPIC_API_KEY — neither has anything to carry forward from the shared
+  // openai slot, and touching them would only risk moving the wrong key.
+  if (!provider || provider !== 'openai' || !apiBaseURL) return null;
 
   const slot = vaultSlotForEndpoint(provider, apiBaseURL);
   // Only endpoints that gained a slot of their own are affected. `null` (no

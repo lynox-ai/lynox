@@ -215,6 +215,37 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
     })).toBeNull();
   });
 
+  it('does nothing — and does not throw — on a vault-less store', () => {
+    // A store that cannot persist (no LYNOX_VAULT_KEY, read-only ~/.lynox) would
+    // throw from set(). Letting that throw escape nulls the entire secret store in
+    // engine-init's try/catch. There is also nothing to migrate: the legacy keys
+    // live in the very vault that is absent. Bail before any write.
+    const setCalls: string[] = [];
+    const vaultless = {
+      resolve: (): string | null => null,
+      set: (n: string): void => { setCalls.push(n); throw new Error('Cannot set secrets without a vault'); },
+      canPersist: (): boolean => false,
+    };
+    expect(() => migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:8000/v1',
+      secretStore: vaultless,
+    })).not.toThrow();
+    expect(setCalls).toEqual([]);
+  });
+
+  it('never touches a custom (Anthropic-wire) endpoint', () => {
+    // A custom-proxy user stores their key in CUSTOM_API_KEY, not the shared
+    // Mistral slot — nothing to carry, and moving MISTRAL_API_KEY here would be
+    // the wrong key entirely.
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+    expect(migrateLegacyEndpointKey({
+      provider: 'custom',
+      apiBaseURL: 'https://my-litellm.example.com/v1',
+      secretStore: store,
+    })).toBeNull();
+  });
+
   it('marks itself done even on a boot with NO endpoint configured', () => {
     // The trap: an Anthropic-only install has no `api_base_url`, so an early
     // return that skipped the marker would leave it unmarked forever. The first

@@ -49,6 +49,34 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
   return out;
 }
 
+/**
+ * May the `ANTHROPIC_API_KEY` value be mirrored into the legacy `api_key` field
+ * for this provider?
+ *
+ * `api_key` is paired DIRECTLY with `api_base_url` by the pre-vault callers
+ * (spawn, pipeline, plan-task, process, the orchestrator). An `ANTHROPIC_API_KEY`
+ * is an Anthropic-wire credential, so it may sit there only on an endpoint that
+ * speaks that wire: `anthropic`, `custom` (an Anthropic-compatible proxy — the
+ * user configured it as one), `vertex` (which ignores it anyway), or the legacy
+ * default (undefined).
+ *
+ * NEVER on `provider: 'openai'`. There the endpoint is Mistral, Groq, Together or
+ * a local Ollama, and pairing the Anthropic key with a Groq base_url — or sending
+ * it in plaintext over http to localhost — is exactly the cross-vendor leak this
+ * whole change closes. The key comes from THAT endpoint's slot instead (see the
+ * openai block in loadConfig).
+ *
+ * Exported + shared so the two places that assign the key — the env path here and
+ * the vault path in engine-init.ts — can never drift apart, which is precisely
+ * how the leak survived three review rounds: each patched one path and missed the
+ * other.
+ */
+export function anthropicKeyMayHoldApiKey(provider: LlmProviderMaybe): boolean {
+  return provider !== 'openai';
+}
+
+type LlmProviderMaybe = LynoxUserConfig['provider'];
+
 /** Override for getLynoxDir(). Set via --data-dir or LYNOX_DATA_DIR. */
 let _dataDirOverride: string | null = null;
 
