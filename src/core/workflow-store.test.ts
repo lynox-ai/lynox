@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { WorkflowStore } from './workflow-store.js';
+import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 
 describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
   const tmpDirs: string[] = [];
@@ -194,5 +195,50 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     // A rename must NOT float 'a' above 'b' (legacy leaves started_at untouched).
     store.rename('a', 'A2');
     expect(store.list().map(w => w.id)).toEqual(['b', 'a']);
+  });
+
+  describe('migrateContentSchema (Move 1 — content-schema versioning)', () => {
+    it('stamps a legacy row (no schema_version) to the current version, content otherwise preserved', () => {
+      const { store } = make();
+      const legacy = JSON.stringify({ id: 'wf1', name: 'W', goal: 'g', steps: [] });
+      store.upsert({ id: 'wf1', name: 'W', definitionJson: legacy, isTemplate: true });
+      expect(store.migrateContentSchema(migratePipelineBlob)).toEqual({ scanned: 1, migrated: 1 });
+      const def = JSON.parse(store.get('wf1')!.definitionJson) as Record<string, unknown>;
+      expect(def['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+      expect(def['goal']).toBe('g');
+    });
+
+    it('is idempotent — a second pass migrates 0', () => {
+      const { store } = make();
+      store.upsert({ id: 'wf1', name: 'W', definitionJson: JSON.stringify({ id: 'wf1' }), isTemplate: false });
+      expect(store.migrateContentSchema(migratePipelineBlob).migrated).toBe(1);
+      expect(store.migrateContentSchema(migratePipelineBlob)).toEqual({ scanned: 1, migrated: 0 });
+    });
+
+    it('preserves updated_at (a migration is not a re-save — must not reorder the library)', () => {
+      const { store, engine } = make();
+      store.upsert({ id: 'wf1', name: 'W', definitionJson: JSON.stringify({ id: 'wf1' }), isTemplate: false });
+      engine.getDb().prepare("UPDATE workflows SET updated_at = '2000-01-01 00:00:00' WHERE id = 'wf1'").run();
+      store.migrateContentSchema(migratePipelineBlob);
+      const row = engine.getDb().prepare('SELECT updated_at FROM workflows WHERE id = ?').get('wf1') as { updated_at: string };
+      expect(row.updated_at).toBe('2000-01-01 00:00:00');
+    });
+
+    it('migrates only rows that need it — the post-crash resume property (mixed legacy + current)', () => {
+      const { store } = make();
+      store.upsert({ id: 'legacy', name: 'L', definitionJson: JSON.stringify({ id: 'legacy' }), isTemplate: false });
+      store.upsert({ id: 'current', name: 'C', definitionJson: JSON.stringify({ id: 'current', schema_version: CURRENT_PIPELINE_SCHEMA_VERSION }), isTemplate: false });
+      // A crash mid-migration leaves some rows stamped and some not; a re-run must
+      // touch ONLY the unstamped ones. The per-blob version gate gives this for free.
+      expect(store.migrateContentSchema(migratePipelineBlob)).toEqual({ scanned: 2, migrated: 1 });
+    });
+
+    it('leaves a malformed row untouched (skipped, not counted, no throw)', () => {
+      const { store } = make();
+      store.upsert({ id: 'bad', name: 'B', definitionJson: 'not json {', isTemplate: false });
+      expect(() => store.migrateContentSchema(migratePipelineBlob)).not.toThrow();
+      expect(store.migrateContentSchema(migratePipelineBlob).migrated).toBe(0);
+      expect(store.get('bad')!.definitionJson).toBe('not json {');
+    });
   });
 });

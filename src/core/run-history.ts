@@ -12,7 +12,8 @@ import { validateContractAgainstSteps } from '../orchestrator/contract-validatio
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
-import { WorkflowStore } from './workflow-store.js';
+import { WorkflowStore, type ContentMigrationCounts } from './workflow-store.js';
+import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 
@@ -2369,10 +2370,20 @@ export class RunHistory {
       id: planned.id,
       name: planned.name,
       description: planned.goal,
-      definitionJson: JSON.stringify(planned),
+      // Move 1 (PRD §4.1): stamp the content-schema version on every native
+      // write. The spread preserves whatever fields the producer passed and adds
+      // the version, so the stored blob is versioned regardless of caller shape.
+      definitionJson: JSON.stringify({ ...planned, schema_version: CURRENT_PIPELINE_SCHEMA_VERSION }),
       isTemplate: planned.template === true,
       sourceRunId: null,
     });
+  }
+
+  /** Move 1 (PRD §4.1): forward-migrate every stored workflow-definition blob to
+   *  the current content-schema version. Boot-time, per-blob version-gated,
+   *  idempotent, forward-only. No-op when the engine.db workflow store is inert. */
+  migrateWorkflowContentSchema(): ContentMigrationCounts {
+    return this._workflowStore?.migrateContentSchema(migratePipelineBlob) ?? { scanned: 0, migrated: 0 };
   }
 
   getPlannedPipeline(id: string): { id: string; manifest_json: string } | undefined {

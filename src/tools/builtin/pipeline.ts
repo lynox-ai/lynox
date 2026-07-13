@@ -46,6 +46,12 @@ const WARNED_LEGACY_MAX = 1024;
  * Mutates and returns the input.
  */
 function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipeline {
+  // NB: `schema_version` is deliberately NOT backfilled here. Its authority is the
+  // write-stamp (`insertPlannedPipeline`) + the boot content-migration, which
+  // together guarantee every STORED blob is versioned; labelling an unstamped
+  // in-memory read as "current" would, once a real transform exists (Slice 1b+),
+  // mask a blob that still carries an old shape. The runtime does not branch on
+  // the version, so leaving it undefined on a read is honest and harmless.
   planned.executionMode ??= 'orchestrated';
   planned.template ??= false;
   // Legacy rows (saved before the re-target schema landed) have no `parameters`;

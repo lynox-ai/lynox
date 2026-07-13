@@ -917,6 +917,22 @@ export class Engine {
           process.stderr.write(`[lynox] verb-graph backfill failed: ${err instanceof Error ? err.message : String(err)} — legacy verb defs NOT migrated; retry next boot\n`);
         }
       }
+
+      // Move 1 (PRD §4.1): forward-migrate every stored workflow-definition blob
+      // to the current content-schema version. Runs AFTER the verb backfill so
+      // legacy defs just copied from history.db are migrated too. Unlike the
+      // backfill this needs NO exactly-once marker — it is per-blob version-gated
+      // (the version stamp lives inside each blob), so a re-run is a cheap no-op
+      // scan and it self-heals after an engine.db recreate. A failure must NOT
+      // break boot; the next boot retries (idempotent).
+      try {
+        const migrated = this.runHistory.migrateWorkflowContentSchema();
+        if (migrated.migrated > 0) {
+          process.stderr.write(`[lynox] workflow content-schema: migrated ${migrated.migrated}/${migrated.scanned} definition(s)\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)

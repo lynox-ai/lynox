@@ -154,6 +154,18 @@ export interface PlannedPipeline {
    * (`resolveHeadlessLimits`). Round-trips on the blob.
    */
   limits?: WorkflowLimits | undefined;
+  /**
+   * Content-model schema version of THIS stored definition blob (Move 1, PRD
+   * §4.1). Orthogonal to the engine.db DDL `schema_version` TABLE — this versions
+   * the JSON CONTENT shape, not the table structure. Optional on the in-memory
+   * type because legacy blobs predate it, but AUTHORITATIVE at storage: stamped
+   * `CURRENT_PIPELINE_SCHEMA_VERSION` on every native write
+   * (`insertPlannedPipeline`) and guaranteed present on every stored row by the
+   * boot content-migration (`WorkflowStore.migrateContentSchema`). Backfilled on
+   * read for any blob still somehow unstamped. The version-negotiation import
+   * validator (Slice 3) refuses a blob whose version is newer-than-known.
+   */
+  schema_version?: number | undefined;
 }
 
 // === Process Capture ===
