@@ -723,7 +723,7 @@ export class WorkerLoop {
     // An empty signal (error/blank page) would otherwise collapse distinct
     // responses to the same hash — key it by raw length so a 404 and a 500
     // don't read as "no change" from each other.
-    const hashInput = currentSignal.length > 0 ? currentSignal : ` empty:${fetchResult.length}`;
+    const hashInput = currentSignal.length > 0 ? currentSignal : `\u0000empty:${fetchResult.length}`;
     const currentHash = createHash('sha256').update(hashInput).digest('hex');
     const previousHash = config.last_hash;
 

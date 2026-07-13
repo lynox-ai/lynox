@@ -243,4 +243,32 @@ describe('Agent Security Audit', () => {
       expect(debugContent).toContain('maskTokenPatterns');
     });
   });
+
+  describe('Source hygiene', () => {
+    // A literal control byte in a .ts source file (a NUL, or an un-escaped
+    // \x1f / \x7f) makes grep/ripgrep classify the file as binary and return
+    // ZERO matches with no error — every absence-claim over that file is then
+    // silently false. This bit real analysis repeatedly (worker-loop.ts,
+    // send-core.ts). Control chars in a string/regex must be written as \xNN /
+    // \uNNNN escapes, never embedded raw. \t \n \r are legitimate whitespace.
+    it('no .ts source file contains a raw control byte (write \\xNN escapes instead)', () => {
+      const ALLOW = new Set([0x09, 0x0a, 0x0d]);
+      const offenders: string[] = [];
+      // Scan src/ AND tests/ — grep goes blind on a tainted test file just as
+      // it does on a module, and this guard exists so it never lies again.
+      const roots = [SRC, join(import.meta.dirname, '..')];
+      for (const file of roots.flatMap((r) => getAllTsFiles(r))) {
+        const bytes = readFileSync(file); // Buffer — raw bytes, not decoded
+        for (let i = 0; i < bytes.length; i++) {
+          const b = bytes[i]!;
+          if ((b < 0x20 && !ALLOW.has(b)) || b === 0x7f) {
+            const line = bytes.subarray(0, i).toString('utf-8').split('\n').length;
+            offenders.push(`${file.replace(SRC, 'src')}:${line} → 0x${b.toString(16).padStart(2, '0')}`);
+            break; // one hit per file is enough to flag it
+          }
+        }
+      }
+      expect(offenders, `raw control bytes make these files grep-blind:\n${offenders.join('\n')}`).toEqual([]);
+    });
+  });
 });
