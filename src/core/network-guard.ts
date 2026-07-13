@@ -4,7 +4,7 @@ import https from 'node:https';
 import { Readable } from 'node:stream';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
-import { isAllowlistedEndpoint } from './llm/endpoint-allowlist.js';
+import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -207,11 +207,13 @@ export function assertHostPolicy(
       // Discovery surfaces stay open (still SSRF/enforce_https gated below).
       if (surface === 'discovery') break;
       // Full-control: reach only baseline ∪ operator floor ∪ human-accepted
-      // profile egress hosts. isAllowlistedEndpoint covers the vetted hosts +
-      // patterns (Azure/RFC1918/localhost); the floor is the operator escape
+      // profile egress hosts. isGuardedBaselineHost is the EXACT vetted-host set
+      // (deliberately stricter than isAllowlistedEndpoint — it excludes the
+      // attacker-registerable *.openai.azure.com wildcard + LAN patterns, which
+      // must go through the floor/ack instead); the floor is the operator escape
       // hatch; guardedAckHosts admits a connected API's accepted host(s).
       const allowed =
-        isAllowlistedEndpoint(rawUrl) ||
+        isGuardedBaselineHost(rawUrl) ||
         (ctx !== undefined && hostInFloor(hostname, ctx)) ||
         (guardedAckHosts?.has(hostname) ?? false);
       if (!allowed) {

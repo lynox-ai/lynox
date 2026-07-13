@@ -564,6 +564,22 @@ describe('assertHostPolicy (network_policy SSOT)', () => {
       expect(() => assertHostPolicy('https://api.anthropic.com/v1/messages', 'full-control', ctx)).not.toThrow();
     });
 
+    it('does NOT admit an attacker-registerable *.openai.azure.com host on full-control', () => {
+      // The guarded baseline is the EXACT vetted-host set, tighter than the
+      // DPA allowlist — a wildcard the agent can register a match for
+      // (any Azure account can create <label>.openai.azure.com) must NOT be
+      // reachable without the operator floor or a human-accepted profile.
+      const ctx = policyCtx({ networkPolicy: 'guarded' });
+      expect(() => assertHostPolicy('https://evilexfil.openai.azure.com/?d=x', 'full-control', ctx))
+        .toThrow(/not permitted under guarded egress policy/);
+    });
+
+    it('does NOT admit a .local / LAN name on full-control (baseline excludes the LAN patterns)', () => {
+      const ctx = policyCtx({ networkPolicy: 'guarded' });
+      expect(() => assertHostPolicy('https://printer.local/status', 'full-control', ctx))
+        .toThrow(/not permitted under guarded egress policy/);
+    });
+
     it('allows an operator-floor host on full-control (exact + wildcard)', () => {
       const exact = policyCtx({ networkPolicy: 'guarded', allowedHosts: new Set(['ops.example.com']) });
       expect(() => assertHostPolicy('https://ops.example.com/x', 'full-control', exact)).not.toThrow();
