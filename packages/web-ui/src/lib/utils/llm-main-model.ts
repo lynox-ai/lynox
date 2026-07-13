@@ -116,14 +116,17 @@ export function selectMainModelId(
 
 /**
  * The capability tiers a NEW-chat composer picker may offer, gated by the
- * tenant's `max_tier` cost ceiling. Deep-first order (deep → balanced → fast)
- * so the composer lists the strongest option at the top. An unset ceiling
- * (self-host default) offers all three. The engine still clamps server-side
- * (the ctor delegates to resolveRunModel), so this is a UX filter that avoids
- * offering an option that would be silently clamped — not the security boundary.
+ * tenant's `max_tier` cost ceiling. **Cost-ASCENDING order (fast → balanced →
+ * deep)** — deliberately NOT deep-first: putting deep at the top suggests "deep
+ * is the best choice", which lures a non-technical user into always picking
+ * Opus and burning money (on managed, WE pay the difference). Cheapest-first
+ * with deep LAST reframes deep as the specialised/pricier option, not the
+ * default-best. An unset ceiling (self-host default) offers all three. The
+ * engine still clamps server-side (the ctor delegates to resolveRunModel), so
+ * this is a UX filter, not the security boundary.
  */
 export function availableComposerTiers(maxTier: string | undefined): ModelTier[] {
-  const ordered: ModelTier[] = ['deep', 'balanced', 'fast'];
+  const ordered: ModelTier[] = ['fast', 'balanced', 'deep'];
   const ceiling = normalizeTier(maxTier);
   if (!ceiling) return ordered;
   const ceilingRank = TIER_RANK[ceiling];
