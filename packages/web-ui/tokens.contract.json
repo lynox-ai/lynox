@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "about": [
+    "The brand primitives that lynox paints on more than one surface: this product UI,",
+    "and the lynox.ai marketing site. Same brand, different codebases — so the values",
+    "are necessarily duplicated. This file is the contract that keeps the duplication",
+    "honest, and it is the ONLY thing that can: the website is a standalone Astro site",
+    "and must not depend on this package (that would drag a Svelte UI into a marketing",
+    "site and couple its build to core releases).",
+    "",
+    "If you change one of these values in app.css, `pnpm tokens:contract` fails — here,",
+    "in this repo, on your commit. That is the point. Update this file in the same",
+    "change, and know that the other surface has to follow.",
+    "",
+    "DARK ONLY. The light ramps are deliberately NOT shared: the product is a tool you",
+    "sit in for hours (flat, quiet, neutral-grey ink); the website is scanned in twenty",
+    "seconds (tonal depth, violet-tinted ink). Two named contexts, not a bug.",
+    "",
+    "This file names no other repository and no private path. It is a list of colours."
+  ],
+  "primitives": {
+    "lyx-bg": "#050510",
+    "lyx-bg-subtle": "#0a0a1a",
+    "lyx-bg-elevated": "#0a0a1a",
+    "lyx-bg-muted": "#0c0c20",
+    "lyx-code-bg": "#0c0c20",
+    "lyx-border": "#1a1a4a",
+    "lyx-border-hover": "#2a2a5a",
+    "lyx-accent": "#6525ef",
+    "lyx-accent-hover": "#7b3fff",
+    "lyx-accent-text": "#9b8aff",
+    "lyx-accent-fg": "#ffffff",
+    "lyx-text": "#ecedf4",
+    "lyx-text-muted": "#b3b3c6",
+    "lyx-text-subtle": "#a6a6c0",
+    "lyx-success": "#22c55e",
+    "lyx-danger": "#ef4444",
+    "lyx-warning": "#f59e0b"
+  },
+  "notGuarded": {
+    "light theme": "Deliberately divergent — see above.",
+    "lyx-focus-ring": "The other surface has no focus-ring token. Nothing to converge onto yet.",
+    "semantic surfaces": "success/error fg+bg+border triplets. Only the three standalone FILL colours are shared."
+  }
+}
