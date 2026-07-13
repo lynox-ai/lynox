@@ -1962,6 +1962,34 @@ describe('api_setup tool', () => {
       fetchSpy.mockRestore();
     });
 
+    it('allows fetch_token under the guarded network policy when token_url is in the accepted-host union', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      // fetch_token is a full-control surface — gated under guarded. The token
+      // exchange must still proceed when token_url is human-accepted.
+      (agent as unknown as { toolContext: { networkPolicy: string } }).toolContext.networkPolicy = 'guarded';
+      store.register({
+        ...SHOPIFY_PROFILE,
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'shpat_ok', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      // guarded's per-hop assertHostPolicy admits token_url via resolveGuardedAckHosts.
+      expect(result).toMatch(/Token exchange OK/i);
+      expect(fetchSpy).toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
     it('refuses fetch_token when the persisted acceptance covers a DIFFERENT host than token_url (swap-after-accept)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, makeMockSecretStore({

@@ -19,6 +19,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
@@ -1354,10 +1355,7 @@ Next steps before calling create:
             headers,
             body,
             signal: ac.signal,
-          }, 'full-control', agent.toolContext, undefined,
-          agent.toolContext?.networkPolicy === 'guarded'
-            ? (agent.toolContext.apiStore?.getAcceptedEgressHosts() ?? new Set<string>())
-            : undefined),
+          }, 'full-control', agent.toolContext, undefined, resolveGuardedAckHosts(agent.toolContext)),
           wallTimeout,
         ]);
         // Charge the token exchange against the session HTTP budget so

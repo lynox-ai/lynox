@@ -167,3 +167,17 @@ export function applyHttpRateLimits(
 export function applyEnforceHttps(ctx: ToolContext, enforce: boolean): void {
   ctx.enforceHttps = enforce;
 }
+
+/**
+ * The egress hosts admitted for a FULL-CONTROL request under the `guarded`
+ * network policy: the union of connected api_profiles' human-accepted
+ * `custom_endpoint_ack` hosts. Returns `undefined` for any other policy (the
+ * caller then relies on baseline + operator floor only). Centralised so the
+ * http_request handler and api_setup fetch_token compute it identically and
+ * can't drift. Only consulted by `assertHostPolicy` for a full-control surface.
+ */
+export function resolveGuardedAckHosts(ctx: ToolContext | undefined): ReadonlySet<string> | undefined {
+  return ctx?.networkPolicy === 'guarded'
+    ? (ctx.apiStore?.getAcceptedEgressHosts() ?? new Set<string>())
+    : undefined;
+}

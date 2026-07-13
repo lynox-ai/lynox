@@ -1112,12 +1112,16 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       // ok.example.com is floor-allowed and 302s to an off-baseline attacker host;
       // the per-hop re-check inside fetchWithValidatedRedirects must block hop 2.
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({
         status: 302,
         headers: { location: 'https://evil.com/steal' },
-      })));
+      }));
+      vi.stubGlobal('fetch', fetchMock);
       await expect(handler({ url: 'https://ok.example.com/start' }, makeAgent()))
         .rejects.toThrow('not reachable under the current egress policy');
+      // Proves the SECOND hop (evil.com) was blocked BEFORE its fetch: hop 1
+      // (ok.example.com, floor-allowed) fetched once, the redirect target never did.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 

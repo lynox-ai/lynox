@@ -3,6 +3,7 @@ import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressSurface } from '../../core/network-guard.js';
@@ -15,7 +16,7 @@ import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-
 // ToolContext. Engine-init wires them via applyNetworkPolicy() /
 // applyHttpRateLimits() / applyEnforceHttps() in tool-context.ts. The
 // tool handler reads from `agent.toolContext` and threads it into
-// applyHostPolicy() + fetchWithValidatedRedirects().
+// assertHostPolicy() + fetchWithValidatedRedirects().
 //
 // SSRF defense + user network-policy: the IP-pinning fetch helper (fetchPinned)
 // and the configurable network_policy gate (assertHostPolicy) both come from
@@ -276,7 +277,7 @@ function detectGetExfiltration(url: string): string | null {
       return 'base64-like data in URL parameters (possible data exfiltration)';
     }
   } catch {
-    // Invalid URL — will be caught by applyHostPolicy later
+    // Invalid URL — will be caught by assertHostPolicy later
   }
   return null;
 }
@@ -465,7 +466,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     let urlAuthType: string | undefined;
     try {
       urlAuthType = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname)?.auth?.type;
-    } catch { /* invalid URL — applyHostPolicy reports it below */ }
+    } catch { /* invalid URL — assertHostPolicy reports it below */ }
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
@@ -513,7 +514,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           }
         }
       } catch {
-        // Invalid URL — caught by applyHostPolicy below
+        // Invalid URL — caught by assertHostPolicy below
       }
     }
 
@@ -524,10 +525,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // write-consent prompts below — so a to-be-blocked host never triggers a
     // pointless consent prompt and returns the correct block reason.
     // fetchWithValidatedRedirects re-checks it per redirect hop.
-    const guardedAckHosts =
-      toolContext?.networkPolicy === 'guarded'
-        ? (toolContext.apiStore?.getAcceptedEgressHosts() ?? new Set<string>())
-        : undefined;
+    const guardedAckHosts = resolveGuardedAckHosts(toolContext);
     if (toolContext?.networkPolicy === 'guarded') {
       try {
         assertHostPolicy(input.url, 'full-control', toolContext, guardedAckHosts);

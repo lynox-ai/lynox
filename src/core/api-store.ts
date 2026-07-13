@@ -725,7 +725,11 @@ export class ApiStore {
     const hosts = new Set<string>();
     for (const profile of this.profiles.values()) {
       const ack = profile.custom_endpoint_ack;
-      if (ack?.accepted === true) {
+      // Array.isArray guard: profiles enter via loadFromDirectory / engine.db
+      // as `JSON.parse(...) as ApiProfile` with no schema validation, so a
+      // corrupt/hand-edited ack with a non-array `hosts` must not throw here —
+      // that would brick EVERY guarded request, not just the bad profile.
+      if (ack?.accepted === true && Array.isArray(ack.hosts)) {
         for (const h of ack.hosts) hosts.add(h);
       }
     }
