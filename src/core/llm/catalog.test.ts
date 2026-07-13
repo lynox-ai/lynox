@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
 
 describe('LLM_CATALOG', () => {
@@ -41,6 +41,42 @@ describe('LLM_CATALOG', () => {
     for (const entry of LLM_CATALOG) {
       expect(['native', 'verified', 'experimental']).toContain(entry.verification);
     }
+  });
+
+  // The vault slot now rides on the endpoint, so the host-matching in
+  // `resolveCatalogKey` decides which credential an endpoint is handed. That
+  // makes it a security boundary, not just a UI convenience: a host that could
+  // impersonate a preset would inherit that preset's key — or, worse, could
+  // impersonate a LOOPBACK preset and thereby claim `vault_slot: null`, which is
+  // the "needs no credential" state readiness checks trust.
+  describe('vaultSlotForEndpoint — slot inheritance under a hostile base URL', () => {
+    it('a suffix-spoofing host cannot inherit a vendor preset’s slot', () => {
+      expect(vaultSlotForEndpoint('openai', 'https://api.groq.com.attacker.com/v1')).not.toBe('GROQ_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://groq.com.evil.io/v1')).not.toBe('GROQ_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://evil.com/?proxy=api.groq.com')).not.toBe('GROQ_API_KEY');
+    });
+
+    it('a remote host cannot masquerade as a loopback runtime', () => {
+      // `null` means "this endpoint takes no credential". A remote host that
+      // reached that state would slip past the readiness key check.
+      expect(vaultSlotForEndpoint('openai', 'https://localhost.attacker.com:11434/v1')).not.toBe(null);
+    });
+
+    it('a legitimate vendor subdomain still resolves to the vendor slot', () => {
+      expect(vaultSlotForEndpoint('openai', 'https://eu.groq.com/v1')).toBe('GROQ_API_KEY');
+    });
+
+    it('an unrecognised or empty endpoint falls back to the legacy slot, never to key-less', () => {
+      expect(vaultSlotForEndpoint('openai', '')).toBe('MISTRAL_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://some-proxy.example.com/v1')).toBe('MISTRAL_API_KEY');
+    });
+
+    it('loopback presets take no credential; endpointNeedsCredential agrees', () => {
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:11434/v1')).toBe(null);
+      expect(endpointNeedsCredential('openai', 'http://localhost:11434/v1')).toBe(false);
+      // Conservative default: an endpoint we cannot place still needs a key.
+      expect(endpointNeedsCredential('openai', 'https://unknown.example.com/v1')).toBe(true);
+    });
   });
 
   it('only entries with a proven wire are non-experimental', () => {
