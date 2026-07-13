@@ -408,7 +408,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'fireworks',
-    model_placeholder: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    model_placeholder: 'accounts/fireworks/models/gpt-oss-120b',
     vault_slot: 'FIREWORKS_API_KEY',
     display_name: 'Fireworks AI',
     models: [],
@@ -416,7 +416,12 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     requires_region: false,
     base_url_default: 'https://api.fireworks.ai/inference/v1',
     default_residency: 'US (Fireworks AI) — on lynox\'s vetted sub-processor list',
-    verification: 'experimental',
+    // Promoted 2026-07-14: the reachability suite drove a full tool_use →
+    // tool_result → answer round-trip through Fireworks on gpt-oss-120b. The wire
+    // is proven; the model stays the user's choice. The old placeholder pinned
+    // llama-v3p3-70b-instruct, which Fireworks no longer serves (a copy 404s), so
+    // it moved to a currently-served tool-capable model.
+    verification: 'verified',
     notes: 'Model is free-text — pick a tool-capable one.',
   },
 ];
