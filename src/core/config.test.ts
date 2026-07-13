@@ -627,6 +627,18 @@ describe('Config', () => {
     expect(loadConfig().api_key).toBeUndefined();
   });
 
+  it('does NOT leave the Anthropic key on a GENERIC openai endpoint (no preset)', async () => {
+    // The most common non-preset config: an OpenRouter / DeepSeek / bare-proxy URL
+    // that falls through to the generic openai-compat tile. It has no pinned slot,
+    // so an earlier narrowing to "pinned endpoints only" left the inherited
+    // Anthropic key sitting on it — while the vault path stripped it. The two must
+    // strip for the same set of endpoints.
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://openrouter.ai/api/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-should-never-reach-openrouter';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
   it('uses the endpoint’s OWN key when it has one', async () => {
     writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1' });
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';

@@ -157,7 +157,11 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
  * the vault rather than config.json so the migration needs no schema change and
  * cannot be lost by a config rewrite.
  */
-const SLOT_MIGRATION_MARKER = '_LLM_ENDPOINT_SLOT_MIGRATION';
+// `LYNOX_` prefix on purpose: it makes the marker an infra secret
+// (INFRA_SECRET_PATTERNS in secret-store.ts), so this bookkeeping timestamp stays
+// out of the agent-visible secret briefing and the non-admin settings API. Not
+// sensitive in itself — just noise that does not belong in the model's context.
+const SLOT_MIGRATION_MARKER = 'LYNOX_LLM_ENDPOINT_SLOT_MIGRATION';
 
 /** Slots that held an OpenAI-compatible key before endpoints had their own. */
 const LEGACY_OPENAI_SLOTS = ['MISTRAL_API_KEY', 'OPENAI_API_KEY'] as const;

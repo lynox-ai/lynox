@@ -456,11 +456,17 @@ export function loadConfig(): LynoxUserConfig {
       // This endpoint's own key. (For Mistral this is the historic promotion,
       // unchanged; for Groq/Ollama/… it is the new, correctly-scoped one.)
       merged.api_key = fromSlot;
-    } else if (slot !== undefined && merged.api_key === anthropicEnvKey && anthropicEnvKey) {
-      // A pinned endpoint with no key of its own, and the only value we hold is
-      // the ANTHROPIC_API_KEY inherited above. It does not belong here — leaving
-      // it would send the Anthropic key to Groq, or in plaintext to a local port.
-      // Fall back to what the user actually wrote in config.json, if anything.
+    } else if (merged.api_key === anthropicEnvKey && anthropicEnvKey) {
+      // The unconditional ANTHROPIC_API_KEY promotion above does not belong on
+      // ANY openai endpoint — pinned (Groq, Ollama) OR generic (OpenRouter,
+      // DeepSeek, a bare proxy that fell through to the openai-compat tile).
+      // Leaving it there sends the Anthropic key to that endpoint via the raw
+      // config.api_key consumers.
+      //
+      // This is the SAME rule the vault path applies in engine-init via
+      // `anthropicKeyMayHoldApiKey` (false for 'openai'). The two must strip for
+      // the same set of endpoints — the leak survived a round precisely because
+      // this path was narrowed to pinned-only while the vault path was not.
       if (configFileApiKey) merged.api_key = configFileApiKey;
       else delete merged.api_key;
     }
