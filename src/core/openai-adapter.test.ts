@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo } from './openai-adapter.js';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages } from './openai-adapter.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
@@ -1130,5 +1130,77 @@ describe('OpenAIAdapter', () => {
         warnSpy.mockRestore();
       }
     });
+  });
+});
+
+describe('translateMessages — user content is never silently dropped', () => {
+  const IMG = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
+
+  it('DEF-0073: translates a user image to an image_url part when vision is supported', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'text', text: 'what is this?' }, IMG] },
+    ], { visionSupport: true });
+    const userMsg = out.find((m) => m.role === 'user')!;
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    const parts = userMsg.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    expect(parts).toEqual([
+      { type: 'text', text: 'what is this?' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    ]);
+  });
+
+  it('DEF-0073: translates an image for an unknown/custom model (visionSupport undefined)', () => {
+    const out = translateMessages(undefined, [{ role: 'user', content: [IMG] }], {});
+    const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+    expect(parts[0]!.type).toBe('image_url');
+  });
+
+  it('DEF-0073: throws a clear error for a known non-vision model instead of silently dropping', () => {
+    expect(() =>
+      translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport: false,
+        modelLabel: 'mistral-large-2512',
+      }),
+    ).toThrow(/mistral-large-2512.*cannot process images/i);
+  });
+
+  it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_1', content: 'result text' },
+        { type: 'text', text: 'and here is my follow-up' },
+      ] },
+    ]);
+    // tool message first (answers the assistant's tool_call), then the user's own text — NOT discarded.
+    const tool = out.find((m) => m.role === 'tool')!;
+    expect(tool.content).toBe('result text');
+    expect(tool.tool_call_id).toBe('call_1');
+    const user = out.find((m) => m.role === 'user')!;
+    expect(user.content).toBe('and here is my follow-up');
+  });
+
+  it('byte-parity: a text-only user message stays a plain string (no array)', () => {
+    const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'plain' }] }]);
+    expect(out).toEqual([{ role: 'user', content: 'plain' }]);
+  });
+
+  it('byte-parity: a tool_result-only turn emits just the tool message, no empty user message', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_2', content: 'r' }] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_2', content: 'r' }]);
+  });
+});
+
+describe('translateMessages — empty-content edge', () => {
+  it('skips an empty user text block that shares a tool_result turn (no content:"" message)', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'c', content: 'r' },
+        { type: 'text', text: '' },
+      ] },
+    ]);
+    // Only the tool message — no trailing empty user message.
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'c', content: 'r' }]);
   });
 });
