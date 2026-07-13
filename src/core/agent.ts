@@ -1536,16 +1536,19 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret', 'spawn_agent', 'run_workflow',
   ]);
 
-  /** Tools whose input is a DOCUMENT to store verbatim, not a call whose
-   *  `secret:NAME` refs should be bound to values before it runs. `import_workflow`
-   *  ingests an untrusted shared workflow whose `secret:NAME` refs MUST survive as
-   *  refs (re-bound later, on the importer's own vault, at run time) — resolving
-   *  them here would bake the importer's plaintext credential into the stored blob
-   *  (and re-export would then leak it), and would hard-fail the import for a
-   *  secret the importer hasn't connected yet (its whole point is import-then-bind).
-   *  The refs still resolve normally when the imported workflow is actually RUN. */
+  /** Tools whose input is STORED as part of a workflow definition, not a call
+   *  whose `secret:NAME` refs should be bound to values before it runs. Their refs
+   *  MUST survive verbatim (re-bound later, on the tenant's own vault, when the
+   *  workflow actually RUNS) — resolving them at store-time would bake a plaintext
+   *  credential into the stored blob (and re-export would then leak it), and would
+   *  hard-fail the write for a secret not yet connected.
+   *   - `import_workflow`: ingests an untrusted shared workflow (its whole point is
+   *     import-then-bind on the importer's vault).
+   *   - `update_workflow_steps`: edits + persists a stored workflow; a `secret:NAME`
+   *     in an edited task must be stored as a ref, not resolved into the def. */
   private static readonly SECRET_RESOLUTION_EXEMPT = new Set([
     'import_workflow',
+    'update_workflow_steps',
   ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {

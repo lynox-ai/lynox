@@ -44,6 +44,24 @@ describe('validateContractAgainstSteps', () => {
     })).toBeNull();
   });
 
+  it('rejects a match-anything host pattern (fleet-wide egress grant)', () => {
+    for (const hostPatterns of [['*'], ['**'], ['api.acme.test', '*']]) {
+      const err = validateContractAgainstSteps({
+        capabilityContract: { ...baseContract, hostPatterns },
+        steps: [step({ url: 'https://api.acme.test/v1/x' })],
+      });
+      expect(err).not.toBeNull();
+      expect(err).toContain('any host');
+    }
+  });
+
+  it('accepts a bounded subdomain wildcard host pattern', () => {
+    expect(validateContractAgainstSteps({
+      capabilityContract: { ...baseContract, hostPatterns: ['*.googleapis.com'] },
+      steps: [step({ url: 'https://x.googleapis.com/v1/x' })],
+    })).toBeNull();
+  });
+
   it('detects a param nested deep inside the input template (object + array walk)', () => {
     const err = validateContractAgainstSteps({
       capabilityContract: baseContract,
