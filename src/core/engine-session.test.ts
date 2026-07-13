@@ -1406,6 +1406,46 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  // -- DEF-0067: a per-session opts.model is clamped to the cost ceiling at ctor --
+
+  describe('ctor clamps opts.model to max_tier (DEF-0067)', () => {
+    // The composer model picker sends `model` on POST /api/sessions, and a resumed
+    // thread's persisted tier reaches the ctor as opts.model via session-store — so
+    // an over-ceiling per-session tier must be clamped HERE, else the picker escapes
+    // max_tier. The ceiling is read fresh from engine.getUserConfig() at ctor time.
+    it('clamps a deep pick down to a balanced ceiling set BEFORE creation', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().max_tier = 'balanced';
+      try {
+        const session = engine.createSession({ model: 'deep' });
+        expect(session.getModelTier()).toBe('balanced');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('clamps a deep pick down to a fast ceiling', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().max_tier = 'fast';
+      try {
+        expect(engine.createSession({ model: 'deep' }).getModelTier()).toBe('fast');
+        // A pick at or below the ceiling is untouched.
+        expect(engine.createSession({ model: 'fast' }).getModelTier()).toBe('fast');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('does not clamp when there is no ceiling (self-host default)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      // max_tier unset → the pick stands.
+      expect(engine.createSession({ model: 'deep' }).getModelTier()).toBe('deep');
+    });
+  });
+
   // -- compact() summarizer model tier (Slice A, issue #72 cost) --
 
   describe('compact() summarizer model tier', () => {
