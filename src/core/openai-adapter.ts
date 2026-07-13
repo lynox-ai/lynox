@@ -15,6 +15,7 @@ import * as os from 'node:os';
 import { randomUUID, randomBytes } from 'node:crypto';
 
 import { readEnvAlias } from './env.js';
+import { modelCapability } from '../types/models.js';
 
 import type {
   BetaRawMessageStreamEvent,
@@ -113,9 +114,16 @@ interface OpenAITool {
   };
 }
 
+/** A multimodal user-content part on the OpenAI chat wire. Text stays a bare
+ *  string when a message has no images (byte-parity); an image turns the whole
+ *  message `content` into an array of these parts. */
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content?: string | null | undefined;
+  content?: string | OpenAIContentPart[] | null | undefined;
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> | undefined;
   tool_call_id?: string | undefined;
 }
@@ -194,9 +202,22 @@ function translateTools(tools: Anthropic.Tool[]): OpenAITool[] {
     }));
 }
 
-function translateMessages(
+/**
+ * Translate an Anthropic-format message history to the OpenAI chat-completions
+ * shape. Exported for tests.
+ *
+ * `visionSupport` gates how a user IMAGE block is handled (it never was before —
+ * images were silently `.filter`ed out, so a tenant on the openai/Mistral wire
+ * got a confident answer to an image the model never saw, DEF-0073):
+ *  - `true` / `undefined` (unknown or custom model) → translate the image to an
+ *    OpenAI `image_url` data-URI part (works for a vision-capable endpoint).
+ *  - `false` (a known non-vision model, e.g. every current Mistral) → throw a
+ *    clear, actionable error instead of a silent drop or a cryptic provider 400.
+ */
+export function translateMessages(
   system: unknown,
   messages: unknown[],
+  opts?: { visionSupport?: boolean | undefined; modelLabel?: string | undefined },
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
 
@@ -222,12 +243,52 @@ function translateMessages(
       if (typeof m.content === 'string') {
         result.push({ role: 'user', content: m.content });
       } else if (Array.isArray(m.content)) {
-        // Extract text from content blocks
-        const text = (m.content as Array<{ type: string; text?: string }>)
-          .filter(b => b.type === 'text')
-          .map(b => b.text ?? '')
-          .join('\n');
-        result.push({ role: 'user', content: text });
+        const blocks = m.content as Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown; source?: { media_type?: string; data?: string } }>;
+
+        // 1. Tool results → role:'tool' messages (they answer the prior
+        //    assistant's tool_calls, so they come first).
+        for (const tr of blocks.filter(b => b.type === 'tool_result')) {
+          let content = '';
+          if (typeof tr.content === 'string') {
+            content = tr.content;
+          } else if (Array.isArray(tr.content)) {
+            content = (tr.content as Array<{ type: string; text?: string }>)
+              .filter(b => b.type === 'text')
+              .map(b => b.text ?? '')
+              .join('\n');
+          }
+          result.push({ role: 'tool', tool_call_id: tr.tool_use_id ?? '', content });
+        }
+
+        // 2. The user's OWN text + images → a user message. Preserved even when
+        //    tool_results share the turn (DEF-0074: the old code `pop()`ed and
+        //    discarded this text). Images become `image_url` parts (DEF-0073:
+        //    the old code silently dropped them).
+        const parts: OpenAIContentPart[] = [];
+        for (const b of blocks) {
+          if (b.type === 'text') {
+            parts.push({ type: 'text', text: b.text ?? '' });
+          } else if (b.type === 'image') {
+            if (opts?.visionSupport === false) {
+              throw new Error(
+                `The active model${opts.modelLabel ? ` (${opts.modelLabel})` : ''} cannot process images. `
+                + `Remove the image, or switch to a vision-capable provider (e.g. Anthropic).`,
+              );
+            }
+            const url = `data:${b.source?.media_type ?? 'image/png'};base64,${b.source?.data ?? ''}`;
+            parts.push({ type: 'image_url', image_url: { url } });
+          }
+        }
+        if (parts.length > 0) {
+          const onlyText = parts.every((p) => p.type === 'text');
+          const content: string | OpenAIContentPart[] = onlyText
+            ? parts.map((p) => (p as { text: string }).text).join('\n')
+            : parts;
+          // Skip an empty-string user message — e.g. a tool_result turn whose only
+          // text block is '' would otherwise emit a `content:''` user message that
+          // some OpenAI-compat endpoints reject (the old code `pop()`ed it).
+          if (content !== '') result.push({ role: 'user', content });
+        }
       }
     } else if (m.role === 'assistant') {
       if (typeof m.content === 'string') {
@@ -249,38 +310,10 @@ function translateMessages(
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         });
       }
-    } else if (m.role === 'tool') {
-      // Anthropic sends tool results as user messages with tool_result content blocks
-      // But in multi-turn, they come as role: 'user' with tool_result blocks
     }
-
-    // Handle user messages that contain tool_result blocks (Anthropic's format for tool responses)
-    if (m.role === 'user' && Array.isArray(m.content)) {
-      const blocks = m.content as Array<{ type: string; tool_use_id?: string; content?: unknown }>;
-      const toolResults = blocks.filter(b => b.type === 'tool_result');
-      if (toolResults.length > 0) {
-        // Remove the user message we just added (it was a tool result, not a real user message)
-        const lastAdded = result[result.length - 1];
-        if (lastAdded?.role === 'user') result.pop();
-
-        for (const tr of toolResults) {
-          let content = '';
-          if (typeof tr.content === 'string') {
-            content = tr.content;
-          } else if (Array.isArray(tr.content)) {
-            content = (tr.content as Array<{ type: string; text?: string }>)
-              .filter(b => b.type === 'text')
-              .map(b => b.text ?? '')
-              .join('\n');
-          }
-          result.push({
-            role: 'tool',
-            tool_call_id: tr.tool_use_id ?? '',
-            content,
-          });
-        }
-      }
-    }
+    // (Anthropic sends tool results as `role:'user'` messages with tool_result
+    // blocks — handled in the user branch above, alongside the user's own text
+    // and images, so nothing is dropped.)
   }
 
   return result;
@@ -668,9 +701,6 @@ export class OpenAIAdapter {
     },
     options?: { signal?: AbortSignal | undefined },
   ): AsyncGenerator<BetaRawMessageStreamEvent> {
-    const openaiMessages = translateMessages(params.system, params.messages);
-    const openaiTools = params.tools ? translateTools(params.tools) : undefined;
-
     // Honour caller-provided model id when it's a real downstream id (e.g.
     // 'mistral-large-2512' from the registered tier-map). Reject Anthropic
     // tier aliases that leak through when no tier-map is registered — those
@@ -679,6 +709,13 @@ export class OpenAIAdapter {
     const requestedModel = typeof params.model === 'string' ? params.model : '';
     const looksAnthropic = requestedModel.startsWith('claude-');
     const model = requestedModel && !looksAnthropic ? requestedModel : this.modelId;
+
+    // Gate image handling on the resolved model's vision capability (DEF-0073):
+    // a known non-vision model (every current Mistral) → a clear error instead of
+    // a silent image drop; a vision or unknown/custom model → translate it.
+    const visionSupport = modelCapability(model)?.features?.vision;
+    const openaiMessages = translateMessages(params.system, params.messages, { visionSupport, modelLabel: model });
+    const openaiTools = params.tools ? translateTools(params.tools) : undefined;
 
     const body: Record<string, unknown> = {
       model,
