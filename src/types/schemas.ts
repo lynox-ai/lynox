@@ -179,7 +179,7 @@ export const LynoxUserConfigSchema = z.object({
   // control (NOT user/agent-writable). The .strict() schema would otherwise
   // reject these keys from config.json — which nulls the WHOLE config, silently
   // dropping every setting, not just these. Default 'allow-all' = unchanged.
-  network_policy:          z.enum(['allow-all', 'allow-list', 'deny-all']).optional(),
+  network_policy:          z.enum(['allow-all', 'allow-list', 'deny-all', 'guarded']).optional(),
   network_allowed_hosts:   z.array(z.string()).optional(),
   bugsink_dsn:             z.string().optional(),
   backup_dir:              z.string().optional(),

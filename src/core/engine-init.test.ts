@@ -205,4 +205,30 @@ describe('configureBudgetAndRateLimits — http-tool security wiring', () => {
     configureBudgetAndRateLimits(mockRunHistory, { ...base, enforce_https: true }, ctx);
     expect(ctx.enforceHttps).toBe(true);
   });
+
+  it('wires the guarded policy + keeps the operator floor onto the ToolContext', () => {
+    const ctx = createToolContext(base);
+    configureBudgetAndRateLimits(
+      mockRunHistory,
+      { ...base, network_policy: 'guarded', network_allowed_hosts: ['ops.example.com'] },
+      ctx,
+    );
+    expect(ctx.networkPolicy).toBe('guarded');
+    // The operator floor is still split into allowedHosts under guarded.
+    expect(ctx.allowedHosts).toEqual(new Set(['ops.example.com']));
+  });
+
+  it('boot-logs the active posture with the guarded-capable marker (rollout-order gate greps it)', () => {
+    const ctx = createToolContext(base);
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let lines: string[] = [];
+    try {
+      configureBudgetAndRateLimits(mockRunHistory, { ...base, network_policy: 'guarded' }, ctx);
+      // Read the captured calls BEFORE mockRestore() (which resets mock.calls).
+      lines = writeSpy.mock.calls.map((c) => String(c[0]));
+    } finally {
+      writeSpy.mockRestore();
+    }
+    expect(lines.some((l) => l.includes('egress policy: guarded') && l.includes('guarded-capable build'))).toBe(true);
+  });
 });

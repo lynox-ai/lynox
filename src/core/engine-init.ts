@@ -93,15 +93,22 @@ export function configureBudgetAndRateLimits(
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
   // Outbound egress policy for the agent's HTTP tool surface. Default
   // 'allow-all' = unchanged behaviour. 'allow-list'/'deny-all' are opt-in
-  // operator/CP controls enforced in http.ts applyHostPolicy + the web-search
+  // operator/CP controls enforced in http.ts assertHostPolicy + the web-search
   // egress gate (assertEgressAllowed) — covering http_request, api_setup, and
   // web_research (query + content). Other egress surfaces (LLM, mail, push,
   // backup, Google, voice) are out of scope — see the network_policy doc.
+  const resolvedPolicy = userConfig.network_policy ?? 'allow-all';
   applyNetworkPolicy(
     toolContext,
-    userConfig.network_policy ?? 'allow-all',
+    resolvedPolicy,
     userConfig.network_allowed_hosts,
   );
+  // Boot-log the active egress posture. The `guarded-capable build` marker is
+  // present on every W1+ image regardless of the active value — the rollout-order
+  // gate (Pro CP) greps the fleet boot logs for it to confirm an image can honour
+  // `guarded` BEFORE emitting LYNOX_NETWORK_POLICY=guarded (a pre-W1 image would
+  // silently drop the unknown value to allow-all). See PRD-EGRESS-POSTURE §3.4.
+  process.stderr.write(`[lynox] egress policy: ${resolvedPolicy} (guarded-capable build)\n`);
 }
 
 export function setupHistorySubscriptions(

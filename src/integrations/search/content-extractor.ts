@@ -1,4 +1,4 @@
-import { fetchPinned, isPrivateIP } from '../../core/network-guard.js';
+import { fetchPinned, assertHostPolicy } from '../../core/network-guard.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
 export interface ExtractedContent {
@@ -22,55 +22,16 @@ const MAX_REDIRECTS = 5;
 // close the DNS-rebinding window between validate + connect).
 
 /**
- * Shared egress gate for the web_research tool surface — used by BOTH the
- * content/page fetch (below) AND the search-query path (search-provider.ts), so
- * an air-gapped / allow-listed policy can't be bypassed by phrasing exfil as a
- * search query. enforce_https + deny-all + allow-list + private-IP, mirroring
- * tools/builtin/http.ts applyHostPolicy.
+ * Egress gate for the web_research tool surface — used by BOTH the content/page
+ * fetch (below) AND the search-query path (search-provider.ts), so an
+ * air-gapped / allow-listed policy can't be bypassed by phrasing exfil as a
+ * search query. web_research is a DISCOVERY surface: open under `guarded`
+ * (credential-free reads) but still SSRF/enforce_https gated and fully blocked
+ * under `deny-all`. Delegates to the shared network-guard SSOT so the policy
+ * lives in one place. `ToolContext` structurally satisfies HostPolicyContext.
  */
 export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefined): void {
-  const parsed = new URL(rawUrl);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
-  }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-
-  // Honor the session's network policy. enforceHttps is checked first so the
-  // error message guides the user to the actual config knob; deny-all and
-  // allow-list mirror tools/builtin/http.ts so web_research / web_page read
-  // can't bypass an air-gapped or restricted policy via the search path.
-  if (ctx?.enforceHttps && parsed.protocol === 'http:') {
-    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
-      throw new Error('Blocked: HTTP not allowed — enforce_https is enabled. Use HTTPS.');
-    }
-  }
-  if (ctx?.networkPolicy === 'deny-all') {
-    // 'Blocked:' prefix to mirror tools/builtin/http.ts (friendly-message layer).
-    throw new Error('Blocked: network access denied (air-gapped isolation)');
-  }
-  if (ctx?.networkPolicy === 'allow-list') {
-    let allowed = false;
-    if (ctx.allowedHosts?.has(hostname)) {
-      allowed = true;
-    } else if (ctx.allowedWildcards.length > 0) {
-      for (const domain of ctx.allowedWildcards) {
-        if (hostname === domain || hostname.endsWith(`.${domain}`)) {
-          allowed = true;
-          break;
-        }
-      }
-    }
-    if (!allowed) {
-      throw new Error(`Blocked: hostname "${hostname}" not in network allow-list`);
-    }
-  }
-
-  // Cheap early-out for literal-IP private targets. fetchPinned catches these
-  // anyway, but rejecting before DNS keeps the error synchronous + matches
-  // the previous behaviour.
-  if (isPrivateIP(hostname)) {
-    throw new Error(`Blocked: private IP address "${hostname}"`);
-  }
+  assertHostPolicy(rawUrl, 'discovery', ctx);
 }
 
 // --- Fetch with redirect validation ---

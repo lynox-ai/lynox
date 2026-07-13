@@ -46,7 +46,7 @@ export interface PipelineCostEstimate {
 // === Isolation & Tenants (Phase 3) ===
 
 export type IsolationLevel = 'shared' | 'scoped' | 'sandboxed' | 'air-gapped';
-export type NetworkPolicy = 'allow-all' | 'allow-list' | 'deny-all';
+export type NetworkPolicy = 'allow-all' | 'allow-list' | 'deny-all' | 'guarded';
 export type HistoryAccess = 'none' | 'own' | 'all';
 
 // === Isolation (shared types — enforcement in lynox-pro) ===

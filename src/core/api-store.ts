@@ -712,6 +712,30 @@ export class ApiStore {
     return [...this.profiles.values()];
   }
 
+  /**
+   * Union of every profile's human-accepted non-allowlisted egress hosts
+   * (`custom_endpoint_ack.hosts`, which covers both `base_url` and an OAuth
+   * `token_url`). Feeds the `guarded` network policy: a full-control request is
+   * admitted to a host outside the baseline/operator-floor only if a connected
+   * API was human-accepted for it. Agent-uncontrollable — the ack is stamped
+   * server-side only after an out-of-band human confirmation at profile save
+   * (see api_setup + endpoint-allowlist.CustomEndpointAck), never from agent input.
+   */
+  getAcceptedEgressHosts(): Set<string> {
+    const hosts = new Set<string>();
+    for (const profile of this.profiles.values()) {
+      const ack = profile.custom_endpoint_ack;
+      // Array.isArray guard: profiles enter via loadFromDirectory / engine.db
+      // as `JSON.parse(...) as ApiProfile` with no schema validation, so a
+      // corrupt/hand-edited ack with a non-array `hosts` must not throw here —
+      // that would brick EVERY guarded request, not just the bad profile.
+      if (ack?.accepted === true && Array.isArray(ack.hosts)) {
+        for (const h of ack.hosts) hosts.add(h);
+      }
+    }
+    return hosts;
+  }
+
   /** Get a profile by ID. */
   get(id: string): ApiProfile | undefined {
     return this.profiles.get(id);

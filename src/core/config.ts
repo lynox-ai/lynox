@@ -203,7 +203,7 @@ export function loadConfig(): LynoxUserConfig {
   // 'allow-all'), never coerced. NOT in PROJECT_SAFE_KEYS: a project config must
   // not be able to weaken a user/operator-set egress policy.
   const netPolicy = process.env['LYNOX_NETWORK_POLICY'];
-  if (netPolicy === 'allow-all' || netPolicy === 'allow-list' || netPolicy === 'deny-all') {
+  if (netPolicy === 'allow-all' || netPolicy === 'allow-list' || netPolicy === 'deny-all' || netPolicy === 'guarded') {
     merged.network_policy = netPolicy;
   }
   const netHosts = process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];

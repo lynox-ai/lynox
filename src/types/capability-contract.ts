@@ -49,7 +49,7 @@ export interface ParamConstraint {
  * → `new Agent` → the danger check. The grant requires host AND path AND method
  * to all match, so a re-target param that resolved into a different
  * host/path/method is NOT granted → stays denied (the S1 fix the host-only
- * `applyHostPolicy` misses).
+ * `assertHostPolicy` misses).
  */
 export interface CapabilityContract {
   /** Contract schema version, stamped into each audit decision (PRD §4.3 S5). */
