@@ -214,6 +214,31 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
       secretStore: store,
     })).toBeNull();
   });
+
+  it('marks itself done even on a boot with NO endpoint configured', () => {
+    // The trap: an Anthropic-only install has no `api_base_url`, so an early
+    // return that skipped the marker would leave it unmarked forever. The first
+    // time that user later selected Ollama, this migration would fire and carry
+    // their old Mistral key into the Ollama slot — the exact leak the marker
+    // exists to prevent. "First boot after the upgrade" is a property of the
+    // INSTALL, not of what happens to be configured on it.
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+
+    // Boot 1: plain Anthropic tenant, no endpoint.
+    expect(migrateLegacyEndpointKey({
+      provider: 'anthropic',
+      apiBaseURL: undefined,
+      secretStore: store,
+    })).toBeNull();
+
+    // Boot 2: the user has since switched to Ollama. Nothing may travel.
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:11434/v1',
+      secretStore: store,
+    })).toBeNull();
+    expect(store.data['OLLAMA_API_KEY']).toBeUndefined();
+  });
 });
 
 describe('vaultSlotForProvider', () => {

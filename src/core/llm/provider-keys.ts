@@ -197,12 +197,23 @@ export function migrateLegacyEndpointKey(input: {
   secretStore: SecretStoreReadWrite | null | undefined;
 }): string | null {
   const { provider, apiBaseURL, secretStore } = input;
-  if (!secretStore || !provider || !apiBaseURL) return null;
+  if (!secretStore) return null;
 
   // Already run once — never again, or the leak walks back in through the door
   // this migration opened.
   if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;
+
+  // Stamp the marker BEFORE looking at the config, and unconditionally. "The
+  // first boot after the upgrade" is a property of the INSTALL, not of what
+  // happens to be configured on it.
+  //
+  // Returning early on a missing `api_base_url` and stamping afterwards would
+  // leave an Anthropic-only user unmarked forever — and then, the first time they
+  // switched to Ollama, this migration would fire and carry their old Mistral key
+  // into the Ollama slot. That is precisely the leak the marker exists to prevent.
   secretStore.set(SLOT_MIGRATION_MARKER, new Date().toISOString());
+
+  if (!provider || !apiBaseURL) return null;
 
   const slot = vaultSlotForEndpoint(provider, apiBaseURL);
   // Only endpoints that gained a slot of their own are affected. `null` (no
