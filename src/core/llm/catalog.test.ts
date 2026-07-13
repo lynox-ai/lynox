@@ -92,7 +92,8 @@ describe('LLM_CATALOG', () => {
     //
     // `ollama` earned its place with a full tool_use → tool_result → answer run
     // on qwen2.5:7b — mutation-checked, so the assertion is known to be capable
-    // of failing. The rest connect but are unproven: they stay `experimental`,
+    // of failing. `fireworks` joined it (2026-07-14) on gpt-oss-120b via the same
+    // round-trip. The rest connect but are unproven: they stay `experimental`,
     // and the settings UI says so on the tile. Adding a preset without proving
     // it therefore fails HERE, which is the point.
     const proven = LLM_CATALOG
@@ -100,7 +101,7 @@ describe('LLM_CATALOG', () => {
       .map(catalogEntryKey)
       .sort();
 
-    expect(proven).toEqual(['anthropic', 'mistral', 'ollama']);
+    expect(proven).toEqual(['anthropic', 'fireworks', 'mistral', 'ollama']);
   });
 
   // Per-entry requires_base_url + requires_region matrix. UI uses these

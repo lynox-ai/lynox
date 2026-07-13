@@ -87,7 +87,7 @@ interface PresetCase {
 const REMOTE_PRESETS: Record<string, { keyEnv: string; defaultModel: string }> = {
   groq:      { keyEnv: 'GROQ_API_KEY',      defaultModel: 'llama-3.3-70b-versatile' },
   together:  { keyEnv: 'TOGETHER_API_KEY',  defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
-  fireworks: { keyEnv: 'FIREWORKS_API_KEY', defaultModel: 'accounts/fireworks/models/llama-v3p3-70b-instruct' },
+  fireworks: { keyEnv: 'FIREWORKS_API_KEY', defaultModel: 'accounts/fireworks/models/gpt-oss-120b' },
 };
 
 /** Default test model per loopback runtime. Each must be tool-capable. */
