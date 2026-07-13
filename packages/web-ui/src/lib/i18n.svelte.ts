@@ -680,6 +680,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.input_label': { de: 'Nachricht an lynox', en: 'Message lynox' },
 	'chat.send': { de: 'Senden', en: 'Send' },
 	'chat.model_picker.label': { de: 'Modell:', en: 'Model:' },
+	'chat.model_picker.recommended': { de: 'empfohlen', en: 'recommended' },
+	'chat.model_picker.pricier': { de: 'teurer', en: 'pricier' },
 	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
 	'chat.activity.thinking': { de: 'Denkt nach...', en: 'Thinking...' },

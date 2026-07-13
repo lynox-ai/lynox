@@ -18,21 +18,21 @@ import {
 } from './llm-main-model.js';
 
 describe('availableComposerTiers', () => {
-  it('offers all three (deep-first) when there is no ceiling', () => {
-    expect(availableComposerTiers(undefined)).toEqual(['deep', 'balanced', 'fast']);
+  it('offers all three cost-ascending (deep LAST, not suggested as best) when there is no ceiling', () => {
+    expect(availableComposerTiers(undefined)).toEqual(['fast', 'balanced', 'deep']);
   });
-  it('caps at a balanced ceiling', () => {
-    expect(availableComposerTiers('balanced')).toEqual(['balanced', 'fast']);
+  it('caps at a balanced ceiling (no deep)', () => {
+    expect(availableComposerTiers('balanced')).toEqual(['fast', 'balanced']);
   });
-  it('caps at a fast ceiling (demo tenant)', () => {
+  it('caps at a fast ceiling (demo tenant → single option, picker hides)', () => {
     expect(availableComposerTiers('fast')).toEqual(['fast']);
   });
   it('accepts legacy tier aliases as the ceiling', () => {
     // 'sonnet' → balanced via normalizeTier
-    expect(availableComposerTiers('sonnet')).toEqual(['balanced', 'fast']);
+    expect(availableComposerTiers('sonnet')).toEqual(['fast', 'balanced']);
   });
   it('treats an unrecognised ceiling as no ceiling (fail-open UX; server still clamps)', () => {
-    expect(availableComposerTiers('nonsense')).toEqual(['deep', 'balanced', 'fast']);
+    expect(availableComposerTiers('nonsense')).toEqual(['fast', 'balanced', 'deep']);
   });
 });
 

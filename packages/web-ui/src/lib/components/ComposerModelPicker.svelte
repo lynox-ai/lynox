@@ -44,6 +44,7 @@
 
   let tiers = $state<ModelTier[]>([]);
   let selected = $state<ModelTier>('balanced');
+  let defaultTier = $state<ModelTier>('balanced');
   let loaded = $state(false);
 
   onMount(async () => {
@@ -51,8 +52,8 @@
     tiers = availableComposerTiers(cfg.maxTier);
     // Default to the configured default_tier, coerced into the available set
     // (a default above the ceiling shouldn't be pre-selected).
-    const def = normalizeTier(cfg.defaultTier) ?? 'balanced';
-    selected = tiers.includes(def) ? def : (tiers[0] ?? 'balanced');
+    defaultTier = normalizeTier(cfg.defaultTier) ?? 'balanced';
+    selected = tiers.includes(defaultTier) ? defaultTier : (tiers[0] ?? 'balanced');
     loaded = true;
   });
 
@@ -60,6 +61,16 @@
     const val = (e.currentTarget as HTMLSelectElement).value as ModelTier;
     selected = val;
     setPendingModel(val);
+  }
+
+  // Steer a non-technical user away from always picking the most expensive tier:
+  // mark the configured default as recommended, and flag deep as pricier (unless
+  // deep IS the default — then "recommended" wins, no double signal).
+  function tierLabel(tier: ModelTier): string {
+    const base = t(`llm.tier.${tier}`);
+    if (tier === defaultTier) return `${base} · ${t('chat.model_picker.recommended')}`;
+    if (tier === 'deep') return `${base} · ${t('chat.model_picker.pricier')}`;
+    return base;
   }
 </script>
 
@@ -74,7 +85,7 @@
       aria-label={t('chat.model_picker.label')}
     >
       {#each tiers as tier (tier)}
-        <option value={tier}>{t(`llm.tier.${tier}`)}</option>
+        <option value={tier}>{tierLabel(tier)}</option>
       {/each}
     </select>
   </div>
