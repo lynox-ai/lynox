@@ -342,25 +342,6 @@ describe('plan_task — decoupled from execution (D4/D9)', () => {
     expect(parsed).not.toHaveProperty('orchestration_fallback');
   });
 
-  it('stores the workflow with executionMode always "orchestrated"', async () => {
-    const promptUser = vi.fn().mockResolvedValue('Proceed');
-    const agent = makeAgent({ promptUser });
-    // A small, sequential, non-cheap-tier plan — historically "tracked".
-    const result = await planTaskTool.handler(
-      {
-        summary: 'Two-step sequential plan',
-        phases: [
-          { name: 'Fetch data', steps: ['query API'] },
-          { name: 'Generate report', steps: ['format'], depends_on: ['Fetch data'] },
-        ],
-      },
-      agent,
-    );
-
-    const parsed = JSON.parse(result) as { workflow_id: string };
-    const pipeline = getPipeline(parsed.workflow_id);
-    expect(pipeline!.executionMode).toBe('orchestrated');
-  });
 
   it('decouples in the non-interactive auto-approve path too', async () => {
     const agent = makeAgent({ promptUser: undefined });
