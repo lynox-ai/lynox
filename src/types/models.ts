@@ -61,8 +61,6 @@ export interface ModelProfile {
   max_tokens?: number | undefined;
   /** Max continuation attempts. Default: 5. */
   max_continuations?: number | undefined;
-  /** Pricing per million tokens (for cost guards). */
-  pricing?: { input: number; output: number } | undefined;
 }
 
 /**

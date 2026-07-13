@@ -723,7 +723,7 @@ export class WorkerLoop {
     // An empty signal (error/blank page) would otherwise collapse distinct
     // responses to the same hash — key it by raw length so a 404 and a 500
     // don't read as "no change" from each other.
-    const hashInput = currentSignal.length > 0 ? currentSignal : ` empty:${fetchResult.length}`;
+    const hashInput = currentSignal.length > 0 ? currentSignal : `\u0000empty:${fetchResult.length}`;
     const currentHash = createHash('sha256').update(hashInput).digest('hex');
     const previousHash = config.last_hash;
 
@@ -765,7 +765,15 @@ export class WorkerLoop {
       ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
       : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
-    const analysis = await analysisSession.run(analysisPrompt);
+    // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
+    // user did not author and an attacker may control (a monitored forum, a
+    // competitor page). A summarize turn needs no tools, so suppress the whole
+    // registry: an injected "run bash …" then has nothing to call, rather than
+    // relying on the consent gate (this session is autonomous + headless, where
+    // a non-critical dangerous tool would AUTO-GRANT — see permission-guard
+    // _detectDanger). Removing the capability beats gating it. Same mechanism the
+    // compaction summarizer uses for the same "pure summarize" shape.
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory, hashTask } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 
 describe('RunHistory', () => {
   const tmpDirs: string[] = [];
@@ -1029,6 +1030,26 @@ describe('RunHistory', () => {
       const [row] = h.getPlannedPipelines(10);
       const parsed = JSON.parse(row!.manifest_json) as { template?: boolean };
       expect(parsed.template).toBe(true);
+      h.close();
+    });
+
+    it('Move 1: a natively-written blob carries the stamped content schema_version', () => {
+      // The write-side half of content versioning — insertPlannedPipeline stamps
+      // it on every native write. Guards against a silent drop of the stamp (which
+      // the migration, repairing only OLD rows, would never surface).
+      const h = createHistory();
+      insertPlanned(h, 'plan-ver', 'ver');
+      const [row] = h.getPlannedPipelines(10);
+      const parsed = JSON.parse(row!.manifest_json) as { schema_version?: number };
+      expect(parsed.schema_version).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+      h.close();
+    });
+
+    it('Move 1: migrateWorkflowContentSchema is a no-op when the engine.db workflow store is inert', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-noverb-'));
+      tmpDirs.push(dir);
+      const h = new RunHistory(join(dir, 'test.db')); // no setVerbGraph → store inert
+      expect(h.migrateWorkflowContentSchema()).toEqual({ scanned: 0, migrated: 0 });
       h.close();
     });
 

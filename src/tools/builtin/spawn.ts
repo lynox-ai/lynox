@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
-import { getDefaultMaxTokens } from '../../types/index.js';
+import { getDefaultMaxTokens, modelCapability, clampTier } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, RunAbortedError } from '../../core/agent.js';
@@ -266,6 +266,28 @@ export function formatSpawnError(err: unknown): string {
   return `${statusPrefix}${err.name}: ${err.message}`;
 }
 
+/**
+ * Does a spawn `profile` route a child to a model whose cost band exceeds the
+ * tenant's `max_tier` ceiling? A profile pins a concrete `model_id` that bypasses
+ * the tier clamp (it wins over the resolved tier), so this is the guard that keeps
+ * an agent-set (hence prompt-injectable) profile from escaping the cost ceiling.
+ *
+ * REFUSE, not clamp: a profile is a specific endpoint, so you cannot substitute a
+ * cheaper model on it (DEF-0080). Semantics:
+ *  - no ceiling (`max_tier` unset, i.e. self-host default) → never exceeds.
+ *  - `max_tier: 'deep'` → not restrictive (nothing is above deep) → never exceeds,
+ *    including an unregistered model.
+ *  - a restrictive ceiling (`fast`/`balanced`): a REGISTERED model exceeds if its
+ *    tier is above the ceiling; an UNREGISTERED model (no known tier) is refused
+ *    conservatively — its band can't be proven within the ceiling.
+ */
+export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier | undefined): boolean {
+  if (!maxTier) return false;
+  const tier = modelCapability(profileModelId)?.tier ?? null;
+  if (tier === null) return maxTier !== 'deep';
+  return clampTier(tier, maxTier) !== tier;
+}
+
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
@@ -290,6 +312,17 @@ async function executeThinker(
     : undefined;
   if (spec.profile && !profile) {
     throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
+  }
+  // A profile sets `model = profile.model_id` below, bypassing the `max_tier`
+  // clamp that `resolveRunModel` applies to a tier. That is the injection lever
+  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
+  // model above the tenant's cost ceiling. Enforce the ceiling HERE — but a
+  // profile cannot be clamped DOWN (you cannot substitute a different model on
+  // someone's endpoint), so the enforcement is REFUSE, not clamp (DEF-0080).
+  // Cross-provider hybrid spawn is unaffected — that runs on the tier path.
+  if (profile && profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
+    const band = modelCapability(profile.model_id)?.tier;
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
   }
 
   // Single chokepoint: the override gate (now a pass-through, D8) THEN CLAMP to
@@ -690,13 +723,17 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // Estimate against the SAME model the run will actually use (gate + clamp +
       // provider), not an Anthropic-only tier map — otherwise a Mistral-tenant or
       // ceiling-clamped spawn is mis-estimated and over/under-reserves the budget.
-      const { modelId } = resolveRunModel({
+      // A profile spawn runs on `profile.model_id` (which WINS over the tier), so
+      // reserve against that — else a profile pointing at a pricier model than the
+      // tier default under-reserves the session budget.
+      const profileModelId = spec.profile ? cfg.model_profiles?.[spec.profile]?.model_id : undefined;
+      const modelId = profileModelId ?? resolveRunModel({
         requested: spec.model,
         defaultTier: (roleDefault ?? cfgTier ?? 'balanced') as ModelTier,
         accountTier: cfg.account_tier,
         maxTier: cfg.max_tier,
         provider,
-      });
+      }).modelId;
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
       return sum + estimateSpawnCost(modelId, iters);
     }, 0);

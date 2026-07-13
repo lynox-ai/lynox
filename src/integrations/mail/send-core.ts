@@ -306,7 +306,7 @@ function parseAddress(raw: string): MailAddress | null {
   // synthetic SMTP headers (Bcc:, Subject:, body separator) when the
   // value reaches the wire. Most MTAs re-encode but we never want to
   // rely on that — drop any segment containing such bytes.
-  if (/[\r\n -]/.test(raw)) return null;
+  if (/[\r\n\x00-\x1f]/.test(raw)) return null;
   const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
   if (angle) {
     const name = angle[1]?.trim();

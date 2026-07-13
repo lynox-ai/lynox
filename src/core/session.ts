@@ -1678,24 +1678,50 @@ export class Session {
     /** Named model profile — overrides provider to OpenAI-compatible for this session. */
     profile?: string | undefined;
   }): void {
-    // costGuard is a session-lifetime budget, NOT a per-recreation setting. A
-    // model/profile swap (setModel / setEffort / this call) rebuilds the Agent,
-    // and this line replaces agentOverrides wholesale — so a per-run cost ceiling
-    // set at createSession (e.g. a background WorkerLoop task) would silently
-    // vanish on the very next _recreateAgent, which executeStandard/executeWatch
-    // always call right after createSession. Preserve it across the rebuild
-    // unless a caller explicitly supplies a new one.
-    const preservedCostGuard = this.agentOverrides.costGuard;
-    this.agentOverrides = overrides ?? {};
-    this.agentOverrides.costGuard ??= preservedCostGuard;
-    // Resolve model profile override if specified
-    if (overrides?.profile) {
+    // The overrides split into TWO classes, and conflating them was the bug:
+    //
+    //   • SESSION-LIFETIME — who this session *is*: its budget, its autonomy, its
+    //     iteration cap, its system-prompt suffix, its named model profile. Set
+    //     once (at createSession, or once by the WorkerLoop right after) and it
+    //     must OUTLIVE every rebuild. A rebuild is infrastructural — a registry
+    //     hot-reload, a provider swap, a tier change — and must not make the
+    //     session forget who it is.
+    //   • PER-REBUILD — a transient isolation for one agent instance:
+    //     `excludeTools`, `continuationPrompt`. A caller *lifts* these by
+    //     recreating without them; `session-disabled-tools-invariant.test.ts`
+    //     pins that lift, so they must NOT be carried.
+    //
+    // This used to replace `agentOverrides` wholesale — i.e. treat every field as
+    // per-rebuild. So a background task silently lost its `autonomy` (→ it starts
+    // hitting approval gates that nobody is there to answer), its `maxIterations`
+    // budget, and its named model profile (→ it falls off the cheaper EU model
+    // onto the main provider: a data-RESIDENCY change, not just a cost one) on the
+    // very next registry bump, StepHint or compaction override. `costGuard` alone
+    // was patched for this; the rule was never about costGuard.
+    // Spelled out field by field rather than spread-merged, for two reasons: the
+    // two classes stay visible to the next reader, and `??` means a key passed as
+    // an explicit `undefined` does NOT erase carried identity (a spread would
+    // have — re-introducing this very bug for any caller that forwards an
+    // optional value).
+    const { profile, ...supplied } = overrides ?? {};
+    this.agentOverrides = {
+      // session-lifetime — carried unless this call supplies a new value
+      maxIterations: supplied.maxIterations ?? this.agentOverrides.maxIterations,
+      systemPromptSuffix: supplied.systemPromptSuffix ?? this.agentOverrides.systemPromptSuffix,
+      autonomy: supplied.autonomy ?? this.agentOverrides.autonomy,
+      costGuard: this.agentOverrides.costGuard, // never a caller's to set here
+      // per-rebuild — reset unless this call supplies one
+      excludeTools: supplied.excludeTools,
+      continuationPrompt: supplied.continuationPrompt,
+    };
+    // A named profile is resolved once and then belongs to the session. Supplying
+    // one re-resolves it; omitting one leaves it in place. Nothing clears it — a
+    // bare rebuild that dropped it WAS the bug above.
+    if (profile !== undefined) {
       const profiles = this.engine.getUserConfig().model_profiles;
-      const profile = profiles?.[overrides.profile];
-      if (!profile) throw new Error(`Unknown model profile "${overrides.profile}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
-      this._profileOverride = profile;
-    } else {
-      this._profileOverride = null;
+      const resolved = profiles?.[profile];
+      if (!resolved) throw new Error(`Unknown model profile "${profile}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
+      this._profileOverride = resolved;
     }
     const messages = this.saveMessages();
     this._createAgent();
