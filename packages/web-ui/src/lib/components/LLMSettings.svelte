@@ -63,6 +63,13 @@
 		default_residency: string;
 		/** Pre-filled api_base_url for presets that pin a fixed endpoint. */
 		base_url_default?: string;
+		/**
+		 * How far the entry is proven (server-side `catalog.ts`). 'experimental'
+		 * means tool-calling through it is NOT verified — lynox is an agent, so
+		 * that is a real caveat and the tile must say so. Optional here only to
+		 * stay tolerant of an older engine that predates the field.
+		 */
+		verification?: 'native' | 'verified' | 'experimental';
 		notes?: string;
 	}
 
@@ -880,7 +887,18 @@
 			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
 				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={isTileLocked(p)}
 					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
-					<div class="font-medium text-sm">{p.display_name}</div>
+					<div class="font-medium text-sm flex items-center gap-1.5">
+						<span>{p.display_name}</span>
+						<!-- The caveat used to live inside display_name ("… (experimental)").
+						     It is a structured field now, so render it explicitly — lynox is an
+						     agent, and "tool-calling not verified here" is a real warning, not a
+						     footnote. -->
+						{#if p.verification === 'experimental'}
+							<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-border text-text-muted">
+								{t('llm.experimental')}
+							</span>
+						{/if}
+					</div>
 					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
 				</button>
 			{/each}

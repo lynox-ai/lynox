@@ -259,6 +259,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.subtitle':           { de: 'Anbieter, Schlüssel und Modell auswählen.',                                 en: 'Pick provider, key, and model.' },
 	'llm.back_to_settings':   { de: 'Zurück zu Einstellungen',                                                   en: 'Back to Settings' },
 	'llm.provider_heading':   { de: 'Anbieter',                                                                  en: 'Provider' },
+	'llm.experimental':       { de: 'ungetestet',                                                                en: 'unverified' },
 	'llm.api_key':            { de: 'API-Schlüssel',                                                             en: 'API key' },
 	'llm.api_key_placeholder':{ de: 'Leer lassen, um den gespeicherten Schlüssel zu behalten.',                  en: 'Leave blank to keep the stored key.' },
 	'llm.api_key_hint':       { de: 'Wird verschlüsselt im Vault gespeichert. Wird nie im Browser angezeigt.',   en: 'Stored encrypted in the vault. Never shown back in the browser.' },
