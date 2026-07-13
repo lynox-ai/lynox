@@ -738,6 +738,142 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  describe('_recreateAgent() — session identity survives, per-rebuild isolation does not', () => {
+    // The costGuard block above fixed ONE field. The rule was never about
+    // costGuard: `agentOverrides` was replaced wholesale, so a bare rebuild
+    // (registry hot-reload, provider swap, StepHint tier change, compaction
+    // override) also stripped autonomy, the iteration budget and the named model
+    // profile. These pin the general rule — AND its boundary: `excludeTools` is a
+    // transient per-instance isolation and must still be lifted by an empty
+    // recreate (see session-disabled-tools-invariant.test.ts).
+    const FALLBACK_PROFILE = {
+      provider: 'openai' as const,
+      api_base_url: 'https://api.mistral.ai/v1',
+      api_key: 'sk-mistral-test',
+      model_id: 'mistral-large-2512',
+    };
+    // NOTE on the try/finally below: `loadConfig()` memoises into a module-level
+    // `_cachedConfig` (config.ts:89), so every Engine in this file shares ONE
+    // userConfig object — an un-deleted mutation leaks into every later test.
+    // Same reason the max_tier / compaction_model tests below clean up after
+    // themselves.
+
+    it('preserves autonomy + maxIterations across a bare rebuild — a background task must not lose them', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+      // The WorkerLoop shape (worker-loop.ts:481).
+      session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous' });
+
+      // A registry hot-reload / config swap then rebuilds with no args
+      // (session.ts:458 / :469). Before the fix this dropped `autonomy`, so an
+      // unattended background run started hitting approval gates nobody answers.
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent();
+
+      const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuilt.autonomy).toBe('autonomous');
+      expect(rebuilt.maxIterations).toBe(40);
+    });
+
+    it('preserves the named model profile across a bare rebuild — no silent provider/residency fallback', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().model_profiles = { fallback: FALLBACK_PROFILE };
+
+      try {
+        const session = engine.createSession({});
+        session._recreateAgent({ profile: 'fallback' });
+
+        const withProfile = vi.mocked(Agent).mock.calls.at(-1)![0];
+        expect(withProfile.provider).toBe('openai');
+        expect(withProfile.apiBaseURL).toBe('https://api.mistral.ai/v1');
+        expect(withProfile.openaiModelId).toBe('mistral-large-2512');
+
+        // A StepHint tier change (session.ts:579) or a compaction override (:632)
+        // rebuilds with no args. Before the fix `_profileOverride` was nulled here,
+        // so the managed WorkerLoop's cheap EU model silently became the main
+        // provider — a data-residency change, not just a cost one.
+        vi.mocked(Agent).mockClear();
+        session._recreateAgent();
+
+        const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+        expect(rebuilt.provider).toBe('openai');
+        expect(rebuilt.apiBaseURL).toBe('https://api.mistral.ai/v1');
+        expect(rebuilt.openaiModelId).toBe('mistral-large-2512');
+      } finally {
+        delete engine.getUserConfig().model_profiles;
+      }
+    });
+
+    it('a partial override changes only what it supplies (worker-loop.ts:752 shape)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().model_profiles = { fallback: FALLBACK_PROFILE };
+
+      try {
+        const session = engine.createSession({});
+        session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous' });
+
+        // Supplying ONLY a profile must not wipe the iteration budget / autonomy.
+        vi.mocked(Agent).mockClear();
+        session._recreateAgent({ profile: 'fallback' });
+
+        const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+        expect(rebuilt.maxIterations).toBe(40);
+        expect(rebuilt.autonomy).toBe('autonomous');
+        expect(rebuilt.openaiModelId).toBe('mistral-large-2512');
+      } finally {
+        delete engine.getUserConfig().model_profiles;
+      }
+    });
+
+    it('a key passed as explicit undefined does not erase carried identity', async () => {
+      // The footgun a spread-merge would have re-introduced: a caller forwarding
+      // an optional value (`autonomy: cfg.autonomy`) must not silently wipe it.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+      session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous' });
+
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent({ autonomy: undefined, maxIterations: undefined });
+
+      const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuilt.autonomy).toBe('autonomous');
+      expect(rebuilt.maxIterations).toBe(40);
+    });
+
+    it('still rejects an unknown profile name', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+
+      expect(() => session._recreateAgent({ profile: 'nope' })).toThrow(/Unknown model profile "nope"/);
+    });
+
+    it('does NOT carry excludeTools — a per-rebuild isolation is still lifted by an empty recreate', async () => {
+      // The boundary of the rule, pinned so nobody "generalises" the fix above
+      // into carrying everything. `excludeTools` is a TRANSIENT per-instance
+      // isolation, not session identity: a caller lifts it by recreating without
+      // it. Same invariant as session-disabled-tools-invariant.test.ts, guarded
+      // here from the preservation side.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+
+      session._recreateAgent({ excludeTools: ['spawn_agent'], autonomy: 'autonomous' });
+      expect(vi.mocked(Agent).mock.calls.at(-1)![0].excludeTools).toContain('spawn_agent');
+
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent();
+
+      const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuilt.excludeTools ?? []).not.toContain('spawn_agent'); // isolation lifted
+      expect(rebuilt.autonomy).toBe('autonomous');                     // identity kept
+    });
+  });
+
   describe('setEffort()', () => {
     it('preserves messages and recreates agent', async () => {
       const savedMessages = [{ role: 'user', content: 'keep' }];
