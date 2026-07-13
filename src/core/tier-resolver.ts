@@ -207,7 +207,7 @@ export function hybridSlotClientConfig(
  *  - **cross** — a hybrid slot whose provider differs from base, or that carries
  *    enriched creds (see `hybridSlotClientConfig`). The Agent's wire + creds come
  *    from the slot; a same-provider slot that `enrichTierSetCreds` deliberately
- *    left key-LESS gets `resolveKey(provider)` filled in so a fresh Agent (which
+ *    left key-LESS gets `resolveKey(provider, slotEndpoint)` filled in so a fresh Agent (which
  *    has no ambient client to borrow a key from) doesn't 401 with an empty key.
  *  - **non-cross** (standard mode / same-provider) — returns the BASE provider +
  *    the tier's base model id + undefined creds. A caller that keeps its base
@@ -238,7 +238,7 @@ export interface CrossProviderSlotCreds {
 export function resolveCrossProviderSlotCreds(
   tier: ModelTier,
   baseProvider: LLMProvider,
-  resolveKey: (provider: LLMProvider) => string | undefined,
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined,
 ): CrossProviderSlotCreds {
   const snap = resolveTierModel(tier, baseProvider);
   const hybrid = hybridSlotClientConfig(snap, baseProvider);
@@ -246,7 +246,7 @@ export function resolveCrossProviderSlotCreds(
     return {
       provider: hybrid.provider,
       model: hybrid.openaiModelId,
-      apiKey: hybrid.apiKey ?? resolveKey(hybrid.provider),
+      apiKey: hybrid.apiKey ?? resolveKey(hybrid.provider, hybrid.apiBaseURL),
       apiBaseURL: hybrid.apiBaseURL,
       openaiModelId: hybrid.openaiModelId,
       crossProviderSlot: true,

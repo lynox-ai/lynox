@@ -284,6 +284,16 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
+   * True when `set()` will persist rather than throw. Callers that want to write
+   * a secret only opportunistically — a boot-time migration that has nothing to
+   * migrate on a vault-less install — check this instead of catching the throw,
+   * so a legitimately vault-less boot is not mistaken for a failure.
+   */
+  canPersist(): boolean {
+    return this.vault !== null;
+  }
+
+  /**
    * Store a secret in the vault and in-memory cache.
    * Requires a vault to be configured.
    */

@@ -22,10 +22,10 @@ import type {
 import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
-import { resolveProviderApiKey } from './llm/provider-keys.js';
+import { resolveProviderApiKey, migrateLegacyEndpointKey } from './llm/provider-keys.js';
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
-import { setVaultApiKeyExists } from './config.js';
+import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget } from './session-budget.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
@@ -427,7 +427,17 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       // always override vault (so users can fix stale vault entries without Web UI).
       const vaultApiKey = vault.get('ANTHROPIC_API_KEY');
       if (vaultApiKey && !process.env['ANTHROPIC_API_KEY']) {
-        userConfig.api_key = vaultApiKey;
+        // Mirror the Anthropic-wire vault key into the legacy `api_key` field —
+        // but NEVER onto a `provider:'openai'` box, whose api_base_url points at
+        // Mistral / Groq / a local Ollama. The raw config.api_key consumers
+        // (spawn/pipeline/plan-task/process/orchestrator) pair this field directly
+        // with api_base_url, so mirroring it there is the cross-vendor leak this
+        // change closes — and the vault is the SECOND door to it: loadConfig only
+        // scoped the ENV path, and never sees this vault value. Same guard, shared
+        // from config.ts, so the two paths cannot drift again.
+        if (anthropicKeyMayHoldApiKey(userConfig.provider)) {
+          userConfig.api_key = vaultApiKey;
+        }
       } else if (vaultApiKey && process.env['ANTHROPIC_API_KEY']) {
         process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
       }
@@ -466,6 +476,29 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       }
     }
     store = new SecretStore(userConfig, vault ?? undefined);
+
+    // One-shot: before endpoints had their own vault slots, every
+    // OpenAI-compatible one shared MISTRAL_API_KEY. A user pointing the generic
+    // tile at their own vLLM on :8000, or at Groq, stored THAT vendor's key there.
+    // Now that such an endpoint has a slot of its own, the key would simply not be
+    // found — and for a loopback endpoint that failure is SILENT, because those do
+    // not require a key: readiness stays green while every request 401s.
+    //
+    // Safe because it runs exactly once: on this first boot, `api_base_url` still
+    // describes where the user already was (they cannot have clicked a preset tile
+    // that did not exist), so the key demonstrably belongs to that endpoint. A
+    // LATER switch must never carry a key across — that is the leak itself.
+    const carried = migrateLegacyEndpointKey({
+      provider: userConfig.provider,
+      apiBaseURL: userConfig.api_base_url,
+      secretStore: store,
+    });
+    if (carried) {
+      process.stderr.write(
+        `[lynox] Moved your existing API key into the ${carried} slot — this endpoint now has one of its own.\n`,
+      );
+    }
+
     // Only advertise agent-visible secrets — infrastructure secrets (mail
     // account / OAuth / SMTP/IMAP / engine-internal) are excluded so their
     // names never enter the model context (and cannot be referenced for exfil).
@@ -613,6 +646,10 @@ export async function initMemoryInstance(
   // the MISTRAL_API_KEY slot on openai, CUSTOM_API_KEY on custom, etc.
   const memoryApiKey = resolveProviderApiKey({
     provider: userConfig.provider,
+    // Endpoint-bound: the memory client is pointed at `api_base_url`, so the key
+    // must come from THAT endpoint's slot — resolving on 'openai' alone would
+    // send a Mistral key to whatever gateway the user actually configured.
+    apiBaseURL: userConfig.api_base_url,
     secretStore,
     userConfig,
   });

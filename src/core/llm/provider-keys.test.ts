@@ -11,6 +11,7 @@ import {
   vaultSlotForProvider,
   resolveProviderApiKey,
   enrichTierSetCreds,
+  migrateLegacyEndpointKey,
 } from './provider-keys.js';
 import type { TierSet } from '../../types/config.js';
 
@@ -30,7 +31,244 @@ describe('VAULT_SLOT_BY_PROVIDER', () => {
     // Secondary slot: OPENAI_API_KEY follows the OpenAI SDK env-var
     // convention so users who set that get picked up for openai-compat.
     expect(PROVIDER_KEY_SLOTS.has('OPENAI_API_KEY')).toBe(true);
-    expect(PROVIDER_KEY_SLOTS.size).toBe(4);
+    // Per-endpoint slots contributed by catalog presets. Derived from the
+    // catalog, so a new preset's slot is recognised by the callers that gate on
+    // this set (the settings API's key-write path) without a second edit here.
+    expect(PROVIDER_KEY_SLOTS.has('GROQ_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.has('TOGETHER_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.has('FIREWORKS_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.has('OLLAMA_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.size).toBe(11);
+  });
+});
+
+// The bug these pin: EVERY OpenAI-compatible vendor — Mistral, Groq, Together,
+// Fireworks, a local Ollama — serialises to `provider: 'openai'`. Resolving the
+// vault slot on the provider alone therefore hands whichever key sits in the
+// shared openai slot to whatever endpoint happens to be configured. A user with
+// a Mistral key who picks the Groq tile would bearer-token their Mistral key
+// straight to Groq. Same class as the Anthropic legacy-fallback hazard this
+// module already guards (see the comment on the `config.api_key` branch) — it
+// just had no way to see the endpoint.
+describe('resolveProviderApiKey — endpoint-bound slots (cross-provider leak)', () => {
+  const GROQ = 'https://api.groq.com/openai/v1';
+  const OLLAMA = 'http://localhost:11434/v1';
+  const MISTRAL = 'https://api.mistral.ai/v1';
+
+  beforeEach(() => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('CUSTOM_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('GROQ_API_KEY', '');
+    vi.stubEnv('OLLAMA_API_KEY', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT hand the Mistral key to a Groq endpoint', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: GROQ,
+      secretStore: null,
+    });
+    expect(key).toBeUndefined();
+  });
+
+  it('does NOT fall back to the OPENAI_API_KEY alias for a Groq endpoint either', () => {
+    // The same leak by another door: the SDK-alias fallback is scoped to the
+    // provider-default slot and must not apply to an endpoint with its own.
+    vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: GROQ,
+      secretStore: null,
+    });
+    expect(key).toBeUndefined();
+  });
+
+  it('uses the Groq endpoint’s own slot when it is set', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('GROQ_API_KEY', 'groq-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: GROQ,
+      secretStore: null,
+    });
+    expect(key).toBe('groq-secret');
+  });
+
+  it('never lends another vendor’s key to a loopback runtime', () => {
+    // Sending a stored vendor key to localhost would put a live credential on the
+    // wire in plaintext, over http, to whatever process holds that port.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: OLLAMA, secretStore: null }))
+      .toBeUndefined();
+  });
+
+  it('does use the loopback runtime’s OWN key when one is configured', () => {
+    // An authenticated local gateway (vLLM / LiteLLM with --api-key) must still
+    // work. Its key lives in its own slot, so this cannot become a leak path.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('OLLAMA_API_KEY', 'local-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: OLLAMA, secretStore: null }))
+      .toBe('local-secret');
+  });
+
+  it('still resolves the Mistral preset from the historic slot (back-compat)', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: MISTRAL, secretStore: null }))
+      .toBe('mistral-secret');
+  });
+
+  it('still resolves an unrecognised OpenAI-compatible host from the historic slot', () => {
+    // The generic tile is where existing installs live — their key is in
+    // MISTRAL_API_KEY and moving it would silently log them out.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: 'https://some-proxy.example.com/v1',
+      secretStore: null,
+    })).toBe('mistral-secret');
+  });
+
+  it('is unchanged when no endpoint is supplied (legacy callers)', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', secretStore: null }))
+      .toBe('mistral-secret');
+  });
+});
+
+describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
+  /** Minimal in-memory stand-in for the vault. */
+  function fakeStore(initial: Record<string, string> = {}) {
+    const data = { ...initial };
+    return {
+      data,
+      resolve: (n: string): string | null => data[n] ?? null,
+      set: (n: string, v: string): void => { data[n] = v; },
+    };
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('carries an existing key into a local runtime’s new slot', () => {
+    // The regression it exists for: this user pointed the GENERIC tile at their
+    // own vLLM and stored its key in the shared slot. Without the carry-forward
+    // the key is simply not found — and silently, because a loopback endpoint is
+    // not required to have one: readiness stays green while every request 401s.
+    const store = fakeStore({ MISTRAL_API_KEY: 'my-vllm-key' });
+    const moved = migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:8000/v1',
+      secretStore: store,
+    });
+    expect(moved).toBe('VLLM_API_KEY');
+    expect(store.data['VLLM_API_KEY']).toBe('my-vllm-key');
+  });
+
+  it('runs exactly ONCE — a later switch must not carry a key across', () => {
+    // This is the whole reason for the marker. A user who was on Mistral and then
+    // selects Ollama has a Mistral key in the shared slot; carrying THAT across
+    // would be the very leak this change closes. At resolve time the two cases are
+    // indistinguishable — same endpoint, same empty slot, same legacy key — so
+    // "was this the first boot after the upgrade?" has to be recorded, not inferred.
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+    migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      secretStore: store,
+    });
+
+    const second = migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:11434/v1',   // user later picks Ollama
+      secretStore: store,
+    });
+    expect(second).toBeNull();
+    expect(store.data['OLLAMA_API_KEY']).toBeUndefined();
+  });
+
+  it('does not overwrite a key the endpoint already has', () => {
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret', GROQ_API_KEY: 'groq-own' });
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'https://api.groq.com/openai/v1',
+      secretStore: store,
+    })).toBeNull();
+    expect(store.data['GROQ_API_KEY']).toBe('groq-own');
+  });
+
+  it('does nothing for an endpoint that still uses the shared slot', () => {
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'https://some-proxy.example.com/v1',   // generic tile
+      secretStore: store,
+    })).toBeNull();
+  });
+
+  it('does nothing — and does not throw — on a vault-less store', () => {
+    // A store that cannot persist (no LYNOX_VAULT_KEY, read-only ~/.lynox) would
+    // throw from set(). Letting that throw escape nulls the entire secret store in
+    // engine-init's try/catch. There is also nothing to migrate: the legacy keys
+    // live in the very vault that is absent. Bail before any write.
+    const setCalls: string[] = [];
+    const vaultless = {
+      resolve: (): string | null => null,
+      set: (n: string): void => { setCalls.push(n); throw new Error('Cannot set secrets without a vault'); },
+      canPersist: (): boolean => false,
+    };
+    expect(() => migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:8000/v1',
+      secretStore: vaultless,
+    })).not.toThrow();
+    expect(setCalls).toEqual([]);
+  });
+
+  it('never touches a custom (Anthropic-wire) endpoint', () => {
+    // A custom-proxy user stores their key in CUSTOM_API_KEY, not the shared
+    // Mistral slot — nothing to carry, and moving MISTRAL_API_KEY here would be
+    // the wrong key entirely.
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+    expect(migrateLegacyEndpointKey({
+      provider: 'custom',
+      apiBaseURL: 'https://my-litellm.example.com/v1',
+      secretStore: store,
+    })).toBeNull();
+  });
+
+  it('marks itself done even on a boot with NO endpoint configured', () => {
+    // The trap: an Anthropic-only install has no `api_base_url`, so an early
+    // return that skipped the marker would leave it unmarked forever. The first
+    // time that user later selected Ollama, this migration would fire and carry
+    // their old Mistral key into the Ollama slot — the exact leak the marker
+    // exists to prevent. "First boot after the upgrade" is a property of the
+    // INSTALL, not of what happens to be configured on it.
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+
+    // Boot 1: plain Anthropic tenant, no endpoint.
+    expect(migrateLegacyEndpointKey({
+      provider: 'anthropic',
+      apiBaseURL: undefined,
+      secretStore: store,
+    })).toBeNull();
+
+    // Boot 2: the user has since switched to Ollama. Nothing may travel.
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:11434/v1',
+      secretStore: store,
+    })).toBeNull();
+    expect(store.data['OLLAMA_API_KEY']).toBeUndefined();
   });
 });
 
@@ -271,6 +509,41 @@ describe('resolveProviderApiKey — legacy config.api_key is base-provider gated
       userConfig: { provider: 'openai', api_key: 'some-key' },
     });
     expect(result).toBeUndefined();
+  });
+});
+
+// A hybrid tier slot is the sharpest form of the leak: every slot may name its
+// OWN endpoint, and they are all `provider: 'openai'`. If the injection resolves
+// the key on the provider, a Groq slot under a Mistral base receives the Mistral
+// key. This went unnoticed once already — the orchestrator's resolveKey closure
+// was declared `(provider)` and silently swallowed the endpoint argument (TS
+// permits lower arity), so it kept resolving against the BASE url. Pin that the
+// endpoint actually reaches the resolver.
+describe('enrichTierSetCreds — the endpoint reaches the key resolver', () => {
+  it('passes each slot’s OWN endpoint, not the base one', () => {
+    const seen: Array<{ provider: string; apiBaseURL?: string }> = [];
+    const tierSet: TierSet = {
+      fast: { provider: 'openai', model_id: 'llama-3.3-70b', api_base_url: 'https://api.groq.com/openai/v1' },
+    };
+    enrichTierSetCreds(tierSet, 'anthropic', (provider, apiBaseURL) => {
+      seen.push({ provider, ...(apiBaseURL !== undefined ? { apiBaseURL } : {}) });
+      return undefined;
+    });
+    expect(seen).toEqual([{ provider: 'openai', apiBaseURL: 'https://api.groq.com/openai/v1' }]);
+  });
+
+  it('a Groq slot under a Mistral base is NOT handed the Mistral key', () => {
+    // End-to-end through the real resolver — the assertion that would have caught
+    // the orchestrator regression.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('GROQ_API_KEY', '');
+    const tierSet: TierSet = {
+      fast: { provider: 'openai', model_id: 'llama-3.3-70b', api_base_url: 'https://api.groq.com/openai/v1' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', (provider, apiBaseURL) =>
+      resolveProviderApiKey({ provider, apiBaseURL, secretStore: null }));
+    expect(out.fast?.api_key).toBeUndefined();
+    vi.unstubAllEnvs();
   });
 });
 

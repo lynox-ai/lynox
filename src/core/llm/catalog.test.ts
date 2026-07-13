@@ -1,17 +1,105 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential } from './catalog.js';
+import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
 
 describe('LLM_CATALOG', () => {
-  it('exposes the five UI entries (anthropic, mistral, openai-compat, vertex, custom)', () => {
+  it('exposes the native entries plus the gateway/local-runtime presets', () => {
     // Mistral is split out from the generic OpenAI-compatible entry so the
     // EU-sovereign option is a first-class button in the provider picker
-    // rather than hidden behind "OpenAI-compatible endpoint". Both UI
-    // entries serialise to `provider: 'openai'` at the wire — disambiguated
-    // by `preset_id` for the UI.
+    // rather than hidden behind "OpenAI-compatible endpoint". The gateway +
+    // local-runtime presets (2026-07-13) follow the same pattern: all serialise
+    // to `provider: 'openai'` at the wire, disambiguated by `preset_id`.
     const keys = LLM_CATALOG.map(catalogEntryKey).sort();
-    expect(keys).toEqual(['anthropic', 'custom', 'mistral', 'openai-compat', 'vertex']);
+    expect(keys).toEqual([
+      'anthropic', 'custom', 'fireworks', 'groq', 'lmstudio', 'localai',
+      'mistral', 'ollama', 'openai-compat', 'together', 'vertex', 'vllm',
+    ]);
+  });
+
+  // The preset set is NOT free to grow: pinning an endpoint implies lynox may
+  // send a user's data there. `endpoint-allowlist.ts` is a DPA / sub-processor
+  // gate, not a technical one — a non-vetted host makes lynox a controller-side
+  // party to that third-party relationship and has to be disclosed.
+  //
+  // So every preset with a pinned `base_url_default` must resolve to a host the
+  // allowlist already vouches for. This is the tripwire: adding a preset for an
+  // un-vetted host fails HERE, loudly, instead of silently bypassing the
+  // disclosure gate. Such endpoints stay fully reachable through the generic
+  // `openai-compat` tile, which routes them through that gate as designed.
+  it('every pinned preset endpoint is already on the vetted sub-processor allowlist', () => {
+    const offenders = LLM_CATALOG
+      .filter((e) => e.base_url_default !== undefined)
+      .filter((e) => !isAllowlistedEndpoint(e.base_url_default!))
+      .map((e) => `${catalogEntryKey(e)} → ${e.base_url_default!}`);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('every entry declares a verification level', () => {
+    for (const entry of LLM_CATALOG) {
+      expect(['native', 'verified', 'experimental']).toContain(entry.verification);
+    }
+  });
+
+  // The vault slot now rides on the endpoint, so the host-matching in
+  // `resolveCatalogKey` decides which credential an endpoint is handed. That
+  // makes it a security boundary, not just a UI convenience: a host that could
+  // impersonate a preset would inherit that preset's key — or, worse, could
+  // impersonate a LOOPBACK preset and thereby claim `vault_slot: null`, which is
+  // the "needs no credential" state readiness checks trust.
+  describe('vaultSlotForEndpoint — slot inheritance under a hostile base URL', () => {
+    it('a suffix-spoofing host cannot inherit a vendor preset’s slot', () => {
+      expect(vaultSlotForEndpoint('openai', 'https://api.groq.com.attacker.com/v1')).not.toBe('GROQ_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://groq.com.evil.io/v1')).not.toBe('GROQ_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://evil.com/?proxy=api.groq.com')).not.toBe('GROQ_API_KEY');
+    });
+
+    it('a remote host cannot masquerade as a loopback runtime', () => {
+      // Loopback endpoints are credential-OPTIONAL: readiness does not demand a
+      // key. A remote host that reached that state would slip past the key check.
+      expect(endpointNeedsCredential('openai', 'https://localhost.attacker.com:11434/v1')).toBe(true);
+      expect(vaultSlotForEndpoint('openai', 'https://localhost.attacker.com:11434/v1')).not.toBe('OLLAMA_API_KEY');
+    });
+
+    it('a legitimate vendor subdomain still resolves to the vendor slot', () => {
+      expect(vaultSlotForEndpoint('openai', 'https://eu.groq.com/v1')).toBe('GROQ_API_KEY');
+    });
+
+    it('an unrecognised or empty endpoint falls back to the legacy slot, never to key-less', () => {
+      expect(vaultSlotForEndpoint('openai', '')).toBe('MISTRAL_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://some-proxy.example.com/v1')).toBe('MISTRAL_API_KEY');
+    });
+
+    it('loopback presets get their OWN slot, and do not require a key', () => {
+      // Their own slot is what keeps the leak shut: a Mistral key lives elsewhere
+      // and can never reach them. But an authenticated local gateway (vLLM or
+      // LiteLLM with --api-key) still has somewhere to put its key — an earlier
+      // cut used `null` here and silently 401'd every such install.
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:11434/v1')).toBe('OLLAMA_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:8000/v1')).toBe('VLLM_API_KEY');
+      expect(endpointNeedsCredential('openai', 'http://localhost:11434/v1')).toBe(false);
+      // Conservative default: an endpoint we cannot place still needs a key.
+      expect(endpointNeedsCredential('openai', 'https://unknown.example.com/v1')).toBe(true);
+    });
+  });
+
+  it('only entries with a proven wire are non-experimental', () => {
+    // The two native providers, plus every preset whose tool-calling has been
+    // PROVEN by a real round-trip in `tests/online/provider-preset-reachability`.
+    //
+    // `ollama` earned its place with a full tool_use → tool_result → answer run
+    // on qwen2.5:7b — mutation-checked, so the assertion is known to be capable
+    // of failing. The rest connect but are unproven: they stay `experimental`,
+    // and the settings UI says so on the tile. Adding a preset without proving
+    // it therefore fails HERE, which is the point.
+    const proven = LLM_CATALOG
+      .filter((e) => e.verification !== 'experimental')
+      .map(catalogEntryKey)
+      .sort();
+
+    expect(proven).toEqual(['anthropic', 'mistral', 'ollama']);
   });
 
   // Per-entry requires_base_url + requires_region matrix. UI uses these
@@ -280,10 +368,46 @@ describe('resolveCatalogKey', () => {
   it('hostname normalises case', () => {
     expect(resolveCatalogKey('openai', 'https://API.MISTRAL.AI/v1')).toBe('mistral');
   });
-  it('non-mistral openai host falls through to openai-compat', () => {
-    expect(resolveCatalogKey('openai', 'https://api.groq.com/openai/v1')).toBe('openai-compat');
+  it('an openai host with no preset falls through to openai-compat', () => {
+    // openrouter.ai is deliberately NOT a preset: it is not on the vetted
+    // sub-processor allowlist, so it must keep routing through the generic tile
+    // and its disclosure gate. If someone ever adds an OpenRouter preset without
+    // vetting the host, this line and the allowlist tripwire above both fire.
     expect(resolveCatalogKey('openai', 'https://openrouter.ai/api/v1')).toBe('openai-compat');
-    expect(resolveCatalogKey('openai', 'http://localhost:11434/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://api.deepseek.com/v1')).toBe('openai-compat');
+  });
+
+  // Ollama, LM Studio, vLLM and LocalAI ALL live on `localhost` — only the port
+  // tells them apart. Matching on hostname alone resolved every one of them to
+  // whichever sat first in the catalog, so a user who saved LM Studio would come
+  // back to the Ollama tile. These pin the host:port comparison that fixes it.
+  it('loopback presets are disambiguated by port, not just hostname', () => {
+    expect(resolveCatalogKey('openai', 'http://localhost:11434/v1')).toBe('ollama');
+    expect(resolveCatalogKey('openai', 'http://localhost:1234/v1')).toBe('lmstudio');
+    expect(resolveCatalogKey('openai', 'http://localhost:8000/v1')).toBe('vllm');
+    expect(resolveCatalogKey('openai', 'http://localhost:8080/v1')).toBe('localai');
+  });
+
+  it('every loopback spelling of the same port resolves to the same preset', () => {
+    // `localhost`, `127.0.0.1` and `0.0.0.0` are the same machine, and users write
+    // all three. Matching the literal string would send `127.0.0.1:11434` to the
+    // GENERIC tile — whose slot is the shared one — and thus put the Mistral key,
+    // in plaintext, on a local port.
+    expect(resolveCatalogKey('openai', 'http://127.0.0.1:11434/v1')).toBe('ollama');
+    expect(resolveCatalogKey('openai', 'http://0.0.0.0:1234/v1')).toBe('lmstudio');
+  });
+
+  it('a loopback host on an unknown port falls through to the generic tile', () => {
+    // Failing to the generic tile (which shows the base-URL input the user needs)
+    // is the safe direction — far better than silently claiming they are on Ollama
+    // when they are running something else on :9999.
+    expect(resolveCatalogKey('openai', 'http://localhost:9999/v1')).toBe('openai-compat');
+  });
+
+  it('remote gateway presets resolve by host', () => {
+    expect(resolveCatalogKey('openai', 'https://api.groq.com/openai/v1')).toBe('groq');
+    expect(resolveCatalogKey('openai', 'https://api.together.xyz/v1')).toBe('together');
+    expect(resolveCatalogKey('openai', 'https://api.fireworks.ai/inference/v1')).toBe('fireworks');
   });
   it('hostile URL smuggling mistral.ai in path/query does not activate mistral', () => {
     // Substring-match used to leak: `'https://attacker.example.com/?proxy=mistral.ai'`

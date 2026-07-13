@@ -9,6 +9,7 @@ import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
+import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
@@ -47,6 +48,34 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
   }
   return out;
 }
+
+/**
+ * May the `ANTHROPIC_API_KEY` value be mirrored into the legacy `api_key` field
+ * for this provider?
+ *
+ * `api_key` is paired DIRECTLY with `api_base_url` by the pre-vault callers
+ * (spawn, pipeline, plan-task, process, the orchestrator). An `ANTHROPIC_API_KEY`
+ * is an Anthropic-wire credential, so it may sit there only on an endpoint that
+ * speaks that wire: `anthropic`, `custom` (an Anthropic-compatible proxy — the
+ * user configured it as one), `vertex` (which ignores it anyway), or the legacy
+ * default (undefined).
+ *
+ * NEVER on `provider: 'openai'`. There the endpoint is Mistral, Groq, Together or
+ * a local Ollama, and pairing the Anthropic key with a Groq base_url — or sending
+ * it in plaintext over http to localhost — is exactly the cross-vendor leak this
+ * whole change closes. The key comes from THAT endpoint's slot instead (see the
+ * openai block in loadConfig).
+ *
+ * Exported + shared so the two places that assign the key — the env path here and
+ * the vault path in engine-init.ts — can never drift apart, which is precisely
+ * how the leak survived three review rounds: each patched one path and missed the
+ * other.
+ */
+export function anthropicKeyMayHoldApiKey(provider: LlmProviderMaybe): boolean {
+  return provider !== 'openai';
+}
+
+type LlmProviderMaybe = LynoxUserConfig['provider'];
 
 /** Override for getLynoxDir(). Set via --data-dir or LYNOX_DATA_DIR. */
 let _dataDirOverride: string | null = null;
@@ -126,8 +155,13 @@ export function loadConfig(): LynoxUserConfig {
     }
   }
 
-  if (process.env['ANTHROPIC_API_KEY']) {
-    merged.api_key = process.env['ANTHROPIC_API_KEY'];
+  // What the user actually wrote in config.json, captured BEFORE the env var
+  // overwrites it. On a non-Anthropic endpoint this is the only key we can trust
+  // to belong there — see the endpoint-scoped block further down.
+  const configFileApiKey = merged.api_key;
+  const anthropicEnvKey = process.env['ANTHROPIC_API_KEY'];
+  if (anthropicEnvKey) {
+    merged.api_key = anthropicEnvKey;
   }
   // Generic LLM endpoint: `LYNOX_API_BASE_URL` (canonical) with the legacy
   // `ANTHROPIC_BASE_URL` accepted forever (real Anthropic-proxy users + every
@@ -397,13 +431,53 @@ export function loadConfig(): LynoxUserConfig {
   // ANTHROPIC_API_KEY in merged.api_key by this point, so guarding on an empty
   // api_key would never fire — the override must win, exactly as the prior
   // eu-sovereign branch did (it overwrote api_key unconditionally).
-  if (merged.provider === 'openai' && isMistralHost(merged.api_base_url) && process.env['MISTRAL_API_KEY']) {
-    merged.api_key = process.env['MISTRAL_API_KEY'];
-    // Single-model fallback when the UI/CP staged no explicit model. Tier
-    // routing (fast/balanced/deep) is wired separately via MISTRAL_MODEL_MAP —
-    // see setOpenAIModelResolver. A pinned versioned snapshot (not `*-latest`)
-    // keeps behaviour reproducible across Mistral model refreshes.
-    if (!merged.openai_model_id) merged.openai_model_id = 'mistral-large-2512';
+  // `api_key` is the LEGACY field that pre-vault callers (spawn, pipeline,
+  // plan-task, process, the orchestrator) pair directly with `api_base_url`. It
+  // therefore has to hold a key that BELONGS to that endpoint.
+  //
+  // Above, it is filled unconditionally from `ANTHROPIC_API_KEY` — the documented
+  // Docker env var. That is right for the Anthropic wire and wrong for every other
+  // one: on `provider: 'openai'` the endpoint may be Mistral, Groq, Together, or a
+  // local Ollama, and handing any of them the Anthropic key is a cross-vendor
+  // credential leak (plaintext over http, in the loopback case). The old code
+  // special-cased exactly ONE endpoint — Mistral — and left the rest holding the
+  // Anthropic key. Generalise it: derive the key from the endpoint, for every
+  // endpoint.
+  if (merged.provider === 'openai') {
+    // ONLY for an endpoint lynox pins by host. A host that fell through to the
+    // generic tile must not be promoted from the shared slot — that is how a
+    // spoofed `api.mistral.ai.evil.com` would be handed the Mistral key, and how a
+    // user's own configured `api_key` would be overwritten by a vendor key that
+    // has nothing to do with their endpoint.
+    const slot = pinnedVaultSlotForEndpoint('openai', merged.api_base_url);
+    const fromSlot = slot ? process.env[slot] : undefined;
+
+    if (fromSlot && fromSlot.length > 0) {
+      // This endpoint's own key. (For Mistral this is the historic promotion,
+      // unchanged; for Groq/Ollama/… it is the new, correctly-scoped one.)
+      merged.api_key = fromSlot;
+    } else if (merged.api_key === anthropicEnvKey && anthropicEnvKey) {
+      // The unconditional ANTHROPIC_API_KEY promotion above does not belong on
+      // ANY openai endpoint — pinned (Groq, Ollama) OR generic (OpenRouter,
+      // DeepSeek, a bare proxy that fell through to the openai-compat tile).
+      // Leaving it there sends the Anthropic key to that endpoint via the raw
+      // config.api_key consumers.
+      //
+      // This is the SAME rule the vault path applies in engine-init via
+      // `anthropicKeyMayHoldApiKey` (false for 'openai'). The two must strip for
+      // the same set of endpoints — the leak survived a round precisely because
+      // this path was narrowed to pinned-only while the vault path was not.
+      if (configFileApiKey) merged.api_key = configFileApiKey;
+      else delete merged.api_key;
+    }
+
+    if (isMistralHost(merged.api_base_url) && !merged.openai_model_id) {
+      // Single-model fallback when the UI/CP staged no explicit model. Tier
+      // routing (fast/balanced/deep) is wired separately via MISTRAL_MODEL_MAP —
+      // see setOpenAIModelResolver. A pinned versioned snapshot (not `*-latest`)
+      // keeps behaviour reproducible across Mistral model refreshes.
+      merged.openai_model_id = 'mistral-large-2512';
+    }
   }
 
   _cachedConfig = merged;

@@ -462,6 +462,10 @@ export class Engine {
     // (rafael-prod incident 2026-05-18).
     const apiKey = resolveProviderApiKey({
       provider: this.userConfig.provider,
+      // The endpoint decides the slot. Without it, every `provider:'openai'`
+      // endpoint (Mistral, Groq, Together, a local Ollama) would draw from the
+      // same vault slot — i.e. a Mistral key would be bearer-tokened to Groq.
+      apiBaseURL: this.userConfig.api_base_url,
       secretStore: this.secretStore,
       userConfig: this.userConfig,
     });
@@ -835,8 +839,8 @@ export class Engine {
     tierSet: import('../types/index.js').TierSet,
   ): import('../types/index.js').TierSet {
     const base = this.userConfig.provider ?? 'anthropic';
-    return enrichTierSetCreds(tierSet, base, (provider) =>
-      resolveProviderApiKey({ provider, secretStore: this.secretStore, userConfig: this.userConfig }),
+    return enrichTierSetCreds(tierSet, base, (provider, apiBaseURL) =>
+      resolveProviderApiKey({ provider, apiBaseURL, secretStore: this.secretStore, userConfig: this.userConfig }),
     );
   }
 

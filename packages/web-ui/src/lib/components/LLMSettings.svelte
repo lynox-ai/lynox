@@ -63,6 +63,21 @@
 		default_residency: string;
 		/** Pre-filled api_base_url for presets that pin a fixed endpoint. */
 		base_url_default?: string;
+		/**
+		 * How far the entry is proven (server-side `catalog.ts`). 'experimental'
+		 * means tool-calling through it is NOT verified — lynox is an agent, so
+		 * that is a real caveat and the tile must say so. Optional here only to
+		 * stay tolerant of an older engine that predates the field.
+		 */
+		verification?: 'native' | 'verified' | 'experimental';
+		/**
+		 * Vault slot this entry's key lives in. `null` = endpoint takes no credential
+		 * (loopback runtime) → render no key field at all. `undefined` = older engine
+		 * that predates the field → fall back to the provider map.
+		 */
+		vault_slot?: string | null;
+		/** Example model id for the free-text field an empty-catalog entry renders. */
+		model_placeholder?: string;
 		notes?: string;
 	}
 
@@ -199,6 +214,21 @@
 		if (!p) return '';
 		return VAULT_SLOTS[p] ?? '';
 	}
+	/**
+	 * The vault slot for a CATALOG ENTRY — the authoritative one. `provider` alone
+	 * cannot decide it: Mistral, Groq, Together and a local Ollama all serialise to
+	 * `provider: 'openai'`, so a provider-keyed lookup would write a Groq key into
+	 * the Mistral slot (and hand the Mistral key to Groq on the next request).
+	 * Mirrors `vaultSlotForEndpoint` in core/src/core/llm/catalog.ts.
+	 *
+	 * Returns '' when the endpoint needs no credential (loopback) — callers use
+	 * that to hide the key field entirely.
+	 */
+	function slotForEntry(entry: CatalogProvider | null | undefined): string {
+		if (!entry) return '';
+		if (entry.vault_slot === null) return '';
+		return entry.vault_slot ?? slotFor(entry.provider);
+	}
 
 	/**
 	 * Disambiguate which preset matches a persisted (provider, api_base_url)
@@ -213,22 +243,49 @@
 	 * cannot accidentally activate the Mistral preset. Apex/api/subdomain
 	 * all match the registered preset; foreign-host suffixes do not.
 	 *
+	 * EXCEPT for loopback presets: Ollama (:11434), LM Studio (:1234), vLLM
+	 * (:8000) and LocalAI (:8080) all share the hostname `localhost` and are
+	 * told apart only by port. Matching on hostname alone resolves every one of
+	 * them to whichever sits first in the catalog, so a user who saved LM Studio
+	 * would come back to the Ollama tile. Compare host:port for those.
+	 *
 	 * Fallback order: single-entry → that entry; multi-preset without a
 	 * match → the `requires_base_url` preset (so the user sees the input
 	 * they need to fill in); else first candidate.
 	 */
+	function isLoopbackHost(hostname: string): boolean {
+		return hostname === 'localhost'
+			|| hostname === '127.0.0.1'
+			|| hostname === '0.0.0.0'
+			|| hostname === '[::1]'
+			|| hostname === '::1';
+	}
+
 	function resolveCatalogKey(provider: LLMProvider, baseUrl?: string): string {
 		const candidates = providers.filter((p) => p.provider === provider);
 		if (candidates.length === 0) return provider;
 		if (candidates.length === 1) return catalogEntryKey(candidates[0]!);
 		if (baseUrl) {
 			let host = '';
-			try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { /* invalid */ }
+			let hostPort = '';
+			try {
+				const u = new URL(baseUrl);
+				host = u.hostname.toLowerCase();
+				hostPort = u.host.toLowerCase();
+			} catch { /* invalid — falls through to the generic tile */ }
 			if (host) {
 				const matched = candidates.find((c) => {
 					if (!c.base_url_default) return false;
 					let defHost = '';
-					try { defHost = new URL(c.base_url_default).hostname.toLowerCase(); } catch { return false; }
+					let defHostPort = '';
+					try {
+						const d = new URL(c.base_url_default);
+						defHost = d.hostname.toLowerCase();
+						defHostPort = d.host.toLowerCase();
+					} catch { return false; }
+					// Loopback: only the port distinguishes the runtimes. A non-default
+					// port falls through to the generic tile, which is the safe direction.
+					if (isLoopbackHost(defHost)) return hostPort === defHostPort;
 					if (host === defHost) return true;
 					const apex = defHost.replace(/^api\./, '');
 					return host === apex || host.endsWith(`.${apex}`);
@@ -438,6 +495,12 @@
 		// empty, the dropdown looked unselected, and "Verbindung testen"
 		// failed because no model was wired.
 		const defaultForNewProvider = pickDefaultModelIdForEntry(entry);
+		// A pinned preset with an EMPTY model catalog (Ollama, Groq, …) has no
+		// default to stamp — the model id is free-text. Carrying the previous
+		// provider's id across is worse than leaving it blank: `mistral-large-2512`
+		// saves cleanly (200), readiness reports green, and every single chat then
+		// 404s against Ollama, which has never heard of that model.
+		const freeTextModel = entry.models.length === 0;
 		if (entry.base_url_default && !entry.requires_base_url) {
 			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
@@ -445,7 +508,9 @@
 			config = {
 				...config,
 				api_base_url: entry.base_url_default,
-				...(defaultForNewProvider ? { openai_model_id: defaultForNewProvider } : {}),
+				...(defaultForNewProvider
+					? { openai_model_id: defaultForNewProvider }
+					: freeTextModel ? { openai_model_id: '' } : {}),
 			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
@@ -473,7 +538,14 @@
 		// caught by HN-launch staging probe 2026-05-23. Custom-endpoint tiles
 		// still defer to the explicit Save button (api_base_url + model id
 		// are required cross-field, server returns 400 if absent).
-		if (!entry.requires_base_url && loaded) {
+		//
+		// A pinned preset with a free-text model is the SAME case, even though its
+		// URL is pinned: the server rejects provider:'openai' without an
+		// openai_model_id. Auto-saving it fires a 400 the instant the user clicks
+		// the tile — before they have had any chance to type the model. So hold the
+		// save until the id is there, exactly as the free-text tiles do.
+		const modelIdMissing = freeTextModel && !config.openai_model_id;
+		if (!entry.requires_base_url && !modelIdMissing && loaded) {
 			void saveConfig();
 		}
 	}
@@ -518,7 +590,7 @@
 		testing = true;
 		testResult = null;
 		try {
-			const slot = slotFor(activeProvider);
+			const slot = slotForEntry(activeProviderEntry);
 			const apiKey = slot ? (keys[slot] ?? '') : '';
 			const res = await fetch(`${getApiBase()}/llm/test`, {
 				method: 'POST',
@@ -880,7 +952,18 @@
 			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
 				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={isTileLocked(p)}
 					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
-					<div class="font-medium text-sm">{p.display_name}</div>
+					<div class="font-medium text-sm flex items-center gap-1.5">
+						<span>{p.display_name}</span>
+						<!-- The caveat used to live inside display_name ("… (experimental)").
+						     It is a structured field now, so render it explicitly — lynox is an
+						     agent, and "tool-calling not verified here" is a real warning, not a
+						     footnote. -->
+						{#if p.verification === 'experimental'}
+							<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-border text-text-muted">
+								{t('llm.experimental')}
+							</span>
+						{/if}
+					</div>
 					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
 				</button>
 			{/each}
@@ -913,12 +996,12 @@
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey() && !hybridActive}
+			{#if slotForEntry(activeProviderEntry) && !cpSuppliesLLMKey() && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
 						placeholder={t('llm.api_key_placeholder')}
-						bind:value={keys[slotFor(activeProviderEntry.provider)]}
+						bind:value={keys[slotForEntry(activeProviderEntry)]}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
@@ -1047,12 +1130,12 @@
 						<div class="space-y-2 border-t border-border/50 pt-4">
 							<span class="block text-sm font-medium">{t('llm.hybrid_keys_heading')}</span>
 							{#each usedHybridProviders as p (catalogEntryKey(p))}
-								{#if slotFor(p.provider)}
+								{#if slotForEntry(p)}
 									<label class="block">
 										<span class="block text-xs text-text-muted mb-1">{p.display_name}</span>
 										<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
 											placeholder={t('llm.api_key_placeholder')}
-											bind:value={keys[slotFor(p.provider)]}
+											bind:value={keys[slotForEntry(p)]}
 											class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 									</label>
 								{/if}
@@ -1090,22 +1173,25 @@
 					<p class="text-xs text-text-muted">{t('llm.main_model.applies_hint')}</p>
 					<p class="text-xs text-text-muted">{t('llm.main_model.autoroute_hint')}</p>
 				</div>
-			{:else if activeProvider === 'custom' || activeCatalogKey === 'openai-compat'}
+			{:else if (activeProviderEntry?.models.length ?? 0) === 0}
 				<!--
-					Free-text endpoints with no enumerated model catalog need an
-					explicit model id. Two tiles qualify: the Anthropic-compatible
-					"custom" provider, AND the generic OpenAI-compatible endpoint
-					(preset_id 'openai-compat', models: []) — both route the model
-					id straight to the proxy (see core/src/core/llm/catalog.ts).
-					The backend rejects provider:'openai' without openai_model_id
-					(http-api.ts), so without this field the openai-compat tile
-					could never save (HTTP 400). Mistral / Anthropic / Vertex have
-					catalogs and use the tier picker above instead.
+					Any entry with an EMPTY model catalog needs an explicit model id —
+					there is nothing to pick from, and the id is routed straight to the
+					endpoint (see core/src/core/llm/catalog.ts). The backend rejects
+					provider:'openai' without openai_model_id (http-api.ts), so without
+					this field such a tile could never save (HTTP 400).
+
+					Derived from `models.length`, NOT from a hardcoded key list. The old
+					list named only 'custom' and 'openai-compat', so every gateway/local
+					preset added later (Ollama, LM Studio, Groq, …) silently rendered no
+					model field at all — selectable, unsaveable, and no way for the user
+					to tell why. Anthropic / Mistral / Vertex ship catalogs and use the
+					tier picker above instead.
 				-->
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.custom_model_id')}</span>
 					<input type="text" disabled={!loaded || providerLocked}
-						placeholder="claude-3-5-sonnet-20241022"
+						placeholder={activeProviderEntry?.model_placeholder ?? 'claude-3-5-sonnet-20241022'}
 						bind:value={config.openai_model_id}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.custom_model_id_hint')}</span>

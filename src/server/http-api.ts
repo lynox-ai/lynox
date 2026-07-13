@@ -30,6 +30,7 @@ import { resolveChatContext, type ChatContextRef } from '../core/chat-context.js
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
+import { endpointNeedsCredential } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
@@ -1575,7 +1576,7 @@ export class LynoxHTTPApi {
           configured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
         } else if (provider === 'custom') {
           const customBase = userConfig.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-          const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          const customKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
           configured = !!customBase && !!customKey;
         } else if (provider === 'openai') {
           // Parity with GET /api/secrets/status (line ~2496): an OpenAI-compat
@@ -1583,10 +1584,14 @@ export class LynoxHTTPApi {
           // = unusable, so the status bar must reflect that. Without the
           // model-id check the two truth sources would disagree (SetupBanner
           // still demands setup while StatusBar already shows green).
-          const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
-          configured = !!userConfig.api_base_url && !!openaiKey && !!userConfig.openai_model_id;
+          const openaiKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
+          // A loopback runtime (Ollama et al.) serves unauthenticated on the
+          // user's own box. Demanding a key there would leave a perfectly
+          // working local install stuck behind a banner it cannot satisfy.
+          const openaiNeedsKey = endpointNeedsCredential(provider, userConfig.api_base_url);
+          configured = !!userConfig.api_base_url && (!openaiNeedsKey || !!openaiKey) && !!userConfig.openai_model_id;
         } else {
-          const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          const anthropicKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
           configured = !!anthropicKey;
         }
       } catch {
@@ -1984,13 +1989,15 @@ export class LynoxHTTPApi {
         preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
       } else if (preflightProvider === 'custom') {
         const base = preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
         preflightKeyOk = !!base && !!key;
       } else if (preflightProvider === 'openai') {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!preflightCfg.api_base_url && !!key && !!preflightCfg.openai_model_id;
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        preflightKeyOk = !!preflightCfg.api_base_url
+          && (!endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) || !!key)
+          && !!preflightCfg.openai_model_id;
       } else {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
         preflightKeyOk = !!key;
       }
       if (!preflightKeyOk) {
@@ -3409,16 +3416,18 @@ export class LynoxHTTPApi {
       } else if (provider === 'custom') {
         // Custom needs api_base_url configured + a key in the CUSTOM_API_KEY slot
         const customBase = userConfig.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        const customKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
         llmConfigured = !!customBase && !!customKey;
       } else if (provider === 'openai') {
         // OpenAI-compatible needs api_base_url + a key (env MISTRAL_API_KEY /
         // OPENAI_API_KEY or vault) + model id
-        const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
-        llmConfigured = !!userConfig.api_base_url && !!openaiKey && !!userConfig.openai_model_id;
+        const openaiKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
+        llmConfigured = !!userConfig.api_base_url
+          && (!endpointNeedsCredential(provider, userConfig.api_base_url) || !!openaiKey)
+          && !!userConfig.openai_model_id;
       } else {
         // Anthropic direct — needs API key (env, vault, or legacy config.api_key)
-        const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        const anthropicKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
         llmConfigured = !!anthropicKey;
       }
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
@@ -4625,16 +4634,22 @@ export class LynoxHTTPApi {
         return;
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
+      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
       // Vault fallback: when the user already saved the key earlier and now
-      // hits "Verbindung testen" without re-typing, the form posts an empty
-      // body key. Pre-1.5.2 the endpoint 400'd "API key required" even though
-      // the vault had the value.
+      // hits "test connection" without re-typing, the form posts an empty body
+      // key. Pre-1.5.2 the endpoint 400'd "API key required" even though the
+      // vault had the value.
+      //
+      // Resolve against the endpoint being TESTED, not just the provider. This is
+      // the leak in its purest form otherwise: a user with a Mistral key saved,
+      // testing a Groq endpoint without re-typing a key, would have that Mistral
+      // key bearer-tokened straight to Groq by the fallback.
       const apiKey = bodyKey || (resolveProviderApiKey({
         provider: provider as LLMProvider,
+        apiBaseURL: baseUrl || undefined,
         secretStore: engine.getSecretStore(),
         userConfig: engine.getUserConfig(),
       }) ?? '');
-      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
       const model = typeof b['model'] === 'string' ? b['model'] : '';
       const started = Date.now();
       try {

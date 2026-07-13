@@ -79,6 +79,67 @@ export interface CatalogProviderEntry {
    * implies api.mistral.ai without making the user type it).
    */
   base_url_default?: string;
+  /**
+   * How far this entry has actually been proven. Structural, because the prose
+   * convention it replaces ("Experimental — wired but not regularly tested",
+   * buried in `notes`) was neither greppable nor testable — nothing could act
+   * on it, and the UI could not surface it.
+   *
+   *   'native'       — first-class, regularly exercised by the online suite.
+   *   'verified'     — a real-API tool-calling walk passes for this preset
+   *                    (`tests/online/provider-preset-reachability.test.ts`).
+   *   'experimental' — wired, but tool-calling through it is NOT proven.
+   *
+   * Why it matters: lynox is an agent, so an endpoint that streams fluent prose
+   * but fumbles tool calls is useless to it — and tool-calling support varies
+   * sharply by model and endpoint. A preset is a promise ("point lynox here and
+   * it works"), so we mark the ones we have actually kept. A passing mock does
+   * not prove a model; only a real call does.
+   */
+  verification: 'native' | 'verified' | 'experimental';
+  /**
+   * Vault slot this entry's API key lives in. `null` = the entry needs no
+   * credential at all (loopback runtimes; Vertex, which uses GCP OAuth).
+   *
+   * This exists because the slot CANNOT be derived from `provider` alone. Every
+   * preset here serialises to `provider: 'openai'` on the wire — Mistral, Groq,
+   * Together, Fireworks and a local Ollama are all "openai" — so a provider-keyed
+   * lookup hands whichever key sits in the openai slot to whatever endpoint is
+   * configured. That is a cross-provider credential leak: pick the Groq tile with
+   * a Mistral key stored and the Mistral key is sent, as a bearer token, to Groq.
+   * (`resolveProviderApiKey` already reasons about exactly this hazard for the
+   * Anthropic legacy fallback; it just had no way to see the endpoint.)
+   *
+   * So the slot is a property of the ENDPOINT, not of the wire format, and it
+   * belongs on the catalog entry that pins that endpoint.
+   *
+   * Back-compat: `mistral` and the generic `openai-compat` tile keep the historic
+   * `MISTRAL_API_KEY` slot — existing installs already store their key there, and
+   * moving it would silently log them out.
+   */
+  vault_slot?: string | null;
+  /**
+   * The endpoint MAY take a key but does not require one.
+   *
+   * Local runtimes are the case: Ollama serves unauthenticated, but the same
+   * loopback ports are routinely held by an authenticated gateway (vLLM or
+   * LiteLLM started with `--api-key`, an SSH tunnel). Giving them a slot of their
+   * OWN keeps the cross-vendor leak shut — a Mistral key can never reach them,
+   * because it lives in a different slot — while still letting a user who needs a
+   * key store one. Readiness checks must not demand it, or an unauthenticated
+   * local install sits behind a setup banner it can never satisfy.
+   *
+   * (An earlier cut of this used `vault_slot: null` for loopback. That closed the
+   * leak but silently broke every authenticated local gateway: no key sent, 401,
+   * and the UI hid the field needed to fix it.)
+   */
+  credential_optional?: boolean;
+  /**
+   * Example model id for the free-text field a `models: []` entry renders. The
+   * generic placeholder is a Claude id, which is actively misleading on an Ollama
+   * or Groq tile — the user would copy a model that endpoint has never heard of.
+   */
+  model_placeholder?: string;
   notes?: string;
 }
 
@@ -212,14 +273,164 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   },
 ];
 
+/**
+ * Gateway / local-runtime presets — the base URL a user would otherwise have to
+ * look up and type by hand, pinned to a one-click tile.
+ *
+ * ## Why this set, and not the obvious longer one
+ *
+ * A preset is not merely a UX nicety: shipping one implies lynox may send a
+ * user's data to that host. `endpoint-allowlist.ts` is the gate, and it is a
+ * **DPA / sub-processor** control rather than a technical one — a non-vetted
+ * host makes lynox "a controller-side party to the third-party data-processing
+ * relationship" and has to be disclosed (Prighter requires explicit listing).
+ *
+ * So this set is exactly the intersection of "useful" and "already vetted":
+ *
+ *   - **Loopback runtimes** (Ollama, LM Studio, vLLM, LocalAI) — `localhost` is
+ *     allowlisted precisely because there is NO third-party exposure: the data
+ *     never leaves the user's machine. Nothing to disclose, and the closest fit
+ *     there is to what self-hosting is for.
+ *   - **Groq / Together / Fireworks** — already in `ALLOWLISTED_HOSTS`.
+ *
+ * Deliberately absent — OpenRouter, DeepSeek, Cloudflare AI Gateway, Portkey,
+ * Baseten and friends: each would be a NEW vetted sub-processor, which is a
+ * disclosure decision, not a code change. They stay fully reachable through the
+ * generic `openai-compat` tile, which routes them through the disclosure gate
+ * exactly as designed. Adding one here would silently skip that gate — hence the
+ * test that asserts every pinned `base_url_default` is already allowlisted.
+ *
+ * ## Tool-calling is the real bar
+ *
+ * lynox is an agent, so an endpoint that streams prose but fumbles tool calls is
+ * worthless to it — and the generic tile already warns that tool-calling
+ * reliability varies sharply by model and endpoint. Every preset here is
+ * therefore born `experimental` and is promoted to `verified` only by a REAL
+ * tool-calling round-trip (`tests/online/provider-preset-reachability.test.ts`),
+ * never by a passing mock.
+ *
+ * `models: []` keeps the model free-text on purpose: the user (or their runtime)
+ * chooses it, and we do not pretend to a tier map we have not measured.
+ */
+const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
+  {
+    provider: 'openai',
+    preset_id: 'ollama',
+    model_placeholder: 'qwen2.5',
+    vault_slot: 'OLLAMA_API_KEY',
+    credential_optional: true,
+    display_name: 'Ollama (local)',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'http://localhost:11434/v1',
+    default_residency: 'Your machine — nothing leaves the host',
+    // Promoted 2026-07-13: `tests/online/provider-preset-reachability.test.ts`
+    // drove a full tool_use → tool_result → answer round-trip through Ollama on
+    // qwen2.5:7b, and a mutation run confirmed the assertion can actually fail.
+    // The WIRE is proven; the model is still the user's choice, hence the note.
+    verification: 'verified',
+    notes: 'Local models via Ollama — nothing leaves your machine. Pick a tool-capable model (qwen2.5, llama3.1, mistral-nemo): lynox is an agent, and a model without tool support cannot drive it.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'lmstudio',
+    model_placeholder: 'qwen2.5-7b-instruct',
+    vault_slot: 'LMSTUDIO_API_KEY',
+    credential_optional: true,
+    display_name: 'LM Studio (local)',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'http://localhost:1234/v1',
+    default_residency: 'Your machine — nothing leaves the host',
+    verification: 'experimental',
+    notes: 'Local models via LM Studio\'s OpenAI-compatible server. Requires a tool-capable model.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'vllm',
+    model_placeholder: 'Qwen/Qwen2.5-7B-Instruct',
+    vault_slot: 'VLLM_API_KEY',
+    credential_optional: true,
+    display_name: 'vLLM (self-hosted)',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'http://localhost:8000/v1',
+    default_residency: 'Your own vLLM server',
+    verification: 'experimental',
+    notes: 'Self-hosted vLLM inference server. Change the port if yours differs.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'localai',
+    model_placeholder: 'qwen2.5-7b-instruct',
+    vault_slot: 'LOCALAI_API_KEY',
+    credential_optional: true,
+    display_name: 'LocalAI (self-hosted)',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'http://localhost:8080/v1',
+    default_residency: 'Your own LocalAI server',
+    verification: 'experimental',
+    notes: 'Self-hosted LocalAI. Change the port if yours differs.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'groq',
+    model_placeholder: 'llama-3.3-70b-versatile',
+    vault_slot: 'GROQ_API_KEY',
+    display_name: 'Groq',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'https://api.groq.com/openai/v1',
+    default_residency: 'US (Groq Inc.) — on lynox\'s vetted sub-processor list',
+    verification: 'experimental',
+    notes: 'Fast inference. Model is free-text — pick a tool-capable one.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'together',
+    model_placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    vault_slot: 'TOGETHER_API_KEY',
+    display_name: 'Together AI',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'https://api.together.xyz/v1',
+    default_residency: 'US (Together Computer) — on lynox\'s vetted sub-processor list',
+    verification: 'experimental',
+    notes: 'Model is free-text — pick a tool-capable one.',
+  },
+  {
+    provider: 'openai',
+    preset_id: 'fireworks',
+    model_placeholder: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    vault_slot: 'FIREWORKS_API_KEY',
+    display_name: 'Fireworks AI',
+    models: [],
+    requires_base_url: false,
+    requires_region: false,
+    base_url_default: 'https://api.fireworks.ai/inference/v1',
+    default_residency: 'US (Fireworks AI) — on lynox\'s vetted sub-processor list',
+    verification: 'experimental',
+    notes: 'Model is free-text — pick a tool-capable one.',
+  },
+];
+
 export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'anthropic',
     display_name: 'Anthropic',
+    vault_slot: 'ANTHROPIC_API_KEY',
     models: ANTHROPIC_MODELS,
     requires_base_url: false,
     requires_region: false,
     default_residency: 'US (Anthropic; DPA + GDPR)',
+    verification: 'native',
   },
   // Mistral is rendered as a first-class native option (its own button above
   // the generic OpenAI-compatible entry) so EU-sovereign customers don't
@@ -230,41 +441,50 @@ export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'openai',
     preset_id: 'mistral',
+    vault_slot: 'MISTRAL_API_KEY',
     display_name: 'Mistral',
     models: MISTRAL_MODELS,
     requires_base_url: false,
     requires_region: false,
     base_url_default: 'https://api.mistral.ai/v1',
     default_residency: 'EU-Paris (Mistral SAS; DPA + GDPR)',
+    verification: 'native',
     notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
   },
+  ...OPENAI_COMPAT_PRESETS,
   {
     provider: 'custom',
-    display_name: 'Anthropic-compatible endpoint (experimental)',
+    display_name: 'Anthropic-compatible endpoint',
+    vault_slot: 'CUSTOM_API_KEY',
     models: [],
     requires_base_url: true,
     requires_region: false,
     default_residency: 'e.g. LiteLLM in Anthropic mode, or an Anthropic-API-compatible gateway',
-    notes: 'Experimental — wired but not regularly tested. Anthropic wire (POST /v1/messages) against a custom base URL. Model ID is free-text — the endpoint routes.',
+    verification: 'experimental',
+    notes: 'Anthropic wire (POST /v1/messages) against a custom base URL. Model ID is free-text — the endpoint routes.',
   },
   {
     provider: 'openai',
     preset_id: 'openai-compat',
-    display_name: 'OpenAI-compatible endpoint (experimental)',
+    vault_slot: 'MISTRAL_API_KEY',   // historic slot — moving it would log existing installs out
+    display_name: 'OpenAI-compatible endpoint',
     models: [],
     requires_base_url: true,
     requires_region: false,
     default_residency: 'depends on the operator-configured endpoint',
-    notes: 'Experimental — wired but not regularly tested. Generic OpenAI wire (POST /chat/completions) for Groq, OpenRouter, LMStudio, LiteLLM in OpenAI mode, or any custom OpenAI-API-compatible server. Tool-calling reliability varies sharply by model and endpoint.',
+    verification: 'experimental',
+    notes: 'Generic OpenAI wire (POST /chat/completions) for any OpenAI-API-compatible server without a preset above — a gateway, an aggregator, or your own proxy. Endpoints outside lynox\'s vetted sub-processor list route through the disclosure gate (see endpoint-allowlist.ts). Tool-calling reliability varies sharply by model and endpoint.',
   },
   {
     provider: 'vertex',
-    display_name: 'Google Vertex AI (Claude) — experimental',
+    display_name: 'Google Vertex AI (Claude)',
+    vault_slot: null,   // GCP OAuth, not an API key
     models: VERTEX_MODELS,
     requires_base_url: false,
     requires_region: true,
     default_residency: 'GCP region (configurable)',
-    notes: 'Experimental — wired but not regularly tested. Same Claude family routed through Vertex. Requires GCP project + region.',
+    verification: 'experimental',
+    notes: 'Same Claude family routed through Vertex. Requires GCP project + region.',
   },
 ];
 
@@ -275,6 +495,106 @@ export const LLM_CATALOG: LLMCatalog = [
  */
 export function catalogEntryKey(entry: CatalogProviderEntry): string {
   return entry.preset_id ?? entry.provider;
+}
+
+/**
+ * Loopback hosts. Several local-runtime presets share these hostnames and are
+ * distinguished only by port, so `resolveCatalogKey` switches to an exact
+ * host:port comparison for them.
+ *
+ * `[::1]` is the bracketed form `URL.hostname` actually returns for IPv6; the
+ * bare `::1` never appears there, so it is not listed.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '0.0.0.0'
+    || hostname === '[::1]';
+}
+
+/** Port of a `host[:port]` pair; '' when the URL carried none. */
+function portOf(hostPort: string): string {
+  const i = hostPort.lastIndexOf(':');
+  return i === -1 ? '' : hostPort.slice(i + 1);
+}
+
+/**
+ * The vault slot the key for a given (provider, endpoint) pair lives in.
+ *
+ * This is the fix for a cross-provider credential leak: the slot cannot be
+ * derived from `provider` alone, because Mistral, Groq, Together, Fireworks and
+ * a local Ollama all serialise to `provider: 'openai'`. Resolving by provider
+ * hands whatever key sits in the openai slot to whatever endpoint is configured
+ * — so a user with a Mistral key who selects Groq would send that Mistral key,
+ * as a bearer token, to Groq. Resolve by ENDPOINT instead.
+ *
+ * Returns `null` when the endpoint needs no credential at all (loopback
+ * runtimes, Vertex) — callers must then send no key rather than fall back to a
+ * provider default, which would reintroduce the leak.
+ *
+ * Returns `undefined` when the pair matches no catalog entry, leaving the caller
+ * to apply its own default (see `resolveProviderApiKey`).
+ */
+export function vaultSlotForEndpoint(
+  provider: LLMProvider | undefined | null,
+  apiBaseURL: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string | null | undefined {
+  if (!provider) return undefined;
+  const key = resolveCatalogKey(provider, apiBaseURL, catalog);
+  const entry = catalog.find((e) => catalogEntryKey(e) === key);
+  return entry?.vault_slot;
+}
+
+/**
+ * The vault slot for an endpoint lynox actually PINS — one that matched a preset
+ * by host.
+ *
+ * Returns `undefined` for anything that fell through to the generic tile. That
+ * distinction is a security boundary, not a nicety: the generic tile's slot is the
+ * SHARED one, so treating a fall-through as a match would promote the shared key
+ * onto an arbitrary host — which is exactly how `api.mistral.ai.evil.com` would
+ * come to be handed the Mistral key, and how a user's own configured key would be
+ * overwritten by a vendor key that has nothing to do with their endpoint.
+ *
+ * Use this wherever a key is being ASSIGNED to an endpoint. Use
+ * `vaultSlotForEndpoint` (which does fall through) only where a key is being READ
+ * back for an endpoint the user already chose.
+ */
+export function pinnedVaultSlotForEndpoint(
+  provider: LLMProvider | undefined | null,
+  apiBaseURL: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string | null | undefined {
+  if (!provider || !apiBaseURL) return undefined;
+  const key = resolveCatalogKey(provider, apiBaseURL, catalog);
+  const entry = catalog.find((e) => catalogEntryKey(e) === key);
+  if (!entry?.base_url_default) return undefined;   // generic / free-text tile
+  return entry.vault_slot;
+}
+
+/**
+ * Does this endpoint require an API key at all?
+ *
+ * A loopback runtime does not — Ollama and friends serve unauthenticated on the
+ * user's own machine. Readiness checks must not demand a key there, or a working
+ * local install would sit behind a setup banner it can never satisfy.
+ *
+ * Conservative by default: an endpoint we do not recognise is assumed to need
+ * one, so an unknown host never silently skips its credential check.
+ */
+export function endpointNeedsCredential(
+  provider: LLMProvider | undefined | null,
+  apiBaseURL: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): boolean {
+  if (!provider) return true;
+  const key = resolveCatalogKey(provider, apiBaseURL, catalog);
+  const entry = catalog.find((e) => catalogEntryKey(e) === key);
+  if (!entry) return true;                       // unknown host — assume it needs one
+  if (entry.vault_slot === null) return false;   // no credential concept (Vertex → GCP OAuth)
+  if (entry.credential_optional) return false;   // may take one, does not require it
+  return true;
 }
 
 /** Look up a single provider entry. Returns undefined when the provider isn't catalogued. */
@@ -318,20 +638,48 @@ export function resolveCatalogKey(
   if (candidates.length === 1) return catalogEntryKey(candidates[0]!);
 
   if (baseUrl) {
-    let host: string;
-    try { host = new URL(baseUrl).hostname.toLowerCase(); }
-    catch { host = ''; }
+    let host = '';       // hostname only        — 'localhost', 'api.mistral.ai'
+    let hostPort = '';   // hostname:port if any — 'localhost:11434'
+    try {
+      const u = new URL(baseUrl);
+      host = u.hostname.toLowerCase();
+      hostPort = u.host.toLowerCase();
+    } catch { /* leave empty — falls through to the generic tile */ }
+
     if (host) {
       const matched = candidates.find((c) => {
         if (!c.base_url_default) return false;
         let defHost: string;
-        try { defHost = new URL(c.base_url_default).hostname.toLowerCase(); }
-        catch { return false; }
-        // Apex + `api.*` + subdomain variants all match the preset:
+        let defHostPort: string;
+        try {
+          const d = new URL(c.base_url_default);
+          defHost = d.hostname.toLowerCase();
+          defHostPort = d.host.toLowerCase();
+        } catch { return false; }
+
+        // Loopback presets (Ollama :11434, LM Studio :1234, vLLM :8000,
+        // LocalAI :8080) ALL share the hostname `localhost` — only the port
+        // tells them apart. Matching on hostname alone would resolve every one
+        // of them to whichever sits first in the catalog, so a user who saved
+        // LM Studio would come back to the Ollama tile. Require the exact
+        // host:port here. A non-default port simply falls through to the
+        // generic tile, which is the safe direction to fail.
+        // The user may write any loopback spelling — `localhost`, `127.0.0.1`,
+        // `0.0.0.0`. Comparing the literal string would send
+        // `http://127.0.0.1:11434/v1` to the GENERIC tile instead of Ollama's, and
+        // the generic tile's slot is the shared one: the Mistral key, in plaintext,
+        // to a local port. So accept any loopback host on either side and let the
+        // PORT do the distinguishing. A non-loopback host can never satisfy this,
+        // so it cannot borrow a local runtime's credential-optional status.
+        if (isLoopbackHost(defHost)) {
+          return isLoopbackHost(host) && portOf(hostPort) === portOf(defHostPort);
+        }
+
+        // Remote presets: apex + `api.*` + subdomain variants all match —
         //   defHost='api.mistral.ai' matches 'api.mistral.ai',
-        //   'mistral.ai' (apex), 'eu.mistral.ai' (subdomain).
-        // Crucially does NOT match 'api.mistral.ai.attacker.com'
-        // because the suffix check requires a leading `.`.
+        //   'mistral.ai' (apex) and 'eu.mistral.ai' (subdomain).
+        // Crucially does NOT match 'api.mistral.ai.attacker.com', because the
+        // suffix check requires a leading `.`.
         if (host === defHost) return true;
         const apex = defHost.replace(/^api\./, '');
         return host === apex || host.endsWith(`.${apex}`);
