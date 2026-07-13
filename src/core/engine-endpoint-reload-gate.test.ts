@@ -83,6 +83,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   httpRequestTool: { name: 'http_request' },
   runWorkflowTool: { name: 'run_workflow' },
   updateWorkflowTool: { name: 'update_workflow_steps' },
+  exportWorkflowTool: { name: 'export_workflow' },
   diagnoseWorkflowTool: { name: 'diagnose_workflow_run' },
   taskCreateTool: { name: 'task_create' },
   taskUpdateTool: { name: 'task_update' },
