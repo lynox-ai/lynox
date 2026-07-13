@@ -22,6 +22,12 @@ describe('Config', () => {
     process.cwd = () => fakeProject;
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_BASE_URL'];
+    // Per-endpoint slots — without these, a key set by one case leaks into the
+    // next and the endpoint-scoping assertions pass for the wrong reason.
+    delete process.env['GROQ_API_KEY'];
+    delete process.env['OLLAMA_API_KEY'];
+    delete process.env['TOGETHER_API_KEY'];
+    delete process.env['FIREWORKS_API_KEY'];
     delete process.env['LYNOX_WORKSPACE'];
     delete process.env['LYNOX_EMBEDDING_PROVIDER'];
     delete process.env['LYNOX_USER'];
@@ -597,6 +603,53 @@ describe('Config', () => {
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  // `api_key` is the LEGACY field that pre-vault callers (spawn, pipeline,
+  // plan-task, process, the orchestrator) pair DIRECTLY with `api_base_url`. It is
+  // filled unconditionally from ANTHROPIC_API_KEY — the documented Docker env var —
+  // which is right for the Anthropic wire and wrong for every other one. The old
+  // code special-cased exactly ONE endpoint (Mistral) and left every other
+  // OpenAI-compatible one holding the Anthropic key: select Groq, and the Anthropic
+  // key goes to Groq as a bearer token; select a local runtime, and it goes to
+  // localhost in plaintext over http.
+  it('does NOT leave the Anthropic key on a Groq endpoint', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-should-never-reach-groq';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  it('does NOT leave the Anthropic key on a local Ollama endpoint', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'http://localhost:11434/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-should-never-reach-localhost';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  it('uses the endpoint’s OWN key when it has one', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    process.env['GROQ_API_KEY'] = 'sk-groq-own';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-groq-own');
+  });
+
+  it('keeps a config.json key on a pinned endpoint with no env key of its own', async () => {
+    // The user wrote this key themselves, for this endpoint. The inherited
+    // Anthropic env var must not displace it — and clearing it would be just as
+    // wrong, since it is the only key that actually belongs here.
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1', api_key: 'sk-mine' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-mine');
+  });
+
+  it('leaves the Anthropic wire untouched (byte-parity for the default install)', async () => {
+    writeUserConfig({ provider: 'anthropic' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-ant-xxx');
   });
 
   it('leaves an anthropic-provider config untouched even with MISTRAL_API_KEY present', async () => {

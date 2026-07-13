@@ -11,6 +11,7 @@ import {
   vaultSlotForProvider,
   resolveProviderApiKey,
   enrichTierSetCreds,
+  migrateLegacyEndpointKey,
 } from './provider-keys.js';
 import type { TierSet } from '../../types/config.js';
 
@@ -138,6 +139,80 @@ describe('resolveProviderApiKey — endpoint-bound slots (cross-provider leak)',
     vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
     expect(resolveProviderApiKey({ provider: 'openai', secretStore: null }))
       .toBe('mistral-secret');
+  });
+});
+
+describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
+  /** Minimal in-memory stand-in for the vault. */
+  function fakeStore(initial: Record<string, string> = {}) {
+    const data = { ...initial };
+    return {
+      data,
+      resolve: (n: string): string | null => data[n] ?? null,
+      set: (n: string, v: string): void => { data[n] = v; },
+    };
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('carries an existing key into a local runtime’s new slot', () => {
+    // The regression it exists for: this user pointed the GENERIC tile at their
+    // own vLLM and stored its key in the shared slot. Without the carry-forward
+    // the key is simply not found — and silently, because a loopback endpoint is
+    // not required to have one: readiness stays green while every request 401s.
+    const store = fakeStore({ MISTRAL_API_KEY: 'my-vllm-key' });
+    const moved = migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:8000/v1',
+      secretStore: store,
+    });
+    expect(moved).toBe('VLLM_API_KEY');
+    expect(store.data['VLLM_API_KEY']).toBe('my-vllm-key');
+  });
+
+  it('runs exactly ONCE — a later switch must not carry a key across', () => {
+    // This is the whole reason for the marker. A user who was on Mistral and then
+    // selects Ollama has a Mistral key in the shared slot; carrying THAT across
+    // would be the very leak this change closes. At resolve time the two cases are
+    // indistinguishable — same endpoint, same empty slot, same legacy key — so
+    // "was this the first boot after the upgrade?" has to be recorded, not inferred.
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+    migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'https://api.mistral.ai/v1',
+      secretStore: store,
+    });
+
+    const second = migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:11434/v1',   // user later picks Ollama
+      secretStore: store,
+    });
+    expect(second).toBeNull();
+    expect(store.data['OLLAMA_API_KEY']).toBeUndefined();
+  });
+
+  it('does not overwrite a key the endpoint already has', () => {
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret', GROQ_API_KEY: 'groq-own' });
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'https://api.groq.com/openai/v1',
+      secretStore: store,
+    })).toBeNull();
+    expect(store.data['GROQ_API_KEY']).toBe('groq-own');
+  });
+
+  it('does nothing for an endpoint that still uses the shared slot', () => {
+    const store = fakeStore({ MISTRAL_API_KEY: 'mistral-secret' });
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'https://some-proxy.example.com/v1',   // generic tile
+      secretStore: store,
+    })).toBeNull();
   });
 });
 

@@ -512,6 +512,12 @@ function isLoopbackHost(hostname: string): boolean {
     || hostname === '[::1]';
 }
 
+/** Port of a `host[:port]` pair; '' when the URL carried none. */
+function portOf(hostPort: string): string {
+  const i = hostPort.lastIndexOf(':');
+  return i === -1 ? '' : hostPort.slice(i + 1);
+}
+
 /**
  * The vault slot the key for a given (provider, endpoint) pair lives in.
  *
@@ -538,6 +544,33 @@ export function vaultSlotForEndpoint(
   const key = resolveCatalogKey(provider, apiBaseURL, catalog);
   const entry = catalog.find((e) => catalogEntryKey(e) === key);
   return entry?.vault_slot;
+}
+
+/**
+ * The vault slot for an endpoint lynox actually PINS — one that matched a preset
+ * by host.
+ *
+ * Returns `undefined` for anything that fell through to the generic tile. That
+ * distinction is a security boundary, not a nicety: the generic tile's slot is the
+ * SHARED one, so treating a fall-through as a match would promote the shared key
+ * onto an arbitrary host — which is exactly how `api.mistral.ai.evil.com` would
+ * come to be handed the Mistral key, and how a user's own configured key would be
+ * overwritten by a vendor key that has nothing to do with their endpoint.
+ *
+ * Use this wherever a key is being ASSIGNED to an endpoint. Use
+ * `vaultSlotForEndpoint` (which does fall through) only where a key is being READ
+ * back for an endpoint the user already chose.
+ */
+export function pinnedVaultSlotForEndpoint(
+  provider: LLMProvider | undefined | null,
+  apiBaseURL: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string | null | undefined {
+  if (!provider || !apiBaseURL) return undefined;
+  const key = resolveCatalogKey(provider, apiBaseURL, catalog);
+  const entry = catalog.find((e) => catalogEntryKey(e) === key);
+  if (!entry?.base_url_default) return undefined;   // generic / free-text tile
+  return entry.vault_slot;
 }
 
 /**
@@ -631,7 +664,16 @@ export function resolveCatalogKey(
         // LM Studio would come back to the Ollama tile. Require the exact
         // host:port here. A non-default port simply falls through to the
         // generic tile, which is the safe direction to fail.
-        if (isLoopbackHost(defHost)) return hostPort === defHostPort;
+        // The user may write any loopback spelling — `localhost`, `127.0.0.1`,
+        // `0.0.0.0`. Comparing the literal string would send
+        // `http://127.0.0.1:11434/v1` to the GENERIC tile instead of Ollama's, and
+        // the generic tile's slot is the shared one: the Mistral key, in plaintext,
+        // to a local port. So accept any loopback host on either side and let the
+        // PORT do the distinguishing. A non-loopback host can never satisfy this,
+        // so it cannot borrow a local runtime's credential-optional status.
+        if (isLoopbackHost(defHost)) {
+          return isLoopbackHost(host) && portOf(hostPort) === portOf(defHostPort);
+        }
 
         // Remote presets: apex + `api.*` + subdomain variants all match —
         //   defHost='api.mistral.ai' matches 'api.mistral.ai',

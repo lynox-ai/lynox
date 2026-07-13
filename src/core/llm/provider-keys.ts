@@ -153,6 +153,79 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
 }
 
 /**
+ * Marker recording that the one-shot legacy-key carry-forward has run. Lives in
+ * the vault rather than config.json so the migration needs no schema change and
+ * cannot be lost by a config rewrite.
+ */
+const SLOT_MIGRATION_MARKER = '_LLM_ENDPOINT_SLOT_MIGRATION';
+
+/** Slots that held an OpenAI-compatible key before endpoints had their own. */
+const LEGACY_OPENAI_SLOTS = ['MISTRAL_API_KEY', 'OPENAI_API_KEY'] as const;
+
+interface SecretStoreReadWrite extends SecretStoreReader {
+  set(name: string, value: string): void;
+}
+
+/**
+ * One-shot carry-forward of a key that predates per-endpoint slots.
+ *
+ * Before presets existed, EVERY OpenAI-compatible endpoint shared the
+ * `MISTRAL_API_KEY` slot. A user who pointed the generic tile at their own vLLM
+ * on `:8000`, or at Groq, therefore stored THAT vendor's key there. Now that such
+ * an endpoint has a slot of its own, the key would simply not be found — and for
+ * a loopback endpoint that failure is SILENT, because those do not require a key:
+ * readiness stays green and every request 401s with nothing to explain why.
+ *
+ * On the first boot after the upgrade, `api_base_url` still describes where the
+ * user already WAS — they cannot have clicked a preset tile that did not exist
+ * yet. Copying the legacy key into that endpoint's own slot is therefore
+ * byte-identical to what was already going over the wire, and adds no new
+ * recipient.
+ *
+ * The marker is what makes this safe, and it is not optional: a LATER switch from
+ * Mistral to Ollama must NOT carry the Mistral key across. That is precisely the
+ * leak this whole change exists to close, and at resolve time the two situations
+ * are indistinguishable — same endpoint, same empty slot, same legacy key. Only
+ * "was this the first boot after the upgrade?" separates them, so it has to be
+ * recorded rather than inferred.
+ *
+ * Returns the slot written, or null when nothing needed doing.
+ */
+export function migrateLegacyEndpointKey(input: {
+  provider: LLMProvider | undefined;
+  apiBaseURL: string | undefined;
+  secretStore: SecretStoreReadWrite | null | undefined;
+}): string | null {
+  const { provider, apiBaseURL, secretStore } = input;
+  if (!secretStore || !provider || !apiBaseURL) return null;
+
+  // Already run once — never again, or the leak walks back in through the door
+  // this migration opened.
+  if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;
+  secretStore.set(SLOT_MIGRATION_MARKER, new Date().toISOString());
+
+  const slot = vaultSlotForEndpoint(provider, apiBaseURL);
+  // Only endpoints that gained a slot of their own are affected. `null` (no
+  // credential concept), the legacy slot itself, or an unrecognised host all mean
+  // nothing moved.
+  if (!slot || (LEGACY_OPENAI_SLOTS as readonly string[]).includes(slot)) return null;
+  if (secretStore.resolve(slot)) return null;   // already has its own key
+
+  for (const legacy of LEGACY_OPENAI_SLOTS) {
+    // `??` would be wrong here: an env var set to the empty string is neither
+    // null nor undefined, so it would shadow a perfectly good vault entry and the
+    // carry-forward would silently do nothing.
+    const fromEnv = process.env[legacy];
+    const value = (fromEnv && fromEnv.length > 0) ? fromEnv : secretStore.resolve(legacy);
+    if (value && value.length > 0) {
+      secretStore.set(slot, value);
+      return slot;
+    }
+  }
+  return null;
+}
+
+/**
  * Resolve per-slot credentials for a hybrid Tier-Set, in-memory only — the pure
  * core of the engine's config-load enrichment. The UI persists a slot as
  * `{provider, model_id, api_base_url?}` with NO api_key (keys belong in the

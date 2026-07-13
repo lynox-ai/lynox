@@ -388,12 +388,20 @@ describe('resolveCatalogKey', () => {
     expect(resolveCatalogKey('openai', 'http://localhost:8080/v1')).toBe('localai');
   });
 
-  it('a loopback host on a non-default port falls through to the generic tile', () => {
+  it('every loopback spelling of the same port resolves to the same preset', () => {
+    // `localhost`, `127.0.0.1` and `0.0.0.0` are the same machine, and users write
+    // all three. Matching the literal string would send `127.0.0.1:11434` to the
+    // GENERIC tile — whose slot is the shared one — and thus put the Mistral key,
+    // in plaintext, on a local port.
+    expect(resolveCatalogKey('openai', 'http://127.0.0.1:11434/v1')).toBe('ollama');
+    expect(resolveCatalogKey('openai', 'http://0.0.0.0:1234/v1')).toBe('lmstudio');
+  });
+
+  it('a loopback host on an unknown port falls through to the generic tile', () => {
     // Failing to the generic tile (which shows the base-URL input the user needs)
-    // is the safe direction — far better than silently claiming they are on
-    // Ollama when they are running something else on :9999.
+    // is the safe direction — far better than silently claiming they are on Ollama
+    // when they are running something else on :9999.
     expect(resolveCatalogKey('openai', 'http://localhost:9999/v1')).toBe('openai-compat');
-    expect(resolveCatalogKey('openai', 'http://127.0.0.1:11434/v1')).toBe('openai-compat');
   });
 
   it('remote gateway presets resolve by host', () => {
