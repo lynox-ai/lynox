@@ -1243,6 +1243,29 @@ describe('WorkerLoop', () => {
     expect(recordTaskRun).toHaveBeenCalledWith('t-cost', 'No changes detected', 'success');
   });
 
+  it('SECURITY: the watch analysis run suppresses ALL tools (untrusted page content cannot reach a tool)', async () => {
+    // DEF-0099: the analysis prompt embeds up to 8 KB of the WATCHED PAGE —
+    // content the user did not author and an attacker may control. The session
+    // is autonomous + headless, where a non-critical dangerous tool AUTO-GRANTS.
+    // So an injected "run bash …" must have nothing to call: the run is toolless.
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const engine = {
+      getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager)),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+
+    mockFetchPinned.mockResolvedValueOnce(new Response('<html><body><main>Watched page content</main></body></html>', { status: 200 }));
+    await fire(makeTask({ id: 't-sec', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+
+    const runOpts = (analysisSession.run as unknown as { mock: { calls: Array<[string, { noTools?: boolean } | undefined]> } }).mock.calls[0]?.[1];
+    expect(runOpts?.noTools).toBe(true);
+  });
+
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.
   // An interactive pipeline that somehow got onto a schedule (legacy data,
   // sync from another instance) must be rejected at the boundary so it
