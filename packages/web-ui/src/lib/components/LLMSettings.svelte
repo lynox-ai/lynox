@@ -495,6 +495,12 @@
 		// empty, the dropdown looked unselected, and "Verbindung testen"
 		// failed because no model was wired.
 		const defaultForNewProvider = pickDefaultModelIdForEntry(entry);
+		// A pinned preset with an EMPTY model catalog (Ollama, Groq, …) has no
+		// default to stamp — the model id is free-text. Carrying the previous
+		// provider's id across is worse than leaving it blank: `mistral-large-2512`
+		// saves cleanly (200), readiness reports green, and every single chat then
+		// 404s against Ollama, which has never heard of that model.
+		const freeTextModel = entry.models.length === 0;
 		if (entry.base_url_default && !entry.requires_base_url) {
 			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
@@ -502,7 +508,9 @@
 			config = {
 				...config,
 				api_base_url: entry.base_url_default,
-				...(defaultForNewProvider ? { openai_model_id: defaultForNewProvider } : {}),
+				...(defaultForNewProvider
+					? { openai_model_id: defaultForNewProvider }
+					: freeTextModel ? { openai_model_id: '' } : {}),
 			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
@@ -530,7 +538,14 @@
 		// caught by HN-launch staging probe 2026-05-23. Custom-endpoint tiles
 		// still defer to the explicit Save button (api_base_url + model id
 		// are required cross-field, server returns 400 if absent).
-		if (!entry.requires_base_url && loaded) {
+		//
+		// A pinned preset with a free-text model is the SAME case, even though its
+		// URL is pinned: the server rejects provider:'openai' without an
+		// openai_model_id. Auto-saving it fires a 400 the instant the user clicks
+		// the tile — before they have had any chance to type the model. So hold the
+		// save until the id is there, exactly as the free-text tiles do.
+		const modelIdMissing = freeTextModel && !config.openai_model_id;
+		if (!entry.requires_base_url && !modelIdMissing && loaded) {
 			void saveConfig();
 		}
 	}

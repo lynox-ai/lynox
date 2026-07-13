@@ -57,9 +57,10 @@ describe('LLM_CATALOG', () => {
     });
 
     it('a remote host cannot masquerade as a loopback runtime', () => {
-      // `null` means "this endpoint takes no credential". A remote host that
-      // reached that state would slip past the readiness key check.
-      expect(vaultSlotForEndpoint('openai', 'https://localhost.attacker.com:11434/v1')).not.toBe(null);
+      // Loopback endpoints are credential-OPTIONAL: readiness does not demand a
+      // key. A remote host that reached that state would slip past the key check.
+      expect(endpointNeedsCredential('openai', 'https://localhost.attacker.com:11434/v1')).toBe(true);
+      expect(vaultSlotForEndpoint('openai', 'https://localhost.attacker.com:11434/v1')).not.toBe('OLLAMA_API_KEY');
     });
 
     it('a legitimate vendor subdomain still resolves to the vendor slot', () => {
@@ -71,8 +72,13 @@ describe('LLM_CATALOG', () => {
       expect(vaultSlotForEndpoint('openai', 'https://some-proxy.example.com/v1')).toBe('MISTRAL_API_KEY');
     });
 
-    it('loopback presets take no credential; endpointNeedsCredential agrees', () => {
-      expect(vaultSlotForEndpoint('openai', 'http://localhost:11434/v1')).toBe(null);
+    it('loopback presets get their OWN slot, and do not require a key', () => {
+      // Their own slot is what keeps the leak shut: a Mistral key lives elsewhere
+      // and can never reach them. But an authenticated local gateway (vLLM or
+      // LiteLLM with --api-key) still has somewhere to put its key — an earlier
+      // cut used `null` here and silently 401'd every such install.
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:11434/v1')).toBe('OLLAMA_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:8000/v1')).toBe('VLLM_API_KEY');
       expect(endpointNeedsCredential('openai', 'http://localhost:11434/v1')).toBe(false);
       // Conservative default: an endpoint we cannot place still needs a key.
       expect(endpointNeedsCredential('openai', 'https://unknown.example.com/v1')).toBe(true);

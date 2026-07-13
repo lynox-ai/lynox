@@ -936,3 +936,97 @@ describe('#66 hybrid tier_set steers pipeline step provider/model (runtime-adapt
     });
   });
 });
+
+/**
+ * A hybrid tier slot may point at a DIFFERENT endpoint than the base config, and
+ * since Mistral, Groq, Together, Fireworks and a local Ollama all serialise to
+ * `provider: 'openai'`, "same provider" no longer implies "same endpoint".
+ * Resolving the slot's key on the provider alone therefore hands the base key to
+ * a foreign endpoint — a Groq slot under a Mistral base gets the Mistral key,
+ * bearer-tokened over the wire.
+ *
+ * This is not hypothetical: it shipped once INSIDE the fix for the very same bug.
+ * The resolver closure here was declared `(provider)`, TypeScript accepted it
+ * where a `(provider, apiBaseURL)` callback was expected — lower arity is always
+ * assignable — and the endpoint argument was silently dropped, so every slot
+ * resolved against the BASE url. The compiler cannot catch that class of mistake.
+ * These tests can.
+ */
+describe('spawnInline — a foreign-endpoint tier slot never inherits the base key', () => {
+  const GROQ = 'https://api.groq.com/openai/v1';
+  const MISTRAL = 'https://api.mistral.ai/v1';
+  const OLLAMA = 'http://localhost:11434/v1';
+
+  const agentCfg = (): Record<string, unknown> =>
+    vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+
+  /** A Mistral tenant: its key lives in the shared openai slot, MISTRAL_API_KEY. */
+  const BASE_MISTRAL = {
+    provider: 'openai',
+    api_base_url: MISTRAL,
+    openai_model_id: 'mistral-large-2512',
+  } as unknown as LynoxUserConfig;
+
+  beforeEach(() => {
+    vi.mocked(Agent).mockClear();
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('GROQ_API_KEY', '');
+    vi.stubEnv('OLLAMA_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    vi.unstubAllEnvs();
+  });
+
+  it('does NOT lend the Mistral key to a Groq slot', async () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'llama-3.3-70b-versatile', api_base_url: GROQ } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    const cfg = agentCfg();
+    expect(cfg['apiBaseURL']).toBe(GROQ);       // the slot does reach Groq…
+    expect(cfg['apiKey']).not.toBe('mistral-secret');  // …without the Mistral key.
+  });
+
+  it('uses the Groq slot’s OWN key once it is configured', async () => {
+    vi.stubEnv('GROQ_API_KEY', 'groq-secret');
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'llama-3.3-70b-versatile', api_base_url: GROQ } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    expect(agentCfg()['apiKey']).toBe('groq-secret');
+  });
+
+  it('does NOT put the Mistral key on the wire to a local Ollama slot', async () => {
+    // Plaintext, over http, to whatever process happens to hold that port.
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'qwen2.5', api_base_url: OLLAMA } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    const cfg = agentCfg();
+    expect(cfg['apiBaseURL']).toBe(OLLAMA);
+    expect(cfg['apiKey']).not.toBe('mistral-secret');
+  });
+
+  it('a slot on the BASE endpoint still resolves normally (no regression)', async () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'ministral-8b-2512', api_base_url: MISTRAL } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    expect(agentCfg()['apiKey']).toBe('mistral-secret');
+  });
+});

@@ -36,7 +36,8 @@ describe('VAULT_SLOT_BY_PROVIDER', () => {
     expect(PROVIDER_KEY_SLOTS.has('GROQ_API_KEY')).toBe(true);
     expect(PROVIDER_KEY_SLOTS.has('TOGETHER_API_KEY')).toBe(true);
     expect(PROVIDER_KEY_SLOTS.has('FIREWORKS_API_KEY')).toBe(true);
-    expect(PROVIDER_KEY_SLOTS.size).toBe(7);
+    expect(PROVIDER_KEY_SLOTS.has('OLLAMA_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.size).toBe(11);
   });
 });
 
@@ -59,6 +60,7 @@ describe('resolveProviderApiKey — endpoint-bound slots (cross-provider leak)',
     vi.stubEnv('CUSTOM_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', '');
     vi.stubEnv('GROQ_API_KEY', '');
+    vi.stubEnv('OLLAMA_API_KEY', '');
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -98,17 +100,21 @@ describe('resolveProviderApiKey — endpoint-bound slots (cross-provider leak)',
     expect(key).toBe('groq-secret');
   });
 
-  it('lends NO key at all to a loopback runtime', () => {
-    // Ollama serves unauthenticated on the user's own machine. Sending it a
-    // stored vendor key would put a live credential on the wire — in plaintext,
-    // over http, to whatever process happens to hold that port.
+  it('never lends another vendor’s key to a loopback runtime', () => {
+    // Sending a stored vendor key to localhost would put a live credential on the
+    // wire in plaintext, over http, to whatever process holds that port.
     vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
-    const key = resolveProviderApiKey({
-      provider: 'openai',
-      apiBaseURL: OLLAMA,
-      secretStore: null,
-    });
-    expect(key).toBeUndefined();
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: OLLAMA, secretStore: null }))
+      .toBeUndefined();
+  });
+
+  it('does use the loopback runtime’s OWN key when one is configured', () => {
+    // An authenticated local gateway (vLLM / LiteLLM with --api-key) must still
+    // work. Its key lives in its own slot, so this cannot become a leak path.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('OLLAMA_API_KEY', 'local-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: OLLAMA, secretStore: null }))
+      .toBe('local-secret');
   });
 
   it('still resolves the Mistral preset from the historic slot (back-compat)', () => {
@@ -372,6 +378,41 @@ describe('resolveProviderApiKey — legacy config.api_key is base-provider gated
       userConfig: { provider: 'openai', api_key: 'some-key' },
     });
     expect(result).toBeUndefined();
+  });
+});
+
+// A hybrid tier slot is the sharpest form of the leak: every slot may name its
+// OWN endpoint, and they are all `provider: 'openai'`. If the injection resolves
+// the key on the provider, a Groq slot under a Mistral base receives the Mistral
+// key. This went unnoticed once already — the orchestrator's resolveKey closure
+// was declared `(provider)` and silently swallowed the endpoint argument (TS
+// permits lower arity), so it kept resolving against the BASE url. Pin that the
+// endpoint actually reaches the resolver.
+describe('enrichTierSetCreds — the endpoint reaches the key resolver', () => {
+  it('passes each slot’s OWN endpoint, not the base one', () => {
+    const seen: Array<{ provider: string; apiBaseURL?: string }> = [];
+    const tierSet: TierSet = {
+      fast: { provider: 'openai', model_id: 'llama-3.3-70b', api_base_url: 'https://api.groq.com/openai/v1' },
+    };
+    enrichTierSetCreds(tierSet, 'anthropic', (provider, apiBaseURL) => {
+      seen.push({ provider, ...(apiBaseURL !== undefined ? { apiBaseURL } : {}) });
+      return undefined;
+    });
+    expect(seen).toEqual([{ provider: 'openai', apiBaseURL: 'https://api.groq.com/openai/v1' }]);
+  });
+
+  it('a Groq slot under a Mistral base is NOT handed the Mistral key', () => {
+    // End-to-end through the real resolver — the assertion that would have caught
+    // the orchestrator regression.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('GROQ_API_KEY', '');
+    const tierSet: TierSet = {
+      fast: { provider: 'openai', model_id: 'llama-3.3-70b', api_base_url: 'https://api.groq.com/openai/v1' },
+    };
+    const out = enrichTierSetCreds(tierSet, 'anthropic', (provider, apiBaseURL) =>
+      resolveProviderApiKey({ provider, apiBaseURL, secretStore: null }));
+    expect(out.fast?.api_key).toBeUndefined();
+    vi.unstubAllEnvs();
   });
 });
 

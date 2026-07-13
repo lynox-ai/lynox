@@ -119,6 +119,22 @@ export interface CatalogProviderEntry {
    */
   vault_slot?: string | null;
   /**
+   * The endpoint MAY take a key but does not require one.
+   *
+   * Local runtimes are the case: Ollama serves unauthenticated, but the same
+   * loopback ports are routinely held by an authenticated gateway (vLLM or
+   * LiteLLM started with `--api-key`, an SSH tunnel). Giving them a slot of their
+   * OWN keeps the cross-vendor leak shut — a Mistral key can never reach them,
+   * because it lives in a different slot — while still letting a user who needs a
+   * key store one. Readiness checks must not demand it, or an unauthenticated
+   * local install sits behind a setup banner it can never satisfy.
+   *
+   * (An earlier cut of this used `vault_slot: null` for loopback. That closed the
+   * leak but silently broke every authenticated local gateway: no key sent, 401,
+   * and the UI hid the field needed to fix it.)
+   */
+  credential_optional?: boolean;
+  /**
    * Example model id for the free-text field a `models: []` entry renders. The
    * generic placeholder is a Claude id, which is actively misleading on an Ollama
    * or Groq tile — the user would copy a model that endpoint has never heard of.
@@ -301,7 +317,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     provider: 'openai',
     preset_id: 'ollama',
     model_placeholder: 'qwen2.5',
-    vault_slot: null,   // local runtime — never lend it a vault key
+    vault_slot: 'OLLAMA_API_KEY',
+    credential_optional: true,
     display_name: 'Ollama (local)',
     models: [],
     requires_base_url: false,
@@ -319,7 +336,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     provider: 'openai',
     preset_id: 'lmstudio',
     model_placeholder: 'qwen2.5-7b-instruct',
-    vault_slot: null,   // local runtime — never lend it a vault key
+    vault_slot: 'LMSTUDIO_API_KEY',
+    credential_optional: true,
     display_name: 'LM Studio (local)',
     models: [],
     requires_base_url: false,
@@ -333,7 +351,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     provider: 'openai',
     preset_id: 'vllm',
     model_placeholder: 'Qwen/Qwen2.5-7B-Instruct',
-    vault_slot: null,   // local runtime — never lend it a vault key
+    vault_slot: 'VLLM_API_KEY',
+    credential_optional: true,
     display_name: 'vLLM (self-hosted)',
     models: [],
     requires_base_url: false,
@@ -347,7 +366,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     provider: 'openai',
     preset_id: 'localai',
     model_placeholder: 'qwen2.5-7b-instruct',
-    vault_slot: null,   // local runtime — never lend it a vault key
+    vault_slot: 'LOCALAI_API_KEY',
+    credential_optional: true,
     display_name: 'LocalAI (self-hosted)',
     models: [],
     requires_base_url: false,
@@ -535,7 +555,13 @@ export function endpointNeedsCredential(
   apiBaseURL: string | undefined,
   catalog: LLMCatalog = LLM_CATALOG,
 ): boolean {
-  return vaultSlotForEndpoint(provider, apiBaseURL, catalog) !== null;
+  if (!provider) return true;
+  const key = resolveCatalogKey(provider, apiBaseURL, catalog);
+  const entry = catalog.find((e) => catalogEntryKey(e) === key);
+  if (!entry) return true;                       // unknown host — assume it needs one
+  if (entry.vault_slot === null) return false;   // no credential concept (Vertex → GCP OAuth)
+  if (entry.credential_optional) return false;   // may take one, does not require it
+  return true;
 }
 
 /** Look up a single provider entry. Returns undefined when the provider isn't catalogued. */

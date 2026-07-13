@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **One-click presets for local runtimes and gateways.** Ollama, LM Studio, vLLM, LocalAI, Groq, Together AI and Fireworks each get their own tile in LLM settings, with the base URL filled in for you. Ollama's is verified end-to-end: a real agent run drives a full tool call and reads the result back. The others connect, but their tool-calling is not yet proven, and the tile says so — lynox is an agent, and a model that cannot call tools cannot run it.
+
+### Fixed
+- **An API key can no longer be sent to the wrong vendor.** Every OpenAI-compatible endpoint — Mistral, Groq, a local Ollama — looks the same to the engine (`provider: "openai"`), and the key was picked from the provider alone. Selecting one vendor while another's key was stored therefore sent that key, as a bearer token, to the endpoint you selected; a local runtime received it in plaintext over http. Keys are now bound to the endpoint they are sent to.
+
+### Changed
+- **If you reached Groq, Together AI or Fireworks through the generic "OpenAI-compatible endpoint" tile, re-enter your API key once.** Those endpoints now have their own tiles and their own key slots, so lynox no longer looks for their key in the slot it shared with Mistral. The engine reports the endpoint as unconfigured until you do, and the settings page shows the field to fix it — nothing is sent with the wrong key in the meantime. Anthropic, Mistral, and any other custom endpoint are unaffected.
+
 ## 2.6.1 — 2026-07-12
 
 A small hardening release. Saving an API integration that sends data to a host outside lynox's vetted list now asks you to confirm out-of-band before it is saved, so a custom endpoint is only ever trusted after a real person approves it — never automatically, and the save fails closed in autonomous/background mode. Separately, the opt-in diagnostic log sinks now have a bounded retention, so enabling them can no longer let a log file grow without limit. Engine-only release; no migration — rollback to 2.6.0 is a clean image swap.

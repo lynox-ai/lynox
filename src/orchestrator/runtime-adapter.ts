@@ -279,11 +279,33 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
  * short-circuits. In the same-provider case `config.api_key` IS the base key, so
  * the fallback lends it only to the base provider — never to a different one.
  */
-function resolveStepSlotCreds(config: LynoxUserConfig, tier: ModelTier): ReturnType<typeof resolveCrossProviderSlotCreds> {
+/**
+ * Exported ONLY so a test can pin that the slot's endpoint reaches the key
+ * resolver. It cannot be guaranteed by types: TypeScript happily assigns a
+ * one-parameter closure where a two-parameter one is expected, so a `(provider)`
+ * signature silently drops `apiBaseURL` and resolves against the base endpoint —
+ * which is exactly how a Groq slot came to be handed a Mistral key. The compiler
+ * will never catch that. A test has to.
+ */
+export function resolveStepSlotCreds(config: LynoxUserConfig, tier: ModelTier): ReturnType<typeof resolveCrossProviderSlotCreds> {
   const baseProvider = config.provider ?? getActiveProvider();
-  const resolveKey = (provider: LLMProvider): string | undefined => {
-    const resolved = resolveProviderApiKey({ provider, apiBaseURL: config.api_base_url, secretStore: undefined, userConfig: config });
-    return resolved ?? (provider === baseProvider ? config.api_key : undefined);
+  // `apiBaseURL` is the SLOT's endpoint, which is not necessarily the base one —
+  // a hybrid slot may point at a different vendor entirely. Declaring the closure
+  // with only `(provider)` silently drops it (TS allows lower arity), which would
+  // resolve the key against the BASE endpoint and hand, say, a Mistral key to a
+  // Groq slot. Take it explicitly.
+  const resolveKey = (provider: LLMProvider, apiBaseURL?: string): string | undefined => {
+    const endpoint = apiBaseURL ?? config.api_base_url;
+    const resolved = resolveProviderApiKey({ provider, apiBaseURL: endpoint, secretStore: undefined, userConfig: config });
+    if (resolved) return resolved;
+
+    // Legacy `config.api_key` fallback. It used to be safe to lend it whenever
+    // the slot named the BASE provider — "same provider" then implied "same
+    // endpoint". Presets break that: a Groq slot and a Mistral base are both
+    // `provider: 'openai'`. So require the endpoint to match too, or the legacy
+    // key walks straight into the leak this whole change closes.
+    const sameEndpoint = endpoint === config.api_base_url;
+    return (provider === baseProvider && sameEndpoint) ? config.api_key : undefined;
   };
   return resolveCrossProviderSlotCreds(tier, baseProvider, resolveKey);
 }
