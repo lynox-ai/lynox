@@ -267,7 +267,7 @@ describe('projectMessages — B-full failure notes', () => {
 
 describe('sanitizeNoteDetail', () => {
   it('strips control characters and caps length', () => {
-    expect(sanitizeNoteDetail('a bcd')).toBe('a b c d');
+    expect(sanitizeNoteDetail('a\x00b\x1fc\x7fd')).toBe('a b c d');
     expect(sanitizeNoteDetail('x'.repeat(500))).toHaveLength(300);
   });
 
