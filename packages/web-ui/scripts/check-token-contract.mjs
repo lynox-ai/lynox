@@ -134,8 +134,9 @@ const problems = [];
 
 // ── 1 + 2 + 4: the token blocks ─────────────────────────────────────────────────
 
-/** Effective dark value per token: last write wins, exactly like the cascade. */
+/** Effective value per token, per theme: last write wins, exactly like the cascade. */
 const effectiveDark = new Map();
+const effectiveLight = new Map();
 
 for (const b of parsed) {
   const dark = isDarkBlock(b.prelude);
@@ -156,6 +157,24 @@ for (const b of parsed) {
     }
 
     if (dark) effectiveDark.set(d.name, d.value.toLowerCase());
+    if (light) effectiveLight.set(d.name, d.value.toLowerCase());
+  }
+}
+
+// The light ramp is NOT shared — but it IS recorded, so that anything drawing this
+// surface (a design system, a preview) can show it truthfully instead of borrowing
+// the other surface's light and lying about it. A record that drifts is a wrong
+// answer with a house style, so it is guarded like everything else.
+for (const [token, expected] of Object.entries(contract.productLight ?? {})) {
+  const got = effectiveLight.get(token);
+  if (got === undefined) {
+    problems.push(`--${token} is gone from app.css's light block, but \`productLight\` still records it`);
+  } else if (got !== expected.toLowerCase()) {
+    problems.push(
+      `--${token} (light)\n` +
+      `       app.css:      ${got}\n` +
+      `       productLight: ${expected}`
+    );
   }
 }
 
@@ -182,6 +201,45 @@ for (const token of effectiveDark.keys()) {
     `       "notGuarded" with a reason if it does not. Silence is the one option\n` +
     `       that is not available.`
   );
+}
+
+// ── 5: shape — theme-independent, so read it anywhere it is declared ────────────
+
+const allDecls = new Map();
+for (const b of parsed) for (const d of decls(b.body)) allDecls.set(d.name, d.value.trim());
+
+for (const [token, expected] of Object.entries(contract.shape ?? {})) {
+  const got = allDecls.get(token);
+  if (got === undefined) {
+    problems.push(`--${token} is gone from app.css, but the contract's \`shape\` still lists it`);
+  } else if (got.toLowerCase() !== expected.toLowerCase()) {
+    problems.push(
+      `--${token} (shape)\n` +
+      `       app.css:  ${got}\n` +
+      `       contract: ${expected}`
+    );
+  }
+}
+
+// ── 6: type — only the FIRST family is the brand; the fallback stack is free ────
+
+const firstFamily = (stack) => stack.split(',')[0].trim().replace(/^["']|["']$/g, '').trim();
+
+for (const [token, expected] of Object.entries(contract.typeFamilies ?? {})) {
+  const got = allDecls.get(token);
+  if (got === undefined) {
+    problems.push(`--${token} is gone from app.css, but the contract's \`typeFamilies\` still lists it`);
+    continue;
+  }
+  const family = firstFamily(got);
+  if (family.toLowerCase() !== expected.toLowerCase()) {
+    problems.push(
+      `--${token} leads with a different family\n` +
+      `       app.css:  ${family}   (from: ${got})\n` +
+      `       contract: ${expected}\n` +
+      `       The fallback chain after it is yours — the first family is the brand.`
+    );
+  }
 }
 
 // ── 3: @theme inline is a mapping layer, not a place to define colour ───────────
@@ -214,7 +272,15 @@ if (problems.length) {
   process.exit(1);
 }
 
+const shared =
+  Object.keys(guarded).length +
+  Object.keys(contract.shape ?? {}).length +
+  Object.keys(contract.typeFamilies ?? {}).length;
+
 console.log(
-  `✓ Token contract: ${Object.keys(guarded).length} shared primitives match the ` +
-  `effective dark values in app.css; ${Object.keys(excused).length} accounted for as not shared.`
+  `✓ Token contract: ${shared} shared decisions hold — ` +
+  `${Object.keys(guarded).length} colours (effective dark), ` +
+  `${Object.keys(contract.shape ?? {}).length} radii, ` +
+  `${Object.keys(contract.typeFamilies ?? {}).length} type families. ` +
+  `${Object.keys(excused).length} tokens accounted for as not shared.`
 );
