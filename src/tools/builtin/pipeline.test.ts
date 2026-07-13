@@ -724,14 +724,13 @@ describe('getPipeline — legacy mode backfill', () => {
       estimatedCost: 0,
       createdAt: new Date().toISOString(),
       executed: false,
-      // No `mode`, no `executionMode`, no `template` — full legacy row.
+      // No `mode`, no `template` — full legacy row.
     };
     const fakeRunHistory = {
       getPlannedPipeline: () => ({ id: pipelineId, manifest_json: JSON.stringify(legacyPlanned) }),
     };
     const planned = getPipeline(pipelineId, fakeRunHistory as never);
     expect(planned?.mode).toBe('autonomous');
-    expect(planned?.executionMode).toBe('orchestrated');
     expect(planned?.template).toBe(false);
   });
 

@@ -67,4 +67,21 @@ describe('pipeline-schema-migration (Move 1 — content-model versioning)', () =
     expect(out).not.toBeNull();
     expect((JSON.parse(out!) as Record<string, unknown>)['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
   });
+
+  it('v1→v2 drops the legacy executionMode tombstone (first real content transform)', () => {
+    const out = migratePipelineBlob(JSON.stringify({ id: 'wf1', name: 'W', executionMode: 'tracked', schema_version: 1 }));
+    expect(out).not.toBeNull();
+    const parsed = JSON.parse(out!) as Record<string, unknown>;
+    expect(parsed['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+    expect('executionMode' in parsed).toBe(false);
+    expect(parsed['name']).toBe('W'); // other content preserved
+  });
+
+  it('migrates a v0 legacy blob straight through to v2, dropping executionMode en route (identity then transform)', () => {
+    const out = migratePipelineBlob(JSON.stringify({ id: 'wf1', name: 'W', executionMode: 'orchestrated' }));
+    expect(out).not.toBeNull();
+    const parsed = JSON.parse(out!) as Record<string, unknown>;
+    expect(parsed['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+    expect('executionMode' in parsed).toBe(false);
+  });
 });

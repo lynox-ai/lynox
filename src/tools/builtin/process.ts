@@ -275,7 +275,6 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       estimatedCost: costEstimate.totalCostUsd,
       createdAt: new Date().toISOString(),
       executed: false,
-      executionMode: 'orchestrated',
       template: true, // Saved workflows are always reusable templates.
       // Captured sessions don't carry ask_user/ask_secret today; infer the
       // interaction mode by step inspection so the contract stays honest.

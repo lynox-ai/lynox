@@ -240,5 +240,14 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
       expect(store.migrateContentSchema(migratePipelineBlob).migrated).toBe(0);
       expect(store.get('bad')!.definitionJson).toBe('not json {');
     });
+
+    it('strips the legacy executionMode tombstone from a stored blob (v1b end-to-end)', () => {
+      const { store } = make();
+      store.upsert({ id: 'wf1', name: 'W', definitionJson: JSON.stringify({ id: 'wf1', executionMode: 'tracked' }), isTemplate: false });
+      expect(store.migrateContentSchema(migratePipelineBlob).migrated).toBe(1);
+      const def = JSON.parse(store.get('wf1')!.definitionJson) as Record<string, unknown>;
+      expect('executionMode' in def).toBe(false);
+      expect(def['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+    });
   });
 });

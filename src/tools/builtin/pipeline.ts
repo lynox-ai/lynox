@@ -52,7 +52,6 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
   // in-memory read as "current" would, once a real transform exists (Slice 1b+),
   // mask a blob that still carries an old shape. The runtime does not branch on
   // the version, so leaving it undefined on a read is honest and harmless.
-  planned.executionMode ??= 'orchestrated';
   planned.template ??= false;
   // Legacy rows (saved before the re-target schema landed) have no `parameters`;
   // default to an empty schema so binding/validation treats them as no-param.

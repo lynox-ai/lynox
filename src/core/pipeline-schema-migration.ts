@@ -17,12 +17,13 @@
  * Current content-model version of a stored workflow definition. Bump this in
  * lock-step with adding a {@link TRANSFORMS} entry that restructures the blob.
  *
- * v1 (Slice 1a): the CURRENT shape, versioned for the first time. Legacy blobs
- * (no `schema_version`) are treated as v0 and stamped v1 with NO content change
- * — an identity migration that validates the harness on real stored data before
- * any restructuring transform lands.
+ * - v1 (Slice 1a): the shape at first versioning. Legacy blobs (no
+ *   `schema_version`) are treated as v0 and reach v1 via an identity step —
+ *   validating the harness on real stored data.
+ * - v2 (Slice 1b): drop the dead `executionMode` tombstone — the first real
+ *   content transform.
  */
-export const CURRENT_PIPELINE_SCHEMA_VERSION = 1;
+export const CURRENT_PIPELINE_SCHEMA_VERSION = 2;
 
 /**
  * Per-version content transforms: `TRANSFORMS[N]` upgrades a blob from v(N-1) to
@@ -35,7 +36,11 @@ export const CURRENT_PIPELINE_SCHEMA_VERSION = 1;
  * MUST NOT depend on any state outside the blob it is handed.
  */
 const TRANSFORMS: Record<number, (blob: Record<string, unknown>) => void> = {
-  // Slice 1b adds [2]: drop the legacy `executionMode` tombstone.
+  // v1→v2: drop the legacy `executionMode` tombstone. Every workflow runs through
+  // the orchestrator (the 'tracked' path was removed, D9); nothing reads the
+  // field, so deleting it shrinks the content model with no behaviour change.
+  // New writes never carry it (the producers no longer set it).
+  2: (blob) => { delete blob['executionMode']; },
 };
 
 /**

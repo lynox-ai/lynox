@@ -154,9 +154,7 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
  * Convert approved phases to a stored pipeline, return workflow_id.
  *
  * Every workflow runs through the orchestrator (`runManifest`) — there is one
- * execution path (D9). `executionMode` is therefore written to the constant
- * `'orchestrated'`; the field is retained on the type only for backward
- * compatibility with legacy stored rows and is otherwise unread.
+ * execution path (D9).
  */
 function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: RunHistory | null | undefined, historicalAvg?: Record<string, number>): string {
   const pipelineSteps = phasesToPipelineSteps(phases);
@@ -174,7 +172,6 @@ function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: Run
     estimatedCost: costEstimate.totalCostUsd,
     createdAt: new Date().toISOString(),
     executed: false,
-    executionMode: 'orchestrated',
     template: false,
     mode: inferPipelineMode(pipelineSteps),
     // plan_task plans carry no capture parameters; the field exists so a saved

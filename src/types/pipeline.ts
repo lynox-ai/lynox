@@ -68,8 +68,6 @@ export interface PipelineResult {
   totalCostUsd: number;
 }
 
-export type PipelineExecutionMode = 'tracked' | 'orchestrated';
-
 /**
  * Pipeline interaction mode.
  * - 'interactive' allows human-in-the-loop tools (ask_user, ask_secret) and
@@ -88,14 +86,6 @@ export interface PlannedPipeline {
   estimatedCost: number;
   createdAt: string;
   executed: boolean;
-  /**
-   * Legacy execution-mode marker. Retained on the type (no migration) so old
-   * stored rows still deserialize; new pipelines always run through the
-   * orchestrator and are written `'orchestrated'`. No code branches on this
-   * field anymore — the `'tracked'` path was removed (D9). Legacy rows
-   * carrying `'tracked'` are inert.
-   */
-  executionMode: PipelineExecutionMode;
   /** Template pipelines can be re-executed (for scheduling) */
   template: boolean;
   /**
