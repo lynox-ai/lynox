@@ -679,6 +679,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// disappears on focus in some AT, so it can't be the only label).
 	'chat.input_label': { de: 'Nachricht an lynox', en: 'Message lynox' },
 	'chat.send': { de: 'Senden', en: 'Send' },
+	'chat.model_picker.label': { de: 'Modell:', en: 'Model:' },
 	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
 	'chat.activity.thinking': { de: 'Denkt nach...', en: 'Thinking...' },
