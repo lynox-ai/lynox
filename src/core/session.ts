@@ -300,8 +300,27 @@ export class Session {
   constructor(engine: Engine, opts?: SessionOptions) {
     this.engine = engine;
     this.sessionId = opts?.sessionId ?? randomUUID();
-    // Copy config from engine — session mutates its own copy, not the shared config
-    this._model = opts?.model ?? engine.config.model ?? 'balanced';
+    // Copy config from engine — session mutates its own copy, not the shared config.
+    // A per-session `opts.model` (POST /api/sessions from the composer picker, or a
+    // resumed thread's persisted tier passed through session-store) must be CLAMPED
+    // to the tenant's cost ceiling — otherwise the picker (or a resumed over-ceiling
+    // tier) escapes `max_tier`. Delegate to the single chokepoint, reading the FRESH
+    // ceiling from engine.getUserConfig() (NOT a once-bound toolContext — the stale-
+    // reference trap the StepHint/compaction clamps have) so this can never disagree
+    // with the run-path clamp. `engine.config.model` is already clamped at engine
+    // init, so only the request-supplied branch needs it.
+    if (opts?.model) {
+      const uc = engine.getUserConfig();
+      this._model = resolveRunModel({
+        requested: opts.model,
+        defaultTier: engine.config.model ?? 'balanced',
+        accountTier: uc.account_tier,
+        maxTier: uc.max_tier,
+        provider: uc.provider ?? 'anthropic',
+      }).tier;
+    } else {
+      this._model = engine.config.model ?? 'balanced';
+    }
     this._effort = opts?.effort ?? engine.config.effort ?? 'medium';
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
