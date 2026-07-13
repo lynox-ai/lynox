@@ -42,8 +42,66 @@
     "lyx-accent-disabled": "Derived, not declared: color-mix(var(--lyx-accent), var(--lyx-bg-muted)). It follows the two tokens above it automatically, so there is nothing to keep in sync.",
     "lyx-focus-ring": "The other surface has no focus-ring token. Nothing to converge onto yet."
   },
+
+  "shapeAbout": [
+    "Colour was never the whole of it. Both surfaces already agree on the corner radii —",
+    "4 / 6 / 8 — and have since before anyone wrote it down, which is exactly the kind of",
+    "agreement that drifts the first time someone rounds a card by eye. Now it is stated.",
+    "",
+    "Theme-independent: a radius has no light and dark."
+  ],
+  "shape": {
+    "radius-sm": "4px",
+    "radius-md": "6px",
+    "radius-lg": "8px"
+  },
+
+  "typeAbout": [
+    "Only the FIRST family is the brand. The fallback stacks legitimately differ — this",
+    "surface carries the longer chain (ui-sans-serif, system-ui) because it is an app that",
+    "must render before its webfont lands; the other one ships the font with the page.",
+    "So the contract holds the family and leaves the stack alone."
+  ],
+  "typeFamilies": {
+    "font-sans": "Space Grotesk",
+    "font-mono": "IBM Plex Mono"
+  },
+
+  "productLightAbout": [
+    "This surface's OWN light ramp. It is NOT shared — that is the whole point of it, and the",
+    "reason it is worth writing down. White ground, neutral-grey ink, a darker accent: chrome you",
+    "sit in for eight hours should recede. The other surface's light is violet-tinted, because a",
+    "page being scanned can afford a mood.",
+    "",
+    "It is recorded here, and guarded here, so that anything that DRAWS this surface — a design",
+    "system, a preview, a mockup — can show it truthfully instead of borrowing the site's light",
+    "and lying about it. A preview that paints the app in the site's colours is worse than no",
+    "preview: it is a wrong answer with a house style."
+  ],
+  "productLight": {
+    "lyx-bg": "#ffffff",
+    "lyx-bg-subtle": "#f6f7f9",
+    "lyx-bg-muted": "#eceef2",
+    "lyx-bg-elevated": "#ffffff",
+    "lyx-border": "#e3e5ea",
+    "lyx-border-hover": "#c6c9d1",
+    "lyx-text": "#0b0b14",
+    "lyx-text-muted": "#4a4d57",
+    "lyx-text-subtle": "#6b6e7b",
+    "lyx-accent": "#21179b",
+    "lyx-accent-hover": "#1a1280",
+    "lyx-accent-text": "#2a1fb8",
+    "lyx-accent-fg": "#ffffff",
+    "lyx-danger": "#c0341d",
+    "lyx-success": "#15803d",
+    "lyx-warning": "#b45309",
+    "lyx-code-bg": "#f2f3f6"
+  },
+
   "alsoNotShared": [
-    "The LIGHT ramps of every token above — see DARK ONLY in `about`.",
-    "The semantic SURFACES on the other surface (success/error fg+bg+border triplets, still hard-coded there). Only the three standalone FILL colours — success/danger/warning — are shared, and they are in `primitives`."
+    "The LIGHT ramps of every colour above — see DARK ONLY in `about`. They are recorded under `productLight`, which is a record, not a contract with the other side.",
+    "The semantic SURFACES on the other surface (success/error fg+bg+border triplets, still hard-coded there). Only the three standalone FILL colours — success/danger/warning — are shared, and they are in `primitives`.",
+    "--font-serif. The italic serif accent is a MARKETING device — one word, for emphasis, on a page that is scanned. It has no place in a tool you sit in for hours, and this surface does not define it.",
+    "The SPACING, TYPE and ELEVATION scales. This surface has none of its own: it rides Tailwind's defaults (text-xs and text-sm alone account for ~900 of its class uses). The other surface authors twelve spacing steps, five type steps and six elevations, because it is scanned in twenty seconds and needs the rhythm. Density here is deliberate, not drift — the same reasoning as the light ramps. Naming them would be inventing a shared decision that was never made."
   ]
 }
