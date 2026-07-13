@@ -75,6 +75,7 @@
 	import PromptAnchor from './PromptAnchor.svelte';
 	import StreamingActivityBar from './StreamingActivityBar.svelte';
 	import AgentPresenceIcon from './AgentPresenceIcon.svelte';
+	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -3037,6 +3038,12 @@
 					</div>
 				{/each}
 			</div>
+		{/if}
+
+		<!-- Model picker: only on an empty chat (before turn 1). Once the chat has a
+		     session it disappears — the model is fixed for the conversation (D1). -->
+		{#if currentSessionId === null}
+			<ComposerModelPicker />
 		{/if}
 
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">

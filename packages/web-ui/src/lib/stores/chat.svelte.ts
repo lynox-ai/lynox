@@ -474,6 +474,10 @@ function emitCompletedTextBlock(content: string, key: string): void {
 }
 
 let sessionModel = $state<string | null>(null);
+// The tier the composer model picker chose for the NEXT new chat (null = let the
+// server use default_tier). Sent as `model` on the session-create POST; cleared on
+// newChat() so every new chat starts from default_tier (no stickiness).
+let pendingModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
 // Set when the engine offers a "prepare & compact" at the prepare threshold
@@ -576,7 +580,15 @@ async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ threadId: resumeThreadId }),
 		}
-		: { method: 'POST' };
+		: pendingModel
+			? {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				// The composer picker's tier for this new chat. The engine clamps it
+				// to max_tier at the ctor, so an over-ceiling value is safe here.
+				body: JSON.stringify({ model: pendingModel }),
+			}
+			: { method: 'POST' };
 	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
@@ -2321,6 +2333,7 @@ export function newChat() {
 	runInterrupted = null;
 	messageQueue = [];
 	sessionModel = null;
+	pendingModel = null; // no stickiness — the next new chat starts at default_tier
 	contextBudget = null;
 	runStartedAt = null;
 	runPromptCount = 0;
@@ -2330,6 +2343,13 @@ export function newChat() {
 
 export function getSessionId() {
 	return sessionId;
+}
+
+/** Set the tier the next new chat will run on (composer model picker). Ignored
+ *  once a session exists — a running chat keeps its model (D1: pick before turn 1). */
+export function setPendingModel(tier: string | null): void {
+	if (sessionId) return;
+	pendingModel = tier;
 }
 
 let _resumeGeneration = 0;

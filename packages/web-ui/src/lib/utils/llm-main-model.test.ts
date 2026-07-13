@@ -12,9 +12,29 @@ import {
   isExpensiveModel,
   buildMainModelOptions,
   selectMainModelId,
+  availableComposerTiers,
   type ProviderLike,
   type MainModelOption,
 } from './llm-main-model.js';
+
+describe('availableComposerTiers', () => {
+  it('offers all three (deep-first) when there is no ceiling', () => {
+    expect(availableComposerTiers(undefined)).toEqual(['deep', 'balanced', 'fast']);
+  });
+  it('caps at a balanced ceiling', () => {
+    expect(availableComposerTiers('balanced')).toEqual(['balanced', 'fast']);
+  });
+  it('caps at a fast ceiling (demo tenant)', () => {
+    expect(availableComposerTiers('fast')).toEqual(['fast']);
+  });
+  it('accepts legacy tier aliases as the ceiling', () => {
+    // 'sonnet' → balanced via normalizeTier
+    expect(availableComposerTiers('sonnet')).toEqual(['balanced', 'fast']);
+  });
+  it('treats an unrecognised ceiling as no ceiling (fail-open UX; server still clamps)', () => {
+    expect(availableComposerTiers('nonsense')).toEqual(['deep', 'balanced', 'fast']);
+  });
+});
 
 const anthropic: ProviderLike = {
   main_chat_models: [
