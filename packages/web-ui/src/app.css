@@ -50,7 +50,7 @@
 	--lyx-accent: #6525EF;
 	--lyx-accent-hover: #7b3fff;
 	--lyx-accent-text: #9B8AFF;
-	--lyx-accent-disabled: color-mix(in srgb, #6525EF 35%, #0c0c20);
+	--lyx-accent-disabled: color-mix(in srgb, var(--lyx-accent) 35%, var(--lyx-bg-muted));
 	--lyx-accent-fg: #ffffff;
 	--lyx-focus-ring: #9B8AFF;
 	--lyx-danger: #ef4444;
@@ -74,7 +74,7 @@
 	--lyx-accent: #21179b;
 	--lyx-accent-hover: #1a1280;
 	--lyx-accent-text: #2a1fb8;
-	--lyx-accent-disabled: color-mix(in srgb, #21179b 35%, #eceef2);
+	--lyx-accent-disabled: color-mix(in srgb, var(--lyx-accent) 35%, var(--lyx-bg-muted));
 	--lyx-accent-fg: #ffffff;
 	--lyx-focus-ring: #0b0b14;
 	--lyx-danger: #c0341d;

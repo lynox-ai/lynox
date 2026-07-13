@@ -57,3 +57,19 @@ pre-commit:
       skip:
         - merge
         - rebase
+    token-contract:
+      # hex-guard allowlists app.css — "the token definitions themselves" — so
+      # nothing guarded the VALUES in it. These primitives are painted on more
+      # than one surface (this UI, and the lynox.ai site, a separate codebase),
+      # so a change here is a change over there. Fail now, on your commit,
+      # rather than by someone else weeks later.
+      #
+      # Fast local feedback only. The gate is .github/workflows/token-contract.yml
+      # — `--no-verify` skips this hook, not that.
+      glob:
+        - "packages/web-ui/src/app.css"
+        - "packages/web-ui/tokens.contract.json"
+      run: node packages/web-ui/scripts/check-token-contract.mjs
+      skip:
+        - merge
+        - rebase

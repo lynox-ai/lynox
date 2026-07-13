@@ -1,0 +1,33 @@
+name: Token Contract
+
+# The brand primitives in packages/web-ui/src/app.css are painted on more than one
+# surface: this product UI, and the lynox.ai marketing site, which is a separate
+# codebase and cannot depend on this package. tokens.contract.json is the contract
+# that keeps that duplication honest, and this asserts app.css still holds it up.
+#
+# It exists here because nothing in this repo knew those values were shared. hex-guard
+# allowlists app.css as "the token definitions themselves", so the values in it were
+# unguarded — a rebrand could land here and be discovered elsewhere, later, by someone
+# else. Now it is caught on the commit that makes it, by the person who makes it.
+#
+# The lefthook pre-commit hook runs the same check locally; this job is the gate
+# (`git commit --no-verify` skips the hook, not this). It is a required status check
+# on main — without that it would be a suggestion, not a gate.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  token-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: app.css still matches tokens.contract.json
+        run: node packages/web-ui/scripts/check-token-contract.mjs
