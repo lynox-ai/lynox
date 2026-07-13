@@ -90,7 +90,7 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier } from './spawn.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 
@@ -1697,6 +1697,46 @@ describe('spawn_agent tool', () => {
         setOpenAIModelResolver({ map: null });
         await initLLMProvider('anthropic'); // restore the default for sibling tests
       }
+    });
+  });
+
+  // DEF-0093: a spawn `profile` pins a concrete model that bypasses the max_tier
+  // clamp. Since `profile` is agent-settable (hence prompt-injectable), a profile
+  // routing a child ABOVE the tenant's cost ceiling must be refused (a profile
+  // cannot be clamped down — REFUSE, not clamp). Real registry ids:
+  // opus=deep, sonnet=balanced, haiku=fast.
+  describe('profileExceedsMaxTier — a profile cannot escape the cost ceiling', () => {
+    const DEEP = 'claude-opus-4-6';
+    const BALANCED = 'claude-sonnet-4-6';
+    const FAST = 'claude-haiku-4-5-20251001';
+    const UNKNOWN = 'some-unregistered-byok-model-xyz';
+
+    it('refuses a registered model whose band is above the ceiling', () => {
+      expect(profileExceedsMaxTier(DEEP, 'fast')).toBe(true);
+      expect(profileExceedsMaxTier(DEEP, 'balanced')).toBe(true);
+      expect(profileExceedsMaxTier(BALANCED, 'fast')).toBe(true);
+    });
+
+    it('allows a registered model at or below the ceiling', () => {
+      expect(profileExceedsMaxTier(FAST, 'fast')).toBe(false);
+      expect(profileExceedsMaxTier(BALANCED, 'balanced')).toBe(false);
+      expect(profileExceedsMaxTier(FAST, 'balanced')).toBe(false);
+    });
+
+    it('treats a deep ceiling as non-restrictive (nothing is above deep)', () => {
+      expect(profileExceedsMaxTier(DEEP, 'deep')).toBe(false);
+      expect(profileExceedsMaxTier(BALANCED, 'deep')).toBe(false);
+      expect(profileExceedsMaxTier(UNKNOWN, 'deep')).toBe(false);
+    });
+
+    it('refuses an unregistered model under a restrictive ceiling (band unprovable)', () => {
+      expect(profileExceedsMaxTier(UNKNOWN, 'fast')).toBe(true);
+      expect(profileExceedsMaxTier(UNKNOWN, 'balanced')).toBe(true);
+    });
+
+    it('never refuses when there is no ceiling (self-host default)', () => {
+      expect(profileExceedsMaxTier(DEEP, undefined)).toBe(false);
+      expect(profileExceedsMaxTier(UNKNOWN, undefined)).toBe(false);
     });
   });
 });
