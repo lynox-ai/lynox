@@ -56,6 +56,35 @@ export function globToRegex(glob: string): RegExp {
   return new RegExp(`^${parts.join('')}$`);
 }
 
+/** Structurally-unrelated probe hosts across unrelated TLDs. A single host glob
+ *  that matches ≥2 of these matches (nearly) any host (`*`, `**`, `*.*`, …) — an
+ *  over-broad grant. A bounded label wildcard (`*.googleapis.com`) matches none. */
+const OVERBROAD_HOST_PROBES = [
+  'a.example.com',
+  'b.attacker-domain.net',
+  'c.some-host.org',
+  'internal.local',
+] as const;
+
+/**
+ * Is `pattern` an over-broad host glob — one that grants (nearly) any host rather
+ * than pinning specific ones? Reuses {@link globToRegex} (the SAME matcher the
+ * capability-contract enforcement uses, so this can't drift from it) and tests it
+ * against structurally-unrelated probes: a match on ≥2 unrelated TLDs means the
+ * pattern is a match-anything wildcard = fleet-wide egress intent. An unparseable
+ * pattern is treated as over-broad (fail-closed). Used to reject an over-broad
+ * grant at contract save-time and to flag one on the workflow-import consent surface.
+ */
+export function isOverbroadHostPattern(pattern: string): boolean {
+  let re: RegExp;
+  try {
+    re = globToRegex(pattern);
+  } catch {
+    return true;
+  }
+  return OVERBROAD_HOST_PROBES.filter(h => re.test(h)).length >= 2;
+}
+
 /**
  * Extract a match string from a tool call for pattern matching.
  */

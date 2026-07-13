@@ -1,5 +1,6 @@
 import type { CapabilityContract, ParamConstraint } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
+import { isOverbroadHostPattern } from '../core/pre-approve.js';
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -68,6 +69,19 @@ export function validateContractAgainstSteps(planned: {
 }): string | null {
   const contract = planned.capabilityContract;
   if (!contract) return null;
+
+  // Reject a match-(nearly)-anything host grant (`hostPatterns: ['*']`/`['**']`):
+  // it would let a contract-governed autonomous run reach ANY host (fleet-wide
+  // egress), which no pinned-host contract should authorise. Uses the SAME matcher
+  // the dispatch-time check uses (`globToRegex`), so it can't drift from enforcement.
+  const overbroadHosts = (contract.hostPatterns ?? []).filter(isOverbroadHostPattern);
+  if (overbroadHosts.length > 0) {
+    return (
+      `Capability-contract is invalid: host pattern(s) ${overbroadHosts.join(', ')} match ` +
+      `effectively any host. A contract-governed workflow must pin specific hosts so an ` +
+      `unattended run cannot redirect an outbound call to an arbitrary destination.`
+    );
+  }
 
   // Only an *effective* constraint counts — a vacuous `{}`/`{ enum: [] }` entry
   // would pass a key-presence check yet enforce nothing at bind (fail-open).

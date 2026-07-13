@@ -25,7 +25,7 @@ import { MAX_STEPS } from '../orchestrator/validate.js';
 import { stripUntrustedSeparators } from './sanitize.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { SECRET_REF_PATTERN, isInfraSecret } from './secret-store.js';
-import { globToRegex } from './pre-approve.js';
+import { isOverbroadHostPattern } from './pre-approve.js';
 
 /**
  * Version of the SHARE ENVELOPE shape itself — the outer container
@@ -300,30 +300,6 @@ const ImportContentSchema = z.object({
 
 type ImportContent = z.infer<typeof ImportContentSchema>;
 
-/** Structurally-unrelated probe hosts across unrelated TLDs. A single host glob
- *  that matches ≥2 of these is a "matches (nearly) anything" wildcard (`*`,
- *  `**`, `*.*`, …) = fleet-wide egress intent; a bounded subdomain wildcard
- *  (`*.googleapis.com`) matches none. */
-const OVERBROAD_HOST_PROBES = [
-  'a.example.com',
-  'b.attacker-domain.net',
-  'c.some-host.org',
-  'internal.local',
-] as const;
-
-function isOverbroadHostGrant(hostPatterns: string[]): boolean {
-  for (const pattern of hostPatterns) {
-    let re: RegExp;
-    try {
-      re = globToRegex(pattern);
-    } catch {
-      return true; // an unparseable pattern is treated as suspicious
-    }
-    if (OVERBROAD_HOST_PROBES.filter(h => re.test(h)).length >= 2) return true;
-  }
-  return false;
-}
-
 /**
  * Extract the JSON body of a `lynox-workflow` share block from pasted text. The
  * fence is variable-length (CommonMark): read the opening fence's backtick run
@@ -511,7 +487,7 @@ export function parseAndValidatePortable(rawText: string): PortableImportResult 
       // (sanitising first could mask a wildcard). Sanitise host/path strings for
       // the consent render only: they are echoed into the agent's tool result, so
       // an exotic separator in a pattern must not slip the A6 boundary either.
-      inboundContractOverbroad = isOverbroadHostGrant(raw.hostPatterns);
+      inboundContractOverbroad = raw.hostPatterns.some(isOverbroadHostPattern);
       inboundContract = {
         ...raw,
         hostPatterns: raw.hostPatterns.map(sanitiseProse),

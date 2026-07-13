@@ -1420,6 +1420,34 @@ describe('Agent', () => {
       expect(store.resolveSecretRefs).not.toHaveBeenCalled();
     });
 
+    it('does NOT resolve secret refs for update_workflow_steps (stored into the def)', async () => {
+      // A workflow edit persists its input as part of the stored definition, so a
+      // secret:NAME in an edited step must be stored as a ref (resolved at RUN),
+      // not baked to plaintext here — same class as import_workflow.
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const handler = vi.fn().mockResolvedValue('edited');
+      const tool = makeTool('update_workflow_steps', handler);
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'update_workflow_steps',
+          input: { workflow_id: 'wf-1', modifications: [{ step_id: 's1', action: 'update_task', value: 'POST with Bearer secret:MY_KEY' }] },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6',
+        tools: [tool], secretStore: store,
+      });
+      await agent.send('Edit it');
+
+      const callArgs = (handler as ReturnType<typeof vi.fn>).mock.calls[0]! as [unknown, unknown];
+      const input = callArgs[0] as { modifications: Array<{ value: string }> };
+      expect(input.modifications[0]!.value).toContain('secret:MY_KEY'); // ref preserved
+      expect(input.modifications[0]!.value).not.toContain('actual-secret-val');
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+    });
+
     it('shows consent dialog on first use of a secret', async () => {
       const store = makeSecretStore();
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));

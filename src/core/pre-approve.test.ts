@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   globToRegex,
+  isOverbroadHostPattern,
   extractMatchString,
   matchesPreApproval,
   buildApprovalSet,
@@ -81,6 +82,20 @@ describe('globToRegex', () => {
       expect(globToRegex('**/**').test(host)).toBe(globToRegex('**').test(host));
     }
     expect(globToRegex('***.googleapis.com').test('a.googleapis.com')).toBe(true);
+  });
+});
+
+describe('isOverbroadHostPattern', () => {
+  it('flags match-anything wildcards', () => {
+    for (const p of ['*', '**', '*.*', '**/**']) {
+      expect(isOverbroadHostPattern(p)).toBe(true);
+    }
+  });
+
+  it('does not flag a pinned host or a bounded subdomain wildcard', () => {
+    for (const p of ['api.acme.test', '*.googleapis.com', 'api.stripe.com']) {
+      expect(isOverbroadHostPattern(p)).toBe(false);
+    }
   });
 });
 
