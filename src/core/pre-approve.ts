@@ -8,32 +8,52 @@ import { isCriticalTool } from '../tools/permission-guard.js';
  * - `**` matches anything (including `/`)
  * - `*` matches anything except `/`
  * - All other regex-special characters are escaped.
- * No backtracking risk — produced patterns are linear.
+ *
+ * INVARIANT: the emitted pattern never contains two ADJACENT unanchored
+ * quantifiers (`.*`/`[^/]*`), which is the catastrophic-backtracking shape — a
+ * hostile glob (e.g. an imported capability-contract `hostPattern`) tested
+ * against a non-matching host would otherwise freeze the event loop. Adjacency
+ * arises not only from consecutive stars but from repeated double-star groups
+ * separated by slashes: each double-star also consumes its trailing slash, so the
+ * separators vanish and the quantifiers land side by side — both cases coalesce.
+ * Two adjacent unanchored quantifiers are match-equivalent to a single `.*` (both
+ * match any run), so they merge; a quantifier separated by any literal (a `?`, a
+ * dot, a domain label, an un-eaten slash) stays anchored and never backtracks.
  */
 export function globToRegex(glob: string): RegExp {
-  let regex = '';
+  const parts: string[] = [];
+  // Append an unanchored quantifier, merging with a preceding one so the output
+  // can never hold two in a row (`.*` ⊇ `[^/]*`, so the union is always `.*`).
+  const coalesceQuantifier = (q: '.*' | '[^/]*'): void => {
+    const last = parts[parts.length - 1];
+    if (last === '.*' || last === '[^/]*') {
+      parts[parts.length - 1] = '.*';
+    } else {
+      parts.push(q);
+    }
+  };
   let i = 0;
   while (i < glob.length) {
     const ch = glob[i]!;
     if (ch === '*' && glob[i + 1] === '*') {
-      regex += '.*';
+      coalesceQuantifier('.*');
       i += 2;
       if (glob[i] === '/') i++;
     } else if (ch === '*') {
-      regex += '[^/]*';
+      coalesceQuantifier('[^/]*');
       i++;
     } else if (ch === '?') {
-      regex += '[^/]';
+      parts.push('[^/]');
       i++;
     } else if ('.+(){}[]^$|\\'.includes(ch)) {
-      regex += '\\' + ch;
+      parts.push('\\' + ch);
       i++;
     } else {
-      regex += ch;
+      parts.push(ch);
       i++;
     }
   }
-  return new RegExp(`^${regex}$`);
+  return new RegExp(`^${parts.join('')}$`);
 }
 
 /**

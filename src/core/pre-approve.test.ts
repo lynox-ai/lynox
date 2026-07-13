@@ -59,6 +59,29 @@ describe('globToRegex', () => {
     expect(globToRegex('file?.txt').test('file1.txt')).toBe(true);
     expect(globToRegex('file?.txt').test('file12.txt')).toBe(false);
   });
+
+  it('does not catastrophically backtrack on hostile wildcard input (ReDoS guard)', () => {
+    // Neither a contiguous star run NOR `**/**/…` groups (where `**` eats its
+    // trailing `/`, re-creating adjacent quantifiers) may hang the event loop when
+    // tested against a non-matching host. Both are reachable from an imported
+    // capability-contract hostPattern (capped at 2000 chars). Each must resolve
+    // promptly — the group vector froze for tens of seconds before the coalesce.
+    for (const pattern of ['*'.repeat(1000) + 'zzz', '**/'.repeat(660) + '9']) {
+      const start = performance.now();
+      const result = globToRegex(pattern).test('b.attacker-domain.net');
+      expect(result).toBe(false);
+      expect(performance.now() - start).toBeLessThan(100);
+    }
+  });
+
+  it('coalescing adjacent quantifiers is match-equivalent', () => {
+    // `****`, `**/**`, `***` all reduce to a single `.*` — same matched language.
+    for (const host of ['a.example.com', 'x', '', 'deep/path/here']) {
+      expect(globToRegex('****').test(host)).toBe(globToRegex('**').test(host));
+      expect(globToRegex('**/**').test(host)).toBe(globToRegex('**').test(host));
+    }
+    expect(globToRegex('***.googleapis.com').test('a.googleapis.com')).toBe(true);
+  });
 });
 
 describe('extractMatchString', () => {

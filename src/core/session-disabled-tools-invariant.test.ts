@@ -153,6 +153,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   runWorkflowTool: { definition: { name: 'run_workflow' }, handler: vi.fn() },
   updateWorkflowTool: { definition: { name: 'update_workflow_steps' }, handler: vi.fn() },
   exportWorkflowTool: { definition: { name: 'export_workflow' }, handler: vi.fn() },
+  importWorkflowTool: { definition: { name: 'import_workflow' }, handler: vi.fn() },
   diagnoseWorkflowTool: { definition: { name: 'diagnose_workflow_run' }, handler: vi.fn() },
   setPipelineConfig: vi.fn(),
   setPlanTaskConfig: vi.fn(),
