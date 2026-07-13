@@ -37,9 +37,16 @@
 	--lyx-bg-overlay: #000000;
 	--lyx-border: #1a1a4a;
 	--lyx-border-hover: #2a2a5a;
-	--lyx-text: #e8e8f0;
-	--lyx-text-muted: #8888aa;
-	--lyx-text-subtle: #7e7eaa;
+	/* Text ramp — brightened 2026-07-13 so the app and the lynox.ai site speak with
+	   one voice. They had drifted: the app was dimmer (#e8e8f0/#8888aa/#7e7eaa).
+	   Both ramps already cleared WCAG AA — the old values measured 5.9:1 and 5.3:1
+	   on this ground — so this is a house-style decision, not an accessibility fix.
+	   Contrast on --lyx-bg (#050510): 17.4 / 9.8 / 8.5 : 1.
+	   DARK ONLY. The light ramp below stays neutral grey on purpose: the app is a
+	   tool you sit in for hours, and its chrome should recede. */
+	--lyx-text: #ecedf4;
+	--lyx-text-muted: #b3b3c6;
+	--lyx-text-subtle: #a6a6c0;
 	--lyx-accent: #6525EF;
 	--lyx-accent-hover: #7b3fff;
 	--lyx-accent-text: #9B8AFF;
