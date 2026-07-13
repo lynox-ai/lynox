@@ -1,30 +1,13 @@
 import type { ToolEntry } from '../../types/index.js';
 import { getPipeline } from './pipeline.js';
-import { toPortableWorkflow } from '../../core/workflow-portable.js';
+import { toPortableWorkflow, buildFence, LYNOX_WORKFLOW_INFO_STRING } from '../../core/workflow-portable.js';
 import { getErrorMessage } from '../../core/utils.js';
+
+// The share-format constants (info-string + dynamic fence builder) live in core
+// alongside the envelope + import validator so producer and parser can never drift.
 
 interface ExportWorkflowInput {
   workflow_id?: string | undefined;
-}
-
-/** Info-string tagging the export code-fence — the Slice-3 import path recognises
- *  exactly this tag on the opening fence line. The FENCE ITSELF is dynamic-length
- *  (see {@link buildFence}): CommonMark requires a fenced block's fence to be longer
- *  than any backtick run inside it, so an exported workflow whose step text or
- *  reasoning contains a literal ``` cannot prematurely close the block. A parser
- *  must therefore read the opening fence's backtick count and match a closing fence
- *  of at least that length — never assume three. Kept as a constant so producer +
- *  (future) parser agree on the tag. */
-export const LYNOX_WORKFLOW_INFO_STRING = 'lynox-workflow';
-
-/** Smallest backtick fence that safely wraps `body`: at least three, and always
- *  longer than the longest backtick run inside it (CommonMark fenced-code rule).
- *  JSON does not escape backticks, so a step task like "run the ```sh``` block"
- *  travels verbatim — without this, a fixed ``` fence would close early and the
- *  copy-block would not round-trip as JSON. */
-export function buildFence(body: string): string {
-  const longestRun = (body.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
-  return '`'.repeat(Math.max(3, longestRun + 1));
 }
 
 /**

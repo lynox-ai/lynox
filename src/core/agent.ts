@@ -1536,6 +1536,18 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret', 'spawn_agent', 'run_workflow',
   ]);
 
+  /** Tools whose input is a DOCUMENT to store verbatim, not a call whose
+   *  `secret:NAME` refs should be bound to values before it runs. `import_workflow`
+   *  ingests an untrusted shared workflow whose `secret:NAME` refs MUST survive as
+   *  refs (re-bound later, on the importer's own vault, at run time) — resolving
+   *  them here would bake the importer's plaintext credential into the stored blob
+   *  (and re-export would then leak it), and would hard-fail the import for a
+   *  secret the importer hasn't connected yet (its whole point is import-then-bind).
+   *  The refs still resolve normally when the imported workflow is actually RUN. */
+  private static readonly SECRET_RESOLUTION_EXEMPT = new Set([
+    'import_workflow',
+  ]);
+
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
     const toolCalls = content.filter(
       (b): b is BetaToolUseBlock => b.type === 'tool_use',
@@ -1689,9 +1701,12 @@ export class Agent implements IAgent {
       }
     }
 
-    // Secret resolution: resolve secret:KEY_NAME refs in tool input
+    // Secret resolution: resolve secret:KEY_NAME refs in tool input. Skipped for
+    // document-ingesting tools (SECRET_RESOLUTION_EXEMPT) whose input carries refs
+    // meant to be STORED verbatim, not bound — resolving there would persist a
+    // plaintext credential (see the set's doc).
     let processedInput = tc.input;
-    if (this.secretStore) {
+    if (this.secretStore && !Agent.SECRET_RESOLUTION_EXEMPT.has(tc.name)) {
       const secretNames = this.secretStore.extractSecretNames(tc.input);
       if (secretNames.length > 0) {
         // Fail-loud gate: refuse the tool call if ANY referenced secret

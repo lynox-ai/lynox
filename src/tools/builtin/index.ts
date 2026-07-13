@@ -9,6 +9,7 @@ export { httpRequestTool } from './http.js';
 export { runWorkflowTool } from './pipeline.js';
 export { updateWorkflowTool } from './update-workflow.js';
 export { exportWorkflowTool } from './export-workflow.js';
+export { importWorkflowTool } from './import-workflow.js';
 export { diagnoseWorkflowTool } from './diagnose-workflow.js';
 export { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
 export { planTaskTool } from './plan-task.js';

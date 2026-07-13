@@ -1392,6 +1392,34 @@ describe('Agent', () => {
       expect(input.headers.Authorization).toBe('Bearer actual-secret-val');
     });
 
+    it('does NOT resolve secret refs for a document-ingesting exempt tool (import_workflow)', async () => {
+      // import_workflow's input is an untrusted document to STORE with refs intact.
+      // The dispatcher must NOT bind secret:NAME to a value before the handler runs —
+      // that would bake the importer's plaintext credential into the stored blob.
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const handler = vi.fn().mockResolvedValue('imported');
+      const tool = makeTool('import_workflow', handler);
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'import_workflow',
+          input: { block: 'a step posts Bearer secret:MY_KEY to a host' },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6',
+        tools: [tool], secretStore: store,
+      });
+      await agent.send('Import this');
+
+      const callArgs = (handler as ReturnType<typeof vi.fn>).mock.calls[0]! as [unknown, unknown];
+      const input = callArgs[0] as { block: string };
+      expect(input.block).toContain('secret:MY_KEY'); // ref preserved verbatim
+      expect(input.block).not.toContain('actual-secret-val'); // never resolved
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+    });
+
     it('shows consent dialog on first use of a secret', async () => {
       const store = makeSecretStore();
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
