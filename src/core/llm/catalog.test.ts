@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, mainChatTierLabels } from './catalog.js';
+import type { CatalogProviderEntry } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
 
 describe('LLM_CATALOG', () => {
@@ -338,6 +339,92 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
       expect(opt.balanced_model).toBeUndefined();
       expect(VERTEX_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
     }
+  });
+});
+
+describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hide)', () => {
+  it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
+      fast: 'Haiku 4.5',
+      balanced: 'Sonnet 4.6',
+      deep: 'Opus 4.6',
+    });
+  });
+
+  it('anthropic: balanced label follows the tenant-selected Sonnet variant (5)', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    const resolved = resolveBalancedModel({ balanced_model: 'claude-sonnet-5' });
+    expect(mainChatTierLabels(entry, resolved)?.balanced).toBe('Sonnet 5');
+  });
+
+  it('mistral: the three tier representatives, labelled', () => {
+    const entry = getCatalogEntryByKey('mistral')!;
+    expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
+      fast: 'Ministral 8B',
+      balanced: 'Ministral 14B',
+      deep: 'Mistral Large 3',
+    });
+  });
+
+  it('free-text providers (openai-compat, custom) yield undefined → picker hides', () => {
+    expect(mainChatTierLabels(getCatalogEntryByKey('openai-compat')!, resolveBalancedModel({}))).toBeUndefined();
+    expect(mainChatTierLabels(getCatalogForProvider('custom')!, resolveBalancedModel({}))).toBeUndefined();
+  });
+
+  it('a single-model provider (all tiers → one id) yields undefined → picker hides', () => {
+    // Synthetic entry: three bands, all pointing at the SAME catalog model.
+    // The distinct-count guard must collapse it to undefined so a proxy that
+    // serves exactly one model never shows a fake 3-way picker (DEF-0082b).
+    const oneModel: CatalogProviderEntry = {
+      provider: 'openai',
+      preset_id: 'synthetic-single',
+      label: 'Synthetic single-model',
+      models: [{ id: 'only-model', label: 'The Only Model', tier: 'balanced' }],
+      main_chat_models: [
+        { id: 'only-model', tier: 'fast' },
+        { id: 'only-model', tier: 'balanced' },
+        { id: 'only-model', tier: 'deep' },
+      ],
+    } as unknown as CatalogProviderEntry;
+    expect(mainChatTierLabels(oneModel, resolveBalancedModel({}))).toBeUndefined();
+  });
+
+  it('two distinct models across bands DO surface (≥2 is the real-picker threshold)', () => {
+    const twoModel: CatalogProviderEntry = {
+      provider: 'openai',
+      preset_id: 'synthetic-two',
+      label: 'Synthetic two-model',
+      models: [
+        { id: 'small', label: 'Small', tier: 'fast' },
+        { id: 'big', label: 'Big', tier: 'deep' },
+      ],
+      main_chat_models: [
+        { id: 'small', tier: 'fast' },
+        { id: 'big', tier: 'deep' },
+      ],
+    } as unknown as CatalogProviderEntry;
+    expect(mainChatTierLabels(twoModel, resolveBalancedModel({}))).toEqual({ fast: 'Small', deep: 'Big' });
+  });
+
+  it('the distinct threshold is on model id, NOT label — two ids, one shared label still surfaces', () => {
+    // Two genuinely different models that happen to render the same display
+    // label. There IS a real choice (different ids route differently), so the
+    // picker must surface — deduping on the label would wrongly collapse+hide it.
+    const sharedLabel: CatalogProviderEntry = {
+      provider: 'openai',
+      preset_id: 'synthetic-collision',
+      label: 'Synthetic label-collision',
+      models: [
+        { id: 'model-a', label: 'Same Name', tier: 'fast' },
+        { id: 'model-b', label: 'Same Name', tier: 'deep' },
+      ],
+      main_chat_models: [
+        { id: 'model-a', tier: 'fast' },
+        { id: 'model-b', tier: 'deep' },
+      ],
+    } as unknown as CatalogProviderEntry;
+    expect(mainChatTierLabels(sharedLabel, resolveBalancedModel({}))).toEqual({ fast: 'Same Name', deep: 'Same Name' });
   });
 });
 

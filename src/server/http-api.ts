@@ -30,7 +30,7 @@ import { resolveChatContext, type ChatContextRef } from '../core/chat-context.js
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
-import { endpointNeedsCredential } from '../core/llm/catalog.js';
+import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
@@ -3776,6 +3776,21 @@ export class LynoxHTTPApi {
       // spread already carries the raw stored value; overriding it with the
       // resolver guarantees the UI never sees `undefined` or a non-served id.
       redacted['balanced_model'] = resolveBalancedModel(config);
+
+      // main_chat_tiers (DEF-0082): the active provider's per-tier model LABEL,
+      // for the composer picker's two follow-ups —
+      //   (a) name-enrichment: render "Tief (Opus 4.6)" instead of a bare tier;
+      //   (b) hide the picker on a single-model provider (a custom / OpenAI-compat
+      //       proxy whose three tiers all resolve to the same one model).
+      // Absent when the active provider exposes fewer than two DISTINCT tier
+      // models; that absence is the signal the composer reads to hide itself.
+      // Derived by `mainChatTierLabels` from the catalog's `main_chat_models` —
+      // where the tier→model maps live — so labels can't drift from what routes.
+      const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
+      if (mainChatEntry) {
+        const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config));
+        if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
+      }
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);

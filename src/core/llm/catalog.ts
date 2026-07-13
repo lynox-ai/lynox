@@ -736,6 +736,45 @@ function buildMainChatModels(entry: CatalogProviderEntry): MainChatModel[] | und
   return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Per-tier model LABEL for a catalog entry's main-chat models, keyed by tier —
+ * the composer picker's name-enrichment source ("Tief (Opus 4.6)"). Returns
+ * `undefined` when the entry exposes fewer than two DISTINCT tier models (a
+ * single-model custom / OpenAI-compat provider whose tiers all resolve to one
+ * model); the picker reads that absence as "hide, don't offer fake choices".
+ * `resolvedBalanced` disambiguates the Anthropic balanced band's served-Sonnet
+ * variants (4.6 vs 5) to the tenant's configured one so the label matches what
+ * actually routes. Pure view over `main_chat_models`, so it can't drift from the
+ * tier→model maps.
+ */
+export function mainChatTierLabels(
+  entry: CatalogProviderEntry,
+  resolvedBalanced: string,
+): Partial<Record<ModelTier, string>> | undefined {
+  const models = entry.main_chat_models;
+  if (!models || models.length === 0) return undefined;
+  const labelForId = (id: string): string => entry.models.find((m) => m.id === id)?.label ?? id;
+  const out: Partial<Record<ModelTier, string>> = {};
+  const pickedIds: string[] = [];
+  for (const tier of ['fast', 'balanced', 'deep'] as const) {
+    const forTier = models.filter((mc) => mc.tier === tier);
+    if (forTier.length === 0) continue;
+    // The balanced band may carry two served-Sonnet variants; prefer the
+    // tenant's configured one so the label matches what runs.
+    const pick =
+      tier === 'balanced'
+        ? forTier.find((mc) => mc.balanced_model === resolvedBalanced) ?? forTier[0]!
+        : forTier[0]!;
+    pickedIds.push(pick.id);
+    out[tier] = labelForId(pick.id);
+  }
+  // Only a REAL picker (≥2 distinct MODELS) is worth surfacing; one model across
+  // all tiers ⇒ undefined ⇒ hidden. Dedup on the model id (not the label) so the
+  // threshold tracks the requirement — "does the provider route to >1 model" —
+  // and can't be fooled by two models that happen to share a display label.
+  return new Set(pickedIds).size >= 2 ? out : undefined;
+}
+
 // Deep-freeze at module load: protects the singleton against accidental
 // mutation when consumers hand `LLM_CATALOG` straight to `jsonResponse`
 // (the response body shares the reference until serialization).
