@@ -3,6 +3,8 @@ import http from 'node:http';
 import https from 'node:https';
 import { Readable } from 'node:stream';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import type { NetworkPolicy } from '../types/index.js';
+import { isAllowlistedEndpoint } from './llm/endpoint-allowlist.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -104,6 +106,134 @@ export function isPrivateIP(ip: string): boolean {
     }
   }
   return false;
+}
+
+// === User/operator network-policy enforcement (SSOT) ===
+//
+// The single implementation of the configurable outbound `network_policy` gate,
+// shared by every agent HTTP surface: `http_request` + `api_setup fetch_token`
+// (full-control) and `web_research` read/search + `api_setup` bootstrap
+// (discovery). Previously duplicated in tools/builtin/http.ts (applyHostPolicy)
+// and integrations/search/content-extractor.ts (assertEgressAllowed); they now
+// delegate here so a policy change is made in one place.
+//
+// This is the USER-POLICY layer that runs BEFORE the SSRF / IP-pinning layer
+// (fetchPinned) — protocol + enforce_https + policy + a cheap private-IP
+// literal early-out. The DNS-resolve + rebind-safe connection pinning still
+// happen in fetchPinned() at connect time.
+
+/**
+ * Which egress surface a request rides. Only the `guarded` policy branches on
+ * it; `allow-all`/`allow-list`/`deny-all` treat every surface uniformly per
+ * host. REQUIRED at every call site — no default is safe (default-open would
+ * fail `http_request` open; default-gated would break `web_research`/search).
+ *
+ *  - 'full-control'  — arbitrary-target, credential-capable: `http_request`
+ *                      (any method) and `api_setup fetch_token`. Gated under
+ *                      `guarded` (the prompt-injection egress surface).
+ *  - 'discovery'     — credential-free reads used to explore: `web_research`
+ *                      read/search, `api_setup` bootstrap (openapi/docs GET).
+ *                      Open under `guarded` (still SSRF/enforce_https gated).
+ */
+export type EgressSurface = 'full-control' | 'discovery';
+
+/**
+ * Structural subset of ToolContext the host-policy gate reads. Kept structural
+ * (not an import of ToolContext) so this module stays free of a core-context
+ * dependency cycle — mirrors how isEndpointAcked takes the ack, not the profile.
+ */
+export interface HostPolicyContext {
+  networkPolicy: NetworkPolicy | undefined;
+  allowedHosts: ReadonlySet<string> | undefined;
+  allowedWildcards: string[];
+  enforceHttps: boolean;
+}
+
+/** True iff `hostname` is in the operator floor (exact host or wildcard apex). */
+function hostInFloor(hostname: string, ctx: HostPolicyContext): boolean {
+  if (ctx.allowedHosts?.has(hostname)) return true;
+  for (const domain of ctx.allowedWildcards) {
+    if (hostname === domain || hostname.endsWith(`.${domain}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Apply the configured `network_policy` to a single URL for the given surface.
+ * Throws `Blocked: …` (the friendly-message layer rewrites those) when the
+ * policy forbids it. Called BEFORE fetchPinned, and re-invoked per redirect hop
+ * so an allowed host can't 302 to a forbidden one.
+ *
+ * `guardedAckHosts` is the union of connected api_profiles' human-accepted
+ * egress hosts (`custom_endpoint_ack.hosts`, incl. an OAuth token_url). Computed
+ * in the handler where the ApiStore resolves and passed in — only consulted for
+ * a full-control surface under the `guarded` policy.
+ */
+export function assertHostPolicy(
+  rawUrl: string,
+  surface: EgressSurface,
+  ctx: HostPolicyContext | undefined,
+  guardedAckHosts?: ReadonlySet<string> | undefined,
+): void {
+  const parsed = new URL(rawUrl);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+
+  // HTTPS enforcement (localhost exempted for development).
+  if (ctx?.enforceHttps && parsed.protocol === 'http:') {
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
+      throw new Error('Blocked: HTTP not allowed — enforce_https is enabled. Use HTTPS.');
+    }
+  }
+
+  const policy = ctx?.networkPolicy;
+  switch (policy) {
+    case undefined:
+    case 'allow-all':
+      break;
+    case 'deny-all':
+      // 'air-gapped' keeps the friendly-message mapping match; blocks EVERY
+      // surface incl. discovery (web_research), unlike guarded.
+      throw new Error('Blocked: network access denied (air-gapped isolation)');
+    case 'allow-list':
+      // Authoritative operator allow-list, uniform across surfaces.
+      if (!ctx || !hostInFloor(hostname, ctx)) {
+        throw new Error(`Blocked: hostname "${hostname}" not in network allow-list`);
+      }
+      break;
+    case 'guarded': {
+      // Discovery surfaces stay open (still SSRF/enforce_https gated below).
+      if (surface === 'discovery') break;
+      // Full-control: reach only baseline ∪ operator floor ∪ human-accepted
+      // profile egress hosts. isAllowlistedEndpoint covers the vetted hosts +
+      // patterns (Azure/RFC1918/localhost); the floor is the operator escape
+      // hatch; guardedAckHosts admits a connected API's accepted host(s).
+      const allowed =
+        isAllowlistedEndpoint(rawUrl) ||
+        (ctx !== undefined && hostInFloor(hostname, ctx)) ||
+        (guardedAckHosts?.has(hostname) ?? false);
+      if (!allowed) {
+        throw new Error(`Blocked: hostname "${hostname}" not permitted under guarded egress policy`);
+      }
+      break;
+    }
+    default: {
+      // Fail closed on a value outside the enum (version skew / malformed) —
+      // never silently allow. Also a compile-time exhaustiveness check: a new
+      // NetworkPolicy value without a case above becomes a type error here.
+      const _exhaustive: never = policy;
+      void _exhaustive;
+      throw new Error('Blocked: network access denied (unrecognised egress policy)');
+    }
+  }
+
+  // Cheap early-out for literal-IP private targets — fetchPinned catches these
+  // anyway, but rejecting before any DNS attempt keeps the error synchronous.
+  if (isPrivateIP(hostname)) {
+    throw new Error(`Blocked: private IP address "${hostname}"`);
+  }
 }
 
 /**

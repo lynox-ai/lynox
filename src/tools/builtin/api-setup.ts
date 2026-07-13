@@ -580,7 +580,7 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const resp = await fetchWithValidatedRedirects(url, { signal: ac.signal }, agent.toolContext);
+      const resp = await fetchWithValidatedRedirects(url, { signal: ac.signal }, 'discovery', agent.toolContext);
       // Bootstrap fetches go around the http_request tool, so the session
       // limit didn't see them pre-1.5.0. Charge each successful fetch so a
       // pathological docs_url can't laundromat its way past the budget.
@@ -736,7 +736,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const resp = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, agent.toolContext);
+      const resp = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, 'discovery', agent.toolContext);
       // Charge the primary docs fetch against the session HTTP budget so
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
@@ -985,7 +985,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, agent.toolContext);
+          resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, 'discovery', agent.toolContext);
           // Charge OpenAPI bootstrap fetches against the session budget too.
           agent.sessionCounters.httpRequests++;
         } finally {
@@ -1344,12 +1344,20 @@ Next steps before calling create:
         // arbitrary attacker-supplied token_url regardless of the tenant's
         // network policy — a credential-exfil channel.
         response = await Promise.race([
+          // fetch_token is a full-control credentialed egress (posts the
+          // client_secret to token_url) — gated under `guarded`. The token_url
+          // host is in this profile's own custom_endpoint_ack (base_url +
+          // token_url were both accepted at save), so the accepted-host union
+          // admits it; a token_url no profile accepted stays blocked.
           fetchWithValidatedRedirects(oauth.token_url, {
             method: 'POST',
             headers,
             body,
             signal: ac.signal,
-          }, agent.toolContext),
+          }, 'full-control', agent.toolContext, undefined,
+          agent.toolContext?.networkPolicy === 'guarded'
+            ? (agent.toolContext.apiStore?.getAcceptedEgressHosts() ?? new Set<string>())
+            : undefined),
           wallTimeout,
         ]);
         // Charge the token exchange against the session HTTP budget so

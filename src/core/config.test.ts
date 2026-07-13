@@ -292,6 +292,12 @@ describe('Config', () => {
     expect(config.network_policy).toBe('allow-list');
   });
 
+  it('accepts guarded as a LYNOX_NETWORK_POLICY value', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'guarded';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().network_policy).toBe('guarded');
+  });
+
   it('saveUserConfig writes with 0600 permissions', async () => {
     const { saveUserConfig } = await import('./config.js');
     saveUserConfig({ api_key: 'sk-test-123', default_tier: 'fast' });

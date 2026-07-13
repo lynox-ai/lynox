@@ -4,7 +4,8 @@ import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { fetchPinned, isPrivateIP, flattenHeaders, redirectHopHeaders, isCrossOriginHop } from '../../core/network-guard.js';
+import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
+import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 
@@ -16,9 +17,10 @@ import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-
 // tool handler reads from `agent.toolContext` and threads it into
 // applyHostPolicy() + fetchWithValidatedRedirects().
 //
-// SSRF defense: isPrivateIP (decodes IPv4-mapped-IPv6 incl. hex form) and the
-// IP-pinning fetch helper come from network-guard.ts. fetchWithValidatedRedirects
-// applies the policy/enforce-https/allow-list checks here and delegates each
+// SSRF defense + user network-policy: the IP-pinning fetch helper (fetchPinned)
+// and the configurable network_policy gate (assertHostPolicy) both come from
+// network-guard.ts. fetchWithValidatedRedirects applies assertHostPolicy per hop
+// (protocol / enforce_https / policy / private-IP early-out) and delegates each
 // HTTP hop to fetchPinned(), which resolves DNS once + pins the connection to
 // the validated IP (closes the DNS-rebinding window between validate + connect).
 
@@ -28,68 +30,14 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
   if (technical.includes('unsupported protocol')) return 'Only HTTP and HTTPS connections are supported.';
   if (technical.includes('air-gapped')) return 'Network access is disabled in this security mode.';
+  if (technical.includes('guarded egress policy')) return 'That server is not reachable under the current egress policy. Connect it as an API via api_setup, or ask your operator to allow it.';
+  if (technical.includes('unrecognised egress policy')) return 'Network access is blocked by an unrecognised egress policy configuration.';
   if (technical.includes('allow-list')) return 'That server is not in the allowed list for this security mode.';
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
   if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
-}
-
-/**
- * Apply user-policy checks BEFORE the SSRF / IP-pinning layer:
- *  - protocol must be http/https
- *  - enforceHttps: reject plain HTTP unless target is localhost
- *  - networkPolicy: deny-all / allow-list
- *  - reject hostname that is itself a private-IP literal (cheap early-out)
- *
- * The DNS-resolve + private-IP check + IP-pinning all happen in fetchPinned()
- * — a single resolve that drives both validation and the socket connect, with
- * no rebind window in between.
- */
-function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
-  const parsed = new URL(rawUrl);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
-  }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-
-  // HTTPS enforcement (localhost exempted for development)
-  if (ctx?.enforceHttps && parsed.protocol === 'http:') {
-    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
-      throw new Error('Blocked: HTTP not allowed — enforce_https is enabled. Use HTTPS.');
-    }
-  }
-
-  // Network policy enforcement
-  if (ctx?.networkPolicy === 'deny-all') {
-    // 'Blocked:' prefix so the handler's friendly-message layer rewrites it
-    // (consistent with every other block); 'air-gapped' keeps the mapping match.
-    throw new Error('Blocked: network access denied (air-gapped isolation)');
-  }
-  if (ctx?.networkPolicy === 'allow-list') {
-    let allowed = false;
-    if (ctx.allowedHosts?.has(hostname)) {
-      allowed = true;
-    } else if (ctx.allowedWildcards.length > 0) {
-      for (const domain of ctx.allowedWildcards) {
-        if (hostname === domain || hostname.endsWith(`.${domain}`)) {
-          allowed = true;
-          break;
-        }
-      }
-    }
-    if (!allowed) {
-      throw new Error(`Blocked: hostname "${hostname}" not in network allow-list`);
-    }
-  }
-
-  // Cheap early-out for literal-IP private targets — fetchPinned would catch
-  // these anyway, but rejecting before any DNS attempt keeps the error
-  // synchronous + matches the legacy validateUrl flow.
-  if (isPrivateIP(hostname)) {
-    throw new Error(`Blocked: private IP address "${hostname}"`);
-  }
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -125,6 +73,9 @@ function shouldRewriteToGet(status: number, method: string): boolean {
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
+  // Which egress surface this ride is — REQUIRED so the `guarded` policy can
+  // open discovery reads while gating full-control targets (no safe default).
+  surface: EgressSurface,
   ctx?: ToolContext | undefined,
   // Slice B: for a capability-contract-governed write, every redirect hop must
   // ALSO stay within the contract — `isDangerous`/the consent gate only saw the
@@ -133,6 +84,10 @@ export async function fetchWithValidatedRedirects(
   // Returns true if the hop is permitted. Omitted for non-contract calls (no
   // redirect-behaviour change).
   redirectGuard?: ((nextUrl: string, method: string) => boolean) | undefined,
+  // Union of connected api_profiles' human-accepted egress hosts, consulted only
+  // for a full-control surface under `guarded`. Computed in the handler (where
+  // the ApiStore resolves) and re-checked here per redirect hop.
+  guardedAckHosts?: ReadonlySet<string> | undefined,
 ): Promise<Response> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
@@ -143,7 +98,7 @@ export async function fetchWithValidatedRedirects(
   let headers = flattenHeaders(init.headers);
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    applyHostPolicy(currentUrl, ctx);
+    assertHostPolicy(currentUrl, surface, ctx, guardedAckHosts);
     const requestInit: RequestInit = {
       ...init,
       method,
@@ -562,6 +517,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
+    // Under the `guarded` egress policy a full-control http_request may reach
+    // only baseline ∪ the operator floor ∪ hosts a connected api_profile was
+    // human-accepted for. Compute that accepted-host union here (the handler is
+    // where the ApiStore resolves) and gate the target BEFORE the exfil /
+    // write-consent prompts below — so a to-be-blocked host never triggers a
+    // pointless consent prompt and returns the correct block reason.
+    // fetchWithValidatedRedirects re-checks it per redirect hop.
+    const guardedAckHosts =
+      toolContext?.networkPolicy === 'guarded'
+        ? (toolContext.apiStore?.getAcceptedEgressHosts() ?? new Set<string>())
+        : undefined;
+    if (toolContext?.networkPolicy === 'guarded') {
+      try {
+        assertHostPolicy(input.url, 'full-control', toolContext, guardedAckHosts);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Blocked:')) {
+          return friendlyBlockMessage(err.message);
+        }
+        // Non-Blocked (e.g. malformed URL) — defer to existing downstream handling.
+      }
+    }
+
     // GET-based exfiltration detection
     if (method === 'GET' || method === 'HEAD') {
       const exfilWarning = detectGetExfiltration(input.url);
@@ -675,7 +652,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
       const response = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, toolContext, redirectGuard),
+        fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;

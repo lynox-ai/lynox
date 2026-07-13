@@ -778,7 +778,7 @@ describe('DuckDuckGoProvider', () => {
 });
 
 describe('network policy gating (search query)', () => {
-  const ctxWith = (policy: 'deny-all' | 'allow-list', hosts?: string[]) => {
+  const ctxWith = (policy: 'deny-all' | 'allow-list' | 'guarded', hosts?: string[]) => {
     const c = createToolContext({});
     applyNetworkPolicy(c, policy, hosts);
     return c;
@@ -816,6 +816,20 @@ describe('network policy gating (search query)', () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
     const provider = new SearXNGProvider('http://localhost:8888');
     await provider.search('q');
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
+  it('SearXNG: guarded leaves the query open (web_research is a discovery surface)', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+    const provider = new SearXNGProvider('https://searx.example.org');
+    await provider.search('q', undefined, ctxWith('guarded'));
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
+  it('DuckDuckGo: guarded leaves the query open (POST search on an off-baseline host)', async () => {
+    mockFetch.mockResolvedValue({ ok: true, text: async () => '<html></html>' });
+    const provider = new DuckDuckGoProvider();
+    await provider.search('q', undefined, ctxWith('guarded'));
     expect(mockFetch).toHaveBeenCalled();
   });
 });

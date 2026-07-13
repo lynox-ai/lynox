@@ -1046,6 +1046,81 @@ describe('httpRequestTool', () => {
     });
   });
 
+  describe('network policy: guarded', () => {
+    // guarded = full-control (http_request) reaches only baseline ∪ operator
+    // floor ∪ hosts a connected api_profile was human-accepted for.
+
+    it('blocks an off-baseline host with no accepting profile', async () => {
+      applyNetworkPolicy(testCtx, 'guarded', undefined);
+      mockDnsPublic();
+      // Early-gate hard-block → agent-visible actionable string (not a throw).
+      const result = await handler({ url: 'https://attacker.example.org/v1' }, makeAgent());
+      expect(result).toContain('not reachable under the current egress policy');
+    });
+
+    it('allows an operator-floor host under guarded', async () => {
+      applyNetworkPolicy(testCtx, 'guarded', ['ops.example.com']);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const result = await handler({ url: 'https://ops.example.com/x' }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+
+    it('allows a human-accepted profile host incl. an OAuth token_url ≠ base_url (P7)', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'provider',
+        name: 'Provider',
+        base_url: 'https://api.provider.net/v1',
+        description: 'oauth2 profile; token endpoint on a different host',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://token.provider.net/oauth/token' } },
+        // Both egress hosts accepted out-of-band at save (base_url + token_url).
+        custom_endpoint_ack: { accepted: true, hosts: ['api.provider.net', 'token.provider.net'], accepted_at: new Date().toISOString() },
+      } as never);
+      testCtx.apiStore = store;
+      applyNetworkPolicy(testCtx, 'guarded', undefined);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      // The token_url host (≠ base_url) is admitted via the accepted-host union.
+      // No secretStore on the stub agent → the OAuth attach block is skipped.
+      expect(await handler({ url: 'https://token.provider.net/oauth/token' }, makeAgent())).toContain('HTTP 200');
+      // A host NOT in any profile's acceptance stays blocked.
+      const blocked = await handler({ url: 'https://unaccepted.example.com' }, makeAgent());
+      expect(blocked).toContain('not reachable under the current egress policy');
+    });
+
+    it('allows a credential-less (no-auth) profile host under guarded (P7)', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'credsfree',
+        name: 'Creds-free',
+        base_url: 'https://api.creds-free.net/v1',
+        description: 'no engine-managed credential; still human-accepted at save',
+        custom_endpoint_ack: { accepted: true, hosts: ['api.creds-free.net'], accepted_at: new Date().toISOString() },
+      } as never);
+      testCtx.apiStore = store;
+      applyNetworkPolicy(testCtx, 'guarded', undefined);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      expect(await handler({ url: 'https://api.creds-free.net/v1/data' }, makeAgent())).toContain('HTTP 200');
+    });
+
+    it('blocks a redirect from an allowed host to an off-baseline host (per-hop)', async () => {
+      applyNetworkPolicy(testCtx, 'guarded', ['ok.example.com']);
+      mockDnsPublic();
+      // ok.example.com is floor-allowed and 302s to an off-baseline attacker host;
+      // the per-hop re-check inside fetchWithValidatedRedirects must block hop 2.
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 302,
+        headers: { location: 'https://evil.com/steal' },
+      })));
+      await expect(handler({ url: 'https://ok.example.com/start' }, makeAgent()))
+        .rejects.toThrow('not reachable under the current egress policy');
+    });
+  });
+
   describe('Response shaping via API profile', () => {
     it('applies response_shape when the hostname has a profile', async () => {
       const { ApiStore } = await import('../../core/api-store.js');

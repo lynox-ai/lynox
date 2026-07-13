@@ -477,6 +477,14 @@ export interface LynoxUserConfig {
    * unchanged. 'deny-all' = those tools cannot reach the network. 'allow-list' =
    * they may reach ONLY the hosts in `network_allowed_hosts`.
    *
+   * 'guarded' = surface-aware lockdown: the full-control surfaces (`http_request`
+   * any method, `api_setup fetch_token`) may reach ONLY baseline vetted hosts ∪
+   * the `network_allowed_hosts` operator floor ∪ the hosts a connected api_profile
+   * was human-accepted for (`custom_endpoint_ack`), while the discovery surfaces
+   * (`web_research` read/search, `api_setup` bootstrap) stay open (still SSRF- and
+   * enforce_https-gated). Blocks credential-free active egress to off-baseline
+   * hosts a prompt-injected agent could steer, without breaking "connect any API".
+   *
    * SCOPE — this is NOT a full process air-gap. It gates the agent-driven HTTP
    * tool surface only. It does NOT gate: the LLM provider call (separate client),
    * mail IMAP/SMTP, push notifications, Google Workspace, voice transcribe/TTS,
