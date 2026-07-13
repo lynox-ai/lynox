@@ -97,6 +97,33 @@ export interface CatalogProviderEntry {
    * not prove a model; only a real call does.
    */
   verification: 'native' | 'verified' | 'experimental';
+  /**
+   * Vault slot this entry's API key lives in. `null` = the entry needs no
+   * credential at all (loopback runtimes; Vertex, which uses GCP OAuth).
+   *
+   * This exists because the slot CANNOT be derived from `provider` alone. Every
+   * preset here serialises to `provider: 'openai'` on the wire — Mistral, Groq,
+   * Together, Fireworks and a local Ollama are all "openai" — so a provider-keyed
+   * lookup hands whichever key sits in the openai slot to whatever endpoint is
+   * configured. That is a cross-provider credential leak: pick the Groq tile with
+   * a Mistral key stored and the Mistral key is sent, as a bearer token, to Groq.
+   * (`resolveProviderApiKey` already reasons about exactly this hazard for the
+   * Anthropic legacy fallback; it just had no way to see the endpoint.)
+   *
+   * So the slot is a property of the ENDPOINT, not of the wire format, and it
+   * belongs on the catalog entry that pins that endpoint.
+   *
+   * Back-compat: `mistral` and the generic `openai-compat` tile keep the historic
+   * `MISTRAL_API_KEY` slot — existing installs already store their key there, and
+   * moving it would silently log them out.
+   */
+  vault_slot?: string | null;
+  /**
+   * Example model id for the free-text field a `models: []` entry renders. The
+   * generic placeholder is a Claude id, which is actively misleading on an Ollama
+   * or Groq tile — the user would copy a model that endpoint has never heard of.
+   */
+  model_placeholder?: string;
   notes?: string;
 }
 
@@ -273,6 +300,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'ollama',
+    model_placeholder: 'qwen2.5',
+    vault_slot: null,   // local runtime — never lend it a vault key
     display_name: 'Ollama (local)',
     models: [],
     requires_base_url: false,
@@ -289,6 +318,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'lmstudio',
+    model_placeholder: 'qwen2.5-7b-instruct',
+    vault_slot: null,   // local runtime — never lend it a vault key
     display_name: 'LM Studio (local)',
     models: [],
     requires_base_url: false,
@@ -301,6 +332,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'vllm',
+    model_placeholder: 'Qwen/Qwen2.5-7B-Instruct',
+    vault_slot: null,   // local runtime — never lend it a vault key
     display_name: 'vLLM (self-hosted)',
     models: [],
     requires_base_url: false,
@@ -313,6 +346,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'localai',
+    model_placeholder: 'qwen2.5-7b-instruct',
+    vault_slot: null,   // local runtime — never lend it a vault key
     display_name: 'LocalAI (self-hosted)',
     models: [],
     requires_base_url: false,
@@ -325,6 +360,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'groq',
+    model_placeholder: 'llama-3.3-70b-versatile',
+    vault_slot: 'GROQ_API_KEY',
     display_name: 'Groq',
     models: [],
     requires_base_url: false,
@@ -337,6 +374,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'together',
+    model_placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    vault_slot: 'TOGETHER_API_KEY',
     display_name: 'Together AI',
     models: [],
     requires_base_url: false,
@@ -349,6 +388,8 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
   {
     provider: 'openai',
     preset_id: 'fireworks',
+    model_placeholder: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    vault_slot: 'FIREWORKS_API_KEY',
     display_name: 'Fireworks AI',
     models: [],
     requires_base_url: false,
@@ -364,6 +405,7 @@ export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'anthropic',
     display_name: 'Anthropic',
+    vault_slot: 'ANTHROPIC_API_KEY',
     models: ANTHROPIC_MODELS,
     requires_base_url: false,
     requires_region: false,
@@ -379,6 +421,7 @@ export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'openai',
     preset_id: 'mistral',
+    vault_slot: 'MISTRAL_API_KEY',
     display_name: 'Mistral',
     models: MISTRAL_MODELS,
     requires_base_url: false,
@@ -392,6 +435,7 @@ export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'custom',
     display_name: 'Anthropic-compatible endpoint',
+    vault_slot: 'CUSTOM_API_KEY',
     models: [],
     requires_base_url: true,
     requires_region: false,
@@ -402,6 +446,7 @@ export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'openai',
     preset_id: 'openai-compat',
+    vault_slot: 'MISTRAL_API_KEY',   // historic slot — moving it would log existing installs out
     display_name: 'OpenAI-compatible endpoint',
     models: [],
     requires_base_url: true,
@@ -413,6 +458,7 @@ export const LLM_CATALOG: LLMCatalog = [
   {
     provider: 'vertex',
     display_name: 'Google Vertex AI (Claude)',
+    vault_slot: null,   // GCP OAuth, not an API key
     models: VERTEX_MODELS,
     requires_base_url: false,
     requires_region: true,
@@ -421,18 +467,6 @@ export const LLM_CATALOG: LLMCatalog = [
     notes: 'Same Claude family routed through Vertex. Requires GCP project + region.',
   },
 ];
-
-/**
- * Catalog entries whose behaviour on the wire is actually proven — `native`
- * providers plus any preset a real tool-calling round-trip has verified. The
- * complement (`experimental`) connects, but its tool-calling is unproven, so it
- * carries a caveat in the UI and should not be recommended as a default.
- */
-export function verifiedProviderKeys(catalog: LLMCatalog = LLM_CATALOG): string[] {
-  return catalog
-    .filter((entry) => entry.verification !== 'experimental')
-    .map(catalogEntryKey);
-}
 
 /**
  * Stable UI key per catalog entry. Multiple entries can share a `provider`
@@ -447,13 +481,61 @@ export function catalogEntryKey(entry: CatalogProviderEntry): string {
  * Loopback hosts. Several local-runtime presets share these hostnames and are
  * distinguished only by port, so `resolveCatalogKey` switches to an exact
  * host:port comparison for them.
+ *
+ * `[::1]` is the bracketed form `URL.hostname` actually returns for IPv6; the
+ * bare `::1` never appears there, so it is not listed.
  */
 function isLoopbackHost(hostname: string): boolean {
   return hostname === 'localhost'
     || hostname === '127.0.0.1'
     || hostname === '0.0.0.0'
-    || hostname === '[::1]'
-    || hostname === '::1';
+    || hostname === '[::1]';
+}
+
+/**
+ * The vault slot the key for a given (provider, endpoint) pair lives in.
+ *
+ * This is the fix for a cross-provider credential leak: the slot cannot be
+ * derived from `provider` alone, because Mistral, Groq, Together, Fireworks and
+ * a local Ollama all serialise to `provider: 'openai'`. Resolving by provider
+ * hands whatever key sits in the openai slot to whatever endpoint is configured
+ * — so a user with a Mistral key who selects Groq would send that Mistral key,
+ * as a bearer token, to Groq. Resolve by ENDPOINT instead.
+ *
+ * Returns `null` when the endpoint needs no credential at all (loopback
+ * runtimes, Vertex) — callers must then send no key rather than fall back to a
+ * provider default, which would reintroduce the leak.
+ *
+ * Returns `undefined` when the pair matches no catalog entry, leaving the caller
+ * to apply its own default (see `resolveProviderApiKey`).
+ */
+export function vaultSlotForEndpoint(
+  provider: LLMProvider | undefined | null,
+  apiBaseURL: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string | null | undefined {
+  if (!provider) return undefined;
+  const key = resolveCatalogKey(provider, apiBaseURL, catalog);
+  const entry = catalog.find((e) => catalogEntryKey(e) === key);
+  return entry?.vault_slot;
+}
+
+/**
+ * Does this endpoint require an API key at all?
+ *
+ * A loopback runtime does not — Ollama and friends serve unauthenticated on the
+ * user's own machine. Readiness checks must not demand a key there, or a working
+ * local install would sit behind a setup banner it can never satisfy.
+ *
+ * Conservative by default: an endpoint we do not recognise is assumed to need
+ * one, so an unknown host never silently skips its credential check.
+ */
+export function endpointNeedsCredential(
+  provider: LLMProvider | undefined | null,
+  apiBaseURL: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): boolean {
+  return vaultSlotForEndpoint(provider, apiBaseURL, catalog) !== null;
 }
 
 /** Look up a single provider entry. Returns undefined when the provider isn't catalogued. */

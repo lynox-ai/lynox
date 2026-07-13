@@ -177,14 +177,15 @@ export function resolveSpawnChildProviderConfig(input: {
   parent: ProviderConfigSnapshot | null;
   baseProvider: LLMProvider;
   userConfig: LynoxUserConfig;
-  resolveKey: (provider: LLMProvider) => string | undefined;
+  /** Endpoint-aware: 'openai' alone cannot tell Mistral from Groq from a local Ollama. */
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined;
 }): ChildProviderConfig {
   const { hybridSlot, routingMode, profile, parent, baseProvider, userConfig, resolveKey } = input;
 
   if (hybridSlot.crossProviderSlot) {
     return {
       provider: hybridSlot.provider,
-      apiKey: hybridSlot.apiKey ?? resolveKey(hybridSlot.provider),
+      apiKey: hybridSlot.apiKey ?? resolveKey(hybridSlot.provider, hybridSlot.apiBaseURL),
       apiBaseURL: hybridSlot.apiBaseURL,
       openaiModelId: hybridSlot.openaiModelId,
       openaiAuth: undefined,
@@ -194,7 +195,7 @@ export function resolveSpawnChildProviderConfig(input: {
   if (!profile && routingMode === 'hybrid') {
     return {
       provider: baseProvider,
-      apiKey: resolveKey(baseProvider),
+      apiKey: resolveKey(baseProvider, userConfig.api_base_url),
       apiBaseURL: userConfig.api_base_url,
       openaiModelId: userConfig.openai_model_id,
       openaiAuth: undefined,
@@ -335,7 +336,7 @@ async function executeThinker(
     parent: readParentProviderConfig(parentAgent),
     baseProvider,
     userConfig,
-    resolveKey: (provider) => resolveProviderApiKey({ provider, secretStore: parentAgent.secretStore, userConfig }),
+    resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: parentAgent.secretStore, userConfig }),
   });
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise

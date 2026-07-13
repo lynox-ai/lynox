@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, verifiedProviderKeys } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
 
 describe('LLM_CATALOG', () => {
@@ -43,15 +43,21 @@ describe('LLM_CATALOG', () => {
     }
   });
 
-  it('only entries with a proven wire are reported as verified', () => {
+  it('only entries with a proven wire are non-experimental', () => {
     // The two native providers, plus every preset whose tool-calling has been
     // PROVEN by a real round-trip in `tests/online/provider-preset-reachability`.
     //
     // `ollama` earned its place with a full tool_use → tool_result → answer run
     // on qwen2.5:7b — mutation-checked, so the assertion is known to be capable
     // of failing. The rest connect but are unproven: they stay `experimental`,
-    // and the settings UI says so on the tile.
-    expect(verifiedProviderKeys().sort()).toEqual(['anthropic', 'mistral', 'ollama']);
+    // and the settings UI says so on the tile. Adding a preset without proving
+    // it therefore fails HERE, which is the point.
+    const proven = LLM_CATALOG
+      .filter((e) => e.verification !== 'experimental')
+      .map(catalogEntryKey)
+      .sort();
+
+    expect(proven).toEqual(['anthropic', 'mistral', 'ollama']);
   });
 
   // Per-entry requires_base_url + requires_region matrix. UI uses these

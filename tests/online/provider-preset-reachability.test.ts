@@ -151,9 +151,29 @@ async function preflight(
       // configuration problem, not a wire-compatibility fact. Skip, don't fail.
       return { ok: false, reason: `endpoint returned ${res.status}` };
     }
-    const body = (await res.json()) as { data?: Array<{ id?: string }> };
-    const served = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
-    if (served.length > 0 && !served.includes(model)) {
+    // Shape-tolerant: most endpoints return `{data: [...]}`, some return a bare
+    // array. Anything else (a random service that happens to hold the port — the
+    // LocalAI default :8080 is a popular one) is NOT an OpenAI-compatible model
+    // list, and we must not point an agent at it.
+    const body: unknown = await res.json();
+    const raw = Array.isArray(body)
+      ? body
+      : (body as { data?: unknown }).data;
+    if (!Array.isArray(raw)) {
+      return { ok: false, reason: `no OpenAI-compatible model list at ${baseUrl}` };
+    }
+    const served = raw
+      .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
+      .filter((id): id is string => typeof id === 'string');
+
+    // An EMPTY list is the "Ollama is running but the model was never pulled"
+    // case — the exact one this preflight exists to catch. Treating it as "fine,
+    // carry on" (the old `served.length > 0 &&` guard did) sails past it and then
+    // fails deep inside the agent loop with a misleading error.
+    if (served.length === 0) {
+      return { ok: false, reason: `endpoint serves no models (is '${model}' pulled?)` };
+    }
+    if (!served.includes(model)) {
       return { ok: false, reason: `model '${model}' not served (has: ${served.slice(0, 3).join(', ')}…)` };
     }
     return { ok: true };
@@ -226,15 +246,30 @@ describe('provider preset reachability (real API — tool-calling round-trip)', 
     const key = catalogEntryKey(entry);
     const baseUrl = entry.base_url_default!;
 
-    it(`${key}: drives a full tool_use → tool_result → answer round-trip`, async () => {
+    it(`${key}: drives a full tool_use → tool_result → answer round-trip`, async (ctx) => {
+      // `ctx.skip()`, NOT a bare `return`. A `return` reports the case as PASSED,
+      // and this file is inside the default vitest include (`tests/**`), so in CI
+      // — where no runtime is up and no key is set — seven green "passes" would
+      // appear having touched nothing at all, while `catalog.test.ts` pins
+      // `ollama` as `verified` on their supposed authority. That is precisely the
+      // skip-green-is-not-pass-green trap this suite exists to prevent; it must
+      // not be built into the suite itself. A skipped case must READ as skipped.
       const testCase = resolveCase(key);
       if (!testCase) {
-        console.log(`[skip] ${key}: no API key configured`);
+        ctx.skip(`${key}: no API key configured`);
         return;
       }
       const pre = await preflight(baseUrl, testCase.apiKey, testCase.model);
       if (!pre.ok) {
-        console.log(`[skip] ${key}: ${pre.reason}`);
+        // A preset we claim is `verified` but cannot exercise is the dangerous
+        // case: the claim outlives its evidence. Say so loudly on the way past.
+        if (entry.verification === 'verified') {
+          console.warn(
+            `[!] ${key} is marked 'verified' in the catalog but was NOT exercised `
+            + `in this run (${pre.reason}). The claim rests on an earlier run.`,
+          );
+        }
+        ctx.skip(`${key}: ${pre.reason}`);
         return;
       }
 

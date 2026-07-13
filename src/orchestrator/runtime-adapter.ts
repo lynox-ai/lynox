@@ -282,7 +282,7 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
 function resolveStepSlotCreds(config: LynoxUserConfig, tier: ModelTier): ReturnType<typeof resolveCrossProviderSlotCreds> {
   const baseProvider = config.provider ?? getActiveProvider();
   const resolveKey = (provider: LLMProvider): string | undefined => {
-    const resolved = resolveProviderApiKey({ provider, secretStore: undefined, userConfig: config });
+    const resolved = resolveProviderApiKey({ provider, apiBaseURL: config.api_base_url, secretStore: undefined, userConfig: config });
     return resolved ?? (provider === baseProvider ? config.api_key : undefined);
   };
   return resolveCrossProviderSlotCreds(tier, baseProvider, resolveKey);

@@ -1,7 +1,13 @@
 // Canonical provider → vault-slot map. Mirrors LLMSettings.svelte's VAULT_SLOTS.
+//
+// This map is the FALLBACK, used only when the caller cannot tell us which
+// endpoint the key is destined for. The authoritative answer is per-endpoint and
+// lives on the catalog entry (`vault_slot`), because several distinct vendors
+// share `provider: 'openai'` — see `vaultSlotForEndpoint`.
 
 import type { LLMProvider } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
+import { LLM_CATALOG, vaultSlotForEndpoint } from './catalog.js';
 
 export const VAULT_SLOT_BY_PROVIDER: Readonly<Record<LLMProvider, string | null>> = Object.freeze({
   anthropic: 'ANTHROPIC_API_KEY',
@@ -23,9 +29,19 @@ const SECONDARY_SLOTS: Readonly<Record<LLMProvider, ReadonlyArray<string>>> = Ob
   custom: [],
 });
 
+/**
+ * Every vault slot that holds an LLM provider credential — the provider-default
+ * map, the SDK aliases, AND every per-endpoint slot declared by a catalog preset
+ * (GROQ_API_KEY, …). Derived from the catalog rather than hand-listed, so adding
+ * a preset with a new slot cannot silently leave that slot unrecognised by the
+ * callers that gate on this set (e.g. the settings API's key-write path).
+ */
 export const PROVIDER_KEY_SLOTS: ReadonlySet<string> = new Set([
   ...Object.values(VAULT_SLOT_BY_PROVIDER).filter((s): s is string => s !== null),
   ...Object.values(SECONDARY_SLOTS).flat(),
+  ...LLM_CATALOG
+    .map((e) => e.vault_slot)
+    .filter((s): s is string => typeof s === 'string'),
 ]);
 
 export function vaultSlotForProvider(provider: LLMProvider | undefined | null): string | null {
@@ -43,6 +59,22 @@ export interface ResolveProviderApiKeyInput {
   provider: LLMProvider | undefined;
   secretStore: SecretStoreReader | null | undefined;
   /**
+   * The endpoint the key would actually be SENT to. Optional, but pass it
+   * wherever it is in scope — it is what stops a cross-provider credential leak.
+   *
+   * `provider` alone is not enough to pick a vault slot: Mistral, Groq, Together,
+   * Fireworks and a local Ollama all serialise to `provider: 'openai'`. Keying
+   * only on the provider therefore lends whatever key sits in the openai slot to
+   * whatever endpoint happens to be configured — a user with a Mistral key who
+   * selects Groq would send that Mistral key, as a bearer token, to Groq.
+   *
+   * With this set, the slot comes from the catalog entry that pins the endpoint,
+   * and a loopback runtime (which needs no credential) correctly resolves to NO
+   * key rather than borrowing someone else's. Omitting it preserves the historic
+   * provider-keyed behaviour for callers that genuinely have no endpoint in hand.
+   */
+  apiBaseURL?: string | undefined;
+  /**
    * Used only for the Anthropic legacy `userConfig.api_key` fallback. Carries
    * the tenant's BASE `provider` so the fallback can confirm `api_key` really
    * is an Anthropic key before lending it (undefined = legacy anthropic default).
@@ -51,15 +83,27 @@ export interface ResolveProviderApiKeyInput {
 }
 
 /**
- * Resolve the API key for the active LLM provider with priority
+ * Resolve the API key for the active LLM endpoint with priority
  * env > vault > config.api_key (legacy Anthropic-only fallback).
  *
- * Returns `undefined` if nothing is configured for the provider's slot.
- * Vertex returns `undefined` — its credentials are GCP OAuth, not a key.
+ * Returns `undefined` if nothing is configured, if the provider has no slot
+ * (Vertex — GCP OAuth, not a key), or if the endpoint needs no credential at all
+ * (a loopback runtime). The last case is deliberate: returning a provider-default
+ * key there is exactly the leak this function guards against.
  */
 export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string | undefined {
-  const { provider, secretStore, userConfig } = input;
-  const slot = vaultSlotForProvider(provider);
+  const { provider, secretStore, userConfig, apiBaseURL } = input;
+
+  // Endpoint-bound slot wins when we know the endpoint. `null` = this endpoint
+  // takes no credential (loopback) — honour that and send nothing, rather than
+  // falling through to the provider default and leaking another vendor's key.
+  const byEndpoint = apiBaseURL !== undefined
+    ? vaultSlotForEndpoint(provider, apiBaseURL)
+    : undefined;
+  if (byEndpoint === null) return undefined;
+
+  const providerSlot = vaultSlotForProvider(provider);
+  const slot = byEndpoint ?? providerSlot;
   if (!slot) return undefined;
 
   // Primary slot: env > vault.
@@ -68,9 +112,15 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
   const primaryVault = secretStore?.resolve(slot);
   if (primaryVault && primaryVault.length > 0) return primaryVault;
 
-  // Secondary slots: official SDK env-var aliases (e.g. OPENAI_API_KEY for
-  // openai-compat providers). Same env > vault order.
-  const secondary = provider ? SECONDARY_SLOTS[provider] : undefined;
+  // Secondary slots: official SDK env-var aliases (OPENAI_API_KEY for
+  // openai-compat callers). Same env > vault order.
+  //
+  // ONLY on the provider-default slot. An endpoint with its own slot (Groq,
+  // Together, Fireworks) must never fall back to the shared openai aliases —
+  // that is the same cross-vendor leak by another door: an `OPENAI_API_KEY` in
+  // the environment would otherwise be bearer-tokened straight to Groq.
+  const allowSecondary = slot === providerSlot;
+  const secondary = allowSecondary && provider ? SECONDARY_SLOTS[provider] : undefined;
   if (secondary) {
     for (const altSlot of secondary) {
       const altEnv = process.env[altSlot];
@@ -127,7 +177,7 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
 export function enrichTierSetCreds(
   tierSet: TierSet,
   baseProvider: LLMProvider,
-  resolveKey: (provider: LLMProvider) => string | undefined,
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined,
 ): TierSet {
   const out: TierSet = {};
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
@@ -137,9 +187,11 @@ export function enrichTierSetCreds(
       out[tier] = slot;
       continue;
     }
-    // Hybrid slots store a catalogued LLMProvider ('anthropic' | 'openai' for
-    // the Mistral preset); the vault-slot map keys off exactly that.
-    const key = resolveKey(slot.provider as LLMProvider);
+    // A hybrid slot names a catalogued provider AND (for openai-compat ones) its
+    // own endpoint. Both are needed: 'openai' alone cannot distinguish Mistral
+    // from Groq from a local Ollama, and resolving on the provider would inject
+    // whichever key sits in the shared slot into a slot pointing elsewhere.
+    const key = resolveKey(slot.provider as LLMProvider, slot.api_base_url);
     out[tier] = key ? { ...slot, api_key: key } : slot;
   }
   return out;

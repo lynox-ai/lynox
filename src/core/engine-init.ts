@@ -613,6 +613,10 @@ export async function initMemoryInstance(
   // the MISTRAL_API_KEY slot on openai, CUSTOM_API_KEY on custom, etc.
   const memoryApiKey = resolveProviderApiKey({
     provider: userConfig.provider,
+    // Endpoint-bound: the memory client is pointed at `api_base_url`, so the key
+    // must come from THAT endpoint's slot — resolving on 'openai' alone would
+    // send a Mistral key to whatever gateway the user actually configured.
+    apiBaseURL: userConfig.api_base_url,
     secretStore,
     userConfig,
   });

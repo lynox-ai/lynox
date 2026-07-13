@@ -30,7 +30,108 @@ describe('VAULT_SLOT_BY_PROVIDER', () => {
     // Secondary slot: OPENAI_API_KEY follows the OpenAI SDK env-var
     // convention so users who set that get picked up for openai-compat.
     expect(PROVIDER_KEY_SLOTS.has('OPENAI_API_KEY')).toBe(true);
-    expect(PROVIDER_KEY_SLOTS.size).toBe(4);
+    // Per-endpoint slots contributed by catalog presets. Derived from the
+    // catalog, so a new preset's slot is recognised by the callers that gate on
+    // this set (the settings API's key-write path) without a second edit here.
+    expect(PROVIDER_KEY_SLOTS.has('GROQ_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.has('TOGETHER_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.has('FIREWORKS_API_KEY')).toBe(true);
+    expect(PROVIDER_KEY_SLOTS.size).toBe(7);
+  });
+});
+
+// The bug these pin: EVERY OpenAI-compatible vendor — Mistral, Groq, Together,
+// Fireworks, a local Ollama — serialises to `provider: 'openai'`. Resolving the
+// vault slot on the provider alone therefore hands whichever key sits in the
+// shared openai slot to whatever endpoint happens to be configured. A user with
+// a Mistral key who picks the Groq tile would bearer-token their Mistral key
+// straight to Groq. Same class as the Anthropic legacy-fallback hazard this
+// module already guards (see the comment on the `config.api_key` branch) — it
+// just had no way to see the endpoint.
+describe('resolveProviderApiKey — endpoint-bound slots (cross-provider leak)', () => {
+  const GROQ = 'https://api.groq.com/openai/v1';
+  const OLLAMA = 'http://localhost:11434/v1';
+  const MISTRAL = 'https://api.mistral.ai/v1';
+
+  beforeEach(() => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('CUSTOM_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('GROQ_API_KEY', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT hand the Mistral key to a Groq endpoint', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: GROQ,
+      secretStore: null,
+    });
+    expect(key).toBeUndefined();
+  });
+
+  it('does NOT fall back to the OPENAI_API_KEY alias for a Groq endpoint either', () => {
+    // The same leak by another door: the SDK-alias fallback is scoped to the
+    // provider-default slot and must not apply to an endpoint with its own.
+    vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: GROQ,
+      secretStore: null,
+    });
+    expect(key).toBeUndefined();
+  });
+
+  it('uses the Groq endpoint’s own slot when it is set', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('GROQ_API_KEY', 'groq-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: GROQ,
+      secretStore: null,
+    });
+    expect(key).toBe('groq-secret');
+  });
+
+  it('lends NO key at all to a loopback runtime', () => {
+    // Ollama serves unauthenticated on the user's own machine. Sending it a
+    // stored vendor key would put a live credential on the wire — in plaintext,
+    // over http, to whatever process happens to hold that port.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    const key = resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: OLLAMA,
+      secretStore: null,
+    });
+    expect(key).toBeUndefined();
+  });
+
+  it('still resolves the Mistral preset from the historic slot (back-compat)', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: MISTRAL, secretStore: null }))
+      .toBe('mistral-secret');
+  });
+
+  it('still resolves an unrecognised OpenAI-compatible host from the historic slot', () => {
+    // The generic tile is where existing installs live — their key is in
+    // MISTRAL_API_KEY and moving it would silently log them out.
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({
+      provider: 'openai',
+      apiBaseURL: 'https://some-proxy.example.com/v1',
+      secretStore: null,
+    })).toBe('mistral-secret');
+  });
+
+  it('is unchanged when no endpoint is supplied (legacy callers)', () => {
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    expect(resolveProviderApiKey({ provider: 'openai', secretStore: null }))
+      .toBe('mistral-secret');
   });
 });
 

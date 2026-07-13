@@ -1900,11 +1900,15 @@ export class Session {
       apiKey: slotCfg.crossProviderSlot
         ? (slotCfg.apiKey ?? resolveProviderApiKey({
             provider: effectiveProvider,
+            // Same endpoint the client below is pointed at — resolving the key on
+            // the provider alone would lend a Mistral key to a Groq slot.
+            apiBaseURL: slotCfg.apiBaseURL,
             secretStore: engine.getSecretStore(),
             userConfig,
           }))
         : (this._profileOverride?.api_key ?? resolveProviderApiKey({
             provider: this._profileOverride?.provider ?? userConfig.provider,
+            apiBaseURL: this._profileOverride?.api_base_url ?? userConfig.api_base_url,
             secretStore: engine.getSecretStore(),
             userConfig,
           })),

@@ -238,7 +238,7 @@ export interface CrossProviderSlotCreds {
 export function resolveCrossProviderSlotCreds(
   tier: ModelTier,
   baseProvider: LLMProvider,
-  resolveKey: (provider: LLMProvider) => string | undefined,
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined,
 ): CrossProviderSlotCreds {
   const snap = resolveTierModel(tier, baseProvider);
   const hybrid = hybridSlotClientConfig(snap, baseProvider);
@@ -246,7 +246,7 @@ export function resolveCrossProviderSlotCreds(
     return {
       provider: hybrid.provider,
       model: hybrid.openaiModelId,
-      apiKey: hybrid.apiKey ?? resolveKey(hybrid.provider),
+      apiKey: hybrid.apiKey ?? resolveKey(hybrid.provider, hybrid.apiBaseURL),
       apiBaseURL: hybrid.apiBaseURL,
       openaiModelId: hybrid.openaiModelId,
       crossProviderSlot: true,
