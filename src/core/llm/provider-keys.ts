@@ -163,7 +163,7 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
  *  - an explicit `api_key` (set by a power-user / managed transform) is kept;
  *  - a SAME-provider slot is left untouched so `clientForTierSnapshot` keeps
  *    reusing the ambient client + its key (byte-parity, no extra client);
- *  - a CROSS-provider slot gets `resolveKey(slot.provider)` injected — or is
+ *  - a CROSS-provider slot gets `resolveKey(slot.provider, slot.api_base_url)` injected — or is
  *    left key-less if nothing resolves. The UI always pairs a cross-provider
  *    slot with its provider's `api_base_url`, so a missing key surfaces a clean
  *    401 at request time (the correct place) rather than us inventing a wrong

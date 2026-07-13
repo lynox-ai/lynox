@@ -207,7 +207,7 @@ export function hybridSlotClientConfig(
  *  - **cross** — a hybrid slot whose provider differs from base, or that carries
  *    enriched creds (see `hybridSlotClientConfig`). The Agent's wire + creds come
  *    from the slot; a same-provider slot that `enrichTierSetCreds` deliberately
- *    left key-LESS gets `resolveKey(provider)` filled in so a fresh Agent (which
+ *    left key-LESS gets `resolveKey(provider, slotEndpoint)` filled in so a fresh Agent (which
  *    has no ambient client to borrow a key from) doesn't 401 with an empty key.
  *  - **non-cross** (standard mode / same-provider) — returns the BASE provider +
  *    the tier's base model id + undefined creds. A caller that keeps its base
