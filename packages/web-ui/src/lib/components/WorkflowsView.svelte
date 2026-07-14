@@ -113,9 +113,10 @@
 		completed: 'bg-success/15 text-success',
 		failed: 'bg-danger/10 text-danger',
 		running: 'bg-warning/15 text-warning',
-		// A run killed mid-flight (boot-swept, 2a/B4) \u2014 terminal but incomplete,
-		// distinct from a clean 'failed'. Muted amber.
-		interrupted: 'bg-warning/10 text-warning',
+		// A run killed mid-flight (boot-swept, 2a/B4) \u2014 terminal but incomplete.
+		// Muted text on a faint amber wash reads as "didn't finish", clearly
+		// apart from running's BRIGHT amber (active) and from the grey fallback.
+		interrupted: 'bg-warning/10 text-text-muted',
 		planned: 'bg-accent/10 text-accent-text',
 	};
 

@@ -567,12 +567,20 @@ describe('RunHistory', () => {
     h.insertPipelineRun({ id: 'crash', manifestName: 'wf', status: 'running', manifestJson: '{}' });
     h.insertPipelineRun({ id: 'done', manifestName: 'wf', status: 'completed', manifestJson: '{}', totalCostUsd: 1 });
     h.insertPipelineRun({ id: 'fail', manifestName: 'wf', status: 'failed', manifestJson: '{}' });
+    // A saved-workflow TEMPLATE lives in pipeline_runs as status='planned' — it
+    // must NEVER be swept (the false-positive class the WHERE clause guards).
+    h.insertPipelineRun({ id: 'tmpl', manifestName: 'wf', status: 'planned', manifestJson: '{}' });
 
     const swept = h.sweepStuckPipelineRuns();
     expect(swept).toBe(1); // only the crashed 'running' row
     expect(h.getPipelineRun('crash')!.status).toBe('interrupted');
     expect(h.getPipelineRun('done')!.status).toBe('completed'); // untouched
     expect(h.getPipelineRun('fail')!.status).toBe('failed'); // untouched
+    // getPipelineRun filters out 'planned', so read it back raw to prove the
+    // template survived the sweep unchanged.
+    const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+    const tmpl = db.prepare("SELECT status FROM pipeline_runs WHERE id = 'tmpl'").get() as { status: string };
+    expect(tmpl.status).toBe('planned');
 
     // Idempotent: 'interrupted' is terminal, a second sweep finds nothing.
     expect(h.sweepStuckPipelineRuns()).toBe(0);
