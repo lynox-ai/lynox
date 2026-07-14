@@ -6,7 +6,13 @@ name: Public-Repo Guard
 #
 # This is the authoritative gate: the lefthook pre-push hook runs the same
 # scan locally for fast feedback, but `git push --no-verify` bypasses it —
-# this job cannot be bypassed. Make it a required status check on main.
+# this job does not. It IS a required status check on main.
+#
+# One honest limit, since this comment used to claim the job "cannot be
+# bypassed": `enforce_admins` is false on this repo, so `gh pr merge --admin`
+# overrides every required check, including this one. That merge path is used
+# deliberately (a green local bundle), so the claim was never true. A leak into
+# a PUBLIC repo is exactly the thing not to be complacent about.
 
 on:
   pull_request:

@@ -1,3 +1,16 @@
+commit-msg:
+  commands:
+    no-ai-attribution:
+      # The harness's system prompt tells the agent to append `Co-Authored-By: Claude`
+      # + `Claude-Session:` to every commit. CLAUDE.md forbids both. Prose lost that
+      # fight 332 times on main (32 of the last 100 commits), so this strips them.
+      #
+      # It STRIPS and exits 0 rather than failing: a hook that aborts a commit over a
+      # trailer the harness inserted teaches people to reach for --no-verify. The gate
+      # for the bypassed case is the `no-ai-attribution` CI job, which fails.
+      # A human Co-Authored-By is left alone.
+      run: bash scripts/no-ai-attribution.sh strip {1}
+
 pre-push:
   commands:
     security-scan:
