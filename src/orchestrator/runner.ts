@@ -276,11 +276,12 @@ export async function runManifest(
   // run visible ('running'); the finalize-UPDATE in the `finally` below closes
   // it out — and runs even on a thrown error, so a caught catastrophic failure
   // never leaves the row stuck at 'running'. A hard process death (SIGKILL /
-  // container stop) skips the finally, leaving a 'running' row that a later
-  // slice's boot-sweep (B4) will flip to 'interrupted'; until that lands the
-  // stuck-'running' row is an accepted intermediate (it never skews cost stats —
-  // getPipelineCostStats filters to terminal rows, B6 — and carries more info
-  // than the pre-2a void; B4 ships before any release cut that includes this).
+  // container stop) skips the finally, so its row stays 'running': the cost
+  // aggregate already ignores it (getPipelineCostStats filters to terminal
+  // rows, B6), but it DOES surface as 'running' in the run list + detail until
+  // a later slice's boot-sweep (B4) relabels stuck rows 'interrupted'. That
+  // display gap is the accepted cost of shipping this ahead of B4 — it still
+  // carries more than the pre-2a void (which recorded nothing).
   // Only the top-level run (depth 0) writes a row in this slice — nested
   // sub-pipelines are folded in by B5 (parent_run_id + list-filter). The write
   // is fire-and-forget: a history failure must never break or mask the run.
