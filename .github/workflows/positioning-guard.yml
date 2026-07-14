@@ -4,8 +4,11 @@ name: Positioning Guard
 # (pro/docs/internal/POSITIONING.md → Vocabulary → Avoid): no legacy category
 # labels ("AI engine", "agent runtime"), no OSI-flavoured "open source" (lynox
 # is ELv2, not OSI-approved), no tired "The AI that…" patterns. The lefthook
-# pre-push hook runs the same scan locally; this job is the unbypassable gate
-# (`git push --no-verify` skips the hook, not this). Make it a required check.
+# pre-push hook runs the same scan locally; this job is the gate — `git push
+# --no-verify` skips the hook, not this. It IS a required status check on main.
+#
+# Not "unbypassable" though, as this comment used to claim: `enforce_admins` is
+# false, so `gh pr merge --admin` overrides every required check.
 
 on:
   pull_request:
