@@ -991,15 +991,65 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     }
   });
 
-  it('writes NO pipeline_runs row for a nested sub-pipeline (depth > 0) in this slice', async () => {
+  it('a nested sub-pipeline (depth > 0) writes its own row with parent_run_id + is filtered from the top-level list (B5/I6)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
-      // The depth===0 guard keeps nested sub-pipelines out of the top-level
-      // pipeline_runs list until B5 threads parent_run_id + a list-filter.
-      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1 });
+      // A top-level run (parent_run_id NULL) + a nested run (depth 1 with a
+      // parent_run_id, as spawnPipeline threads).
+      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
+
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
-      const count = (db.prepare('SELECT COUNT(*) as c FROM pipeline_runs').get() as { c: number }).c;
-      expect(count).toBe(0);
+      // Both runs wrote a row — the nested one carries its parent link.
+      const all = db.prepare('SELECT parent_run_id FROM pipeline_runs ORDER BY started_at').all() as Array<{ parent_run_id: string | null }>;
+      expect(all).toHaveLength(2);
+      expect(all.some(r => r.parent_run_id === 'outer-run-id')).toBe(true);
+
+      // ...but the top-level list shows ONLY the top-level run (I6 filter).
+      const list = h.getRecentPipelineRuns(20);
+      expect(list).toHaveLength(1);
+      expect(list[0]!.manifest_name).toBe('test-flow');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('spawnPipeline stamps its parentRunId onto the nested run row (B5 threading end-to-end)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const { spawnPipeline } = await import('./runtime-adapter.js');
+      const counters: SessionCounters = {
+        httpRequests: 0, writeBytes: 0, costUSD: 0,
+        approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+      };
+      // A runtime:'pipeline' step nests. The inner inline step fails here (no
+      // parentTools), but the nested pipeline_runs row is INSERTed at run-start
+      // with the threaded parent link before that — which is what we assert.
+      const step = { id: 'nest', agent: 'nest', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do it' }] } as unknown as Parameters<typeof spawnPipeline>[0];
+      await spawnPipeline(step, {}, CONFIG, [], 0, undefined, undefined, counters, null, 'autonomous', undefined, h, undefined, 'PARENT-RUN-ID');
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const row = db.prepare('SELECT parent_run_id FROM pipeline_runs').get() as { parent_run_id: string | null } | undefined;
+      expect(row?.parent_run_id).toBe('PARENT-RUN-ID');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('both top-level views exclude nested runs, which stay reachable by id (B5 / I6)', () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      h.insertPipelineRun({ id: 'top', manifestName: 'wf', status: 'completed', manifestJson: '{}', totalCostUsd: 3, stepCount: 1 });
+      h.insertPipelineRun({ id: 'child', manifestName: 'nest-sub', status: 'completed', manifestJson: '{}', totalCostUsd: 5, stepCount: 1, parentRunId: 'top' });
+
+      // Cost stats: only the top-level manifest bucket, no synthetic 'nest-sub'.
+      expect(h.getPipelineCostStats(30).map(s => s.manifest_name)).toEqual(['wf']);
+      // Run list: only the top-level run.
+      expect(h.getRecentPipelineRuns(20).map(r => r.id)).toEqual(['top']);
+      // But the nested run is still retrievable by id — drill-down preserved.
+      expect(h.getPipelineRun('child')?.parent_run_id).toBe('top');
     } finally {
       h.close();
       cleanup();
@@ -1105,13 +1155,16 @@ describe('runManifest — 2a/B3 durable step-record', () => {
     }
   });
 
-  it('writes NO step rows for a nested sub-pipeline (depth > 0) — no orphan under a missing parent run', async () => {
+  it('a nested sub-pipeline (depth > 0) writes its step rows under its OWN run row — no orphan (B5)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
-      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1 });
+      const state = await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
-      const count = (db.prepare('SELECT COUNT(*) as c FROM pipeline_step_results').get() as { c: number }).c;
-      expect(count).toBe(0);
+      // The nested run now writes a pipeline_runs row (parent exists), so its
+      // step rows attach to its OWN run id — never orphaned.
+      const rows = db.prepare('SELECT pipeline_run_id FROM pipeline_step_results').all() as Array<{ pipeline_run_id: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.every(r => r.pipeline_run_id === state.runId)).toBe(true);
     } finally {
       h.close();
       cleanup();

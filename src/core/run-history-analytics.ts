@@ -160,6 +160,10 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
     FROM pipeline_runs
     WHERE started_at >= datetime('now', ?)
       AND status IN ('completed', 'failed')
+      -- 2a/B5: top-level runs only — a nested sub-pipeline (parent_run_id set)
+      -- is a step-sub child, not a workflow the user ran; counting it would add
+      -- a synthetic per-manifest bucket. Matches getRecentPipelineRuns.
+      AND parent_run_id IS NULL
     GROUP BY manifest_name
   `).all(`-${days} days`) as Array<{
     manifest_name: string; run_count: number; avg_cost_usd: number;
