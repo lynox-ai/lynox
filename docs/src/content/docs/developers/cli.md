@@ -55,8 +55,8 @@ REST/SSE endpoints exposed by this server.
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (required for the anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API endpoint (for proxies) |
-| `MISTRAL_API_KEY` | Mistral API key (required for the mistral provider — EU data residency) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `mistral` \| `custom` \| `openai` \| `vertex` (legacy — wired for existing config.json setups, no longer offered by the installer/wizard) |
+| `MISTRAL_API_KEY` | Mistral API key (used with `provider: openai` pinned to the Mistral endpoint — EU data residency) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `custom` \| `openai` \| `vertex` (legacy — wired for existing config.json setups, no longer offered by the installer/wizard) |
 | `LYNOX_VAULT_KEY` | AES-256 key for the secrets vault (critical — cannot be recovered if lost) |
 | `LYNOX_DATA_DIR` | Override data directory (same as `--data-dir`) |
 | `LYNOX_HTTP_PORT` | HTTP API port (default: `3100`) |
