@@ -215,8 +215,11 @@
 								{/if}
 
 								<!-- "💬 Fixen": discuss + fix a failed OR interrupted run in chat
-								     (§4.6). An interrupted run carries its as-completed step
-								     rows (B3), so chat can diagnose what ran before it died. -->
+								     (§4.6). An interrupted run carries its as-completed step rows,
+								     so chat can see WHICH steps ran and what they cost — their
+								     outputs are deliberately not persisted for a run that never
+								     finalized, so it can diagnose the shape of the failure, not
+								     replay the results. -->
 								{#if run.status === 'failed' || run.status === 'interrupted'}
 									<button
 										onclick={() => onFixInChat(run.id, run.manifest_name)}

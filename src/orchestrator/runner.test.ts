@@ -1180,6 +1180,13 @@ describe('runManifest — 2a/B3 durable step-record', () => {
       expect(rows[0]!.step_id).toBe('step-1');
       expect(rows[0]!.status).toBe('failed');
       expect(rows[0]!.result).toBe(''); // a failed step carries no result
+
+      // The run's step_count is derived from the RECORDED step rows, so it agrees
+      // with its own /:id/steps list. Summing state.outputs (which the stop-failed
+      // step never entered) would have said 0 steps while the list showed 1.
+      const run = h.getPipelineRun(state.runId)!;
+      expect(run.step_count).toBe(rows.length);
+      expect(run.step_count).toBe(1);
     } finally {
       h.close();
       cleanup();

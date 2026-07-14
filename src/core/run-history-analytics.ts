@@ -150,11 +150,17 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
   manifest_name: string; run_count: number; avg_cost_usd: number;
   total_cost_usd: number; avg_duration_ms: number;
 }> {
-  // 2a/B6 (invariant I8): pipeline_runs is no longer all-terminal — a run is
-  // born 'running' and a hard crash leaves it 'running'/'interrupted' with
-  // totals still at their 0 defaults (finalize never ran). Restrict the cost
-  // aggregate to runs whose finalize DID record real totals ('completed' /
-  // 'failed'), else in-flight + crashed rows dilute AVG and inflate COUNT.
+  // 2a/B6 (invariant I8): pipeline_runs is no longer all-terminal — a run is born
+  // 'running' with 0-default totals. Count every run whose totals are REAL, and
+  // exclude ONLY the states where they are still placeholders:
+  //   • 'running'   — in flight, the finalize hasn't summed anything yet.
+  //   • 'planned'   — a saved-workflow template, not an execution at all.
+  // Everything else HAS real totals and must be counted: 'completed'/'failed'
+  // (the finalize summed them) AND 'rejected' (a gate-rejected run whose steps
+  // already ran and cost money — an allowlist of completed/failed silently dropped
+  // its real spend) AND 'interrupted' (the boot sweep backfills its partial totals
+  // from its step rows). A denylist keeps this correct when a terminal status is
+  // added later — the failure mode an allowlist just demonstrated.
   return db.prepare(`
     SELECT manifest_name,
            COUNT(*) as run_count,
@@ -163,7 +169,7 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
            AVG(total_duration_ms) as avg_duration_ms
     FROM pipeline_runs
     WHERE started_at >= datetime('now', ?)
-      AND status IN ('completed', 'failed')
+      AND status NOT IN ('running', 'planned')
       -- 2a/B5: top-level runs only — a nested sub-pipeline (parent_run_id set)
       -- is a step-sub child, not a workflow the user ran; counting it would add
       -- a synthetic per-manifest bucket. Matches getRecentPipelineRuns.

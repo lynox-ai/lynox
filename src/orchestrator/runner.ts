@@ -281,9 +281,9 @@ export async function runManifest(
   // sweep (B4) relabels 'interrupted' on the next start (and which the cost
   // aggregate already ignores — it filters to terminal rows, B6).
   // Every run at ANY depth writes its row (B5): a nested sub-pipeline stamps its
-  // parent's runId (parent_run_id), so the top-level views — getRecentPipelineRuns
-  // and getPipelineCostStats, both filtered to parent_run_id IS NULL — keep it
-  // out while it stays reachable by id (invariant I6). The write is
+  // parent's runId (parent_run_id), so the top-level per-manifest views — the run
+  // list, the cost aggregate and the step stats, all filtered to parent_run_id IS
+  // NULL — keep it out while it stays reachable by id (invariant I6). The write is
   // fire-and-forget: a history failure must never break or mask the run.
   const rh = options.runHistory;
   if (rh !== undefined) {
@@ -340,14 +340,20 @@ export async function runManifest(
   } finally {
     if (rh !== undefined) {
       try {
-        const outs = [...state.outputs.values()];
+        // Totals + step_count derive from the RECORDED step rows, never from
+        // state.outputs: a stop-failed or GATE-REJECTED step gets a row but never
+        // enters outputs (the catch halts first), so summing outputs would
+        // under-count both the steps and the real spend — and leave the run row
+        // disagreeing with its own /:id/steps list. `stepRows` is present exactly
+        // when `rh` is (same gate), so this is the same set the rows were written from.
+        const rows = stepRows ?? [];
         rh.updatePipelineRun(runId, {
           status: state.status,
-          totalDurationMs: outs.reduce((s, o) => s + o.durationMs, 0),
-          totalCostUsd: outs.reduce((s, o) => s + o.costUsd, 0),
-          totalTokensIn: outs.reduce((s, o) => s + o.tokensIn, 0),
-          totalTokensOut: outs.reduce((s, o) => s + o.tokensOut, 0),
-          stepCount: state.outputs.size,
+          totalDurationMs: rows.reduce((s, o) => s + o.durationMs, 0),
+          totalCostUsd: rows.reduce((s, o) => s + o.costUsd, 0),
+          totalTokensIn: rows.reduce((s, o) => s + o.tokensIn, 0),
+          totalTokensOut: rows.reduce((s, o) => s + o.tokensOut, 0),
+          stepCount: rows.length,
           error: state.error,
         });
       } catch { /* fire-and-forget */ }
@@ -482,7 +488,18 @@ type StepResult = 'ok' | 'halt';
  * matching the pipeline_runs row — a nested run's step rows attach to its own
  * parent run row (B5), so they never orphan.
  */
-type StepRowAccumulator = Array<{ rowId: number | bigint; result: string }>;
+type StepRowAccumulator = Array<{
+  rowId: number | bigint;
+  result: string;
+  /** The step's recorded spend. The run's finalize sums THESE (not state.outputs)
+   *  so the run row and the /:id/steps list can never disagree: a stop-failed or
+   *  gate-rejected step gets a row but never enters state.outputs, which would
+   *  otherwise make the run under-count both its step_count and its real cost. */
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  durationMs: number;
+}>;
 
 /**
  * Insert one pipeline_step_results row as-completed (result='' deferred) and
@@ -510,7 +527,11 @@ function recordStepRow(
       costUsd: output.costUsd,
       modelTier: step.model ?? 'balanced',
     });
-    acc.push({ rowId, result: output.result });
+    acc.push({
+      rowId, result: output.result,
+      costUsd: output.costUsd, tokensIn: output.tokensIn,
+      tokensOut: output.tokensOut, durationMs: output.durationMs,
+    });
   } catch { /* best-effort */ }
 }
 
@@ -543,6 +564,14 @@ async function executeStep(
   // on (becomes `model_id`, '' for mock/pipeline steps that resolve no model).
   let toolSeq = 0;
   let stepModelId = '';
+  // Also hoisted: a step's real spend. A GATE-REJECTED step has already RUN and
+  // cost money (the gate check happens AFTER the step completes) — but it throws
+  // before `state.outputs.set`, so the catch is the only place that can record
+  // what it actually cost. Left at 0 when the step throws before executing.
+  let costUsd = 0;
+  let stepTokensIn = 0;
+  let stepTokensOut = 0;
+  let stepDurationMs = 0;
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
@@ -597,7 +626,6 @@ async function executeStep(
       : undefined;
 
     let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
-    let costUsd = 0;
 
     // Build per-step pre-approval set if configured
     let stepPreApproval: PreApprovalSet | undefined;
@@ -653,6 +681,12 @@ async function executeStep(
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }
+
+    // The step has RUN — stamp its real spend on the hoisted vars so the catch
+    // below can still record it if the gate rejects (which happens next).
+    stepTokensIn = r.tokensIn;
+    stepTokensOut = r.tokensOut;
+    stepDurationMs = r.durationMs;
 
     // Gate point check after step completes (real and mock paths)
     if (manifest.gate_points.includes(step.id) && options.gateAdapter) {
@@ -715,17 +749,24 @@ async function executeStep(
     // rest like response_text). The error also surfaces via state.error/outputs.
     if (stepRunId && options.runHistory) {
       try {
-        options.runHistory.updateRun(stepRunId, { status: 'failed', errorText: error.message, toolCallCount: toolSeq, modelId: stepModelId });
+        options.runHistory.updateRun(stepRunId, {
+          status: 'failed', errorText: error.message, toolCallCount: toolSeq, modelId: stepModelId,
+          // Real spend of a step that RAN and was then rejected/failed (0 if it
+          // threw before executing) — kept in sync with the step row below.
+          costUsd, tokensIn: stepTokensIn, tokensOut: stepTokensOut, durationMs: stepDurationMs,
+        });
       } catch { /* best-effort */ }
     }
     // 2a/B3: record the failed step in pipeline_step_results too (result=''), so
     // it shows in the /:id/steps list even under on_failure='stop', which halts
     // WITHOUT adding the step to state.outputs (the batch writer's blind spot).
-    // Covers every caught mode (stop/notify/continue/gate) exactly once here.
+    // Covers every caught mode (stop/notify/continue/gate) exactly once here —
+    // carrying its REAL cost, which a gate-rejected step has already incurred.
     if (stepRows && options.runHistory) {
       recordStepRow(options.runHistory, state.runId, step, {
         stepId: step.id, result: '', startedAt: stepStart, completedAt: new Date().toISOString(),
-        durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, skipped: false, error: error.message,
+        durationMs: stepDurationMs, tokensIn: stepTokensIn, tokensOut: stepTokensOut, costUsd,
+        skipped: false, error: error.message,
       }, stepRows);
     }
 

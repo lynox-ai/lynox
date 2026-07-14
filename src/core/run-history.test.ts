@@ -601,14 +601,50 @@ describe('RunHistory', () => {
     h.close();
   });
 
-  it('an interrupted run (0 run-level totals) is excluded from getPipelineCostStats (B4↔B6 reconcile)', () => {
+  it('the sweep backfills an interrupted run\'s totals from its step rows, and the cost aggregate then counts it', () => {
     const h = createHistory();
     h.insertPipelineRun({ id: 'done', manifestName: 'wfX', status: 'completed', manifestJson: '{}', totalCostUsd: 1, stepCount: 1 });
+    // A crashed run: still 'running' with 0-default totals (its finalize never
+    // ran), but its as-completed step rows carry the REAL spend of the steps that
+    // finished before the crash.
     h.insertPipelineRun({ id: 'crash', manifestName: 'wfX', status: 'running', manifestJson: '{}' });
-    h.sweepStuckPipelineRuns(); // crash → interrupted, its totals still the 0 defaults
+    h.insertPipelineStepResult({ pipelineRunId: 'crash', stepId: 's1', status: 'completed', costUsd: 0.3, tokensIn: 10, tokensOut: 20, durationMs: 5 });
+    h.insertPipelineStepResult({ pipelineRunId: 'crash', stepId: 's2', status: 'completed', costUsd: 0.2, tokensIn: 10, tokensOut: 20, durationMs: 5 });
+
+    expect(h.sweepStuckPipelineRuns()).toBe(1);
+    const crashed = h.getPipelineRun('crash')!;
+    expect(crashed.status).toBe('interrupted');
+    expect(crashed.step_count).toBe(2); // backfilled — not the misleading 0
+    expect(crashed.total_cost_usd).toBeCloseTo(0.5); // its REAL partial spend
+    expect(crashed.total_tokens_in).toBe(20);
+
+    // Its totals are now real, so it is a truthful sample and IS counted.
     const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfX');
-    expect(wf?.run_count).toBe(1); // the interrupted run is not counted
-    expect(wf?.avg_cost_usd).toBe(1); // not diluted by the 0-cost interrupted row
+    expect(wf?.run_count).toBe(2);
+    h.close();
+  });
+
+  it('a gate-rejected run IS counted in the cost aggregate — its steps ran and cost money', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'ok', manifestName: 'wfY', status: 'completed', manifestJson: '{}', totalCostUsd: 1, stepCount: 1 });
+    // 'rejected' is a TERMINAL status whose finalize recorded real totals (the
+    // gate rejects AFTER the steps ran). An allowlist of completed/failed silently
+    // dropped this run's real spend from the aggregate — the regression this guards.
+    h.insertPipelineRun({ id: 'gated', manifestName: 'wfY', status: 'rejected', manifestJson: '{}', totalCostUsd: 0.42, stepCount: 3 });
+
+    const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfY');
+    expect(wf?.run_count).toBe(2);
+    expect(wf?.total_cost_usd).toBeCloseTo(1.42); // the rejected run's spend is not lost
+    h.close();
+  });
+
+  it('an in-flight run (0-placeholder totals) is still excluded from the cost aggregate', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'done', manifestName: 'wfZ', status: 'completed', manifestJson: '{}', totalCostUsd: 2, stepCount: 1 });
+    h.insertPipelineRun({ id: 'live', manifestName: 'wfZ', status: 'running', manifestJson: '{}' });
+    const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfZ');
+    expect(wf?.run_count).toBe(1); // the in-flight row has no real totals yet
+    expect(wf?.avg_cost_usd).toBe(2); // not diluted to 1
     h.close();
   });
 
