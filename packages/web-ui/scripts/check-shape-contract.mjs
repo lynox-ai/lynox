@@ -27,7 +27,13 @@
  * without touching markup. So app.css AND every component's own scoped `<style>` are
  * forbidden from targeting a class this contract names — the first version of this rule
  * checked only app.css, which left the six components that HAVE a `<style>` wide open,
- * including the one carrying four of the ten shapes.
+ * including the one carrying four of the ten shapes. The element itself is checked too:
+ * no inline `style=` AND no `style:` DIRECTIVE (a separate Svelte node that is an inline
+ * style by another name), and any `class:` it toggles becomes a guarded class. The
+ * selector scan reads every prelude — a CSS-nesting parent `.ai-badge { …; &:hover{} }`
+ * and an `@scope (.ai-badge)` both NAME the class and are both caught; the rounds that
+ * found them walking past are why the parser now emits every brace-block, not the ones
+ * whose bodies happen to be flat.
  *
  * `0.5px` — and `.5px`, which the first regex missed — is banned as a CSS value. It is
  * the marketing site's hairline. The design system tells designers this package does not
@@ -108,6 +114,12 @@ function elements(src) {
           if (eq !== -1) classValue = raw.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
         } else if (a.type === 'Attribute' && a.name === 'style') {
           hasStyle = true;
+        } else if (a.type === 'StyleDirective') {
+          // Svelte's `style:prop={…}` is a SEPARATE node type from the style attribute,
+          // and it compiles to `el.style.setProperty(...)` — an inline style by any other
+          // name, byte-identical class attribute, beats every stylesheet. Checking only
+          // `Attribute:style` left `style:display="none"` free to delete the AI-Act badge.
+          hasStyle = true;
         } else if (a.type === 'ClassDirective') {
           classDirectives.push(a.name);
         }
@@ -187,8 +199,12 @@ for (const [name, shape] of Object.entries(contract.shapes)) {
     );
   }
 
+  // Whitespace-normalised: a raw `src.includes` would false-fail on a legitimate reflow
+  // of `outline: 2px solid …` to `outline:  2px  solid …`, and a guard that blocks honest
+  // formatting gets deleted by the next person.
+  const flatSrc = src.replace(/\s+/g, ' ');
   for (const ev of shape.evidence.css ?? []) {
-    if (src.includes(ev)) continue;
+    if (flatSrc.includes(ev.replace(/\s+/g, ' '))) continue;
     problems.push(`${name}: ${shape.source} no longer declares \`${ev}\``);
   }
 }
@@ -220,11 +236,16 @@ function rules(css) {
       j++;
     }
     const body = css.slice(open + 1, j - 1);
-    if (selector && !selector.startsWith('@') && !/[{}]/.test(body)) {
-      out.push({ selector, body: body.replace(/\s+/g, ' ').trim() });
-    }
-    // Recurse: a rule nested in @media/@layer is still a rule.
-    out.push(...rules(css.slice(open + 1, j - 1)));
+    // Emit EVERY brace-block's prelude — at-rules included, brace-containing bodies
+    // included. The previous version fell open twice: it dropped any rule whose body had
+    // braces (so `.ai-badge { display:none; &:hover{} }` — CSS nesting — was never emitted
+    // and its `.ai-badge` never checked), and it skipped any `@`-prelude (so `@scope
+    // (.ai-badge) { :scope{…} }` named the guarded class in a prelude nothing read). Both
+    // NAME a guarded class and both fall inside the guard's claimed coverage. So: emit the
+    // prelude always, keep the FULL body (nested and all) so pinned-rule comparison sees an
+    // added nested child, and recurse for the inner rules too.
+    if (selector) out.push({ selector, body: body.replace(/\s+/g, ' ').trim() });
+    out.push(...rules(body));
     i = j;
   }
   return out;
