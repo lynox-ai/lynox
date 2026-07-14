@@ -19,9 +19,38 @@ describe('pipeline-schema-migration (Move 1 — content-model versioning)', () =
     expect(parsed['steps']).toEqual([{ id: 's1', task: 't' }]);
   });
 
+  it('v0→v1 backfill: first-run-confirms a legacy self-built template (F1 regression guard)', () => {
+    // A pre-versioning template predates the import feature → self-built. The
+    // v2.7.0 consent gate would otherwise retroactively refuse it at /run + cron.
+    const legacyTemplate = JSON.stringify({ id: 'wf1', name: 'Weekly', template: true, steps: [{ id: 's1', task: 't' }] });
+    const parsed = JSON.parse(migratePipelineBlob(legacyTemplate)!) as Record<string, unknown>;
+    expect(parsed['confirmedAt']).toBeTruthy();
+    expect(parsed['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+  });
+
+  it('v0→v1 backfill: does NOT overwrite an existing confirmedAt', () => {
+    const already = JSON.stringify({ id: 'wf1', template: true, confirmedAt: '2026-01-01T00:00:00.000Z', steps: [] });
+    const parsed = JSON.parse(migratePipelineBlob(already)!) as Record<string, unknown>;
+    expect(parsed['confirmedAt']).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('v0→v1 backfill: leaves a non-template (plan_task) blob unconfirmed', () => {
+    // template:false is not library-runnable → no consent gate applies, no stamp.
+    const nonTemplate = JSON.stringify({ id: 'wf1', template: false, steps: [] });
+    const parsed = JSON.parse(migratePipelineBlob(nonTemplate)!) as Record<string, unknown>;
+    expect(parsed['confirmedAt']).toBeUndefined();
+  });
+
   it('returns null for a blob already at the current version (no rewrite)', () => {
     const current = JSON.stringify({ id: 'wf1', schema_version: CURRENT_PIPELINE_SCHEMA_VERSION });
     expect(migratePipelineBlob(current)).toBeNull();
+  });
+
+  it('an already-versioned (imported) template is NOT retro-confirmed by the v0→v1 backfill', () => {
+    // An imported blob is stamped at CURRENT on persist, so it never enters the
+    // v0→v1 step and stays unconfirmed by design — the backfill is v0-only.
+    const importedAtV1 = JSON.stringify({ id: 'wf-imp', template: true, schema_version: CURRENT_PIPELINE_SCHEMA_VERSION, steps: [] });
+    expect(migratePipelineBlob(importedAtV1)).toBeNull(); // no rewrite → confirmedAt never added
   });
 
   it('is idempotent — feeding the migrated output back returns null', () => {

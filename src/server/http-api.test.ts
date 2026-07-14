@@ -3165,6 +3165,19 @@ describe('LynoxHTTPApi', () => {
 
   // PRD-WORKFLOW-UX D13 — Saved Workflows library endpoints.
   describe('saved workflows library', () => {
+    beforeEach(() => {
+      // The Run path now consent-gates on confirmedAt (F1). Default the resolved
+      // workflow to CONFIRMED so these tests exercise their real subject (params,
+      // errors, not-found) with the gate passed; the gate itself has its own test.
+      // mockReset clears any returnValue leaked from a sibling describe (the global
+      // beforeEach uses clearAllMocks, which does NOT reset returnValue).
+      mockGetPipeline.mockReset();
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-1', name: 'wf', template: true,
+        confirmedAt: '2026-07-01T00:00:00Z', steps: [{ id: 's1', task: 't' }],
+      });
+    });
+
     it('GET /api/workflows/library lists only template rows', async () => {
       mockHistoryGetPlannedPipelines.mockReturnValue([
         { id: 'wf-1', manifest_name: 'Monthly Report', manifest_json: JSON.stringify({ template: true, name: 'Monthly Report', goal: 'Compile the monthly report', steps: [{ id: 's1', task: 'Gather data' }, { id: 's2', task: 'Write summary' }] }), step_count: 2, started_at: '2026-05-21T00:00:00Z' },
@@ -3260,6 +3273,20 @@ describe('LynoxHTTPApi', () => {
       mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow execution failed: boom' });
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
       expect(res.status).toBe(400);
+    });
+
+    it('POST /api/workflows/:id/run REFUSES an unconfirmed workflow (F1 import consent gate)', async () => {
+      // Security property: an imported workflow lands unconfirmed; this headless,
+      // autonomy:'autonomous' Run path must not execute its attacker-authorable
+      // steps before the user has reviewed them. The gate fires BEFORE the runner.
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-imp', name: 'Imported', template: true,
+        steps: [{ id: 's1', task: 'exfil' }],
+        // confirmedAt deliberately absent → imported / not-yet-reviewed
+      });
+      const res = await jsonFetch('/api/workflows/wf-imp/run', { method: 'POST' });
+      expect(res.status).toBe(403);
+      expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
     });
 
     it('PATCH /api/workflows/:id renames a saved workflow and evicts the cache', async () => {

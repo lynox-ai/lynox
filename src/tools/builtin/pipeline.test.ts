@@ -29,6 +29,15 @@ vi.mock('../../orchestrator/validate.js', () => ({
   MAX_STEPS: 20,
 }));
 
+// Spy the billing debit so the money-leak fix can be asserted: an in-session
+// run_workflow must report its aggregated step cost (partial mock — keep every
+// other export real).
+const mockReportMeteredCost = vi.fn();
+vi.mock('../../core/metered-request.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../core/metered-request.js')>();
+  return { ...actual, reportMeteredCost: (...args: unknown[]) => mockReportMeteredCost(...args) };
+});
+
 import {
   runWorkflowTool,
   storePipeline,
@@ -387,6 +396,92 @@ describe('run_workflow — inline steps', () => {
     );
 
     expect(result).toBe('Error: Workflow execution failed: Agent crashed');
+  });
+});
+
+describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  // A run on a managed instance: meteredHost drives the CP debit. The fix uses
+  // reportMeteredCost (CP-only), NOT debitInRunHelperCost — the steps already
+  // charged the local session cap via the runner, so a recordSessionCost here
+  // would double-count it (see the fn comment). meteredHost is a sentinel; the
+  // runId is a fresh uuid, so it's asserted as expect.any(String).
+  function makeBillableAgent(): { agent: IAgent; meteredHost: unknown } {
+    const agent = makePipelineAgent();
+    const meteredHost = { sentinel: 'metered-host' };
+    (agent.toolContext as Record<string, unknown>)['meteredHost'] = meteredHost;
+    return { agent, meteredHost };
+  }
+
+  function twoStepState(): RunState {
+    return makeRunState({
+      outputs: new Map<string, AgentOutput>([
+        ['a', { stepId: 'a', result: 'r', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0.002, skipped: false }],
+        ['b', { stepId: 'b', result: 'r', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0.01, skipped: false }],
+      ]),
+    });
+  }
+
+  it('reports the AGGREGATED step cost to CP billing for an inline run', async () => {
+    // The core money property: two steps at 0.002 + 0.01 must be billed as 0.012.
+    // Before the fix this spend was written only as excluded pipeline_step rows,
+    // so it escaped the daily/monthly cap and the managed-billing debit entirely.
+    const { agent, meteredHost } = makeBillableAgent();
+    mockRunManifest.mockResolvedValueOnce(twoStepState());
+
+    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x'), makeStep('b', 'y')] }, agent);
+
+    expect(mockReportMeteredCost).toHaveBeenCalledTimes(1);
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.012, 'balanced');
+  });
+
+  it('reports a stored-workflow (workflow_id) run too', async () => {
+    const { agent, meteredHost } = makeBillableAgent();
+    const pipelineId = seedStoredPipeline([{ id: 'only', task: 'do it' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState()); // costUsd 0.001
+
+    await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'balanced');
+  });
+
+  it('does NOT report on self-host / BYOK (no metered host)', async () => {
+    // No meteredHost → no CP balance to debit; the local session cap is the only
+    // ceiling there, and the runner already charges it. Guards against a stray debit.
+    const agent = makePipelineAgent();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x')] }, agent);
+
+    expect(mockReportMeteredCost).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES an unconfirmed workflow from an AUTONOMOUS session (F1 tool-path gate)', async () => {
+    // The other headless path: run_workflow is reachable from an autonomous worker
+    // session. An unconfirmed (e.g. imported) workflow must not run there without a
+    // per-action approver — the same consent gate the /run route + cron enforce.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = seedStoredPipeline([{ id: 's1', task: 'x' }]); // seeded UNCONFIRMED
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toContain('first-run confirmation');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('ALLOWS an unconfirmed workflow from an INTERACTIVE session (each step still prompts)', async () => {
+    // autonomy undefined = interactive chat: the per-step approver is present, so
+    // run_workflow stays the safe way to trial an imported workflow. Not gated.
+    const { agent } = makeBillableAgent();
+    const pipelineId = seedStoredPipeline([{ id: 's1', task: 'x' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 });
 

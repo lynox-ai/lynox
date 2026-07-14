@@ -1,4 +1,6 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier } from '../../types/index.js';
+import { reportMeteredCost } from '../../core/metered-request.js';
+import { randomUUID } from 'node:crypto';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
@@ -324,6 +326,37 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
 
 // ===== Private execution helpers =====
 
+/**
+ * Debit the aggregated cost of an IN-SESSION `run_workflow` execution.
+ *
+ * Workflow steps run as sub-agents whose token streams are never seen by the
+ * parent agent's onAfterRun, and every step is written as a `pipeline_step` row
+ * that all cost queries EXCLUDE (getCostByDay / getCostByModel — the sources of
+ * the daily/monthly persistent-budget cap AND the managed-billing debit). So
+ * without this, in-session workflow spend on the shared pool key was unbilled and
+ * escaped the persistent cap entirely. `reportMeteredCost` fires the onAfterRun
+ * hook that debits the tenant's managed balance + persistent cap — the axis the
+ * pipeline_step exclusion left uncovered.
+ *
+ * CP-only (`reportMeteredCost`, NOT `debitInRunHelperCost`) — exactly spawn.ts's
+ * choice, for the same reason: the LOCAL per-session $-cap is ALREADY charged for
+ * these steps. Each step runs on the parent's SessionCounters (runner.ts threads
+ * `parentSessionCounters` = `deps.sessionCounters`), and `checkSessionBudget` +
+ * `adjustSessionCost` net the actual step cost onto `counters.costUSD` per step.
+ * A `recordSessionCost` here would count the same spend a SECOND time and trip the
+ * session ceiling at ~half the real spend. The headless path bills separately
+ * (saved-workflow-runner), and the step rows never enter the CP cost queries, so
+ * there is no double-count on the CP axis either.
+ */
+function debitInSessionWorkflowCost(deps: PipelineDeps, state: RunState): void {
+  // No metered host = self-host / BYOK → no CP balance to debit (mirrors spawn.ts).
+  const meteredHost = deps.toolContext?.meteredHost;
+  if (!meteredHost) return;
+  const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
+  const tier: ModelTier = deps.config.default_tier ?? 'balanced';
+  reportMeteredCost(meteredHost, randomUUID(), costUsd, tier);
+}
+
 async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
   const steps = input.steps!;
 
@@ -384,6 +417,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       secretStore: deps.secretStore,
     }));
 
+    debitInSessionWorkflowCost(deps, state);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -611,6 +645,19 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
   }
 
+  // Consent gate for UNATTENDED execution — the same first-run-confirm the cron
+  // gate (worker-loop.ts:574) and the library /run route enforce. run_workflow is
+  // reachable from an AUTONOMOUS worker session (the run_agent trigger builds a
+  // session with the full tool registry), so without this an autonomous caller
+  // could run an UNCONFIRMED imported workflow — attacker-authored steps — with no
+  // per-action approver. Scoped to autonomy==='autonomous': an interactive chat
+  // (autonomy undefined) still prompts on each dangerous step, so the in-chat path
+  // stays open, matching how run_workflow was always the safe way to trial an
+  // imported workflow.
+  if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
+    return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
+  }
+
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
 
   // Retry mode
@@ -646,6 +693,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state });
+      debitInSessionWorkflowCost(deps, state);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -727,6 +775,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
 
+    debitInSessionWorkflowCost(deps, state);
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
@@ -864,12 +913,13 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
 
     const pipelineToolContext = agent.toolContext;
 
-    // run_workflow is always called from a chat session; inherit the parent
-    // agent's prompt callbacks so sub-agents can route ask_user/ask_secret
-    // back through the live SSE stream. Stored autonomous pipelines that
-    // somehow get invoked here will still be rejected at executePipelineById
-    // / WorkerLoop boundaries; for inline runs the contract is "always
-    // interactive" by definition.
+    // run_workflow inherits the parent agent's prompt callbacks so sub-agents can
+    // route ask_user/ask_secret back through the live SSE stream when there is one.
+    // It is NOT always a live chat, though: an autonomous worker session can call
+    // run_workflow too — which is exactly why executePipelineById now enforces the
+    // confirmedAt consent gate for `autonomy==='autonomous'` (an unconfirmed
+    // imported workflow can't be run headless via this tool). For inline runs the
+    // contract is "always interactive" by definition.
     const parentPrompt = (agent.promptUser || agent.promptTabs || agent.promptSecret)
       ? {
           parentPromptUser: agent.promptUser,

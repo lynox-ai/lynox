@@ -7,7 +7,8 @@
 
 import type { LLMProvider } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
-import { LLM_CATALOG, vaultSlotForEndpoint } from './catalog.js';
+import { LLM_CATALOG, vaultSlotForEndpoint, pinnedVaultSlotForEndpoint } from './catalog.js';
+import { isGuardedBaselineHost } from './endpoint-allowlist.js';
 
 export const VAULT_SLOT_BY_PROVIDER: Readonly<Record<LLMProvider, string | null>> = Object.freeze({
   anthropic: 'ANTHROPIC_API_KEY',
@@ -150,6 +151,41 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
   }
 
   return undefined;
+}
+
+/**
+ * May a VAULT-STORED key be used as the fallback for `apiBaseURL` when the caller
+ * supplied no key of its own?
+ *
+ * This exists for exactly one caller: the `/api/llm/test` probe, where `base_url`
+ * is UNTRUSTED request input — unlike every other `resolveProviderApiKey` caller,
+ * which passes the stored `userConfig.api_base_url`. `resolveProviderApiKey` falls
+ * through to the generic tile's SHARED slot (the managed pool key) for any host it
+ * does not recognise, so probing an arbitrary `base_url` with no typed key would
+ * bearer-token the pool key straight to that host — a credential-exfil door the
+ * per-endpoint key-binding work otherwise closed.
+ *
+ * A vault fallback is safe only for an endpoint the stored key actually belongs to:
+ *   - the provider default (no `base_url` → Anthropic/Vertex tile),
+ *   - a host that MATCHES A PRESET (`pinnedVaultSlotForEndpoint` — a real pin, not a
+ *     generic fall-through; the fall-through is precisely the leak), or
+ *   - an EXACT vetted provider host (`isGuardedBaselineHost`).
+ * Anything else (a free-text or attacker-supplied host) must fall back to nothing,
+ * so the probe 400s "API key required" and the caller supplies the key explicitly.
+ * A body-supplied key is the caller's own credential and is never gated by this.
+ *
+ * Deliberately `isGuardedBaselineHost` (exact `ALLOWLISTED_HOSTS` only), NOT
+ * `isAllowlistedEndpoint`: the latter also vouches for `*.openai.azure.com` — an
+ * attacker-registerable namespace — plus `.local`/`.lan` wildcards. That breadth
+ * is right for the BYOK sub-processor-vetting gate it was built for, but this is a
+ * CREDENTIALED egress of the SHARED pool key, where a wildcard the caller can
+ * register a match for is exactly the door to keep shut (purpose-scoped: the
+ * vetting allowlist is not the egress baseline).
+ */
+export function mayFallBackToStoredKey(provider: LLMProvider, apiBaseURL: string): boolean {
+  return !apiBaseURL
+    || pinnedVaultSlotForEndpoint(provider, apiBaseURL) !== undefined
+    || isGuardedBaselineHost(apiBaseURL);
 }
 
 /**
