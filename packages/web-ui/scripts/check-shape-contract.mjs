@@ -2,45 +2,36 @@
 /**
  * Shape contract — this repo, checked against itself.
  *
- * `tokens.contract.json` is about colour. This one is about FORM: the shapes that carry
- * what the app looks like — the chat turn, the tool call, the inbox row, the state
- * surface, the one primitive — which a design system elsewhere draws by hand, from
- * reading these components.
+ * `tokens.contract.json` is about colour. This one is about FORM: the shapes a design
+ * system elsewhere draws by hand, from reading these components.
  *
- * ── WHAT THIS CHECKS, EXACTLY ───────────────────────────────────────────────────
+ * ── FOUR ROUNDS OF REVIEW, THREE OF WHICH BROKE THE GUARD ───────────────────────
  *
- * That the element carrying each shape is still CLASSED the way it was read. Not that
- * it still LOOKS that way. The distinction cost a review round: a previous version of
- * this header said "restyle the chat and it fails here", and it does not — a stylesheet
- * can restyle an element in place without touching a single class.
+ * v1 GREPPED for a substring of the class attribute. Appending `border-2` left the
+ * substring intact — the row went to 2px, the design system kept drawing 1px, ✓.
  *
- * So the stylesheet path is closed separately, by two rules rather than by a claim:
+ * v2 grepped for the WHOLE class attribute. Better, and still a grep: a review hid the
+ * evidence in an HTML comment, then in a JS string, then in a `<template>`, each time
+ * while replacing the real markup with a flat list. Stripping comments, then scripts,
+ * then templates is a race you lose one hiding place at a time.
  *
- *   - app.css may not target any class this contract names. It is a token and base
- *     file (fifteen selectors, all scrollbar utilities); a rule in it aimed at
- *     `.ai-badge`, or redefining `.border-l-2`, is not a style, it is a shape change
- *     wearing a stylesheet. `.ai-badge { display: none }` would have deleted an EU AI
- *     Act Art. 50(1) disclosure with every class attribute byte-identical.
+ * v3 (this) PARSES. The evidence is the value of a class attribute on a real element in
+ * the Svelte AST. A comment is not an element; a string is not an element; a `<template>`
+ * is not rendered. There is nowhere left to park it, structurally, rather than by another
+ * regex.
  *
- *   - `0.5px` is banned as a CSS value. It is the marketing site's hairline; this
- *     package does not use it, and the design system tells designers so. That sentence
- *     was the only unguarded claim left, and it was the one a review used to turn the
- *     inbox into hairline-separated rows from app.css.
+ * ── AND A GREP CANNOT SEE A STYLESHEET AT ALL ───────────────────────────────────
  *
- * Evidence is matched with comments AND <script> blocks stripped: two rounds of review
- * hid the evidence in a comment, then in a string, while replacing the real markup.
+ * Every class attribute can stay byte-identical while CSS changes what the element
+ * looks like. `.ai-badge { display: none }` deletes an EU AI Act Art. 50(1) disclosure
+ * without touching markup. So app.css AND every component's own scoped `<style>` are
+ * forbidden from targeting a class this contract names — the first version of this rule
+ * checked only app.css, which left the six components that HAVE a `<style>` wide open,
+ * including the one carrying four of the ten shapes.
  *
- * ── WHY THE EVIDENCE IS THE WHOLE CLASS ATTRIBUTE ───────────────────────────────
- *
- * The first version compared substrings. Appending `border-2` to the inbox row left the
- * substring intact — the row went to 2px while the design system kept drawing 1px, ✓.
- * A substring check is orthogonal to whether the shape is still live.
- *
- * The far end — the design system's own check — RENDERS its product page in a browser
- * and reads getComputedStyle off the real elements. It does not parse CSS. That took two
- * rounds to learn: a hand-written cascade model was walked around by a longhand after a
- * shorthand, by a higher-specificity selector, by `!important`, by an inline style. A
- * model of the pixel is not the pixel.
+ * `0.5px` — and `.5px`, which the first regex missed — is banned as a CSS value. It is
+ * the marketing site's hairline. The design system tells designers this package does not
+ * use it, and that sentence was the last unguarded claim in the contract.
  *
  * Run: node packages/web-ui/scripts/check-shape-contract.mjs   (`pnpm shapes:contract`)
  */
@@ -48,6 +39,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
+import { parse } from 'svelte/compiler';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, '..');
@@ -57,75 +49,182 @@ const APP_CSS = resolve(ROOT, 'src/app.css');
 const contract = JSON.parse(await readFile(CONTRACT, 'utf8'));
 const problems = [];
 
-/** Markup inside a comment is not markup. Nor is markup inside a string. */
-const liveMarkup = (src) =>
-  src.replace(/<!--[\s\S]*?-->/g, '').replace(/<script[\s\S]*?<\/script>/g, '');
+// ── 0. the contract itself must assert something ────────────────────────────────
+//
+// `declarations: {}` used to pass while the guard printed "all 10 shapes render the way
+// the app does". A shape that asserts nothing is not a shape, it is a comment.
 
-// ── 1. the shapes: the whole class attribute, still on a live element ────────────
+const shapeNames = Object.keys(contract.shapes ?? {});
+if (shapeNames.length === 0) problems.push('the contract lists no shapes at all');
 
-for (const [name, shape] of Object.entries(contract.shapes)) {
-  let src;
-  try {
-    src = liveMarkup(await readFile(resolve(ROOT, shape.source), 'utf8'));
-  } catch {
-    problems.push(`${name}: its source is gone — ${shape.source}`);
-    continue;
-  }
-
-  for (const ev of shape.evidence) {
-    if (src.includes(ev)) continue;
-    problems.push(
-      `${name} — the design system draws this shape, and the element it was read from no\n` +
-      `       longer carries these classes in ${shape.source}:\n\n` +
-      `         ${ev}\n\n` +
-      `       This is the WHOLE class attribute, so a single added or removed utility\n` +
-      `       trips it, and it must be in live markup — not in a comment, not in a\n` +
-      `       string. Both of those were used to walk past the earlier version.\n\n` +
-      `       Either the shape moved — update shapes.contract.json AND the design\n` +
-      `       system's product page in the same change — or it was reformatted and the\n` +
-      `       evidence needs re-copying. What is not an option is leaving the design\n` +
-      `       system drawing a shape this app no longer has.`
-    );
+for (const [name, s] of Object.entries(contract.shapes ?? {})) {
+  if (!s.evidence?.classes?.length) problems.push(`${name}: no class evidence — it asserts nothing here`);
+  if (!s.preview?.sample) problems.push(`${name}: no \`sample\` — the design system has nothing to probe`);
+  if (!Object.keys(s.preview?.declarations ?? {}).length) {
+    problems.push(`${name}: \`declarations\` is empty — the design system could draw anything`);
   }
 }
 
-// ── 2. app.css may not restyle a shape out from under its classes ───────────────
+// ── 1. the class attributes, from the AST ───────────────────────────────────────
 
-/** Every class name the contract's evidence mentions — utilities included. */
-const guardedClasses = new Set();
-for (const shape of Object.values(contract.shapes)) {
-  for (const ev of shape.evidence) {
-    for (const m of ev.matchAll(/class="([^"]*)"/g)) {
-      // Drop Svelte expressions; keep the literal utilities, including those inside them.
-      for (const tok of m[1].replace(/[{}?:'"]/g, ' ').split(/\s+/)) {
-        if (tok && /^[a-zA-Z][\w:./[\]()%-]*$/.test(tok)) guardedClasses.add(tok);
+/** Every class-attribute VALUE on a real element, as written. Not a grep: a parse. */
+function classAttributes(src) {
+  const found = [];
+  const ast = parse(src, { modern: true });
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return;
+    if (n.type === 'RegularElement' || n.type === 'SvelteElement') {
+      for (const a of n.attributes ?? []) {
+        if (a.type !== 'Attribute' || a.name !== 'class') continue;
+        // The raw source of the value, quotes stripped — expressions and all.
+        const raw = src.slice(a.start, a.end);
+        const eq = raw.indexOf('=');
+        if (eq === -1) continue;
+        found.push(raw.slice(eq + 1).trim().replace(/^["']|["']$/g, ''));
       }
+    }
+    for (const k of Object.keys(n)) {
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') walk(v);
+    }
+  };
+  walk(ast.fragment);
+  return found;
+}
+
+/** The real utility classes in a class value: text outside `{…}`, plus string literals inside. */
+function utilityClasses(value) {
+  const outside = value.replace(/\{[^}]*\}/g, ' ');
+  const inside = [...value.matchAll(/\{[^}]*\}/g)]
+    .flatMap((m) => [...m[0].matchAll(/'([^']*)'|"([^"]*)"/g)].map((x) => x[1] ?? x[2]));
+  return [outside, ...inside].join(' ').split(/\s+/).filter(Boolean);
+}
+
+const sources = new Map();
+const guardedClasses = new Set();
+
+for (const [name, shape] of Object.entries(contract.shapes)) {
+  let src = sources.get(shape.source);
+  if (src === undefined) {
+    try {
+      src = await readFile(resolve(ROOT, shape.source), 'utf8');
+      sources.set(shape.source, src);
+    } catch {
+      problems.push(`${name}: its source is gone — ${shape.source}`);
+      continue;
+    }
+  }
+
+  let attrs;
+  try {
+    attrs = classAttributes(src);
+  } catch (e) {
+    problems.push(`${name}: ${shape.source} does not parse as Svelte — ${e.message}`);
+    continue;
+  }
+
+  for (const ev of shape.evidence.classes ?? []) {
+    if (attrs.includes(ev)) {
+      for (const c of utilityClasses(ev)) guardedClasses.add(c);
+      continue;
+    }
+    problems.push(
+      `${name} — no element in ${shape.source} carries this class attribute:\n\n` +
+      `         ${ev}\n\n` +
+      `       This is the value of a real element's \`class\`, read out of the Svelte AST,\n` +
+      `       so it cannot be satisfied by a comment, a string or a <template> — three\n` +
+      `       hiding places a review used, one per round, against the version that grepped.\n\n` +
+      `       Either the shape moved — update shapes.contract.json AND the design system's\n` +
+      `       product page in the same change — or it was reformatted and the evidence needs\n` +
+      `       re-copying. What is not an option is leaving the design system drawing a shape\n` +
+      `       this app no longer has.`
+    );
+  }
+
+  for (const ev of shape.evidence.css ?? []) {
+    if (src.includes(ev)) continue;
+    problems.push(`${name}: ${shape.source} no longer declares \`${ev}\``);
+  }
+}
+
+// ── 2. no stylesheet may restyle a shape out from under its classes ─────────────
+
+/** Top-level rule preludes, brace-matched. Parens and escapes survive; the old regex ate them. */
+function preludes(css) {
+  const out = [];
+  let i = 0;
+  while (i < css.length) {
+    const open = css.indexOf('{', i);
+    if (open === -1) break;
+    const prelude = css.slice(i, open).split(/[;}]/).pop().trim();
+    let depth = 1;
+    let j = open + 1;
+    while (j < css.length && depth > 0) {
+      if (css[j] === '{') depth++;
+      else if (css[j] === '}') depth--;
+      j++;
+    }
+    if (prelude && !prelude.startsWith('@')) out.push(prelude);
+    // Recurse: a rule nested in @media/@layer is still a rule.
+    out.push(...preludes(css.slice(open + 1, j - 1)));
+    i = j;
+  }
+  return out;
+}
+
+/** Classes a selector targets — `.foo`, escaped `.rounded-\[…\]`, and `[class~="foo"]`. */
+function targetedClasses(selector) {
+  const out = [];
+  for (const m of selector.matchAll(/\.((?:\\.|[\w-])+)/g)) out.push(m[1].replace(/\\(.)/g, '$1'));
+  for (const m of selector.matchAll(/\[class[~^*$|]?=\s*["']?([^"'\]]+)/g)) out.push(...m[1].trim().split(/\s+/));
+  return out;
+}
+
+// EVERY stylesheet in the library, not only the components the contract happens to cite.
+// The first version scanned the cited ones, which left AppShell — whose <style> already
+// uses `:global()` — free to hide `.ai-badge` app-wide with the guard printing a tick. A
+// shape can be restyled from any file that ships, so every file that ships is read.
+const stylesheets = [['src/app.css', await readFile(APP_CSS, 'utf8')]];
+for (const dir of ['src/lib/components', 'src/lib/primitives']) {
+  for (const f of (await readdir(resolve(ROOT, dir))).filter((x) => x.endsWith('.svelte'))) {
+    const rel = join(dir, f);
+    const src = sources.get(rel) ?? (await readFile(resolve(ROOT, rel), 'utf8'));
+    for (const m of src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) stylesheets.push([rel, m[1]]);
+  }
+}
+
+const allowed = contract.allowedStyleRules ?? {};
+
+for (const [file, css] of stylesheets) {
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const selector of preludes(clean)) {
+    for (const cls of targetedClasses(selector)) {
+      if (!guardedClasses.has(cls)) continue;
+      // A component styling its OWN shape is the shape. The checkbox primitive is the
+      // only one that does it, its five rules are listed in the contract, and the design
+      // system draws exactly those five. Anything else is a change nobody was told about.
+      if ((allowed[file] ?? []).includes(selector)) continue;
+      problems.push(
+        `${file} targets \`.${cls}\`, a class the shape contract depends on:\n\n` +
+        `         ${selector} { … }\n\n` +
+        `       A rule here changes what a shape LOOKS like while every class attribute\n` +
+        `       stays byte-identical, so the AST check above cannot see it and the design\n` +
+        `       system goes on drawing the old shape. \`.ai-badge { display: none }\` deletes\n` +
+        `       an EU AI Act Art. 50(1) disclosure exactly this way.\n\n` +
+        `       Style the component through its utilities, or change the shape properly —\n` +
+        `       in the contract and in the design system, in the same commit.`
+      );
     }
   }
 }
 
-const appCss = (await readFile(APP_CSS, 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
+// ── 3. the hairline this package does not have ──────────────────────────────────
 
-// Selectors only: the text before each `{`, minus at-rule preludes.
-for (const m of appCss.matchAll(/([^{}();@]+)\{/g)) {
-  const selector = m[1].trim();
-  if (!selector || selector.startsWith('@')) continue;
-  for (const c of selector.matchAll(/\.((?:[\w-]|\\.)+)/g)) {
-    const cls = c[1].replace(/\\(.)/g, '$1'); // `space-y-0\.5` → `space-y-0.5`
-    if (!guardedClasses.has(cls)) continue;
-    problems.push(
-      `app.css targets \`.${cls}\`, which is a class the shape contract depends on:\n\n` +
-      `         ${selector} { … }\n\n` +
-      `       A rule here can change what a shape LOOKS like while every class attribute\n` +
-      `       stays byte-identical — the evidence check above cannot see it, and the\n` +
-      `       design system would go on drawing the old shape. \`.ai-badge { display:\n` +
-      `       none }\` would have deleted an EU AI Act Art. 50(1) disclosure exactly this\n` +
-      `       way. app.css is tokens and base; style the component, not this file.`
-    );
-  }
-}
-
-// ── 3. the hairline the design system says this package does not have ───────────
+// 0.5px AND .5px — the first version missed the second. The `(?<![\d.])` matters more than
+// it looks: without it this fires on the `.5px` inside `2.5px`, and a ban that blocks real
+// work gets deleted by the next person, which is the same as not having one.
+const HAIRLINE = /(?<![\d.])0?\.50?px\b/;
 
 for (const dir of ['src/app.css', 'src/lib']) {
   const files = dir.endsWith('.css')
@@ -134,16 +233,14 @@ for (const dir of ['src/app.css', 'src/lib']) {
         .filter((f) => /\.(svelte|css)$/.test(f))
         .map((f) => join(dir, f));
   for (const f of files) {
-    const src = await readFile(resolve(ROOT, f), 'utf8');
-    if (!/\b0\.5px\b/.test(src)) continue;
+    if (!HAIRLINE.test(await readFile(resolve(ROOT, f), 'utf8'))) continue;
     problems.push(
-      `${f} uses \`0.5px\`.\n\n` +
-      `       That is the marketing site's hairline. This package does not use it, and the\n` +
+      `${f} uses a 0.5px hairline.\n\n` +
+      `       That is the marketing site's idiom. This package does not use it, and the\n` +
       `       design system tells designers so in as many words — it is the sentence a\n` +
-      `       review used to turn the inbox into a flat hairline-separated list from a\n` +
-      `       stylesheet, with every class attribute intact. If the product genuinely\n` +
-      `       wants hairlines now, that is a real decision: make it in the design system\n` +
-      `       too, and delete this check.`
+      `       review used, twice, to turn the inbox into a flat hairline-separated list.\n` +
+      `       If the product genuinely wants hairlines now, that is a real decision: make\n` +
+      `       it in the design system too, and delete this check.`
     );
   }
 }
@@ -157,9 +254,7 @@ for (const dir of ['src/lib/components', 'src/lib/primitives']) {
   }
 }
 
-// RESTING borders only. The previous regex had no left boundary, so `hover:border-danger`
-// counted — and the design system's prose then claimed a destructive button carries a
-// full-strength border when it does not until you point at it.
+// RESTING borders only: the old regex had no left boundary and counted `hover:border-danger`.
 const RESTING_SEMANTIC_BORDER = /(?<![\w:-])border-(danger|warning|success)(?![-/\w])/g;
 let atRest = 0;
 let successBorders = 0;
@@ -182,10 +277,9 @@ const ex = contract.stateExceptions ?? {};
 if (atRest !== ex.fullStrengthSemanticBordersAtRest) {
   problems.push(
     `stateExceptions: the tree has ${atRest} full-strength semantic borders at rest, the\n` +
-    `       contract says ${ex.fullStrengthSemanticBordersAtRest}.\n\n` +
-    `       The design system tells designers the app "almost never" does this, and gives\n` +
-    `       the number. That sentence has now been written wrong three times. If the\n` +
-    `       number moved, the prose moves with it, or it is a lie with a citation.`
+    `       contract says ${ex.fullStrengthSemanticBordersAtRest}. The design system gives that\n` +
+    `       number to designers. It has been written wrong three times; if it moved, the\n` +
+    `       prose moves with it, or it is a lie with a citation.`
   );
 }
 if (successBorders !== ex.fullStrengthSuccessBorders) {
@@ -204,9 +298,6 @@ const check = (label, got, want) => {
 
 check('components', nComponents, contract.counts.components);
 check('primitives', nPrimitives, contract.counts.primitives);
-// Split, because "six COMPONENTS carry scoped CSS" was false — it is five components and
-// one primitive — and the old check counted them in one bucket, so it could never fail
-// on the sentence it existed to protect.
 check('scopedStyleComponents', styleComponents, contract.counts.scopedStyleComponents);
 check('scopedStylePrimitives', stylePrimitives, contract.counts.scopedStylePrimitives);
 
@@ -215,8 +306,8 @@ if (hasButton !== contract.counts.buttonComponent) {
   problems.push(
     hasButton
       ? `counts.buttonComponent: a Button component now exists. The design system says\n` +
-        `       "there is no button component to match" — that is now false, and a\n` +
-        `       designer is being told to invent something that has since been built.`
+        `       "there is no button component to match" — a designer is being told to invent\n` +
+        `       something that has since been built.`
       : `counts.buttonComponent: the contract expects one, and there is none.`
   );
 }
@@ -235,8 +326,8 @@ if (problems.length) {
 }
 
 console.log(
-  `✓ Shape contract: ${Object.keys(contract.shapes).length} shapes still classed as read; ` +
-  `app.css targets none of their classes; no 0.5px hairline; ` +
-  `${atRest} full-strength semantic borders at rest (${successBorders} success); ` +
+  `✓ Shape contract: ${shapeNames.length} shapes still carried by real elements in the AST; ` +
+  `${stylesheets.length} stylesheets target none of their ${guardedClasses.size} classes; ` +
+  `no 0.5px hairline; ${atRest} full-strength semantic borders at rest (${successBorders} success); ` +
   `${nComponents} components, ${nPrimitives} primitives, no button component.`
 );

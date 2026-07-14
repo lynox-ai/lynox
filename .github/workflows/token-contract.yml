@@ -37,6 +37,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with: { version: '10' }
+      # The shape contract PARSES the components — a grep could be fooled by evidence
+      # hidden in a comment, a string or a <template>, and was, three times. Parsing needs
+      # the Svelte compiler, so this job needs the workspace installed. It failed loudly
+      # without it rather than passing quietly, which is the only acceptable way for a
+      # guard to be broken.
+      - run: pnpm install --frozen-lockfile
       - name: app.css still matches tokens.contract.json
         run: node packages/web-ui/scripts/check-token-contract.mjs
       - name: the components still have the shapes shapes.contract.json records
