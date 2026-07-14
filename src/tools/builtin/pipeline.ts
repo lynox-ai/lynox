@@ -318,11 +318,9 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   return JSON.stringify(result, null, 2);
 }
 
-// 2a/B3: the pipeline_runs row AND its pipeline_step_results rows are now both
-// written by the orchestrator (`runManifest`): the run row via start-INSERT +
-// finalize-UPDATE, and each step row AS-COMPLETED with its result-text deferred
-// to run-finalize (the structural 2b-fence, invariant I4). The tool layer no
-// longer persists anything — the batch `persistStepResults` was retired here.
+// 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
+// written by the orchestrator (`runManifest`); the tool-layer batch writer was
+// retired here.
 
 // ===== Private execution helpers =====
 

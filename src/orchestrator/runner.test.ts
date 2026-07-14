@@ -1044,9 +1044,10 @@ describe('runManifest — 2a/B3 durable step-record', () => {
     try {
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
-      // Snapshot the step rows the first time a step completes: step-1's row is
-      // already written, the run is NOT finalized — so result MUST be '' (the
-      // structural 2b fence: partial result-text is never persisted mid-run).
+      // onStepComplete fires BEFORE this step's own row is inserted, so the first
+      // NON-EMPTY snapshot is step-1's row seen at step-2's callback — the run is
+      // still in flight, so its result MUST be '' (the structural 2b fence:
+      // partial result-text is never persisted mid-run).
       let midRun: Array<{ status: string; result: string }> = [];
       const hooks = {
         onStepComplete: () => {
@@ -1111,6 +1112,102 @@ describe('runManifest — 2a/B3 durable step-record', () => {
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const count = (db.prepare('SELECT COUNT(*) as c FROM pipeline_step_results').get() as { c: number }).c;
       expect(count).toBe(0);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('fills result-text by ROWID, not by (run_id, step_id) — two rows sharing a step_id keep distinct results (I5)', () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Simulate the for_each shape: two step rows under the SAME run_id + step_id
+      // (no UNIQUE forbids it). A finalize keyed on (run_id, step_id) would collapse
+      // both to one result; keyed on the returned rowid, each keeps its own.
+      h.insertPipelineRun({ id: 'run-x', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+      const rowA = h.insertPipelineStepResult({ pipelineRunId: 'run-x', stepId: 'loop', status: 'completed', result: '' });
+      const rowB = h.insertPipelineStepResult({ pipelineRunId: 'run-x', stepId: 'loop', status: 'completed', result: '' });
+      expect(rowA).not.toBe(rowB);
+      h.updatePipelineStepResultText(rowA, 'item-A');
+      h.updatePipelineStepResultText(rowB, 'item-B');
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare("SELECT result FROM pipeline_step_results WHERE pipeline_run_id = 'run-x' ORDER BY id").all() as Array<{ result: string }>;
+      expect(rows.map(r => r.result)).toEqual(['item-A', 'item-B']);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records step rows for a PARALLEL run (v1.1), each row keeping its own result', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const parallelManifest: Manifest = {
+        manifest_version: '1.1',
+        name: 'par-flow',
+        triggered_by: 'test',
+        context: {},
+        execution: 'parallel',
+        agents: [
+          { id: 'p-a', agent: 'agent-a', runtime: 'mock' },
+          { id: 'p-b', agent: 'agent-b', runtime: 'mock' },
+        ],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(parallelManifest, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      expect(state.status).toBe('completed');
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; status: string; result: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.find(r => r.step_id === 'p-a')?.result).toBe('ra');
+      expect(rows.find(r => r.step_id === 'p-b')?.result).toBe('rb');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records a cached (retry-reused) step with its CACHED result, not blank', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const cached: AgentOutput = {
+        stepId: 'step-1', result: 'cached-a', startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(), durationMs: 5, tokensIn: 1, tokensOut: 2, costUsd: 0, skipped: false,
+      };
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-b', 'rb']]), runHistory: h, cachedOutputs: new Map([['step-1', cached]]) });
+      expect(state.status).toBe('completed');
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT step_id, result FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; result: string }>;
+      // The cached step's row must carry its reused result, not '' (a bug pushing
+      // '' instead of cached.result would leave it blank at finalize).
+      expect(rows.find(r => r.step_id === 'step-1')?.result).toBe('cached-a');
+      expect(rows.find(r => r.step_id === 'step-2')?.result).toBe('rb');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('emits exactly ONE row per step under on_failure=continue (fail + success = 2 rows, no double-emit)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const manifest: Manifest = {
+        ...MANIFEST,
+        on_failure: 'continue',
+        agents: [
+          { id: 'step-1', agent: 'agent-a', runtime: 'mock', input_from: ['does-not-exist'] },
+          { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+        ],
+      };
+      await runManifest(manifest, CONFIG, { mockResponses: new Map([['agent-b', 'rb']]), runHistory: h });
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT step_id, status FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; status: string }>;
+      // The continue-failed step enters state.outputs AND hits the catch — it must
+      // still produce exactly ONE row (a double-emit would make this 3).
+      expect(rows).toHaveLength(2);
+      expect(rows.find(r => r.step_id === 'step-1')?.status).toBe('failed');
+      expect(rows.find(r => r.step_id === 'step-2')?.status).toBe('completed');
     } finally {
       h.close();
       cleanup();
