@@ -582,18 +582,22 @@ export class Session {
     const pendingHint = toolCtx.pendingStepHint;
     if (pendingHint) {
       toolCtx.pendingStepHint = null;
-      const maxTier = toolCtx.userConfig.max_tier;
       if (pendingHint.model) {
         // Resolve via the single chokepoint — the override gate is now a
         // pass-through (D8); the max_tier CLAMP is the cost cap that still
         // applies here (this path historically skipped it). Only the resolved
-        // tier is used.
+        // tier is used. Read the FRESH config (engine.getUserConfig), NOT the
+        // once-bound toolCtx.userConfig: after a reloadUserConfig (e.g. a CP
+        // sync-env that lowered max_tier) the tool context still holds the OLD
+        // config object, so clamping against it uses a stale ceiling (DEF-0077).
+        // The ctor opts.model clamp reads fresh for exactly this reason (#957).
+        const uc = this.engine.getUserConfig();
         this._model = resolveRunModel({
           requested: pendingHint.model,
           defaultTier: pendingHint.model,
-          accountTier: toolCtx.userConfig.account_tier,
-          maxTier,
-          provider: toolCtx.userConfig.provider ?? 'anthropic',
+          accountTier: uc.account_tier,
+          maxTier: uc.max_tier,
+          provider: uc.provider ?? 'anthropic',
         }).tier;
         this._recreateAgent();
       }
@@ -637,12 +641,15 @@ export class Session {
       // Resolve through the same chokepoint the pendingHint.model path uses, so
       // an operator-set compaction_model above the tenant's max_tier cost
       // ceiling is still clamped (this override would otherwise bypass the cap).
+      // Fresh config (engine.getUserConfig), not the stale toolCtx.userConfig —
+      // same reload-staleness reason as the pendingHint clamp above (DEF-0077).
+      const uc = this.engine.getUserConfig();
       const overrideTier = resolveRunModel({
         requested: runOptions.modelTier,
         defaultTier: runOptions.modelTier,
-        accountTier: toolCtx.userConfig.account_tier,
-        maxTier: toolCtx.userConfig.max_tier,
-        provider: toolCtx.userConfig.provider ?? 'anthropic',
+        accountTier: uc.account_tier,
+        maxTier: uc.max_tier,
+        provider: uc.provider ?? 'anthropic',
       }).tier;
       if (overrideTier !== this._model) {
         restoreModelTierTo = this._model;
