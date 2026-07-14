@@ -1015,6 +1015,15 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] run-history sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
+      // 2a/B4: the pipeline_runs counterpart — flip any workflow run still
+      // 'running' at boot to the terminal 'interrupted' (its finalize never ran).
+      // Separate try so a failure here can't blank the runs sweep above.
+      try {
+        const sweptPipelines = this.runHistory.sweepStuckPipelineRuns();
+        if (sweptPipelines > 0) process.stderr.write(`[lynox] run-history: swept ${sweptPipelines} orphaned running workflow run(s) to interrupted\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] pipeline-run sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     // Initialize the resumable run-event buffer manager (pure in-memory, no DB).

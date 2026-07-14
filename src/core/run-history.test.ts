@@ -562,6 +562,48 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('sweepStuckPipelineRuns flips orphaned running pipeline_runs to interrupted, leaving terminals untouched (2a/B4)', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'crash', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+    h.insertPipelineRun({ id: 'done', manifestName: 'wf', status: 'completed', manifestJson: '{}', totalCostUsd: 1 });
+    h.insertPipelineRun({ id: 'fail', manifestName: 'wf', status: 'failed', manifestJson: '{}' });
+
+    const swept = h.sweepStuckPipelineRuns();
+    expect(swept).toBe(1); // only the crashed 'running' row
+    expect(h.getPipelineRun('crash')!.status).toBe('interrupted');
+    expect(h.getPipelineRun('done')!.status).toBe('completed'); // untouched
+    expect(h.getPipelineRun('fail')!.status).toBe('failed'); // untouched
+
+    // Idempotent: 'interrupted' is terminal, a second sweep finds nothing.
+    expect(h.sweepStuckPipelineRuns()).toBe(0);
+    h.close();
+  });
+
+  it('a finalize AFTER the sweep wins — updatePipelineRun is unconditional-by-id (multi-process race)', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'racer', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+    // A boot sweep in one process marks it interrupted...
+    expect(h.sweepStuckPipelineRuns()).toBe(1);
+    expect(h.getPipelineRun('racer')!.status).toBe('interrupted');
+    // ...but the run was actually still finalizing in another process. The
+    // finalize is keyed by id with NO only-if-running guard, so it corrects the
+    // swept row back to its real terminal status (finalize must always win).
+    h.updatePipelineRun('racer', { status: 'completed', totalCostUsd: 2 });
+    expect(h.getPipelineRun('racer')!.status).toBe('completed');
+    h.close();
+  });
+
+  it('an interrupted run (0 run-level totals) is excluded from getPipelineCostStats (B4↔B6 reconcile)', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'done', manifestName: 'wfX', status: 'completed', manifestJson: '{}', totalCostUsd: 1, stepCount: 1 });
+    h.insertPipelineRun({ id: 'crash', manifestName: 'wfX', status: 'running', manifestJson: '{}' });
+    h.sweepStuckPipelineRuns(); // crash → interrupted, its totals still the 0 defaults
+    const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfX');
+    expect(wf?.run_count).toBe(1); // the interrupted run is not counted
+    expect(wf?.avg_cost_usd).toBe(1); // not diluted by the 0-cost interrupted row
+    h.close();
+  });
+
   // === v4 Pre-approval audit ===
 
   it('v4 migration creates pre_approval_sets table', () => {
