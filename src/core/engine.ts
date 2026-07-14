@@ -952,6 +952,28 @@ export class Engine {
       }
     }
 
+    // Provenance recovery backfill (arc:model-selector P1, DEF-0095). The v47
+    // `model_tier_source` column starts every pre-column thread at 'unknown'; this
+    // one-shot pass labels a thread whose tier differs from the instance default as
+    // a likely deliberate pick ('user'), recovering the real historical picks the
+    // composer made before the column existed. It CANNOT be migration SQL — it needs
+    // the per-instance `default_tier` (clamped like config.model at :362) + legacy
+    // brand-name normalisation. Gated exactly-once by a history.db marker
+    // (flag-independent — unlike the verb backfill it never touches engine.db). A
+    // failure must NOT break boot: the marker stays 0 and the next boot retries.
+    if (this.runHistory && !this.runHistory.isModelProvenanceBackfillDone()) {
+      try {
+        const defaultTier = clampTier(normalizeTier(this.userConfig.default_tier) ?? 'balanced', this.userConfig.max_tier);
+        const labelled = this.runHistory.backfillModelTierSourceFromDefault(defaultTier);
+        this.runHistory.markModelProvenanceBackfillDone();
+        if (labelled > 0) {
+          process.stderr.write(`[lynox] model-provenance backfill: labelled ${labelled} pre-column thread(s) as 'user'\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`[lynox] model-provenance backfill failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
+      }
+    }
+
     // Initialize prompt store (shares DB connection with RunHistory)
     if (this.runHistory) {
       try {

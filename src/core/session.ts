@@ -11,6 +11,7 @@ import type {
   StreamHandler,
   StreamEvent,
   ModelTier,
+  ThreadModelSource,
   LLMProvider,
   EffortLevel,
   ThinkingMode,
@@ -139,11 +140,24 @@ export interface RunOptions {
    *  registry, so a reconnecting client can replay-then-tail from exactly the
    *  durable boundary (Tier-2 resumable re-attach, no double-render). */
   onPersistCheckpoint?: (() => void) | undefined;
+  /** What fired this run (arc:model-selector P1, DEF-0097): the WorkerLoop passes
+   *  the trigger source (`cron`/`watch`/`webhook`/`inbox_event`/`manual`) so a
+   *  scheduled automation turn is distinguishable from a user chat turn (which
+   *  leaves this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension
+   *  from `run_type`; observability only, never gates money. */
+  triggerOrigin?: string | undefined;
 }
 
 export interface SessionOptions {
   sessionId?: string | undefined;
   model?: ModelTier | undefined;
+  /** Provenance of `model` for a NEW thread (arc:model-selector P1, DEF-0095).
+   *  CLIENT-supplied — only the picker UI knows an explicit pick from an
+   *  untouched default. Stamped into `threads.model_tier_source` at creation;
+   *  ignored on resume (the thread already carries its provenance). Absent → the
+   *  schema default `'unknown'` (a programmatic session that did not observe it).
+   *  ADVISORY-ONLY: never gates a tier/cost decision. */
+  source?: ThreadModelSource | undefined;
   effort?: EffortLevel | undefined;
   thinking?: ThinkingMode | undefined;
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
@@ -365,6 +379,10 @@ export class Session {
       try {
         threadStore.createThread(this.sessionId, {
           model_tier: this._model,
+          // Provenance (P1, DEF-0095): the picker UI declares 'user' (explicit
+          // pick) vs 'default' (untouched); a programmatic creator sends nothing
+          // → 'unknown'. OR IGNORE means a resume never re-stamps this.
+          model_tier_source: opts?.source ?? 'unknown',
           context_id: engine.getContext()?.id ?? '',
         });
       } catch { /* best-effort */ }
@@ -727,6 +745,7 @@ export class Session {
           promptHash,
           contextId: context?.id ?? '',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
+          ...(runOptions?.triggerOrigin ? { triggerOrigin: runOptions.triggerOrigin } : {}),
         });
         // Snapshot prompt if this hash is new
         runHistory.insertPromptSnapshot(promptHash, 'default', effectivePrompt);
@@ -1584,6 +1603,81 @@ export class Session {
     this._createAgent();
     this.loadMessages(messages);
     return resolveTierModel(tier, getActiveProvider()).modelId;
+  }
+
+  /**
+   * Would running this session on `targetTier` overflow that tier's context
+   * window? Used by the mid-thread re-pick (PATCH /api/sessions/:id/model, §5.1b)
+   * to BLOCK a downgrade that would silently truncate the occupied context
+   * (D20, F9 > F8). Compares the LIVE agent's current occupancy (no rebuild —
+   * `getEstimatedOccupancyTokens`) against the target tier's EFFECTIVE window.
+   *
+   * Two correctness pins:
+   *  - `effectiveContextWindow` takes a MODEL-ID, not a tier (a bare tier string
+   *    silently falls back to the 200k default), so resolve `targetTier → modelId`
+   *    first — via the active `_profileOverride` if one is set (a profiled session
+   *    keeps its endpoint across a tier change), else `resolveTierModel`.
+   *  - `_displayContextWindow` already folds in the user cap AND an active
+   *    profile's pinned window, so a "downgrade" on a PROFILED session (whose
+   *    window is tier-independent) does not false-refuse (RP1 — Axis A / Axis B
+   *    stay separate; the §1 conflation must not re-enter through this guard).
+   */
+  checkTierWindowFit(targetTier: ModelTier): { fits: boolean; occupancy: number; window: number } {
+    const occupancy = this.agent ? Math.round(this.agent.getEstimatedOccupancyTokens()) : 0;
+    const targetModelId = this._profileOverride?.model_id
+      ?? resolveTierModel(targetTier, getActiveProvider()).modelId;
+    const window = this._displayContextWindow(targetModelId);
+    return { fits: occupancy <= window, occupancy, window };
+  }
+
+  /**
+   * Mid-thread re-pick — the SECOND half of the ask ("continue a historical chat
+   * on another model"). Ordered per §5.1b (the caller MUST already have refused
+   * 409 if a run is in flight — this method does not see `runningSessions`):
+   *  0. CLAMP the requested tier — `setModel` (A5) is the one unclamped Axis-A
+   *     writer, so without this a managed user could re-pick above `max_tier`
+   *     and bill the higher tier (S1, money-safety). Ships in P1, not P2.
+   *  1. DOWNGRADE-OVERFLOW pre-check on the clamped tier (the tier that will
+   *     actually run) — refuse BEFORE any write if the occupied context wouldn't
+   *     fit (D20/F9, data-safety). New code that PREVENTS reaching the pre-existing
+   *     truncation path, so it needs no F9 dependency (§5.3 wave-split → P1).
+   *  2. PERSIST the REQUESTED (unclamped) pick + source='user' — the row records
+   *     INTENT; every resume re-clamps it against the fresh ceiling
+   *     (session-store → ctor clamp), so persisting an over-ceiling pick never
+   *     causes an over-ceiling RUN, while a later ceiling-RAISE restores the real
+   *     choice (RF-ARCH4). Persist-before-setModel: on a setModel throw the row is
+   *     already correct and resume self-heals.
+   *  3. `setModel(clamped)` on the live session — money-safe live tier.
+   * Not a transaction (an in-memory rebuild + a SQLite write can't share one);
+   * the order + failure handling are what's defined, not atomicity (A3).
+   */
+  repickModel(requestedTier: ModelTier):
+    | { ok: true; tier: ModelTier; modelId: string }
+    | { ok: false; reason: 'overflow'; targetTier: ModelTier; occupancy: number; window: number } {
+    const uc = this.engine.getUserConfig();
+    const clampedTier = resolveRunModel({
+      requested: requestedTier,
+      defaultTier: this.engine.config.model ?? 'balanced',
+      accountTier: uc.account_tier,
+      maxTier: uc.max_tier,
+      provider: uc.provider ?? 'anthropic',
+    }).tier;
+
+    const fit = this.checkTierWindowFit(clampedTier);
+    if (!fit.fits) {
+      return { ok: false, reason: 'overflow', targetTier: clampedTier, occupancy: fit.occupancy, window: fit.window };
+    }
+
+    // Persist the REQUESTED tier (intent), stamped 'user' — the sole sanctioned
+    // writer of model_tier/model_tier_source (the widened updateThread whitelist,
+    // guarded by thread-store.write-restriction.test.ts).
+    this.engine.getThreadStore()?.updateThread(this.sessionId, {
+      model_tier: requestedTier,
+      model_tier_source: 'user',
+    });
+
+    const modelId = this.setModel(clampedTier);
+    return { ok: true, tier: clampedTier, modelId };
   }
 
   getModelTier(): ModelTier {

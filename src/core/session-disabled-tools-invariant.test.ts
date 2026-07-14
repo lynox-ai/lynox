@@ -310,6 +310,9 @@ vi.mock('./run-history.js', () => ({
     this.close = vi.fn();
     // @ts-expect-error mock constructor — S3a verb-graph mirror wiring (engine.ts).
     this.setVerbGraph = vi.fn();
+    // @ts-expect-error mock constructor — P1 provenance backfill gate (engine.ts boot):
+    // 'done' → the one-shot backfill is skipped in this mocked-DB test.
+    this.isModelProvenanceBackfillDone = vi.fn().mockReturnValue(true);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
       prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),

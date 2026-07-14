@@ -1,39 +1,5 @@
 <script module lang="ts">
-  import { getApiBase } from '../config.svelte.js';
-
-  // The active provider's per-tier model labels ({fast,balanced,deep} → label),
-  // or undefined when the provider has no distinct per-tier models (a
-  // single-model custom / OpenAI-compat proxy). Undefined ⇒ hide the picker.
-  type MainChatTiers = { fast?: string; balanced?: string; deep?: string };
-  type TierConfig = {
-    defaultTier: string | undefined;
-    maxTier: string | undefined;
-    mainChatTiers: MainChatTiers | undefined;
-  };
-
-  // Module-level cache: config rarely changes and the picker re-mounts on every
-  // new chat, so fetch /api/config once. A settings change to default_tier takes
-  // effect on the next full page load — acceptable for a new-chat default. Only a
-  // SUCCESSFUL response is cached, so a transient failure (engine not ready yet)
-  // retries on the next mount instead of pinning the picker to "no ceiling".
-  let _cache: TierConfig | null = null;
-
-  async function loadTierConfig(): Promise<TierConfig> {
-    if (_cache) return _cache;
-    try {
-      const res = await fetch(`${getApiBase()}/config`);
-      if (!res.ok) return { defaultTier: undefined, maxTier: undefined, mainChatTiers: undefined };
-      const data = (await res.json()) as {
-        default_tier?: string;
-        max_tier?: string;
-        main_chat_tiers?: MainChatTiers;
-      };
-      _cache = { defaultTier: data.default_tier, maxTier: data.max_tier, mainChatTiers: data.main_chat_tiers };
-      return _cache;
-    } catch {
-      return { defaultTier: undefined, maxTier: undefined, mainChatTiers: undefined };
-    }
-  }
+  import { loadTierConfig, type MainChatTiers } from '../utils/tier-config.js';
 </script>
 
 <!--

@@ -474,6 +474,12 @@ function emitCompletedTextBlock(content: string, key: string): void {
 }
 
 let sessionModel = $state<string | null>(null);
+// The current thread's capability TIER (`fast`/`balanced`/`deep`) — distinct from
+// `sessionModel`, which the turn_end SSE frame overwrites with the concrete
+// model-id (e.g. `claude-sonnet-4-6`). Set only from the tier-bearing POST/resume/
+// re-pick responses (never turn_end), so the per-thread model control (P1 §5.1b)
+// always reads a real tier. null before a session exists / on a new chat.
+let sessionTier = $state<string | null>(null);
 // The tier the composer model picker chose for the NEXT new chat (null = let the
 // server use default_tier). Sent as `model` on the session-create POST; cleared on
 // newChat() so every new chat starts from default_tier (no stickiness).
@@ -574,26 +580,27 @@ async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 	// any LLM error surfaces, the tier is known and error copy branches
 	// correctly.
 	void probeManagedTier();
-	const init: RequestInit = resumeThreadId
-		? {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ threadId: resumeThreadId }),
-		}
+	// `source` records provenance (P1, DEF-0095): a NON-null pendingModel means the
+	// user actively picked → 'user'; an untouched new chat → 'default'. Resume sends
+	// no source (createThread is OR IGNORE on an existing thread, so the thread keeps
+	// its original provenance). ADVISORY-ONLY server-side — it gates nothing.
+	const body: Record<string, unknown> = resumeThreadId
+		? { threadId: resumeThreadId }
 		: pendingModel
-			? {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				// The composer picker's tier for this new chat. The engine clamps it
-				// to max_tier at the ctor, so an over-ceiling value is safe here.
-				body: JSON.stringify({ model: pendingModel }),
-			}
-			: { method: 'POST' };
+			// The composer picker's tier for this new chat. The engine clamps it to
+			// max_tier at the ctor, so an over-ceiling value is safe here.
+			? { model: pendingModel, source: 'user' }
+			: { source: 'default' };
+	const init: RequestInit = {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	};
 	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
-	if (data.model) sessionModel = data.model;
+	if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 	if (data.contextWindow) contextWindow = data.contextWindow;
 	return sessionId;
 }
@@ -2233,6 +2240,12 @@ export function getAuthError() {
 export function getSessionModel() {
 	return sessionModel;
 }
+/** The current thread's capability tier (`fast`/`balanced`/`deep`), or null before
+ *  a session exists. Drives the per-thread model control (P1 §5.1b) — unlike
+ *  {@link getSessionModel}, never a concrete model-id. */
+export function getSessionTier() {
+	return sessionTier;
+}
 export function getContextWindow() {
 	return contextWindow;
 }
@@ -2333,6 +2346,7 @@ export function newChat() {
 	runInterrupted = null;
 	messageQueue = [];
 	sessionModel = null;
+	sessionTier = null;
 	pendingModel = null; // no stickiness — the next new chat starts at default_tier
 	contextBudget = null;
 	runStartedAt = null;
@@ -2346,10 +2360,54 @@ export function getSessionId() {
 }
 
 /** Set the tier the next new chat will run on (composer model picker). Ignored
- *  once a session exists — a running chat keeps its model (D1: pick before turn 1). */
+ *  once a session exists — a new pick on a live thread goes through
+ *  {@link repickSessionModel} instead (D18 reverses D1). */
 export function setPendingModel(tier: string | null): void {
 	if (sessionId) return;
 	pendingModel = tier;
+}
+
+/** Re-pick the model tier of the CURRENT live/historical thread — the mid-thread
+ *  control (arc:model-selector P1 §5.1b, "continue a historical chat on another
+ *  model"). PATCHes /api/sessions/:id/model; on success the live session swaps and
+ *  the thread row is persisted as a 'user' pick (sticky on resume). Returns a
+ *  discriminated result so the caller can surface the downgrade-overflow refusal
+ *  (422) as actionable copy. Refuses locally when there is no session yet or a run
+ *  is streaming (the server 409s the latter regardless — this is just fast-path UX). */
+export async function repickSessionModel(tier: string): Promise<
+	| { ok: true; model: string }
+	| { ok: false; reason: 'busy' | 'no_session' | 'error' }
+	| { ok: false; reason: 'overflow'; targetTier: string; occupancy: number; window: number }
+> {
+	if (!sessionId) return { ok: false, reason: 'no_session' };
+	if (isStreaming) return { ok: false, reason: 'busy' };
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/model`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ tier }),
+		});
+		if (res.ok) {
+			const data = (await res.json()) as { model?: string; modelId?: string };
+			// `model` is the resolved (clamped) TIER; `modelId` is the concrete
+			// model-id. Keep sessionModel a model-id (consistent with the turn_end
+			// frame + the StatusBar tooltip) and sessionTier the tier (drives the
+			// per-thread control). Falling back to the tier only if modelId is absent.
+			if (data.model) {
+				sessionTier = data.model;
+				sessionModel = data.modelId ?? data.model;
+			}
+			return { ok: true, model: data.model ?? tier };
+		}
+		if (res.status === 422) {
+			const data = (await res.json()) as { targetTier?: string; occupancy?: number; window?: number };
+			return { ok: false, reason: 'overflow', targetTier: data.targetTier ?? tier, occupancy: data.occupancy ?? 0, window: data.window ?? 0 };
+		}
+		if (res.status === 409) return { ok: false, reason: 'busy' };
+		return { ok: false, reason: 'error' };
+	} catch {
+		return { ok: false, reason: 'error' };
+	}
 }
 
 let _resumeGeneration = 0;
@@ -2592,7 +2650,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 		const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 		sessionId = data.sessionId;
-		if (data.model) sessionModel = data.model;
+		if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 		if (data.contextWindow) contextWindow = data.contextWindow;
 
 		// Load thread metadata (extraction flag)

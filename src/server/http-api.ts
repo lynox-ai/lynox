@@ -38,7 +38,7 @@ import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
@@ -1827,6 +1827,10 @@ export class LynoxHTTPApi {
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? normalizeTier(opts['model']) : undefined,
+        // Provenance (P1, DEF-0095): the picker declares 'user' vs 'default'.
+        // Only stamped for a genuinely NEW thread (createThread is OR IGNORE on
+        // resume). Absent/invalid → 'unknown' at the ctor.
+        source: normalizeThreadModelSource(opts['source']),
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
         systemPromptSuffix: WEB_UI_SYSTEM_PROMPT_SUFFIX,
       });
@@ -3009,6 +3013,45 @@ export class LynoxHTTPApi {
       const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
       const result = await session.compact(focus);
       jsonResponse(res, 200, { ok: result.success, summary: result.summary });
+    }));
+
+    // Mid-thread model re-pick (arc:model-selector P1, §5.1b) — the "continue a
+    // historical chat on another model" half of the ask. Resolves an EXISTING
+    // live session (never mints — `get`, not `getOrCreate`, so an unknown id is a
+    // 404 not a new thread; S2). Refuses 409 while a run is in flight (swapping
+    // the agent mid-turn would orphan the in-flight output — the same hazard
+    // /compact guards). The Session method clamps (S1) + pre-checks downgrade
+    // overflow (D20/F9) + persists the requested pick; a downgrade that wouldn't
+    // fit the smaller window is refused BEFORE any write with a 422 the client
+    // renders as actionable copy (U1).
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/sessions/:id/model', async (_req, res, params, body) => {
+      const sessionId = params['id']!;
+      const session = this.sessionStore.get(sessionId);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (this.runningSessions.has(sessionId)) {
+        errorResponse(res, 409, 'Cannot change the model while a run is in progress');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const requestedTier = typeof b?.['tier'] === 'string' ? normalizeTier(b['tier']) : undefined;
+      if (!requestedTier) {
+        errorResponse(res, 400, 'Invalid or missing tier — expected fast, balanced, or deep');
+        return;
+      }
+      const result = session.repickModel(requestedTier);
+      if (!result.ok) {
+        // Downgrade overflow (D20/F9): the occupied context does not fit the
+        // target window. 422 (distinct from the 409 busy case) + machine-readable
+        // fields; the client localizes the "chat too long for {tier}" copy.
+        jsonResponse(res, 422, {
+          error: 'context_overflow',
+          targetTier: result.targetTier,
+          occupancy: result.occupancy,
+          window: result.window,
+        });
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, model: result.tier, modelId: result.modelId });
     }));
 
     // ── Threads ──
