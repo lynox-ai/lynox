@@ -102,9 +102,28 @@ Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/int
 
 ## Git
 
-- Pre-commit: typecheck + hex-guard
-- Pre-push: gitleaks + pattern-scan + security-scan + public-repo-guard (internal-infra leaks) + drift-guard (doc/code drift) + positioning-guard (copy vs POSITIONING.md). All three guards re-run as required CI checks so `--no-verify` can't bypass them.
+Hooks (`lefthook.yml` is the source of truth — this list had drifted from it, naming
+pre-push for what actually runs at pre-commit):
+
+- **commit-msg**: no-ai-attribution — strips `Co-Authored-By: Claude` / `Claude-Session:` /
+  "Generated with Claude Code". It strips silently rather than failing (the harness inserts
+  those trailers, so failing would only teach `--no-verify`); the `no-ai-attribution` CI job
+  is the gate for the bypassed case. A human `Co-Authored-By` is left alone.
+- **pre-commit**: gitleaks, pattern-scan, typecheck, hex-guard, token-contract, shape-contract.
+  gitleaks/pattern-scan belong here, not pre-push: they read the *index*, which is empty at
+  push time — at pre-push they were no-ops.
+- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), drift-guard (doc/code
+  drift), positioning-guard (copy vs POSITIONING.md).
+
+Most of these re-run as **required CI checks**, so `git push --no-verify` cannot bypass them —
+that is what makes them gates rather than suggestions. Two honest caveats: `security-scan` and
+`hex-guard` have **no** CI job (hook-only → `--no-verify` removes them entirely), and
+`enforce_admins` is **false** on this repo, so `gh pr merge --admin` overrides *every* required
+check. Do not call a guard unbypassable while that is true.
+
 - Commits: English, imperative, first line <70 chars
+- **No AI attribution** — enforced by the commit-msg hook above. It is self-promotion and does
+  not belong in this history.
 
 ## Docker
 

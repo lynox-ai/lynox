@@ -1,0 +1,38 @@
+name: no-ai-attribution
+
+# CLAUDE.md forbids `Co-Authored-By: Claude`, `Claude-Session:` and "Generated with
+# Claude Code" in this history. The commit-msg hook strips them; this job is the
+# backstop for `git commit --no-verify` and for commits made where the hook is not
+# installed.
+#
+# Scope note (why this only scans the PR's own commits): main already carries ~332
+# such commits. They are NOT being rewritten — rewriting public history to remove a
+# trailer is a worse trade than living with it. So this asserts only that the commits
+# a PR ADDS are clean, and the history heals going forward.
+#
+# Honesty note: this is only a gate if it is a REQUIRED status check — otherwise it is
+# a suggestion. And with `enforce_admins: false` on this repo, even a required check
+# yields to `gh pr merge --admin`.
+
+on:
+  pull_request:
+
+# No paths-ignore: a docs-only PR carries commit messages too.
+
+jobs:
+  no-ai-attribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Need full history to walk base..head.
+          fetch-depth: 0
+
+      - name: Check the commits this PR adds
+        # Via env, not interpolated into the command line. These two are GitHub-minted
+        # SHAs, not attacker-controlled strings — but the safe form costs nothing and
+        # keeps the next person from copying the unsafe one.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/no-ai-attribution.sh check "$BASE_SHA" "$HEAD_SHA"
