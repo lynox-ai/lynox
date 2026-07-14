@@ -1,18 +1,26 @@
-name: Token Contract
+name: Design Contracts
 
-# The brand primitives in packages/web-ui/src/app.css are painted on more than one
-# surface: this product UI, and the lynox.ai marketing site, which is a separate
-# codebase and cannot depend on this package. tokens.contract.json is the contract
-# that keeps that duplication honest, and this asserts app.css still holds it up.
+# lynox paints two surfaces: this product UI, and the lynox.ai marketing site — a
+# separate codebase that cannot depend on this package. Two things cross that gap, and
+# both are duplicated by hand on the other side:
 #
-# It exists here because nothing in this repo knew those values were shared. hex-guard
-# allowlists app.css as "the token definitions themselves", so the values in it were
-# unguarded — a rebrand could land here and be discovered elsewhere, later, by someone
-# else. Now it is caught on the commit that makes it, by the person who makes it.
+#   COLOUR — tokens.contract.json. The brand primitives in packages/web-ui/src/app.css.
+#     Nothing in this repo knew those values were shared: hex-guard allowlists app.css
+#     as "the token definitions themselves", so the values IN it were unguarded, and a
+#     rebrand could land here and be discovered elsewhere, later, by someone else.
 #
-# The lefthook pre-commit hook runs the same check locally; this job is the gate
-# (`git commit --no-verify` skips the hook, not this). It is a required status check
-# on main — without that it would be a suggestion, not a gate.
+#   FORM — shapes.contract.json. The chat turn, the tool call, the inbox row, the state
+#     surface, the one primitive. A design system draws these by hand from reading these
+#     components. It was done once, carefully, with a paragraph promising the shapes had
+#     been read off the real source — and two of the four were wrong within a week (the
+#     inbox row was drawn flat with hairline separators, which is the marketing site's
+#     idiom and appears nowhere in this package; the state surface was generalised from
+#     two callouts into a rule the other hundred-odd state surfaces do not follow). Both
+#     were plausible. Nothing could tell. Now the reading is written down and checked.
+#
+# The lefthook pre-commit hook runs both locally; this job is the gate (`--no-verify`
+# skips the hook, not this). It is a required status check on main — without that it
+# would be a suggestion.
 
 on:
   pull_request:
@@ -31,3 +39,5 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: app.css still matches tokens.contract.json
         run: node packages/web-ui/scripts/check-token-contract.mjs
+      - name: the components still have the shapes shapes.contract.json records
+        run: node packages/web-ui/scripts/check-shape-contract.mjs

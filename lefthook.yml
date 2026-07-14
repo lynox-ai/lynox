@@ -73,3 +73,23 @@ pre-commit:
       skip:
         - merge
         - rebase
+    shape-contract:
+      # The colour half of the contract stopped the two surfaces' TOKENS drifting.
+      # Nothing stopped their SHAPES: a design system draws the chat turn, the tool
+      # call, the inbox row and the state surface by hand, from reading these
+      # components, and two of the four were wrong within a week of being drawn.
+      # shapes.contract.json is that reading, written down; this asserts the
+      # components still have the shapes it records.
+      #
+      # Globs every component it cites, not just the contract — the drift that matters
+      # is someone restyling a shape here without knowing it is drawn over there.
+      #
+      # Fast local feedback only. The gate is the same workflow.
+      glob:
+        - "packages/web-ui/shapes.contract.json"
+        - "packages/web-ui/src/lib/components/*.svelte"
+        - "packages/web-ui/src/lib/primitives/*.svelte"
+      run: node packages/web-ui/scripts/check-shape-contract.mjs
+      skip:
+        - merge
+        - rebase
