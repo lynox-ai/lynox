@@ -56,6 +56,18 @@
     hint = null;
   });
 
+  // The cache-hint warns about the ONE next reply re-processing the conversation
+  // after a mid-thread model switch (the one-time cost bump). Once that reply has
+  // streamed — isStreaming goes true→false — the warning is stale and must clear,
+  // instead of lingering until the user happens to switch models again. `prev` is
+  // a plain (non-reactive) local so this effect depends only on getIsStreaming().
+  let prevStreaming = false;
+  $effect(() => {
+    const streaming = getIsStreaming();
+    if (prevStreaming && !streaming) hint = null;
+    prevStreaming = streaming;
+  });
+
   function tierLabel(tier: ModelTier): string {
     const model = modelNames?.[tier];
     const base = model ? `${t(`llm.tier.${tier}`)} (${model})` : t(`llm.tier.${tier}`);

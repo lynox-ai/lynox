@@ -6,11 +6,13 @@
  */
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
+import type { TierSet } from '../../types/config.js';
 import {
   MODEL_MAP,
   VERTEX_MODEL_MAP,
   MISTRAL_MODEL_MAP,
   SERVED_BALANCED_SONNET_IDS,
+  getModelId,
 } from '../../types/models.js';
 
 export interface CatalogModel {
@@ -777,6 +779,39 @@ export function mainChatTierLabels(
   // all tiers ⇒ undefined ⇒ hidden. Dedup on the model id (not the label) so the
   // threshold tracks the requirement — "does the provider route to >1 model" —
   // and can't be fooled by two models that happen to share a display label.
+  return new Set(pickedIds).size >= 2 ? out : undefined;
+}
+
+/**
+ * Hybrid-routing counterpart to {@link mainChatTierLabels}. In `routing_mode:
+ * 'hybrid'` each tier may run a DIFFERENT provider+model via the `tier_set`, so
+ * the single-provider `main_chat_models` map is the wrong source — it shows the
+ * base provider's default (e.g. "Ausgewogen (Sonnet 5)") while the tier actually
+ * runs the slot's model (e.g. Mistral Large). This resolves each tier the same
+ * way `resolveTierModel` does at runtime — the configured slot's model_id, else
+ * the base provider's tier model — and looks the LABEL up catalog-wide (a slot's
+ * model can belong to any provider's entry), so the picker label matches what
+ * routes. Same ≥2-distinct-models hide rule as the standard path.
+ */
+export function mainChatTierLabelsFromTierSet(
+  tierSet: TierSet,
+  baseProvider: LLMProvider,
+  catalog: LLMCatalog = LLM_CATALOG,
+): Partial<Record<ModelTier, string>> | undefined {
+  const out: Partial<Record<ModelTier, string>> = {};
+  const pickedIds: string[] = [];
+  for (const tier of ['fast', 'balanced', 'deep'] as const) {
+    const slot = tierSet[tier];
+    // Mirror resolveTierModel: the slot names its own model; otherwise the base
+    // provider's tier model (getModelId resolves the served balanced variant).
+    // The slot's provider is not needed here — the label is looked up catalog-WIDE
+    // by model id, since a slot's model can belong to any provider's entry
+    // (Mistral runs on the openai-wire entry). Fall back to the raw id.
+    const modelId = slot?.model_id ?? getModelId(tier, baseProvider);
+    const label = catalog.flatMap((e) => e.models).find((m) => m.id === modelId)?.label ?? modelId;
+    pickedIds.push(modelId);
+    out[tier] = label;
+  }
   return new Set(pickedIds).size >= 2 ? out : undefined;
 }
 

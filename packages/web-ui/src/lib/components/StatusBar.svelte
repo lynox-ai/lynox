@@ -5,7 +5,7 @@
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
-	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
+	import { getAuthError } from '../stores/chat.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
@@ -434,27 +434,6 @@
 	<a href="/app/settings/account/mobile" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" title={t('mobile.title')}>
 		<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M7 2a2 2 0 00-2 2v12a2 2 0 002 2h6a2 2 0 002-2V4a2 2 0 00-2-2H7zm3 14a1 1 0 100-2 1 1 0 000 2z"/></svg>
 	</a>
-
-	<!-- Context Window -->
-	{#if getContextBudget()}
-		{@const pct = getContextBudget()?.usagePercent ?? 0}
-		<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
-		     thread is to a compaction, cost-wise) when the engine sends it, else
-		     falls back to the window-fill `pct` so the bar is unchanged on older /
-		     non-lazy engines (colorPct === pct then). Displayed number stays `pct`
-		     (honest window-fill) — no second number. Mirrors ChatView's chip so the
-		     persistent status-strip bar and the per-message chip never disagree (#78b). -->
-		{@const colorPct = getContextBudget()?.budgetPercent !== undefined ? Math.min(getContextBudget()!.budgetPercent!, 100) : pct}
-		{@const color = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
-		{@const textColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
-		<span class="text-border">|</span>
-		<div class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="{getContextBudget()?.totalTokens ?? 0} / {getContextBudget()?.maxTokens ?? 0} tokens{getSessionModel() ? ` · ${getSessionModel()}` : ''}">
-			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">
-				<div class="{color} h-full rounded-full transition-all duration-500" style="width: {Math.min(pct, 100)}%"></div>
-			</div>
-			<span class="text-[10px] font-mono {textColor}">{Math.min(pct, 100)}%</span>
-		</div>
-	{/if}
 
 	<!-- Legal + version (right-aligned) -->
 	<div class="flex items-center gap-2 ml-auto px-3 shrink-0">

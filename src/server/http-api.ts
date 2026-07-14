@@ -30,7 +30,7 @@ import { resolveChatContext, type ChatContextRef } from '../core/chat-context.js
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
-import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels } from '../core/llm/catalog.js';
+import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
@@ -3829,10 +3829,20 @@ export class LynoxHTTPApi {
       // models; that absence is the signal the composer reads to hide itself.
       // Derived by `mainChatTierLabels` from the catalog's `main_chat_models` —
       // where the tier→model maps live — so labels can't drift from what routes.
-      const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
-      if (mainChatEntry) {
-        const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config));
+      // In HYBRID routing each tier may run a different provider+model (tier_set),
+      // so the labels must be resolved through the tier_set — otherwise the picker
+      // shows the active provider's default map (e.g. "Ausgewogen (Sonnet 5)")
+      // while the tier actually routes to the slot's model (e.g. Mistral Large).
+      // Standard routing keeps the single-provider derivation.
+      if (config.routing_mode === 'hybrid' && config.tier_set) {
+        const tierLabels = mainChatTierLabelsFromTierSet(config.tier_set, activeProvider);
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
+      } else {
+        const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
+        if (mainChatEntry) {
+          const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config));
+          if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
+        }
       }
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.

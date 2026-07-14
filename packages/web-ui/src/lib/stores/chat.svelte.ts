@@ -3,6 +3,7 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
+import { parseFollowUps, type FollowUpSuggestion } from './follow-ups.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -19,9 +20,7 @@ export type { UsageInfo } from './chat-usage.js';
 // Follow-up parsing (<follow_ups>…</follow_ups> block extraction)
 // ---------------------------------------------------------------------------
 
-const FOLLOW_UP_RE = /<follow_ups>\s*([\s\S]*?)\s*<\/follow_ups>/;
-const MAX_FOLLOW_UPS = 4;
-const MAX_LABEL_LENGTH = 40;
+// Follow-up suggestion parsing lives in ./follow-ups.ts (pure module, unit-tested).
 
 /** Resolved once per module load — the user's tz doesn't change mid-tab. Server falls back to UTC if `''`. */
 const USER_TIMEZONE: string = (() => {
@@ -31,42 +30,6 @@ const USER_TIMEZONE: string = (() => {
 		return '';
 	}
 })();
-
-function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; cleanText: string } {
-	const match = FOLLOW_UP_RE.exec(text);
-	if (!match) return { suggestions: [], cleanText: text };
-
-	const cleanText = text.replace(FOLLOW_UP_RE, '').trimEnd();
-	let suggestions: FollowUpSuggestion[] = [];
-
-	try {
-		const parsed: unknown = JSON.parse(match[1]!);
-		if (!Array.isArray(parsed)) return { suggestions: [], cleanText };
-
-		for (const item of parsed) {
-			if (typeof item !== 'object' || item === null) continue;
-			const obj = item as Record<string, unknown>;
-			if (typeof obj['label'] !== 'string' || typeof obj['task'] !== 'string') continue;
-			if (!obj['label'].trim() || !obj['task'].trim()) continue;
-			suggestions.push({
-				label: obj['label'].trim().slice(0, MAX_LABEL_LENGTH),
-				task: obj['task'].trim(),
-			});
-		}
-	} catch {
-		return { suggestions: [], cleanText };
-	}
-
-	// Deduplicate by label
-	const seen = new Set<string>();
-	suggestions = suggestions.filter(s => {
-		if (seen.has(s.label)) return false;
-		seen.add(s.label);
-		return true;
-	});
-
-	return { suggestions: suggestions.slice(0, MAX_FOLLOW_UPS), cleanText };
-}
 
 // `UsageInfo` and `usageFromDoneEvent` live in ./chat-usage.ts (pure module,
 // unit-tested) and are re-exported at the top of this file for back-compat.
@@ -86,11 +49,6 @@ export type ContentBlock =
 	| { type: 'text'; text: string }
 	| { type: 'thinking'; text: string }
 	| { type: 'tool_call'; index: number };
-
-export interface FollowUpSuggestion {
-	label: string;
-	task: string;
-}
 
 export interface ChatMessage {
 	role: 'user' | 'assistant';
@@ -672,7 +630,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const display = displayText ?? task;
 		const fileNames = files?.map((f) => f.name).join(', ');
 		const id = newQueueId();
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id, createdAt: new Date().toISOString() });
 		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
@@ -802,7 +760,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		userMsgIdx = queuedIdx;
 	} else {
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
 		userMsgIdx = messages.length - 1;
 	}
 
@@ -2136,7 +2094,7 @@ export function getMessages() {
 /** Add a temporary placeholder message (e.g. voice transcription bubble). Returns its index. */
 export function pushPlaceholder(content: string): number {
 	const idx = messages.length;
-	messages.push({ role: 'user', content });
+	messages.push({ role: 'user', content, createdAt: new Date().toISOString() });
 	return idx;
 }
 /** Update placeholder content at given index (for live transcription). */
