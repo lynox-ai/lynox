@@ -1024,9 +1024,13 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // === Step Hints (LLM-driven per-step configuration) ===
 
-/** Hints the LLM attaches to options or plan phases to configure the next step. */
+/**
+ * Hints the LLM attaches to `ask_user` options to tune the NEXT step's
+ * thinking/effort. It deliberately carries NO model tier: the agent never
+ * drives the main-session tier — only the user (composer picker / thread
+ * re-pick) does. See model-execution-policy D23.
+ */
 export interface StepHint {
-  model?: ModelTier | undefined;
   thinking?: ThinkingHint | undefined;
   effort?: EffortLevel | undefined;
 }

@@ -320,7 +320,7 @@ export class Session {
     // to the tenant's cost ceiling — otherwise the picker (or a resumed over-ceiling
     // tier) escapes `max_tier`. Delegate to the single chokepoint, reading the FRESH
     // ceiling from engine.getUserConfig() (NOT a once-bound toolContext — the stale-
-    // reference trap the StepHint/compaction clamps have) so this can never disagree
+    // reference trap the compaction clamp has) so this can never disagree
     // with the run-path clamp. `engine.config.model` is already clamped at engine
     // init, so only the request-supplied branch needs it.
     if (opts?.model) {
@@ -600,25 +600,9 @@ export class Session {
     const pendingHint = toolCtx.pendingStepHint;
     if (pendingHint) {
       toolCtx.pendingStepHint = null;
-      if (pendingHint.model) {
-        // Resolve via the single chokepoint — the override gate is now a
-        // pass-through (D8); the max_tier CLAMP is the cost cap that still
-        // applies here (this path historically skipped it). Only the resolved
-        // tier is used. Read the FRESH config (engine.getUserConfig), NOT the
-        // once-bound toolCtx.userConfig: after a reloadUserConfig (e.g. a CP
-        // sync-env that lowered max_tier) the tool context still holds the OLD
-        // config object, so clamping against it uses a stale ceiling (DEF-0077).
-        // The ctor opts.model clamp reads fresh for exactly this reason (#957).
-        const uc = this.engine.getUserConfig();
-        this._model = resolveRunModel({
-          requested: pendingHint.model,
-          defaultTier: pendingHint.model,
-          accountTier: uc.account_tier,
-          maxTier: uc.max_tier,
-          provider: uc.provider ?? 'anthropic',
-        }).tier;
-        this._recreateAgent();
-      }
+      // A StepHint tunes the next step's thinking/effort only — it deliberately
+      // carries NO model tier. The agent never drives the main-session tier;
+      // only the user does (composer picker / thread re-pick). See D23.
       if (pendingHint.effort) {
         this._effort = pendingHint.effort;
       }
@@ -652,13 +636,13 @@ export class Session {
     // baked into a `readonly` Agent field at construction (agent.ts), so
     // honoring the override — and restoring the session's real tier afterward
     // — both require a scoped `_recreateAgent()` round-trip (byte-identical
-    // message-history preserve, same mechanism setModel/pendingHint.model use).
+    // message-history preserve, same mechanism `setModel` uses).
     // Restored in the `finally` below so the override never outlives this run.
     let restoreModelTierTo: ModelTier | null = null;
     if (runOptions?.modelTier !== undefined) {
-      // Resolve through the same chokepoint the pendingHint.model path uses, so
-      // an operator-set compaction_model above the tenant's max_tier cost
-      // ceiling is still clamped (this override would otherwise bypass the cap).
+      // Resolve through the same chokepoint `setModel` and the ctor opts.model
+      // clamp use, so an operator-set compaction_model above the tenant's
+      // max_tier cost ceiling is still clamped (would otherwise bypass the cap).
       // Fresh config (engine.getUserConfig), not the stale toolCtx.userConfig —
       // same reload-staleness reason as the pendingHint clamp above (DEF-0077).
       const uc = this.engine.getUserConfig();
@@ -1816,7 +1800,7 @@ export class Session {
     // hitting approval gates that nobody is there to answer), its `maxIterations`
     // budget, and its named model profile (→ it falls off the cheaper EU model
     // onto the main provider: a data-RESIDENCY change, not just a cost one) on the
-    // very next registry bump, StepHint or compaction override. `costGuard` alone
+    // very next registry bump or compaction override. `costGuard` alone
     // was patched for this; the rule was never about costGuard.
     // Spelled out field by field rather than spread-merged, for two reasons: the
     // two classes stay visible to the next reader, and `??` means a key passed as

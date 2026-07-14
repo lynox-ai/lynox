@@ -258,7 +258,7 @@ export interface LynoxUserConfig {
   /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */
   gcp_region?: string | undefined;
   default_tier?: ModelTier | undefined;
-  /** Maximum allowed model tier — the cost ceiling. Requests for a higher tier (StepHints, pipeline steps, run-options) are clamped via `clampTier`. Post-D8 this is the sole tier cap (the budget caps spend); managed + managed_pro set `'deep'`. */
+  /** Maximum allowed model tier — the cost ceiling. Requests for a higher tier (pipeline steps, run-options) are clamped via `clampTier`. Post-D8 this is the sole tier cap (the budget caps spend); managed + managed_pro set `'deep'`. */
   max_tier?: ModelTier | undefined;
   /**
    * Account-level plan tier, independent of LLM model tier. Post-D8

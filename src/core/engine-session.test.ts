@@ -811,8 +811,8 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('_recreateAgent() — session identity survives, per-rebuild isolation does not', () => {
     // The costGuard block above fixed ONE field. The rule was never about
     // costGuard: `agentOverrides` was replaced wholesale, so a bare rebuild
-    // (registry hot-reload, provider swap, StepHint tier change, compaction
-    // override) also stripped autonomy, the iteration budget and the named model
+    // (registry hot-reload, provider swap, compaction override) also stripped
+    // autonomy, the iteration budget and the named model
     // profile. These pin the general rule — AND its boundary: `excludeTools` is a
     // transient per-instance isolation and must still be lifted by an empty
     // recreate (see session-disabled-tools-invariant.test.ts).
@@ -860,8 +860,8 @@ describe('Engine + Session (Orchestrator)', () => {
         expect(withProfile.apiBaseURL).toBe('https://api.mistral.ai/v1');
         expect(withProfile.openaiModelId).toBe('mistral-large-2512');
 
-        // A StepHint tier change (session.ts:579) or a compaction override (:632)
-        // rebuilds with no args. Before the fix `_profileOverride` was nulled here,
+        // A compaction override (runOptions.modelTier) rebuilds with no args.
+        // Before the fix `_profileOverride` was nulled here,
         // so the managed WorkerLoop's cheap EU model silently became the main
         // provider — a data-residency change, not just a cost one.
         vi.mocked(Agent).mockClear();

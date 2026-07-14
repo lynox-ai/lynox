@@ -689,6 +689,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.thread_model.error': { de: 'Modellwechsel fehlgeschlagen. Versuch es nochmal.', en: 'Couldn’t change the model. Please try again.' },
 	// Downgrade-overflow refusal (U1). {tier} is interpolated with the target tier label.
 	'chat.thread_model.overflow': { de: 'Dieser Chat ist zu lang für {tier} — er passt nicht mehr in dessen Kontextfenster. Kürze zuerst den Verlauf oder bleib beim aktuellen Modell.', en: 'This chat is too long for {tier} — it no longer fits that model’s context window. Shorten the history first, or stay on the current model.' },
+	// One-time cache-rewrite hint after a mid-thread switch (P2 §5.1b, Fork-3). Cost-framed, so suppressed on demo/CP-paid tenants at the call site.
+	'chat.thread_model.cache_hint': { de: 'Modellwechsel: die nächste Antwort verarbeitet den bisherigen Verlauf einmalig neu — der Cache ist modellspezifisch, das kostet einmalig etwas mehr.', en: 'Model switched: the next reply re-processes the conversation once — the cache is model-specific, so that one turn costs a little more.' },
 	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
 	'chat.activity.thinking': { de: 'Denkt nach...', en: 'Thinking...' },

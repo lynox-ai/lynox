@@ -398,6 +398,38 @@ describe('Engine — main-chat tier (default_tier → config.model)', () => {
   const modelOf = (e: Engine): string | undefined =>
     (e as unknown as { config: { model?: string } }).config.model;
 
+  // D25 drift-lock: `balanced` is the UNIVERSAL default main-chat tier. With no
+  // `default_tier` picked (a fresh self-host config) and no ceiling, the CTOR seam
+  // (engine.ts:273) must resolve to `balanced` — never `fast` (a silent quality
+  // drop) or `deep` (a silent cost blowout). Pins that `?? 'balanced'` fallback
+  // against a quiet flip; the reload seam (engine.ts:362, a separate `?? 'balanced'`
+  // expression) is pinned by the sibling reload test below. See model-execution-
+  // policy D25 ("balanced universal default"); managed enforces it via TIER_POLICY.
+  it('ctor: unset default_tier resolves to the balanced universal default (D25)', () => {
+    mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC }); // no default_tier, no max_tier
+    const engine = new Engine({}); // no explicit model → the universal default applies
+    expect(modelOf(engine)).toBe('balanced');
+  });
+
+  // D25 drift-lock — the RELOAD seam (engine.ts:362). Separate `?? 'balanced'`
+  // expression from the ctor, so it needs its own pin: a regression flipping only
+  // the reload fallback would slip past the ctor test above.
+  it('reloadUserConfig: unset default_tier re-resolves to the balanced universal default (D25)', async () => {
+    const engine = makeEngine(); // starts at balanced
+    // Move it OFF balanced first, so the final assertion proves the fallback
+    // actively fires at reload rather than mere inertia.
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC, default_tier: 'deep' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('deep');
+    // User clears the pick (default_tier unset) → reload must fall back to balanced,
+    // never strand the session on the previously-picked deep tier.
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('balanced');
+  });
+
   it('ctor: config.model comes from default_tier, clamped to max_tier (G3)', () => {
     mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'balanced' });
     const engine = new Engine({}); // no explicit model → applies default_tier
