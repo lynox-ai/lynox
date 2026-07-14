@@ -3,27 +3,38 @@
     "The app's SHAPE vocabulary — the companion to tokens.contract.json.",
     "",
     "The token contract stopped the two surfaces' COLOURS from drifting apart. Nothing",
-    "stopped their SHAPES, and a design system drew four of them by hand, from reading",
-    "this source, with nothing checking the reading. Two of the four were wrong within",
-    "a week: it described the inbox row as flat hairline-separated rows (the marketing",
+    "stopped their SHAPES, and a design system drew them by hand, from reading this",
+    "source, with nothing checking the reading. Two of the first four were wrong within",
+    "a week: the inbox row was described as flat hairline-separated rows (the marketing",
     "site's idiom — `0.5px` appears nowhere in this package) when the real row is a",
-    "bordered card in a spaced list, and it generalised the state pattern from the two",
-    "warning callouts in LLMSettings into a rule the other 100+ state surfaces do not",
-    "follow. Both were plausible. Both were read off this code. Both were false.",
+    "bordered card in a spaced list, and the state pattern was generalised from the two",
+    "warning callouts in LLMSettings into a rule most state surfaces do not follow.",
     "",
-    "So the reading is now written down and checked from both ends:",
+    "So the reading is written down and checked from both ends:",
     "",
-    "  `evidence` — literal class strings that MUST still be present in `source`.",
-    "    Checked HERE, in this repo, on the commit that changes the component. If the",
-    "    app restyles a shape, this fails and the design system has to follow.",
+    "  `evidence` — the FULL class attribute of the element that carries the shape. It",
+    "    must be present, verbatim, in `source`. Checked HERE, on the commit that changes",
+    "    the component.",
     "",
-    "  `preview` — the CSS the design system's product page MUST use to draw the shape.",
-    "    Checked THERE, against this file, fetched over https (this repo is public).",
-    "    If the design system draws something the app does not do, that fails.",
+    "    It is the WHOLE attribute and not a substring on purpose. The first version of",
+    "    this check tested substrings, and a review broke it in four ways in one sitting:",
+    "    appending `border-2` to the inbox row left the substring intact (the row went to",
+    "    2px while the design system kept drawing 1px, ✓), and moving the evidence into an",
+    "    HTML comment while replacing the real markup with a flat `divide-y` list passed",
+    "    too — the original lie, re-landed, with the guard applauding. A substring check is",
+    "    orthogonal to whether the shape is still LIVE. The whole attribute is not, and",
+    "    comments are stripped before matching.",
     "",
-    "Neither half alone is enough: the first catches the app moving, the second catches",
-    "the drawing moving. The reason the previous version could be wrong at all is that",
-    "it had neither — it had a paragraph promising the shapes were read carefully.",
+    "  `preview` — what the design system's product page must DRAW. Its declarations are",
+    "    resolved last-wins across every rule with that selector, so appending an",
+    "    overriding rule cannot slip a different shape past. Checked THERE, against this",
+    "    file, fetched over https (this repo is public).",
+    "",
+    "WHAT THIS DOES NOT CATCH, said plainly so nobody trusts it further than it goes: it",
+    "checks that the element still carries these classes, not that the element is still",
+    "rendered, reachable, or in the place the design system shows it. A shape can be",
+    "hidden by a parent, or moved, and this will not know. It catches restyling, which is",
+    "what actually happens.",
     "",
     "It names no other repository and no private path: it is a list of class names",
     "checked against this package's own components."
@@ -34,110 +45,165 @@
       "what": "The user's turn is a bubble. It is the only thing in the chat that is.",
       "source": "src/lib/components/ChatView.svelte",
       "evidence": [
-        "rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%]",
-        "bg-accent/10 border border-accent/20"
+        "class=\"rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}\""
       ],
       "preview": {
         "selector": ".bubble-user",
-        "declarations": [
-          "var(--color-accent) 10%",
-          "var(--color-accent) 20%",
-          "border-radius: var(--radius-md)",
-          "max-width: 80%"
-        ]
+        "declarations": {
+          "background": "color-mix(in srgb, var(--color-accent) 10%, transparent)",
+          "border": "1px solid color-mix(in srgb, var(--color-accent) 20%, transparent)",
+          "border-radius": "var(--radius-md)",
+          "max-width": "80%"
+        }
       }
     },
 
     "chat-assistant": {
-      "what": "The assistant's turn has no container at all — plus the AI-disclosure badge, which is not optional.",
+      "what": "The assistant's turn has no container at all — but it carries the AI-disclosure badge, which is not optional (EU AI Act Art. 50(1)).",
       "source": "src/lib/components/ChatView.svelte",
       "evidence": [
         "class=\"ai-message-wrap space-y-2\" data-ai-generated=\"true\"",
-        "class=\"ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent\""
+        "class=\"ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent-text\""
       ],
       "preview": {
         "selector": ".ai-badge",
-        "declarations": [
-          "var(--color-accent) 40%",
-          "var(--color-accent) 10%",
-          "font-family: var(--font-mono)",
-          "text-transform: uppercase",
-          "color: var(--color-accent)"
-        ]
+        "declarations": {
+          "border": "1px solid color-mix(in srgb, var(--color-accent) 40%, transparent)",
+          "background": "color-mix(in srgb, var(--color-accent) 10%, transparent)",
+          "font-family": "var(--font-mono)",
+          "font-size": "10px",
+          "text-transform": "uppercase",
+          "color": "var(--color-accent-text)"
+        }
       }
     },
 
     "chat-tool": {
-      "what": "A tool call is a left rule, never a card. State lives in the rule's colour AND in a full-strength tick.",
+      "what": "A tool call is a left rule, never a card — but once it settles it earns a full-strength tick.",
       "source": "src/lib/components/ChatView.svelte",
       "evidence": [
-        "text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 {isError ? 'border-danger/40' : isRunning ? 'border-warning/40' : 'border-border'} pl-3",
-        "{isError ? 'text-danger' : 'text-success'}\">{isError ? '✗' : '✓'}"
+        "class=\"flex items-center gap-2 md:gap-1.5 text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 {isError ? 'border-danger/40' : isRunning ? 'border-warning/40' : 'border-border'} pl-3 py-1 md:py-0.5\"",
+        "class=\"ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}\">{isError ? '✗' : '✓'}"
       ],
       "preview": {
         "selector": ".tool",
-        "declarations": [
-          "border-left: 2px solid var(--color-border)",
-          "padding: 2px 0 2px 12px",
-          "var(--color-text-subtle) 70%"
-        ]
+        "declarations": {
+          "border-left": "2px solid var(--color-border)",
+          "padding": "2px 0 2px 12px",
+          "color": "color-mix(in srgb, var(--color-text-subtle) 70%, transparent)"
+        }
+      }
+    },
+
+    "chat-tool-tick": {
+      "what": "The tick is full strength — the rule is for glancing, the tick is for when you actually look.",
+      "source": "src/lib/components/ChatView.svelte",
+      "evidence": [
+        "class=\"ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}\""
+      ],
+      "preview": {
+        "selector": ".tool-mark--ok",
+        "declarations": { "color": "var(--color-success)" }
+      }
+    },
+
+    "inbox-list": {
+      "what": "A SPACED list — 2px apart (space-y-0.5). Not hairline-separated rows.",
+      "source": "src/lib/components/InboxView.svelte",
+      "evidence": ["<ul class=\"space-y-0.5\" role=\"list\">"],
+      "preview": {
+        "selector": ".ibx-list",
+        "declarations": { "gap": "2px" }
       }
     },
 
     "inbox-row": {
-      "what": "A bordered card in a spaced list — NOT a flat hairline-separated row. Selection is the dominant state.",
+      "what": "A bordered card — --radius-sm, 1px border, transparent at rest so nothing shifts when it lights up.",
       "source": "src/lib/components/InboxView.svelte",
       "evidence": [
-        "<ul class=\"space-y-0.5\" role=\"list\">",
-        "rounded-[var(--radius-sm)] border transition-colors",
-        "border-accent bg-accent/5",
-        "border-transparent hover:border-border hover:bg-bg-subtle/60"
+        "class=\"rounded-[var(--radius-sm)] border transition-colors {isActiveSelection ? 'border-accent bg-accent/5' : 'border-transparent hover:border-border hover:bg-bg-subtle/60'}\""
       ],
       "preview": {
         "selector": ".ibx-row",
-        "declarations": [
-          "border-radius: var(--radius-sm)",
-          "border: 1px solid transparent"
-        ]
+        "declarations": {
+          "border-radius": "var(--radius-sm)",
+          "border": "1px solid transparent"
+        }
+      }
+    },
+
+    "inbox-row-selected": {
+      "what": "Selection is the loudest thing on the screen: the accent at full strength, over a 5% wash.",
+      "source": "src/lib/components/InboxView.svelte",
+      "evidence": ["'border-accent bg-accent/5'"],
+      "preview": {
+        "selector": ".ibx-row--sel",
+        "declarations": {
+          "border-color": "var(--color-accent)",
+          "background": "color-mix(in srgb, var(--color-accent) 5%, transparent)"
+        }
       }
     },
 
     "inbox-bar": {
       "what": "The toolbar sits on a 40% wash of the subtle ground — enough to separate, not enough to announce itself.",
       "source": "src/lib/components/InboxTriagePane.svelte",
-      "evidence": ["border-b border-border bg-bg-subtle/40 px-4 py-2"],
+      "evidence": ["class=\"border-b border-border bg-bg-subtle/40 px-4 py-2 flex items-center gap-2\""],
       "preview": {
         "selector": ".ibx-bar",
-        "declarations": ["var(--color-bg-subtle) 40%"]
+        "declarations": {
+          "background": "color-mix(in srgb, var(--color-bg-subtle) 40%, transparent)"
+        }
       }
     },
 
     "state": {
-      "what": "A tint, a border of the SAME colour at low opacity, and the text in the semantic colour. Not a full-strength border, and never the normal ink.",
+      "what": "The DOMINANT state surface: a tint, a border of the SAME colour at low opacity, and the text in the semantic colour. (A minority of surfaces — five, all warning — use a full-strength border instead; see `stateExceptions`.)",
       "source": "src/lib/components/WorkflowsView.svelte",
-      "evidence": ["bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger"],
+      "evidence": [
+        "class=\"rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4\""
+      ],
       "preview": {
         "selector": ".state--err",
-        "declarations": [
-          "var(--color-danger) 10%",
-          "var(--color-danger) 20%",
-          "color: var(--color-danger)"
-        ]
+        "declarations": {
+          "background": "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+          "border": "1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)",
+          "color": "var(--color-danger)"
+        }
       }
     },
 
     "checkbox": {
-      "what": "The one real primitive. 16px, and it keeps a visible focus ring.",
+      "what": "The one real primitive. 16px, and it keeps a visible focus ring — in the accent-TEXT role, because the accent fill is too dark to read as an outline on the dark ground.",
       "source": "src/lib/primitives/Checkbox.svelte",
       "evidence": [
         "class=\"lynox-checkbox shrink-0 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 {sizeClass}\"",
         "outline: 2px solid var(--color-accent-text)"
       ],
       "preview": {
-        "selector": ".lynox-checkbox:focus-visible",
-        "declarations": ["outline: 2px solid var(--color-accent-text)"]
+        "selector": ".lynox-checkbox",
+        "declarations": { "width": "16px", "height": "16px" }
       }
     }
+  },
+
+  "stateExceptions": {
+    "$comment": [
+      "The design system says the app's state surfaces are a tint + a same-colour border",
+      "at LOW opacity + the text in the semantic colour. That is the dominant pattern, not",
+      "a universal, and the last two attempts to write it as a universal were both wrong in",
+      "opposite directions. So the exceptions are counted, and the count is checked.",
+      "",
+      "`fullStrengthSemanticBorders` — every `border-danger` / `border-warning` /",
+      "`border-success` at FULL strength in src/lib. Three of the danger ones are a badge",
+      "and two buttons (not state surfaces at all); the five warning ones are real state",
+      "surfaces and are the genuine exception. Success never does it.",
+      "",
+      "If this number moves, the design system's prose about 'the app almost never does",
+      "this' has to move with it — which is the only reason it is here."
+    ],
+    "fullStrengthSemanticBorders": 8,
+    "fullStrengthSuccessBorders": 0
   },
 
   "counts": {
