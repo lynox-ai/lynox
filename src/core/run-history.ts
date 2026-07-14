@@ -1982,11 +1982,12 @@ export class RunHistory {
    * writer, so every 'running' row is an orphan. Flip it to the terminal
    * 'interrupted' so it stops reading as perpetually in-flight in the run list.
    *
-   * Unlike sweepStuckRuns (→ 'failed', to count partial spend), an interrupted
-   * run's RUN-LEVEL totals are still 0 (finalize never summed them), so it is
-   * deliberately EXCLUDED from getPipelineCostStats (B6) — the real per-step
-   * costs live in its as-completed pipeline_step_results rows (B3) and are
-   * counted there instead.
+   * The finalize never ran, so the run's totals are still their 0 defaults — but
+   * its as-completed step rows (B3) DO carry the real spend of every step that
+   * finished before the crash. So the sweep also BACKFILLS step_count + totals
+   * from those rows: an interrupted run then reports "3 steps · $0.42" instead of
+   * a misleading "0 steps · $0", and becomes a truthful sample for the cost
+   * aggregate (which excludes only rows whose totals are still placeholders).
    *
    * Multi-process safety: this sweep is unconditional-by-status while the
    * finalize (updatePipelineRun) is unconditional-by-id — so a run swept here
@@ -1996,7 +1997,14 @@ export class RunHistory {
    */
   sweepStuckPipelineRuns(): number {
     return this.db.prepare(
-      "UPDATE pipeline_runs SET status = 'interrupted' WHERE status = 'running'",
+      `UPDATE pipeline_runs SET
+         status = 'interrupted',
+         step_count = (SELECT COUNT(*) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_cost_usd = (SELECT COALESCE(SUM(cost_usd), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_tokens_in = (SELECT COALESCE(SUM(tokens_in), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_tokens_out = (SELECT COALESCE(SUM(tokens_out), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_duration_ms = (SELECT COALESCE(SUM(duration_ms), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id)
+       WHERE status = 'running'`,
     ).run().changes;
   }
 
