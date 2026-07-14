@@ -424,8 +424,11 @@ export function insertPipelineStepResult(db: Database.Database, params: {
   tokensOut?: number | undefined;
   costUsd?: number | undefined;
   modelTier?: string | undefined;
-}): void {
-  db.prepare(`
+}): number | bigint {
+  // Returns the AUTOINCREMENT rowid so the caller can defer the result-text and
+  // fill it at run-finalize by id — NOT by (run_id, step_id), which is not
+  // unique (for_each writes N rows per step_id; invariant I5).
+  return db.prepare(`
     INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error, duration_ms, tokens_in, tokens_out, cost_usd, model_tier)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
@@ -433,7 +436,17 @@ export function insertPipelineStepResult(db: Database.Database, params: {
     params.result ?? '', params.error ?? null,
     params.durationMs ?? 0, params.tokensIn ?? 0, params.tokensOut ?? 0, params.costUsd ?? 0,
     params.modelTier ?? '',
-  );
+  ).lastInsertRowid;
+}
+
+/**
+ * Fill a step row's deferred result-text at run-finalize (2a/B3). The INSERT
+ * writes result='' as-completed (the structural 2b-fence — a crashed run's
+ * partial result-text is never persisted, invariant I4); this UPDATE persists
+ * it only once the run terminates, addressed by the row's own id (I5).
+ */
+export function updatePipelineStepResultText(db: Database.Database, rowId: number | bigint, result: string): void {
+  db.prepare('UPDATE pipeline_step_results SET result = ? WHERE id = ?').run(result, rowId);
 }
 
 export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<{

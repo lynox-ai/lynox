@@ -18,6 +18,7 @@ import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestSt
 import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
+import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -298,6 +299,13 @@ export async function runManifest(
     } catch { /* fire-and-forget */ }
   }
 
+  // 2a/B3 durable step-record: each step writes its pipeline_step_results row
+  // AS-COMPLETED (result='' deferred) into this accumulator; the finally below
+  // fills the result-text by rowid once the run terminates. Gated to the SAME
+  // condition as the run row (top-level + RunHistory) so a nested step row never
+  // orphans a missing parent run row (the depth-0 fence, B5 lifts it).
+  const stepRows: StepRowAccumulator | undefined = rh !== undefined ? [] : undefined;
+
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
@@ -308,9 +316,9 @@ export async function runManifest(
   const mode = getExecutionMode(manifest);
   try {
     if (mode === 'parallel') {
-      await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
+      await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters, stepRows);
     } else {
-      await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
+      await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters, stepRows);
     }
 
     if (state.status === 'running') {
@@ -343,6 +351,19 @@ export async function runManifest(
           error: state.error,
         });
       } catch { /* fire-and-forget */ }
+
+      // 2a/B3: NOW persist the deferred step result-texts (each row was inserted
+      // result='' as-completed). This runs only on run termination (completed /
+      // failed) — a hard crash skips the finally, so a crashed run's step rows
+      // keep result='' on disk (invariant I4, the structural 2b fence). Filled
+      // by rowid, never by (run_id, step_id), so for_each's N-per-step survives.
+      if (stepRows !== undefined) {
+        const limit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
+        for (const { rowId, result } of stepRows) {
+          if (result === '') continue; // skipped / failed steps carry no result
+          try { rh.updatePipelineStepResultText(rowId, truncateResult(result, limit)); } catch { /* fire-and-forget */ }
+        }
+      }
     }
   }
 }
@@ -379,6 +400,7 @@ async function runSequential(
   agentsDir: string,
   options: RunManifestOptions,
   stepCounters: SessionCounters,
+  stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
   const startMs = Date.parse(state.startedAt);
   let iterations = 0;
@@ -390,7 +412,7 @@ async function runSequential(
       state.completedAt = new Date().toISOString();
       return;
     }
-    const result = await executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
+    const result = await executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
     iterations++;
     if (result === 'halt') return;
   }
@@ -405,6 +427,7 @@ async function runParallel(
   agentsDir: string,
   options: RunManifestOptions,
   stepCounters: SessionCounters,
+  stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
   const { phases } = computePhases(manifest.agents);
   const stepsById = new Map(manifest.agents.map(s => [s.id, s]));
@@ -424,7 +447,7 @@ async function runParallel(
 
     const promises = phase.stepIds.map(async (stepId) => {
       const step = stepsById.get(stepId)!;
-      return executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
+      return executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
     });
 
     const settled = await Promise.allSettled(promises);
@@ -450,6 +473,47 @@ async function runParallel(
 
 type StepResult = 'ok' | 'halt';
 
+/**
+ * 2a/B3 accumulator: the pipeline_step_results rowid each step wrote AS-COMPLETED
+ * paired with the step's result-text, held IN MEMORY until run-finalize persists
+ * it. The row was inserted with result='' (invariant I4 — the structural 2b
+ * fence: a crash before finalize leaves result='' on disk, so the partial
+ * result-text is never persisted). Present only for a top-level (depth 0) run
+ * with a RunHistory, matching the pipeline_runs row (nested runs get neither
+ * until B5, avoiding an orphan step row with no parent run row).
+ */
+type StepRowAccumulator = Array<{ rowId: number | bigint; result: string }>;
+
+/**
+ * Insert one pipeline_step_results row as-completed (result='' deferred) and
+ * record its rowid + result-text for the finalize fill. Best-effort: the
+ * durable record must never break or mask the run.
+ */
+function recordStepRow(
+  runHistory: RunHistory,
+  runId: string,
+  step: ManifestStep,
+  output: AgentOutput,
+  acc: StepRowAccumulator,
+): void {
+  const status = output.skipped ? 'skipped' : output.error ? 'failed' : 'completed';
+  try {
+    const rowId = runHistory.insertPipelineStepResult({
+      pipelineRunId: runId,
+      stepId: step.id,
+      status,
+      result: '', // I4: deferred — filled by id at run-finalize, never mid-run
+      error: output.error,
+      durationMs: output.durationMs,
+      tokensIn: output.tokensIn,
+      tokensOut: output.tokensOut,
+      costUsd: output.costUsd,
+      modelTier: step.model ?? 'balanced',
+    });
+    acc.push({ rowId, result: output.result });
+  } catch { /* best-effort */ }
+}
+
 async function executeStep(
   step: ManifestStep,
   manifest: Manifest,
@@ -458,11 +522,13 @@ async function executeStep(
   agentsDir: string,
   options: RunManifestOptions,
   stepCounters: SessionCounters,
+  stepRows: StepRowAccumulator | undefined,
 ): Promise<StepResult> {
   // Check cached outputs for retry (skip already-completed steps)
   if (options.cachedOutputs?.has(step.id)) {
     const cached = options.cachedOutputs.get(step.id)!;
     state.outputs.set(step.id, cached);
+    if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, cached, stepRows);
     options.hooks?.onStepRetrySkipped?.(step.id);
     return 'ok';
   }
@@ -485,7 +551,9 @@ async function executeStep(
     const condContext = buildConditionContext(state.globalContext, state.outputs);
 
     if (!shouldRunStep(condContext, step.conditions)) {
-      state.outputs.set(step.id, makeSkipped(step.id, 'conditions not met'));
+      const skipped = makeSkipped(step.id, 'conditions not met');
+      state.outputs.set(step.id, skipped);
+      if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, skipped, stepRows);
       options.hooks?.onStepSkipped?.(step.id, 'conditions not met');
       return 'ok';
     }
@@ -635,6 +703,9 @@ async function executeStep(
         });
       } catch { /* best-effort */ }
     }
+    // 2a/B3: durable pipeline_step_results row, written as-completed with its
+    // result-text DEFERRED to run-finalize (invariant I4).
+    if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, output, stepRows);
     return 'ok';
 
   } catch (err: unknown) {
@@ -646,6 +717,16 @@ async function executeStep(
       try {
         options.runHistory.updateRun(stepRunId, { status: 'failed', errorText: error.message, toolCallCount: toolSeq, modelId: stepModelId });
       } catch { /* best-effort */ }
+    }
+    // 2a/B3: record the failed step in pipeline_step_results too (result=''), so
+    // it shows in the /:id/steps list even under on_failure='stop', which halts
+    // WITHOUT adding the step to state.outputs (the batch writer's blind spot).
+    // Covers every caught mode (stop/notify/continue/gate) exactly once here.
+    if (stepRows && options.runHistory) {
+      recordStepRow(options.runHistory, state.runId, step, {
+        stepId: step.id, result: '', startedAt: stepStart, completedAt: new Date().toISOString(),
+        durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, skipped: false, error: error.message,
+      }, stepRows);
     }
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
