@@ -115,13 +115,18 @@ pre-push for what actually runs at pre-commit):
 - **pre-push**: security-scan, public-repo-guard (internal-infra leaks), drift-guard (doc/code
   drift), positioning-guard (copy vs POSITIONING.md).
 
-Most of these re-run as **required CI checks**, so `git push --no-verify` cannot bypass them —
-that is what makes them gates rather than suggestions. Two honest caveats: `security-scan` and
-`hex-guard` have **no** CI job (hook-only → `--no-verify` removes them entirely), and
-`enforce_admins` is **false** on this repo, so `gh pr merge --admin` overrides *every* required
-check. Do not call a guard unbypassable while that is true.
+Every hook above re-runs as a **required CI check**, so `git commit/push --no-verify` cannot
+bypass any of them — that is what makes them gates rather than suggestions. (`security-scan` and
+`hex-guard` got theirs on 2026-07-14, in `hook-guards.yml`; before that they were hook-only, so
+`--no-verify` removed them entirely. The same workflow adds `web-ui-typecheck`, because the root
+`pnpm typecheck` is `tsc --noEmit` over `src` and never touched the SvelteKit package — 1038 files
+that nothing checked.)
 
-- Commits: English, imperative, first line <70 chars
+One honest limit remains: `enforce_admins` is **false** on this repo, so `gh pr merge --admin`
+overrides *every* required check. That merge path is used deliberately, so do not call a guard
+unbypassable while it exists.
+
+- Commits: English, imperative, first line ≤72 chars
 - **No AI attribution** — enforced by the commit-msg hook above. It is self-promotion and does
   not belong in this history.
 
