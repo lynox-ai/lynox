@@ -1015,23 +1015,39 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     }
   });
 
-  it('spawnPipeline stamps its parentRunId onto the nested run row (B5 threading end-to-end)', async () => {
+  it('a real runtime:pipeline step threads the OUTER runId onto its nested run row (B5, end-to-end)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
-      const { spawnPipeline } = await import('./runtime-adapter.js');
-      const counters: SessionCounters = {
-        httpRequests: 0, writeBytes: 0, costUSD: 0,
-        approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+      // A runtime:'pipeline' step actually nests through executeStep → spawnPipeline
+      // → the nested runManifest (this is the ONLY path that exercises executeStep
+      // passing `state.runId` as the parent). The inner inline step fails
+      // DETERMINISTICALLY — a missing dependency throws "has not run yet" in
+      // buildStepContext, before any model call — so the test needs no network.
+      const nestingManifest: Manifest = {
+        manifest_version: '1.1',
+        name: 'outer-flow',
+        triggered_by: 'test',
+        context: {},
+        execution: 'sequential',
+        agents: [
+          {
+            id: 'nest', agent: 'nest', runtime: 'pipeline',
+            pipeline: [{ id: 'inner', task: 'x', input_from: ['does-not-exist'] }],
+          } as unknown as Manifest['agents'][number],
+        ],
+        gate_points: [],
+        on_failure: 'continue',
       };
-      // A runtime:'pipeline' step nests. The inner inline step fails here (no
-      // parentTools), but the nested pipeline_runs row is INSERTed at run-start
-      // with the threaded parent link before that — which is what we assert.
-      const step = { id: 'nest', agent: 'nest', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do it' }] } as unknown as Parameters<typeof spawnPipeline>[0];
-      await spawnPipeline(step, {}, CONFIG, [], 0, undefined, undefined, counters, null, 'autonomous', undefined, h, undefined, 'PARENT-RUN-ID');
+      // NO mockResponses → the pipeline step nests for real (not spawnMock).
+      const state = await runManifest(nestingManifest, CONFIG, { runHistory: h });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
-      const row = db.prepare('SELECT parent_run_id FROM pipeline_runs').get() as { parent_run_id: string | null } | undefined;
-      expect(row?.parent_run_id).toBe('PARENT-RUN-ID');
+      const nested = db.prepare('SELECT parent_run_id FROM pipeline_runs WHERE parent_run_id IS NOT NULL').get() as { parent_run_id: string } | undefined;
+      // The nested row's parent is the OUTER run's id — proving executeStep passed
+      // state.runId (not step.id / the undefined top-level parentRunId).
+      expect(nested?.parent_run_id).toBe(state.runId);
+      // ...and the nested run is filtered out of the top-level list (only the outer).
+      expect(h.getRecentPipelineRuns(20).map(r => r.id)).toEqual([state.runId]);
     } finally {
       h.close();
       cleanup();
@@ -1050,6 +1066,21 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       expect(h.getRecentPipelineRuns(20).map(r => r.id)).toEqual(['top']);
       // But the nested run is still retrievable by id — drill-down preserved.
       expect(h.getPipelineRun('child')?.parent_run_id).toBe('top');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('getPipelineStepStats (per-manifest step view) also excludes nested runs (B5)', () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      h.insertPipelineRun({ id: 'top', manifestName: 'wf', status: 'completed', manifestJson: '{}' });
+      h.insertPipelineRun({ id: 'child', manifestName: 'nest-sub', status: 'completed', manifestJson: '{}', parentRunId: 'top' });
+      h.insertPipelineStepResult({ pipelineRunId: 'top', stepId: 's1', status: 'completed', costUsd: 1, modelTier: 'balanced' });
+      h.insertPipelineStepResult({ pipelineRunId: 'child', stepId: 's2', status: 'completed', costUsd: 1, modelTier: 'balanced' });
+      // Only the top-level workflow's steps — no synthetic 'nest-sub' bucket.
+      expect(h.getPipelineStepStats(30).map(s => s.manifest_name)).toEqual(['wf']);
     } finally {
       h.close();
       cleanup();

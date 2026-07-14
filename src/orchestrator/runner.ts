@@ -478,9 +478,9 @@ type StepResult = 'ok' | 'halt';
  * paired with the step's result-text, held IN MEMORY until run-finalize persists
  * it. The row was inserted with result='' (invariant I4 — the structural 2b
  * fence: a crash before finalize leaves result='' on disk, so the partial
- * result-text is never persisted). Present only for a top-level (depth 0) run
- * with a RunHistory, matching the pipeline_runs row (nested runs get neither
- * until B5, avoiding an orphan step row with no parent run row).
+ * result-text is never persisted). Present for any run with a RunHistory,
+ * matching the pipeline_runs row — a nested run's step rows attach to its own
+ * parent run row (B5), so they never orphan.
  */
 type StepRowAccumulator = Array<{ rowId: number | bigint; result: string }>;
 
