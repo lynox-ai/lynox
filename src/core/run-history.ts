@@ -1975,6 +1975,32 @@ export class RunHistory {
   }
 
   /**
+   * Boot-time recovery for the pipeline_runs record (2a/B4) — the sibling of
+   * {@link sweepStuckRuns} for the `runs` table. A workflow run still 'running'
+   * at boot was killed mid-flight (the finalize in runManifest's `finally` never
+   * ran) and can never close itself; one-engine-per-DB means no other live
+   * writer, so every 'running' row is an orphan. Flip it to the terminal
+   * 'interrupted' so it stops reading as perpetually in-flight in the run list.
+   *
+   * Unlike sweepStuckRuns (→ 'failed', to count partial spend), an interrupted
+   * run's RUN-LEVEL totals are still 0 (finalize never summed them), so it is
+   * deliberately EXCLUDED from getPipelineCostStats (B6) — the real per-step
+   * costs live in its as-completed pipeline_step_results rows (B3) and are
+   * counted there instead.
+   *
+   * Multi-process safety: this sweep is unconditional-by-status while the
+   * finalize (updatePipelineRun) is unconditional-by-id — so a run swept here
+   * but still finalizing in another process is corrected back to its real
+   * terminal status by the finalize, which must therefore NEVER be guarded with
+   * "only-if-running". Returns the number of rows swept.
+   */
+  sweepStuckPipelineRuns(): number {
+    return this.db.prepare(
+      "UPDATE pipeline_runs SET status = 'interrupted' WHERE status = 'running'",
+    ).run().changes;
+  }
+
+  /**
    * Usage Dashboard Phase 1 — aggregates completed runs in a time window into
    * the `UsageSummary` shape required by `GET /api/usage/summary`. Pre-v28
    * rows (kind=NULL) count as 'llm'. cost is returned in cents as an integer

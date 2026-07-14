@@ -113,6 +113,10 @@
 		completed: 'bg-success/15 text-success',
 		failed: 'bg-danger/10 text-danger',
 		running: 'bg-warning/15 text-warning',
+		// A run killed mid-flight (boot-swept, 2a/B4) \u2014 terminal but incomplete.
+		// Muted text on a faint amber wash reads as "didn't finish", clearly
+		// apart from running's BRIGHT amber (active) and from the grey fallback.
+		interrupted: 'bg-warning/10 text-text-muted',
 		planned: 'bg-accent/10 text-accent-text',
 	};
 
@@ -120,6 +124,7 @@
 		completed: '\u2713',
 		failed: '\u2717',
 		running: '\u25CE',
+		interrupted: '\u25CC', // dotted circle: a broken/incomplete run
 		planned: '\u25CB',
 		pending: '\u25CB',
 	};
@@ -209,8 +214,10 @@
 									</div>
 								{/if}
 
-								<!-- "💬 Fixen": discuss + fix a failed run in chat (§4.6) -->
-								{#if run.status === 'failed'}
+								<!-- "💬 Fixen": discuss + fix a failed OR interrupted run in chat
+								     (§4.6). An interrupted run carries its as-completed step
+								     rows (B3), so chat can diagnose what ran before it died. -->
+								{#if run.status === 'failed' || run.status === 'interrupted'}
 									<button
 										onclick={() => onFixInChat(run.id, run.manifest_name)}
 										class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2.5 py-1 text-xs text-accent-text hover:bg-accent/20 transition-colors"
