@@ -324,7 +324,13 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   return JSON.stringify(result, null, 2);
 }
 
-function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number, workflowId?: string | undefined): void {
+// 2a: the pipeline_runs row is written by the orchestrator (`runManifest`:
+// start-INSERT + finalize-UPDATE = the single canonical writer, invariant I1),
+// including the run→workflow linkage (threaded via `buildRunCtx({ workflowId })`).
+// This tool-layer path retains ONLY the batch step-results write, run once after
+// the run settles. B3 moves it into the orchestrator as incremental as-completed
+// rows (with result-text deferred to finalize — the structural 2b-fence).
+function persistStepResults(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number): void {
   if (!pipelineRunHistory) return;
   // Build step-id → model-tier lookup from manifest
   const stepModelMap = new Map<string, string>();
@@ -332,21 +338,6 @@ function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHist
     stepModelMap.set(step.id, step.model ?? 'balanced');
   }
   try {
-    pipelineRunHistory.insertPipelineRun({
-      id: state.runId,
-      manifestName: manifest.name,
-      status: state.status,
-      manifestJson: JSON.stringify(manifest),
-      totalDurationMs: [...state.outputs.values()].reduce((s, o) => s + o.durationMs, 0),
-      totalCostUsd: [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0),
-      totalTokensIn: [...state.outputs.values()].reduce((s, o) => s + o.tokensIn, 0),
-      totalTokensOut: [...state.outputs.values()].reduce((s, o) => s + o.tokensOut, 0),
-      stepCount: state.outputs.size,
-      error: state.error,
-      // Slice C2: link the run to its saved workflow (undefined for inline/ad-hoc)
-      // so a failed run resolves back to the workflow for diagnose/fix/re-run.
-      ...(workflowId ? { workflowId } : {}),
-    });
     for (const [, output] of state.outputs) {
       pipelineRunHistory.insertPipelineStepResult({
         pipelineRunId: state.runId,
@@ -428,7 +419,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       secretStore: deps.secretStore,
     }));
 
-    persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
+    persistStepResults(state, manifest, deps.runHistory, resultLimit);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -629,8 +620,9 @@ export async function runSavedWorkflow(
       // runaway from inside the run. Absent contract = the safe deny default.
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
+      workflowId: planned.id,
     }));
-    persistPipelineRun(state, manifest, runHistory, resultLimit, planned.id);
+    persistStepResults(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
     // shows WHICH step failed (not just status). `ok:true` = the run executed;
@@ -688,10 +680,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         userTimezone: deps.userTimezone,
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
+        workflowId: planned.id,
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state });
-      persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit, planned.id);
+      persistStepResults(state, prev.manifest, deps.runHistory, resultLimit);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -765,10 +758,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      workflowId: planned.id,
     }));
 
     recordExecutedState(planned.id, { manifest, state });
-    persistPipelineRun(state, manifest, deps.runHistory, resultLimit, planned.id);
+    persistStepResults(state, manifest, deps.runHistory, resultLimit);
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }

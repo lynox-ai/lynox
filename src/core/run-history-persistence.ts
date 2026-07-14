@@ -370,9 +370,13 @@ export function insertPipelineRun(db: Database.Database, params: {
    *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
   workflowId?: string | undefined;
 }): void {
+  // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a
+  // NULL completed_at and is closed out by `updatePipelineRun` at finalize.
+  // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
+  // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, completed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
@@ -386,6 +390,9 @@ export function updatePipelineRun(db: Database.Database, id: string, params: {
   status?: string | undefined;
   totalDurationMs?: number | undefined;
   totalCostUsd?: number | undefined;
+  totalTokensIn?: number | undefined;
+  totalTokensOut?: number | undefined;
+  stepCount?: number | undefined;
   error?: string | undefined;
 }): void {
   const sets: string[] = [];
@@ -393,6 +400,12 @@ export function updatePipelineRun(db: Database.Database, id: string, params: {
   if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
   if (params.totalDurationMs !== undefined) { sets.push('total_duration_ms = ?'); values.push(params.totalDurationMs); }
   if (params.totalCostUsd !== undefined) { sets.push('total_cost_usd = ?'); values.push(params.totalCostUsd); }
+  // 2a/B2: the finalize path records step_count + token totals (the run-END
+  // INSERT used to carry these; they'd stay 0 otherwise since the start-INSERT
+  // writes the row before any step has run).
+  if (params.totalTokensIn !== undefined) { sets.push('total_tokens_in = ?'); values.push(params.totalTokensIn); }
+  if (params.totalTokensOut !== undefined) { sets.push('total_tokens_out = ?'); values.push(params.totalTokensOut); }
+  if (params.stepCount !== undefined) { sets.push('step_count = ?'); values.push(params.stepCount); }
   if (params.error !== undefined) { sets.push('error = ?'); values.push(params.error); }
   if (sets.length === 0) return;
   sets.push("completed_at = datetime('now')");

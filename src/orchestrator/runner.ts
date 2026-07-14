@@ -32,6 +32,14 @@ export interface RunManifestOptions {
   depth?: number | undefined;
   runHistory?: RunHistory | undefined;
   parentRunId?: string | undefined;
+  /**
+   * 2a: the saved-workflow id this run executes (undefined for ad-hoc/inline
+   * runs). Threaded here so the orchestrator's start-INSERT stamps the run→
+   * workflow linkage (Slice-C2 "Fix in chat" / diagnose) — previously the
+   * tool-layer `persistPipelineRun` carried it, but the pipeline_runs writer
+   * now lives in `runManifest`.
+   */
+  workflowId?: string | undefined;
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   /**
    * Parent session's prompt callbacks. When provided, sub-agents in this run
@@ -122,6 +130,7 @@ export interface RunCtxInput {
   capabilityContract?: CapabilityContract | undefined;
   limits?: WorkflowLimits | undefined;
   secretStore?: SecretStoreLike | undefined;
+  workflowId?: string | undefined;
 }
 
 /**
@@ -152,6 +161,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     capabilityContract: input.capabilityContract,
     limits: input.limits,
     secretStore: input.secretStore,
+    workflowId: input.workflowId,
   };
 }
 
@@ -261,6 +271,28 @@ export async function runManifest(
 
   options.hooks?.onRunStart?.();
 
+  // 2a durable run-record: the orchestrator is the SINGLE canonical writer of
+  // the pipeline_runs row (invariant I1). A start-INSERT here makes an in-flight
+  // run visible ('running'); the finalize-UPDATE in the `finally` below closes
+  // it out — and runs even on a thrown error, so a caught catastrophic failure
+  // never leaves the row stuck at 'running'. A hard process death (SIGKILL /
+  // container stop) skips the finally; that row is reaped by the boot-sweep (B4).
+  // Only the top-level run (depth 0) writes a row in this slice — nested
+  // sub-pipelines are folded in by B5 (parent_run_id + list-filter). The write
+  // is fire-and-forget: a history failure must never break or mask the run.
+  const rh = depth === 0 ? options.runHistory : undefined;
+  if (rh !== undefined) {
+    try {
+      rh.insertPipelineRun({
+        id: runId,
+        manifestName: manifest.name,
+        status: 'running',
+        manifestJson: JSON.stringify(manifest),
+        ...(options.workflowId !== undefined ? { workflowId: options.workflowId } : {}),
+      });
+    } catch { /* fire-and-forget */ }
+  }
+
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
@@ -269,18 +301,45 @@ export async function runManifest(
     : { ...options, parentPrompt };
 
   const mode = getExecutionMode(manifest);
-  if (mode === 'parallel') {
-    await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
-  } else {
-    await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
-  }
+  try {
+    if (mode === 'parallel') {
+      await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
+    } else {
+      await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
+    }
 
-  if (state.status === 'running') {
-    state.status = 'completed';
-    state.completedAt = new Date().toISOString();
+    if (state.status === 'running') {
+      state.status = 'completed';
+      state.completedAt = new Date().toISOString();
+    }
+    options.hooks?.onRunComplete?.(state);
+    return state;
+  } catch (err) {
+    // A thrown (catastrophic) error must not leave the record at 'running':
+    // settle the in-memory state to 'failed' so the finalize records a terminal
+    // row. Re-throw — recording must never swallow the caller's error.
+    if (state.status === 'running') {
+      state.status = 'failed';
+      state.error = state.error ?? (err instanceof Error ? err.message : String(err));
+      state.completedAt = new Date().toISOString();
+    }
+    throw err;
+  } finally {
+    if (rh !== undefined) {
+      try {
+        const outs = [...state.outputs.values()];
+        rh.updatePipelineRun(runId, {
+          status: state.status,
+          totalDurationMs: outs.reduce((s, o) => s + o.durationMs, 0),
+          totalCostUsd: outs.reduce((s, o) => s + o.costUsd, 0),
+          totalTokensIn: outs.reduce((s, o) => s + o.tokensIn, 0),
+          totalTokensOut: outs.reduce((s, o) => s + o.tokensOut, 0),
+          stepCount: state.outputs.size,
+          error: state.error,
+        });
+      } catch { /* fire-and-forget */ }
+    }
   }
-  options.hooks?.onRunComplete?.(state);
-  return state;
 }
 
 /**

@@ -915,6 +915,62 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
   });
 });
 
+describe('runManifest — 2a durable pipeline_runs record', () => {
+  function tmpHistory(): { h: RunHistory; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-2a-'));
+    return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('writes exactly ONE pipeline_runs row: born running → finalized terminal, with totals + workflow linkage', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, workflowId: 'wf-123' });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').all(state.runId) as Array<Record<string, unknown>>;
+      // I1: the start-INSERT is the SOLE INSERT — no double-fire, exactly one row.
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row.status).toBe('completed');        // finalize-UPDATE settled it
+      expect(row.completed_at).not.toBeNull();      // finalize stamps completed_at
+      expect(row.started_at).not.toBeNull();        // start-INSERT default
+      expect(row.workflow_id).toBe('wf-123');       // run→workflow linkage threaded
+      // B2: step_count/token totals are 0 at the start-INSERT and only the
+      // finalize UPDATE carries them — so step_count===2 (not the default 0)
+      // proves the finalize path wired the B2 columns.
+      expect(row.step_count).toBe(2);
+      expect(typeof row.total_tokens_in).toBe('number');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('finalizes the row as a terminal status (never stuck at running) when the run does not complete', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+      // maxIterations:1 aborts the run mid-way → status 'failed', not 'completed'.
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, limits: { maxIterations: 1 } });
+      expect(state.status).toBe('failed');
+
+      const row = h.getPipelineRun(state.runId);
+      expect(row?.status).toBe('failed');           // finalized terminal, NOT 'running'
+      expect(row?.completed_at).not.toBeNull();     // no stuck-running row
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('does NOT write a pipeline_runs row when no runHistory is provided', async () => {
+    // No throw, no record — the orchestrator writer is opt-in on runHistory.
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]) });
+    expect(state.status).toBe('completed');
+  });
+});
+
 // === Slice B: per-workflow DoS bounds (S3) ===
 describe('workflowBoundExceeded', () => {
   const counters: SessionCounters = {
