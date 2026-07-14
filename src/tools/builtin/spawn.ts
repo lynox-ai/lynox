@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
-import { getDefaultMaxTokens, modelCapability, clampTier } from '../../types/index.js';
+import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, RunAbortedError } from '../../core/agent.js';
@@ -282,10 +282,12 @@ export function formatSpawnError(err: unknown): string {
  *    conservatively — its band can't be proven within the ceiling.
  */
 export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier | undefined): boolean {
-  if (!maxTier) return false;
-  const tier = modelCapability(profileModelId)?.tier ?? null;
-  if (tier === null) return maxTier !== 'deep';
-  return clampTier(tier, maxTier) !== tier;
+  // Delegates to the shared predicate — the same rule now guards the tier
+  // chokepoint (`resolveRunModel`), so a raw pipeline `step.model` id is refused
+  // the same way a profile is (DEF-0080). (`spec.model` here is separately enum-
+  // gated to tiers, so it never reaches the chokepoint's raw-id branch.) Kept as a
+  // domain-named wrapper.
+  return modelIdExceedsMaxTier(profileModelId, maxTier);
 }
 
 async function executeThinker(

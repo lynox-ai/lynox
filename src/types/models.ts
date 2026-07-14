@@ -1010,3 +1010,18 @@ export function clampTier(requested: ModelTier, maxTier: ModelTier | undefined):
   if (!maxTier) return requested;
   return TIER_ORDER[requested] > TIER_ORDER[maxTier] ? maxTier : requested;
 }
+
+/**
+ * Does an explicit model id resolve to a cost band ABOVE the ceiling? A raw model
+ * id carries no tier to clamp — it names a specific model/endpoint that cannot be
+ * substituted — so an over-ceiling id must be REFUSED, not clamped (DEF-0080). An
+ * id unknown to the registry has no tier and is treated as `deep` (fail closed),
+ * matching FALLBACK_PRICING's conservative Opus default. Shared by the tier
+ * chokepoint (`resolveRunModel`) and the spawn profile guard (`profileExceedsMaxTier`).
+ */
+export function modelIdExceedsMaxTier(modelId: string, maxTier: ModelTier | undefined): boolean {
+  if (!maxTier) return false;
+  const tier = modelCapability(modelId)?.tier ?? null;
+  if (tier === null) return maxTier !== 'deep';
+  return clampTier(tier, maxTier) !== tier;
+}

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   clampTier,
+  modelIdExceedsMaxTier,
   getModelId,
   getContextWindow,
   getDefaultMaxTokens,
@@ -153,6 +154,40 @@ describe('clampTier', () => {
     expect(clampTier('deep', 'deep')).toBe('deep');
     expect(clampTier('balanced', 'deep')).toBe('balanced');
     expect(clampTier('fast', 'deep')).toBe('fast');
+  });
+});
+
+describe('modelIdExceedsMaxTier — the shared refuse predicate (DEF-0080)', () => {
+  const DEEP = getModelId('deep', 'anthropic');
+  const BALANCED = getModelId('balanced', 'anthropic');
+  const FAST = getModelId('fast', 'anthropic');
+  const UNKNOWN = 'some-unregistered-model-xyz';
+
+  it('no ceiling → nothing exceeds (self-host default)', () => {
+    expect(modelIdExceedsMaxTier(DEEP, undefined)).toBe(false);
+    expect(modelIdExceedsMaxTier(UNKNOWN, undefined)).toBe(false);
+  });
+
+  it('a registered model above a restrictive ceiling exceeds', () => {
+    expect(modelIdExceedsMaxTier(DEEP, 'fast')).toBe(true);
+    expect(modelIdExceedsMaxTier(DEEP, 'balanced')).toBe(true);
+    expect(modelIdExceedsMaxTier(BALANCED, 'fast')).toBe(true);
+  });
+
+  it('a registered model at or below the ceiling does not exceed', () => {
+    expect(modelIdExceedsMaxTier(FAST, 'fast')).toBe(false);
+    expect(modelIdExceedsMaxTier(BALANCED, 'balanced')).toBe(false);
+    expect(modelIdExceedsMaxTier(FAST, 'balanced')).toBe(false);
+  });
+
+  it('a deep ceiling is not restrictive — even an unknown model passes', () => {
+    expect(modelIdExceedsMaxTier(DEEP, 'deep')).toBe(false);
+    expect(modelIdExceedsMaxTier(UNKNOWN, 'deep')).toBe(false);
+  });
+
+  it('an UNKNOWN model under a restrictive ceiling is refused (fail closed)', () => {
+    expect(modelIdExceedsMaxTier(UNKNOWN, 'fast')).toBe(true);
+    expect(modelIdExceedsMaxTier(UNKNOWN, 'balanced')).toBe(true);
   });
 });
 
