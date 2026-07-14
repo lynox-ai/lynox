@@ -824,7 +824,8 @@ describe('getPipeline — legacy mode backfill', () => {
 
 // PRD-WORKFLOW-UX D13 — Saved Workflows library "Run" path.
 describe('runSavedWorkflow', () => {
-  // Minimal RunHistory stub — persistPipelineRun fire-and-forgets these.
+  // Minimal RunHistory stub — the run row is written by runManifest (2a) and
+  // the tool-layer persistStepResults fire-and-forgets the step rows.
   const fakeRunHistory = {
     getPlannedPipeline: () => undefined,
     insertPipelineRun: vi.fn(),

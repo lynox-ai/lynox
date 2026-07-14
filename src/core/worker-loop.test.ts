@@ -842,6 +842,9 @@ describe('WorkerLoop', () => {
   //   the next tick can fire it again.
   it('executes a scheduled saved workflow and leaves the template row byte-identical', async () => {
     vi.useRealTimers();
+    // This suite's beforeEach does NOT reset mockRunManifest — reset here so the
+    // call-count + call-args assertions below observe only THIS test's tick.
+    mockRunManifest.mockReset();
     mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-monthly', status: 'completed' }));
 
     // Round-trip through JSON so we capture exactly what SQLite would hold.
@@ -864,6 +867,9 @@ describe('WorkerLoop', () => {
     // row before AND after the tick and assert deep equality.
     const stored = { manifest_json: templateBefore };
     const taskManager = makeTaskManager();
+    // Stable ref (getRunHistory returns a fresh object each call) so we can
+    // assert the tool layer no longer inserts a run row (2a: runManifest owns it).
+    const insertPipelineRunMock = vi.fn();
 
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
@@ -877,7 +883,7 @@ describe('WorkerLoop', () => {
         // 2a: the fresh pipeline_runs row is written by runManifest (mocked in
         // this suite); the tool-layer keeps only the step-results batch. Neither
         // touches the template row.
-        insertPipelineRun: vi.fn(),
+        insertPipelineRun: insertPipelineRunMock,
         insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
@@ -920,10 +926,13 @@ describe('WorkerLoop', () => {
     // 3. The run→workflow linkage is threaded into runManifest — the single
     //    canonical pipeline_runs writer (2a) — so the fresh run records its own
     //    runId + workflow_id as a SEPARATE entry, never a mutation of the
-    //    template row (whose byte-identity #2 asserts). `lastCall` (not a
-    //    call-count) because this suite's beforeEach doesn't reset the mock.
-    const runOpts = mockRunManifest.mock.lastCall?.[2] as { workflowId?: string } | undefined;
+    //    template row (whose byte-identity #2 asserts).
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    const runOpts = mockRunManifest.mock.calls[0]?.[2] as { workflowId?: string } | undefined;
     expect(runOpts?.workflowId).toBe('saved-monthly-report');
+    // The tool layer no longer double-inserts the run row — that would be the
+    // I1-violating second INSERT (PK collision → stuck 'running').
+    expect(insertPipelineRunMock).not.toHaveBeenCalled();
   });
 
   // Lock the headline cron-fires-N-times guarantee: a scheduled

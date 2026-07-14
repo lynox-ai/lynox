@@ -146,6 +146,11 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
   manifest_name: string; run_count: number; avg_cost_usd: number;
   total_cost_usd: number; avg_duration_ms: number;
 }> {
+  // 2a/B6 (invariant I8): pipeline_runs is no longer all-terminal — a run is
+  // born 'running' and a hard crash leaves it 'running'/'interrupted' with
+  // totals still at their 0 defaults (finalize never ran). Restrict the cost
+  // aggregate to runs whose finalize DID record real totals ('completed' /
+  // 'failed'), else in-flight + crashed rows dilute AVG and inflate COUNT.
   return db.prepare(`
     SELECT manifest_name,
            COUNT(*) as run_count,
@@ -154,6 +159,7 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
            AVG(total_duration_ms) as avg_duration_ms
     FROM pipeline_runs
     WHERE started_at >= datetime('now', ?)
+      AND status IN ('completed', 'failed')
     GROUP BY manifest_name
   `).all(`-${days} days`) as Array<{
     manifest_name: string; run_count: number; avg_cost_usd: number;
