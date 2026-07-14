@@ -37,11 +37,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-          cache: pnpm
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with: { version: '10' }
       # The shape contract PARSES the components — a grep could be fooled by evidence
       # hidden in a comment, a string or a <template>, and was, three times. Parsing needs
       # the Svelte compiler, so this job needs the workspace installed. It failed loudly
