@@ -1,0 +1,156 @@
+{
+  "$comment": [
+    "The app's SHAPE vocabulary — the companion to tokens.contract.json.",
+    "",
+    "The token contract stopped the two surfaces' COLOURS from drifting apart. Nothing",
+    "stopped their SHAPES, and a design system drew four of them by hand, from reading",
+    "this source, with nothing checking the reading. Two of the four were wrong within",
+    "a week: it described the inbox row as flat hairline-separated rows (the marketing",
+    "site's idiom — `0.5px` appears nowhere in this package) when the real row is a",
+    "bordered card in a spaced list, and it generalised the state pattern from the two",
+    "warning callouts in LLMSettings into a rule the other 100+ state surfaces do not",
+    "follow. Both were plausible. Both were read off this code. Both were false.",
+    "",
+    "So the reading is now written down and checked from both ends:",
+    "",
+    "  `evidence` — literal class strings that MUST still be present in `source`.",
+    "    Checked HERE, in this repo, on the commit that changes the component. If the",
+    "    app restyles a shape, this fails and the design system has to follow.",
+    "",
+    "  `preview` — the CSS the design system's product page MUST use to draw the shape.",
+    "    Checked THERE, against this file, fetched over https (this repo is public).",
+    "    If the design system draws something the app does not do, that fails.",
+    "",
+    "Neither half alone is enough: the first catches the app moving, the second catches",
+    "the drawing moving. The reason the previous version could be wrong at all is that",
+    "it had neither — it had a paragraph promising the shapes were read carefully.",
+    "",
+    "It names no other repository and no private path: it is a list of class names",
+    "checked against this package's own components."
+  ],
+
+  "shapes": {
+    "chat-user": {
+      "what": "The user's turn is a bubble. It is the only thing in the chat that is.",
+      "source": "src/lib/components/ChatView.svelte",
+      "evidence": [
+        "rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%]",
+        "bg-accent/10 border border-accent/20"
+      ],
+      "preview": {
+        "selector": ".bubble-user",
+        "declarations": [
+          "var(--color-accent) 10%",
+          "var(--color-accent) 20%",
+          "border-radius: var(--radius-md)",
+          "max-width: 80%"
+        ]
+      }
+    },
+
+    "chat-assistant": {
+      "what": "The assistant's turn has no container at all — plus the AI-disclosure badge, which is not optional.",
+      "source": "src/lib/components/ChatView.svelte",
+      "evidence": [
+        "class=\"ai-message-wrap space-y-2\" data-ai-generated=\"true\"",
+        "class=\"ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent\""
+      ],
+      "preview": {
+        "selector": ".ai-badge",
+        "declarations": [
+          "var(--color-accent) 40%",
+          "var(--color-accent) 10%",
+          "font-family: var(--font-mono)",
+          "text-transform: uppercase",
+          "color: var(--color-accent)"
+        ]
+      }
+    },
+
+    "chat-tool": {
+      "what": "A tool call is a left rule, never a card. State lives in the rule's colour AND in a full-strength tick.",
+      "source": "src/lib/components/ChatView.svelte",
+      "evidence": [
+        "text-[13px] md:text-[11px] text-text-subtle/70 border-l-2 {isError ? 'border-danger/40' : isRunning ? 'border-warning/40' : 'border-border'} pl-3",
+        "{isError ? 'text-danger' : 'text-success'}\">{isError ? '✗' : '✓'}"
+      ],
+      "preview": {
+        "selector": ".tool",
+        "declarations": [
+          "border-left: 2px solid var(--color-border)",
+          "padding: 2px 0 2px 12px",
+          "var(--color-text-subtle) 70%"
+        ]
+      }
+    },
+
+    "inbox-row": {
+      "what": "A bordered card in a spaced list — NOT a flat hairline-separated row. Selection is the dominant state.",
+      "source": "src/lib/components/InboxView.svelte",
+      "evidence": [
+        "<ul class=\"space-y-0.5\" role=\"list\">",
+        "rounded-[var(--radius-sm)] border transition-colors",
+        "border-accent bg-accent/5",
+        "border-transparent hover:border-border hover:bg-bg-subtle/60"
+      ],
+      "preview": {
+        "selector": ".ibx-row",
+        "declarations": [
+          "border-radius: var(--radius-sm)",
+          "border: 1px solid transparent"
+        ]
+      }
+    },
+
+    "inbox-bar": {
+      "what": "The toolbar sits on a 40% wash of the subtle ground — enough to separate, not enough to announce itself.",
+      "source": "src/lib/components/InboxTriagePane.svelte",
+      "evidence": ["border-b border-border bg-bg-subtle/40 px-4 py-2"],
+      "preview": {
+        "selector": ".ibx-bar",
+        "declarations": ["var(--color-bg-subtle) 40%"]
+      }
+    },
+
+    "state": {
+      "what": "A tint, a border of the SAME colour at low opacity, and the text in the semantic colour. Not a full-strength border, and never the normal ink.",
+      "source": "src/lib/components/WorkflowsView.svelte",
+      "evidence": ["bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger"],
+      "preview": {
+        "selector": ".state--err",
+        "declarations": [
+          "var(--color-danger) 10%",
+          "var(--color-danger) 20%",
+          "color: var(--color-danger)"
+        ]
+      }
+    },
+
+    "checkbox": {
+      "what": "The one real primitive. 16px, and it keeps a visible focus ring.",
+      "source": "src/lib/primitives/Checkbox.svelte",
+      "evidence": [
+        "class=\"lynox-checkbox shrink-0 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 {sizeClass}\"",
+        "outline: 2px solid var(--color-accent-text)"
+      ],
+      "preview": {
+        "selector": ".lynox-checkbox:focus-visible",
+        "declarations": ["outline: 2px solid var(--color-accent-text)"]
+      }
+    }
+  },
+
+  "counts": {
+    "$comment": [
+      "Facts the design system states in prose. Prose rots silently; these do not.",
+      "Scope is the LIBRARY — src/lib/components + src/lib/primitives, i.e. what pro",
+      "actually imports. The standalone app's own routes/ are not part of it (there is",
+      "a seventh <style> block in routes/login, and counting it here would make the",
+      "design system describe a surface no consumer of this package ever renders)."
+    ],
+    "components": 71,
+    "primitives": 2,
+    "scopedStyleBlocks": 6,
+    "buttonComponent": false
+  }
+}

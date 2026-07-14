@@ -67,6 +67,7 @@
     "security": "sh scripts/security-scan.sh && vitest run tests/security/",
     "lint": "eslint src/",
     "tokens:contract": "node packages/web-ui/scripts/check-token-contract.mjs",
+    "shapes:contract": "node packages/web-ui/scripts/check-shape-contract.mjs",
     "prepack": "find dist -name '*.js.map' -o -name '*.d.ts.map' | xargs rm -f",
     "prepublishOnly": "npm run build"
   },
