@@ -1,0 +1,58 @@
+name: Hook Guards
+
+# The CI half of three checks that, until now, existed ONLY as lefthook hooks:
+# security-scan, hex-guard (both here) and web-ui's typecheck.
+#
+# Why they needed one: a hook is not a gate. `git commit --no-verify` /
+# `git push --no-verify` removes it entirely, and there was nothing behind these
+# three — unlike gitleaks, drift-guard, positioning-guard and the rest, which all
+# re-run in CI precisely so the bypass has a backstop. That asymmetry was invisible
+# because the docs described all of them the same way.
+#
+# web-ui was worse than hook-only: nothing typechecked it at all. `pnpm typecheck` at
+# the repo root is `tsc --noEmit` over `src`, and web-ui is a separate SvelteKit
+# package needing `svelte-check`. ~75 components, 1038 files, checked by nobody.
+#
+# No `paths-ignore`, and no `branches: [main]` filter — a required check must run on
+# every PR, or it hangs at "expected" and the PR cannot merge. (The older guard
+# workflows do filter on `branches: [main]`, which means they never run on a stacked
+# PR targeting a feature branch. Not repeating that here.)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with: { version: '10' }
+      # The scan's last step shells out to `pnpm audit --prod`, which needs the
+      # lockfile resolved. Everything before it is pure pattern matching.
+      - run: pnpm install --frozen-lockfile
+      - run: sh scripts/security-scan.sh
+
+  hex-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Pure bash + grep over the web-ui sources. No install needed.
+      - run: bash packages/web-ui/scripts/hex-guard.sh
+
+  web-ui-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with: { version: '10' }
+      - run: pnpm install --frozen-lockfile
+      - name: svelte-check
+        working-directory: packages/web-ui
+        run: pnpm run typecheck
