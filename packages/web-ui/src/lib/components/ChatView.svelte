@@ -60,7 +60,8 @@
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
-	import { formatTurnTokens, formatUsageMeta } from '../stores/chat-usage.js';
+	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
+	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
@@ -1801,10 +1802,11 @@
 
 	// The footer usage line is split into two pure helpers in `chat-usage.ts`:
 	// `formatTurnTokens` (the per-turn SUM, with a `Σ` prefix + tooltip so it
-	// no longer reads as a single over-window prompt) and `formatUsageMeta`
-	// (the $ / cache / model tail). The real current window fill is shown
-	// separately as the co-located occupancy chip. `includeCost` gates only the
-	// dollar figures (demo tenants pass false). See chat-usage.ts for rationale.
+	// no longer reads as a single over-window prompt) and `formatUsageMetaParts`
+	// (the $ / cache / model tail as an array, so the footer can set off every
+	// segment with one consistent `·` separator). The real current window fill is
+	// shown separately as the co-located occupancy chip. `includeCost` gates only
+	// the dollar figures (demo tenants pass false). See chat-usage.ts for rationale.
 
 	// Diagnostics panel helpers (opt-in via Advanced metrics setting).
 	function fmtMs(ms: number): string {
@@ -1885,16 +1887,23 @@
 	     broken over-window figure. The chip only rides the LAST message because
 	     `ctxBudget` is a single live session value, not a per-message stat. -->
 	<div class="flex items-center gap-2 mt-2">
-		{#if usage && !isStreamingMsg}
-			{@const meta = formatUsageMeta(usage, !getDemoMode())}
-			<span class="text-[11px] font-mono text-text-subtle truncate">
-				<span
-					class="cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
-					title={t('chat.footer_tokens_tooltip')}
-				>{formatTurnTokens(usage)}</span>{#if meta} · {meta}{/if}
-			</span>
-		{/if}
-		{#if isLast && ctxBudget && !isStreamingMsg}
+		{#if !isStreamingMsg && (usage || (isLast && ctxBudget))}
+			<!-- One coherent stats line — Σ tokens · $ · cache · model · context
+			     meter — every segment set off by the SAME `·` separator at the
+			     same gap. Horizontally swipeable on mobile when a long model id
+			     overflows (scroll-fades the clipped edge) instead of truncating;
+			     the action icons stay pinned right, outside this scroll box. -->
+			<div class="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scrollbar-none whitespace-nowrap text-[11px] font-mono text-text-subtle" use:scrollFade>
+				{#if usage}
+					<span
+						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+						title={t('chat.footer_tokens_tooltip')}
+					>{formatTurnTokens(usage)}</span>
+					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
+						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span><span class="shrink-0">{part}</span>
+					{/each}
+				{/if}
+		{#if isLast && ctxBudget}
 			{@const pct = Math.min(ctxBudget.usagePercent, 100)}
 			<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
 			     thread is to a compaction, cost-wise) when the engine sends it;
@@ -1906,6 +1915,7 @@
 			{@const colorPct = ctxBudget.budgetPercent !== undefined ? Math.min(ctxBudget.budgetPercent, 100) : pct}
 			{@const barColor = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
 			{@const txtColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
+			{#if usage}<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{/if}
 			<span
 				class="inline-flex items-center gap-1 shrink-0"
 				title="{t('chat.ctx_occupancy_tooltip')} · {ctxBudget.totalTokens.toLocaleString()} / {ctxBudget.maxTokens.toLocaleString()}"
@@ -1914,8 +1924,10 @@
 				<span class="w-10 h-1 rounded-full bg-border overflow-hidden">
 					<span class="block {barColor} h-full rounded-full transition-all duration-500" style="width: {pct}%"></span>
 				</span>
-				<span class="text-[10px] font-mono {txtColor}">{pct}%</span>
+				<span class="text-[10px] {txtColor}">{pct}%</span>
 			</span>
+			{/if}
+			</div>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
 			{@render speakButton(msgKey, msgContent)}
@@ -1954,15 +1966,6 @@
 				{/if}
 			</dl>
 		</details>
-	{/if}
-{/snippet}
-
-{#snippet messageTimestamp(createdAt: string | undefined, align: 'left' | 'right')}
-	{#if createdAt}
-		{@const label = formatMessageTime(createdAt)}
-		{#if label}
-			<div class="mt-0.5 text-[10px] text-text-subtle/50 select-none {align === 'right' ? 'text-right pr-1' : ''}">{label}</div>
-		{/if}
 	{/if}
 {/snippet}
 
@@ -2243,6 +2246,14 @@
 				{:else if msg.role === 'user'}
 					{@const userText = stripNowMarker(msg.content)}
 					<div class="flex justify-end items-start gap-1.5">
+						<!-- Timestamp on the operator's own row, pushed hard-left (mr-auto)
+						     so it sits opposite the right-aligned bubble on the same line.
+						     Only the user's turns carry it — the assistant's don't. The
+						     mt nudges it down to line up with the bubble's first text line. -->
+						{#if msg.createdAt}
+							{@const ts = formatMessageTime(msg.createdAt)}
+							{#if ts}<span class="mr-auto mt-2.5 shrink-0 text-[10px] text-text-subtle/50 select-none tabular-nums">{ts}</span>{/if}
+						{/if}
 						{#if msg.queued}
 							<button
 								onclick={() => removeQueuedMessage(msg)}
@@ -2269,7 +2280,6 @@
 							{/if}
 						</button>
 					</div>
-					{@render messageTimestamp(msg.createdAt, 'right')}
 				{:else}
 					<!-- EU AI Act Art. 50 §1: persistent visible disclosure that the
 					     message is AI-generated. data-ai-generated exposes the same
@@ -2436,7 +2446,6 @@
 								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
 						{/if}
-						{@render messageTimestamp(msg.createdAt, 'left')}
 					</div>
 				{/if}
 			{/each}

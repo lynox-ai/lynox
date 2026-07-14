@@ -115,7 +115,7 @@ export function formatTurnTokens(u: UsageInfo): string {
  * box) without surfacing prices. Real tenants (self-host, BYOK, Managed) always
  * see cost — keeping AI spend transparent rather than hidden. (rafael 2026-05-29)
  */
-export function formatUsageMeta(u: UsageInfo, includeCost: boolean): string {
+export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): string[] {
 	const parts: string[] = [];
 	if (includeCost) {
 		parts.push(formatCost(u.costUsd));
@@ -133,5 +133,14 @@ export function formatUsageMeta(u: UsageInfo, includeCost: boolean): string {
 	// observable rather than hidden behind an Anthropic-flavoured tier alias in
 	// the model's text response).
 	if (u.model) parts.push(u.model);
-	return parts.join(' · ');
+	return parts;
+}
+
+/**
+ * The footer tail as a single ` · `-joined string. Kept for callers/tests that
+ * want the flat form; the ChatView footer renders the parts individually (via
+ * `formatUsageMetaParts`) so every separator is one consistent styled element.
+ */
+export function formatUsageMeta(u: UsageInfo, includeCost: boolean): string {
+	return formatUsageMetaParts(u, includeCost).join(' · ');
 }
