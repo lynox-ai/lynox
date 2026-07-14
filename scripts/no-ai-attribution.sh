@@ -28,9 +28,19 @@
 
 set -uo pipefail
 
-# Matches: Co-Authored-By: Claude <...> · Claude-Session: https://... ·
-#          🤖 Generated with [Claude Code](...)
-PATTERN='^[[:space:]]*(co-authored-by:[[:space:]].*claude|claude-session:)|generated with \[?claude code'
+# Match the TRAILER FORM, not merely a line that starts with the word.
+#
+# The first version of this matched `^claude-session:` and promptly ate a line of this
+# very repo's prose — a commit body that began "Claude-Session:, no 'Generated with
+# Claude Code'..." while EXPLAINING the rule. A guard that fires on obviously-safe
+# lines is the exact failure it was written to prevent, and this one did it silently.
+#
+# So each pattern demands the shape of the real trailer:
+#   Co-Authored-By: Claude … <someone@somewhere>   → must end in an email in angle brackets
+#   Claude-Session: https://…                      → must be a bare URL
+#   🤖 Generated with [Claude Code](…)             → must start the line
+# Prose that merely mentions or quotes them does not match.
+PATTERN='^[[:space:]]*co-authored-by:.*claude.*<[^>]+@[^>]+>[[:space:]]*$|^[[:space:]]*claude-session:[[:space:]]*https?://[^[:space:]]+[[:space:]]*$|^[[:space:]]*(🤖[[:space:]]*)?generated with \[?claude code\]?'
 
 usage() {
   echo "usage: no-ai-attribution.sh strip <commit-msg-file>" >&2
