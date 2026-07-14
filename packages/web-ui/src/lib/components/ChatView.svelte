@@ -2386,7 +2386,7 @@
 							{:else if gBlock.type === 'text' && gBlock.text}
 								{#if gIdx === firstTextIdx}
 									<span
-										class="ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent"
+										class="ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent-text"
 										aria-label={t('chat.ai_generated_aria')}
 									>{t('chat.ai_generated_badge')}</span>
 								{/if}
