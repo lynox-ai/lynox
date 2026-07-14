@@ -41,6 +41,35 @@ export function normalizeTier(value: string | undefined): ModelTier | undefined 
   return LEGACY_TIER_ALIASES[value];
 }
 
+/**
+ * Provenance of a thread's persisted `model_tier` (arc:model-selector Wave P1,
+ * DEF-0095). Records WHO chose the tier so a sticky per-thread pick (D18) is
+ * distinguishable from a machine default:
+ *  - `'user'`    — a deliberate pick (the composer picker was touched, or the
+ *                  mid-thread re-pick endpoint ran). STICKY: resume honours it.
+ *  - `'default'` — a new thread whose creator did NOT touch the picker.
+ *  - `'unknown'` — origin not observed (the schema DEFAULT + the conservative
+ *                  backfill value for pre-column rows).
+ *
+ * ADVISORY-ONLY: it is client-supplied (only the picker UI knows explicit-vs-
+ * untouched), so a client CAN send `'user'` for a machine default. That is
+ * harmless ONLY as long as `source` stays observational — it MUST NOT gate any
+ * tier/cost/capability decision. The instant a policy keys off it, a client
+ * could pin an expensive tier by lying. Kept a 3-value enum on purpose; because
+ * the column is `TEXT`, a future value (e.g. `'inferred'`) is a zero-migration
+ * string add (DEF-0127), so no speculative writers are named now.
+ */
+export type ThreadModelSource = 'user' | 'default' | 'unknown';
+
+/**
+ * Validate a client-supplied `source` at an input boundary. Returns `undefined`
+ * for anything unrecognised so callers fall back to the schema default
+ * (`'unknown'`). Mirrors {@link normalizeTier}'s boundary-validation shape.
+ */
+export function normalizeThreadModelSource(value: unknown): ThreadModelSource | undefined {
+  return value === 'user' || value === 'default' || value === 'unknown' ? value : undefined;
+}
+
 export type LLMProvider = 'anthropic' | 'vertex' | 'custom' | 'openai';
 
 /** Named model profile for non-Claude providers (Mistral, Gemini, Grok, etc.). */

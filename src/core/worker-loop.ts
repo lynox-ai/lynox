@@ -501,7 +501,9 @@ export class WorkerLoop {
       ? `Task: ${task.title}\n\n${task.description}`
       : `Task: ${task.title}`;
 
-    const result = await session.run(prompt);
+    // Attribute the run to its trigger source (P1, DEF-0097) so this scheduled
+    // automation turn is distinguishable from a user chat turn in run-history.
+    const result = await session.run(prompt, { triggerOrigin: task.source });
     const truncatedResult = result.length > MAX_TASK_RESULT_CHARS
       ? result.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : result;
@@ -773,7 +775,7 @@ export class WorkerLoop {
     // a non-critical dangerous tool would AUTO-GRANT — see permission-guard
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch' });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

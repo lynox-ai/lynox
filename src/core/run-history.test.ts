@@ -2295,6 +2295,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub — this test exercises the tasks split, not threads.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         INSERT INTO tasks (id, title, assignee, priority, due_date) VALUES ('m-todo','Pay invoice','user','high','2026-07-01');
         INSERT INTO tasks (id, title) VALUES ('m-todo-null','Loose note');
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('m-cron','Digest','lynox','scheduled','0 9 * * *','2020-01-01T00:00:00.000Z');
@@ -2369,6 +2371,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub for the tasks-split test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- a TRIGGER parent (scheduled) + a kept-TODO child pointing at it (cross-table)
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('par-trig','Weekly job','lynox','scheduled','0 9 * * 1','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-trig','Subtask','user','par-trig');
@@ -2450,6 +2454,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (42);
         -- a real v42 db has threads (created v22); v46 ALTERs it. Minimal stub for the v43 prompts-migration test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
       `);

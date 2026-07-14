@@ -7,7 +7,8 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
-import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
+import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
@@ -1121,6 +1122,50 @@ const MIGRATIONS: string[] = [
 
    ALTER TABLE threads ADD COLUMN primary_subject_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_threads_primary_subject ON threads(primary_subject_id);`,
+
+  // v47 — Model Execution Policy (arc:model-selector) Wave P1, provenance
+  // (DEF-0094/DEF-0095): record WHO chose a thread's `model_tier`, so a sticky
+  // per-thread pick (D18) is distinguishable from a machine default. The picker
+  // already ships (#958/#960/#964) writing real user picks into `model_tier` with
+  // no way to tell them from defaults — this column starts capturing that. Three
+  // values (`'user'` deliberate pick · `'default'` new thread, picker untouched ·
+  // `'unknown'` origin not observed). ADVISORY-ONLY: it MUST NOT gate any tier/
+  // cost/capability decision (it is client-supplied → a client could lie), so a
+  // mislabel authorises nothing. Column-ADD is O(1) metadata; every existing row
+  // starts `'unknown'`. The `≠default → 'user'` RECOVERY of pre-column picks is a
+  // gated boot-backfill in engine.ts (needs the per-instance `default_tier` +
+  // legacy brand-name normalisation, neither expressible in static migration SQL).
+  // Un-guarded ADD COLUMN is safe: the runner execs MIGRATIONS[i>=currentVersion],
+  // so v47 runs exactly once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
+   ALTER TABLE threads ADD COLUMN model_tier_source TEXT NOT NULL DEFAULT 'unknown';`,
+
+  // v48 — Model Execution Policy Wave P1, run attribution (DEF-0097, D21): a
+  // cron/WorkerLoop-fired run must be distinguishable from a user chat turn so the
+  // policy is auditable ("what did my nightly automation burn?"). A SEPARATE
+  // nullable column, NOT a new `run_type` value — `run_type` is a closed structural
+  // union feeding the usage/billing filters, and a new value could silently pass
+  // them + miscount automation as user turns (product-not-sum at the schema level).
+  // Nullable: every pre-v48 row (and any run without an explicit origin) reads NULL
+  // = "unattributed / legacy". Plumbed from the worker call sites → run() →
+  // insertRun; the HistoryView surface is a fast P1-follow (data accrues now).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (48);
+   ALTER TABLE runs ADD COLUMN trigger_origin TEXT;`,
+
+  // v49 — Model Execution Policy Wave P1: the exactly-once marker for the
+  // provenance RECOVERY backfill (DEF-0095). The v47 column starts every existing
+  // row at 'unknown'; a boot-backfill in engine.ts then labels a thread whose tier
+  // differs from the instance default as a likely deliberate pick ('user'). That
+  // recovery needs the per-instance `default_tier` + legacy brand-name
+  // normalisation — neither expressible in static migration SQL — so it runs in
+  // engine.ts, gated exactly-once by THIS marker (mirrors engine.db's
+  // `verb_backfill_marker`). Flag-independent (history.db only, no engine.db).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (49);
+   CREATE TABLE IF NOT EXISTS model_provenance_backfill_marker (
+     id INTEGER PRIMARY KEY,
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO model_provenance_backfill_marker (id, done) VALUES (1, 0);`,
 ];
 
 export class RunHistory {
@@ -1344,11 +1389,16 @@ export class RunHistory {
     roleId?: string | undefined;
     kind?: 'llm' | 'voice_stt' | 'voice_tts' | undefined;
     units?: number | undefined;
+    /** What fired this run (DEF-0097, v48): e.g. `'cron'` / `'watch'` for a
+     *  WorkerLoop-scheduled turn, absent (→ NULL) for a live user chat turn or a
+     *  legacy row. A SEPARATE dimension from `run_type` (the closed structural
+     *  union) so automation is auditable without polluting the billing filters. */
+    triggerOrigin?: string | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units, provider)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
+      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units, provider, trigger_origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       params.sessionId ?? '',
@@ -1367,6 +1417,7 @@ export class RunHistory {
       params.kind ?? null,
       params.units ?? 0,
       params.provider ?? '',
+      params.triggerOrigin ?? null,
     );
     return id;
   }
@@ -1762,6 +1813,53 @@ export class RunHistory {
         AND run_type != 'pipeline_step'
     `).get(sessionId) as { cost_usd: number; tokens_in: number; tokens_out: number } | undefined;
     return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
+  }
+
+  // ── Model-provenance backfill (arc:model-selector P1, DEF-0095) ──
+  // The exactly-once gate for the boot-backfill in engine.ts, mirroring engine.db's
+  // `verb_backfill_marker`. The recovery itself lives here (it owns the threads DB)
+  // but is DRIVEN from engine.ts because it needs the per-instance default tier.
+
+  isModelProvenanceBackfillDone(): boolean {
+    try {
+      const row = this.db.prepare('SELECT done FROM model_provenance_backfill_marker WHERE id = 1').get() as
+        { done: number } | undefined;
+      return row?.done === 1;
+    } catch {
+      // Marker table absent (a pre-v49 DB mid-migration / a degraded open) → treat
+      // as not-done so the next healthy boot retries rather than skipping silently.
+      return false;
+    }
+  }
+
+  markModelProvenanceBackfillDone(): void {
+    this.db.prepare('UPDATE model_provenance_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
+  /**
+   * One-shot recovery of pre-column provenance (DEF-0095): the v47 column starts
+   * every existing thread at `'unknown'`. A thread whose NORMALISED tier differs
+   * from the instance default was almost certainly a deliberate pick (the composer
+   * picker shipped before this column), so label it `'user'` — strictly better
+   * than a blanket `'unknown'` that erases every real historical pick. Only touches
+   * rows still at `'unknown'` (never clobbers a fresh `'user'`/`'default'` write).
+   * Normalises legacy brand names (`sonnet`/`opus`/`haiku`) since the DB DDL default
+   * is `'sonnet'` and pre-rename rows carry brand names; an unparseable tier is
+   * treated as the default (NOT claimed as a pick — conservative). BEST-EFFORT +
+   * ADVISORY-ONLY: an internal `fast`/escalation thread on a non-default instance is
+   * over-labelled `'user'`, which is harmless because `source` gates nothing (v47
+   * caveat; the `'inferred'` refinement is register-deferred DEF-0127). Returns the
+   * number of rows labelled.
+   */
+  backfillModelTierSourceFromDefault(defaultTier: ModelTier): number {
+    const rows = this.db.prepare(
+      "SELECT id, model_tier FROM threads WHERE model_tier_source = 'unknown'",
+    ).all() as Array<{ id: string; model_tier: string }>;
+    const toMark = rows.filter(r => (normalizeTier(r.model_tier) ?? defaultTier) !== defaultTier);
+    if (toMark.length === 0) return 0;
+    const upd = this.db.prepare("UPDATE threads SET model_tier_source = 'user' WHERE id = ?");
+    this.db.transaction((ids: string[]) => { for (const id of ids) upd.run(id); })(toMark.map(r => r.id));
+    return toMark.length;
   }
 
   getStats(): RunStats {

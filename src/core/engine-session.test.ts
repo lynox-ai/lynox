@@ -326,6 +326,10 @@ vi.mock('./run-history.js', () => ({
     // Without it the first-run rollup throws before the title path, so the
     // fast-tier title metering never fires.
     this.getThreadTotals = vi.fn().mockReturnValue({ tokens_in: 0, tokens_out: 0, cost_usd: 0 });
+    // @ts-expect-error mock constructor — P1 provenance backfill gate (engine.ts
+    // boot). 'done' so the one-shot backfill is skipped in these mocked-DB tests;
+    // the real recovery is covered by run-history-provenance-backfill.test.ts.
+    this.isModelProvenanceBackfillDone = vi.fn().mockReturnValue(true);
     // @ts-expect-error mock constructor — debug-export Tier 2 compaction events.
     this.insertCompactionEvent = vi.fn();
     // @ts-expect-error mock constructor
@@ -700,6 +704,70 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(session.setModel('deep')).toBe('claude-opus-4-6');
       expect(session.setModel('balanced')).toBe('claude-sonnet-4-6');
       expect(session.setModel('fast')).toBe('claude-haiku-4-5-20251001');
+    });
+  });
+
+  // -- arc:model-selector P1 §5.1b: the mid-thread re-pick (repickModel) --
+  describe('repickModel() — mid-thread tier change', () => {
+    it('clamps to max_tier on the live session but persists the REQUESTED (unclamped) pick as "user"', async () => {
+      const { engine, session } = await createEngineAndSession();
+      engine.getUserConfig().max_tier = 'balanced';
+      const updateSpy = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      try {
+        const result = session.repickModel('deep');
+        expect(result.ok).toBe(true);
+        // Live session runs the CLAMPED tier (S1 money-safety — setModel is A5, unclamped).
+        expect(result.ok && result.tier).toBe('balanced');
+        expect(session.getModelTier()).toBe('balanced');
+        // The ROW records INTENT — the requested tier, source 'user' (RF-ARCH4 /
+        // Fable: resume re-clamps, so an over-ceiling row never causes an over-ceiling run).
+        expect(updateSpy).toHaveBeenCalledWith(session.sessionId, {
+          model_tier: 'deep',
+          model_tier_source: 'user',
+        });
+      } finally {
+        updateSpy.mockRestore();
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('switches to the exact tier when no ceiling applies', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const updateSpy = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      try {
+        const result = session.repickModel('deep');
+        expect(result.ok && result.tier).toBe('deep');
+        expect(session.getModelTier()).toBe('deep');
+        expect(updateSpy).toHaveBeenCalledWith(session.sessionId, {
+          model_tier: 'deep',
+          model_tier_source: 'user',
+        });
+      } finally {
+        updateSpy.mockRestore();
+      }
+    });
+
+    it('refuses a downgrade that overflows the target window, with NO write (D20/F9)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Force a small effective window (floors at MIN_EFFECTIVE = 32k) + an
+      // occupancy above it, so the target tier cannot hold the context.
+      engine.getUserConfig().max_context_window_tokens = 1;
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'x'.repeat(120_000) }]);
+      const updateSpy = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      const before = session.getModelTier();
+      try {
+        const result = session.repickModel('fast');
+        expect(result.ok).toBe(false);
+        expect(!result.ok && result.reason).toBe('overflow');
+        expect(!result.ok && result.occupancy).toBeGreaterThan(!result.ok ? result.window : 0);
+        // Refuse is BEFORE any write, and the live tier is untouched.
+        expect(updateSpy).not.toHaveBeenCalled();
+        expect(session.getModelTier()).toBe(before);
+      } finally {
+        updateSpy.mockRestore();
+        mockGetMessages.mockReturnValue([]);
+        delete engine.getUserConfig().max_context_window_tokens;
+      }
     });
   });
 

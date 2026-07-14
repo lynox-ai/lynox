@@ -194,6 +194,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       'Task: Daily Report\n\nGenerate the daily report',
+      { triggerOrigin: 'cron' },
     );
   });
 
@@ -551,7 +552,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron' });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -568,7 +569,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron' });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----

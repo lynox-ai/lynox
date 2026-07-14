@@ -682,6 +682,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.model_picker.label': { de: 'Modell:', en: 'Model:' },
 	'chat.model_picker.recommended': { de: 'empfohlen', en: 'recommended' },
 	'chat.model_picker.pricier': { de: 'teurer', en: 'pricier' },
+	// Per-thread model control (P1 §5.1b) — the running-thread indicator + re-pick.
+	'chat.thread_model.label': { de: 'Läuft auf', en: 'Running on' },
+	'chat.thread_model.change': { de: 'Modell für diesen Chat wechseln', en: 'Change the model for this chat' },
+	'chat.thread_model.busy': { de: 'Während eine Antwort läuft, lässt sich das Modell nicht wechseln.', en: 'You can’t change the model while a response is streaming.' },
+	'chat.thread_model.error': { de: 'Modellwechsel fehlgeschlagen. Versuch es nochmal.', en: 'Couldn’t change the model. Please try again.' },
+	// Downgrade-overflow refusal (U1). {tier} is interpolated with the target tier label.
+	'chat.thread_model.overflow': { de: 'Dieser Chat ist zu lang für {tier} — er passt nicht mehr in dessen Kontextfenster. Kürze zuerst den Verlauf oder bleib beim aktuellen Modell.', en: 'This chat is too long for {tier} — it no longer fits that model’s context window. Shorten the history first, or stay on the current model.' },
 	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
 	'chat.activity.thinking': { de: 'Denkt nach...', en: 'Thinking...' },
