@@ -113,6 +113,19 @@ describe('save_workflow — session source', () => {
     expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
   });
 
+  it('first-run-confirms the saved workflow (self-built = authorised)', async () => {
+    // The provenance seam behind the library Run gate + the worker-loop cron gate:
+    // the user authored these steps in their own session, so the saved workflow is
+    // confirmed for unattended execution at save time. An IMPORTED workflow lands
+    // UNCONFIRMED on purpose (its steps are attacker-authorable) — asserted in
+    // import-workflow.test.ts. Without this stamp the Run gate would refuse a
+    // user's own saved workflow.
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    const pipeline = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+    expect(pipeline?.confirmedAt).toBeTruthy();
+  });
+
   it('resolves input_from by step order even when order != array index', async () => {
     // Regression: processToSteps builds step IDs as `step-<order>`. Deriving
     // `input_from` from the array index instead of the order value left a

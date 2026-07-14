@@ -10,6 +10,7 @@ import {
   PROVIDER_KEY_SLOTS,
   vaultSlotForProvider,
   resolveProviderApiKey,
+  mayFallBackToStoredKey,
   enrichTierSetCreds,
   migrateLegacyEndpointKey,
 } from './provider-keys.js';
@@ -139,6 +140,49 @@ describe('resolveProviderApiKey — endpoint-bound slots (cross-provider leak)',
     vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
     expect(resolveProviderApiKey({ provider: 'openai', secretStore: null }))
       .toBe('mistral-secret');
+  });
+});
+
+describe('mayFallBackToStoredKey — vault fallback is endpoint-bound for untrusted base_url', () => {
+  // Guards the /api/llm/test probe, whose base_url is untrusted request input.
+  // resolveProviderApiKey falls through to the SHARED generic-tile slot (the
+  // managed pool key) for any host it doesn't recognise — proven one describe
+  // up ("still resolves an unrecognised OpenAI-compatible host from the historic
+  // slot" → mistral-secret). Without this gate, an authenticated tenant could
+  // POST {provider:'openai', base_url:'https://attacker.tld', api_key:''} and the
+  // pool key would be bearer-tokened straight to attacker.tld.
+  const GROQ = 'https://api.groq.com/openai/v1';
+  const MISTRAL = 'https://api.mistral.ai/v1';
+
+  it('REFUSES the fallback for an unrecognised (attacker-supplied) host', () => {
+    // The core security property. resolveProviderApiKey WOULD hand back the pool
+    // key here (see the describe above); the gate must stop it before that.
+    expect(mayFallBackToStoredKey('openai', 'https://attacker.tld/v1')).toBe(false);
+    expect(mayFallBackToStoredKey('openai', 'https://api.mistral.ai.attacker.com/v1')).toBe(false);
+    expect(mayFallBackToStoredKey('custom', 'https://attacker.tld')).toBe(false);
+  });
+
+  it('REFUSES an attacker-registerable wildcard host (purpose-scoped, not the vetting allowlist)', () => {
+    // isAllowlistedEndpoint (the BYOK sub-processor-vetting gate) vouches for
+    // *.openai.azure.com — any account can register a <label>.openai.azure.com —
+    // and .local/.lan names. Sending the SHARED pool key there is a credentialed
+    // egress to a host the caller controls the DNS label of, so the fallback must
+    // use the exact-host baseline (isGuardedBaselineHost), which rejects both.
+    expect(mayFallBackToStoredKey('openai', 'https://attacker-label.openai.azure.com/v1')).toBe(false);
+    expect(mayFallBackToStoredKey('openai', 'https://evil.local/v1')).toBe(false);
+  });
+
+  it('ALLOWS the fallback for the provider default (no base_url)', () => {
+    // Anthropic/Vertex tile: the stored key genuinely belongs to the provider.
+    expect(mayFallBackToStoredKey('anthropic', '')).toBe(true);
+    expect(mayFallBackToStoredKey('openai', '')).toBe(true);
+  });
+
+  it('ALLOWS the fallback for a host that matches a preset', () => {
+    // The stored key is pinned to this endpoint — no leak, and re-testing a saved
+    // Groq/Mistral endpoint without re-typing the key must keep working.
+    expect(mayFallBackToStoredKey('openai', GROQ)).toBe(true);
+    expect(mayFallBackToStoredKey('openai', MISTRAL)).toBe(true);
   });
 });
 

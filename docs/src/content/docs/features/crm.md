@@ -85,7 +85,7 @@ lynox can connect to external REST APIs on your behalf. The API Store manages cr
 
 Or let lynox set it up during a conversation:
 
-- *"Connect to the Stripe API — here's my key: `<your-stripe-secret-key>`"*
+- *"Connect to the Stripe API"* — lynox asks for the key through a secure, out-of-band prompt and stores it in the vault. Don't paste a secret key into the chat itself: the chat input rejects anything that looks like a credential, precisely so a key never lands in your message history.
 
 ### Using APIs
 

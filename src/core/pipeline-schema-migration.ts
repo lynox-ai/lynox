@@ -18,8 +18,8 @@
  * lock-step with adding a {@link TRANSFORMS} entry that restructures the blob.
  *
  * - v1 (Slice 1a): the shape at first versioning. Legacy blobs (no
- *   `schema_version`) are treated as v0 and reach v1 via an identity step —
- *   validating the harness on real stored data.
+ *   `schema_version`) are treated as v0 and reach v1 via the first-run-confirm
+ *   backfill (v2.7.0 — every pre-versioning template is self-built; see TRANSFORMS[1]).
  * - v2 (Slice 1b): drop the dead `executionMode` tombstone — the first real
  *   content transform.
  */
@@ -36,6 +36,23 @@ export const CURRENT_PIPELINE_SCHEMA_VERSION = 2;
  * MUST NOT depend on any state outside the blob it is handed.
  */
 const TRANSFORMS: Record<number, (blob: Record<string, unknown>) => void> = {
+  // v0→v1: first-run-confirm backfill (v2.7.0). A v0 blob has NO `schema_version`,
+  // which means it predates content-versioning — and versioning arrived WITH the
+  // portable-import feature, so every v0 template is a SELF-BUILT workflow the user
+  // authored in their own session. v2.7.0 added a consent gate (cron + /run +
+  // autonomous run_workflow) that refuses an unconfirmed workflow; without this
+  // backfill it would retroactively refuse a workflow the user made themselves,
+  // which save_workflow now confirms at write time. Grant the same confirm here.
+  //   Safe against imports: an imported blob is persisted through a fail-closed
+  // chokepoint that stamps `schema_version` at CURRENT (import-workflow.ts), so it
+  // is never v0 and never enters this step — it stays unconfirmed by design.
+  // Only touches reusable templates; a plan_task pipeline (template:false) is not
+  // library-runnable and needs no confirm.
+  1: (blob) => {
+    if (blob['template'] === true && !blob['confirmedAt']) {
+      blob['confirmedAt'] = new Date().toISOString();
+    }
+  },
   // v1→v2: drop the legacy `executionMode` tombstone. Every workflow runs through
   // the orchestrator (the 'tracked' path was removed, D9); nothing reads the
   // field, so deleting it shrinks the content model with no behaviour change.

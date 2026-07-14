@@ -155,6 +155,12 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     template: true,
     executed: false,
     createdAt: new Date().toISOString(),
+    // First-run-confirm the workflow: the user built these steps in their own
+    // session, so they have seen and authorised them. `confirmedAt` is the seam
+    // that lets a workflow run unattended (worker-loop cron gate + the library
+    // Run gate). An IMPORTED workflow deliberately does NOT get this — its steps
+    // are attacker-authorable, so it stays inert until the user reviews it.
+    confirmedAt: new Date().toISOString(),
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],
@@ -276,6 +282,10 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       createdAt: new Date().toISOString(),
       executed: false,
       template: true, // Saved workflows are always reusable templates.
+      // First-run-confirm: captured from the user's own session → they authored
+      // and saw these steps. Lets the workflow run unattended (cron + library
+      // Run gate); an IMPORTED workflow stays unconfirmed until reviewed.
+      confirmedAt: new Date().toISOString(),
       // Captured sessions don't carry ask_user/ask_secret today; infer the
       // interaction mode by step inspection so the contract stays honest.
       mode: inferPipelineMode(pipelineSteps),

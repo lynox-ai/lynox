@@ -29,7 +29,7 @@ import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
-import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
+import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
@@ -4302,6 +4302,25 @@ export class LynoxHTTPApi {
           runParams = rawParams as Record<string, unknown>;
         }
       }
+      // Consent gate — mirror the worker-loop cron gate (worker-loop.ts:574).
+      // This Run path executes the workflow headless with autonomy:'autonomous'
+      // (no per-action approval prompt), so it must not run a workflow whose steps
+      // the user has never seen. A self-built workflow is first-run-confirmed at
+      // save (process.ts); an IMPORTED workflow lands unconfirmed on purpose, its
+      // steps being attacker-authorable. Refuse an unconfirmed workflow here
+      // rather than headless-running arbitrary imported bash. (Resolve via
+      // getPipeline so a prefix id + the post-confirm cache eviction are handled;
+      // a not-found id falls through to runGuardedSavedWorkflow's 404.)
+      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const plannedForRun = getPipeline(params['id']!, history);
+      if (plannedForRun && !plannedForRun.confirmedAt) {
+        errorResponse(
+          res,
+          403,
+          'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
+        );
+        return;
+      }
       // Route through the budget + managed-credit lifecycle (cap, credit gate,
       // cost report) — runSavedWorkflow alone bypasses all three.
       const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
@@ -4702,12 +4721,26 @@ export class LynoxHTTPApi {
       // the leak in its purest form otherwise: a user with a Mistral key saved,
       // testing a Groq endpoint without re-typing a key, would have that Mistral
       // key bearer-tokened straight to Groq by the fallback.
-      const apiKey = bodyKey || (resolveProviderApiKey({
-        provider: provider as LLMProvider,
-        apiBaseURL: baseUrl || undefined,
-        secretStore: engine.getSecretStore(),
-        userConfig: engine.getUserConfig(),
-      }) ?? '');
+      //
+      // SECURITY — `base_url` here is untrusted request input, unlike every other
+      // resolveProviderApiKey() caller (which passes the STORED userConfig.api_base_url).
+      // resolveProviderApiKey falls through to the generic tile's SHARED slot (the
+      // managed pool key) for any host it doesn't recognise, so a request with an
+      // arbitrary base_url and no typed key would bearer-token the pool key straight
+      // to that host. Gate the vault fallback to an endpoint the stored key actually
+      // belongs to: the provider default (no base_url → Anthropic/Vertex tile), a host
+      // that matches a preset (pinned slot, not a generic fall-through), or a vetted
+      // LLM host. A free-text/unknown base_url with no typed key gets the pre-1.5.2
+      // "API key required" — the user must supply it, never the shared pool key. A
+      // body-supplied key is the caller's own credential and always passes through.
+      const apiKey = bodyKey || (mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
+        ? (resolveProviderApiKey({
+            provider: provider as LLMProvider,
+            apiBaseURL: baseUrl || undefined,
+            secretStore: engine.getSecretStore(),
+            userConfig: engine.getUserConfig(),
+          }) ?? '')
+        : '');
       const model = typeof b['model'] === 'string' ? b['model'] : '';
       const started = Date.now();
       try {
