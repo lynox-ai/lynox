@@ -712,6 +712,7 @@ export async function spawnPipeline(
   capabilityContract?: CapabilityContract | undefined,
   runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
   secretStore?: SecretStoreLike | undefined,
+  parentRunId?: string | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -772,6 +773,9 @@ export async function spawnPipeline(
     // `runtime:'pipeline'` step's inner inline/named steps also resolve secrets
     // + fire the fail-loud guard, instead of dropping it one level down.
     secretStore,
+    // 2a/B5: stamp the caller's run id so the nested pipeline_runs row links to
+    // its parent and is filtered out of the top-level run list + cost stats.
+    parentRunId,
   });
 
   // Aggregate results

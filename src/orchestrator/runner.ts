@@ -277,16 +277,15 @@ export async function runManifest(
   // run visible ('running'); the finalize-UPDATE in the `finally` below closes
   // it out — and runs even on a thrown error, so a caught catastrophic failure
   // never leaves the row stuck at 'running'. A hard process death (SIGKILL /
-  // container stop) skips the finally, so its row stays 'running': the cost
-  // aggregate already ignores it (getPipelineCostStats filters to terminal
-  // rows, B6), but it DOES surface as 'running' in the run list + detail until
-  // a later slice's boot-sweep (B4) relabels stuck rows 'interrupted'. That
-  // display gap is the accepted cost of shipping this ahead of B4 — it still
-  // carries more than the pre-2a void (which recorded nothing).
-  // Only the top-level run (depth 0) writes a row in this slice — nested
-  // sub-pipelines are folded in by B5 (parent_run_id + list-filter). The write
-  // is fire-and-forget: a history failure must never break or mask the run.
-  const rh = depth === 0 ? options.runHistory : undefined;
+  // container stop) skips the finally, leaving a 'running' row that the boot
+  // sweep (B4) relabels 'interrupted' on the next start (and which the cost
+  // aggregate already ignores — it filters to terminal rows, B6).
+  // Every run at ANY depth writes its row (B5): a nested sub-pipeline stamps its
+  // parent's runId (parent_run_id), so the top-level views — getRecentPipelineRuns
+  // and getPipelineCostStats, both filtered to parent_run_id IS NULL — keep it
+  // out while it stays reachable by id (invariant I6). The write is
+  // fire-and-forget: a history failure must never break or mask the run.
+  const rh = options.runHistory;
   if (rh !== undefined) {
     try {
       rh.insertPipelineRun({
@@ -295,15 +294,16 @@ export async function runManifest(
         status: 'running',
         manifestJson: JSON.stringify(manifest),
         ...(options.workflowId !== undefined ? { workflowId: options.workflowId } : {}),
+        ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
       });
     } catch { /* fire-and-forget */ }
   }
 
   // 2a/B3 durable step-record: each step writes its pipeline_step_results row
   // AS-COMPLETED (result='' deferred) into this accumulator; the finally below
-  // fills the result-text by rowid once the run terminates. Gated to the SAME
-  // condition as the run row (top-level + RunHistory) so a nested step row never
-  // orphans a missing parent run row (the depth-0 fence, B5 lifts it).
+  // fills the result-text by rowid once the run terminates. Present whenever the
+  // run row is (any depth with RunHistory), so a nested run's step rows attach to
+  // its own parent run row — never an orphan (B5 lifted the old depth-0 gate).
   const stepRows: StepRowAccumulator | undefined = rh !== undefined ? [] : undefined;
 
   // Effective options carry the (possibly-augmented) parentPrompt so
@@ -478,9 +478,9 @@ type StepResult = 'ok' | 'halt';
  * paired with the step's result-text, held IN MEMORY until run-finalize persists
  * it. The row was inserted with result='' (invariant I4 — the structural 2b
  * fence: a crash before finalize leaves result='' on disk, so the partial
- * result-text is never persisted). Present only for a top-level (depth 0) run
- * with a RunHistory, matching the pipeline_runs row (nested runs get neither
- * until B5, avoiding an orphan step row with no parent run row).
+ * result-text is never persisted). Present for any run with a RunHistory,
+ * matching the pipeline_runs row — a nested run's step rows attach to its own
+ * parent run row (B5), so they never orphan.
  */
 type StepRowAccumulator = Array<{ rowId: number | bigint; result: string }>;
 
@@ -616,7 +616,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {

@@ -135,6 +135,10 @@ export function getPipelineStepStats(db: Database.Database, days: number): Array
     FROM pipeline_step_results psr
     JOIN pipeline_runs pr ON psr.pipeline_run_id = pr.id
     WHERE pr.started_at >= datetime('now', ?)
+      -- 2a/B5: top-level runs only, matching getRecentPipelineRuns /
+      -- getPipelineCostStats. This view GROUPs BY manifest_name, so a nested
+      -- sub-pipeline (parent_run_id set) would add synthetic step-sub buckets.
+      AND pr.parent_run_id IS NULL
     GROUP BY psr.step_id, pr.manifest_name
   `).all(`-${days} days`) as Array<{
     step_id: string; manifest_name: string; avg_duration_ms: number;
@@ -160,6 +164,10 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
     FROM pipeline_runs
     WHERE started_at >= datetime('now', ?)
       AND status IN ('completed', 'failed')
+      -- 2a/B5: top-level runs only — a nested sub-pipeline (parent_run_id set)
+      -- is a step-sub child, not a workflow the user ran; counting it would add
+      -- a synthetic per-manifest bucket. Matches getRecentPipelineRuns.
+      AND parent_run_id IS NULL
     GROUP BY manifest_name
   `).all(`-${days} days`) as Array<{
     manifest_name: string; run_count: number; avg_cost_usd: number;
@@ -168,6 +176,10 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
 }
 
 export function getAvgStepCostByModelTier(db: Database.Database, days: number): Record<string, number> {
+  // 2a/B5: intentionally NOT filtered on parent_run_id — unlike the per-manifest
+  // views, this groups by model_tier to estimate cost, and a nested sub-pipeline's
+  // steps are REAL executions at their tier: including them gives more (correct)
+  // cost samples, not a synthetic bucket.
   const rows = db.prepare(`
     SELECT model_tier, AVG(cost_usd) as avg_cost_usd, COUNT(*) as run_count
     FROM pipeline_step_results psr

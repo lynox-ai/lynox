@@ -457,8 +457,13 @@ export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<
   // plans share the `pipeline_runs` table with actual runs but represent
   // templates/plans, not executions. Without this filter, the Workflows
   // run-history tab leaks every saved-workflow library entry.
+  // Also exclude nested sub-pipeline runs (2a/B5, invariant I6): a run with a
+  // parent_run_id is a `runtime:'pipeline'` child recorded for its own drill-down
+  // (reachable by id), NOT a top-level execution — showing it here would pollute
+  // the list with synthetic `<step>-sub` rows. Every pre-B5 row has NULL, so this
+  // is a no-op on existing data.
   return db.prepare(
-    "SELECT id, manifest_name, status, total_duration_ms, total_cost_usd, step_count, error, started_at FROM pipeline_runs WHERE status != 'planned' ORDER BY started_at DESC LIMIT ?"
+    "SELECT id, manifest_name, status, total_duration_ms, total_cost_usd, step_count, error, started_at FROM pipeline_runs WHERE status != 'planned' AND parent_run_id IS NULL ORDER BY started_at DESC LIMIT ?"
   ).all(limit) as Array<{
     id: string; manifest_name: string; status: string; total_duration_ms: number;
     total_cost_usd: number; step_count: number; error: string | null; started_at: string;
