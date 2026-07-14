@@ -19,7 +19,7 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor } from '../types/index.js';
+import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
 import { channels } from './observability.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
@@ -29,7 +29,9 @@ export interface RunModelRequest {
    * The caller's requested tier or model id (spawn `spec.model`, a step hint,
    * a pipeline step). A tier name (canonical or legacy) is gated + clamped; a
    * genuine model id (e.g. a pinned `claude-opus-4-7`) is passed through as the
-   * model id since it carries no tier to gate/clamp. `undefined` → use `defaultTier`.
+   * model id when it is within the ceiling, but REFUSED (throws) when its cost band
+   * exceeds `maxTier` — a specific id cannot be clamped down (DEF-0080). `undefined`
+   * → use `defaultTier`.
    */
   requested?: string | undefined;
   /** Tier used when `requested` is absent (the role default, then the config default). */
@@ -59,10 +61,30 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   const requested = req.requested ? req.requested : undefined;
   const normalized = requested !== undefined ? normalizeTier(requested) : undefined;
 
-  // A genuine model id (not a tier name) carries no tier to gate/clamp — pass it
-  // through verbatim as the model id, but still derive a (clamped) tier from the
-  // default so callers that need a cost band (budget, estimation) get one.
+  // A genuine model id (not a tier name) carries no tier to gate/clamp. It names a
+  // specific model/endpoint that cannot be substituted, so an OVER-ceiling id is
+  // REFUSED, not clamped (DEF-0080) — the same rule the spawn profile guard applies
+  // (`profileExceedsMaxTier`, now delegating to the shared predicate). The one live
+  // raw-id ingress that reaches this branch is a pipeline `ManifestStep.model`
+  // (a `string`, not tier-validated). The agent-facing `spawn` tool's `spec.model`
+  // is enum-restricted to fast/balanced/deep at input validation (`spawn.ts` schema
+  // + `SpawnSpec.model: ModelTier`), and the main-chat `opts.model` is `normalizeTier`d
+  // at the HTTP boundary — so a raw id never reaches this throw from those paths;
+  // the check is defense-in-depth for them. DO NOT drop the spawn enum on the belief
+  // that this chokepoint guards `spec.model` — it never exercises that path. Below
+  // the ceiling the id passes through verbatim; the tier is derived (clamped) from
+  // the default so callers that need a cost band still get one.
   if (requested !== undefined && normalized === undefined) {
+    if (modelIdExceedsMaxTier(requested, req.maxTier)) {
+      const band = modelCapability(requested)?.tier;
+      // The id can be an operator/agent-authored manifest string; bound + strip
+      // control chars before it enters an error surface (defense against a crafted
+      // step.model poisoning a downstream context).
+      const shownId = requested.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
+      throw new Error(
+        `Model "${shownId}" is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown, treated as deep)'} exceeds the max tier "${req.maxTier ?? ''}". A specific model id cannot be clamped down, so it is refused — request a tier (fast/balanced/deep) instead, which is clamped to the ceiling.`,
+      );
+    }
     return { tier: clampTier(req.defaultTier, req.maxTier), modelId: requested };
   }
 

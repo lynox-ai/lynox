@@ -1546,6 +1546,47 @@ describe('Engine + Session (Orchestrator)', () => {
       }
     });
 
+    it('reads the FRESH ceiling on the run-path clamp, not the stale tool context (DEF-0077)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      // Operator wants deep summaries...
+      engine.getUserConfig().compaction_model = 'deep';
+      // ...but a CP sync-env then LOWERS the cost ceiling to `fast`. Reproduce the
+      // exact divergence reloadUserConfig() creates: it reassigns `this.userConfig`
+      // (so engine.getUserConfig() is the FRESH object with max_tier `fast`) but
+      // never re-binds `_toolContext.userConfig`, which still points at the OLD
+      // object (no ceiling). The run-path clamp must read the fresh ceiling — or a
+      // post-downgrade compaction silently fails to bite (DEF-0077).
+      engine.getUserConfig().max_tier = 'fast';
+      const toolCtx = engine.getToolContext();
+      (toolCtx as { userConfig: import('../types/index.js').LynoxUserConfig }).userConfig = {
+        ...toolCtx.userConfig,
+        max_tier: undefined,
+      };
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      try {
+        const result = await session.compact();
+        expect(result.success).toBe(true);
+
+        const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+        // The summarizer (FIRST construction) must be clamped DOWN to the FRESH
+        // `fast` ceiling (Haiku). Without the fix the clamp reads the stale tool
+        // context (no ceiling) and the summarizer builds on the un-clamped `deep`
+        // (Opus) — this assertion fails. The scoped restore rebuilds `deep` last.
+        expect(constructedModels[0]?.includes('haiku')).toBe(true);
+        expect(constructedModels.at(-1)).toBe('claude-opus-4-6');
+        expect(session.getModelTier()).toBe('deep');
+      } finally {
+        delete engine.getUserConfig().compaction_model;
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
     it('is provider-agnostic — under Mistral/openai the fast tier resolves to the Mistral small model, never a hardcoded Haiku', async () => {
       // Model-agnosticity proof (rafael follow-up): the summarizer must ride the
       // `fast` TIER through `resolveTierModel(getActiveProvider())`, not a
