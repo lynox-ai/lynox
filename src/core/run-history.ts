@@ -2285,6 +2285,9 @@ export class RunHistory {
     status?: string | undefined;
     totalDurationMs?: number | undefined;
     totalCostUsd?: number | undefined;
+    totalTokensIn?: number | undefined;
+    totalTokensOut?: number | undefined;
+    stepCount?: number | undefined;
     error?: string | undefined;
   }): void {
     persistence.updatePipelineRun(this.db, id, params);
