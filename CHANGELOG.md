@@ -1,15 +1,34 @@
 # Changelog
 
-## Unreleased
+## 2.7.0 — 2026-07-14
+
+This release makes model choice a first-class control and workflows portable, and hardens the paths that carry credentials and money. You can pick the model for a new chat from the composer and set a per-thread execution policy, while the engine enforces your plan's tier ceiling on every path. Workflows gained a versioned export/import format with a re-consent boundary, so a recipe from one instance can be carried to another without silently carrying its secrets or trusted hosts across the trust line. Under that: the workflow run record is durable and honest, in-session workflow spend is now billed, a cluster of LLM-key-isolation fixes closes every path by which a stored key could reach the wrong endpoint, and a saved workflow now needs first-run confirmation before it runs unattended. A guarded outbound-egress policy for agent HTTP tools ships **dormant** (default `allow-all`, no behaviour change). **No engine.db migration** — rollback to 2.6.1 is a clean image swap.
 
 ### Added
-- **One-click presets for local runtimes and gateways.** Ollama, LM Studio, vLLM, LocalAI, Groq, Together AI and Fireworks each get their own tile in LLM settings, with the base URL filled in for you. Ollama's is verified end-to-end: a real agent run drives a full tool call and reads the result back. The others connect, but their tool-calling is not yet proven, and the tile says so — lynox is an agent, and a model that cannot call tools cannot run it.
+- **Pick the model for a new chat, right from the composer.** New chats get a model picker that shows real model names and hides providers that only offer a single model, and a per-thread execution policy lets a thread run on the tier you choose. (#958, #960, #964, #975)
+- **One-click presets for local runtimes and gateways.** Ollama, LM Studio, vLLM, LocalAI, Groq, Together AI and Fireworks each get their own tile in LLM settings, with the base URL filled in for you. Ollama's and Fireworks' are verified end-to-end: a real agent run drives a full tool call and reads the result back. The others connect, but their tool-calling is not yet proven, and the tile says so — lynox is an agent, and a model that cannot call tools cannot run it. (#941, #965)
+- **Portable workflow export and import.** A saved workflow can be exported to a versioned, self-contained format and imported on another instance. Import crosses a re-consent boundary: the secret references and reachable hosts a workflow needs are re-approved on the importing instance, never trusted implicitly from the file. (#955, #959, #974)
 
 ### Fixed
 - **An API key can no longer be sent to the wrong vendor.** Every OpenAI-compatible endpoint — Mistral, Groq, a local Ollama — looks the same to the engine (`provider: "openai"`), and the key was picked from the provider alone. Selecting one vendor while another's key was stored therefore sent that key, as a bearer token, to the endpoint you selected; a local runtime received it in plaintext over http. Keys are now bound to the endpoint they are sent to.
+- **The connection test no longer sends a stored key to an unknown host.** Testing a connection to a free-text endpoint without re-typing a key no longer falls back to a stored key unless the endpoint is a known, vetted host — so a probe can't be used to send a saved credential somewhere it doesn't belong. (#984)
+- **The OpenAI adapter no longer drops your images and text.** A message combining text and images sent through an OpenAI-compatible endpoint keeps all of its content instead of silently losing parts of it. (#961)
+- **Workflow run history is durable and complete.** Real workflow spend is recorded instead of dropped, nested sub-pipeline runs are tracked (and filtered out of top-level views), step results are written as each step completes, and a run left "running" by a restart is reconciled to "interrupted" on boot. (#974, #977, #978, #979, #980)
+- **In-session workflow runs count toward your budget.** A workflow run started from chat now reports its cost the same way other work does, so its spend is billed and counts against the usage cap instead of slipping past it. (#984)
+- **Your plan's model-tier ceiling is enforced on every path.** A per-session model override and an agent-selected spawn profile are both clamped to your plan's maximum tier, the agent no longer has a lever to raise its own session tier, and the managed default stays `balanced`. (#954, #957, #982)
+- **Saving a workflow preserves its secret references and rejects overly broad hosts.** (#963)
+- **Session identity survives an agent rebuild.** (#949)
 
 ### Changed
 - **If you reached Groq, Together AI or Fireworks through the generic "OpenAI-compatible endpoint" tile, re-enter your API key once.** Those endpoints now have their own tiles and their own key slots, so lynox no longer looks for their key in the slot it shared with Mistral. The engine reports the endpoint as unconfigured until you do, and the settings page shows the field to fix it — nothing is sent with the wrong key in the meantime. Anthropic, Mistral, and any other custom endpoint are unaffected.
+- **The dark-theme text ramp is brighter, matching lynox.ai.** A design-token and shape contract now guards these values against drift. (#948, #962, #966-#976)
+
+### Security
+- **A saved workflow needs first-run confirmation before it runs unattended.** The library Run button, a scheduled run, and an autonomous run all require a workflow to be confirmed first. A workflow you build yourself is confirmed when you save it; an imported workflow stays inert until you review it, so an imported recipe can't run its steps headless before you've seen them. (#984)
+
+### Notes
+- **Guarded agent-egress policy ships dormant.** A per-tenant outbound-egress control for the agent's HTTP tools is present but defaults to `allow-all` — no behaviour change. (#947)
+- **Tools are suppressed in the watch-analysis turn.** (#950)
 
 ## 2.6.1 — 2026-07-12
 
