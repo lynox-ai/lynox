@@ -299,7 +299,7 @@ export function loadConfig(): LynoxUserConfig {
   if (balancedModel !== undefined && balancedModel.trim() !== '') {
     merged.balanced_model = balancedModel.trim();
   }
-  // Max model tier cap (managed hosting cost control — StepHints and pipelines
+  // Max model tier cap (managed hosting cost control — pipelines and run-options
   // are clamped): `LYNOX_MAX_MODEL_TIER` (canonical) / legacy `LYNOX_MAX_TIER`.
   const maxTier = envTier('LYNOX_MAX_MODEL_TIER');
   if (maxTier) merged.max_tier = maxTier;

@@ -63,20 +63,20 @@ describe('askUserTool', () => {
     });
 
     it('applies a step hint only when exactly one option was selected', async () => {
-      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['deep']));
+      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['thorough']));
       const agent = makeAgent({ promptUser });
       await askUserTool.handler(
-        { question: 'Tier?', options: [{ label: 'deep', hint: { model: 'deep' } }], multiSelect: true },
+        { question: 'Depth?', options: [{ label: 'thorough', hint: { effort: 'high' } }], multiSelect: true },
         agent,
       );
-      expect(agent.toolContext.pendingStepHint).toEqual({ model: 'deep' });
+      expect(agent.toolContext.pendingStepHint).toEqual({ effort: 'high' });
     });
 
     it('does NOT apply a hint when multiple are selected', async () => {
-      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['deep', 'fast']));
+      const promptUser = vi.fn().mockResolvedValue(JSON.stringify(['thorough', 'quick']));
       const agent = makeAgent({ promptUser });
       await askUserTool.handler(
-        { question: 'Tiers?', options: [{ label: 'deep', hint: { model: 'deep' } }, 'fast'], multiSelect: true },
+        { question: 'Depth?', options: [{ label: 'thorough', hint: { effort: 'high' } }, 'quick'], multiSelect: true },
         agent,
       );
       expect(agent.toolContext.pendingStepHint).toBeNull();
@@ -172,8 +172,8 @@ describe('askUserTool', () => {
     const result = await askUserTool.handler({
       question: 'How to proceed?',
       options: [
-        { label: 'Quick summary', hint: { model: 'fast', effort: 'low' } },
-        { label: 'Deep analysis', hint: { model: 'deep', effort: 'high' } },
+        { label: 'Quick summary', hint: { effort: 'low' } },
+        { label: 'Deep analysis', hint: { effort: 'high' } },
       ],
     }, agent);
 
@@ -192,13 +192,12 @@ describe('askUserTool', () => {
     await askUserTool.handler({
       question: 'How to proceed?',
       options: [
-        { label: 'Quick summary', hint: { model: 'fast', effort: 'low' } },
-        { label: 'Deep analysis', hint: { model: 'deep', thinking: 'enabled', effort: 'high' } },
+        { label: 'Quick summary', hint: { effort: 'low' } },
+        { label: 'Deep analysis', hint: { thinking: 'enabled', effort: 'high' } },
       ],
     }, agent);
 
     expect(toolContext.pendingStepHint).toEqual({
-      model: 'deep',
       thinking: 'enabled',
       effort: 'high',
     });
@@ -212,7 +211,7 @@ describe('askUserTool', () => {
     await askUserTool.handler({
       question: 'Continue?',
       options: [
-        { label: 'Analyze', hint: { model: 'deep' } },
+        { label: 'Analyze', hint: { effort: 'high' } },
         'Cancel',
       ],
     }, agent);
@@ -241,7 +240,7 @@ describe('askUserTool', () => {
       question: 'Proceed?',
       options: [
         'Yes',
-        { label: 'No', hint: { model: 'fast' } },
+        { label: 'No', hint: { effort: 'low' } },
       ],
     }, agent);
 
@@ -281,7 +280,7 @@ describe('askUserTool', () => {
   it('stores hint from sequential multi-question fallback', async () => {
     const promptUser = vi.fn()
       .mockResolvedValueOnce('answer 1')
-      .mockResolvedValueOnce('Opus mode');
+      .mockResolvedValueOnce('High effort');
     const toolContext = makeToolContext();
     const agent = makeAgent({ promptUser, toolContext });
 
@@ -289,11 +288,11 @@ describe('askUserTool', () => {
       question: 'Multi',
       questions: [
         { question: 'Q1' },
-        { question: 'Q2', options: [{ label: 'Opus mode', hint: { model: 'deep' } }] },
+        { question: 'Q2', options: [{ label: 'High effort', hint: { effort: 'high' } }] },
       ],
     }, agent);
 
-    expect(toolContext.pendingStepHint).toEqual({ model: 'deep' });
+    expect(toolContext.pendingStepHint).toEqual({ effort: 'high' });
   });
 
   it('accepts a questions-only batch with no top-level question', async () => {

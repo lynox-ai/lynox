@@ -18,6 +18,7 @@
   import { availableComposerTiers, normalizeTier, type ModelTier } from '../utils/llm-main-model.js';
   import { loadTierConfig, type MainChatTiers } from '../utils/tier-config.js';
   import { getSessionId, getSessionTier, getIsStreaming, repickSessionModel } from '../stores/chat.svelte.js';
+  import { getDemoMode } from '../config.svelte.js';
   import { t } from '../i18n.svelte.js';
 
   let tiers = $state<ModelTier[]>([]);
@@ -25,6 +26,7 @@
   let modelNames = $state<MainChatTiers | undefined>(undefined);
   let loaded = $state(false);
   let notice = $state<string | null>(null);
+  let hint = $state<string | null>(null);
   let pending = $state(false);
 
   onMount(async () => {
@@ -42,11 +44,26 @@
     loaded && getSessionId() !== null && !!modelNames && tiers.length >= 2 && currentTier !== undefined,
   );
 
+  // Clear any transient message when the thread changes. ChatView renders this
+  // control under a plain `{:else}` (not a keyed block), so a thread switch does
+  // NOT remount it — only its bound tier re-derives. Without this, thread A's
+  // one-time cache-hint (or an error notice) would linger on thread B's control:
+  // a misleading cost signal on a thread the user never changed. Reads the session
+  // id so the effect re-runs on every switch; a same-thread re-pick keeps its hint.
+  $effect(() => {
+    getSessionId();
+    notice = null;
+    hint = null;
+  });
+
   function tierLabel(tier: ModelTier): string {
     const model = modelNames?.[tier];
     const base = model ? `${t(`llm.tier.${tier}`)} (${model})` : t(`llm.tier.${tier}`);
     if (tier === defaultTier) return `${base} · ${t('chat.model_picker.recommended')}`;
-    if (tier === 'deep') return `${base} · ${t('chat.model_picker.pricier')}`;
+    // The "pricier" marker is a cost signal — suppress it where the user does not
+    // bear the LLM cost (demo / CP-paid), mirroring the usage-footer's
+    // `!getDemoMode()` gate so cost framing stays consistent across the UI.
+    if (tier === 'deep' && !getDemoMode()) return `${base} · ${t('chat.model_picker.pricier')}`;
     return base;
   }
 
@@ -60,12 +77,20 @@
     const el = e.currentTarget as HTMLSelectElement;
     const val = el.value as ModelTier;
     notice = null;
+    hint = null;
     if (val === currentTier) return;
     if (getIsStreaming()) { notice = t('chat.thread_model.busy'); revert(el); return; }
     pending = true;
     const result = await repickSessionModel(val);
     pending = false;
-    if (result.ok) return; // sessionTier updated → the bound value reflects the new tier
+    if (result.ok) {
+      // A mid-thread model switch invalidates the model-specific prompt cache, so
+      // the next reply re-processes the whole conversation once (a one-time cost
+      // bump). Surface that honestly — but only where the user bears the cost
+      // (suppressed on demo / CP-paid tenants, mirroring the usage-footer gate).
+      if (!getDemoMode()) hint = t('chat.thread_model.cache_hint');
+      return; // sessionTier updated → the bound value reflects the new tier
+    }
     if (result.reason === 'overflow') {
       notice = t('chat.thread_model.overflow').replace('{tier}', t(`llm.tier.${result.targetTier}`));
     } else if (result.reason === 'busy') {
@@ -97,6 +122,8 @@
     </div>
     {#if notice}
       <p class="mt-1 text-warning" role="status">{notice}</p>
+    {:else if hint}
+      <p class="mt-1 text-text-subtle" role="status">{hint}</p>
     {/if}
   </div>
 {/if}
