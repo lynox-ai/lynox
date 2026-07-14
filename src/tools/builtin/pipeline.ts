@@ -1,6 +1,7 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike } from '../../types/index.js';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
+import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
@@ -12,7 +13,6 @@ import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.j
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 
-const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
 /** Retry-state buffer cap — larger than the plan cache so a burst of distinct
  *  workflows keeps each other's executed state retriable; bounds the leak. */
@@ -153,12 +153,6 @@ export function forgetPipeline(id: string): void {
 /** Get executed state for retry */
 export function getExecutedResult(pipelineId: string): { manifest: Manifest; state: RunState } | undefined {
   return executedStates.get(pipelineId);
-}
-
-function truncateResult(result: string, limit = DEFAULT_RESULT_BYTES): string {
-  if (result.length <= limit) return result;
-  const limitKB = Math.round(limit / 1024);
-  return result.slice(0, limit) + `\n...[truncated — result was ${result.length} chars, showing first ${limitKB}KB. Set "pipeline_step_result_limit" in config to increase.]`;
 }
 
 export function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'stop' | 'continue' | 'notify', context?: Record<string, unknown>): Manifest {
@@ -324,38 +318,11 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   return JSON.stringify(result, null, 2);
 }
 
-// 2a: the pipeline_runs row is written by the orchestrator (`runManifest`:
-// start-INSERT + finalize-UPDATE = the single canonical writer, invariant I1),
-// including the run→workflow linkage (threaded via `buildRunCtx({ workflowId })`).
-// This tool-layer path retains ONLY the batch step-results write, run once after
-// the run settles. B3 moves it into the orchestrator as incremental as-completed
-// rows (with result-text deferred to finalize — the structural 2b-fence).
-function persistStepResults(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number): void {
-  if (!pipelineRunHistory) return;
-  // Build step-id → model-tier lookup from manifest
-  const stepModelMap = new Map<string, string>();
-  for (const step of manifest.agents) {
-    stepModelMap.set(step.id, step.model ?? 'balanced');
-  }
-  try {
-    for (const [, output] of state.outputs) {
-      pipelineRunHistory.insertPipelineStepResult({
-        pipelineRunId: state.runId,
-        stepId: output.stepId,
-        status: output.skipped ? 'skipped' : output.error ? 'failed' : 'completed',
-        result: truncateResult(output.result, resultLimit),
-        error: output.error,
-        durationMs: output.durationMs,
-        tokensIn: output.tokensIn,
-        tokensOut: output.tokensOut,
-        costUsd: output.costUsd,
-        modelTier: stepModelMap.get(output.stepId) ?? '',
-      });
-    }
-  } catch {
-    // Fire-and-forget
-  }
-}
+// 2a/B3: the pipeline_runs row AND its pipeline_step_results rows are now both
+// written by the orchestrator (`runManifest`): the run row via start-INSERT +
+// finalize-UPDATE, and each step row AS-COMPLETED with its result-text deferred
+// to run-finalize (the structural 2b-fence, invariant I4). The tool layer no
+// longer persists anything — the batch `persistStepResults` was retired here.
 
 // ===== Private execution helpers =====
 
@@ -419,7 +386,6 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       secretStore: deps.secretStore,
     }));
 
-    persistStepResults(state, manifest, deps.runHistory, resultLimit);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -588,7 +554,6 @@ export async function runSavedWorkflow(
     return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
   }
 
-  const resultLimit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
     // (§4.5 drift fix). Backfilled to 'stop' on read, so legacy rows are
@@ -622,7 +587,6 @@ export async function runSavedWorkflow(
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
     }));
-    persistStepResults(state, manifest, runHistory, resultLimit);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
     // shows WHICH step failed (not just status). `ok:true` = the run executed;
@@ -684,7 +648,6 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state });
-      persistStepResults(state, prev.manifest, deps.runHistory, resultLimit);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -762,7 +725,6 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }));
 
     recordExecutedState(planned.id, { manifest, state });
-    persistStepResults(state, manifest, deps.runHistory, resultLimit);
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }

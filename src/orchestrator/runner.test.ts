@@ -1033,6 +1033,91 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
   });
 });
 
+describe('runManifest — 2a/B3 durable step-record', () => {
+  function tmpHistory(): { h: RunHistory; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-b3-'));
+    return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('writes step rows AS-COMPLETED with the result DEFERRED — empty mid-run, filled only at finalize (I4)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+      // Snapshot the step rows the first time a step completes: step-1's row is
+      // already written, the run is NOT finalized — so result MUST be '' (the
+      // structural 2b fence: partial result-text is never persisted mid-run).
+      let midRun: Array<{ status: string; result: string }> = [];
+      const hooks = {
+        onStepComplete: () => {
+          if (midRun.length === 0) {
+            midRun = db.prepare('SELECT status, result FROM pipeline_step_results ORDER BY id').all() as Array<{ status: string; result: string }>;
+          }
+        },
+      };
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, hooks });
+      expect(state.status).toBe('completed');
+
+      expect(midRun.length).toBeGreaterThanOrEqual(1);
+      expect(midRun[0]!.status).toBe('completed');
+      expect(midRun[0]!.result).toBe(''); // I4: NOT persisted mid-run
+
+      // After finalize the result-text is filled — by rowid, so both distinct
+      // rows get their OWN result (I5: no UNIQUE(run_id, step_id) collapse).
+      const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY id').all() as Array<{ step_id: string; status: string; result: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.map(r => r.status)).toEqual(['completed', 'completed']);
+      expect(rows.find(r => r.step_id === 'step-1')?.result).toBe('result-a');
+      expect(rows.find(r => r.step_id === 'step-2')?.result).toBe('result-b');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records a stop-failed step in pipeline_step_results even though it never enters state.outputs', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const manifestWithError: Manifest = {
+        ...MANIFEST,
+        on_failure: 'stop',
+        agents: [
+          { id: 'step-1', agent: 'agent-a', runtime: 'mock', input_from: ['does-not-exist'] },
+          { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+        ],
+      };
+      const state = await runManifest(manifestWithError, CONFIG, { mockResponses: new Map(), runHistory: h });
+      expect(state.status).toBe('failed');
+      expect(state.outputs.has('step-1')).toBe(false); // the batch writer's blind spot
+
+      // B3 closes the gap: /:id/steps (which reads ONLY pipeline_step_results)
+      // now shows the failed step. step-2 never ran (halt) → exactly one row.
+      const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY id').all() as Array<{ step_id: string; status: string; result: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.step_id).toBe('step-1');
+      expect(rows[0]!.status).toBe('failed');
+      expect(rows[0]!.result).toBe(''); // a failed step carries no result
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('writes NO step rows for a nested sub-pipeline (depth > 0) — no orphan under a missing parent run', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1 });
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const count = (db.prepare('SELECT COUNT(*) as c FROM pipeline_step_results').get() as { c: number }).c;
+      expect(count).toBe(0);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+});
+
 // === Slice B: per-workflow DoS bounds (S3) ===
 describe('workflowBoundExceeded', () => {
   const counters: SessionCounters = {

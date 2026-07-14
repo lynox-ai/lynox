@@ -2402,8 +2402,12 @@ export class RunHistory {
     tokensOut?: number | undefined;
     costUsd?: number | undefined;
     modelTier?: string | undefined;
-  }): void {
-    persistence.insertPipelineStepResult(this.db, params);
+  }): number | bigint {
+    return persistence.insertPipelineStepResult(this.db, params);
+  }
+
+  updatePipelineStepResultText(rowId: number | bigint, result: string): void {
+    persistence.updatePipelineStepResultText(this.db, rowId, result);
   }
 
   getRecentPipelineRuns(limit = 20): Array<{
