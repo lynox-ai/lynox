@@ -33,6 +33,22 @@
  * the marketing site's hairline. The design system tells designers this package does not
  * use it, and that sentence was the last unguarded claim in the contract.
  *
+ * The stylesheet ban catches a rule that NAMES a guarded class, by every spelling a
+ * review found — `.foo`, escaped, `[class~=foo]`, and the substring forms `[class*=fo]`.
+ * The shape ELEMENT itself is checked too: no inline `style=`, no `class:` directive
+ * handing a `:global()` a hook the class check cannot see.
+ *
+ * ── THE ONE BOUNDARY, STATED PLAINLY ────────────────────────────────────────────
+ *
+ * A static parser cannot resolve an arbitrary selector to the elements it hits. A rule
+ * that reaches a shape WITHOUT naming its class — `ul[role="list"] > li`,
+ * `input[type=checkbox]` — is invisible here, because knowing it lands on the inbox row
+ * needs the rendered DOM. That is a browser's job; the complete fix is to render the app
+ * and photograph it, the way the design-system PAGE is rendered on the pro side. It is
+ * deferred, on the record, as DEF-0124 — not pretended closed. app.css is a token and
+ * base file by convention (fifteen selectors, all scrollbar utilities), which is the
+ * social half of the same guarantee.
+ *
  * Run: node packages/web-ui/scripts/check-shape-contract.mjs   (`pnpm shapes:contract`)
  */
 
@@ -65,23 +81,38 @@ for (const [name, s] of Object.entries(contract.shapes ?? {})) {
   }
 }
 
-// ── 1. the class attributes, from the AST ───────────────────────────────────────
+// ── 1. the elements, from the AST ───────────────────────────────────────────────
 
-/** Every class-attribute VALUE on a real element, as written. Not a grep: a parse. */
-function classAttributes(src) {
-  const found = [];
+/**
+ * Every real element, with its class-attribute value, whether it carries an inline
+ * `style=`, and any `class:NAME` directives on it. Not a grep: a parse.
+ *
+ * The element node — not just its class string — because a shape can be restyled without
+ * touching a class: an inline `style="border-radius:0"` on the same element, or a
+ * `class:zapped` directive paired with a `:global(.zapped){display:none}`. A grep for the
+ * class attribute is blind to both.
+ */
+function elements(src) {
+  const out = [];
   const ast = parse(src, { modern: true });
   const walk = (n) => {
     if (!n || typeof n !== 'object') return;
     if (n.type === 'RegularElement' || n.type === 'SvelteElement') {
+      let classValue = null;
+      let hasStyle = false;
+      const classDirectives = [];
       for (const a of n.attributes ?? []) {
-        if (a.type !== 'Attribute' || a.name !== 'class') continue;
-        // The raw source of the value, quotes stripped — expressions and all.
-        const raw = src.slice(a.start, a.end);
-        const eq = raw.indexOf('=');
-        if (eq === -1) continue;
-        found.push(raw.slice(eq + 1).trim().replace(/^["']|["']$/g, ''));
+        if (a.type === 'Attribute' && a.name === 'class') {
+          const raw = src.slice(a.start, a.end);
+          const eq = raw.indexOf('=');
+          if (eq !== -1) classValue = raw.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+        } else if (a.type === 'Attribute' && a.name === 'style') {
+          hasStyle = true;
+        } else if (a.type === 'ClassDirective') {
+          classDirectives.push(a.name);
+        }
       }
+      out.push({ classValue, hasStyle, classDirectives });
     }
     for (const k of Object.keys(n)) {
       const v = n[k];
@@ -90,7 +121,7 @@ function classAttributes(src) {
     }
   };
   walk(ast.fragment);
-  return found;
+  return out;
 }
 
 /** The real utility classes in a class value: text outside `{…}`, plus string literals inside. */
@@ -116,17 +147,31 @@ for (const [name, shape] of Object.entries(contract.shapes)) {
     }
   }
 
-  let attrs;
+  let els;
   try {
-    attrs = classAttributes(src);
+    els = elements(src);
   } catch (e) {
     problems.push(`${name}: ${shape.source} does not parse as Svelte — ${e.message}`);
     continue;
   }
 
   for (const ev of shape.evidence.classes ?? []) {
-    if (attrs.includes(ev)) {
+    const carrier = els.find((e) => e.classValue === ev);
+    if (carrier) {
       for (const c of utilityClasses(ev)) guardedClasses.add(c);
+      // A shape's own element must not be restyled out from under its classes. An inline
+      // `style=` does it directly; a `class:NAME` directive does it by handing a
+      // stylesheet a hook (`:global(.NAME)`) the class-attribute check never sees. So the
+      // element carries neither — and any class it toggles becomes a guarded class too,
+      // so a rule that targets it is caught by the stylesheet ban below.
+      if (carrier.hasStyle) {
+        problems.push(
+          `${name}: the element carrying this shape has an inline \`style=\` in ${shape.source}.\n` +
+          `       Inline style restyles the shape while its class attribute stays byte-identical,\n` +
+          `       which the class check cannot see. Style it through utilities, or move the shape.`
+        );
+      }
+      for (const d of carrier.classDirectives) guardedClasses.add(d);
       continue;
     }
     problems.push(
@@ -149,15 +194,24 @@ for (const [name, shape] of Object.entries(contract.shapes)) {
 }
 
 // ── 2. no stylesheet may restyle a shape out from under its classes ─────────────
+//
+// WHAT THIS CANNOT DO, said before the code so nobody trusts it further: a static parser
+// cannot resolve an arbitrary selector to the elements it hits. A rule that reaches a
+// shape WITHOUT naming its class — `ul[role="list"] > li { … }`, `input[type=checkbox]` —
+// is invisible here, because knowing it lands on the inbox row needs the rendered DOM,
+// which is a browser's job. The complete fix is to render the app and photograph it (as
+// the design-system page IS rendered on the pro side); that is deferred (DEF-0124). What
+// IS closed: any rule that names a guarded class, by any spelling — `.foo`, the escaped
+// `.rounded-\[…\]`, `[class~=foo]`, and the substring forms `[class*=fo]` / `^` / `$`.
 
-/** Top-level rule preludes, brace-matched. Parens and escapes survive; the old regex ate them. */
-function preludes(css) {
+/** Brace-matched top-level rules, `{selector, body}`. Parens and escapes survive. */
+function rules(css) {
   const out = [];
   let i = 0;
   while (i < css.length) {
     const open = css.indexOf('{', i);
     if (open === -1) break;
-    const prelude = css.slice(i, open).split(/[;}]/).pop().trim();
+    const selector = css.slice(i, open).split(/[;}]/).pop().trim();
     let depth = 1;
     let j = open + 1;
     while (j < css.length && depth > 0) {
@@ -165,20 +219,41 @@ function preludes(css) {
       else if (css[j] === '}') depth--;
       j++;
     }
-    if (prelude && !prelude.startsWith('@')) out.push(prelude);
+    const body = css.slice(open + 1, j - 1);
+    if (selector && !selector.startsWith('@') && !/[{}]/.test(body)) {
+      out.push({ selector, body: body.replace(/\s+/g, ' ').trim() });
+    }
     // Recurse: a rule nested in @media/@layer is still a rule.
-    out.push(...preludes(css.slice(open + 1, j - 1)));
+    out.push(...rules(css.slice(open + 1, j - 1)));
     i = j;
   }
   return out;
 }
 
-/** Classes a selector targets — `.foo`, escaped `.rounded-\[…\]`, and `[class~="foo"]`. */
-function targetedClasses(selector) {
-  const out = [];
-  for (const m of selector.matchAll(/\.((?:\\.|[\w-])+)/g)) out.push(m[1].replace(/\\(.)/g, '$1'));
-  for (const m of selector.matchAll(/\[class[~^*$|]?=\s*["']?([^"'\]]+)/g)) out.push(...m[1].trim().split(/\s+/));
-  return out;
+/** Does this selector target one of the guarded classes, by any spelling? Returns it, or null. */
+function targetsGuarded(selector) {
+  for (const m of selector.matchAll(/\.((?:\\.|[\w-])+)/g)) {
+    const c = m[1].replace(/\\(.)/g, '$1');
+    if (guardedClasses.has(c)) return c;
+  }
+  // Attribute selectors on `class`. `~=`/`|=`/`=` name a whole token; `*=`/`^=`/`$=` name
+  // a SUBSTRING — `[class*="ai-bad"]` reaches `.ai-badge` without ever writing it whole,
+  // which is how a review deleted the badge past the token-only check.
+  for (const m of selector.matchAll(/\[class([~^*$|]?)=\s*["']?([^"'\]]+)/g)) {
+    const [, op, raw] = m;
+    const val = raw.trim();
+    for (const g of guardedClasses) {
+      const hit =
+        op === '*' ? g.includes(val)
+        : op === '^' ? g.startsWith(val)
+        : op === '$' ? g.endsWith(val)
+        : val.split(/\s+/).includes(g); // '', '~', '|'
+      if (hit) return g;
+    }
+  }
+  // `[class]` bare — matches any element that has a class at all, guarded ones included.
+  if (/\[class\s*\]/.test(selector) && guardedClasses.size) return '(any class)';
+  return null;
 }
 
 // EVERY stylesheet in the library, not only the components the contract happens to cite.
@@ -195,27 +270,50 @@ for (const dir of ['src/lib/components', 'src/lib/primitives']) {
 }
 
 const allowed = contract.allowedStyleRules ?? {};
+const seenAllowed = new Set();
 
 for (const [file, css] of stylesheets) {
   const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  for (const selector of preludes(clean)) {
-    for (const cls of targetedClasses(selector)) {
-      if (!guardedClasses.has(cls)) continue;
-      // A component styling its OWN shape is the shape. The checkbox primitive is the
-      // only one that does it, its five rules are listed in the contract, and the design
-      // system draws exactly those five. Anything else is a change nobody was told about.
-      if ((allowed[file] ?? []).includes(selector)) continue;
-      problems.push(
-        `${file} targets \`.${cls}\`, a class the shape contract depends on:\n\n` +
-        `         ${selector} { … }\n\n` +
-        `       A rule here changes what a shape LOOKS like while every class attribute\n` +
-        `       stays byte-identical, so the AST check above cannot see it and the design\n` +
-        `       system goes on drawing the old shape. \`.ai-badge { display: none }\` deletes\n` +
-        `       an EU AI Act Art. 50(1) disclosure exactly this way.\n\n` +
-        `       Style the component through its utilities, or change the shape properly —\n` +
-        `       in the contract and in the design system, in the same commit.`
-      );
+  const allowedHere = allowed[file] ?? {};
+  for (const { selector, body } of rules(clean)) {
+    // An allowed rule is checked by its BODY, not waved through by its selector. Allow-
+    // listing `.lynox-checkbox` alone let a review add `border-radius:50%; width:40px` to
+    // it and turn the square primitive into a big circle, guard green.
+    if (selector in allowedHere) {
+      seenAllowed.add(`${file}::${selector}`);
+      if (body !== allowedHere[selector]) {
+        problems.push(
+          `${file}: the allowed rule \`${selector}\` has been restyled.\n\n` +
+          `         is:       ${body}\n` +
+          `         pinned:   ${allowedHere[selector]}\n\n` +
+          `       This rule IS a shape — the design system draws it. Change it here and you\n` +
+          `       change what the app looks like; update shapes.contract.json's\n` +
+          `       allowedStyleRules and the design system in the same commit, or revert.`
+        );
+      }
+      continue;
     }
+    const cls = targetsGuarded(selector);
+    if (!cls) continue;
+    problems.push(
+      `${file} targets \`${cls}\`, a class the shape contract depends on:\n\n` +
+      `         ${selector} { … }\n\n` +
+      `       A rule here changes what a shape LOOKS like while every class attribute\n` +
+      `       stays byte-identical, so the AST check above cannot see it and the design\n` +
+      `       system goes on drawing the old shape. \`.ai-badge { display: none }\` deletes\n` +
+      `       an EU AI Act Art. 50(1) disclosure exactly this way.\n\n` +
+      `       Style the component through its utilities, or change the shape properly —\n` +
+      `       in the contract and in the design system, in the same commit.`
+    );
+  }
+}
+
+// Every pinned allowed rule must still exist — a shape cannot quietly lose its styling.
+for (const [file, sels] of Object.entries(allowed)) {
+  if (file === '$comment') continue;
+  for (const selector of Object.keys(sels)) {
+    if (seenAllowed.has(`${file}::${selector}`)) continue;
+    problems.push(`${file}: the pinned rule \`${selector}\` is gone — the checkbox shape lost its styling`);
   }
 }
 

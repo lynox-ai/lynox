@@ -254,24 +254,24 @@
   },
   "allowedStyleRules": {
     "$comment": [
-      "The ONLY rules allowed to target a class this contract names.",
+      "The ONLY rules allowed to target a class this contract names — and now their exact",
+      "bodies, not just their selectors.",
       "",
-      "The ban exists because a stylesheet can restyle a shape with every class attribute",
-      "byte-identical — `.ai-badge { display: none }` in ChatView's own <style> deletes an",
-      "EU AI Act Art. 50(1) disclosure that way. But the checkbox primitive legitimately",
-      "styles .lynox-checkbox in its own <style>: that IS the shape, and the design system",
-      "draws exactly these rules.",
+      "The checkbox primitive legitimately styles .lynox-checkbox in its own <style>: that IS",
+      "the shape. But allow-listing the SELECTOR alone let the body be rewritten — a review",
+      "turned the 16px square into a 40px circle by adding declarations to an allowed rule,",
+      "and the guard, checking only that `.lynox-checkbox` was allowed, printed a tick.",
       "",
-      "So the legitimate set is listed rather than inferred. Add a sixth rule to the",
-      "checkbox and this fails — which is correct: the design system draws five, and it",
-      "should be told."
+      "So the whole rule is pinned. Restyle the checkbox and this fails until the contract",
+      "AND the design system are updated to match — which is the discipline the contract",
+      "exists to enforce. Body text is whitespace-normalised."
     ],
-    "src/lib/primitives/Checkbox.svelte": [
-      ".lynox-checkbox",
-      ".lynox-checkbox:hover:not(:disabled)",
-      ".lynox-checkbox:focus-visible",
-      ".lynox-checkbox:checked",
-      ".lynox-checkbox:checked::after"
-    ]
+    "src/lib/primitives/Checkbox.svelte": {
+      ".lynox-checkbox": "appearance: none; -webkit-appearance: none; background-color: var(--color-bg-subtle); border: 1px solid var(--color-border); border-radius: var(--radius-sm); display: inline-block; position: relative; transition: background-color 120ms, border-color 120ms;",
+      ".lynox-checkbox:hover:not(:disabled)": "border-color: var(--color-border-hover);",
+      ".lynox-checkbox:focus-visible": "outline: 2px solid var(--color-accent-text); outline-offset: 2px;",
+      ".lynox-checkbox:checked": "background-color: var(--color-accent); border-color: var(--color-accent);",
+      ".lynox-checkbox:checked::after": "content: ''; position: absolute; inset: 0; background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M3 8l3.5 3.5L13 5' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\"); background-size: contain; background-position: center; background-repeat: no-repeat;"
+    }
   }
 }
