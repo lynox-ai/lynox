@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, mainChatTierLabels } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, mainChatTierLabels, mainChatTierLabelsFromTierSet } from './catalog.js';
+import type { TierSet } from '../../types/config.js';
 import type { CatalogProviderEntry } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
 
@@ -426,6 +427,33 @@ describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hid
       ],
     } as unknown as CatalogProviderEntry;
     expect(mainChatTierLabels(sharedLabel, resolveBalancedModel({}))).toEqual({ fast: 'Same Name', deep: 'Same Name' });
+  });
+});
+
+describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tier_set, not the base provider)', () => {
+  it('labels each tier by its configured slot model, across providers', () => {
+    // The exact bug: hybrid config with balanced→Mistral Large, deep→Sonnet, but
+    // the picker showed the Anthropic default (balanced "Sonnet 5", deep "Opus 4.6").
+    // Labels must now follow the tier_set — catalog-wide by model id.
+    const tierSet: TierSet = {
+      fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+      balanced: { provider: 'mistral', model_id: 'mistral-large-2512' },
+      deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
+    };
+    expect(mainChatTierLabelsFromTierSet(tierSet, 'anthropic')).toEqual({
+      fast: 'Haiku 4.5',
+      balanced: 'Mistral Large 3', // NOT the base-provider "Sonnet 5"
+      deep: 'Sonnet 5', // NOT the base-provider "Opus 4.6"
+    });
+  });
+
+  it('falls an unset tier back to the base provider tier model', () => {
+    // Only balanced is overridden; fast/deep fall back to the base (anthropic).
+    const tierSet: TierSet = { balanced: { provider: 'mistral', model_id: 'mistral-large-2512' } };
+    const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
+    expect(out?.balanced).toBe('Mistral Large 3');
+    expect(out?.fast).toBe('Haiku 4.5');
+    expect(out?.deep).toBe('Opus 4.6');
   });
 });
 
