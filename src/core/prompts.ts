@@ -165,25 +165,80 @@ The user is a developer. Adjust your communication style:
 - Show file paths, error codes, and stack traces when debugging
 - For setup instructions, include both UI and CLI/config options`;
 
+/** Provider-family display labels, keyed on the sanitized provider key. Shared
+ *  by the base identity line and the per-tier resolved map so both name a
+ *  provider the same way. `mistral` is first-class (registry PR-1a) so a hybrid
+ *  slot resolving to it reads as "Mistral", not the raw key. */
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: 'Anthropic (Claude family)',
+  openai: 'Mistral / OpenAI-compatible',
+  mistral: 'Mistral',
+  custom: 'a custom Anthropic-compatible proxy',
+  vertex: 'Google Cloud Vertex AI (Claude family)',
+};
+
+/** Human-readable family for a provider key. Sanitizes the key to `[a-z-]` +
+ *  caps length so an unknown/user-supplied key can't break out of the prompt.
+ *  Pure string map — NO resolver import (keeps this module dependency-free). */
+export function providerFamilyLabel(provider: string | undefined | null): string {
+  const safeProviderKey = String(provider ?? '').toLowerCase().replace(/[^a-z-]/g, '');
+  return PROVIDER_LABELS[safeProviderKey] ?? safeProviderKey.slice(0, 24);
+}
+
+/** One resolved capability tier for {@link modelIdentityContext}. Carries ONLY
+ *  the fields safe to render — the tier name, the concrete model id, and a
+ *  provider-family label. It deliberately has NO `api_key` / `api_base_url`
+ *  field, so a per-slot credential can never reach the system prompt. */
+export interface TierModelInfo {
+  readonly tier: string;
+  readonly modelId: string;
+  /** Provider-family label (build via {@link providerFamilyLabel}). */
+  readonly providerLabel: string;
+}
+
 /** Anchor active provider + model so a non-Anthropic adapter can't hallucinate
  *  its identity. Inputs are user-controllable on managed tier — sanitize
- *  before interpolation to close the prompt-injection vector. */
-export function modelIdentityContext(provider: string | undefined | null, modelId: string | undefined | null): string {
+ *  before interpolation to close the prompt-injection vector.
+ *
+ *  `tierMap` is THIS instance's resolved fast/balanced/deep → model map (computed
+ *  by the caller through the tier resolver — this module stays resolver-free).
+ *  When present it replaces the old generic per-provider example, so the agent
+ *  plans against the map it actually runs, not a hallucinated one (the fast/
+ *  balanced inversion bug). Both live call sites pass it in lockstep. */
+export function modelIdentityContext(
+  provider: string | undefined | null,
+  modelId: string | undefined | null,
+  tierMap?: readonly TierModelInfo[] | undefined,
+): string {
   if (!provider || !modelId) return '';
-  const label: Record<string, string> = {
-    anthropic: 'Anthropic (Claude family)',
-    openai: 'Mistral / OpenAI-compatible',
-    custom: 'a custom Anthropic-compatible proxy',
-    vertex: 'Google Cloud Vertex AI (Claude family)',
-  };
   // Sanitize: strip backticks + control chars + any markdown/prompt boundary
   // chars, then cap length. Model IDs are conventionally `[a-z0-9._-]+` —
   // anything else is treated as adversarial.
-  const safeId = String(modelId).replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 64);
-  const safeProviderKey = String(provider).toLowerCase().replace(/[^a-z-]/g, '');
-  const prettyProvider = label[safeProviderKey] ?? safeProviderKey.slice(0, 24);
-  if (!safeId || !prettyProvider) return '';
-  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${safeId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id. \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities — each resolves to a different concrete model per provider (e.g. on Mistral \`balanced\`→\`ministral-14b-2512\`, \`fast\`→\`ministral-8b-2512\`, \`deep\`→\`mistral-large-2512\`; on Anthropic to the Claude models). Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+  const safeId = (id: string | undefined | null): string =>
+    String(id ?? '').replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 64);
+  const selfId = safeId(modelId);
+  const prettyProvider = providerFamilyLabel(provider);
+  if (!selfId || !prettyProvider) return '';
+
+  // THIS instance's resolved tier→model map, rendered model-id-FIRST so the
+  // agent anchors on the concrete id when it plans which tier runs which model.
+  // Every id passes through the SAME safeId path (a hybrid slot's model_id is
+  // user-controllable); an id that sanitizes to empty is dropped. The provider
+  // label is already a bounded family string from `providerFamilyLabel`, so a
+  // light backtick/control strip is enough to keep the code-span intact.
+  const tierLines = (tierMap ?? [])
+    .map((e) => ({
+      id: safeId(e.modelId),
+      tier: String(e.tier).replace(/[^a-zA-Z]/g, '').slice(0, 16),
+      family: String(e.providerLabel).replace(/`/g, '').slice(0, 48),
+    }))
+    .filter((e) => e.id.length > 0 && e.tier.length > 0)
+    .map((e) => `- \`${e.id}\` — the \`${e.tier}\` tier (${e.family})`);
+  const tierGuidance = tierLines.length > 0
+    ? `\n\nOn THIS instance the tiers resolve as follows — use THIS map when you plan which tier runs which model, never a generic mapping:\n${tierLines.join('\n')}\n\n`
+    : ' Each resolves to a different concrete model per provider (e.g. on Mistral `balanced`→`ministral-14b-2512`, `fast`→`ministral-8b-2512`, `deep`→`mistral-large-2512`; on Anthropic to the Claude models). ';
+
+  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id. \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
 }
 
 /**
