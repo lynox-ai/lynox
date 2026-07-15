@@ -106,6 +106,22 @@ export function createManagedHook(): LynoxHooks {
   // Cumulative un-debited spend the hook has had to drop this process lifetime.
   let droppedReports = 0;
   let droppedCents = 0;
+  // ── Local balance mirror (C2 / DEF-0083(b′)) ────────────────────────────────
+  // A best-effort, bounded local tightening of the coarse ≤5-min allow-boolean.
+  // `undefined` until the first authoritative /status parse — a `0` sentinel would
+  // refuse every run on a healthy fresh boot. The CP `debitUsage` stays the exact
+  // authority + backstop; the mirror only ever TIGHTENS admission (it can never
+  // admit what the existing `!isStale() && allowed` predicate already refuses).
+  let mirror: number | undefined = undefined;
+  // The current in-flight flush batch: spliced out of `pending` but not yet acked
+  // by the CP, so invisible to BOTH `pending` and the CP's next status_balance.
+  // Set at the splice, cleared when the flush resolves (FD1). Distinct from the
+  // (correctly-dropped) run-grain reserve accumulator: this rides the flush
+  // lifecycle's paired splice→ack seam and sums actual reported cents.
+  let inflightCents = 0;
+  // Coalesce forced resyncs on the refuse path so a looping/injected agent cannot
+  // turn refuses into a CP fetch-storm (S2).
+  let lastForcedResyncAtMs = 0;
   // Sub-cent billing carry, in integer micro-cents (1 cent = 1000 micro-cents).
   // The CP debits whole cents, so each run's exact cost accumulates here and only
   // whole cents are reported — the sub-cent fraction carries to the next run.
@@ -154,11 +170,22 @@ export function createManagedHook(): LynoxHooks {
       .catch(() => { /* monitoring is best-effort */ });
   }
 
+  /** Σ the whole-cent reports in a list — a mirror in-flight bucket sum. */
+  function sumReportCents(reports: UsageReport[]): number {
+    return reports.reduce((n, r) => n + (Number.isFinite(r.cost_cents) ? r.cost_cents : 0), 0);
+  }
+
   async function flush(): Promise<void> {
     if (flushing || pending.length === 0) return;
     flushing = true;
 
     const batch = pending.splice(0);
+    // Track this batch as in-flight for the mirror: spliced out of `pending` but
+    // not yet debited by the CP, so a /status re-anchor in this window must still
+    // subtract it (FD1). Success → the CP debits it (lands in the next
+    // status_balance); requeue → it returns to `pending` (counted there). Either
+    // way it is cleared in the finally below.
+    inflightCents = sumReportCents(batch);
     const url = `${controlPlaneUrl}/internal/usage/${instanceId}`;
 
     try {
@@ -183,6 +210,9 @@ export function createManagedHook(): LynoxHooks {
       process.stderr.write(`[lynox] Managed usage report error: ${msg}\n`);
     } finally {
       flushing = false;
+      // Batch resolved (debited on success, or requeued into `pending` on
+      // failure) — either way it is no longer a separate in-flight term.
+      inflightCents = 0;
     }
   }
 
@@ -210,9 +240,22 @@ export function createManagedHook(): LynoxHooks {
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (res.ok) {
-        const data = (await res.json()) as { allowed: boolean };
+        const data = (await res.json()) as { allowed: boolean; balance_cents?: number | null };
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
+        // Re-anchor the mirror off the AUTHORITATIVE /status balance (flush's
+        // balance is unreliable — an all-skipped/dedup batch returns 0). The
+        // mirror is that balance minus the two LOCAL in-flight buckets the CP
+        // response cannot yet reflect: Σ(pending, not yet flushed) and the current
+        // in-flight flush batch (spliced out, not yet acked, FD1). Always a FULL
+        // recompute, never a bare overwrite (else those double-count) and never a
+        // running increment (so a /status straddling a concurrent flush's debit —
+        // re-anchoring high by up to one batch — is absorbed by the next CP debit
+        // rather than stacking). `null` balance (BYOK/hosted, no CP entitlement)
+        // leaves the mirror a no-op.
+        if (typeof data.balance_cents === 'number') {
+          mirror = data.balance_cents - sumReportCents(pending) - inflightCents;
+        }
       }
     } catch {
       // Sync failed — keep current state. The staleness check in
@@ -254,7 +297,11 @@ export function createManagedHook(): LynoxHooks {
       resyncTimer = setInterval(() => { void syncStatus(); }, resyncIntervalMs);
     },
 
-    onBeforeRun(_runId: string, _context: RunContext) {
+    async onBeforeRun(_runId: string, _context: RunContext) {
+      // Admit predicate: three terms CONJOINED over one pre-side-effect snapshot,
+      // `isStale()` FIRST as the fail-closed staleness backstop (§7(i)). The mirror
+      // is a THIRD condition ANDed after the existing two — it can only REFUSE
+      // more, never admit what `!isStale() && allowed` already refuses.
       if (isStale()) {
         throw new Error(
           'Managed control plane temporarily unreachable — credit status could not be confirmed and the engine paused new runs for safety. ' +
@@ -262,6 +309,25 @@ export function createManagedHook(): LynoxHooks {
         );
       }
       if (!allowed) {
+        throw new Error(
+          'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
+          'Manage your account at https://lynox.ai/managed/account',
+        );
+      }
+      if (mirror !== undefined && mirror <= 0) {
+        // The local mirror says this period's balance is spent before the coarse
+        // allow-boolean has caught up. Force ONE coalesced authoritative resync —
+        // flush pending THEN /status, so `/status` is the LAST writer of `allowed`
+        // (§7(iii); a bare /status could read a degenerate flush-written state).
+        // This refreshes state for the NEXT run and picks up a just-purchased
+        // credit pack; the CURRENT run's refuse is FINAL — no re-evaluate-and-admit
+        // after the in-refuse resync (§7(ii)).
+        const now = Date.now();
+        if (now - lastForcedResyncAtMs >= resyncIntervalMs) {
+          lastForcedResyncAtMs = now;
+          await flush();
+          await syncStatus();
+        }
         throw new Error(
           'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
           'Manage your account at https://lynox.ai/managed/account',
@@ -301,6 +367,11 @@ export function createManagedHook(): LynoxHooks {
         model: context.modelTier,
         cost_cents: costCents,
       });
+      // Move the mirror in lockstep with what the CP will debit: decrement by the
+      // SAME whole-cent costCents just queued (not the sub-cent `microCentsCarry`
+      // remainder), placed AFTER the `seenRunIds` dedup guard above so a failed-run
+      // double-fire cannot double-decrement. No-op until the first /status anchor.
+      if (mirror !== undefined) mirror -= costCents;
 
       // Drop oldest if over capacity — report each dropped report as un-debited.
       while (pending.length > MAX_PENDING) {
