@@ -411,4 +411,33 @@ describe('SecretStore', () => {
       expect(store.findUnresolvedSecretRefs({ url: 'https://example.com', body: 'plain text' })).toEqual([]);
     });
   });
+
+  describe('findNameMatches (near-identical name reconciliation)', () => {
+    it('matches a stored name that normalizes to the requested name', () => {
+      process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-1234';
+      const store = new SecretStore();
+      expect(store.findNameMatches('Z_AI_API_KEY')).toEqual(['ZAI_API_KEY']);
+    });
+
+    it('excludes an exact match — that is not a mismatch', () => {
+      process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-1234';
+      const store = new SecretStore();
+      expect(store.findNameMatches('ZAI_API_KEY')).toEqual([]);
+    });
+
+    it('returns empty when nothing normalizes to the requested name', () => {
+      process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-live-1';
+      const store = new SecretStore();
+      expect(store.findNameMatches('OPENAI_API_KEY')).toEqual([]);
+    });
+
+    it('never surfaces an infra secret as a near-match (leak guard)', () => {
+      const infraName = 'MAIL_ACCOUNT_SHOP';
+      expect(isInfraSecret(infraName)).toBe(true);
+      process.env['LYNOX_SECRET_MAIL_ACCOUNT_SHOP'] = 'infra-cred';
+      const store = new SecretStore();
+      expect(store.findNameMatches('MAILACCOUNTSHOP')).toEqual([]);
+      expect(store.findNameMatches(infraName)).toEqual([]);
+    });
+  });
 });

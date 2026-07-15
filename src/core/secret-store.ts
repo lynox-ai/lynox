@@ -238,6 +238,22 @@ export class SecretStore implements SecretStoreLike {
     return [...this.secrets.keys()].filter(n => !isInfraSecret(n));
   }
 
+  /**
+   * Agent-visible stored names whose NORMALIZED form (uppercased, non-alphanumerics
+   * stripped) equals the requested name's — the reconciliation for the near-identical
+   * name class (a requested `Z_AI_API_KEY` against a stored `ZAI_API_KEY`, both →
+   * `ZAIAPIKEY`), which otherwise loops the agent through "not in vault". An exact
+   * match is not a mismatch, so it is excluded; infra names are never surfaced
+   * (listAgentVisibleNames already filters them). Names may surface to the agent;
+   * values never do.
+   */
+  findNameMatches(requested: string): string[] {
+    const norm = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const target = norm(requested);
+    if (!target) return [];
+    return this.listAgentVisibleNames().filter(n => n !== requested && norm(n) === target);
+  }
+
   containsSecret(text: string): boolean {
     for (const secret of this.secrets.values()) {
       if (secret.value.length < 2) continue; // skip single-char values to avoid false positives
