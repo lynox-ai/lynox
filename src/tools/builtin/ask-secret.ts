@@ -1,9 +1,10 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 
 interface AskSecretInput {
-  name: string;
-  prompt: string;
+  name?: string | undefined;
+  prompt?: string | undefined;
   key_type?: string | undefined;
+  action?: 'collect' | 'list' | undefined;
 }
 
 const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -23,15 +24,22 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     input_schema: {
       type: 'object' as const,
       properties: {
+        action: {
+          type: 'string',
+          enum: ['collect', 'list'],
+          description:
+            'Optional, default "collect" (prompt for a new secret). "list" returns already-stored secret ' +
+            'names (masked, no plaintext) so you reference an existing key instead of re-collecting it.',
+        },
         name: {
           type: 'string',
           description:
             'Vault key name in UPPER_SNAKE_CASE (e.g. STRIPE_API_KEY, GITHUB_TOKEN). ' +
-            'Must start with a letter, only A-Z, 0-9, underscore. Max 64 chars.',
+            'Must start with a letter, only A-Z, 0-9, underscore. Max 64 chars. Required for action:"collect".',
         },
         prompt: {
           type: 'string',
-          description: 'Human-readable prompt shown to the user (e.g. "Enter your Stripe API key")',
+          description: 'Human-readable prompt shown to the user (e.g. "Enter your Stripe API key"). Required for action:"collect".',
         },
         key_type: {
           type: 'string',
@@ -40,12 +48,43 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
             'Examples: "stripe" (sk_live_/sk_test_), "openai" (sk-), "github" (ghp_/gho_/ghs_)',
         },
       },
-      required: ['name', 'prompt'],
+      required: [],
     },
   },
   handler: async (input: AskSecretInput, agent: IAgent): Promise<string> => {
+    const action = input.action ?? 'collect';
+
+    if (action === 'list') {
+      // Read-only discovery: surface the names the agent MAY reference (infra
+      // secrets excluded) + masked values — never plaintext. The fresh, queryable
+      // counterpart to the boot-time <secrets> briefing, which goes stale the
+      // moment a secret is stored mid-session.
+      const store = agent.secretStore;
+      const names = store?.listAgentVisibleNames?.() ?? [];
+      if (names.length === 0) {
+        return 'No secrets are stored in the vault yet. Use ask_secret (action:"collect") to add one.';
+      }
+      const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
+      return `Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`;
+    }
+
+    // action: 'collect'
+    if (!input.name || !input.prompt) {
+      return 'Error: ask_secret with action:"collect" needs both `name` and `prompt`. To see what is already stored, call ask_secret with action:"list".';
+    }
     if (!NAME_PATTERN.test(input.name)) {
       return `Error: Invalid secret name "${input.name}". Must be UPPER_SNAKE_CASE (A-Z, 0-9, _), start with a letter, max 64 chars.`;
+    }
+
+    // Reconcile a near-identical stored name BEFORE prompting, so a guessed
+    // spelling (Z_AI_API_KEY vs a stored ZAI_API_KEY) references the existing key
+    // instead of looping the user through a duplicate collection.
+    const nearMatches = agent.secretStore?.findNameMatches?.(input.name) ?? [];
+    if (nearMatches.length > 0) {
+      const refs = nearMatches.map(n => `secret:${n}`).join(' or ');
+      return `A near-identical key is already in the vault: ${nearMatches.map(n => `"${n}"`).join(', ')}. ` +
+        `Reference ${refs} instead of collecting a duplicate. Only call ask_secret again — with a clearly DIFFERENT ` +
+        `name — if you genuinely need a separate second key.`;
     }
 
     if (!agent.promptSecret) {

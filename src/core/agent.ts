@@ -1725,10 +1725,21 @@ export class Agent implements IAgent {
         // bodies". They do — when the vault has the value.
         const unresolved = this.secretStore.findUnresolvedSecretRefs(tc.input);
         if (unresolved.length > 0) {
+          // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
+          // stored ZAI_API_KEY) should point at the existing name instead of looping.
+          const suggestions = unresolved
+            .map((n) => {
+              const m = this.secretStore!.findNameMatches?.(n) ?? [];
+              return m.length > 0 ? `"${n}" → did you mean secret:${m[0]}?` : null;
+            })
+            .filter((s): s is string => s !== null);
+          const hint = suggestions.length > 0
+            ? ` A near-identical name IS in the vault: ${suggestions.join('; ')} — reference that instead of re-collecting.`
+            : '';
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${unresolved.map((n) => `"${n}"`).join(', ')}. The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value, then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
+            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${unresolved.map((n) => `"${n}"`).join(', ')}.${hint} The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value (or use the suggested existing name), then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
             is_error: true,
           };
         }

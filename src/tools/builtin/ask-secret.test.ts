@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { askSecretTool } from './ask-secret.js';
+import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
@@ -162,5 +163,63 @@ describe('askSecretTool', () => {
     // The result should never contain the actual secret value
     expect(result).not.toContain(secret);
     expect(result).toContain('saved securely');
+  });
+});
+
+describe('askSecretTool — discovery + reconciliation (DEF-vault-name-discovery)', () => {
+  const cleanSecretEnv = (): void => {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('LYNOX_SECRET_')) delete process.env[key];
+    }
+  };
+  beforeEach(cleanSecretEnv);
+  afterEach(cleanSecretEnv);
+
+  it('reconciles a near-identical requested name instead of collecting a duplicate (ZAI/Z_AI)', async () => {
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'Z_AI_API_KEY', prompt: 'Enter your z.ai key' },
+      agent,
+    );
+    // The loop is dead: the agent is pointed at the existing name, not re-prompted.
+    expect(result).toContain('ZAI_API_KEY');
+    expect(result).toContain('secret:ZAI_API_KEY');
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).not.toContain('sk-zai-secretvalue'); // value never surfaces
+  });
+
+  it('still collects when the requested name matches an existing one exactly (overwrite path)', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-old';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    await askSecretTool.handler({ name: 'STRIPE_API_KEY', prompt: 'Re-enter' }, agent);
+    expect(promptSecret).toHaveBeenCalledWith('STRIPE_API_KEY', 'Re-enter', undefined);
+  });
+
+  it('action:"list" surfaces stored names + masked values, never plaintext or infra names', async () => {
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    process.env['LYNOX_SECRET_MAIL_ACCOUNT_SHOP'] = 'infra-cred'; // infra → must not appear
+    const agent = makeAgent({ secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler({ action: 'list' }, agent);
+    expect(result).toContain('ZAI_API_KEY');
+    expect(result).not.toContain('sk-zai-secretvalue'); // no plaintext value
+    expect(result).not.toContain('MAIL_ACCOUNT_SHOP'); // infra excluded
+  });
+
+  it('action:"list" reports an empty vault cleanly', async () => {
+    const agent = makeAgent({ secretStore: new SecretStore() });
+    const result = await askSecretTool.handler({ action: 'list' }, agent);
+    expect(result).toContain('No secrets');
+  });
+
+  it('collect still errors clearly when name/prompt are missing', async () => {
+    const agent = makeAgent({ secretStore: new SecretStore() });
+    const result = await askSecretTool.handler({ action: 'collect' }, agent);
+    expect(result).toContain('needs both');
   });
 });

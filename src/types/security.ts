@@ -16,6 +16,10 @@ export interface SecretStoreLike {
   getMasked(name: string): string | null;
   resolve(name: string): string | null;
   listNames(): string[];
+  /** Agent-visible names only (infra secrets excluded) — for discovery + reconciliation. */
+  listAgentVisibleNames?(): string[];
+  /** Agent-visible stored names that normalize-collide with `requested` (near-identical name reconciliation). */
+  findNameMatches?(requested: string): string[];
   containsSecret(text: string): boolean;
   maskSecrets(text: string): string;
   recordConsent(name: string): void;
