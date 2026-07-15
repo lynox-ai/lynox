@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.7.1 — 2026-07-15
+
+A small polish release for the chat surface. The composer's model picker now reflects hybrid routing honestly — a tier pointed at a different provider shows that provider's model, not the base default — and the follow-up "what next" pills no longer leak raw JSON when the agent omits their wrapper. The message footer is one coherent, mobile-swipeable line, per-message timestamps are back on your own turns, and the status bar drops the context meter that duplicated the per-message chip. No engine.db migration — rollback to 2.7.0 is a clean image swap.
+
+### Fixed
+- **Model picker follows hybrid routing.** In hybrid mode a tier assigned to another provider (e.g. balanced → Mistral Large) now shows that model in the picker and footer, instead of the base provider's default label. (#987)
+- **Follow-up pills no longer leak raw JSON.** When the agent emits its "what next" suggestions as a bare trailing array without the wrapper, they render as pills instead of leaking the JSON into the message. (#987)
+- **Coherent, swipeable message footer with timestamps.** The per-message stats read as one consistently-separated line that scrolls horizontally on mobile instead of truncating, and per-message timestamps are restored on your own turns. (#987)
+- **Status bar drops the duplicate context meter.** The persistent context-window bar is removed; the per-message occupancy chip is now the single source. (#987)
+- **Model-switch hint clears after the turn.** The "switching re-processes context" hint disappears once the reprocessed reply finishes, instead of lingering. (#987)
+
+### Internal
+- CI now runs security-scan, hex-guard, and web-ui-typecheck as jobs, and enforces the no-AI-attribution rule via a commit-msg hook plus a required check. (#986, #983)
+
 ## 2.7.0 — 2026-07-14
 
 This release makes model choice a first-class control and workflows portable, and hardens the paths that carry credentials and money. You can pick the model for a new chat from the composer and set a per-thread execution policy, while the engine enforces your plan's tier ceiling on every path. Workflows gained a versioned export/import format with a re-consent boundary, so a recipe from one instance can be carried to another without silently carrying its secrets or trusted hosts across the trust line. Under that: the workflow run record is durable and honest, in-session workflow spend is now billed, a cluster of LLM-key-isolation fixes closes every path by which a stored key could reach the wrong endpoint, and a saved workflow now needs first-run confirmation before it runs unattended. A guarded outbound-egress policy for agent HTTP tools ships **dormant** (default `allow-all`, no behaviour change). **No engine.db migration** — rollback to 2.6.1 is a clean image swap.
