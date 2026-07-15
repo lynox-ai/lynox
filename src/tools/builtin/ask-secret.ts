@@ -76,15 +76,16 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       return `Error: Invalid secret name "${input.name}". Must be UPPER_SNAKE_CASE (A-Z, 0-9, _), start with a letter, max 64 chars.`;
     }
 
-    // Reconcile a near-identical stored name BEFORE prompting, so a guessed
-    // spelling (Z_AI_API_KEY vs a stored ZAI_API_KEY) references the existing key
-    // instead of looping the user through a duplicate collection.
+    // Reconcile an already-stored name BEFORE prompting, so a guessed spelling
+    // (Z_AI_API_KEY vs a stored ZAI_API_KEY) OR a guessed name in the same vendor
+    // namespace (DATAFORSEO_API_LOGIN vs a stored DATAFORSEO_B64) references the
+    // existing key instead of looping the user through a duplicate collection.
     const nearMatches = agent.secretStore?.findNameMatches?.(input.name) ?? [];
     if (nearMatches.length > 0) {
       const refs = nearMatches.map(n => `secret:${n}`).join(' or ');
-      return `A near-identical key is already in the vault: ${nearMatches.map(n => `"${n}"`).join(', ')}. ` +
-        `Reference ${refs} instead of collecting a duplicate. Only call ask_secret again — with a clearly DIFFERENT ` +
-        `name — if you genuinely need a separate second key.`;
+      return `A key with a near-identical name or in the same namespace is already in the vault: ` +
+        `${nearMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
+        `Only call ask_secret again — with a clearly DIFFERENT name — if you genuinely need a separate second key.`;
     }
 
     if (!agent.promptSecret) {
