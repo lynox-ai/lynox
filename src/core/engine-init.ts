@@ -724,10 +724,13 @@ export async function initKnowledgeLayer(
     // opt-in retrieval shadow log. Both per-tenant, default off.
     const memoryScoringV2 = userConfig.memory_scoring_v2 === true;
     const retrievalShadowLog = userConfig.retrieval_shadow_log === true;
+    // Memory Foundation Wave 2: the write-trust gate. Per-tenant, default off (byte-
+    // identical write path until flipped after the shadow window).
+    const memoryWriteTrustGate = userConfig.memory_write_trust_gate === true;
     const layer = new KnowledgeLayer(
       dbPath, embeddingProvider, client, runHistory ?? undefined,
       engineDb ?? undefined, subjectGraphEnabled, memoryGraphReads,
-      memoryScoringV2, retrievalShadowLog,
+      memoryScoringV2, retrievalShadowLog, memoryWriteTrustGate,
     );
     await layer.init();
     return layer;

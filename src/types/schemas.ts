@@ -219,6 +219,11 @@ export const LynoxUserConfigSchema = z.object({
   // confirmation-count write). Default off; flipped per-tenant. The .strict()
   // schema would otherwise reject this key from config.json (silently disabling it).
   memory_scoring_v2:       z.boolean().optional(),
+  // Memory Foundation Wave 2 — the write-trust gate: a strictly-lower-trust write can no
+  // longer retire a higher-trust memory (contradiction demote-to-coexist, tier-first
+  // consolidation keeper, retire-primitive backstops, dedup tier-raise). Default off;
+  // flipped per-tenant after the shadow window. Operator-only (not in PROJECT_SAFE_KEYS).
+  memory_write_trust_gate: z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one

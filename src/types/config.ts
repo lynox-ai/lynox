@@ -464,6 +464,17 @@ export interface LynoxUserConfig {
    * soaked fleet-wide (dual-scorer sunset: rafael, 2026-08-31).
    */
   memory_scoring_v2?: boolean | undefined;
+  /**
+   * Memory Foundation Wave 2 — the write-trust gate. When true, a strictly-lower-trust
+   * write can no longer retire a higher-trust memory: a contradiction demotes
+   * `superseded → coexist`, consolidation's keeper-sort is tier-first, both retire
+   * primitives backstop-refuse a downgrade, and a higher-trust re-assert of a near-dup
+   * RAISES the stored fact (supersede-not-mutate). Default false → the write path is
+   * byte-identical. The would-be decision is measured independently under
+   * `retrieval_shadow_log` (shadow-first). Per-tenant flip (rafael canary first);
+   * intentionally NOT in PROJECT_SAFE_KEYS (operator-only, never agent-settable).
+   */
+  memory_write_trust_gate?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

@@ -2,6 +2,8 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
 import { blobToEmbed, cosineSimilarity } from './embedding.js';
+import { canSupersede } from './provenance.js';
+import type { ProvenanceKind } from '../types/memory.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -240,7 +242,21 @@ export class MemoryGraphStore {
    * row. The `supersedes` provenance junction is intentionally NOT mirrored in
    * S1b (its FK needs both stubs present); S2 recomputes it authoritatively.
    */
-  markSuperseded(memoryId: string, supersededById: string): void {
+  markSuperseded(memoryId: string, supersededById: string, opts?: { newTier?: ProvenanceKind | undefined }): void {
+    // Memory Foundation Wave 2 — the write-trust gate BACKSTOP (defense-in-depth).
+    // Unlike the legacy store, this mirror fires BEFORE the new memory's stub exists
+    // (upsertStub runs after markSuperseded in the store() mirror) and holds only the
+    // engine.db handle — so it CANNOT DB-look-up the incoming tier. The caller passes it
+    // as `opts.newTier` (like the resolution). We look up the OLD stub's tier (it exists —
+    // it's the row being retired) and REFUSE a strictly-lower-trust retire. An UNDEFINED
+    // `newTier` (flag off, OR the consolidation mirror whose keeper-sort already guarantees
+    // keeper ≥ victim) skips the backstop → byte-identical / a safe no-op. If the old stub
+    // is absent the UPDATE no-ops anyway (nothing to protect).
+    if (opts?.newTier !== undefined) {
+      const old = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
+        .get(memoryId) as { source_type: string } | undefined;
+      if (old && !canSupersede(opts.newTier, old.source_type as ProvenanceKind)) return;
+    }
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = datetime('now')
       WHERE id = ?

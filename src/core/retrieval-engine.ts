@@ -43,6 +43,38 @@ const GRAPH_BOOST = 0.15;
 const THREAD_BOOST = 0.10;
 
 /**
+ * Memory Foundation Wave 2 (P2) — the read-side raw-cosine floor. A purely-vector-surfaced
+ * candidate (no graph reachability, no FTS/run signal) must clear this RAW cosine to be
+ * recalled, cutting the low-relevance "context poison" the nominal `threshold*0.3` gate lets
+ * through. Gated on `memory_write_trust_gate` and applied ONLY to pure-vector candidates
+ * (graph/FTS/run-surfaced facts are EXEMPT — a bare cosine floor would drop graph-reachable
+ * `user_asserted` truths; refute RF-ARCH1).
+ *
+ * ⚠️ Stays 0 (measure-only, byte-identical: `rawCosine >= 0` is always true) until the ≥2-week
+ * shadow window closes (~2026-07-26, DEF-0010) and the constant is DERIVED from the
+ * `retrieval-shadow.jsonl` cosine distribution. Setting it is a SEPARATE reviewed change +
+ * operator GO — never a hot env knob (a fat-fingered high floor silences recall).
+ */
+const MEMORY_READ_COSINE_FLOOR = 0;
+
+/**
+ * Memory Foundation Wave 2 (P2) — does a candidate clear the raw-cosine floor? A candidate
+ * with ANY non-vector signal (graph reachability, FTS, run boost) or no cosine at all
+ * (`vectorScore === 0`) is EXEMPT — the floor never drops a graph-surfaced `user_asserted`
+ * truth (refute RF-ARCH1). A purely-vector candidate must clear `floor` on its RAW cosine
+ * (`vectorScore / VECTOR_WEIGHT`, undoing the `VECTOR_WEIGHT` scaling). Exported so the LOGIC
+ * is tested at multiple floor values while the production constant stays 0 until the shadow
+ * window closes (a reviewed constant, not a hot knob).
+ */
+export function passesReadCosineFloor(
+  c: { vectorScore: number; graphBoost: number; ftsScore: number; runBoost: number },
+  floor: number,
+): boolean {
+  if (c.graphBoost > 0 || c.ftsScore > 0 || c.runBoost > 0 || c.vectorScore === 0) return true;
+  return (c.vectorScore / VECTOR_WEIGHT) >= floor;
+}
+
+/**
  * Context-Hierarchy Scoping (Slice C) — the SOFT walk-up weights that replace the
  * flat `scopeWeight(scope_type)` when the active thread is anchored to a subject.
  * A memory is weighted by how its PRIMARY subject relates to the anchor's hierarchy:
@@ -193,6 +225,14 @@ export class RetrievalEngine {
      * Filters nothing. Default false.
      */
     private readonly shadowLog: boolean = false,
+    /**
+     * Memory Foundation Wave 2 (P2). When true, a raw-cosine FLOOR
+     * ({@link MEMORY_READ_COSINE_FLOOR}) is applied to purely-vector-surfaced candidates
+     * (graph/FTS/run-surfaced facts exempt). Default false → the legacy `threshold*0.3`
+     * gate alone (byte-identical). The floor constant is 0 until the shadow window closes,
+     * so even ON this is byte-identical until the constant is set (a separate reviewed GO).
+     */
+    private readonly memoryWriteTrustGate: boolean = false,
   ) {}
 
   setDataStoreBridge(bridge: DataStoreBridge): void {
@@ -388,7 +428,18 @@ export class RetrievalEngine {
       }
     }
 
-    const aboveThreshold = candidates.filter(c => c.finalScore > threshold * 0.3);
+    // Base gate (legacy): the nominal relevance threshold. Memory Foundation Wave 2 (P2):
+    // under the trust gate, ALSO require a purely-vector-surfaced candidate to clear the raw
+    // cosine floor — `rawCosine = vectorScore / VECTOR_WEIGHT`. A candidate with ANY non-vector
+    // signal (graph reachability, FTS, run boost) or no cosine at all is EXEMPT, so the floor
+    // never drops a graph-surfaced `user_asserted` truth (refute RF-ARCH1). Strictly tightening
+    // (`A && B ⊆ A`): the extra clause can only remove low-cosine pure-vector rows, never add.
+    // With the floor at 0 (`rawCosine >= 0` always true) this is byte-identical.
+    const aboveThreshold = candidates.filter(c => {
+      if (!(c.finalScore > threshold * 0.3)) return false;
+      if (!this.memoryWriteTrustGate) return true;
+      return passesReadCosineFloor(c, MEMORY_READ_COSINE_FLOOR);
+    });
 
     // Memory Foundation Wave 0 — shadow mode: record the full scored candidate
     // distribution (raw cosine + tier + subject + would-pass) so the Wave-2 FLOOR

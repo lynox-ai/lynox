@@ -46,6 +46,7 @@ describe('Config', () => {
     delete process.env['LYNOX_MEMORY_GRAPH_READS'];
     delete process.env['LYNOX_MEMORY_SCORING_V2'];
     delete process.env['LYNOX_RETRIEVAL_SHADOW_LOG'];
+    delete process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
@@ -284,6 +285,25 @@ describe('Config', () => {
     process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = 'on';
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().retrieval_shadow_log).toBeUndefined();
+  });
+
+  it('reads memory_write_trust_gate from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_write_trust_gate).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_write_trust_gate).toBe(false);
+    }
+    vi.resetModules();
+    process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().memory_write_trust_gate).toBeUndefined(); // non-enum ignored, never coerced
   });
 
   it('ignores an unrecognised LYNOX_NETWORK_POLICY value', async () => {
