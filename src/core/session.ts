@@ -56,8 +56,10 @@ import {
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
   currentDateContext,
   modelIdentityContext,
+  providerFamilyLabel,
   withCurrentTimePrefix,
 } from './prompts.js';
+import type { TierModelInfo } from './prompts.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
@@ -685,7 +687,8 @@ export class Session {
     // Provider-agnostic routing: capture the full per-tier snapshot so the run
     // record attributes the provider the tier ACTUALLY resolved to (e.g. a
     // hybrid `balanced→Mistral` slot → provider 'mistral'), not the base.
-    const runSnap = resolveTierModel(this._model, getActiveProvider());
+    const runBaseProvider = getActiveProvider();
+    const runSnap = resolveTierModel(this._model, runBaseProvider);
     const model = runSnap.modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
@@ -707,9 +710,13 @@ export class Session {
     }
     // Mirror the prompt-assembly that _createAgent uses so the hash and the
     // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
+    // The resolved tier map is built from the SAME base provider `_createAgent`
+    // uses (`getActiveProvider()`), so the snapshot's identity context matches
+    // the agent's byte-for-byte.
     const runIdentityContext = modelIdentityContext(
       this._profileOverride?.provider ?? this.engine.getUserConfig().provider,
       model,
+      this._identityTierMap(runBaseProvider),
     );
     const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
@@ -1832,6 +1839,23 @@ export class Session {
     this.loadMessages(messages);
   }
 
+  /**
+   * THIS instance's resolved fast/balanced/deep → model map for the model-identity
+   * context. Resolved through the SAME `resolveTierModel(tier, baseProvider)` the
+   * runtime dispatch uses, so the map the agent PLANS against is the map it runs
+   * (fixes the fast/balanced hallucination). Both the prompt-snapshot mirror in
+   * `run()` and the real Agent build in `_createAgent` call this with the same
+   * `getActiveProvider()` base, so their identity context stays byte-identical
+   * (the Fix-C snapshot==agent invariant). Carries no per-slot creds — only the
+   * tier, model id, and provider-family label reach the prompt.
+   */
+  private _identityTierMap(baseProvider: LLMProvider): TierModelInfo[] {
+    return (['fast', 'balanced', 'deep'] as const).map((tier) => {
+      const snap = resolveTierModel(tier, baseProvider);
+      return { tier, modelId: snap.modelId, providerLabel: providerFamilyLabel(snap.provider) };
+    });
+  }
+
   private _createAgent(): void {
     const engine = this.engine;
     const userConfig = engine.getUserConfig();
@@ -1950,10 +1974,14 @@ export class Session {
       basePrompt += WEB_SEARCH_FALLBACK_PROMPT_SUFFIX;
     }
     // Anchor the model identity so a third-party adapter (Mistral, custom)
-    // doesn't hallucinate "I am Claude Haiku" from training-data bias.
+    // doesn't hallucinate "I am Claude Haiku" from training-data bias. The
+    // resolved tier map (built from the same `baseProvider`) tells the agent
+    // which concrete model each fast/balanced/deep tier maps to, so it plans
+    // against the real routing instead of a hallucinated per-provider table.
     const identityContext = modelIdentityContext(
       effectiveProvider,
       model,
+      this._identityTierMap(baseProvider),
     );
     const systemPrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix

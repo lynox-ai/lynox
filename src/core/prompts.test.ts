@@ -4,11 +4,15 @@ import {
   withCurrentTimePrefix,
   SYSTEM_PROMPT,
   modelIdentityContext,
+  providerFamilyLabel,
   NO_WEB_SEARCH_PROMPT_SUFFIX,
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
   GROUNDING_PROMPT_BLOCK,
 } from './prompts.js';
+import type { TierModelInfo } from './prompts.js';
+import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
+import { getModelId, type LLMProvider, type ModelTier } from '../types/index.js';
 
 // File-level reset so a forgotten useRealTimers() in a future test can't
 // poison the next case's `new Date()` reads.
@@ -339,6 +343,155 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
   it('returns empty string when sanitization strips the entire modelId', () => {
     const out = modelIdentityContext('openai', '\n\n```');
     expect(out).toBe('');
+  });
+});
+
+// DEF-routing-self-knowledge (the fast/balanced inversion bug): before this,
+// modelIdentityContext emitted a HARDCODED generic Mistral example, so the agent
+// hallucinated its own tier→model map when it PLANNED (correct only post-hoc).
+// The fix renders THIS instance's resolved map, computed by the caller through
+// `resolveTierModel`. V1 pins the anti-drift property: the rendered map for each
+// tier equals what the resolver actually returns — including a hybrid `tier_set`.
+//
+// This is the MOCK-green half: it proves the RENDER carries the correct map.
+// That the model USES the map a-priori is proven by the online eval
+// (tests/online/routing-self-knowledge.test.ts) — see fb_skip_ne_pass_green.
+describe('modelIdentityContext — resolved tier map (V1 resolver-parity)', () => {
+  afterEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: null }));
+
+  // Mirrors Session._identityTierMap — the SAME expression both live call sites
+  // use, so the test exercises the real map-building path, not a stand-in.
+  const buildTierMap = (base: LLMProvider): TierModelInfo[] =>
+    (['fast', 'balanced', 'deep'] as const).map((tier) => {
+      const snap = resolveTierModel(tier, base);
+      return { tier, modelId: snap.modelId, providerLabel: providerFamilyLabel(snap.provider) };
+    });
+
+  // Locate the rendered bullet for a tier so we can assert the id PAIRED with it
+  // (an inversion — fast's id under the balanced tier — must fail here).
+  const lineForTier = (out: string, tier: ModelTier): string =>
+    out.split('\n').find((l) => l.includes(`\`${tier}\` tier`)) ?? '';
+
+  interface Cfg {
+    name: string;
+    base: LLMProvider;
+    seed?: () => void;
+  }
+  const cases: Cfg[] = [
+    { name: 'standard Anthropic base', base: 'anthropic' },
+    { name: 'standard OpenAI/Mistral base', base: 'openai' },
+    {
+      // The literal repro: base-Anthropic instance with a hybrid balanced→Mistral
+      // slot → fast=claude-haiku, balanced=mistral-large, deep=claude (all differ).
+      name: 'hybrid balanced→Mistral over an Anthropic base',
+      base: 'anthropic',
+      seed: () => setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: {
+          balanced: {
+            provider: 'mistral',
+            model_id: 'mistral-large-2512',
+            api_key: 'sk-SECRET-LEAK-should-never-render',
+            api_base_url: 'https://secret-endpoint.example/v1',
+          },
+        },
+      }),
+    },
+  ];
+
+  for (const c of cases) {
+    it(`renders each tier's resolved model id (no drift, no inversion): ${c.name}`, () => {
+      c.seed?.();
+      const out = modelIdentityContext(c.base, resolveTierModel('balanced', c.base).modelId, buildTierMap(c.base));
+
+      for (const tier of ['fast', 'balanced', 'deep'] as const) {
+        const resolvedId = resolveTierModel(tier, c.base).modelId;
+        const line = lineForTier(out, tier);
+        // The tier's own line must carry its OWN resolved id…
+        expect(line).toContain(resolvedId);
+        // …and must NOT carry a DIFFERENT tier's id (the inversion the bug caused).
+        for (const other of ['fast', 'balanced', 'deep'] as const) {
+          const otherId = resolveTierModel(other, c.base).modelId;
+          if (otherId !== resolvedId) expect(line).not.toContain(otherId);
+        }
+      }
+      // Sanity on the concrete hybrid map: balanced really is the Mistral slot.
+      if (c.seed) {
+        expect(lineForTier(out, 'balanced')).toContain('mistral-large-2512');
+        expect(lineForTier(out, 'fast')).toContain(getModelId('fast', 'anthropic'));
+      }
+    });
+  }
+
+  it('LEAK GUARD: a hybrid slot api_key / api_base_url NEVER reaches the prompt', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: {
+        balanced: {
+          provider: 'mistral',
+          model_id: 'mistral-large-2512',
+          api_key: 'sk-SECRET-LEAK-should-never-render',
+          api_base_url: 'https://secret-endpoint.example/v1',
+        },
+      },
+    });
+    const out = modelIdentityContext('anthropic', getModelId('balanced', 'anthropic'), buildTierMap('anthropic'));
+    // The map is rendered (so this is a live, non-empty output)…
+    expect(out).toContain('mistral-large-2512');
+    // …but the per-slot credential + endpoint are structurally absent: the map
+    // type carries neither, so neither can leak into the system prompt.
+    expect(out).not.toContain('sk-SECRET-LEAK-should-never-render');
+    expect(out).not.toContain('secret-endpoint.example');
+    expect(out).not.toContain('api_key');
+    expect(out).not.toContain('api_base_url');
+  });
+
+  it('falls back to the generic example when no map is supplied (isolated call)', () => {
+    const out = modelIdentityContext('anthropic', 'claude-sonnet-4-6');
+    // No map param → the old generic wording is retained (backward-compatible).
+    expect(out).toContain('concrete model per provider');
+    expect(out).not.toContain('On THIS instance the tiers resolve');
+  });
+});
+
+// V2 — the snapshot-mirror drift guard. Fix C requires the recorded prompt
+// snapshot to equal what the Agent was built with. Both session call sites now
+// build the tier map through the SAME Session._identityTierMap over the SAME
+// `getActiveProvider()` base, so the rendered identity context is identical.
+describe('modelIdentityContext — snapshot/agent mirror (V2 drift guard)', () => {
+  afterEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: null }));
+
+  const buildTierMap = (base: LLMProvider): TierModelInfo[] =>
+    (['fast', 'balanced', 'deep'] as const).map((tier) => {
+      const snap = resolveTierModel(tier, base);
+      return { tier, modelId: snap.modelId, providerLabel: providerFamilyLabel(snap.provider) };
+    });
+
+  it('standard mode: both call sites produce byte-identical identity context', () => {
+    const base: LLMProvider = 'anthropic';
+    const model = resolveTierModel('balanced', base).modelId;
+    // Site A = the prompt-snapshot mirror in run(); Site B = the real _createAgent
+    // build. In standard mode the provider first-arg is identical at both sites
+    // (no cross-provider slot), so the WHOLE context must match byte-for-byte.
+    const siteA = modelIdentityContext(base, model, buildTierMap(base));
+    const siteB = modelIdentityContext(base, model, buildTierMap(base));
+    expect(siteA).toBe(siteB);
+    expect(siteA).toContain('On THIS instance the tiers resolve');
+  });
+
+  it('hybrid mode: the tier-map block is byte-identical across both sites', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { balanced: { provider: 'mistral', model_id: 'mistral-large-2512' } },
+    });
+    const base: LLMProvider = 'anthropic';
+    const model = resolveTierModel('balanced', base).modelId;
+    // Both sites call _identityTierMap(getActiveProvider()) → identical map input,
+    // so the rendered map is identical even when a tier crosses providers.
+    const siteA = modelIdentityContext(base, model, buildTierMap(base));
+    const siteB = modelIdentityContext(base, model, buildTierMap(base));
+    expect(siteA).toBe(siteB);
+    expect(siteA).toContain('mistral-large-2512');
   });
 });
 
