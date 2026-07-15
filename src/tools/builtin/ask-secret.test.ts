@@ -191,6 +191,23 @@ describe('askSecretTool — discovery + reconciliation (DEF-vault-name-discovery
     expect(result).not.toContain('sk-zai-secretvalue'); // value never surfaces
   });
 
+  it('reconciles a same-VENDOR-namespace name instead of re-collecting (DATAFORSEO class)', async () => {
+    // The real dogfood loop: stored DATAFORSEO_B64, agent guessed DATAFORSEO_API_LOGIN
+    // (no normalize-collision, same vendor) → it re-opened the form + gave up.
+    process.env['LYNOX_SECRET_DATAFORSEO_B64'] = 'base64-creds-value';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'DATAFORSEO_API_LOGIN', prompt: 'Enter DataForSEO login' },
+      agent,
+    );
+    expect(result).toContain('DATAFORSEO_B64');
+    expect(result).toContain('secret:DATAFORSEO_B64');
+    expect(promptSecret).not.toHaveBeenCalled(); // no duplicate collection
+    expect(result).not.toContain('base64-creds-value'); // value never surfaces
+  });
+
   it('still collects when the requested name matches an existing one exactly (overwrite path)', async () => {
     process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-old';
     const promptSecret = vi.fn().mockResolvedValue('saved');

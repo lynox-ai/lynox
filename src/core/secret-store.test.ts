@@ -439,5 +439,36 @@ describe('SecretStore', () => {
       expect(store.findNameMatches('MAILACCOUNTSHOP')).toEqual([]);
       expect(store.findNameMatches(infraName)).toEqual([]);
     });
+
+    it('matches a stored name in the same VENDOR namespace (DATAFORSEO class)', () => {
+      // The real dogfood failure: stored DATAFORSEO_B64, agent guessed
+      // DATAFORSEO_API_LOGIN — they do NOT normalize-collide, but share the vendor.
+      process.env['LYNOX_SECRET_DATAFORSEO_B64'] = 'base64creds';
+      const store = new SecretStore();
+      expect(store.findNameMatches('DATAFORSEO_API_LOGIN')).toEqual(['DATAFORSEO_B64']);
+    });
+
+    it('does NOT over-match on a generic leading token (API/KEY/...)', () => {
+      process.env['LYNOX_SECRET_API_LOGIN_BETA'] = 'x';
+      const store = new SecretStore();
+      // First token "API" is generic → no vendor match, only normalization (none here).
+      expect(store.findNameMatches('API_KEY_ALPHA')).toEqual([]);
+    });
+
+    it('lists the exact (normalized) match before a vendor-namespace match', () => {
+      process.env['LYNOX_SECRET_STRIPEAPIKEY'] = 'a'; // normalizes to STRIPEAPIKEY
+      process.env['LYNOX_SECRET_STRIPE_WEBHOOK_SECRET'] = 'b'; // same vendor
+      const store = new SecretStore();
+      // Requesting STRIPE_API_KEY: exact-normalize STRIPEAPIKEY first, then the vendor sibling.
+      expect(store.findNameMatches('STRIPE_API_KEY')).toEqual(['STRIPEAPIKEY', 'STRIPE_WEBHOOK_SECRET']);
+    });
+
+    it('does not surface an infra secret even when it shares the vendor token', () => {
+      // GOOGLE_OAUTH_* is infra; a requested GOOGLE_MAPS_KEY must never pull it in.
+      expect(isInfraSecret('GOOGLE_OAUTH_TOKEN')).toBe(true);
+      process.env['LYNOX_SECRET_GOOGLE_OAUTH_TOKEN'] = 'infra';
+      const store = new SecretStore();
+      expect(store.findNameMatches('GOOGLE_MAPS_KEY')).toEqual([]);
+    });
   });
 });

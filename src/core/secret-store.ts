@@ -239,19 +239,35 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
-   * Agent-visible stored names whose NORMALIZED form (uppercased, non-alphanumerics
-   * stripped) equals the requested name's — the reconciliation for the near-identical
-   * name class (a requested `Z_AI_API_KEY` against a stored `ZAI_API_KEY`, both →
-   * `ZAIAPIKEY`), which otherwise loops the agent through "not in vault". An exact
-   * match is not a mismatch, so it is excluded; infra names are never surfaced
-   * (listAgentVisibleNames already filters them). Names may surface to the agent;
-   * values never do.
+   * Agent-visible stored names that reconcile against `requested` — the two near-miss
+   * classes that otherwise loop the agent through "not in vault":
+   *  1. NORMALIZED collision (uppercased, non-alphanumerics stripped) — a spelling
+   *     variant (`Z_AI_API_KEY` vs a stored `ZAI_API_KEY`, both → `ZAIAPIKEY`).
+   *  2. VENDOR namespace — the same leading UPPER_SNAKE token (`DATAFORSEO_API_LOGIN`
+   *     vs a stored `DATAFORSEO_B64`), guarded by a generic-token stoplist so a
+   *     generic first token (API/KEY/TOKEN/…) never groups every `API_*` secret.
+   * Exact matches are excluded (not a mismatch); infra names are never surfaced
+   * (listAgentVisibleNames already filters them); values never surface. Exact-first.
    */
   findNameMatches(requested: string): string[] {
     const norm = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const firstToken = (s: string): string => s.toUpperCase().split('_')[0] ?? '';
+    // Generic leading tokens carry no vendor identity — matching on them would group
+    // every unrelated API_*/KEY_* secret. A vendor match needs a distinctive first token.
+    const GENERIC_TOKENS = new Set([
+      'API', 'KEY', 'TOKEN', 'SECRET', 'AUTH', 'LOGIN', 'PASSWORD', 'PASS',
+      'URL', 'ID', 'CLIENT', 'ACCESS', 'APP', 'USER', 'ACCOUNT', 'PUBLIC', 'PRIVATE',
+    ]);
     const target = norm(requested);
     if (!target) return [];
-    return this.listAgentVisibleNames().filter(n => n !== requested && norm(n) === target);
+    const reqVendor = firstToken(requested);
+    const vendorMatchable = reqVendor.length >= 3 && !GENERIC_TOKENS.has(reqVendor);
+    const visible = this.listAgentVisibleNames().filter(n => n !== requested);
+    const exact = visible.filter(n => norm(n) === target);
+    const vendor = vendorMatchable
+      ? visible.filter(n => norm(n) !== target && firstToken(n) === reqVendor)
+      : [];
+    return [...exact, ...vendor];
   }
 
   containsSecret(text: string): boolean {
