@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // === Mocks ===
 
@@ -805,6 +805,60 @@ describe('Engine + Session (Orchestrator)', () => {
 
       const rebuiltConfig = vi.mocked(Agent).mock.calls[0]![0];
       expect(rebuiltConfig.costGuard).toEqual({ maxBudgetUSD: 15 });
+    });
+  });
+
+  describe('createSession — managed per-run cost ceiling ($10 CP-owned, C2 / DEF-0083)', () => {
+    // The main-chat path sets no costGuard of its own (T-within), so createSession
+    // defaults one from the CP-emitted, clamped LYNOX_MANAGED_RUN_COST_CEILING_USD.
+    // Ships atomically with the balance mirror (managed-hook.ts) — FB-BOUND-3.
+    const ENV = 'LYNOX_MANAGED_RUN_COST_CEILING_USD';
+    afterEach(() => { delete process.env[ENV]; });
+
+    it('defaults an interactive managed session to the CP-owned per-run costGuard', async () => {
+      process.env[ENV] = '10';
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.createSession(); // no opts → the main-chat path
+      const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(born.costGuard).toEqual({ maxBudgetUSD: 10 });
+    });
+
+    it('clamps a tenant-tampered ceiling to [1, 50] and falls back to $10 on garbage', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const cases: ReadonlyArray<readonly [string, number]> = [
+        ['100', 50], // above ceiling → clamped down (can't disable the guard)
+        ['0.5', 1], // below floor → clamped up (can't set uselessly low)
+        ['abc', 10], // non-numeric → default
+        ['0', 10], // zero → default
+        ['-5', 10], // negative → default
+      ];
+      for (const [raw, expected] of cases) {
+        process.env[ENV] = raw;
+        vi.mocked(Agent).mockClear();
+        engine.createSession();
+        const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+        expect(born.costGuard).toEqual({ maxBudgetUSD: expected });
+      }
+    });
+
+    it('does NOT override an explicit costGuard — the WorkerLoop keeps its own $15', async () => {
+      process.env[ENV] = '10';
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.createSession({ costGuard: { maxBudgetUSD: 15 } }); // executeStandard's shape
+      const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(born.costGuard).toEqual({ maxBudgetUSD: 15 });
+    });
+
+    it('applies NO default guard on self-host / BYOK (ceiling env absent)', async () => {
+      delete process.env[ENV];
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.createSession();
+      const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(born.costGuard).toBeUndefined();
     });
   });
 

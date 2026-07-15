@@ -66,7 +66,9 @@ describe('managed-hook credit heartbeat', () => {
     await vi.advanceTimersByTimeAsync(305_000);
 
     // CP is healthy (fetch resolves ok), so a run must NOT be blocked.
-    expect(() => hook.onBeforeRun?.('run-1', CTX)).not.toThrow();
+    // onBeforeRun is async now (the mirror refuse path awaits a resync) — assert
+    // on the promise, not a sync throw (A2/RD-GAP5).
+    await expect(hook.onBeforeRun!('run-1', CTX)).resolves.toBeUndefined();
 
     await hook.onShutdown?.();
   });
@@ -79,7 +81,7 @@ describe('managed-hook credit heartbeat', () => {
 
     await vi.advanceTimersByTimeAsync(305_000);
 
-    expect(() => hook.onBeforeRun?.('run-2', CTX)).toThrow(/control plane temporarily unreachable/i);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/control plane temporarily unreachable/i);
 
     await hook.onShutdown?.();
   });
@@ -254,5 +256,118 @@ describe('managed-hook sub-cent billing (L-LE-3)', () => {
     await hook.onShutdown?.();
     const total = flushedRuns().reduce((n, r) => n + r.cost_cents, 0);
     expect(total).toBe(2);
+  });
+});
+
+/**
+ * C2 / DEF-0083(b′) — the local balance mirror. A best-effort bounded local
+ * tightening of the coarse ≤5-min allow-boolean: it can only REFUSE more, never
+ * admit what `!isStale() && allowed` already refuses. Each test pins one of the
+ * §7 build invariants (i–iv) or a §4.2 verify-done clause. The CP stays the exact
+ * authority; the mirror closes the burst window between syncs.
+ */
+describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  let statusBalance: number | null;
+  let statusAllowed: boolean;
+
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+    statusBalance = 50; // 50c default entitlement
+    statusAllowed = true;
+    fetchSpy = vi.fn().mockImplementation((url: string) => {
+      if (String(url).endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: statusAllowed, balance_cents: statusBalance }) });
+      }
+      // flush POST — its balance is deliberately unreliable and the mirror ignores it.
+      return Promise.resolve({ ok: true, json: async () => ({ allowed: statusAllowed, balance_cents: 0 }) });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  const statusCalls = (): number =>
+    fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/status')).length;
+
+  it('refuses a run when a burst drains the mirror ≤0 between CP syncs (verify-done)', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // one /status → mirror = 50c
+    // A $0.60 run debits 60c locally with no intervening /status: mirror 50 → -10.
+    hook.onAfterRun?.('r1', 0.60, CTX);
+    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await hook.onShutdown?.();
+  });
+
+  it('refuse is FINAL for the current run, but the resync picks up a credit pack for the next (§7 ii)', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10
+    statusBalance = 200; // customer buys a credit pack; the CP now reports 200c
+    // The refuse forces a resync (which re-anchors mirror to +200), yet THIS run
+    // is still refused — no re-evaluate-and-admit after the in-refuse resync.
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    // The NEXT run sees the refreshed mirror and is admitted.
+    await expect(hook.onBeforeRun!('run-2', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
+  });
+
+  it('is a no-op for BYOK/hosted (null balance never mints a mirror)', async () => {
+    statusBalance = null; // BYOK/hosted — no CP entitlement
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror stays undefined
+    hook.onAfterRun?.('r1', 5.00, CTX); // huge cost, but no mirror to decrement
+    await expect(hook.onBeforeRun!('run-x', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
+  });
+
+  it('refuse path resyncs flush→status, /status the last writer, and touches only those endpoints (§7 iii/iv)', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+    statusBalance = 10;
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10, pending has one 60c report
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
+    const calls = fetchSpy.mock.calls.map(([url]) => String(url));
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0]!.endsWith('/status')).toBe(false); // flush POST FIRST
+    expect(calls[1]!.endsWith('/status')).toBe(true); // then authoritative /status
+    // No endpoint other than the flush POST + /status GET is hit on the refuse path.
+    expect(calls.every(u => u.endsWith('/status') || u.includes(`/internal/usage/inst-1`))).toBe(true);
+    await hook.onShutdown?.();
+  });
+
+  it('coalesces forced resyncs so repeated refuses can not fetch-storm the CP (verify-done, S2)', async () => {
+    statusBalance = 0; // depleted — every run refuses
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 0
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    // Two refuses in the same coalesce window → exactly ONE forced /status.
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('checks staleness BEFORE the mirror (§7 i) — a stale CP refuses with the unreachable message, not budget', async () => {
+    vi.useFakeTimers();
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c, clock fresh, timers started
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10 (would trip the budget refuse)
+    await hook.onShutdown?.(); // stop the heartbeat timers so advancing the clock cannot resync
+    fetchSpy.mockRejectedValue(new Error('network down')); // CP now unreachable
+    vi.advanceTimersByTime(305_000); // clock past the 300s staleness threshold; nothing resyncs it
+    // isStale() is evaluated first, so the message is the staleness one — the mirror
+    // term (mirror ≤ 0) is never reached even though it would refuse.
+    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/control plane temporarily unreachable/i);
   });
 });

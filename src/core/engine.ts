@@ -1748,7 +1748,39 @@ export class Engine {
 
   /** Create a new per-conversation session. */
   createSession(opts?: SessionOptions): Session {
+    // Managed interactive (main-chat) sessions get a CP-owned per-run cost ceiling
+    // (T-within / DEF-0083(b)): the main path otherwise sets no `costGuard`, so one
+    // looping run could drain far past the entitlement balance. Defaulted ONLY when
+    // the caller set none (the WorkerLoop's executeStandard passes its own $15) and
+    // ONLY on managed instances where the CP emits the ceiling env (self-host / BYOK
+    // → undefined → unchanged). Ships atomically with the balance mirror
+    // (managed-hook.ts) — FB-BOUND-3.
+    if (!opts?.costGuard) {
+      const ceilingUSD = this._resolveManagedRunCostCeilingUSD();
+      if (ceilingUSD !== undefined) {
+        opts = { ...opts, costGuard: { maxBudgetUSD: ceilingUSD } };
+      }
+    }
     return new Session(this, opts);
+  }
+
+  /**
+   * The CP-owned per-run USD ceiling for managed interactive sessions, from the
+   * `LYNOX_MANAGED_RUN_COST_CEILING_USD` env the control plane emits (pro
+   * instance-env). Clamped like the flush interval so a managed tenant editing
+   * their own .env cannot disable the guard (floor) or set it uselessly high
+   * (ceiling). Absent (self-host / BYOK, no CP entitlement) → undefined → no
+   * default guard is applied.
+   */
+  private _resolveManagedRunCostCeilingUSD(): number | undefined {
+    const raw = process.env['LYNOX_MANAGED_RUN_COST_CEILING_USD'];
+    if (raw === undefined) return undefined;
+    const DEFAULT_USD = 10;
+    const MIN_USD = 1;
+    const MAX_USD = 50;
+    const n = Number.parseFloat(raw);
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_USD;
+    return Math.min(Math.max(n, MIN_USD), MAX_USD);
   }
 
   /** Register pipeline tools on demand (saves ~350 tokens when not used) */
