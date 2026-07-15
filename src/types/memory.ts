@@ -140,6 +140,14 @@ export interface ContradictionInfo {
   existingText: string;
   similarity: number;
   resolution: 'superseded' | 'coexist' | 'flagged';
+  /**
+   * The provenance tier of the EXISTING (contradicted) row — carried forward from the
+   * recall row so the write-trust gate (Memory Foundation Wave 2) can decide, at the
+   * single resolution-finalization site, whether the incoming write is trusted enough
+   * to retire it. Optional: pre-gate callers / rows without a projected `source_type`
+   * leave it undefined (the gate then treats the pair as ungated — legacy behaviour).
+   */
+  existingSourceType?: ProvenanceKind | undefined;
 }
 
 export interface KnowledgeStoreResult {

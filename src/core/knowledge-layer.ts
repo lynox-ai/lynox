@@ -37,8 +37,9 @@ import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
-import { deriveProvenanceTier } from './provenance.js';
+import { deriveProvenanceTier, provenanceRank, canSupersede } from './provenance.js';
 import { appendMemoryWriteLog } from './memory-write-log.js';
+import { appendMemoryWriteDecisionLog, type WriteDecision } from './memory-write-decision-log.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
 const DEDUP_THRESHOLD = 0.95;
@@ -95,6 +96,16 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   /** Wave 1.3b: gate the write-side tier telemetry on the SAME measurement flag as the
    *  retrieval shadow log (one flag, one retention story). Default off. */
   private readonly retrievalShadowLog: boolean;
+  /**
+   * Memory Foundation Wave 2 — the write-trust gate ENFORCEMENT flag. When true, a
+   * strictly-lower-trust write can no longer retire a higher-trust fact (P1a: a
+   * contradiction `superseded → coexist` demotion + consolidation keeper is tier-first +
+   * both retire primitives backstop-refuse), and a higher-trust re-assert of a near-dup
+   * RAISES the stored fact via supersede-not-mutate (P1b). Default false → the write path
+   * is byte-identical. The would-be DECISION is measured independently under
+   * {@link retrievalShadowLog} (shadow-first: measure before enforcing).
+   */
+  private readonly memoryWriteTrustGate: boolean;
   private readonly subjectStore: SubjectStore | null;
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
@@ -128,6 +139,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     memoryGraphReads?: boolean | undefined,
     memoryScoringV2?: boolean | undefined,
     retrievalShadowLog?: boolean | undefined,
+    memoryWriteTrustGate?: boolean | undefined,
   ) {
     this.db = new AgentMemoryDb(dbPath);
     this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
@@ -135,9 +147,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.entityResolver = new EntityResolver(this.db, embeddingProvider);
     this.memoryScoringV2 = memoryScoringV2 ?? false;
     this.retrievalShadowLog = retrievalShadowLog ?? false;
+    this.memoryWriteTrustGate = memoryWriteTrustGate ?? false;
     this.retrievalEngine = new RetrievalEngine(
       this.db, embeddingProvider, this.entityResolver, anthropicClient, runHistory,
-      this.memoryScoringV2, retrievalShadowLog ?? false,
+      this.memoryScoringV2, retrievalShadowLog ?? false, this.memoryWriteTrustGate,
     );
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
@@ -314,16 +327,27 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // silently absorbed as a confirmation of the wrong project's fact — the same
       // subject-blind data-loss class the supersede veto guards, at the dedup gate.
       if (!hasHeuristicContradiction(trimmedText, candidate.text) && !subjectsDisagree(trimmedText, candidate.text)) {
+        // Memory Foundation Wave 2 (P1b — dedup tier-RAISE): a dedup hit whose incoming
+        // write is STRICTLY higher-trust than the stored row should upgrade it to the
+        // protected tier (a `ui` re-assert of an `agent_inferred` fact → `user_asserted`).
+        // Done via SUPERSEDE-NOT-MUTATE (store the fresh higher-trust row + retire the old)
+        // so the Wave-1 write-once-evidence invariant holds and the raise is reversible —
+        // NOT by overwriting the stored row's evidence. Measured under the shadow flag
+        // (would-be decision, blast-radius before the flip); enforced under the trust gate.
+        const existingTier = candidate.source_type as ProvenanceKind;
+        const wouldRaise = provenanceRank(derivedTier) > provenanceRank(existingTier);
+        this._emitWriteDecision(wouldRaise ? 'tier-raise' : 'confirm', derivedTier, existingTier, candidate.id, namespace);
+
+        if (this.memoryWriteTrustGate && wouldRaise) {
+          const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
+          return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+        }
+
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
         // The write-time confirm was a second feeder of the self-reinforcement loop
         // (PRD §2.2). No new row is stored either way; the existing fact stands
-        // unchanged (its tier is untouched here).
-        // Wave 1 scope note: PRD §5.4-rung-3 amends this to "record the incoming evidence
-        // and re-derive the stored tier (raise ONLY from first-party high-trust)". That
-        // recompute has NO consumer until the Wave-2 read gate exists — a stale tier on a
-        // dedup'd row has no read effect yet — so it is deliberately deferred to Wave 2,
-        // not built here (reine Evidenz-Welle). Until then a re-asserted fact keeps its
-        // original tier; the deterministic batch re-derive (§5.6) repairs it when the gate lands.
+        // unchanged (its tier is untouched here — a same-or-lower re-assert stays a
+        // plain no-op-confirm; only a strictly-higher re-assert raises, above).
         if (!this.memoryScoringV2) {
           this.db.confirmMemory(candidate.id);
           // S5b recall parity: mirror the confirmation onto the engine.db stub so its
@@ -347,6 +371,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       );
     }
 
+    // 3b. Memory Foundation Wave 2 (P1a — trust-aware conflict, DECIDED AT SOURCE).
+    // Finalize each `superseded` resolution against the write-trust order ONCE, here,
+    // before ANY store consumes the array — so the legacy write AND every engine.db mirror
+    // (which all key on the SAME by-reference `contradictions` array) act on one already-
+    // demoted decision (the RF4 divergence trap: a DB-guard that refuses on one store while
+    // a mirror fires on the pre-guard decision would leave the truth invisible under the
+    // read cutover). A strictly-lower-trust write is demoted `superseded → coexist` so both
+    // facts survive. Measured under the shadow flag; enforced under the trust gate.
+    for (const c of contradictions) {
+      if (c.resolution !== 'superseded' || c.existingSourceType === undefined) continue;
+      const wouldBlock = !canSupersede(derivedTier, c.existingSourceType);
+      this._emitWriteDecision(wouldBlock ? 'demote-coexist' : 'supersede', derivedTier, c.existingSourceType, c.existingMemoryId, namespace);
+      if (this.memoryWriteTrustGate && wouldBlock) c.resolution = 'coexist';
+    }
+
     // 4+5. Create memory + supersede contradicted (atomic transaction)
     const memoryId = this.db.transaction(() => {
       const id = this.db.createMemory({
@@ -359,7 +398,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       });
       for (const c of contradictions) {
         if (c.resolution === 'superseded') {
-          this.db.supersedMemory(c.existingMemoryId, id);
+          // Backstop (defense-in-depth): the demotion above already prevents a blocked
+          // pair from reaching here; this refuses a direct trust-downgrade too. Gated →
+          // flag off passes trustGate:false → byte-identical.
+          this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate });
           this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
         }
       }
@@ -740,7 +782,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    when the old memory has no stub; superseded_by is a soft column (no
       //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
@@ -930,7 +972,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
@@ -1621,6 +1663,122 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
   }
 
+  /**
+   * Memory Foundation Wave 2 — emit one write-trust DECISION to the shadow sink, gated on
+   * the measurement flag (`retrievalShadowLog`) INDEPENDENTLY of enforcement, so the gate's
+   * blast-radius is measurable before the enforcement flag flips (shadow-first). Fire-and-
+   * forget, text-free (opaque row id + tiers only — the emit sites sit next to PII-bearing
+   * memory text; see `memory-write-decision-log.ts`).
+   */
+  private _emitWriteDecision(
+    decision: WriteDecision,
+    newTier: ProvenanceKind,
+    existingTier: ProvenanceKind,
+    existingId: string,
+    namespace: MemoryNamespace,
+  ): void {
+    if (!this.retrievalShadowLog) return;
+    void appendMemoryWriteDecisionLog({
+      ts: Date.now(), decision, newTier, existingTier,
+      enforced: this.memoryWriteTrustGate, existingId, namespace,
+    });
+  }
+
+  /**
+   * P1b — raise a deduped row's trust tier via SUPERSEDE-NOT-MUTATE. Stores the fresh
+   * higher-trust row (write-once evidence intact), retires the old lower-trust one
+   * (`canSupersede(new, old)` holds → the backstop passes), and carries forward the old
+   * row's confirmation_count so the raise doesn't drop accumulated confirmations vs today's
+   * no-op-confirm (`createMemory` hardcodes 0). Skips contradiction detection (a near-dup of
+   * the retired row). Reversible pre-GC (un-retire the tombstone until `gc()` reaps it — the
+   * same soft-delete semantics as every supersede here); NO evidence overwrite → the
+   * Wave-1 re-derivable-tier invariant holds. Done inline (not via `store()` recursion, which
+   * would re-enter dedup and re-find the same ≥0.95 row). Returns the fresh row's id.
+   */
+  private _raiseTier(
+    candidate: ScoredMemoryRow,
+    text: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    derivedTier: ProvenanceKind,
+    embeddingModel: string,
+    embedding: number[],
+    options: {
+      sourceRunId?: string | undefined;
+      sourceThreadId?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+  ): string {
+    const newId = this.db.transaction(() => {
+      const id = this.db.createMemory({
+        text, namespace, scopeType: scope.type, scopeId: scope.id,
+        sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel, provider: this.embeddingProvider.name, embedding,
+      });
+      this.db.supersedMemory(candidate.id, id, { trustGate: true });
+      this.db.createSupersedes(id, candidate.id, 'tier-raise');
+      this.db.addConfirmations(id, candidate.confirmation_count);
+      return id;
+    });
+    this._mirrorTierRaise(candidate, newId, text, namespace, scope, derivedTier, embeddingModel, embedding, options);
+    return newId;
+  }
+
+  /**
+   * Mirror a P1b tier-raise onto engine.db (dual-write gate): retire the old stub + insert
+   * the fresh stub carrying the old row's subject linkage + confirmation count, so recall
+   * under the S5b cutover sees the RAISED row and not the retired one. Isolated — a mirror
+   * failure never affects the authoritative legacy raise (already committed).
+   */
+  private _mirrorTierRaise(
+    candidate: ScoredMemoryRow,
+    newId: string,
+    text: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    derivedTier: ProvenanceKind,
+    embeddingModel: string,
+    embedding: number[],
+    options: {
+      sourceRunId?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+  ): void {
+    if (!this.subjectGraphEnabled || !this.memoryGraphStore) return;
+    const memoryGraph = this.memoryGraphStore;
+    try {
+      const oldSubject = memoryGraph.getStub(candidate.id)?.subject_id ?? null;
+      const oldMentions = memoryGraph.getLinkedSubjectIds(candidate.id);
+      this.engineDb!.getDb().transaction(() => {
+        memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        memoryGraph.upsertStub({
+          id: newId, text, namespace, scopeType: scope.type, scopeId: scope.id,
+          subjectId: oldSubject,
+          sourceRunId: options?.sourceRunId ?? null,
+          sourceType: derivedTier,
+          sourceToolName: options?.sourceToolName ?? null,
+          sourceChannel: options?.sourceChannel ?? null,
+          sourceUntrusted: options?.sourceUntrusted,
+          embeddingModel,
+          provider: this.embeddingProvider.name,
+          embedding: embedToBlob(embedding),
+          confirmationCount: candidate.confirmation_count,
+        });
+        if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
+      })();
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:subject-graph] tier-raise mirror failed for ${newId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
   /** Consolidate similar memories within a scope. Returns count merged. */
   consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number {
     // Inject the subject-agreement veto so the clusterer never merges two projects'
@@ -1636,6 +1794,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       namespace, scopeType, scopeId, undefined,
       { tokenize: properNounTokens, disagree: subjectTokensDisagree },
       !this.memoryScoringV2,
+      // Wave 2: tier-first keeper-sort so a low-trust duplicate can't win the merge and
+      // retire a user truth. Flag off → legacy confirmation-count-then-length sort.
+      this.memoryWriteTrustGate,
     );
     // S5b'-c: mirror every consolidation supersede + confirmation transfer onto the
     // engine.db stubs (the authoritative recall store under the cutover), else the

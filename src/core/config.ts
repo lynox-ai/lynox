@@ -231,6 +231,18 @@ export function loadConfig(): LynoxUserConfig {
   } else if (retrievalShadow === 'false' || retrievalShadow === '0') {
     merged.retrieval_shadow_log = false;
   }
+  // Memory Foundation Wave 2: the write-trust gate enforcement flag. The CP flips it
+  // per-tenant via env (rafael canary first, after the shadow window closes) without
+  // editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in
+  // PROJECT_SAFE_KEYS — a project config must not be able to change the user's memory
+  // trust/write behaviour (an agent-writable flag would be a self-grant of the very
+  // privilege this gate withholds).
+  const memWriteTrustGate = process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'];
+  if (memWriteTrustGate === 'true' || memWriteTrustGate === '1') {
+    merged.memory_write_trust_gate = true;
+  } else if (memWriteTrustGate === 'false' || memWriteTrustGate === '0') {
+    merged.memory_write_trust_gate = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default

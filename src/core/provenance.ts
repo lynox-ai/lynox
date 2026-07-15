@@ -1,4 +1,5 @@
 import type { ProvenanceKind } from '../types/memory.js';
+import { ALL_PROVENANCE_KINDS } from '../types/memory.js';
 
 /**
  * The write CHANNEL a memory came from — the evidence the caller *knows* at the
@@ -55,4 +56,35 @@ export function deriveProvenanceTier(ev: ProvenanceEvidence): ProvenanceKind {
   // Rule 5 — no (or unknown) channel reported → we cannot vouch for it → floor. Closes the
   // fail-open door for any future `channels.memoryStore` publisher that forgets to say anything.
   return 'external_unverified';
+}
+
+/**
+ * The trust RANK of a provenance tier — a total order where a HIGHER number is
+ * MORE trusted. `user_asserted` → 3, `tool_verified` → 2, `agent_inferred` → 1,
+ * `external_unverified` → 0. This is the single source of the trust ordering used
+ * by every memory retire path (Memory Foundation Wave 2 — the write-trust gate).
+ *
+ * ⚠️ DIRECTION IS SECURITY-CRITICAL (from /security-deep-dive S2). {@link ALL_PROVENANCE_KINDS}
+ * is highest-trust-FIRST — `user_asserted` is index 0, `external_unverified` index 3. A raw
+ * `indexOf` would therefore INVERT the rank (user_asserted→0, external_unverified→3) and make
+ * `canSupersede(external_unverified, user_asserted)` TRUE — the gate would then AUTHORIZE an
+ * injected low-trust write to retire a user's truth, i.e. become an injection ENABLER. The
+ * rank MUST reverse the index. Tests assert the BEHAVIOURAL `canSupersede` pairs (never a
+ * scalar `provenanceRank === N`, which would silently cement the inversion).
+ */
+export function provenanceRank(kind: ProvenanceKind): number {
+  return (ALL_PROVENANCE_KINDS.length - 1) - ALL_PROVENANCE_KINDS.indexOf(kind);
+}
+
+/**
+ * The trust gate primitive: may a write of tier `newTier` retire (supersede) an
+ * existing row of tier `existingTier`? True iff the incoming write is of
+ * EQUAL-OR-HIGHER trust. A strictly lower-trust write may never retire a
+ * higher-trust fact (that is the integrity hole this closes — an `agent_inferred`
+ * or injection-seeded `external_unverified` write silently deleting a
+ * `user_asserted` truth). A reusable pure function imported by every retire path
+ * in both memory stores (legacy `AgentMemoryDb`, engine.db `MemoryGraphStore`).
+ */
+export function canSupersede(newTier: ProvenanceKind, existingTier: ProvenanceKind): boolean {
+  return provenanceRank(newTier) >= provenanceRank(existingTier);
 }

@@ -15,6 +15,7 @@ import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
+import { canSupersede, provenanceRank } from './provenance.js';
 
 /** Row cap for an `exhaustive` similarity scan (dedup). 50× the old dedup floor
  *  of 100 so an older duplicate past the newest window is caught, but still a
@@ -710,10 +711,33 @@ export class AgentMemoryDb {
     return row?.source_thread_id ?? undefined;
   }
 
-  supersedMemory(memoryId: string, supersededById: string): void {
+  /**
+   * Retire `memoryId`, marking it superseded by `supersededById`.
+   *
+   * `opts.trustGate` (Memory Foundation Wave 2 — the write-trust gate, default off →
+   * byte-identical) turns on the defense-in-depth BACKSTOP: both rows already exist when
+   * this is called (the new row was created first), so it DB-looks-up both `source_type`s
+   * and REFUSES (no-op, returns false) a strictly-lower-trust retire — an
+   * `agent_inferred`/`external_unverified` write can never silently delete a
+   * `user_asserted` truth. The primary gate is the resolution-finalization demotion in
+   * KnowledgeLayer (so a blocked pair never reaches here); this backstop guards a direct
+   * misuse. Returns true iff the retire was applied.
+   */
+  supersedMemory(memoryId: string, supersededById: string, opts?: { trustGate?: boolean }): boolean {
+    if (opts?.trustGate) {
+      const existing = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
+        .get(memoryId) as { source_type: string } | undefined;
+      const incoming = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
+        .get(supersededById) as { source_type: string } | undefined;
+      if (existing && incoming
+        && !canSupersede(incoming.source_type as ProvenanceKind, existing.source_type as ProvenanceKind)) {
+        return false;
+      }
+    }
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = ? WHERE id = ?
     `).run(supersededById, new Date().toISOString(), memoryId);
+    return true;
   }
 
   /** Increment confirmation count and boost confidence (capped at 1.0). Called on dedup match. */
@@ -723,6 +747,20 @@ export class AgentMemoryDb {
       UPDATE memories SET confirmation_count = confirmation_count + 1,
         confidence = MIN(confidence + 0.05, 1.0), updated_at = ? WHERE id = ?
     `).run(now, memoryId);
+  }
+
+  /**
+   * Add `delta` to a memory's confirmation_count (no confidence bump). Used to CARRY
+   * FORWARD an accumulated confirmation count onto a keeper/raised row when a duplicate
+   * is superseded (consolidation transfer; the Wave-2 dedup tier-raise), so the merge
+   * doesn't drop the confirmations the retired row had earned. No-op for delta ≤ 0.
+   * Mirrors {@link MemoryGraphStore.addConfirmations} for the legacy store.
+   */
+  addConfirmations(memoryId: string, delta: number): void {
+    if (delta <= 0) return;
+    this.db.prepare(`
+      UPDATE memories SET confirmation_count = confirmation_count + ?, updated_at = ? WHERE id = ?
+    `).run(delta, new Date().toISOString(), memoryId);
   }
 
   updateMemoryRetrieved(memoryId: string): void {
@@ -1359,6 +1397,12 @@ export class AgentMemoryDb {
     // UPDATE is skipped and each pair's `victimConfirmations` is zeroed so the
     // caller's engine.db mirror transfers nothing either. Default true (legacy).
     transferConfirmations = true,
+    // Memory Foundation Wave 2 (the write-trust gate): when true, the keeper-sort's
+    // PRIMARY key becomes the provenance rank (highest-trust wins), so consolidating a
+    // `user_asserted` + `agent_inferred` cluster keeps the `user_asserted` row — a
+    // low-trust duplicate can never win the merge and retire a user's truth. Default
+    // false → the legacy confirmation-count-then-length sort (byte-identical).
+    enforceTrustGate = false,
   ): ConsolidationPair[] {
     // scopeId='*' means all scopes of this type
     const rows = scopeId === '*'
@@ -1419,10 +1463,17 @@ export class AgentMemoryDb {
 
       if (cluster.length < 2) continue;
 
-      // Keep the best memory: highest confirmation_count, then longest text
+      // Keep the best memory. Under the trust gate the PRIMARY key is the provenance
+      // rank (highest-trust wins) so a low-trust duplicate can't retire a user truth;
+      // then highest confirmation_count, then longest text. Flag off → the legacy
+      // confirmation-count-then-length sort (byte-identical).
       cluster.sort((a, b) => {
         const ra = rows[a]!;
         const rb = rows[b]!;
+        if (enforceTrustGate) {
+          const rankDiff = provenanceRank(rb.source_type as ProvenanceKind) - provenanceRank(ra.source_type as ProvenanceKind);
+          if (rankDiff !== 0) return rankDiff;
+        }
         if (rb.confirmation_count !== ra.confirmation_count) return rb.confirmation_count - ra.confirmation_count;
         return rb.text.length - ra.text.length;
       });

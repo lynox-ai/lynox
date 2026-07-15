@@ -1,4 +1,4 @@
-import type { MemoryNamespace, MemoryScopeRef, ContradictionInfo } from '../types/index.js';
+import type { MemoryNamespace, MemoryScopeRef, ContradictionInfo, ProvenanceKind } from '../types/index.js';
 import type { ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { KG_COMMON_NOUNS } from './kg-stopwords.js';
@@ -91,6 +91,10 @@ export async function detectContradictions(
         existingText: existing.text,
         similarity: existing._similarity,
         resolution: subjectsDisagree(newText, existing.text) ? 'coexist' : 'superseded',
+        // Carry the existing row's tier forward so the write-trust gate can decide
+        // at the single resolution-finalization site (KnowledgeLayer.store) whether the
+        // incoming write may retire it. Pure data — the resolution above is unchanged.
+        existingSourceType: existing.source_type as ProvenanceKind,
       });
     }
   }
