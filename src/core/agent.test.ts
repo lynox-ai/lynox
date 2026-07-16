@@ -3001,6 +3001,31 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawUntrustedData).toBe(true);
   });
 
+  it('sets sawExternalContentTool when a stored-read-back tool runs (DK.1 H4 denylist)', async () => {
+    // Regression guard (/security-deep-dive S5): a `data_store_query` can surface content a
+    // prior tainted turn seeded, so it MUST taint the turn for a later `remember` even though
+    // it wraps no untrusted marker and is scan-exempt. If it drops off EXTERNAL_CONTENT_TOOLS,
+    // an injected active+pinned fact rides out of the store on a clean turn.
+    const dsTool = makeTool('data_store_query', vi.fn().mockResolvedValue('rows: ACME | 2026-03'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'data_store_query', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dsTool] });
+    expect(agent.sawExternalContentTool).toBe(false);
+    await agent.send('what do we know about ACME');
+    expect(agent.sawExternalContentTool).toBe(true);
+  });
+
+  it('leaves sawExternalContentTool false for a non-external tool', async () => {
+    const benign = makeTool('task_create', vi.fn().mockResolvedValue('task created'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'task_create', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [benign] });
+    await agent.send('add a task');
+    expect(agent.sawExternalContentTool).toBe(false);
+  });
+
   it('re-arms (resets to false) at the next run entry — a clean run is not tainted by a prior one', async () => {
     const fetchTool = makeTool('fetch_page', vi.fn().mockResolvedValue(
       wrapUntrustedData('The datacenter migration is scheduled for next Tuesday.', 'http'),

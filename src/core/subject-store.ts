@@ -213,6 +213,11 @@ const SELF_OWNER = '__self__';
 interface RepointTarget { table: string; pkCol: string; column: string }
 const REPOINT_TARGETS: readonly RepointTarget[] = [
   { table: 'memories',      pkCol: 'id',         column: 'subject_id' },
+  // Durable Knowledge Substrate (DK.1): a subject merge repoints authored entries onto the
+  // canonical + the merge ledger/rollback covers them. The v9 table always exists (engine.db
+  // migrates unconditionally); when durable memory is off it is empty, so the repoint selects
+  // zero rows and is a no-op — harmless, never pushed to the ledger.
+  { table: 'knowledge_entries', pkCol: 'id',     column: 'subject_id' },
   { table: 'tasks',         pkCol: 'id',         column: 'subject_id' },
   { table: 'tasks',         pkCol: 'id',         column: 'assignee_subject_id' },
   { table: 'triggers',      pkCol: 'id',         column: 'subject_id' },

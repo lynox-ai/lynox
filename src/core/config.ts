@@ -243,6 +243,17 @@ export function loadConfig(): LynoxUserConfig {
   } else if (memWriteTrustGate === 'false' || memWriteTrustGate === '0') {
     merged.memory_write_trust_gate = false;
   }
+  // Durable Knowledge Substrate (DK.1): the CP flips it per-tenant via env (rafael
+  // canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no
+  // z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to swap the
+  // whole memory pillar (an agent-writable flag would let injected content route its own
+  // writes past the extraction-decoupling + trust routing this substrate depends on).
+  const durableMemory = process.env['LYNOX_DURABLE_MEMORY_ENABLED'];
+  if (durableMemory === 'true' || durableMemory === '1') {
+    merged.durable_memory_enabled = true;
+  } else if (durableMemory === 'false' || durableMemory === '0') {
+    merged.durable_memory_enabled = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default

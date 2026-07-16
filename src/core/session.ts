@@ -54,6 +54,7 @@ import {
   DEVELOPER_PROMPT_SUFFIX,
   NO_WEB_SEARCH_PROMPT_SUFFIX,
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
+  DURABLE_MEMORY_PROMPT_SUFFIX,
   currentDateContext,
   modelIdentityContext,
   providerFamilyLabel,
@@ -766,37 +767,59 @@ export class Session {
     // context stays visible to the LLM via conversation history; no extra
     // grounding is needed for a clarification.
     const knowledgeLayer = this.engine.getKnowledgeLayer();
-    const { isShortClarification } = await import('./short-input-heuristic.js');
-    const skipShortInputRetrieval = typeof task === 'string' && isShortClarification(task);
-    if (knowledgeLayer && !isMultimodal && !skipShortInputRetrieval) {
-      try {
-        // Context-Hierarchy Scoping (Slice C): thread the active thread's anchor
-        // subject into retrieval so recall weights the project→customer hierarchy.
-        // Read only when the subject graph is on (an indexed PK lookup on the flag-off
-        // hot path is avoided); a null anchor / stale anchor degrades to flat scoping.
-        const threadAnchorSubjectId =
-          this.engine.getUserConfig().subject_graph_enabled === true
-            ? (threadStore?.getThread(this.sessionId)?.primary_subject_id ?? null)
-            : null;
-        const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
-          topK: 8,
-          threshold: 0.55,
-          useHyDE: true,
-          useGraphExpansion: true,
-          threadAnchorSubjectId,
-          // Wave 0 shadow mode records this (plaintext) to correlate the admission
-          // distribution by conversation; only read when retrieval_shadow_log is on.
-          threadId: this.sessionId,
-        });
-        this._retrievedMemoryIds = result.memories.map(m => m.id);
-        this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result, undefined, task));
-      } catch {
+    if (this.engine.getUserConfig().durable_memory_enabled === true) {
+      // DK.1 (D-5): default-injection DIES. Instead of per-turn top-K `knowledgeLayer.retrieve`,
+      // the always-loaded blocks (profile + playbook + the per-turn DERIVED focus) render on the
+      // ephemeral uncached tail via `setMemoryBlocks`; on-demand retrieval is the `recall` tool.
+      // Cheap + stable, so no short-input/multimodal skip — the blocks always ground the turn
+      // (the derived focus just returns nothing when no known subject is named). `feedbackOnRetrieval`
+      // below is naturally inert here: `_retrievedMemoryIds` stays empty (H11).
+      const knowledgeStore = this.engine.getKnowledgeStore();
+      if (knowledgeStore) {
+        try {
+          const threadAnchorSubjectId =
+            this.engine.getUserConfig().subject_graph_enabled === true
+              ? (threadStore?.getThread(this.sessionId)?.primary_subject_id ?? null)
+              : null;
+          const turnText = typeof task === 'string' ? task : '';
+          this.agent.setMemoryBlocks(knowledgeStore.renderBlocks({ turnText, threadAnchorSubjectId }));
+        } catch {
+          this.agent.setMemoryBlocks(undefined);
+        }
+      }
+    } else {
+      const { isShortClarification } = await import('./short-input-heuristic.js');
+      const skipShortInputRetrieval = typeof task === 'string' && isShortClarification(task);
+      if (knowledgeLayer && !isMultimodal && !skipShortInputRetrieval) {
+        try {
+          // Context-Hierarchy Scoping (Slice C): thread the active thread's anchor
+          // subject into retrieval so recall weights the project→customer hierarchy.
+          // Read only when the subject graph is on (an indexed PK lookup on the flag-off
+          // hot path is avoided); a null anchor / stale anchor degrades to flat scoping.
+          const threadAnchorSubjectId =
+            this.engine.getUserConfig().subject_graph_enabled === true
+              ? (threadStore?.getThread(this.sessionId)?.primary_subject_id ?? null)
+              : null;
+          const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
+            topK: 8,
+            threshold: 0.55,
+            useHyDE: true,
+            useGraphExpansion: true,
+            threadAnchorSubjectId,
+            // Wave 0 shadow mode records this (plaintext) to correlate the admission
+            // distribution by conversation; only read when retrieval_shadow_log is on.
+            threadId: this.sessionId,
+          });
+          this._retrievedMemoryIds = result.memories.map(m => m.id);
+          this.agent.setKnowledgeContext(knowledgeLayer.formatRetrievalContext(result, undefined, task));
+        } catch {
+          this.agent.setKnowledgeContext('');
+        }
+      } else if (skipShortInputRetrieval) {
+        // Clear any prior turn's retrieved context so stale memory can't
+        // bleed forward as still-relevant grounding.
         this.agent.setKnowledgeContext('');
       }
-    } else if (skipShortInputRetrieval) {
-      // Clear any prior turn's retrieved context so stale memory can't
-      // bleed forward as still-relevant grounding.
-      this.agent.setKnowledgeContext('');
     }
 
     // Per-turn precise time, outside the hour-truncated cached system prompt so
@@ -1973,6 +1996,11 @@ export class Session {
     } else if (webSearchStatus === 'fallback') {
       basePrompt += WEB_SEARCH_FALLBACK_PROMPT_SUFFIX;
     }
+    // DK.1: re-point the capture/recall duty onto remember/recall/memory_block_edit when the
+    // durable substrate is on. Additive suffix → flag-OFF is byte-identical.
+    if (userConfig.durable_memory_enabled === true) {
+      basePrompt += DURABLE_MEMORY_PROMPT_SUFFIX;
+    }
     // Anchor the model identity so a third-party adapter (Mistral, custom)
     // doesn't hallucinate "I am Claude Haiku" from training-data bias. The
     // resolved tier map (built from the same `baseProvider`) tells the agent
@@ -2004,6 +2032,9 @@ export class Session {
       effort: this._effort,
       maxTokens: this._maxTokens,
       memory: engine.getMemory() ?? undefined,
+      // DK.1: when on, the Agent stands down the legacy end-of-turn extraction (capture moves
+      // to the `remember` tool). Default off = byte-identical.
+      durableMemoryEnabled: userConfig.durable_memory_enabled === true,
       costGuard: this.agentOverrides.costGuard,
       onStream: streamHandler,
       // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at

@@ -1,6 +1,7 @@
 export { bashTool } from './bash.js';
 export { readFileTool, writeFileTool, editFileTool } from './fs.js';
 export { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, memoryListTool, memoryPromoteTool } from './memory.js';
+export { rememberTool, recallTool, memoryBlockEditTool } from './knowledge.js';
 export { spawnAgentTool } from './spawn.js';
 export { askUserTool } from './ask-user.js';
 export { askSecretTool } from './ask-secret.js';

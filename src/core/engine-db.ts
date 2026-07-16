@@ -542,6 +542,69 @@ const MIGRATIONS: string[] = [
    ALTER TABLE memories ADD COLUMN source_channel TEXT;
    ALTER TABLE memories ADD COLUMN source_untrusted INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE memories ADD COLUMN embedding_model TEXT;`,
+
+  // v9 (Durable Knowledge Substrate — DK.1): the two user-owned Know tables. NEW
+  // tables via CREATE (not ALTER) — additive, so a fresh DB and an upgraded DB get
+  // the identical shape, and the v1 CREATE is NEVER edited (an added column there
+  // would collide with a future ALTER on a fresh DB; ADD COLUMN has no IF NOT EXISTS).
+  // These tables exist unconditionally (engine.db is always opened) but are read/written
+  // ONLY when `durable_memory_enabled` is on — flag-OFF stays byte-identical.
+  //
+  //   knowledge_entries — the archival, DURABLE store: no byte-cap, no oldest-first
+  //   trim, no TTL (contrast memory-file.ts). Only explicit transitions: supersede
+  //   (tier-gated), reject (user), delete (user/GDPR — deleteAllData auto-enumerates it).
+  //   `text` is enc()'d at rest by KnowledgeStore; `subject_hint` stays PLAINTEXT (a
+  //   surface name, like subjects.name — used to link on approval, never minted). The
+  //   provenance evidence columns (source_channel/source_untrusted/source_type) make the
+  //   tier a re-derivable pure function (provenance.ts), never the only thing stored.
+  //
+  //   H6 (pin is a STORE INVARIANT, not a prompt convention): the CHECK forbids
+  //   pinned=1 unless the row is active AND its tier is not external_unverified — so an
+  //   injected/untrusted `remember({pin:true})` write can never ride into the every-turn
+  //   `focus` block, and approval can never inherit an attacker-set pin. Defense in depth
+  //   alongside the KnowledgeStore write/approval guard.
+  //
+  //   memory_blocks — the always-loaded working set: only 'profile' + 'playbook' are
+  //   STORED (the 'focus' block is DERIVED per turn, never persisted). char_limit is the
+  //   loud-error bound (no silent trim); over-limit is a tool error, not an eviction.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (9);
+   CREATE TABLE knowledge_entries (
+     id               TEXT PRIMARY KEY,
+     subject_id       TEXT REFERENCES subjects(id) ON DELETE SET NULL,
+     subject_hint     TEXT,                       -- surface name when unmatched (NEVER minted); PLAINTEXT
+     kind             TEXT NOT NULL DEFAULT 'fact'
+                        CHECK (kind IN ('fact','preference','rule','event','block_edit')),
+     text             TEXT NOT NULL,              -- enc()'d at rest by KnowledgeStore
+     pinned           INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
+     importance       INTEGER NOT NULL DEFAULT 1 CHECK (importance IN (0,1,2)),
+     status           TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','pending_review','rejected','superseded')),
+     source_channel   TEXT,                       -- provenance evidence (re-derivable tier input)
+     source_untrusted INTEGER NOT NULL DEFAULT 0, -- provenance evidence (routes untrusted → pending_review)
+     source_type      TEXT NOT NULL DEFAULT 'agent_inferred'
+                        CHECK (source_type IN ('user_asserted','tool_verified','agent_inferred','external_unverified')),
+     source_thread_id TEXT,                       -- soft ref → history.db threads (audit only; a
+                                                  -- REAL FK to engine.db threads would FK-fail
+                                                  -- since live threads stay in history.db pre-S2)
+     source_run_id    TEXT,                       -- soft ref → history.db runs
+     superseded_by    TEXT,                       -- soft pointer to the retiring entry
+     reviewed_at      TEXT,
+     review_action    TEXT,                       -- approve|edit_approve|reject (audit)
+     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+     -- H6: pin is a store invariant. Only an active, non-external_unverified row may pin.
+     CHECK (pinned = 0 OR (status = 'active' AND source_type != 'external_unverified'))
+   );
+   CREATE INDEX idx_knowledge_subject_status ON knowledge_entries(subject_id, status);
+   CREATE INDEX idx_knowledge_status         ON knowledge_entries(status);
+   CREATE INDEX idx_knowledge_pinned         ON knowledge_entries(pinned);
+
+   CREATE TABLE memory_blocks (
+     id         TEXT PRIMARY KEY CHECK (id IN ('profile','playbook')),
+     content    TEXT NOT NULL DEFAULT '',
+     char_limit INTEGER NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /**
