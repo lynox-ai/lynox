@@ -1204,3 +1204,51 @@ describe('translateMessages — empty-content edge', () => {
     expect(out).toEqual([{ role: 'tool', tool_call_id: 'c', content: 'r' }]);
   });
 });
+
+
+describe('OpenAIAdapter — request idle timeout (DEF-openai-adapter-timeout)', () => {
+  const prev = process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
+  beforeEach(() => { process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'] = '300'; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
+    else process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'] = prev;
+  });
+
+  it('aborts a connection that never sends response headers (silently-dropped socket)', async () => {
+    // Handler accepts the socket and never responds — the openai-wire fetch has no built-in
+    // timeout, so without the idle watchdog this hangs forever (the 2026-07-16 prod-shape hang).
+    const server = await createMockServer(() => { /* hang: never writeHead / end */ });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'k', modelId: 'm' });
+      await expect(
+        collectEvents(adapter.beta.messages.stream({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] })),
+      ).rejects.toThrow(/timed out|no data/i);
+    } finally { server.close(); }
+  }, 5000);
+
+  it('aborts a stream that stalls mid-response (headers + one chunk, then silence)', async () => {
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({ id: 's', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }] }));
+      // then stall forever — no [DONE], no res.end()
+    });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'k', modelId: 'm' });
+      await expect(
+        collectEvents(adapter.beta.messages.stream({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] })),
+      ).rejects.toThrow(/timed out|no data/i);
+    } finally { server.close(); }
+  }, 5000);
+
+  it('a caller-supplied signal still aborts (composition preserved)', async () => {
+    const server = await createMockServer(() => { /* hang */ });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'k', modelId: 'm' });
+      const ac = new AbortController();
+      setTimeout(() => ac.abort(), 100);
+      await expect(
+        collectEvents(adapter.beta.messages.stream({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] }, { signal: ac.signal })),
+      ).rejects.toThrow();
+    } finally { server.close(); }
+  }, 5000);
+});

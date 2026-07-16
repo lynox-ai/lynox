@@ -556,6 +556,18 @@ async function* translateStream(
 /** Static API key or a function that returns a fresh token (e.g. OAuth refresh). */
 export type ApiKeyProvider = string | (() => Promise<string>);
 
+/** Default idle timeout for an OpenAI-compatible request (ms): abort when no bytes arrive for
+ *  this long — covers both a dead-before-headers connection and a mid-stream stall. A long
+ *  generation is unaffected (the timer re-arms per chunk). Env override:
+ *  `LYNOX_OPENAI_REQUEST_TIMEOUT_MS`. */
+export const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 180_000;
+
+function resolveOpenAIRequestTimeoutMs(): number {
+  const raw = process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
+}
+
 export class OpenAIAdapter {
   private baseURL: string;
   private apiKeyProvider: ApiKeyProvider;
@@ -753,21 +765,54 @@ export class OpenAIAdapter {
     }
 
     const apiKey = await this.resolveApiKey();
-    const response = await fetch(`${this.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: options?.signal ?? null,
-    });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`OpenAI-compatible API error ${response.status}: ${errText}`);
+    // Idle-timeout watchdog. The openai-wire `fetch` has NO implicit request timeout (unlike the
+    // Anthropic SDK), and only the caller's optional signal was wired — so a silently-dropped
+    // socket that neither resolves nor rejects hangs the agent loop indefinitely (observed
+    // 2026-07-16: a Mistral request stuck 20+ min with zero open TCP). Abort if NO bytes (response
+    // headers OR a stream chunk) arrive for the idle window; a long generation stays fine because
+    // the timer re-arms on every chunk. The caller's signal is composed in, so an external abort
+    // (stop button) still propagates.
+    const idleMs = resolveOpenAIRequestTimeoutMs();
+    const ac = new AbortController();
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let idleAborted = false;
+    const armIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { idleAborted = true; ac.abort(); }, idleMs);
+    };
+    const caller = options?.signal;
+    if (caller) {
+      if (caller.aborted) ac.abort(caller.reason);
+      else caller.addEventListener('abort', () => ac.abort(caller.reason), { once: true });
     }
 
-    yield* translateStream(response);
+    try {
+      armIdle();
+      const response = await fetch(`${this.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: ac.signal,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenAI-compatible API error ${response.status}: ${errText}`);
+      }
+
+      for await (const event of translateStream(response)) {
+        armIdle(); // a chunk arrived — reset the idle window
+        yield event;
+      }
+    } catch (err) {
+      if (idleAborted) throw new Error(`OpenAI-compatible request timed out (no data for ${idleMs}ms)`);
+      throw err;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+    }
   }
 }
