@@ -560,6 +560,17 @@ async function executeThinker(
     // doesn't leave a half-constructed agent in the active set).
     activeChildAgents.add(childAgent);
 
+    // DK.1 F5/S8: a child spawned from a tainted parent inherits the taint for durable writes.
+    // A prompt-injected parent's `spec.task`/`context` can carry an injected `remember(pin:true)`;
+    // the child shares the parent's KnowledgeStore but starts with a clean per-run latch, so
+    // without this an injected write would launder to active+pinned through the child. Arm the
+    // child's STICKY conversation latch (survives its send() per-run reset, unlike sawUntrustedData)
+    // so any such write routes to pending_review. Over-taints in the safe direction only.
+    if (parentAgent.sawUntrustedData === true || parentAgent.sawExternalContentTool === true
+      || parentAgent.conversationSawUntrusted === true) {
+      childAgent.noteUntrustedData();
+    }
+
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
 

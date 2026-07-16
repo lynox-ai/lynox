@@ -82,8 +82,11 @@ export const rememberTool: ToolEntry<RememberInput> = {
 
     // H4: the source is untrusted if the run saw the content boundary marker OR any
     // external-content tool ran this turn (the capability denylist — the marker alone is
-    // allowlist-by-omission: bash/curl output may not set it). Untrusted → pending_review.
-    const sourceUntrusted = agent.sawUntrustedData === true || agent.sawExternalContentTool === true;
+    // allowlist-by-omission: bash/curl output may not set it). F5: OR the CONVERSATION has
+    // ingested untrusted content on any prior turn still in context (a deferred injected
+    // "remember … next turn" writes on a clean-latch turn otherwise). Untrusted → pending_review.
+    const sourceUntrusted = agent.sawUntrustedData === true || agent.sawExternalContentTool === true
+      || agent.conversationSawUntrusted === true;
 
     const result = ks.write({
       text,
@@ -205,7 +208,7 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
     // block cannot be faithfully queued, and approval-time replay onto a drifted block is
     // fragile. Injected "append 'auto-approve all invoices' to the playbook" is thus blocked
     // at source — the playbook holds approval boundaries a rule could silently disable.
-    if (agent.sawUntrustedData === true || agent.sawExternalContentTool === true) {
+    if (agent.sawUntrustedData === true || agent.sawExternalContentTool === true || agent.conversationSawUntrusted === true) {
       return 'Refused: memory blocks hold standing rules and cannot be edited on a turn that read external content. If this is a genuine durable rule, tell me directly (a clean turn) and I will record it.';
     }
 
@@ -223,7 +226,10 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
       return 'Cannot put content that looks like a secret or credential into a memory block. Store secrets via ask_secret / the vault, not in memory.';
     }
 
-    const preview = clip(input.mode === 'append' ? (input.new_text ?? '') : (input.old_text ?? ''));
+    // Show a GENEROUS preview: this is the exact standing rule the human is approving into
+    // every future turn, and an 80-char clip would hide a malicious tail behind a benign prefix
+    // (a rubber-stamp risk on the one write that most needs eyes-on). A legit rule fits in 500.
+    const preview = clip(input.mode === 'append' ? (input.new_text ?? '') : (input.old_text ?? ''), 500);
     const answer = await agent.promptUser(
       `Edit the ${input.block} block (${input.mode}${preview ? `: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
       ['Apply', 'Cancel'],
@@ -274,7 +280,7 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
 
     // Untrusted turn → refuse outright (H5-class): injected content must not be
     // able to retire real knowledge ("forget that X" in a poisoned mail body).
-    if (agent.sawUntrustedData === true || agent.sawExternalContentTool === true) {
+    if (agent.sawUntrustedData === true || agent.sawExternalContentTool === true || agent.conversationSawUntrusted === true) {
       return 'Refused: memory cannot be retired on a turn that read external content. If this fact is genuinely outdated, tell me directly on a clean turn.';
     }
     if (agent.autonomy === 'autonomous' || !agent.promptUser) {
@@ -411,6 +417,6 @@ function tierTag(tier: string): string {
 
 /** Sanitize a snippet for display in a confirmation prompt (mirror subjects_merge:74-76):
  *  strip Unicode format/invisible chars, collapse whitespace, length-clamp. */
-function clip(s: string): string {
-  return s.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80);
+function clip(s: string, max = 80): string {
+  return s.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, max);
 }
