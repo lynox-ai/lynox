@@ -23,6 +23,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   memory_update: 'Updating knowledge',
   memory_list: 'Listing knowledge',
   memory_promote: 'Sharing knowledge',
+  // Durable Knowledge Substrate (DK.1) — the tools that replace the legacy memory_* set.
+  remember: 'Remembering',
+  recall: 'Recalling',
+  memory_block_edit: 'Updating memory',
   data_store_create: 'Setting up table',
   data_store_insert: 'Adding data',
   data_store_query: 'Searching data',

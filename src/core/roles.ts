@@ -47,7 +47,10 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
     model: 'fast',
     effort: 'medium',
     autonomy: 'supervised',
-    allowTools: ['ask_user', 'memory_store', 'memory_recall'],
+    // Superset: the legacy memory_store/recall AND the DK.1 remember/recall — allowTools is a
+    // whitelist, so listing the not-registered pair for the current flag state is a harmless
+    // no-op, and the collector role works under both flag states (H9 — no partial swap).
+    allowTools: ['ask_user', 'memory_store', 'memory_recall', 'remember', 'recall'],
     description: 'Structured Q&A with user. Minimal tools.',
   },
 };

@@ -86,13 +86,23 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
 ];
 
-/** All builtin `ToolEntry` objects exported from the builtin tools barrel. */
+// The Durable Knowledge Substrate (DK.1) tools are MUTUALLY EXCLUSIVE with the six legacy
+// `memory_*` tools at runtime: engine.ts registers exactly one set per `durable_memory_enabled`
+// state (no partial swap). The barrel exports BOTH so the flag can swap them, but a single turn
+// never carries both. The guard must measure the MAX real per-turn prefix, which is the LEGACY
+// set (larger than the 3 DK.1 tools) — so exclude the DK.1 tools here, otherwise the sum
+// double-counts a set that is never on the wire alongside the legacy one.
+const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit']);
+
+/** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
+ *  swap tools — see above; they replace the legacy set at runtime, never co-exist with it). */
 const BUILTIN_TOOLS: readonly ToolEntry[] = Object.values(builtinTools).filter(
   (v): v is ToolEntry =>
     typeof v === 'object' &&
     v !== null &&
     'definition' in v &&
-    typeof (v as { definition: unknown }).definition === 'object',
+    typeof (v as { definition: unknown }).definition === 'object' &&
+    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name),
 );
 
 /**

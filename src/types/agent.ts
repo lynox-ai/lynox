@@ -187,6 +187,13 @@ export interface IAgent {
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */
   readonly sawUntrustedData?: boolean | undefined;
+  /** DK.1 (H4): has any EXTERNAL-content tool (bash/http/read_file/media/api_setup/mail/…)
+   *  run this turn? Read by `remember` — ORed with {@link sawUntrustedData} to derive
+   *  `sourceUntrusted`, since the content marker is allowlist-by-omission. */
+  readonly sawExternalContentTool?: boolean | undefined;
+  /** DK.1: whether the durable knowledge substrate is on for this agent — read by spawn so a
+   *  child inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
+  readonly durableMemoryEnabled?: boolean | undefined;
   /** Wave 1.2: mark this run as having seen untrusted content — used by spawn to
    *  propagate a shared-Memory child's taint onto the parent. */
   noteUntrustedData?(): void;

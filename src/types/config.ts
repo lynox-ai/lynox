@@ -68,6 +68,15 @@ export interface AgentConfig {
   capabilityContract?: CapabilityContract | undefined;
   /** Knowledge context for system prompt. Truthy string = inject as Block 2. Falsy/undefined = no memory block. */
   knowledgeContext?:   string | undefined;
+  /** Durable Knowledge Substrate (DK.1): the pre-rendered always-loaded blocks
+   *  (profile + playbook + derived focus) for this turn. Truthy = render fenced on the
+   *  ephemeral uncached tail; falsy/undefined = no block. Set by Session when
+   *  `durable_memory_enabled` is on (mirrors {@link knowledgeContext}). */
+  memoryBlocks?:       string | undefined;
+  /** DK.1: when true, the legacy end-of-turn memory extraction is stood down (the
+   *  substrate captures via the `remember` tool instead). Default/undefined = off =
+   *  byte-identical legacy extraction. */
+  durableMemoryEnabled?: boolean | undefined;
   secretStore?:        SecretStoreLike | undefined;
   userId?:             string | undefined;
   activeScopes?:       MemoryScopeRef[] | undefined;
@@ -475,6 +484,20 @@ export interface LynoxUserConfig {
    * intentionally NOT in PROJECT_SAFE_KEYS (operator-only, never agent-settable).
    */
   memory_write_trust_gate?: boolean | undefined;
+  /**
+   * Durable Knowledge Substrate (DK.1). When true, the memory pillar is rebuilt as
+   * a user-owned substrate: agent-authored `memory_blocks` (profile/playbook) + an
+   * archival `knowledge_entries` store, captured via the `remember` tool (direct
+   * insert, decoupled from the extraction minting channel) and surfaced through a
+   * per-turn derived `focus` block on the ephemeral uncached tail. Replaces the six
+   * legacy `memory_*` tools with `remember`/`recall`/`memory_block_edit`, kills the
+   * per-turn `knowledgeLayer.retrieve` default-injection, and stands down the
+   * end-of-turn extraction. Default false → BYTE-IDENTICAL (legacy extraction +
+   * injection + `memory_*` tools; the v9 tables exist but are never read/written on
+   * the hot path). Operator-only per-tenant flip (rafael canary first); intentionally
+   * NOT in PROJECT_SAFE_KEYS — never agent-settable.
+   */
+  durable_memory_enabled?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

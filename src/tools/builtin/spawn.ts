@@ -474,6 +474,10 @@ async function executeThinker(
     effort,
     maxTokens: spec.max_tokens ?? profile?.max_tokens,
     memory,
+    // DK.1: inherit the durable-memory flag so a sub-agent on an ON tenant also stands down
+    // the legacy end-of-turn extraction (the child shares the parent's Memory; without this it
+    // would keep extracting into the minting channel the substrate decouples from).
+    durableMemoryEnabled: parentAgent.durableMemoryEnabled,
     onStream: parentOnStream ?? undefined,
     spawnDepth: childDepth,
     maxIterations,

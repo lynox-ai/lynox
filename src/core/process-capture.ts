@@ -10,6 +10,8 @@ import type { ToolCallRecord } from './run-history.js';
 /** Tools that are internal bookkeeping — excluded from process capture */
 const INTERNAL_TOOLS = new Set([
   'memory_store', 'memory_recall', 'memory_delete', 'memory_update', 'memory_list', 'memory_promote',
+  // Durable Knowledge Substrate (DK.1) — the tools that replace the legacy memory_* set.
+  'remember', 'recall', 'memory_block_edit',
   'ask_user', 'plan_task', 'save_workflow',
 ]);
 

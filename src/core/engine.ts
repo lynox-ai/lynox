@@ -44,6 +44,9 @@ import {
   memoryUpdateTool,
   memoryListTool,
   memoryPromoteTool,
+  rememberTool,
+  recallTool,
+  memoryBlockEditTool,
   spawnAgentTool,
   askUserTool,
   askSecretTool,
@@ -255,6 +258,9 @@ export class Engine {
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
+  /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
+   *  `durable_memory_enabled` is on (+ engine.db present). */
+  private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
   private _subjectFootprintReader: import('./subject-footprint-reader.js').SubjectFootprintReader | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
@@ -1217,12 +1223,6 @@ export class Engine {
       .register(readFileTool)
       .register(writeFileTool)
       .register(editFileTool)
-      .register(memoryStoreTool)
-      .register(memoryRecallTool)
-      .register(memoryDeleteTool)
-      .register(memoryUpdateTool)
-      .register(memoryListTool)
-      .register(memoryPromoteTool)
       .register(spawnAgentTool)
       .register(askUserTool)
       .register(askSecretTool)
@@ -1235,6 +1235,25 @@ export class Engine {
       .register(planTaskTool)
       .register(recallToolResultTool)
       .register(mediaProcessTool);
+
+    // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
+    // tools with `remember`/`recall`/`memory_block_edit` when `durable_memory_enabled` is on
+    // (H9 — no partial swap: the six legacy tools are NOT registered when durable is on, and
+    // the new three are NOT registered when it is off, so flag-OFF is byte-identical).
+    if (this.userConfig.durable_memory_enabled === true) {
+      this.registry
+        .register(rememberTool)
+        .register(recallTool)
+        .register(memoryBlockEditTool);
+    } else {
+      this.registry
+        .register(memoryStoreTool)
+        .register(memoryRecallTool)
+        .register(memoryDeleteTool)
+        .register(memoryUpdateTool)
+        .register(memoryListTool)
+        .register(memoryPromoteTool);
+    }
 
     // Wire task manager if run history is available
     if (this.runHistory) {
@@ -1662,6 +1681,25 @@ export class Engine {
       }
     }
 
+    // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
+    // remember/recall/memory_block_edit tools (registered above under the same flag). Gated on
+    // `durable_memory_enabled` + engine.db → zero standing surface when off. Independent of
+    // `subject_graph_enabled`: the substrate anchors on subjects, but SubjectStore is a thin
+    // per-call wrapper over engine.db, so it works whether or not the legacy subject-graph
+    // mirror is on (a fresh subjects table just grows deliberate findOrCreate anchors — H1).
+    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
+      try {
+        const { SubjectStore } = await import('./subject-store.js');
+        const { KnowledgeStore } = await import('./knowledge-store.js');
+        const subjectStore = this._subjectStore ?? new SubjectStore(this.engineDb);
+        const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
+        this._knowledgeStore = knowledgeStore;
+        this._toolContext.knowledgeStore = knowledgeStore;
+      } catch (err) {
+        process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+
     // Initialize backup manager (always available — backup is essential)
     try {
       const { BackupManager } = await import('./backup.js');
@@ -1833,6 +1871,8 @@ export class Engine {
   getUserId(): string | null { return this.userId; }
   getEmbeddingProvider(): EmbeddingProvider | null { return this.embeddingProvider; }
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
+  /** Durable Knowledge Substrate (DK.1) store, or null when `durable_memory_enabled` is off. */
+  getKnowledgeStore(): import('./knowledge-store.js').KnowledgeStore | null { return this._knowledgeStore; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }

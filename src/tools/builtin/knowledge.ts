@@ -1,0 +1,253 @@
+import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { KnowledgeKind, MemoryBlockEditMode } from '../../types/memory.js';
+import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-store.js';
+import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
+import { getErrorMessage } from '../../core/utils.js';
+
+/**
+ * Durable Knowledge Substrate tools (DK.1). The always-on capture/read surface that
+ * REPLACES the six legacy `memory_*` tools when `durable_memory_enabled` is on (registered
+ * in engine.ts; the legacy tools are skipped). All three read/write via
+ * `agent.toolContext.knowledgeStore` — a direct SQLite insert that NEVER publishes the
+ * `channels.memoryStore` extraction minting channel (decoupling, req 2).
+ *
+ * Trust posture (from the /security-deep-dive gate, verified at source):
+ *  - `remember` ROUTES an untrusted turn to `pending_review` (never drops/blocks — H4),
+ *    and rejects secret-shaped text on the write path (H7).
+ *  - `memory_block_edit` REFUSES on an untrusted turn (H5 — a singleton block can't be
+ *    faithfully queued) and, on a trusted turn, mirrors `subjects_merge`:
+ *    autonomous-refuse + interactive confirmation (a block loads into EVERY turn).
+ *  - `recall` renders only `status='active'` (pending/rejected are never agent-readable).
+ */
+
+// ── remember (THE capture tool) ──
+
+interface RememberInput {
+  text: string;
+  subject?: string | undefined;
+  kind?: KnowledgeKind | undefined;
+  pin?: boolean | undefined;
+}
+
+export const rememberTool: ToolEntry<RememberInput> = {
+  definition: {
+    name: 'remember',
+    description:
+      'Record a durable business fact, decision, or standing preference so it persists across sessions. ' +
+      'Link it to the client / company / project by name via `subject` so it resurfaces when that subject is in focus. ' +
+      'Use when you LEARN something durable — NOT for one-off computation, deadlines (use task_create), or ' +
+      'structured/quantitative data (use data_store_insert). Record it before you finish the turn.',
+    eager_input_streaming: true,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        text: { type: 'string', description: 'The durable fact / decision / preference, in one clear sentence.' },
+        subject: {
+          type: 'string',
+          description: 'The client, company, or project this is about, by name. Links the entry to that subject. Omit only for a global preference about the operator themselves.',
+        },
+        kind: {
+          type: 'string',
+          enum: ['fact', 'preference', 'rule', 'event'],
+          description: 'fact (default): a business fact · preference: a durable preference · rule: a standing rule · event: something that happened.',
+        },
+        pin: {
+          type: 'boolean',
+          description: 'Pin into the always-loaded focus block for this subject. Reserve for the FEW facts you want present in every future turn about it.',
+        },
+      },
+      required: ['text'],
+    },
+  },
+  handler: async (input: RememberInput, agent: IAgent): Promise<string> => {
+    const ks = agent.toolContext.knowledgeStore;
+    if (!ks) return 'Durable memory is not enabled for this agent.';
+
+    const text = input.text?.trim();
+    if (!text) return 'Pass a non-empty `text` to remember.';
+    // S8/S6: bound the durable write. A knowledge entry is ONE concise fact — an unbounded
+    // `remember` (or an injected loop of them) would bloat engine.db at rest. Loud reject, not
+    // a silent trim; long material belongs in a document / data_store, not a memory entry.
+    if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
+      return `That is too long for a single memory (${text.length} chars, max ${MAX_KNOWLEDGE_ENTRY_CHARS}). Record one concise fact, or put the full material in a document / data_store.`;
+    }
+
+    // H7: a secret-SHAPED scan on the write path (not only tenant-known secrets). Reject
+    // clear credentials (API keys, tokens, Bearer/JWT) — reject, never queue: a decrypted
+    // credential must not sit in the review panel. Legitimate business facts (incl. IBANs,
+    // which are not credentials) are unaffected.
+    if (matchesSecretPattern(text) || agent.secretStore?.containsSecret(text) === true) {
+      return 'Cannot record content that looks like a secret or credential. Store secrets via ask_secret / the vault, not in memory.';
+    }
+
+    // H4: the source is untrusted if the run saw the content boundary marker OR any
+    // external-content tool ran this turn (the capability denylist — the marker alone is
+    // allowlist-by-omission: bash/curl output may not set it). Untrusted → pending_review.
+    const sourceUntrusted = agent.sawUntrustedData === true || agent.sawExternalContentTool === true;
+
+    const result = ks.write({
+      text,
+      subjectName: input.subject,
+      kind: input.kind,
+      pin: input.pin,
+      sourceChannel: 'agent',
+      sourceUntrusted,
+      sourceThreadId: agent.currentThreadId,
+      sourceRunId: agent.currentRunId,
+    });
+
+    if (result.status === 'pending_review') {
+      // Do NOT echo the (possibly injected) text back into context.
+      return 'Recorded for review: this turn read external content, so it is queued for your approval before it becomes active knowledge.';
+    }
+    const linked = result.subjectId ? ' and linked to the named subject' : '';
+    const pinned = result.pinned ? ', pinned to focus' : '';
+    return `Remembered${linked}${pinned}.`;
+  },
+};
+
+// ── recall (on-demand retrieve) ──
+
+interface RecallInput {
+  query: string;
+  subject?: string | undefined;
+}
+
+export const recallTool: ToolEntry<RecallInput> = {
+  definition: {
+    name: 'recall',
+    description:
+      'Look up durable knowledge you have recorded. Pass a `query` describing what you need; optionally scope to a ' +
+      '`subject` (client / company / project). Returns your active entries only, ranked by relevance. Only call when ' +
+      'the CURRENT message needs prior context — not on short follow-ups or when the visible conversation already has it.',
+    eager_input_streaming: true,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'What you are looking for.' },
+        subject: { type: 'string', description: 'Optional: scope the lookup to this client / company / project by name (also pulls in its parent-level knowledge).' },
+      },
+      required: ['query'],
+    },
+  },
+  handler: async (input: RecallInput, agent: IAgent): Promise<string> => {
+    const ks = agent.toolContext.knowledgeStore;
+    if (!ks) return 'Durable memory is not enabled for this agent.';
+
+    const query = input.query?.trim();
+    if (!query) return 'Pass a `query` describing what to recall.';
+
+    const entries = ks.recall({ query, subjectName: input.subject });
+    if (entries.length === 0) return 'No matching durable knowledge found.';
+    // H7: mask secrets in the tool RESULT too — recall returns decrypted text into model
+    // context, so it must run the SAME two masking layers as the always-loaded block render
+    // (knowledge-store.renderBlocks), else recall would be a strictly weaker surface: a
+    // trusted-turn operator secret stored active would echo back into context unmasked.
+    return entries
+      .map(e => {
+        const tenantMasked = agent.secretStore ? agent.secretStore.maskSecrets(e.text) : e.text;
+        return `- ${maskSecretPatterns(tenantMasked)}${tierTag(e.sourceType)}`;
+      })
+      .join('\n');
+  },
+};
+
+// ── memory_block_edit (edit the always-loaded blocks) ──
+
+interface BlockEditInput {
+  block: 'profile' | 'playbook';
+  mode: MemoryBlockEditMode;
+  old_text?: string | undefined;
+  new_text?: string | undefined;
+}
+
+export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
+  requiresConfirmation: true,
+  // A standing-rule change that loads into EVERY turn is destructive-class — defense in
+  // depth so isDangerous flags it. The hard refusal in autonomous mode lives in the handler
+  // (a self-confirming tool's [BLOCKED] would route through the worker-wired promptUser as a
+  // rubber-stampable notification), mirroring subjects_merge.
+  destructive: { mode: 'data' },
+  definition: {
+    name: 'memory_block_edit',
+    description:
+      'Edit an always-loaded memory block: `profile` (operator identity + durable preferences) or `playbook` ' +
+      '(standing operating rules, approval boundaries, invoicing conventions). mode: replace (exact old_text → new_text), ' +
+      'append (add new_text on a new line), remove (delete old_text). These blocks load into EVERY future turn, so an ' +
+      'edit needs your confirmation and cannot run on a turn that read external content.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        block: { type: 'string', enum: ['profile', 'playbook'], description: 'Which block to edit.' },
+        mode: { type: 'string', enum: ['replace', 'append', 'remove'], description: 'replace | append | remove.' },
+        old_text: { type: 'string', description: 'The exact existing text to replace or remove (required for replace/remove).' },
+        new_text: { type: 'string', description: 'The new text (required for append; the replacement for replace).' },
+      },
+      required: ['block', 'mode'],
+    },
+  },
+  handler: async (input: BlockEditInput, agent: IAgent): Promise<string> => {
+    const ks = agent.toolContext.knowledgeStore;
+    if (!ks) return 'Durable memory is not enabled for this agent.';
+
+    if (input.block !== 'profile' && input.block !== 'playbook') {
+      return 'block must be "profile" or "playbook".';
+    }
+
+    // H5: an untrusted turn REFUSES a block edit outright (not pending_review). A singleton
+    // block cannot be faithfully queued, and approval-time replay onto a drifted block is
+    // fragile. Injected "append 'auto-approve all invoices' to the playbook" is thus blocked
+    // at source — the playbook holds approval boundaries a rule could silently disable.
+    if (agent.sawUntrustedData === true || agent.sawExternalContentTool === true) {
+      return 'Refused: memory blocks hold standing rules and cannot be edited on a turn that read external content. If this is a genuine durable rule, tell me directly (a clean turn) and I will record it.';
+    }
+
+    // H5: mirror subjects_merge — a standing-rule change hard-refuses in autonomous mode or
+    // with no interactive channel, then confirms explicitly (the requiresConfirmation flag
+    // makes the guard defer to this preview instead of its generic warning).
+    if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+      return 'Refused: editing a memory block needs interactive confirmation and cannot run autonomously.';
+    }
+
+    // H7: secret-shaped scan on the block WRITE path too (mirror `remember`) — a block loads
+    // into every turn, so a shaped credential must not be written in. Reject, never store.
+    const added = input.new_text ?? '';
+    if (added && (matchesSecretPattern(added) || agent.secretStore?.containsSecret(added) === true)) {
+      return 'Cannot put content that looks like a secret or credential into a memory block. Store secrets via ask_secret / the vault, not in memory.';
+    }
+
+    const preview = clip(input.mode === 'append' ? (input.new_text ?? '') : (input.old_text ?? ''));
+    const answer = await agent.promptUser(
+      `Edit the ${input.block} block (${input.mode}${preview ? `: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
+      ['Apply', 'Cancel'],
+    );
+    if (answer !== 'Apply') return `Cancelled — the ${input.block} block is unchanged.`;
+
+    try {
+      ks.editBlock(input.block, input.mode, input.old_text, input.new_text);
+      return `Updated the ${input.block} block.`;
+    } catch (err) {
+      // Loud, actionable errors (over-limit / bad match) surface verbatim to the model.
+      if (err instanceof BlockOverLimitError || err instanceof BlockEditError) return err.message;
+      return `memory_block_edit error: ${getErrorMessage(err)}`;
+    }
+  },
+};
+
+// ── helpers ──
+
+function tierTag(tier: string): string {
+  switch (tier) {
+    case 'user_asserted': return ' [user]';
+    case 'tool_verified': return ' [tool]';
+    case 'agent_inferred': return ' [agent]';
+    case 'external_unverified': return ' [unverified]';
+    default: return '';
+  }
+}
+
+/** Sanitize a snippet for display in a confirmation prompt (mirror subjects_merge:74-76):
+ *  strip Unicode format/invisible chars, collapse whitespace, length-clamp. */
+function clip(s: string): string {
+  return s.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80);
+}

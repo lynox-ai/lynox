@@ -29,6 +29,10 @@ export const INLINE_CORE_TOOLS = new Set([
   'bash', 'read_file', 'write_file', 'http', 'ask_user',
   'data_store_query', 'data_store_insert',
   'memory_recall', 'memory_store', 'memory_update', 'memory_list',
+  // Durable Knowledge Substrate (DK.1): the capture/recall pair that replaces memory_store/
+  // memory_recall when the flag is on — safe in the inline sandbox (read-or-tenant-scoped).
+  // memory_block_edit stays opt-in per-step (it needs interactive confirmation).
+  'remember', 'recall',
 ]);
 
 /**

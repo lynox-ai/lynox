@@ -224,6 +224,12 @@ export const LynoxUserConfigSchema = z.object({
   // consolidation keeper, retire-primitive backstops, dedup tier-raise). Default off;
   // flipped per-tenant after the shadow window. Operator-only (not in PROJECT_SAFE_KEYS).
   memory_write_trust_gate: z.boolean().optional(),
+  // Durable Knowledge Substrate (DK.1): rebuilds the memory pillar as a user-owned
+  // substrate (memory_blocks + archival knowledge_entries, `remember`/`recall`/
+  // `memory_block_edit` tools, per-turn derived focus block, no default-injection,
+  // no end-of-turn extraction). Default off = byte-identical. Operator-only per-tenant
+  // flip (not in PROJECT_SAFE_KEYS — never agent-settable).
+  durable_memory_enabled: z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one
