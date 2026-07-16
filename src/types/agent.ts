@@ -191,6 +191,11 @@ export interface IAgent {
    *  run this turn? Read by `remember` — ORed with {@link sawUntrustedData} to derive
    *  `sourceUntrusted`, since the content marker is allowlist-by-omission. */
   readonly sawExternalContentTool?: boolean | undefined;
+  /** DK.1 F5: has THIS CONVERSATION (sticky across turns, not just this run) ingested untrusted
+   *  content? Read by `remember`/`memory_block_edit`/`memory_retire` — ORed with the per-run
+   *  signals so a deferred injected write ("remember … on your next reply") on a later clean turn
+   *  still routes to pending_review instead of active+pinned. */
+  readonly conversationSawUntrusted?: boolean | undefined;
   /** DK.1: whether the durable knowledge substrate is on for this agent — read by spawn so a
    *  child inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   readonly durableMemoryEnabled?: boolean | undefined;

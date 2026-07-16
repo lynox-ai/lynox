@@ -45,6 +45,9 @@ import {
   memoryListTool,
   memoryPromoteTool,
   rememberTool,
+  memoryRetireTool,
+  memoryFocusTool,
+  archiveSearchTool,
   recallTool,
   memoryBlockEditTool,
   spawnAgentTool,
@@ -1244,7 +1247,10 @@ export class Engine {
       this.registry
         .register(rememberTool)
         .register(recallTool)
-        .register(memoryBlockEditTool);
+        .register(memoryBlockEditTool)
+        .register(memoryRetireTool)
+        .register(memoryFocusTool)
+        .register(archiveSearchTool);
     } else {
       this.registry
         .register(memoryStoreTool)

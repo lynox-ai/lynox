@@ -93,6 +93,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'hub.intelligence.data': { de: 'Daten', en: 'Data' },
 	'hub.intelligence.subjects': { de: 'Subjekte', en: 'Subjects' },
+	// DK.2 review queue (durable memory) — tab + panel strings.
+	'hub.intelligence.queue': { de: 'Prüfen', en: 'Review' },
+	'knowledge.queue.title': { de: 'Merk-Warteschlange', en: 'Memory review queue' },
+	'knowledge.queue.subtitle': { de: 'Fakten aus Durchläufen mit externen Inhalten warten hier auf deine Freigabe.', en: 'Facts captured on turns that read external content wait here for your approval.' },
+	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
+	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
+	'knowledge.queue.approve': { de: 'Freigeben', en: 'Approve' },
+	'knowledge.queue.edit': { de: 'Bearbeiten…', en: 'Edit…' },
+	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
+	'knowledge.queue.reject': { de: 'Ablehnen', en: 'Reject' },
+	'knowledge.queue.reject_confirm': { de: 'Eintrag ablehnen? Er bleibt als abgelehnt protokolliert und wird dem Agenten nie gezeigt.', en: 'Reject this entry? It stays on record as rejected and is never shown to the agent.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.

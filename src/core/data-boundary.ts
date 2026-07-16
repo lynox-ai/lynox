@@ -17,7 +17,7 @@ interface InjectionResult {
 // terminal (so the match keeps FAILING expensively); the gate makes that O(n).
 const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: RegExp }> = [
   // Tool invocation language
-  { pattern: /\b(use|call|execute|invoke|run)\s+(the\s+)?(bash|write_file|http_request|spawn_agent|read_file|memory_store|remember|recall|memory_block_edit)\s+tool\b/i, label: 'tool invocation' },
+  { pattern: /\b(use|call|execute|invoke|run)\s+(the\s+)?(bash|write_file|http_request|spawn_agent|read_file|memory_store|remember|recall|memory_block_edit|memory_retire|memory_focus|archive_search)\s+tool\b/i, label: 'tool invocation' },
   { pattern: /\b(use|call|execute|invoke|run)\s+(the\s+)?(google_gmail|google_drive|google_sheets|google_calendar|google_docs)\s+tool\b/i, label: 'tool invocation' },
 
   // System prompt overrides

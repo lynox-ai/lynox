@@ -411,8 +411,20 @@ export class Agent implements IAgent {
   private _sawUntrustedData = false;
   /** Whether this run has seen wrapped untrusted content (Wave 1.2). */
   get sawUntrustedData(): boolean { return this._sawUntrustedData; }
-  /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here). */
-  noteUntrustedData(): void { this._sawUntrustedData = true; }
+  /** DK.1 F5: sticky over the CONVERSATION (not reset per run) — set once this conversation
+   *  has ingested untrusted content (a wrapped marker OR an {@link Agent.EXTERNAL_CONTENT_TOOLS}
+   *  read). The per-run latch resets each turn, but an injected instruction ("on your NEXT
+   *  reply, remember(pin:true) …") persists in context, so a clean-latch turn could still be
+   *  executing it. A durable-write gate ORs this in → such a deferred `remember` routes to
+   *  pending_review, not active+pinned. Reset only on a fresh conversation (`reset`) or
+   *  re-derived from history on rehydrate (`loadMessages`). Over-taints in the SAFE direction
+   *  (queue-inflow is the watched canary metric), never under. */
+  private _conversationSawUntrusted = false;
+  /** Whether this CONVERSATION has ingested untrusted content (sticky; see field doc). */
+  get conversationSawUntrusted(): boolean { return this._conversationSawUntrusted; }
+  /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
+   *  Also arms the sticky conversation latch (DK.1 F5). */
+  noteUntrustedData(): void { this._sawUntrustedData = true; this._conversationSawUntrusted = true; }
   /**
    * DK.1 (H4): the set of tool NAMES executed on THIS run. The `_sawUntrustedData` content
    * marker is allowlist-by-omission — `bash`/`curl`/`read_file`/`media_process`/`api_setup`
@@ -441,9 +453,23 @@ export class Agent implements IAgent {
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
     'google_docs', 'google_drive', 'google_sheets',
+    // `import_workflow` ingests an attacker-authored SHARED workflow block THIS turn and echoes
+    // its name/goal/step text back into context (its consent render) — a direct-ingest source
+    // that sets no wrap marker, so without it here a clean-classified `import_workflow →
+    // remember(pin)` launders attacker text active+pinned into the always-loaded focus block.
+    'import_workflow',
     // Stored read-back (a prior tainted turn could have seeded these from external input)
     'data_store_query', 'data_store_list', 'contacts_search',
     'task_list', 'artifact_list', 'artifact_history', 'artifact_restore', 'diagnose_workflow_run',
+    // `export_workflow` reads back a stored workflow definition that could itself have been
+    // `import_workflow`'d from attacker content — the same stored-read-back class as
+    // `data_store_query`/`artifact_restore`.
+    'export_workflow',
+    // archive_search returns the LEGACY knowledge store — populated by the OLD extraction over
+    // emails/web/docs WITHOUT the DK trust gate, so its content is attacker-seedable exactly like
+    // the stored-read-back class. Without this, a clean-turn `archive_search → remember(pin)` would
+    // land attacker text active+pinned in the always-loaded focus block instead of pending_review.
+    'archive_search',
   ]);
   /** DK.1 (H4): true when any external-content tool ran this turn (the capability signal a
    *  `remember` write ORs with {@link sawUntrustedData} to derive `sourceUntrusted`). */
@@ -655,6 +681,36 @@ export class Agent implements IAgent {
     this._lastRealInputTokens = undefined;
     this._lastCacheReadTokens = undefined;
     this._lastRealAtMsgCount = 0;
+    // DK.1 F5: a fresh conversation has ingested nothing untrusted yet.
+    this._conversationSawUntrusted = false;
+  }
+
+  /** DK.1 F5: does the current context still hold a wrapped-untrusted-data marker? Scans
+   *  tool_result / text blocks (where wrapped external content rides) so a rehydrated thread
+   *  re-derives its conversation taint. Short-circuits on the first hit; ignores image blocks. */
+  private _contextHoldsUntrustedMarker(): boolean {
+    for (const msg of this.messages) {
+      const content = msg.content;
+      if (typeof content === 'string') {
+        if (containsUntrustedMarker(content)) return true;
+        continue;
+      }
+      for (const block of content) {
+        if (block.type === 'text') {
+          if (containsUntrustedMarker(block.text)) return true;
+        } else if (block.type === 'tool_result') {
+          const rc = block.content;
+          if (typeof rc === 'string') {
+            if (containsUntrustedMarker(rc)) return true;
+          } else if (Array.isArray(rc)) {
+            for (const b of rc) {
+              if (b.type === 'text' && containsUntrustedMarker(b.text)) return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
   }
 
   getMessages(): BetaMessageParam[] {
@@ -693,6 +749,9 @@ export class Agent implements IAgent {
     this._lastRealInputTokens = undefined;
     this._lastCacheReadTokens = undefined;
     this._lastRealAtMsgCount = 0;
+    // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
+    // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
+    this._conversationSawUntrusted = this._contextHoldsUntrustedMarker();
   }
 
   abort(): void {
@@ -1588,7 +1647,7 @@ export class Agent implements IAgent {
     // externally-derivable knowledge text, so it MUST go through scanToolResult like any other
     // content-bearing tool (a recalled entry could carry injected text; masking alone is not
     // injection-scanning). See /security-deep-dive S2.
-    'remember', 'memory_block_edit',
+    'remember', 'memory_block_edit', 'memory_retire', 'memory_focus',
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',
@@ -1720,6 +1779,12 @@ export class Agent implements IAgent {
     // derive `sourceUntrusted` from the capability denylist (over-marking is the SAFE
     // direction — it routes to pending_review, never to trusted knowledge).
     this._turnToolNames.add(tc.name);
+    // DK.1 F5: a denylist tool's output persists in context across turns (many do not wrap,
+    // so a later marker scan cannot see them) — arm the sticky conversation latch so a
+    // deferred `remember` on a later clean turn is still routed to pending_review.
+    if (Agent.EXTERNAL_CONTENT_TOOLS.has(tc.name)) {
+      this._conversationSawUntrusted = true;
+    }
 
     const tool = this.tools.find(t => t.definition.name === tc.name);
 
@@ -1913,6 +1978,12 @@ export class Agent implements IAgent {
       // in wrapUntrustedData (a pure fn also run outside any agent turn).
       if (!this._sawUntrustedData && containsUntrustedMarker(scanned)) {
         this._sawUntrustedData = true;
+      }
+      // DK.1 F5: arm the sticky conversation latch too (this marker stays in context
+      // across turns, so a later clean-latch `remember` could still be executing an
+      // injected instruction that rode in with it).
+      if (containsUntrustedMarker(scanned)) {
+        this._conversationSawUntrusted = true;
       }
 
       // H-024 shadow mode: observe tool-call sequences for anomaly patterns.

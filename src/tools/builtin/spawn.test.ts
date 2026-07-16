@@ -24,6 +24,8 @@ interface MockedAgentShape {
   promptUser?: unknown;
   promptSecret?: unknown;
   promptTabs?: unknown;
+  // F5/S8: spawn seeds the child's sticky taint from a tainted parent.
+  noteUntrustedData: ReturnType<typeof vi.fn>;
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
 }
 
@@ -48,6 +50,7 @@ vi.mock('../../core/agent.js', () => ({
     this.promptUser = config.promptUser;
     this.promptSecret = config.promptSecret;
     this.promptTabs = config.promptTabs;
+    this.noteUntrustedData = vi.fn();
     this.getCostSnapshot = () => mockCostSnapshot;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
@@ -442,6 +445,26 @@ describe('spawn_agent tool', () => {
     expect(toolNames).not.toContain('write_file');
     expect(toolNames).not.toContain('bash');
     expect(toolNames).not.toContain('spawn_agent');
+  });
+
+  // === F5/S8: spawn seeds the child's sticky taint from a tainted parent ===
+
+  it('F5/S8: a tainted parent seeds the spawned child\'s untrusted taint', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    // Parent read untrusted content earlier (sticky conversation latch set) — an injected
+    // "spawn a child that remembers X" must not launder through the child's clean per-run latch.
+    const agent = makeAgent({ conversationSawUntrusted: true } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as MockedAgentShape;
+    expect(child.noteUntrustedData).toHaveBeenCalled();
+  });
+
+  it('F5/S8: a clean parent does NOT taint the spawned child', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const agent = makeAgent(); // no taint signals
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as MockedAgentShape;
+    expect(child.noteUntrustedData).not.toHaveBeenCalled();
   });
 
   it('explicit spec fields override role defaults', async () => {

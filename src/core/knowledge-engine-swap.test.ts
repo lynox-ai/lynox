@@ -12,7 +12,7 @@ import { reloadConfig } from './config.js';
 describe('DK.1 engine tool swap', () => {
   const tmpDirs: string[] = [];
   const LEGACY = ['memory_store', 'memory_recall', 'memory_delete', 'memory_update', 'memory_list', 'memory_promote'];
-  const DURABLE = ['remember', 'recall', 'memory_block_edit'];
+  const DURABLE = ['remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search'];
 
   async function initEngine(durable: boolean): Promise<Engine> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-swap-'));
