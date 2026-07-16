@@ -444,6 +444,11 @@ export class Agent implements IAgent {
     // Stored read-back (a prior tainted turn could have seeded these from external input)
     'data_store_query', 'data_store_list', 'contacts_search',
     'task_list', 'artifact_list', 'artifact_history', 'artifact_restore', 'diagnose_workflow_run',
+    // archive_search returns the LEGACY knowledge store — populated by the OLD extraction over
+    // emails/web/docs WITHOUT the DK trust gate, so its content is attacker-seedable exactly like
+    // the stored-read-back class. Without this, a clean-turn `archive_search → remember(pin)` would
+    // land attacker text active+pinned in the always-loaded focus block instead of pending_review.
+    'archive_search',
   ]);
   /** DK.1 (H4): true when any external-content tool ran this turn (the capability signal a
    *  `remember` write ORs with {@link sawUntrustedData} to derive `sourceUntrusted`). */
@@ -1588,7 +1593,7 @@ export class Agent implements IAgent {
     // externally-derivable knowledge text, so it MUST go through scanToolResult like any other
     // content-bearing tool (a recalled entry could carry injected text; masking alone is not
     // injection-scanning). See /security-deep-dive S2.
-    'remember', 'memory_block_edit',
+    'remember', 'memory_block_edit', 'memory_retire', 'memory_focus',
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',

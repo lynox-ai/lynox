@@ -92,7 +92,7 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
 // never carries both. The guard must measure the MAX real per-turn prefix, which is the LEGACY
 // set (larger than the 3 DK.1 tools) — so exclude the DK.1 tools here, otherwise the sum
 // double-counts a set that is never on the wire alongside the legacy one.
-const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit']);
+const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search']);
 
 /** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
  *  swap tools — see above; they replace the legacy set at runtime, never co-exist with it). */

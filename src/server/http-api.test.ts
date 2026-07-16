@@ -165,6 +165,9 @@ vi.mock('../core/engine.js', () => ({
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
     this.getSubjectStore = vi.fn().mockReturnValue(null);
+    // getKnowledgeStore is read by GET /api/config (has_durable_memory, DK.2) +
+    // the /api/knowledge/queue routes (503 when null = flag off).
+    this.getKnowledgeStore = vi.fn().mockReturnValue(null);
     this.getSubjectFootprint = vi.fn().mockReturnValue(null);
     // The saved-workflow run path now flows through the budget/credit
     // lifecycle (runGuardedSavedWorkflow), which reads these off the engine.

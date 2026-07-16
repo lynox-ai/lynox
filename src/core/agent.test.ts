@@ -3016,6 +3016,22 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawExternalContentTool).toBe(true);
   });
 
+  it('sets sawExternalContentTool when archive_search runs (DK.2 legacy-archive read-back)', async () => {
+    // Regression guard (/security-deep-dive S2/S8, DK.2): archive_search surfaces the LEGACY
+    // knowledge store — populated by the old extraction over emails/web/docs WITHOUT the DK
+    // trust gate — so it is attacker-seedable exactly like the stored-read-back class. If it
+    // drops off EXTERNAL_CONTENT_TOOLS, a clean-turn `archive_search → remember(pin)` lands
+    // attacker text active+pinned in the always-loaded focus block instead of pending_review.
+    const arch = makeTool('archive_search', vi.fn().mockResolvedValue('- legacy: ACME pays annually [archive]'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'archive_search', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [arch] });
+    expect(agent.sawExternalContentTool).toBe(false);
+    await agent.send('search the archive for ACME');
+    expect(agent.sawExternalContentTool).toBe(true);
+  });
+
   it('leaves sawExternalContentTool false for a non-external tool', async () => {
     const benign = makeTool('task_create', vi.fn().mockResolvedValue('task created'));
     mockProcess

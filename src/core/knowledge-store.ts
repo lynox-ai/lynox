@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
-import { deriveProvenanceTier, provenanceRank } from './provenance.js';
-import { maskSecretPatterns } from './secret-store.js';
+import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
+import { maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import type { SecretStoreLike } from '../types/security.js';
 import {
@@ -20,6 +20,16 @@ import {
  *  write against a pathological / injected multi-KB `remember`. Long material belongs in a
  *  document / data_store. Enforced at the tool (friendly reject) AND the store (backstop). */
 export const MAX_KNOWLEDGE_ENTRY_CHARS = 8000;
+
+/** Union-coverage bar for write-path dedup: skip a new active write when ≥ this fraction of its
+ *  tokens are already covered by existing active entries (same subject or same run). 0.7 catches
+ *  restatements, combinations (whose only uncovered tokens are framing words like "operator has
+ *  two clients"), and corrections, while leaving detail-adding facts (measured ~0.25 coverage)
+ *  and genuinely-different facts (~0.3) well below the bar. The 0.7-0.8 band holds only combined
+ *  restatements (the measured junk) and "same fact + a tiny extra detail" — erring toward merging
+ *  is correct for the over-capture problem this fixes, and the rare small-detail loss is
+ *  human-fixable via the review/edit flow. */
+export const DEDUP_COVERAGE_THRESHOLD = 0.7;
 
 /**
  * KnowledgeStore — the Durable Knowledge Substrate (DK.1).
@@ -52,12 +62,25 @@ export const MAX_KNOWLEDGE_ENTRY_CHARS = 8000;
 export class KnowledgeStore {
   private readonly db: Database.Database;
 
+  /**
+   * DK.2 `memory_focus`: a session-scoped subject override for the derived
+   * focus block — in-memory only, no DB write; dies with the process. The store
+   * is engine-scoped (single-tenant engine, one interactive session), which is
+   * the same scope the toolContext itself has. `renderBlocks` uses it as the
+   * default when the caller passes no explicit override.
+   */
+  private _focusOverrideSubjectId: string | null = null;
+
   constructor(
     private readonly engine: EngineDb,
     private readonly subjects: SubjectStore,
     private readonly secretStore: SecretStoreLike | null = null,
   ) {
     this.db = engine.getDb();
+  }
+
+  setFocusOverride(subjectId: string | null): void {
+    this._focusOverrideSubjectId = subjectId;
   }
 
   // ── Tokenizer (H3: Unicode-aware; NOT tokeniseForSupersede's ASCII splitter) ──
@@ -114,6 +137,31 @@ export class KnowledgeStore {
       }
     }
 
+    // A `subject`-null active write that clearly concerns ONE known subject (its name/alias is
+    // mentioned in the text, and that subject already has active entries) is linked to it. The
+    // model frequently restates a subjectful fact a second time WITHOUT the subject ("client
+    // Ada runs AlphaClinic" after "Ada Fischer: businesses AlphaClinic, BetaStore"); resolving
+    // the subject from the text both improves attribution AND lets the dedup below catch the
+    // restatement (a cross-turn, subject-null duplicate that neither the subject nor the run
+    // clause would otherwise reach). Conservative: only when EXACTLY ONE subject is mentioned.
+    if (status === 'active' && !subjectId) {
+      const mentioned = this._deriveFocusSubjects(params.text, null, null);
+      if (mentioned.length === 1) subjectId = mentioned[0]!;
+    }
+
+    // Structural write-path dedup (only for ACTIVE-landing writes). The model, despite the
+    // prompt, restates facts it already recorded this turn (a combined "operator has clients A
+    // and B" after separate A/B entries) and writes both sides of a same-turn correction. Prompt
+    // words did not fix it (measured across prompt v4-v6); this is the structural fix. Only ACTIVE
+    // rows are candidates — an untrusted (pending) write is never in the set, so an injected write
+    // can neither be a dedup target nor block a later legitimate write.
+    if (status === 'active') {
+      const dup = this._findActiveDuplicate(params.text, subjectId, params.sourceRunId);
+      if (dup) {
+        return { id: dup.id, status: 'active', tier: dup.source_type as ProvenanceKind, subjectId: dup.subject_id, pinned: dup.pinned === 1, deduped: true };
+      }
+    }
+
     // H6: pin is a store invariant. Only an active, non-external_unverified row may pin —
     // enforced here AND by the v9 CHECK (defense in depth). An injected `pin:true` on an
     // untrusted turn is silently downgraded to unpinned (the write still lands, in the queue).
@@ -142,6 +190,41 @@ export class KnowledgeStore {
     );
 
     return { id, status, tier, subjectId, pinned: pinned === 1 };
+  }
+
+  /**
+   * Find an existing ACTIVE entry that the new text merely restates. Criterion = UNION coverage:
+   * skip only when (nearly) every token of the NEW text is already covered by the union of
+   * candidate entries. This catches an exact duplicate, a combined restatement of two facts
+   * already recorded (a superset of one, its remainder covered by the other), and both sides of a
+   * same-turn correction — WITHOUT deduping a genuine fact that ADDS detail (its new tokens are
+   * not covered → coverage falls below the bar). Candidates are scoped to the same subject (a
+   * cross-turn duplicate) OR the same run (a same-turn restatement, incl. a `subject`-null combined
+   * one). Returns the single most-overlapping row (the "already recorded" anchor), or null.
+   */
+  private _findActiveDuplicate(text: string, subjectId: string | null, sourceRunId: string | undefined): KnowledgeRow | null {
+    const newTokens = new Set(KnowledgeStore.tokenize(text));
+    if (newTokens.size < 2) return null; // too short to judge a duplicate
+    const clauses: string[] = [];
+    const args: string[] = [];
+    if (subjectId) { clauses.push('subject_id = ?'); args.push(subjectId); }
+    if (sourceRunId) { clauses.push('source_run_id = ?'); args.push(sourceRunId); }
+    if (clauses.length === 0) return null;
+    const rows = this.db.prepare(
+      `SELECT * FROM knowledge_entries WHERE status = 'active' AND (${clauses.join(' OR ')}) ORDER BY created_at DESC LIMIT 50`,
+    ).all(...args) as KnowledgeRow[];
+
+    const covered = new Set<string>();
+    let anchor: KnowledgeRow | null = null;
+    let anchorShared = 0;
+    for (const row of rows) {
+      let sharedHere = 0;
+      for (const t of KnowledgeStore.tokenize(this.engine.dec(row.text))) {
+        if (newTokens.has(t)) { covered.add(t); sharedHere += 1; }
+      }
+      if (sharedHere > anchorShared) { anchorShared = sharedHere; anchor = row; }
+    }
+    return covered.size / newTokens.size >= DEDUP_COVERAGE_THRESHOLD ? anchor : null;
   }
 
   // ── Recall (D-4: deterministic subject resolution + token-overlap rank) ──
@@ -208,7 +291,7 @@ export class KnowledgeStore {
       sections.push(`## Operating playbook\n${playbook.content.trim()}`);
     }
 
-    const focus = this._renderFocus(params.turnText, params.threadAnchorSubjectId ?? null, params.focusOverrideSubjectId ?? null);
+    const focus = this._renderFocus(params.turnText, params.threadAnchorSubjectId ?? null, params.focusOverrideSubjectId ?? this._focusOverrideSubjectId);
     if (focus) sections.push(focus);
 
     if (sections.length === 0) return '';
@@ -281,6 +364,123 @@ export class KnowledgeStore {
   pendingCount(): number {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM knowledge_entries WHERE status = 'pending_review'").get() as { n: number };
     return row.n;
+  }
+
+  /** The review queue (DK.2 UI): queued entries oldest-first, decrypted. */
+  listPending(limit = 100): KnowledgeEntry[] {
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' ORDER BY created_at ASC LIMIT ?",
+    ).all(capped) as KnowledgeRow[];
+    return rows.map(r => this._rowToEntry(r));
+  }
+
+  /**
+   * Resolve a queued entry (DK.2 review). Approval is the HUMAN trust event:
+   * status → `active`, tier → `user_asserted` (the ui/user channel —
+   * `provenance.ts` rule 2), and the deliberate subject link runs NOW via
+   * `findOrCreate` from the stored `subject_hint` (pending-entry hygiene: a
+   * rejected entry never mints a subject). `edit_approve` replaces the text
+   * with the reviewer's wording first. Pin is NEVER inherited through approval
+   * — H6 stays a deliberate post-approval act. Rejection keeps the row (audit
+   * trail: `reviewed_at` + `review_action`), it never deletes.
+   * Returns the updated entry, or null when the id is not a queued entry.
+   */
+  reviewEntry(id: string, action: 'approve' | 'edit_approve' | 'reject', editedText?: string): KnowledgeEntry | null {
+    const row = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE id = ? AND status = 'pending_review'",
+    ).get(id) as KnowledgeRow | undefined;
+    if (!row) return null;
+
+    if (action === 'reject') {
+      this.db.prepare(`
+        UPDATE knowledge_entries
+        SET status = 'rejected', reviewed_at = datetime('now'), review_action = 'reject', updated_at = datetime('now')
+        WHERE id = ?
+      `).run(id);
+      return this.getEntry(id);
+    }
+
+    const text = action === 'edit_approve' ? (editedText ?? '').trim() : this.engine.dec(row.text);
+    if (!text) throw new BlockEditError('the entry to approve has no text.');
+    if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
+      throw new Error(`edited text is ${text.length} chars, over the ${MAX_KNOWLEDGE_ENTRY_CHARS}-char store limit.`);
+    }
+    // Secret-shape scan at the promotion choke point — mirrors `remember`'s write-path guard
+    // (matchesSecretPattern + containsSecret). Approval makes the text agent-readable via
+    // `recall`; the `remember` scan can miss a value that became a vault secret AFTER queueing,
+    // and `edit_approve` introduces brand-new reviewer text. Reject, never store a credential.
+    if (matchesSecretPattern(text) || this.secretStore?.containsSecret(text) === true) {
+      throw new BlockEditError('This entry looks like it contains a secret or credential and cannot be approved into memory. Store secrets in the vault, not in a memory entry.');
+    }
+
+    let subjectId: string | null = row.subject_id;
+    const hint = row.subject_hint?.trim();
+    if (!subjectId && hint) {
+      subjectId = this.subjects.findOrCreate({ kind: 'organization', name: hint }).id;
+    }
+
+    // Only rewrite the ciphertext when the reviewer actually EDITED the text — a plain approve
+    // leaves it unchanged, and re-encrypting produces a fresh (IV-randomised) ciphertext for no
+    // reason. edit_approve → write the new text; approve → keep the stored ciphertext.
+    if (action === 'edit_approve') {
+      this.db.prepare(`
+        UPDATE knowledge_entries
+        SET status = 'active', source_type = 'user_asserted', text = ?, subject_id = ?, subject_hint = NULL,
+            reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(this.engine.enc(text), subjectId, action, id);
+      return this.getEntry(id);
+    }
+    this.db.prepare(`
+      UPDATE knowledge_entries
+      SET status = 'active', source_type = 'user_asserted', subject_id = ?, subject_hint = NULL,
+          reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(subjectId, action, id);
+    return this.getEntry(id);
+  }
+
+  /**
+   * Resolve an ACTIVE entry by full id or a unique hex-id prefix (≥8 chars —
+   * what `recall` shows the agent). Returns null on no match; throws on an
+   * AMBIGUOUS prefix so the caller asks for a longer one instead of retiring
+   * the wrong fact.
+   */
+  findActiveByIdPrefix(idOrPrefix: string): KnowledgeEntry | null {
+    const p = idOrPrefix.trim().toLowerCase();
+    if (!/^[0-9a-f-]{8,36}$/.test(p)) return null;
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'active' AND id LIKE ? LIMIT 2",
+    ).all(`${p}%`) as KnowledgeRow[];
+    if (rows.length === 0) return null;
+    if (rows.length > 1) throw new Error(`id prefix "${p}" is ambiguous — pass more characters.`);
+    return this._rowToEntry(rows[0]!);
+  }
+
+  /**
+   * Retire an active entry (DK.2 `memory_retire`): status → `superseded`,
+   * optionally pointing at the successor entry. Gated by `canSupersede`
+   * (`provenance.ts`): the retiring actor's tier must be equal-or-higher than
+   * the entry's — an agent (acting at `agent_inferred`) can retire its own
+   * inferences and unverified material but NEVER a `user_asserted` or
+   * `tool_verified` fact; those need the human (the UI / a user-channel act).
+   * Returns the retired entry, or throws with the refusal reason.
+   */
+  retireEntry(id: string, retiringTier: ProvenanceKind, supersededBy?: string): KnowledgeEntry {
+    const entry = this.findActiveByIdPrefix(id);
+    if (!entry) throw new Error('No active entry with this id.');
+    if (!canSupersede(retiringTier, entry.sourceType)) {
+      throw new Error(
+        `Refused: this fact is ${entry.sourceType} and outranks the ${retiringTier} channel. Ask the user to retire or correct it.`,
+      );
+    }
+    this.db.prepare(`
+      UPDATE knowledge_entries
+      SET status = 'superseded', superseded_by = ?, pinned = 0, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(supersededBy ?? null, entry.id);
+    return this.getEntry(entry.id)!;
   }
 
   // ── Focus derivation (H2-gated) ──
@@ -493,6 +693,9 @@ export interface KnowledgeWriteResult {
   tier: ProvenanceKind;
   subjectId: string | null;
   pinned: boolean;
+  /** True when the write was a near-duplicate of an existing active entry and was NOT inserted;
+   *  `id` then points at that existing entry. */
+  deduped?: boolean;
 }
 
 /** The raw v9 `knowledge_entries` row (text still enc()'d). */

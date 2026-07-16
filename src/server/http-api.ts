@@ -3390,6 +3390,51 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { updated });
     }));
 
+    // ── Knowledge review queue (DK.2) — the pending_review surface ──
+    // Present ONLY when `durable_memory_enabled` (getKnowledgeStore() returns null
+    // otherwise → requireService 503). Single-tenant, user scope: the queue is the
+    // tenant's OWN untrusted-turn captures awaiting the human trust event. The
+    // reviewer sees the RAW text deliberately (a human must judge injected content
+    // on its actual wording — masking here would hide exactly what needs judging).
+    this.addStatic('user', 'GET /api/knowledge/queue', async (req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 100, 500));
+      jsonResponse(res, 200, { entries: store.listPending(limit), pendingCount: store.pendingCount() });
+    });
+
+    // Cheap badge poll (the Intelligence-Hub tab pill).
+    this.addStatic('user', 'GET /api/knowledge/queue/count', async (_req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      jsonResponse(res, 200, { pendingCount: store.pendingCount() });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/queue/:id/review', async (_req, res, params, body) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      const b = body as Record<string, unknown> | null;
+      const action = typeof b?.['action'] === 'string' ? b['action'] : '';
+      if (action !== 'approve' && action !== 'edit_approve' && action !== 'reject') {
+        errorResponse(res, 400, "action must be 'approve', 'edit_approve' or 'reject'"); return;
+      }
+      const editedText = typeof b?.['text'] === 'string' ? b['text'] : undefined;
+      if (action === 'edit_approve' && !editedText?.trim()) { errorResponse(res, 400, 'edit_approve needs text'); return; }
+      // Approval promotes to the agent-readable active set — the same secret guard
+      // as every other durable write surface (mirror of the memory PUT above).
+      if (editedText && engine.getSecretStore()?.containsSecret(editedText)) {
+        errorResponse(res, 400, 'Cannot store content containing secret values. Remove secrets and try again.'); return;
+      }
+      try {
+        const entry = store.reviewEntry(params['id']!, action, editedText);
+        if (!entry) { errorResponse(res, 404, 'No queued entry with this id'); return; }
+        jsonResponse(res, 200, { entry });
+      } catch (err) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Review failed');
+      }
+    }));
+
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
     // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint
     // return null otherwise → requireService 503). Single-tenant, user scope; every
@@ -3732,6 +3777,9 @@ export class LynoxHTTPApi {
         // R2b subject-graph surface: true iff subject_graph_enabled wired the store
         // (fleet OFF today) → the Web UI shows/hides the Subjects tab on this probe.
         has_subject_graph: engine.getSubjectStore() !== null,
+        // DK.2 durable-memory surface: true iff durable_memory_enabled wired the
+        // KnowledgeStore → the Web UI shows/hides the review-queue tab on this probe.
+        has_durable_memory: engine.getKnowledgeStore() !== null,
         // Hard-limits exposure: full numbers for self-host/BYOK,
         // opaque tier-tag for managed (prevents DoS-knob disclosure).
         hard_limits: isManagedTier

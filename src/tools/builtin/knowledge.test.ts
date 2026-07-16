@@ -6,7 +6,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { SubjectStore } from '../../core/subject-store.js';
 import { KnowledgeStore } from '../../core/knowledge-store.js';
 import { createToolContext } from '../../core/tool-context.js';
-import { rememberTool, recallTool, memoryBlockEditTool } from './knowledge.js';
+import { rememberTool, recallTool, memoryBlockEditTool, memoryRetireTool, memoryFocusTool, archiveSearchTool } from './knowledge.js';
 import type { IAgent } from '../../types/index.js';
 
 interface MockOpts {
@@ -127,9 +127,9 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
 
   it('memory_block_edit applies on a trusted turn after confirmation', async () => {
     const { agent, ks } = make({ promptAnswer: 'Apply' });
-    const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Firm: brandfusion' }, agent);
+    const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Firm: Acme Agency' }, agent);
     expect(out).toContain('Updated');
-    expect(ks.getBlock('profile')?.content).toContain('brandfusion');
+    expect(ks.getBlock('profile')?.content).toContain('Acme Agency');
   });
 
   it('memory_block_edit cancels when the user declines', async () => {
@@ -162,5 +162,114 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     const out = await rememberTool.handler({ text: 'x'.repeat(8001) }, agent);
     expect(out).toMatch(/too long/i);
     expect(ks.pendingCount()).toBe(0);
+  });
+});
+
+describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
+  const tmpDirs: string[] = [];
+
+  function make(opts: MockOpts = {}): { agent: IAgent; ks: KnowledgeStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-k2-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
+    const ctx = createToolContext({} as never);
+    ctx.knowledgeStore = ks;
+    ctx.subjectStore = subjects;
+    const agent = {
+      toolContext: ctx,
+      sawUntrustedData: opts.sawUntrustedData ?? false,
+      sawExternalContentTool: opts.sawExternalContentTool ?? false,
+      autonomy: opts.autonomy ?? 'supervised',
+      promptUser: opts.promptAnswer === null ? undefined : async () => opts.promptAnswer ?? 'Retire',
+    } as unknown as IAgent;
+    return { agent, ks };
+  }
+
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function activeFact(ks: KnowledgeStore, text = 'ACME uses the old portal'): string {
+    return ks.write({ text, subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false }).id;
+  }
+
+  it('memory_retire REFUSES on an untrusted turn (injected "forget X" is blocked)', async () => {
+    const { agent, ks } = make({ sawExternalContentTool: true });
+    const id = activeFact(ks);
+    const out = await memoryRetireTool.handler({ id: id.slice(0, 8) }, agent);
+    expect(out).toMatch(/refused/i);
+    expect(ks.getEntry(id)?.status).toBe('active');
+  });
+
+  it('memory_retire REFUSES in autonomous mode', async () => {
+    const { agent, ks } = make({ autonomy: 'autonomous' });
+    const id = activeFact(ks);
+    const out = await memoryRetireTool.handler({ id }, agent);
+    expect(out).toMatch(/refused|autonomous/i);
+  });
+
+  it('memory_retire retires after confirmation via the recall id prefix', async () => {
+    const { agent, ks } = make({ promptAnswer: 'Retire' });
+    const id = activeFact(ks);
+    const out = await memoryRetireTool.handler({ id: id.slice(0, 8), reason: 'portal migrated' }, agent);
+    expect(out).toMatch(/retired/i);
+    expect(ks.getEntry(id)?.status).toBe('superseded');
+  });
+
+  it('memory_retire surfaces the canSupersede refusal for user_asserted facts', async () => {
+    const { agent, ks } = make({ promptAnswer: 'Retire' });
+    const id = ks.write({ text: 'User-confirmed terms', sourceChannel: 'ui', sourceUntrusted: false }).id;
+    const out = await memoryRetireTool.handler({ id }, agent);
+    expect(out).toMatch(/user_asserted|Refused/);
+    expect(ks.getEntry(id)?.status).toBe('active');
+  });
+
+  it('memory_retire cancels cleanly', async () => {
+    const { agent, ks } = make({ promptAnswer: 'Cancel' });
+    const id = activeFact(ks);
+    const out = await memoryRetireTool.handler({ id }, agent);
+    expect(out).toMatch(/cancel/i);
+    expect(ks.getEntry(id)?.status).toBe('active');
+  });
+
+  it('recall output carries the [id] prefix handle memory_retire consumes', async () => {
+    const { agent, ks } = make();
+    const id = activeFact(ks);
+    const out = await recallTool.handler({ query: 'old portal', subject: 'ACME' }, agent);
+    expect(out).toContain(`[${id.slice(0, 8)}]`);
+  });
+
+  it('memory_focus sets + clears the session focus override', async () => {
+    const { agent, ks } = make();
+    activeFact(ks); // mints ACME with an active entry (H2 gate)
+    const set = await memoryFocusTool.handler({ subject: 'ACME' }, agent);
+    expect(set).toMatch(/focus set/i);
+    expect(ks.renderBlocks({ turnText: 'unrelated' })).toContain('ACME');
+    const cleared = await memoryFocusTool.handler({}, agent);
+    expect(cleared).toMatch(/cleared/i);
+  });
+
+  it('memory_focus refuses an unknown subject by name', async () => {
+    const { agent } = make();
+    const out = await memoryFocusTool.handler({ subject: 'Nonexistent GmbH' }, agent);
+    expect(out).toMatch(/no known subject/i);
+  });
+
+  it('archive_search masks secret-shaped archive content (S1 discipline)', async () => {
+    const { agent } = make();
+    (agent.toolContext as { knowledgeLayer: unknown }).knowledgeLayer = {
+      retrieve: async () => ({ memories: [{ text: 'legacy token Bearer abcdefghij1234567890abcd' }] }),
+    };
+    const out = await archiveSearchTool.handler({ query: 'token' }, agent);
+    expect(out).not.toContain('abcdefghij1234567890abcd');
+    expect(out).toContain('[archive]');
+  });
+
+  it('archive_search degrades cleanly without a knowledge layer', async () => {
+    const { agent } = make();
+    const out = await archiveSearchTool.handler({ query: 'anything' }, agent);
+    expect(out).toMatch(/not available/i);
   });
 });

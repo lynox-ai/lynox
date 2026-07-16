@@ -9,6 +9,7 @@
 	import MemoryInsightsView from './MemoryInsightsView.svelte';
 	import MemoryView from './MemoryView.svelte';
 	import SubjectsView from './SubjectsView.svelte';
+	import KnowledgeQueueView from './KnowledgeQueueView.svelte';
 	import { scrollFade } from '../utils/scroll-fade.js';
 
 	// PRD-IA-V2 P3-PR-H: IntelligenceHub shrinks 5 → 4 top-tabs.
@@ -17,26 +18,42 @@
 	// `?tab=graph&sub=insights` by the route's `+page.ts` for bookmark survival.
 	// R2b: a `subjects` tab appears ONLY when the engine reports
 	// capabilities.has_subject_graph (subject_graph_enabled — fleet OFF today).
-	type Tab = 'wissen' | 'graph' | 'contacts' | 'data' | 'subjects';
+	type Tab = 'wissen' | 'graph' | 'contacts' | 'data' | 'subjects' | 'queue';
 	type GraphSub = 'overview' | 'insights';
 
 	let hasSubjectGraph = $state(false);
+	// DK.2: the review-queue tab appears ONLY when durable_memory_enabled wired
+	// the KnowledgeStore (capabilities.has_durable_memory — fleet OFF today).
+	let hasDurableMemory = $state(false);
+	let queueCount = $state(0);
 
 	$effect(() => {
 		void (async () => {
 			try {
 				const res = await fetch(`${getApiBase()}/config`);
 				if (!res.ok) return;
-				const body = (await res.json()) as { capabilities?: { has_subject_graph?: boolean } };
+				const body = (await res.json()) as { capabilities?: { has_subject_graph?: boolean; has_durable_memory?: boolean } };
 				hasSubjectGraph = body.capabilities?.has_subject_graph === true;
-			} catch { /* leave the tab hidden on probe failure */ }
+				hasDurableMemory = body.capabilities?.has_durable_memory === true;
+				if (hasDurableMemory) void refreshQueueCount();
+			} catch { /* leave the tabs hidden on probe failure */ }
 		})();
 	});
+
+	async function refreshQueueCount(): Promise<void> {
+		try {
+			const res = await fetch(`${getApiBase()}/knowledge/queue/count`);
+			if (!res.ok) return;
+			const body = (await res.json()) as { pendingCount?: number };
+			queueCount = body.pendingCount ?? 0;
+		} catch { /* badge stays at the last known count */ }
+	}
 
 	const tab = $derived<Tab>(((): Tab => {
 		const p = $page.url.searchParams.get('tab');
 		if (p === 'graph' || p === 'contacts' || p === 'data') return p;
 		if (p === 'subjects' && hasSubjectGraph) return 'subjects';
+		if (p === 'queue' && hasDurableMemory) return 'queue';
 		return 'wissen';
 	})());
 
@@ -69,6 +86,7 @@
 		{ id: 'contacts', labelKey: 'hub.intelligence.contacts' },
 		{ id: 'data', labelKey: 'hub.intelligence.data' },
 		...(hasSubjectGraph ? [{ id: 'subjects' as const, labelKey: 'hub.intelligence.subjects' }] : []),
+		...(hasDurableMemory ? [{ id: 'queue' as const, labelKey: 'hub.intelligence.queue' }] : []),
 	]);
 
 	const graphSubTabs: ReadonlyArray<{ id: GraphSub; labelKey: string }> = [
@@ -84,7 +102,7 @@
 				type="button"
 				class="inline-flex items-center justify-center min-h-[44px] sm:min-h-0 shrink-0 whitespace-nowrap px-3 py-1.5 rounded-[var(--radius-sm)] text-xs font-medium transition-colors {tab === t_item.id ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 				onclick={() => setTab(t_item.id)}
-			>{t(t_item.labelKey)}</button>
+			>{t(t_item.labelKey)}{#if t_item.id === 'queue' && queueCount > 0}<span class="ml-1.5 rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{queueCount}</span>{/if}</button>
 		{/each}
 	</div>
 	{#if tab === 'graph'}
@@ -111,6 +129,8 @@
 			<ContactsView />
 		{:else if tab === 'subjects'}
 			<SubjectsView />
+		{:else if tab === 'queue'}
+			<KnowledgeQueueView onCountChange={(n) => { queueCount = n; }} />
 		{:else}
 			<DataStoreView />
 		{/if}
