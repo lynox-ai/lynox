@@ -22,14 +22,24 @@ import {
 export const MAX_KNOWLEDGE_ENTRY_CHARS = 8000;
 
 /** Union-coverage bar for write-path dedup: skip a new active write when ≥ this fraction of its
- *  tokens are already covered by existing active entries (same subject or same run). 0.7 catches
- *  restatements, combinations (whose only uncovered tokens are framing words like "operator has
- *  two clients"), and corrections, while leaving detail-adding facts (measured ~0.25 coverage)
- *  and genuinely-different facts (~0.3) well below the bar. The 0.7-0.8 band holds only combined
- *  restatements (the measured junk) and "same fact + a tiny extra detail" — erring toward merging
- *  is correct for the over-capture problem this fixes, and the rare small-detail loss is
- *  human-fixable via the review/edit flow. */
+ *  CONTENT tokens are already covered by existing active entries (same subject or same run). 0.7
+ *  catches restatements and combinations (whose only uncovered tokens are framing words) while
+ *  leaving detail-adding and genuinely-different facts well below the bar. Coverage is measured
+ *  over content tokens ONLY (see {@link DEDUP_FUNCTION_WORDS}): a VALUE CORRECTION ("X is in
+ *  Winterthur" after "X is located in Zürich") shares the subject + filler words "is/in", which
+ *  would inflate raw-token coverage to 0.75 and silently EAT the correction, leaving the stale
+ *  fact. Over content tokens the new value ("winterthur") is uncovered → coverage 0.5 → the
+ *  correction is written, not dropped. (Superseding the stale entry is the agent's `memory_retire`
+ *  job, user-confirmed; dedup must only ever skip a true restatement, never a value change.) */
 export const DEDUP_COVERAGE_THRESHOLD = 0.7;
+
+/** Short function words that survive `tokenize` (length > 1, not in STOP_WORDS) but carry no
+ *  meaning — they must NOT count toward dedup coverage, or a subject + filler overlap masks a
+ *  changed value as a duplicate. Dedup-local (does not affect recall ranking). */
+const DEDUP_FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  'is', 'in', 'on', 'at', 'to', 'of', 'as', 'by', 'or', 'be', 'an', 'its', 'it',
+  'im', 'am', 'zu', 'an', 'er', 'es',
+]);
 
 /**
  * KnowledgeStore — the Durable Knowledge Substrate (DK.1).
@@ -203,8 +213,12 @@ export class KnowledgeStore {
    * one). Returns the single most-overlapping row (the "already recorded" anchor), or null.
    */
   private _findActiveDuplicate(text: string, subjectId: string | null, sourceRunId: string | undefined): KnowledgeRow | null {
-    const newTokens = new Set(KnowledgeStore.tokenize(text));
-    if (newTokens.size < 2) return null; // too short to judge a duplicate
+    // Coverage is measured over CONTENT tokens only — filler like "is/in/of" would otherwise let a
+    // shared subject + framing mask a changed VALUE (a correction) as a duplicate, silently
+    // dropping the correction and keeping the stale fact (validated bug, 2026-07-17).
+    const contentTokens = (t: string): string[] => KnowledgeStore.tokenize(t).filter(w => !DEDUP_FUNCTION_WORDS.has(w));
+    const newTokens = new Set(contentTokens(text));
+    if (newTokens.size < 2) return null; // too little content to judge a duplicate
     const clauses: string[] = [];
     const args: string[] = [];
     if (subjectId) { clauses.push('subject_id = ?'); args.push(subjectId); }
@@ -219,7 +233,7 @@ export class KnowledgeStore {
     let anchorShared = 0;
     for (const row of rows) {
       let sharedHere = 0;
-      for (const t of KnowledgeStore.tokenize(this.engine.dec(row.text))) {
+      for (const t of contentTokens(this.engine.dec(row.text))) {
         if (newTokens.has(t)) { covered.add(t); sharedHere += 1; }
       }
       if (sharedHere > anchorShared) { anchorShared = sharedHere; anchor = row; }

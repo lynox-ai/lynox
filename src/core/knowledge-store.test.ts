@@ -434,6 +434,20 @@ describe('KnowledgeStore write-path dedup (structural)', () => {
     expect(ks.recall({ query: 'gammapraxis Northville', subjectName: 'gammapraxis' }).length).toBe(2);
   });
 
+  it('does NOT dedup a VALUE CORRECTION that restates only the NEW value (behavioral-walk regression 2026-07-17)', () => {
+    // The bug: "X is in <new place>" shares the subject + filler words "is/in" with
+    // "X is located in <old place>", inflating RAW-token coverage to 0.75 → the correction
+    // was silently deduped, leaving the STALE fact + the agent falsely claiming success.
+    // Content-token coverage (filler excluded) sees the new value uncovered → 0.5 → it writes.
+    const { ks } = make();
+    const first = w(ks, 'gammapraxis is located in Zurich', 'gammapraxis');
+    const correction = w(ks, 'gammapraxis is in Winterthur', 'gammapraxis');
+    expect(correction.deduped).toBeUndefined();       // the correction must LAND, not be eaten
+    expect(correction.id).not.toBe(first.id);
+    // both are recallable now (the agent's user-confirmed memory_retire supersedes the stale one)
+    expect(ks.recall({ query: 'gammapraxis location', subjectName: 'gammapraxis' }).some(e => /winterthur/i.test(e.text))).toBe(true);
+  });
+
   it('does NOT dedup a genuinely different fact about the same subject', () => {
     const { ks } = make();
     w(ks, 'Meridian AG pays by annual invoice', 'Meridian AG');
