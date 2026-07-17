@@ -62,3 +62,42 @@ export function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[
 
 	return { suggestions: suggestions.slice(0, MAX_FOLLOW_UPS), cleanText };
 }
+
+/** Minimal message shape the history strip operates on (a subset of ChatMessage). */
+export interface FollowUpHistoryMessage {
+	role: 'user' | 'assistant';
+	content: string;
+	blocks?: Array<{ type: string; text?: string }>;
+	followUps?: FollowUpSuggestion[];
+}
+
+/**
+ * Re-apply follow-up stripping to a REHYDRATED transcript (thread resume / local snapshot).
+ * The live stream-completion handler strips follow-ups client-side, but the server persists the
+ * agent's RAW output — the `<follow_ups>` / bare-JSON trailer is still in each assistant turn's
+ * `content`. Rendering the server transcript verbatim leaks that raw JSON into the bubble and the
+ * pills never reappear (the engine re-entry bug). This mutates in place: strips the trailer from
+ * EVERY assistant turn, and keeps the parsed suggestions only on the LAST assistant message (pills
+ * are the current "what next", matching the live handler — stale turns get their text cleaned but
+ * no pills).
+ */
+export function stripFollowUpsFromHistory(messages: FollowUpHistoryMessage[]): void {
+	let lastAssistantIdx = -1;
+	for (let i = 0; i < messages.length; i += 1) {
+		if (messages[i]!.role === 'assistant') lastAssistantIdx = i;
+	}
+	messages.forEach((m, i) => {
+		if (m.role !== 'assistant' || !m.content) return;
+		const parsed = parseFollowUps(m.content);
+		if (parsed.suggestions.length === 0) return;
+		m.content = parsed.cleanText;
+		if (m.blocks?.length) {
+			const lastBlock = m.blocks[m.blocks.length - 1];
+			if (lastBlock && lastBlock.type === 'text' && typeof lastBlock.text === 'string') {
+				lastBlock.text = parseFollowUps(lastBlock.text).cleanText;
+			}
+		}
+		// Pills only on the last assistant message; earlier turns keep the cleaned text, no pills.
+		if (i === lastAssistantIdx) m.followUps = parsed.suggestions;
+	});
+}

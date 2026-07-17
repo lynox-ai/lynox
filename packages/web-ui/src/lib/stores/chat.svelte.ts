@@ -3,7 +3,7 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
-import { parseFollowUps, type FollowUpSuggestion } from './follow-ups.js';
+import { parseFollowUps, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -2670,6 +2670,12 @@ export async function resumeThread(threadId: string): Promise<void> {
 					return cm;
 				}),
 			);
+			// Follow-ups are stripped from the DISPLAY at stream-completion (client-side), but the
+			// server persists the agent's RAW output — the `<follow_ups>` / bare-JSON trailer is
+			// still in each assistant turn's content. Re-rendering the server transcript verbatim
+			// leaks the raw `[{"label":…,"task":…}]` into the bubble and the pills never reappear
+			// (the engine re-entry bug). Re-apply the strip on resume; pills land on the last turn.
+			stripFollowUpsFromHistory(serverMessages);
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts
