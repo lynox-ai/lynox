@@ -532,14 +532,11 @@ export const WEB_UI_SYSTEM_PROMPT_SUFFIX = `
 ## Web UI Mode
 
 ### Follow-up suggestions
-At the very end of every response, include a \`<follow_ups>\` block with 2-4 contextual follow-up actions the user might want to take next. Use the user's language for labels.
+As the FINAL action of every response, call the \`suggest_follow_ups\` tool with 2-4 contextual follow-up actions the user might want to take next. This is a terminal action — it ends your turn, so call it only when your reply is otherwise complete. Use the user's language for labels.
 
-Format:
-<follow_ups>[{"label":"Short label","task":"Full task description for the agent"}]</follow_ups>
-
-Rules:
+Each suggestion is { "label": "...", "task": "..." }:
 - Labels: 2-5 words, max 40 characters (these become clickable chips in the UI)
-- Tasks: complete instructions that the agent can execute independently
+- Tasks: complete, self-contained instructions the agent can execute independently
 - Be contextual — suggest actions that make sense given what just happened
-- No filler — if nothing useful comes to mind, output an empty array
-- Always place the block as the very last thing in your response`;
+- If nothing useful comes to mind, call it with an empty \`suggestions\` array (or don't call it)
+- Do NOT write the suggestions as visible text — only the tool call renders them`;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseFollowUps, stripFollowUpsFromHistory, type FollowUpHistoryMessage } from './follow-ups.js';
+import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpHistoryMessage } from './follow-ups.js';
 
 describe('parseFollowUps', () => {
 	it('parses the wrapped <follow_ups> form and strips it from the text', () => {
@@ -67,6 +67,43 @@ describe('parseFollowUps', () => {
 				']</follow_ups>',
 		);
 		expect(r.suggestions.map((s) => s.label)).toEqual(['A', 'C', 'D', 'E']); // A once, capped at 4
+	});
+});
+
+describe('followUpsFromToolInput (suggest_follow_ups tool-call path)', () => {
+	it('extracts and normalizes suggestions from the tool input', () => {
+		const r = followUpsFromToolInput({ suggestions: [{ label: 'BVG', task: 'Recherchiere BVG' }] });
+		expect(r).toEqual([{ label: 'BVG', task: 'Recherchiere BVG' }]);
+	});
+
+	it('applies the SAME rules as the text parser: skip malformed, dedupe by label, cap at 4', () => {
+		const r = followUpsFromToolInput({
+			suggestions: [
+				{ label: 'A', task: 'ta' },
+				{ label: 'A', task: 'dup' }, // dedup by label
+				{ label: '', task: 'empty' }, // blank label skipped
+				{ label: 'B' }, // missing task skipped
+				{ label: 'C', task: 'tc' },
+				{ label: 'D', task: 'td' },
+				{ label: 'E', task: 'te' },
+			],
+		});
+		expect(r.map((s) => s.label)).toEqual(['A', 'C', 'D', 'E']); // A once, capped at 4
+	});
+
+	it('trims the label to 40 characters', () => {
+		const long = 'x'.repeat(60);
+		const r = followUpsFromToolInput({ suggestions: [{ label: long, task: 't' }] });
+		expect(r[0]!.label.length).toBe(40);
+	});
+
+	it('returns [] for any non-conforming input (never throws)', () => {
+		expect(followUpsFromToolInput(null)).toEqual([]);
+		expect(followUpsFromToolInput(undefined)).toEqual([]);
+		expect(followUpsFromToolInput('a string')).toEqual([]);
+		expect(followUpsFromToolInput({})).toEqual([]);
+		expect(followUpsFromToolInput({ suggestions: 'not an array' })).toEqual([]);
+		expect(followUpsFromToolInput({ suggestions: [{ foo: 'bar' }] })).toEqual([]);
 	});
 });
 

@@ -49,6 +49,15 @@ export interface ToolEntry<TInput = unknown> {
     mode: 'data' | 'external';
     check?: (input: TInput) => string | null;
   } | undefined;
+  /**
+   * When true, calling this tool ENDS the agent's turn: after the tool_result
+   * is appended and checkpointed, the loop returns the turn's text instead of
+   * looping back to the model. Use for terminal tools whose whole job is a
+   * final side effect with nothing more to say (e.g. `suggest_follow_ups`,
+   * which emits end-of-turn suggestion chips) — this skips the extra
+   * full-context round-trip a regular tool would force before `end_turn`.
+   */
+  endsTurn?: boolean | undefined;
 }
 
 // === 4.3 Stream Event Union ===

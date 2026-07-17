@@ -58,6 +58,7 @@ vi.mock('./observability.js', () => ({
 
 import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
+import { TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -98,6 +99,17 @@ function toolUseResponse(tools: Array<{ id: string; name: string; input: unknown
       name: t.name,
       input: t.input,
     })),
+    stop_reason: 'tool_use',
+    usage: { input_tokens: 100, output_tokens: 50 },
+  };
+}
+
+function toolUseWithTextResponse(text: string, tools: Array<{ id: string; name: string; input: unknown }>) {
+  return {
+    content: [
+      { type: 'text' as const, text },
+      ...tools.map(t => ({ type: 'tool_use' as const, id: t.id, name: t.name, input: t.input })),
+    ],
     stop_reason: 'tool_use',
     usage: { input_tokens: 100, output_tokens: 50 },
   };
@@ -501,6 +513,91 @@ describe('Agent', () => {
       expect(result).toBe('Done');
       expect(tool.handler).toHaveBeenCalledWith({ x: 1 }, agent);
       expect(mockProcess).toHaveBeenCalledTimes(2);
+    });
+
+    it('endsTurn tool: ends the turn after the tool_result, NO extra model call', async () => {
+      // A terminal tool (e.g. suggest_follow_ups) must short-circuit the loop:
+      // the tool runs, its tool_result is appended, and the turn's text is
+      // returned WITHOUT a second full-context model round-trip.
+      const handler = vi.fn().mockResolvedValue('Presented 2 follow-up suggestions.');
+      const endsTurnTool: ToolEntry = {
+        endsTurn: true,
+        definition: {
+          name: 'suggest_follow_ups',
+          description: 'terminal test tool',
+          input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
+        },
+        handler,
+      };
+      mockProcess.mockResolvedValueOnce(
+        toolUseWithTextResponse('Here is your answer.', [
+          { id: 'tu_1', name: 'suggest_follow_ups', input: { suggestions: [] } },
+        ]),
+      );
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [endsTurnTool] });
+      const result = await agent.send('Question');
+
+      expect(handler).toHaveBeenCalledTimes(1);      // the tool ran
+      expect(result).toBe('Here is your answer.');   // returned THIS turn's text
+      expect(mockProcess).toHaveBeenCalledTimes(1);  // no second model call — the short-circuit
+
+      // The tool_use/tool_result pair is still persisted (valid message sequence),
+      // but WITHOUT the continuation hint (there is no follow-up model turn).
+      const toolResults = agent.getMessages().flatMap(m =>
+        Array.isArray(m.content)
+          ? m.content.filter((b): b is Extract<typeof b, { type: 'tool_result' }> => b.type === 'tool_result')
+          : [],
+      );
+      expect(toolResults).toHaveLength(1);
+      const carrierTexts = agent.getMessages().flatMap(m =>
+        Array.isArray(m.content)
+          ? m.content.filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text').map(b => b.text)
+          : [],
+      );
+      expect(carrierTexts).not.toContain(TOOL_RESULT_CONTINUATION_HINT);
+    });
+
+    it('endsTurn tool: runs memory extraction on the turn text (parity with end_turn)', async () => {
+      const memory = {
+        load: vi.fn(), save: vi.fn(), append: vi.fn(),
+        delete: vi.fn().mockResolvedValue(0), update: vi.fn().mockResolvedValue(false),
+        render: vi.fn().mockReturnValue(''), hasContent: vi.fn().mockReturnValue(false),
+        loadAll: vi.fn(), maybeUpdate: vi.fn(), appendScoped: vi.fn(), loadScoped: vi.fn(),
+        deleteScoped: vi.fn().mockResolvedValue(0), updateScoped: vi.fn().mockResolvedValue(false),
+      };
+      const endsTurnTool: ToolEntry = {
+        endsTurn: true,
+        definition: {
+          name: 'suggest_follow_ups', description: 'terminal test tool',
+          input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
+        },
+        handler: vi.fn().mockResolvedValue('ack'),
+      };
+      mockProcess.mockResolvedValueOnce(
+        toolUseWithTextResponse('The answer is 42', [
+          { id: 'tu_1', name: 'suggest_follow_ups', input: { suggestions: [] } },
+        ]),
+      );
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', memory, tools: [endsTurnTool] });
+      await agent.send('Question');
+
+      // The end_turn path passes the turn text to maybeUpdate; the endsTurn path
+      // must do the same (only the tool-count differs — one tool ran this turn).
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined);
+    });
+
+    it('a non-endsTurn tool still continues the loop (contrast)', async () => {
+      const tool = makeTool('normal_tool');  // no endsTurn flag
+      mockProcess
+        .mockResolvedValueOnce(toolUseWithTextResponse('working', [{ id: 'tu_1', name: 'normal_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      const result = await agent.send('go');
+      expect(result).toBe('Done');
+      expect(mockProcess).toHaveBeenCalledTimes(2);  // continued to a second model call
     });
 
     it('elides a large tool_result byte-identical to an earlier one (append-time dedup)', async () => {

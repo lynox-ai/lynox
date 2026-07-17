@@ -3,7 +3,7 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
-import { parseFollowUps, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -1076,9 +1076,13 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	pendingTabsPrompt = null;
 	retryStatus = null;
 
-	// Parse follow-up suggestions from assistant response
+	// Parse follow-up suggestions from assistant response. FALLBACK only: if the
+	// agent used the suggest_follow_ups tool, the tool_call handler already set
+	// followUps live — the text parse must not run (there is no trailer to strip,
+	// and it must not override the structured pills). Text-form output (legacy or
+	// weak models) still lands here.
 	const lastMsg = messages[assistantIdx];
-	if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content) {
+	if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content && !lastMsg.followUps) {
 		const parsed = parseFollowUps(lastMsg.content);
 		if (parsed.suggestions.length > 0) {
 			lastMsg.followUps = parsed.suggestions;
@@ -1213,6 +1217,15 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'tool_call': {
 			const toolName = String(data['name'] ?? '');
 			const toolInput = data['input'];
+			// suggest_follow_ups is a terminal, INVISIBLE tool: its input IS the
+			// follow-up pills. Populate them directly and render nothing — no tool
+			// card, no context flash, not pushed to toolCalls/blocks. The turn ends
+			// server-side (endsTurn), so no further model output follows.
+			if (toolName === 'suggest_follow_ups') {
+				const fu = followUpsFromToolInput(toolInput);
+				if (fu.length > 0) msg.followUps = fu;
+				break;
+			}
 			msg.toolCalls = msg.toolCalls ?? [];
 			// Dedup: skip if last tool call has same name and is still running
 			const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
@@ -2676,6 +2689,21 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// leaks the raw `[{"label":…,"task":…}]` into the bubble and the pills never reappear
 			// (the engine re-entry bug). Re-apply the strip on resume; pills land on the last turn.
 			stripFollowUpsFromHistory(serverMessages);
+			// Structured pills WIN over the text fallback: if the last assistant turn
+			// called suggest_follow_ups, derive the chips from that tool input (the
+			// tool_use block the server persisted verbatim — see render-projection).
+			// This is the resume counterpart to the live tool_call handler; the tool
+			// row itself is hidden via HIDDEN_TOOLS so it never renders as a card.
+			for (let i = serverMessages.length - 1; i >= 0; i -= 1) {
+				const m = serverMessages[i];
+				if (!m || m.role !== 'assistant') continue;
+				const tc = m.toolCalls?.find((t) => t.name === 'suggest_follow_ups');
+				if (tc) {
+					const fu = followUpsFromToolInput(tc.input);
+					if (fu.length > 0) m.followUps = fu;
+				}
+				break; // only the last assistant turn carries the current pills
+			}
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts

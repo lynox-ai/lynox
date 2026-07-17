@@ -65,41 +65,61 @@ export function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[
 	}
 	if (jsonText === null) return { suggestions: [], cleanText: text };
 
-	let suggestions: FollowUpSuggestion[] = [];
+	let parsed: unknown;
 	try {
-		const parsed: unknown = JSON.parse(jsonText);
-		// Not a follow-up block → leave the text completely untouched (never strip mid-text JSON).
-		if (!Array.isArray(parsed)) return { suggestions: [], cleanText: text };
-
-		for (const item of parsed) {
-			if (typeof item !== 'object' || item === null) continue;
-			const obj = item as Record<string, unknown>;
-			if (typeof obj['label'] !== 'string' || typeof obj['task'] !== 'string') continue;
-			if (!obj['label'].trim() || !obj['task'].trim()) continue;
-			suggestions.push({
-				label: obj['label'].trim().slice(0, MAX_LABEL_LENGTH),
-				task: obj['task'].trim(),
-			});
-		}
+		parsed = JSON.parse(jsonText);
 	} catch {
 		return { suggestions: [], cleanText: text };
 	}
+	// Not a follow-up block → leave the text completely untouched (never strip mid-text JSON).
+	if (!Array.isArray(parsed)) return { suggestions: [], cleanText: text };
 
+	const suggestions = normalizeSuggestions(parsed);
 	if (suggestions.length === 0) return { suggestions: [], cleanText: text };
 
 	// Strip ONLY the follow-up span; keep any surrounding text (incl. trailing prose). Collapse a
 	// gap left in the middle so removing an inline block doesn't leave a triple newline.
 	const cleanText = (text.slice(0, spanStart) + text.slice(spanEnd)).replace(/\n{3,}/g, '\n\n').trim();
 
-	// Deduplicate by label
-	const seen = new Set<string>();
-	suggestions = suggestions.filter(s => {
-		if (seen.has(s.label)) return false;
-		seen.add(s.label);
-		return true;
-	});
+	return { suggestions, cleanText };
+}
 
-	return { suggestions: suggestions.slice(0, MAX_FOLLOW_UPS), cleanText };
+/**
+ * Validate + normalize a raw array of suggestion candidates into the rendered
+ * shape: skip malformed items (missing/blank label or task), trim + cap the
+ * label length, deduplicate by label, and cap the count. Shared by the text
+ * parser and the `suggest_follow_ups` tool-input path so both apply identical
+ * rules. Returns `[]` for anything that isn't a conforming array.
+ */
+function normalizeSuggestions(parsed: unknown): FollowUpSuggestion[] {
+	if (!Array.isArray(parsed)) return [];
+	const out: FollowUpSuggestion[] = [];
+	const seen = new Set<string>();
+	for (const item of parsed) {
+		if (typeof item !== 'object' || item === null) continue;
+		const obj = item as Record<string, unknown>;
+		if (typeof obj['label'] !== 'string' || typeof obj['task'] !== 'string') continue;
+		const label = obj['label'].trim().slice(0, MAX_LABEL_LENGTH);
+		const task = obj['task'].trim();
+		if (!label || !task) continue;
+		if (seen.has(label)) continue;
+		seen.add(label);
+		out.push({ label, task });
+		if (out.length >= MAX_FOLLOW_UPS) break;
+	}
+	return out;
+}
+
+/**
+ * Build follow-up suggestions from the `suggest_follow_ups` tool-call input
+ * (`{ suggestions: [{label, task}] }`) — the structured replacement for the
+ * text `<follow_ups>` block. Same validation as the text parser (dedup, cap,
+ * label length), but there is no visible text to strip: the tool call carries
+ * only its input. Returns `[]` for any non-conforming input.
+ */
+export function followUpsFromToolInput(input: unknown): FollowUpSuggestion[] {
+	if (typeof input !== 'object' || input === null) return [];
+	return normalizeSuggestions((input as Record<string, unknown>)['suggestions']);
 }
 
 /** Minimal message shape the history strip operates on (a subset of ChatMessage). */

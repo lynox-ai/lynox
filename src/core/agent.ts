@@ -1107,19 +1107,38 @@ export class Agent implements IAgent {
 
       if (response.stop_reason === 'tool_use') {
         const results = await this._dispatchTools(response.content);
+        // Did any dispatched tool declare itself terminal (endsTurn)? Such a tool
+        // (e.g. `suggest_follow_ups`) ends the turn right after its tool_result —
+        // no extra model round-trip. Resolved from the registry (not the input),
+        // so an injected tool_use naming it still goes through the same entry.
+        const endsTurn = response.content.some(
+          b => b.type === 'tool_use'
+            && this.tools.find(t => t.definition.name === b.name)?.endsTurn === true,
+        );
         // Append a continuation hint so the model reads this tool-result turn as
         // its OWN action output, not a new (empty) user message (which made it
         // emit "looks like an empty submit" filler turns). The render projection
         // detects + suppresses this hint, so it never shows as a chat bubble.
-        // Only when there ARE tool results — a degenerate `tool_use` stop with
-        // zero dispatched blocks (some openai-compat providers) must not produce
-        // a hint-only carrier (it would have no tool_result to ride on).
-        const carrier = results.length > 0
+        // Only when there ARE tool results AND we're actually continuing — a
+        // degenerate `tool_use` stop with zero dispatched blocks (some
+        // openai-compat providers) must not produce a hint-only carrier, and an
+        // endsTurn tool has no follow-up model turn to read the hint.
+        const carrier = (results.length > 0 && !endsTurn)
           ? [...results, { type: 'text' as const, text: TOOL_RESULT_CONTINUATION_HINT }]
           : results;
         this.messages.push({ role: 'user', content: carrier });
         // Same checkpoint after tool_results — see above.
         await this._checkpoint();
+        if (endsTurn) {
+          // Mirror the end_turn path exactly: return this turn's text and run the
+          // same memory-extraction gate (skipped for untrusted/internal/durable).
+          const text = extractText(response.content);
+          if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun && !this._durableMemoryEnabled) {
+            const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
+          }
+          return text;
+        }
         continue;
       }
 
