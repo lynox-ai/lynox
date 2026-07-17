@@ -94,7 +94,15 @@ export type StreamEvent =
       budgetPercent?: number | undefined; agent: string }
   | { type: 'changeset_ready'; fileCount: number; agent: string }
   | { type: 'context_compacted'; summary: string; previousUsagePercent: number; agent: string }
-  | { type: 'compaction_offer'; usagePercent: number; agent: string };
+  | { type: 'compaction_offer'; usagePercent: number; agent: string }
+
+  // DK-UX: a durable-knowledge write happened this turn. A CLIENT-ONLY signal for the
+  // inline chip (trusted → "gemerkt in X · undo", untrusted → review "keep/discard").
+  // NOT a tool-result and never folded into model context — it renders in the web-ui from
+  // the SSE side-channel only. `text` carries the raw (possibly-injected) wording for the
+  // untrusted review chip; that is exactly why it stays strictly client-bound.
+  | { type: 'knowledge_write'; id: string; subject?: string | undefined; kind?: string | undefined;
+      status: 'active' | 'pending_review'; text: string; agent: string };
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
 

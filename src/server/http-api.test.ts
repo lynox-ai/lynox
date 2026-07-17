@@ -2981,6 +2981,73 @@ describe('LynoxHTTPApi', () => {
         expect(captured[1]![1]).toEqual({ limit: 50 });   // NaN → default
       });
     });
+
+    // ── Knowledge read-surface (DK-UX) — GET entries + blocks, flag-gated + masked-by-store ──
+
+    it('GET /api/knowledge/entries → 503 when durable memory is off (store absent)', async () => {
+      const res = await jsonFetch('/api/knowledge/entries'); // default mock getKnowledgeStore() → null
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/knowledge/entries → 200 returns active entries, threading the bounded limit', async () => {
+      const captured: number[] = [];
+      const entries = [{ id: 'k1', subjectName: 'ACME', kind: 'fact', text: 'renews in March', pinned: true }];
+      await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return entries; } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries?limit=50');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ entries });
+        expect(captured[0]).toBe(50);
+      });
+    });
+
+    it('GET /api/knowledge/entries clamps the limit (600→500, abc→200, -5→1 floor)', async () => {
+      const captured: number[] = [];
+      await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return []; } }) }, async () => {
+        await jsonFetch('/api/knowledge/entries?limit=600');
+        await jsonFetch('/api/knowledge/entries?limit=abc');
+        await jsonFetch('/api/knowledge/entries?limit=-5');
+        expect(captured[0]).toBe(500); // over-cap clamped
+        expect(captured[1]).toBe(200); // NaN → default
+        expect(captured[2]).toBe(1);   // negative floored — a bare negative LIMIT would be unbounded
+      });
+    });
+
+    it('GET /api/knowledge/blocks → 503 when durable memory is off', async () => {
+      const res = await jsonFetch('/api/knowledge/blocks');
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/knowledge/blocks → 200 returns profile + playbook', async () => {
+      const blocks = { profile: 'prefers terse replies', playbook: 'weekly reports on Mondays' };
+      await swapEngine({ getKnowledgeStore: () => ({ readSurfaceBlocks: () => blocks }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/blocks');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(blocks);
+      });
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 503 when durable memory is off', async () => {
+      const res = await jsonFetch('/api/knowledge/entries/k1/retire', { method: 'POST' });
+      expect(res.status).toBe(503);
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 200 retires the entry as user_asserted', async () => {
+      const captured: Array<[string, string]> = [];
+      const entry = { id: 'k1', status: 'superseded' };
+      await swapEngine({ getKnowledgeStore: () => ({ retireEntry: (id: string, tier: string) => { captured.push([id, tier]); return entry; } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries/k1/retire', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ entry });
+        expect(captured[0]).toEqual(['k1', 'user_asserted']); // the USER channel, not the agent's
+      });
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 404 when the entry is not active (already gone)', async () => {
+      await swapEngine({ getKnowledgeStore: () => ({ retireEntry: () => { throw new Error('No active entry with this id.'); } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries/gone/retire', { method: 'POST' });
+        expect(res.status).toBe(404);
+      });
+    });
   });
 
   describe('thread debug-export (comprehensive)', () => {

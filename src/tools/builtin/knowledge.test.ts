@@ -60,6 +60,38 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(ks.recall({ query: 'ACME renews', subjectName: 'ACME' }).length).toBe(1);
   });
 
+  it('remember emits a knowledge_write StreamEvent (trusted → active) for the inline chip', async () => {
+    const { agent } = make();
+    const events: Array<Record<string, unknown>> = [];
+    (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const kw = events.find((e) => e['type'] === 'knowledge_write');
+    expect(kw).toBeDefined();
+    expect(kw!['status']).toBe('active');
+    expect(kw!['subject']).toBe('ACME');
+    expect(typeof kw!['id']).toBe('string');
+    expect(kw!['text']).toBe('ACME renews in March');
+  });
+
+  it('remember emits knowledge_write with status pending_review on an untrusted turn', async () => {
+    const { agent } = make({ sawExternalContentTool: true });
+    const events: Array<Record<string, unknown>> = [];
+    (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+    await rememberTool.handler({ text: 'ACME switched its bank in June', subject: 'ACME' }, agent);
+    const kw = events.find((e) => e['type'] === 'knowledge_write');
+    expect(kw).toBeDefined();
+    expect(kw!['status']).toBe('pending_review');
+  });
+
+  it('remember does NOT emit knowledge_write for a dedup no-op', async () => {
+    const { agent } = make();
+    await rememberTool.handler({ text: 'ACME uses Stripe for billing', subject: 'ACME' }, agent);
+    const events: Array<Record<string, unknown>> = [];
+    (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+    await rememberTool.handler({ text: 'ACME uses Stripe for billing', subject: 'ACME' }, agent); // identical → dedup
+    expect(events.find((e) => e['type'] === 'knowledge_write')).toBeUndefined();
+  });
+
   it('remember routes to pending_review when an external-content tool ran this turn (H4)', async () => {
     const { agent, ks } = make({ sawExternalContentTool: true });
     const out = await rememberTool.handler({ text: 'ACME IBAN is CHXX', subject: 'ACME' }, agent);

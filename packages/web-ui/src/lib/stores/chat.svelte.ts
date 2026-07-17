@@ -50,6 +50,18 @@ export type ContentBlock =
 	| { type: 'thinking'; text: string }
 	| { type: 'tool_call'; index: number };
 
+/** DK-UX inline chip for a durable-knowledge write (from the `knowledge_write` SSE event). */
+export interface KnowledgeWriteChip {
+	id: string;
+	subject?: string | undefined;
+	kind?: string | undefined;
+	status: 'active' | 'pending_review';
+	/** Raw wording (for the untrusted review chip). Client-only; never re-enters model context. */
+	text: string;
+	/** UI-local once the user resolves the chip, so it renders as done and the buttons retire. */
+	resolved?: 'undone' | 'kept' | 'discarded' | undefined;
+}
+
 export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
@@ -73,6 +85,11 @@ export interface ChatMessage {
 	failed?: boolean;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
+	/** DK-UX: durable-knowledge writes made during this turn, surfaced as inline chips
+	 *  (trusted → "gemerkt · rückgängig", untrusted → keep/discard review). CLIENT-ONLY:
+	 *  populated from the SSE side-channel, never persisted to the thread and never folded
+	 *  back into model context (so a resume cannot re-inject the untrusted wording). */
+	knowledgeWrites?: KnowledgeWriteChip[];
 	/** Set on a synthetic marker bubble inserted when the engine auto-compacts
 	 *  the conversation — renders as an inline "conversation compacted" divider. */
 	compactionNote?: { previousPercent: number };
@@ -1679,6 +1696,27 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			addToast(t('context.compacted').replace('{pct}', String(prevPct ?? '?')), 'info', 5000);
 			break;
 		}
+		case 'knowledge_write': {
+			// DK-UX: a durable-knowledge write happened this turn. Batch onto the assistant
+			// message as an inline chip (trusted → "gemerkt · rückgängig"; untrusted →
+			// keep/discard review). Client-only: never persisted, never re-injected into
+			// model context — so a resume cannot re-surface the untrusted wording.
+			const id = String(data['id'] ?? '');
+			if (!id) break;
+			const status = data['status'] === 'pending_review' ? 'pending_review' : 'active';
+			msg.knowledgeWrites = msg.knowledgeWrites ?? [];
+			// Dedup by id — a Tier-2 SSE replay on reconnect can re-deliver the event.
+			if (!msg.knowledgeWrites.some((w) => w.id === id)) {
+				msg.knowledgeWrites.push({
+					id,
+					subject: typeof data['subject'] === 'string' ? data['subject'] : undefined,
+					kind: typeof data['kind'] === 'string' ? data['kind'] : undefined,
+					status,
+					text: String(data['text'] ?? ''),
+				});
+			}
+			break;
+		}
 	}
 }
 
@@ -2086,6 +2124,49 @@ export function removeQueuedMessage(target: ChatMessage): void {
 
 	messages.splice(msgIdx, 1);
 	messageQueue.splice(queueIdx, 1);
+}
+
+/** DK-UX: undo a just-made trusted durable write (the inline "rückgängig" chip). A USER
+ *  action on a user-scope route — retires the active entry (status → superseded). Not an
+ *  agent tool, so the agent can never self-undo; only the person clicking can. */
+export async function retireKnowledge(msgIdx: number, id: string): Promise<void> {
+	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
+	if (!chip || chip.resolved) return;
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/entries/${id}/retire`, { method: 'POST' });
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		chip.resolved = 'undone';
+	} catch {
+		addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
+	}
+}
+
+/** DK-UX: resolve an untrusted durable capture from the inline review chip. Routes to the
+ *  EXISTING queue-review endpoint (approve/edit_approve/reject) — a USER act on a user-scope
+ *  route, never agent-callable, so the agent can never self-approve its injected capture. */
+export async function reviewKnowledge(
+	msgIdx: number,
+	id: string,
+	action: 'approve' | 'edit_approve' | 'reject',
+	editedText?: string,
+): Promise<void> {
+	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
+	if (!chip || chip.resolved) return;
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/queue/${id}/review`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(editedText !== undefined ? { action, text: editedText } : { action }),
+		});
+		if (!res.ok) {
+			const body = (await res.json().catch(() => null)) as { error?: string } | null;
+			throw new Error(body?.error ?? `HTTP ${res.status}`);
+		}
+		if (editedText !== undefined) chip.text = editedText;
+		chip.resolved = action === 'reject' ? 'discarded' : 'kept';
+	} catch (e) {
+		addToast(e instanceof Error ? e.message : t('chat.knowledge.review_failed'), 'error', 4000);
+	}
 }
 
 export function getMessages() {

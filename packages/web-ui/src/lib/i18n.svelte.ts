@@ -104,6 +104,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
 	'knowledge.queue.reject': { de: 'Ablehnen', en: 'Reject' },
 	'knowledge.queue.reject_confirm': { de: 'Eintrag ablehnen? Er bleibt als abgelehnt protokolliert und wird dem Agenten nie gezeigt.', en: 'Reject this entry? It stays on record as rejected and is never shown to the agent.' },
+	// DK-UX read-surface ("Wissen"-Tab, active durable knowledge — browse only).
+	'knowledge.active.count_label': { de: 'aktive Einträge', en: 'active entries' },
+	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat. Änderungen besprichst du direkt im Chat.', en: 'What lynox has remembered about you and your work. Discuss any changes directly in chat.' },
+	'knowledge.active.profile': { de: 'Profil', en: 'Profile' },
+	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
+	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
+	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
+	'knowledge.active.edit_hint': { de: 'Etwas ändern oder löschen? Sag es lynox einfach im Chat.', en: 'Want to change or remove something? Just tell lynox in chat.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
@@ -850,6 +858,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	// EU AI Act Art. 50 §1 — persistent transparency disclosure on every assistant message
 	'chat.ai_generated_badge': { de: 'KI', en: 'AI' },
 	'chat.ai_generated_aria': { de: 'Von KI generiert', en: 'AI-generated' },
+	// DK-UX inline durable-knowledge chips (trusted write → confirmation + undo).
+	'chat.knowledge.saved_to': { de: 'gemerkt bei {subject}', en: 'saved to {subject}' },
+	'chat.knowledge.saved': { de: 'gemerkt', en: 'saved' },
+	'chat.knowledge.undo': { de: 'rückgängig', en: 'undo' },
+	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
+	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
+	// DK-UX untrusted-capture review chip (turn read external content → keep/edit/discard).
+	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
+	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
+	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
+	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },
+	'chat.knowledge.review_save_keep': { de: 'speichern + behalten', en: 'save + keep' },
+	'chat.knowledge.review_kept': { de: 'übernommen', en: 'kept' },
+	'chat.knowledge.review_discarded': { de: 'verworfen', en: 'discarded' },
+	'chat.knowledge.review_failed': { de: 'Prüfung fehlgeschlagen.', en: 'Review failed.' },
 	// EU AI Act Art. 50 §1 — composer-level disclosure (interacting with AI) + §8 output caveat
 	'chat.ai_disclaimer': {
 		de: 'Antworten werden von KI generiert und können Fehler enthalten — wichtige Angaben bitte überprüfen.',
