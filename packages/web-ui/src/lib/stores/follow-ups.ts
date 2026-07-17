@@ -17,26 +17,59 @@ const FOLLOW_UP_RE = /<follow_ups>\s*([\s\S]*?)\s*<\/follow_ups>/;
 // Anchored to the end and guarded by requiring both "label" and "task" keys so it
 // never consumes ordinary trailing JSON the agent might legitimately show.
 const FOLLOW_UP_BARE_RE = /(\[\s*\{[\s\S]*?"label"[\s\S]*?"task"[\s\S]*?\])\s*$/;
+// Looser fallback for a bare array followed by TRAILING PROSE ("… [array]\n\nSoll ich …?"):
+// the $-anchored form above misses it and the raw JSON leaks. Global (no end-anchor) so we can
+// take the LAST occurrence; JSON.parse below is the real guard — an array that doesn't parse to
+// {label,task} objects is left untouched, so ordinary mid-text JSON is never stripped.
+const FOLLOW_UP_LOOSE_RE = /\[\s*\{[\s\S]*?"label"[\s\S]*?"task"[\s\S]*?\}\s*\]/g;
 const MAX_FOLLOW_UPS = 4;
 const MAX_LABEL_LENGTH = 40;
 
 export function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; cleanText: string } {
-	// Preferred: the wrapped <follow_ups>…</follow_ups> form. Fall back to a bare
-	// trailing array so a missing wrapper doesn't leak raw JSON into the message.
-	let re = FOLLOW_UP_RE;
-	let match = FOLLOW_UP_RE.exec(text);
-	if (!match) {
-		match = FOLLOW_UP_BARE_RE.exec(text);
-		re = FOLLOW_UP_BARE_RE;
+	// Locate the follow-up block: preferred wrapped <follow_ups>…</follow_ups>, else a bare array
+	// anchored at the end, else the LAST label+task array anywhere (so trailing prose after the
+	// array doesn't cause a leak). We capture the exact span so only the block is stripped.
+	let jsonText: string | null = null;
+	let spanStart = -1;
+	let spanEnd = -1;
+	const wrapped = FOLLOW_UP_RE.exec(text);
+	if (wrapped) {
+		jsonText = wrapped[1]!;
+		spanStart = wrapped.index;
+		spanEnd = wrapped.index + wrapped[0].length;
+	} else {
+		const anchored = FOLLOW_UP_BARE_RE.exec(text);
+		if (anchored) {
+			jsonText = anchored[1]!;
+			spanStart = anchored.index;
+			spanEnd = anchored.index + anchored[0].length;
+		} else {
+			// Trailing-prose case: accept the LAST label+task array ONLY as a trailer — there must be
+			// reply content BEFORE it (never an array that opens the message) and only a short
+			// sentence AFTER it (a follow-up is the tail of a reply, not mid-content JSON). This keeps
+			// the $-anchor's false-positive protection while tolerating a short "Soll ich …?" after.
+			const all = [...text.matchAll(FOLLOW_UP_LOOSE_RE)];
+			const last = all[all.length - 1];
+			if (last) {
+				const start = last.index!;
+				const end = start + last[0].length;
+				const before = text.slice(0, start).trim();
+				const after = text.slice(end).trim();
+				if (before.length > 0 && after.length <= 200) {
+					jsonText = last[0];
+					spanStart = start;
+					spanEnd = end;
+				}
+			}
+		}
 	}
-	if (!match) return { suggestions: [], cleanText: text };
+	if (jsonText === null) return { suggestions: [], cleanText: text };
 
-	const cleanText = text.replace(re, '').trimEnd();
 	let suggestions: FollowUpSuggestion[] = [];
-
 	try {
-		const parsed: unknown = JSON.parse(match[1]!);
-		if (!Array.isArray(parsed)) return { suggestions: [], cleanText };
+		const parsed: unknown = JSON.parse(jsonText);
+		// Not a follow-up block → leave the text completely untouched (never strip mid-text JSON).
+		if (!Array.isArray(parsed)) return { suggestions: [], cleanText: text };
 
 		for (const item of parsed) {
 			if (typeof item !== 'object' || item === null) continue;
@@ -49,8 +82,14 @@ export function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[
 			});
 		}
 	} catch {
-		return { suggestions: [], cleanText };
+		return { suggestions: [], cleanText: text };
 	}
+
+	if (suggestions.length === 0) return { suggestions: [], cleanText: text };
+
+	// Strip ONLY the follow-up span; keep any surrounding text (incl. trailing prose). Collapse a
+	// gap left in the middle so removing an inline block doesn't leave a triple newline.
+	const cleanText = (text.slice(0, spanStart) + text.slice(spanEnd)).replace(/\n{3,}/g, '\n\n').trim();
 
 	// Deduplicate by label
 	const seen = new Set<string>();

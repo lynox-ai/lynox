@@ -27,8 +27,24 @@ describe('parseFollowUps', () => {
 		expect(r.cleanText).toBe(text); // untouched — no false positive
 	});
 
-	it('does NOT match a suggestions array that is NOT at the end of the message', () => {
+	it('does NOT match a suggestions array that OPENS the message (no reply content before it)', () => {
 		const text = '[{"label":"x","task":"y"}] und dann noch Text danach.';
+		const r = parseFollowUps(text);
+		expect(r.suggestions).toEqual([]);
+		expect(r.cleanText).toBe(text);
+	});
+
+	it('TRAILING-TEXT: strips a bare array followed by a SHORT closing sentence (root cause #2)', () => {
+		// The observed leak: a bare array then a trailing "Soll ich …?" broke the $-anchored fallback.
+		const text = 'Der Leitfaden ist fertig.\n\n[{"label":"BVG recherchieren","task":"Recherchiere BVG-Optionen"}]\n\nSoll ich damit beginnen?';
+		const r = parseFollowUps(text);
+		expect(r.suggestions.map((s) => s.label)).toEqual(['BVG recherchieren']);
+		expect(r.cleanText).toBe('Der Leitfaden ist fertig.\n\nSoll ich damit beginnen?');
+	});
+
+	it('does NOT strip a mid-content array with a long body of text after it (still a false-positive guard)', () => {
+		const longAfter = 'Hier folgt eine ausführliche Analyse. '.repeat(10);
+		const text = `Kurzer Vorspann. [{"label":"x","task":"y"}] ${longAfter}`;
 		const r = parseFollowUps(text);
 		expect(r.suggestions).toEqual([]);
 		expect(r.cleanText).toBe(text);
