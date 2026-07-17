@@ -600,6 +600,34 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);  // continued to a second model call
     });
 
+    it('co-emitted working tool + endsTurn tool: keeps looping so the working result is read', async () => {
+      // If the model emits a WORKING tool (e.g. web_research) AND suggest_follow_ups in ONE
+      // assistant message, short-circuiting on the terminal tool would discard the working
+      // tool's result unread. endsTurn must require EVERY dispatched tool_use to be terminal.
+      const working = makeTool('web_research');
+      const endsTurnTool: ToolEntry = {
+        endsTurn: true,
+        definition: {
+          name: 'suggest_follow_ups', description: 'terminal test tool',
+          input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
+        },
+        handler: vi.fn().mockResolvedValue('ack'),
+      };
+      mockProcess
+        .mockResolvedValueOnce(toolUseWithTextResponse('partial (pre-research)', [
+          { id: 'tu_1', name: 'web_research', input: {} },
+          { id: 'tu_2', name: 'suggest_follow_ups', input: { suggestions: [] } },
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Final answer using the research.'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [working, endsTurnTool] });
+      const result = await agent.send('research then wrap up');
+
+      expect(working.handler).toHaveBeenCalledTimes(1);         // the working tool ran
+      expect(mockProcess).toHaveBeenCalledTimes(2);             // did NOT short-circuit — looped
+      expect(result).toBe('Final answer using the research.');  // final text, not the pre-research partial
+    });
+
     it('elides a large tool_result byte-identical to an earlier one (append-time dedup)', async () => {
       // Same tool run twice returns the SAME large payload. The first copy stays
       // verbatim resident; the second collapses to a compact reference so the

@@ -137,7 +137,17 @@ export function computeDeferredTray(
 	max: number,
 ): FollowUpSuggestion[] {
 	const seen = new Set(current.map((f) => f.task));
-	const siblings = set.filter((s) => s.task !== clicked.task && !seen.has(s.task));
+	const siblings: FollowUpSuggestion[] = [];
+	for (const s of set) {
+		// Skip the taken pill, any task already in the tray, AND any task already accepted
+		// this round: `normalizeSuggestions` dedups by LABEL, so `set` can legitimately hold
+		// two items with the same `task` (different labels). Without deduping by task here,
+		// both would enter the tray and the tray's task-keyed `{#each … (fu.task)}` throws
+		// `each_key_duplicate`. Update `seen` as we accept, so the second same-task item drops.
+		if (s.task === clicked.task || seen.has(s.task)) continue;
+		seen.add(s.task);
+		siblings.push(s);
+	}
 	if (siblings.length === 0) return current;
 	return [...current, ...siblings].slice(-max);
 }

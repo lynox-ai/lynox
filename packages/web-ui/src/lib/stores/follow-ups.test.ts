@@ -141,6 +141,16 @@ describe('computeDeferredTray (deferred-siblings tray — the "second option sur
 		const current = [B, C];
 		expect(computeDeferredTray(current, A, [A, B, C], 8)).toBe(current);
 	});
+
+	it('dedups two siblings that share a task but differ by label (task-keyed tray must not duplicate)', () => {
+		// normalizeSuggestions dedups by LABEL, so a set can legitimately hold two items with
+		// the same `task` and different labels. The tray `{#each … (fu.task)}` is task-keyed, so
+		// letting both through would crash Svelte with each_key_duplicate. Only ONE must land.
+		const bAlt = { label: 'B alternative', task: 'tb' };
+		const next = computeDeferredTray([], A, [A, B, bAlt, C], 8);
+		expect(next.map((f) => f.task)).toEqual(['tb', 'tc']); // tb once, not twice
+		expect(new Set(next.map((f) => f.task)).size).toBe(next.length); // no duplicate task keys
+	});
 });
 
 describe('stripFollowUpsFromHistory (thread-resume re-parse — the engine re-entry bug)', () => {

@@ -1107,14 +1107,17 @@ export class Agent implements IAgent {
 
       if (response.stop_reason === 'tool_use') {
         const results = await this._dispatchTools(response.content);
-        // Did any dispatched tool declare itself terminal (endsTurn)? Such a tool
-        // (e.g. `suggest_follow_ups`) ends the turn right after its tool_result —
-        // no extra model round-trip. Resolved from the registry (not the input),
-        // so an injected tool_use naming it still goes through the same entry.
-        const endsTurn = response.content.some(
-          b => b.type === 'tool_use'
-            && this.tools.find(t => t.definition.name === b.name)?.endsTurn === true,
-        );
+        // Did the turn end via a terminal tool (endsTurn)? Such a tool (e.g.
+        // `suggest_follow_ups`) ends the turn right after its tool_result — no extra
+        // model round-trip. Resolved from the registry (not the input), so an injected
+        // tool_use naming it still goes through the same entry. ONLY end when EVERY
+        // dispatched tool_use is terminal: if the model co-emits a working tool (e.g.
+        // `web_research`) alongside `suggest_follow_ups`, short-circuiting here would
+        // discard the working tool's result unread — so keep looping and let the model
+        // read it (it can re-suggest at the real end).
+        const toolUses = response.content.filter(b => b.type === 'tool_use');
+        const endsTurn = toolUses.length > 0
+          && toolUses.every(b => this.tools.find(t => t.definition.name === b.name)?.endsTurn === true);
         // Append a continuation hint so the model reads this tool-result turn as
         // its OWN action output, not a new (empty) user message (which made it
         // emit "looks like an empty submit" filler turns). The render projection

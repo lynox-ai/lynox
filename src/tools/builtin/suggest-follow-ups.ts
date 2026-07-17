@@ -43,6 +43,7 @@ export const suggestFollowUpsTool: ToolEntry<SuggestFollowUpsInput> = {
         suggestions: {
           type: 'array',
           description: 'Up to 4 follow-up suggestions.',
+          maxItems: 4,
           items: {
             type: 'object',
             properties: {
