@@ -396,14 +396,20 @@ export class KnowledgeStore {
    * is a display surface, unlike the review queue ({@link listPending}) which shows raw
    * text for human judgement. `limit` bounds the row count (1..500).
    */
-  listActive(limit = 200): KnowledgeEntry[] {
+  listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(
       "SELECT * FROM knowledge_entries WHERE status = 'active' ORDER BY pinned DESC, created_at DESC LIMIT ?",
     ).all(capped) as KnowledgeRow[];
     return rows.map(r => {
       const e = this._rowToEntry(r);
-      return { ...e, text: this._maskText(e.text) };
+      // Active rows link via `subject_id` (`subject_hint` is NULL post-approval — H4/reviewEntry),
+      // so resolve the canonical subject NAME for the browse surface: which client/subject the
+      // entry belongs to. `resolveActiveSubject` follows merges to the live canonical id.
+      const subjectName = e.subjectId
+        ? this.subjects.getSubject(this.subjects.resolveActiveSubject(e.subjectId))?.name ?? null
+        : null;
+      return { ...e, text: this._maskText(e.text), subjectName };
     });
   }
 

@@ -2493,7 +2493,7 @@
 													<button
 														disabled={!editingKnowledgeText.trim()}
 														class="px-2.5 py-1 rounded-[var(--radius-sm)] bg-accent/10 text-accent-text hover:bg-accent/20 disabled:opacity-50"
-														onclick={() => { void reviewKnowledge(msgIdx, kw.id, 'edit_approve', editingKnowledgeText); editingKnowledgeId = null; }}
+														onclick={() => { void reviewKnowledge(msgIdx, kw.id, 'edit_approve', editingKnowledgeText).then(() => { if (kw.resolved) editingKnowledgeId = null; }); }}
 													>{t('chat.knowledge.review_save_keep')}</button>
 													<button
 														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-text-muted hover:bg-bg-muted"

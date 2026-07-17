@@ -2991,7 +2991,7 @@ describe('LynoxHTTPApi', () => {
 
     it('GET /api/knowledge/entries → 200 returns active entries, threading the bounded limit', async () => {
       const captured: number[] = [];
-      const entries = [{ id: 'k1', subjectHint: 'ACME', kind: 'fact', text: 'renews in March', pinned: true }];
+      const entries = [{ id: 'k1', subjectName: 'ACME', kind: 'fact', text: 'renews in March', pinned: true }];
       await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return entries; } }) }, async () => {
         const res = await jsonFetch('/api/knowledge/entries?limit=50');
         expect(res.status).toBe(200);
@@ -3000,13 +3000,15 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/knowledge/entries clamps the limit (600→500, abc→200)', async () => {
+    it('GET /api/knowledge/entries clamps the limit (600→500, abc→200, -5→1 floor)', async () => {
       const captured: number[] = [];
       await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return []; } }) }, async () => {
         await jsonFetch('/api/knowledge/entries?limit=600');
         await jsonFetch('/api/knowledge/entries?limit=abc');
+        await jsonFetch('/api/knowledge/entries?limit=-5');
         expect(captured[0]).toBe(500); // over-cap clamped
         expect(captured[1]).toBe(200); // NaN → default
+        expect(captured[2]).toBe(1);   // negative floored — a bare negative LIMIT would be unbounded
       });
     });
 

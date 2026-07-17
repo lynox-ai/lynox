@@ -370,6 +370,25 @@ describe('KnowledgeStore read-surface (DK-UX — listActive / readSurfaceBlocks)
     expect(ks.listActive(3)).toHaveLength(3);
   });
 
+  it('listActive FLOORS a negative limit to 1 (a bare negative LIMIT reads as unbounded)', () => {
+    const { ks } = make();
+    for (let i = 0; i < 4; i++) ks.write({ text: `distinct durable fact number ${i}`, sourceChannel: 'ui', sourceUntrusted: false });
+    // The `Math.max(1, …)` floor is the SOLE guard against an unbounded read: SQLite treats a
+    // negative `LIMIT ?` as no-limit, so without the floor this returns every row (4), not 1.
+    expect(ks.listActive(-5)).toHaveLength(1);
+  });
+
+  it('listActive resolves the canonical subject NAME for the browse surface', () => {
+    const { ks } = make();
+    ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.write({ text: 'a fact with no subject at all', sourceChannel: 'ui', sourceUntrusted: false });
+    const active = ks.listActive();
+    // Active rows link via subject_id (subject_hint is NULL post-approval); the browse surface
+    // resolves the id → name, so the "→ ACME" attribution is present, not silently dropped.
+    expect(active.find(e => e.text === 'ACME renews in March')!.subjectName).toBe('ACME');
+    expect(active.find(e => e.text === 'a fact with no subject at all')!.subjectName).toBeNull();
+  });
+
   it('listActive MASKS secret-shaped tokens in entry text (a display surface)', () => {
     const { ks } = make();
     ks.write({ text: 'Deploy key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 is set', sourceChannel: 'ui', sourceUntrusted: false });

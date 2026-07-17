@@ -39,7 +39,7 @@
 	}
 
 	// ── DK-UX read-surface state ──
-	interface DkEntry { id: string; subjectHint: string | null; kind: string; text: string; pinned: boolean; }
+	interface DkEntry { id: string; subjectName: string | null; kind: string; text: string; pinned: boolean; }
 	let dkEntries = $state<DkEntry[]>([]);
 	let dkProfile = $state('');
 	let dkPlaybook = $state('');
@@ -237,7 +237,7 @@
 					<div class="border border-border rounded-[var(--radius-md)] bg-bg-subtle p-3 space-y-1.5">
 						<div class="flex items-center gap-2 text-[10px] text-text-muted font-mono">
 							{#if entry.pinned}<span class="rounded-full bg-accent/15 text-accent-text px-1.5">{t('knowledge.active.pinned')}</span>{/if}
-							{#if entry.subjectHint}<span>→ {entry.subjectHint}</span>{/if}
+							{#if entry.subjectName}<span>→ {entry.subjectName}</span>{/if}
 							<span>{entry.kind}</span>
 						</div>
 						<p class="text-sm text-text whitespace-pre-wrap leading-relaxed">{entry.text}</p>
