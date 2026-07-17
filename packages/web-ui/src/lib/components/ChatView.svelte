@@ -391,7 +391,8 @@
 	 *  value so callers can skip rendering. */
 	function formatMessageTime(createdAt: string): string {
 		// A SQLite space-separated 'YYYY-MM-DD HH:MM:SS' must become 'T'-separated before the 'Z'
-		// or Safari/Firefox parse it as Invalid Date (Chrome is lenient) — mirrors KnowledgeQueueView.fmtDate.
+		// or Safari/Firefox parse it as Invalid Date (Chrome is lenient) — the same space→'T'
+		// normalization KnowledgeQueueView.fmtDate applies (its regex is stricter; behaviour matches).
 		const iso = createdAt.endsWith('Z') || createdAt.includes('+')
 			? createdAt
 			: (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(createdAt) ? createdAt.replace(' ', 'T') : createdAt) + 'Z';
