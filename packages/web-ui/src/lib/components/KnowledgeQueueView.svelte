@@ -89,7 +89,7 @@
 			<h2 class="text-sm font-semibold">{t('knowledge.queue.title')}</h2>
 			<p class="text-xs text-text-muted mt-0.5">{t('knowledge.queue.subtitle')}</p>
 		</div>
-		<button type="button" class="text-xs text-text-muted hover:text-text px-2 py-1 rounded-[var(--radius-sm)] hover:bg-bg-muted" onclick={() => void load()}>↻</button>
+		<button type="button" aria-label={t('knowledge.queue.reload_aria')} title={t('knowledge.queue.reload_aria')} class="text-xs text-text-muted hover:text-text px-2 py-1 rounded-[var(--radius-sm)] hover:bg-bg-muted" onclick={() => void load()}>↻</button>
 	</div>
 
 	{#if error}
@@ -113,6 +113,7 @@
 				</div>
 				{#if editingId === entry.id}
 					<textarea
+						aria-label={t('knowledge.queue.edit_aria')}
 						class="w-full text-xs bg-bg-muted border border-border rounded-[var(--radius-sm)] p-2 min-h-[60px]"
 						bind:value={editText}
 					></textarea>

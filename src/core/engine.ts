@@ -1703,6 +1703,11 @@ export class Engine {
         const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
         this._knowledgeStore = knowledgeStore;
         this._toolContext.knowledgeStore = knowledgeStore;
+        // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
+        // subject_graph block wires it, but the durable substrate is independent of that flag —
+        // so wire it here too (idempotent), or a durable-only tenant's memory_focus set-path is
+        // dead ("subject lookup is not available"). Exactly the planned canary flip's config.
+        this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
       } catch (err) {
         process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }

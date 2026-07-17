@@ -698,6 +698,12 @@ export class Agent implements IAgent {
       for (const block of content) {
         if (block.type === 'text') {
           if (containsUntrustedMarker(block.text)) return true;
+        } else if (block.type === 'tool_use') {
+          // A tool whose OUTPUT is external content (bash, http_request, read_file, …)
+          // arms the taint by NAME during a live run — those results carry no wrap
+          // marker — so the resume re-derivation must scan tool_use names too, or a
+          // rehydrated thread that ran such a tool silently disarms its durable-write gate.
+          if (Agent.EXTERNAL_CONTENT_TOOLS.has(block.name)) return true;
         } else if (block.type === 'tool_result') {
           const rc = block.content;
           if (typeof rc === 'string') {
@@ -877,6 +883,12 @@ export class Agent implements IAgent {
     this.continuationCount = 0;
     this._loopToolCount = 0;
     this._sawUntrustedData = false;
+    // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
+    // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
+    // Without this reset the guard latches after 200 cumulative model-calls and every
+    // later turn silently ends tool-less. Reset at entry (like _sawUntrustedData) so a
+    // post-run costSnapshot() reader (spawn.ts) still observes this run's cost.
+    this.costGuard?.reset();
     this._turnToolNames.clear();
     this._suppressTools = opts?.suppressTools === true;
     try {
@@ -1726,7 +1738,13 @@ export class Agent implements IAgent {
       (b): b is BetaToolUseBlock => b.type === 'tool_use',
     );
 
-    this._loopToolCount += toolCalls.length;
+    // Terminal tools (suggest_follow_ups) are a turn-ending UI action, not knowledge-
+    // producing tool interaction — exclude them so a short turn whose only tool call is
+    // the mandatory follow-up suggestion still counts as tool-free for the memory-
+    // extraction skip heuristic (memory.maybeUpdate), instead of firing a paid extraction.
+    this._loopToolCount += toolCalls.filter(
+      (b) => this.tools.find((t) => t.definition.name === b.name)?.endsTurn !== true,
+    ).length;
 
     // Enforce fan-out limit: execute first N in parallel, truncate excess
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;

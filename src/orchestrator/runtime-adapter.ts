@@ -29,10 +29,12 @@ export const INLINE_CORE_TOOLS = new Set([
   'bash', 'read_file', 'write_file', 'http', 'ask_user',
   'data_store_query', 'data_store_insert',
   'memory_recall', 'memory_store', 'memory_update', 'memory_list',
-  // Durable Knowledge Substrate (DK.1): the capture/recall pair that replaces memory_store/
-  // memory_recall when the flag is on — safe in the inline sandbox (read-or-tenant-scoped).
-  // memory_block_edit stays opt-in per-step (it needs interactive confirmation).
-  'remember', 'recall',
+  // Durable Knowledge Substrate (DK.1): only the READ side (recall) is inline-safe. `remember`
+  // is deliberately NOT inline — a pipeline step builds a FRESH Agent with the untrusted-taint
+  // latches cleared, so an inline `remember` of an upstream step's external content would write
+  // it as ACTIVE (an H4 pending_review bypass) instead of queuing it. Durable writes stay
+  // opt-in per-step, like memory_block_edit.
+  'recall',
 ]);
 
 /**

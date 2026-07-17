@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
+import { subjectsDisagree } from './contradiction-detector.js';
 import { maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import type { SecretStoreLike } from '../types/security.js';
@@ -168,7 +169,17 @@ export class KnowledgeStore {
     if (status === 'active') {
       const dup = this._findActiveDuplicate(params.text, subjectId, params.sourceRunId);
       if (dup) {
-        return { id: dup.id, status: 'active', tier: dup.source_type as ProvenanceKind, subjectId: dup.subject_id, pinned: dup.pinned === 1, deduped: true };
+        // Pin is a deliberate post-approval act, so a `pin:true` re-assert of an already-
+        // stored fact must be able to pin the EXISTING row — otherwise a fact can only ever
+        // be pinned on its first write (dedup early-returns before the pin path below, and no
+        // other pin-update path exists). An active dup row is pin-eligible by H6; the incoming
+        // write is trusted (we are in the status==='active' branch).
+        let dupPinned = dup.pinned === 1;
+        if (params.pin === true && !dupPinned && (dup.source_type as ProvenanceKind) !== 'external_unverified') {
+          this.db.prepare('UPDATE knowledge_entries SET pinned = 1 WHERE id = ?').run(dup.id);
+          dupPinned = true;
+        }
+        return { id: dup.id, status: 'active', tier: dup.source_type as ProvenanceKind, subjectId: dup.subject_id, pinned: dupPinned, deduped: true };
       }
     }
 
@@ -232,8 +243,18 @@ export class KnowledgeStore {
     let anchor: KnowledgeRow | null = null;
     let anchorShared = 0;
     for (const row of rows) {
+      const rowText = this.engine.dec(row.text);
+      // Subject-safety: a candidate pulled in by the SAME-RUN clause can name a DIFFERENT
+      // subject — two structurally-parallel facts written in one turn ("AlphaClinic uses
+      // Slack and Notion" then "BetaStore uses Slack and Notion"). Deduping across them
+      // silently drops the second subject's fact and mis-attributes its id. Skip a candidate
+      // whose subject differs — by explicit subject_id (the structured case), or by proper-noun
+      // divergence in the text (the subject-null combined-write case; the same guard the
+      // recall-layer sibling applies). A genuine combined restatement shares its subjects.
+      if (subjectId && row.subject_id && row.subject_id !== subjectId) continue;
+      if (subjectsDisagree(text, rowText)) continue;
       let sharedHere = 0;
-      for (const t of contentTokens(this.engine.dec(row.text))) {
+      for (const t of contentTokens(rowText)) {
         if (newTokens.has(t)) { covered.add(t); sharedHere += 1; }
       }
       if (sharedHere > anchorShared) { anchorShared = sharedHere; anchor = row; }

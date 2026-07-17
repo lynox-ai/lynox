@@ -713,15 +713,22 @@ export class Session {
     // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
     // The resolved tier map is built from the SAME base provider `_createAgent`
     // uses (`getActiveProvider()`), so the snapshot's identity context matches
-    // the agent's byte-for-byte.
+    // the agent's. This mirror APPROXIMATES _createAgent — it reproduces the
+    // durable-substrate suffix and identity context, but not yet every other
+    // suffix / hybrid-slot identity delta (tracked in the deferred register).
     const runIdentityContext = modelIdentityContext(
       this._profileOverride?.provider ?? this.engine.getUserConfig().provider,
       model,
       this._identityTierMap(runBaseProvider),
     );
+    // DK.1: _createAgent appends this suffix to basePrompt when the substrate is on; mirror it
+    // so a durable-on run's snapshot/hash isn't silently divergent from the real agent prompt.
+    const snapshotBase = this.engine.getUserConfig().durable_memory_enabled === true
+      ? basePrompt + DURABLE_MEMORY_PROMPT_SUFFIX
+      : basePrompt;
     const effectivePrompt = (this.agentOverrides.systemPromptSuffix
-      ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt) + runIdentityContext + currentDateContext();
+      ? snapshotBase + this.agentOverrides.systemPromptSuffix
+      : snapshotBase) + runIdentityContext + currentDateContext();
     const promptHash = hashPrompt(effectivePrompt);
 
     // Record run start

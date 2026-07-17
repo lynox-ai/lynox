@@ -223,6 +223,10 @@ vi.mock('../core/config.js', () => ({
   }),
   saveUserConfig: vi.fn(),
   reloadConfig: vi.fn(),
+  // The /api/config picker-label branch calls this for a managed hybrid tier_set. These
+  // route tests don't assert the constraint semantics (FN-7 is verified live on staging),
+  // so a passthrough preserves their existing labels.
+  applyManagedTierSetConstraints: vi.fn((ts: unknown) => ts),
   // engine-init.ts (pulled in by http-api.ts for ensureHttpSecret) reads
   // these from config.js — provide them so the real ensureHttpSecret() can
   // run in the T1-1 ordering test. getLynoxDir honours LYNOX_DATA_DIR so the

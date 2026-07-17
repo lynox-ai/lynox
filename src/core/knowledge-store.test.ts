@@ -596,4 +596,31 @@ describe('KnowledgeStore write-path dedup — subject-null resolution (completes
     const both = ks.write({ text: 'A new joint venture between Ada Fischer and Nora Baumann is forming', sourceChannel: 'agent', sourceUntrusted: false });
     expect(both.subjectId).toBeNull();
   });
+
+  it('FN-1: does NOT dedup a same-run write for a DIFFERENT subject (no cross-subject data loss)', () => {
+    const { ks } = make();
+    const a = ks.write({ text: 'AlphaClinic uses Slack and Notion for daily ops', subjectName: 'AlphaClinic', sourceChannel: 'agent', sourceUntrusted: false, sourceRunId: 'run1' });
+    const b = ks.write({ text: 'BetaStore uses Slack and Notion for daily ops', subjectName: 'BetaStore', sourceChannel: 'agent', sourceUntrusted: false, sourceRunId: 'run1' });
+    expect(a.deduped).not.toBe(true);
+    expect(b.deduped).not.toBe(true);   // was silently deduped by the subject-blind same-run clause
+    expect(b.id).not.toBe(a.id);        // BetaStore's fact kept, not mis-attributed to AlphaClinic
+  });
+
+  it('FN-1: STILL dedups a same-subject cross-turn restatement (guard did not over-widen)', () => {
+    const { ks } = make();
+    const a = ks.write({ text: 'ACME renews its contract in March every year', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    const b = ks.write({ text: 'ACME renews its contract in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(a.deduped).not.toBe(true);
+    expect(b.deduped).toBe(true);
+  });
+
+  it('FN-2: pin:true on an already-stored fact pins the EXISTING row (dedup path)', () => {
+    const { ks } = make();
+    const first = ks.write({ text: 'ACME HQ is in Zurich', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(first.pinned).toBe(false);
+    const again = ks.write({ text: 'ACME HQ is in Zurich', subjectName: 'ACME', pin: true, sourceChannel: 'agent', sourceUntrusted: false });
+    expect(again.deduped).toBe(true);
+    expect(again.id).toBe(first.id);
+    expect(again.pinned).toBe(true);   // existing row now pinned — was structurally impossible before
+  });
 });

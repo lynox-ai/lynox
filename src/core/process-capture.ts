@@ -12,7 +12,10 @@ const INTERNAL_TOOLS = new Set([
   'memory_store', 'memory_recall', 'memory_delete', 'memory_update', 'memory_list', 'memory_promote',
   // Durable Knowledge Substrate (DK.1) — the tools that replace the legacy memory_* set.
   'remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search',
-  'ask_user', 'plan_task', 'save_workflow',
+  // suggest_follow_ups is a terminal UI action mandated on every web-ui turn — a workflow
+  // capture must not freeze it into the deterministic step spine (it would replay as a real
+  // step). Same rationale as ask_user/plan_task.
+  'ask_user', 'plan_task', 'save_workflow', 'suggest_follow_ups',
 ]);
 
 const MAX_INPUT_CHARS = 500;
