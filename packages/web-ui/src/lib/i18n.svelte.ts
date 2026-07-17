@@ -864,6 +864,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.undo': { de: 'rückgängig', en: 'undo' },
 	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
 	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
+	// DK-UX untrusted-capture review chip (turn read external content → keep/edit/discard).
+	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
+	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
+	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
+	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },
+	'chat.knowledge.review_save_keep': { de: 'speichern + behalten', en: 'save + keep' },
+	'chat.knowledge.review_kept': { de: 'übernommen', en: 'kept' },
+	'chat.knowledge.review_discarded': { de: 'verworfen', en: 'discarded' },
+	'chat.knowledge.review_failed': { de: 'Prüfung fehlgeschlagen.', en: 'Review failed.' },
 	// EU AI Act Art. 50 §1 — composer-level disclosure (interacting with AI) + §8 output caveat
 	'chat.ai_disclaimer': {
 		de: 'Antworten werden von KI generiert und können Fehler enthalten — wichtige Angaben bitte überprüfen.',

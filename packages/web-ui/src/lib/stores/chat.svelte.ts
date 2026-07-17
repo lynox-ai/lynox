@@ -2141,6 +2141,34 @@ export async function retireKnowledge(msgIdx: number, id: string): Promise<void>
 	}
 }
 
+/** DK-UX: resolve an untrusted durable capture from the inline review chip. Routes to the
+ *  EXISTING queue-review endpoint (approve/edit_approve/reject) — a USER act on a user-scope
+ *  route, never agent-callable, so the agent can never self-approve its injected capture. */
+export async function reviewKnowledge(
+	msgIdx: number,
+	id: string,
+	action: 'approve' | 'edit_approve' | 'reject',
+	editedText?: string,
+): Promise<void> {
+	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
+	if (!chip || chip.resolved) return;
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/queue/${id}/review`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(editedText !== undefined ? { action, text: editedText } : { action }),
+		});
+		if (!res.ok) {
+			const body = (await res.json().catch(() => null)) as { error?: string } | null;
+			throw new Error(body?.error ?? `HTTP ${res.status}`);
+		}
+		if (editedText !== undefined) chip.text = editedText;
+		chip.resolved = action === 'reject' ? 'discarded' : 'kept';
+	} catch (e) {
+		addToast(e instanceof Error ? e.message : t('chat.knowledge.review_failed'), 'error', 4000);
+	}
+}
+
 export function getMessages() {
 	return messages;
 }
