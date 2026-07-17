@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpHistoryMessage } from './follow-ups.js';
+import { parseFollowUps, followUpsFromToolInput, computeDeferredTray, stripFollowUpsFromHistory, type FollowUpHistoryMessage } from './follow-ups.js';
 
 describe('parseFollowUps', () => {
 	it('parses the wrapped <follow_ups> form and strips it from the text', () => {
@@ -104,6 +104,42 @@ describe('followUpsFromToolInput (suggest_follow_ups tool-call path)', () => {
 		expect(followUpsFromToolInput({})).toEqual([]);
 		expect(followUpsFromToolInput({ suggestions: 'not an array' })).toEqual([]);
 		expect(followUpsFromToolInput({ suggestions: [{ foo: 'bar' }] })).toEqual([]);
+	});
+});
+
+describe('computeDeferredTray (deferred-siblings tray — the "second option survives" fix)', () => {
+	const A = { label: 'A', task: 'ta' };
+	const B = { label: 'B', task: 'tb' };
+	const C = { label: 'C', task: 'tc' };
+
+	it('adds the un-taken siblings of the clicked pill, excluding the clicked one', () => {
+		const next = computeDeferredTray([], A, [A, B, C], 8);
+		expect(next.map((f) => f.task)).toEqual(['tb', 'tc']);
+	});
+
+	it('dedups new siblings against what is already in the tray', () => {
+		const next = computeDeferredTray([B], A, [A, B, C], 8);
+		expect(next.map((f) => f.task)).toEqual(['tb', 'tc']); // B not duplicated, C added
+	});
+
+	it('caps at max, dropping the oldest (newest-last)', () => {
+		const current = [
+			{ label: 'x1', task: 't1' },
+			{ label: 'x2', task: 't2' },
+		];
+		const next = computeDeferredTray(current, A, [A, B, C], 3);
+		// current [t1,t2] + siblings [tb,tc] = 4 → cap 3 → drop oldest t1
+		expect(next.map((f) => f.task)).toEqual(['t2', 'tb', 'tc']);
+	});
+
+	it('returns the SAME reference when there are no new siblings (single-pill set)', () => {
+		const current = [B];
+		expect(computeDeferredTray(current, A, [A], 8)).toBe(current); // no siblings → unchanged
+	});
+
+	it('returns the SAME reference when every sibling is already in the tray', () => {
+		const current = [B, C];
+		expect(computeDeferredTray(current, A, [A, B, C], 8)).toBe(current);
 	});
 });
 

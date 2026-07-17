@@ -122,6 +122,26 @@ export function followUpsFromToolInput(input: unknown): FollowUpSuggestion[] {
 	return normalizeSuggestions((input as Record<string, unknown>)['suggestions']);
 }
 
+/**
+ * Compute the deferred-follow-ups tray after the user TAKES `clicked` from `set`.
+ * The un-taken siblings (everything in `set` except `clicked`) are appended to
+ * `current`, deduped by `task` against what's already in the tray, kept
+ * newest-last and capped at `max` (oldest dropped). Returns the SAME array
+ * reference when nothing changes, so the caller can skip a needless persist.
+ * Pure — the store wraps it with persistence + sending the clicked task.
+ */
+export function computeDeferredTray(
+	current: FollowUpSuggestion[],
+	clicked: FollowUpSuggestion,
+	set: FollowUpSuggestion[],
+	max: number,
+): FollowUpSuggestion[] {
+	const seen = new Set(current.map((f) => f.task));
+	const siblings = set.filter((s) => s.task !== clicked.task && !seen.has(s.task));
+	if (siblings.length === 0) return current;
+	return [...current, ...siblings].slice(-max);
+}
+
 /** Minimal message shape the history strip operates on (a subset of ChatMessage). */
 export interface FollowUpHistoryMessage {
 	role: 'user' | 'assistant';
