@@ -1029,4 +1029,12 @@ describe('spawnInline — a foreign-endpoint tier slot never inherits the base k
 
     expect(agentCfg()['apiKey']).toBe('mistral-secret');
   });
+
+  it('B3: INLINE_CORE_TOOLS exposes recall (read) but NOT remember (write)', () => {
+    // A pipeline step builds a FRESH Agent with the untrusted-taint latches cleared, so an
+    // inline `remember` of an upstream step's external content would write it ACTIVE (an H4
+    // pending_review bypass). Only the read side is inline-safe; durable writes stay opt-in.
+    expect(INLINE_CORE_TOOLS.has('recall')).toBe(true);
+    expect(INLINE_CORE_TOOLS.has('remember')).toBe(false);
+  });
 });

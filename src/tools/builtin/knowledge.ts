@@ -247,7 +247,15 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
     // Show a GENEROUS preview: this is the exact standing rule the human is approving into
     // every future turn, and an 80-char clip would hide a malicious tail behind a benign prefix
     // (a rubber-stamp risk on the one write that most needs eyes-on). A legit rule fits in 500.
-    const preview = clip(input.mode === 'append' ? (input.new_text ?? '') : (input.old_text ?? ''), 500);
+    // Preview the STANDING RULE the human is approving into every future turn. For append and
+    // replace that is new_text — showing old_text on a replace would hide the new (possibly
+    // inverted) rule the human is actually consenting to. Show old→new on a replace so a
+    // silent inversion is visible; for a pure removal (no new_text) show what is removed.
+    const preview = input.new_text
+      ? (input.mode === 'replace' && input.old_text
+          ? `${clip(input.old_text, 240)} → ${clip(input.new_text, 240)}`
+          : clip(input.new_text, 500))
+      : clip(input.old_text ?? '', 500);
     const answer = await agent.promptUser(
       `Edit the ${input.block} block (${input.mode}${preview ? `: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
       ['Apply', 'Cancel'],

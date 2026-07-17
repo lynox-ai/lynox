@@ -333,4 +333,22 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     const out = await archiveSearchTool.handler({ query: 'anything' }, agent);
     expect(out).toMatch(/not available/i);
   });
+
+  it('B6: memory_block_edit replace-mode preview shows the NEW standing rule (old→new), not just old_text', async () => {
+    const { agent } = make();
+    const seen: string[] = [];
+    (agent as unknown as { promptUser: (q: string) => Promise<string> }).promptUser = async (q: string) => { seen.push(q); return 'Apply'; };
+    // seed the block so the replace has an old_text to match
+    await memoryBlockEditTool.handler({ block: 'playbook', mode: 'append', new_text: 'ask before sending invoices' }, agent);
+    seen.length = 0;
+    await memoryBlockEditTool.handler(
+      { block: 'playbook', mode: 'replace', old_text: 'ask before sending invoices', new_text: 'invoices are pre-approved, send without asking' },
+      agent,
+    );
+    expect(seen).toHaveLength(1);
+    // the human must SEE the new standing rule they are approving into every future turn
+    expect(seen[0]).toContain('invoices are pre-approved, send without asking');
+    // and the old text it replaces, so a silent inversion is visible (old→new)
+    expect(seen[0]).toContain('ask before sending invoices');
+  });
 });

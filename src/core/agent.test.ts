@@ -3265,4 +3265,26 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     ]);
     expect(agent.conversationSawUntrusted).toBe(true);
   });
+
+  it('B2: re-arms conversation taint on resume from an external-content TOOL_USE with NO wrap marker', () => {
+    // bash/http_request/read_file results carry no wrap marker, so the resume re-derivation
+    // must recognise the tool_use NAME — else a rehydrated thread that ran such a tool
+    // silently disarms its durable-write gate (fail-open). Unmarked result, still armed:
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    agent.loadMessages([
+      { role: 'user', content: 'fetch that page' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_x', name: 'http_request', input: { url: 'https://x' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_x', content: 'plain attacker output, no marker' }] },
+    ]);
+    expect(agent.conversationSawUntrusted).toBe(true);
+  });
+
+  it('B2: does NOT over-arm conversation taint for a benign resumed history', () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    agent.loadMessages([
+      { role: 'user', content: 'hello there' },
+      { role: 'assistant', content: [{ type: 'text', text: 'hi, how can I help' }] },
+    ]);
+    expect(agent.conversationSawUntrusted).toBe(false);
+  });
 });
