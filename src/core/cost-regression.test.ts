@@ -226,7 +226,16 @@ function measureStaticPrefixTokens(): number {
 // result. Rides the cached prefix (fires on the main agent AND every spawned /
 // pipeline step), a deliberate correctness edit — not accidental growth. Keeps
 // ~2% headroom over the measured value, matching the media_process precedent.
-const STATIC_PREFIX_BUDGET = 23500;
+// 2026-07-17: bump 23500 → 23685 (measured 23671) — the `suggest_follow_ups`
+// builtin tool (the 44th), the structured replacement for the leaky text
+// `<follow_ups>` block: the agent now emits end-of-turn chips as a schema-
+// validated, turn-ending tool call, so nothing leaks as raw JSON and the pills
+// survive thread resume. Description trimmed to minimal first (structural lever,
+// −79 from the untrimmed 23750); the WEB_UI_SYSTEM_PROMPT_SUFFIX follow-up block
+// was rewritten in place (text-block → tool directive, net ~neutral). The
+// residual is one genuine new tool schema — the whole point of the change — and
+// is cache-read priced. Tight headroom by design: the next tool add re-trips it.
+const STATIC_PREFIX_BUDGET = 23685;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

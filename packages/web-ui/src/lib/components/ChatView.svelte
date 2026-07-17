@@ -35,6 +35,11 @@
 		clearError,
 		cancelQueue,
 		removeQueuedMessage,
+		takeFollowUp,
+		getDeferredFollowUps,
+		runDeferredFollowUp,
+		dismissDeferredFollowUp,
+		clearDeferredFollowUps,
 		getSessionModel,
 		getContextBudget,
 		getCompactionOffer,
@@ -1487,6 +1492,7 @@
 		return t('chat.thinking');
 	});
 	const queueLength = $derived(getQueueLength());
+	const deferredFollowUpsList = $derived(getDeferredFollowUps());
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
@@ -2538,7 +2544,7 @@
 					<div class="flex flex-wrap gap-2 mt-1">
 						{#each lastAssistant.followUps as fu}
 							<button
-								onclick={() => sendMessage(fu.task)}
+								onclick={() => takeFollowUp(fu, lastAssistant.followUps ?? [])}
 								class="rounded-full border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all"
 							>{fu.label}</button>
 						{/each}
@@ -3104,6 +3110,38 @@
 			currentToolStartedAt={currentToolStartedAt}
 			lastEventAt={lastEventAt}
 		/>
+	{/if}
+
+	<!-- Deferred follow-ups tray: un-taken siblings of a pill the user took, kept
+	     pinned above the composer so a second matching suggestion isn't lost.
+	     Clicking one runs it as a FRESH in-context turn (sendMessage), not a blind
+	     pre-recorded queue. Glanceable + click-to-run + dismiss only — no editor. -->
+	{#if deferredFollowUpsList.length > 0}
+		<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap items-center gap-2">
+				<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.deferred_title')}</span>
+				{#each deferredFollowUpsList as fu (fu.task)}
+					<div class="inline-flex items-center rounded-full border border-accent/30 bg-accent/5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all">
+						<button
+							onclick={() => runDeferredFollowUp(fu)}
+							class="rounded-l-full px-3 py-1.5"
+						>{fu.label}</button>
+						<button
+							onclick={() => dismissDeferredFollowUp(fu)}
+							aria-label={t('chat.deferred_dismiss')}
+							title={t('chat.deferred_dismiss')}
+							class="rounded-r-full py-1.5 pl-1 pr-2.5 text-text-subtle hover:text-danger"
+						>×</button>
+					</div>
+				{/each}
+				{#if deferredFollowUpsList.length > 1}
+					<button
+						onclick={() => clearDeferredFollowUps()}
+						class="text-[10px] font-mono uppercase tracking-widest text-text-subtle hover:text-danger"
+					>{t('chat.deferred_clear')}</button>
+				{/if}
+			</div>
+		</div>
 	{/if}
 
 	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row

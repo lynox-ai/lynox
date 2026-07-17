@@ -64,6 +64,7 @@ import {
   taskUpdateTool,
   taskListTool,
   planTaskTool,
+  suggestFollowUpsTool,
   dataStoreCreateTool,
   dataStoreInsertTool,
   dataStoreQueryTool,
@@ -1237,6 +1238,7 @@ export class Engine {
       .register(taskListTool)
       .register(planTaskTool)
       .register(recallToolResultTool)
+      .register(suggestFollowUpsTool)
       .register(mediaProcessTool);
 
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
