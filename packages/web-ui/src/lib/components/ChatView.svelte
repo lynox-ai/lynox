@@ -57,6 +57,8 @@
 		getRunInterrupted,
 		retryInterruptedRun,
 		dismissInterruptedRun,
+		retireKnowledge,
+		reviewKnowledge,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
@@ -492,6 +494,9 @@
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
+	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
+	let editingKnowledgeId = $state<string | null>(null);
+	let editingKnowledgeText = $state('');
 	const SCROLL_THRESHOLD_PX = 64;
 	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
@@ -2451,6 +2456,77 @@
 								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
 								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
+						{/if}
+						{#if msg.role === 'assistant' && msg.knowledgeWrites?.length}
+							<!-- DK-UX inline chips: a durable-knowledge write made this turn.
+							     Trusted → confirmation + undo. (Untrusted review chip: Slice C.) -->
+							<div class="flex flex-col gap-1 mt-2">
+								{#each msg.knowledgeWrites as kw (kw.id)}
+									{#if kw.status === 'active'}
+										<div class="flex items-center gap-2 text-[11px] text-text-muted">
+											<span class="inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
+												<span aria-hidden="true">✓</span>
+												{kw.subject ? t('chat.knowledge.saved_to').replace('{subject}', kw.subject) : t('chat.knowledge.saved')}
+											</span>
+											{#if kw.resolved === 'undone'}
+												<span class="text-text-subtle">· {t('chat.knowledge.undone')}</span>
+											{:else}
+												<button
+													class="text-text-subtle hover:text-text underline underline-offset-2"
+													onclick={() => retireKnowledge(msgIdx, kw.id)}
+												>{t('chat.knowledge.undo')}</button>
+											{/if}
+										</div>
+									{:else}
+										<!-- Untrusted capture (turn read external content): a review chip. Shows the
+										     RAW wording (escaped plain text, not markdown) so the person judges the
+										     actual — possibly injected — content, exactly like the review queue.
+										     Keep/discard route to the EXISTING queue-review endpoint. -->
+										<div class="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs space-y-2">
+											<div class="flex items-center gap-2 text-[10px] font-mono text-text-muted">
+												<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5">{t('chat.knowledge.review_tag')}</span>
+												{#if kw.subject}<span>→ {kw.subject}</span>{/if}
+												<span class="text-text-subtle">{t('chat.knowledge.review_hint')}</span>
+											</div>
+											{#if kw.resolved}
+												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
+											{:else if editingKnowledgeId === kw.id}
+												<textarea
+													bind:value={editingKnowledgeText}
+													class="w-full text-xs bg-bg-muted border border-border rounded-[var(--radius-sm)] p-2 min-h-[56px]"
+												></textarea>
+												<div class="flex gap-2">
+													<button
+														disabled={!editingKnowledgeText.trim()}
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] bg-accent/10 text-accent-text hover:bg-accent/20 disabled:opacity-50"
+														onclick={() => { void reviewKnowledge(msgIdx, kw.id, 'edit_approve', editingKnowledgeText).then(() => { if (kw.resolved) editingKnowledgeId = null; }); }}
+													>{t('chat.knowledge.review_save_keep')}</button>
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-text-muted hover:bg-bg-muted"
+														onclick={() => { editingKnowledgeId = null; }}
+													>{t('common.cancel')}</button>
+												</div>
+											{:else}
+												<p class="text-text whitespace-pre-wrap">{kw.text}</p>
+												<div class="flex gap-2">
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] bg-accent/10 text-accent-text hover:bg-accent/20"
+														onclick={() => reviewKnowledge(msgIdx, kw.id, 'approve')}
+													>{t('chat.knowledge.review_keep')}</button>
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-text-muted hover:bg-bg-muted"
+														onclick={() => { editingKnowledgeId = kw.id; editingKnowledgeText = kw.text; }}
+													>{t('chat.knowledge.review_edit')}</button>
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-red-500/80 hover:bg-red-500/10"
+														onclick={() => reviewKnowledge(msgIdx, kw.id, 'reject')}
+													>{t('chat.knowledge.review_discard')}</button>
+												</div>
+											{/if}
+										</div>
+									{/if}
+								{/each}
+							</div>
 						{/if}
 					</div>
 				{/if}
