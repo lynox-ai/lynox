@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.8.0 — 2026-07-17
+
+This release lands the **Durable Knowledge** substrate: a second, archival memory tier that keeps durable facts without the byte-cap and oldest-first eviction of the working store, with a review queue and curation tools for what lynox learns, and an in-chat surface to see and correct it as it happens. The whole substrate ships **dormant** behind a per-tenant flag — default off, byte-identical engine behaviour — and is turned on per instance by an operator, not by this release. Separately, the follow-up "what next" suggestions now arrive through a structured tool instead of parsed text, so they can no longer leak as raw JSON and they survive a thread reload; the managed control plane gains a per-run cost ceiling and a live balance mirror; and the secret vault reconciles near-identical key names instead of stashing a duplicate. **No active engine.db migration** on the default fleet — the durable-knowledge table only materializes once the flag is on. Rollback to 2.7.1 is a clean image swap.
+
+### Added
+- **Durable Knowledge — an archival memory tier (dormant).** Alongside the working memory store, lynox can keep durable facts in a separate archival store with no byte-cap and no oldest-first eviction, so a long-lived fact isn't pushed out by recent chatter. Anything learned from untrusted content — a web page, an inbound mail — lands in a review queue instead of active memory, and curation tools let a fact be retired, pinned, or archived. Ships behind a per-tenant flag, default off: no behaviour change until an operator enables it. (#996, #997, #998, #1000)
+- **See and correct what lynox remembers, in the chat.** When durable knowledge is on, a Knowledge view shows the active facts plus the profile and playbook blocks (secret-masked), and the moment lynox records something you see it inline: a confirmation you can undo for something you told it directly, and a review chip — keep, discard, or edit — for anything learned from external content, so an injected line can't become a durable fact without your click. (#1002)
+- **A per-run cost ceiling and a live balance mirror on managed.** A managed workflow run is now bounded by a per-run cost ceiling, and the tenant's balance is mirrored into the engine so spend is visible and capped per run instead of only reconciled after the fact. (#989)
+
+### Fixed
+- **Follow-up suggestions come through a structured tool, not parsed text.** The end-of-turn "what next" pills are emitted as a tool call instead of a trailing text block, so they can no longer leak as raw JSON when a model omits the wrapper, they render live, and they survive a thread reload. Suggestions you didn't take earlier in the turn stay available in a tray. (#1003)
+- **The secret vault reconciles near-identical key names.** A key stored under a slightly different name — a guessed vendor namespace, a near-duplicate vault entry — is reconciled against the existing one instead of creating a second, divergent copy, and the vault gained a list action to see what's stored. (#990, #992)
+- **The agent's tier-to-model map is grounded, not guessed.** The prompt that tells the agent which model backs each tier is derived from the real routing configuration instead of a hard-coded guess that could drift from it. (#991)
+- **The OpenAI-compatible stream has an idle timeout.** A stalled response from an OpenAI-compatible endpoint no longer hangs indefinitely — an idle timeout closes it. (#999)
+- **Message timestamps show on Safari and Firefox.** A restored message's timestamp no longer comes up blank on Safari or Firefox (a date-parsing difference from Chrome), and the durable-knowledge review surfaces gained accessible names for screen readers. (#1005)
+
+### Notes
+- **Memory write-trust gate ships dormant.** A second-wave memory control — a write-trust gate plus a read-cosine floor — is present but default off, with no behaviour change until enabled. (#995)
+- **Durable knowledge is opt-in per instance.** On hosted plans the substrate is enabled per instance by the operator; self-hosted enables it with an environment flag. Default off means no behaviour change until you turn it on.
+
 ## 2.7.1 — 2026-07-15
 
 A small polish release for the chat surface. The composer's model picker now reflects hybrid routing honestly — a tier pointed at a different provider shows that provider's model, not the base default — and the follow-up "what next" pills no longer leak raw JSON when the agent omits their wrapper. The message footer is one coherent, mobile-swipeable line, per-message timestamps are back on your own turns, and the status bar drops the context meter that duplicated the per-message chip. No engine.db migration — rollback to 2.7.0 is a clean image swap.
