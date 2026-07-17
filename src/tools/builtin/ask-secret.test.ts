@@ -191,9 +191,13 @@ describe('askSecretTool — discovery + reconciliation (DEF-vault-name-discovery
     expect(result).not.toContain('sk-zai-secretvalue'); // value never surfaces
   });
 
-  it('reconciles a same-VENDOR-namespace name instead of re-collecting (DATAFORSEO class)', async () => {
-    // The real dogfood loop: stored DATAFORSEO_B64, agent guessed DATAFORSEO_API_LOGIN
-    // (no normalize-collision, same vendor) → it re-opened the form + gave up.
+  it('collects a same-VENDOR-namespace second key (hint, NOT hard-block) — DATAFORSEO class', async () => {
+    // DATAFORSEO_API_LOGIN is potentially a DISTINCT credential from a stored
+    // DATAFORSEO_B64 (same vendor, no normalize-collision). The vendor namespace
+    // legitimately holds more than one key, so we surface the sibling as a non-blocking
+    // hint on the prompt and STILL collect — a hard block here would dead-end a genuine
+    // second key. (If it IS the same credential, the hint tells the user to cancel and
+    // reference the existing one.)
     process.env['LYNOX_SECRET_DATAFORSEO_B64'] = 'base64-creds-value';
     const promptSecret = vi.fn().mockResolvedValue('saved');
     const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
@@ -202,10 +206,46 @@ describe('askSecretTool — discovery + reconciliation (DEF-vault-name-discovery
       { name: 'DATAFORSEO_API_LOGIN', prompt: 'Enter DataForSEO login' },
       agent,
     );
-    expect(result).toContain('DATAFORSEO_B64');
-    expect(result).toContain('secret:DATAFORSEO_B64');
-    expect(promptSecret).not.toHaveBeenCalled(); // no duplicate collection
+    expect(promptSecret).toHaveBeenCalledTimes(1); // collected, not dead-ended
+    // the sibling is surfaced as a non-blocking hint appended to the prompt
+    expect(promptSecret.mock.calls[0]?.[1]).toContain('DATAFORSEO_B64');
+    expect(result).toContain('saved securely');
     expect(result).not.toContain('base64-creds-value'); // value never surfaces
+  });
+
+  it('collects a legitimate second same-vendor key (AWS id → secret) instead of dead-ending', async () => {
+    // Regression (release-review v2.8.0): the vendor-namespace reconcile used to
+    // HARD-BLOCK ANY second key sharing the leading token, so AWS_SECRET_ACCESS_KEY after
+    // a stored AWS_ACCESS_KEY_ID (the canonical AWS pair) could never be stored by the
+    // agent — and it was tempted to reference the WRONG existing key. It must collect the
+    // NEW key while hinting at the sibling.
+    process.env['LYNOX_SECRET_AWS_ACCESS_KEY_ID'] = 'AKIAEXAMPLE';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'AWS_SECRET_ACCESS_KEY', prompt: 'Enter your AWS secret access key' },
+      agent,
+    );
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+    expect(promptSecret.mock.calls[0]?.[0]).toBe('AWS_SECRET_ACCESS_KEY'); // the NEW key
+    expect(promptSecret.mock.calls[0]?.[1]).toContain('AWS_ACCESS_KEY_ID'); // sibling hinted
+    expect(result).toContain('saved securely');
+  });
+
+  it('still HARD-BLOCKS an exact-normalized duplicate under a different spelling (ZAI/Z_AI)', async () => {
+    // The exact-match dedup path must survive the vendor-second-key relaxation:
+    // Z_AI_API_KEY normalizes to the stored ZAI_API_KEY → collecting would duplicate it.
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'Z_AI_API_KEY', prompt: 'Enter your z.ai key' },
+      agent,
+    );
+    expect(promptSecret).not.toHaveBeenCalled(); // hard-blocked (duplicate)
+    expect(result).toContain('secret:ZAI_API_KEY');
   });
 
   it('still collects when the requested name matches an existing one exactly (overwrite path)', async () => {
