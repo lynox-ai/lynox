@@ -390,7 +390,12 @@
 	 *  UTC (the server persists UTC without an offset). Returns '' on a bad/absent
 	 *  value so callers can skip rendering. */
 	function formatMessageTime(createdAt: string): string {
-		const parsed = new Date(createdAt.endsWith('Z') || createdAt.includes('+') ? createdAt : createdAt + 'Z');
+		// A SQLite space-separated 'YYYY-MM-DD HH:MM:SS' must become 'T'-separated before the 'Z'
+		// or Safari/Firefox parse it as Invalid Date (Chrome is lenient) — mirrors KnowledgeQueueView.fmtDate.
+		const iso = createdAt.endsWith('Z') || createdAt.includes('+')
+			? createdAt
+			: (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(createdAt) ? createdAt.replace(' ', 'T') : createdAt) + 'Z';
+		const parsed = new Date(iso);
 		if (Number.isNaN(parsed.getTime())) return '';
 		const now = new Date();
 		const lang = getLocale();
@@ -2492,6 +2497,7 @@
 												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
 											{:else if editingKnowledgeId === kw.id}
 												<textarea
+													aria-label={t('chat.knowledge.review_edit_aria')}
 													bind:value={editingKnowledgeText}
 													class="w-full text-xs bg-bg-muted border border-border rounded-[var(--radius-sm)] p-2 min-h-[56px]"
 												></textarea>

@@ -3762,7 +3762,7 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (_req, res) => {
-      const { readUserConfig } = await import('../core/config.js');
+      const { readUserConfig, applyManagedTierSetConstraints } = await import('../core/config.js');
       const config = readUserConfig();
       // Canonical redaction: strips top-level secrets (with `${key}_configured`
       // markers for the UI) AND nested tier_set/model_profiles api_keys.
@@ -3918,7 +3918,11 @@ export class LynoxHTTPApi {
       // while the tier actually routes to the slot's model (e.g. Mistral Large).
       // Standard routing keeps the single-provider derivation.
       if (config.routing_mode === 'hybrid' && config.tier_set) {
-        const tierLabels = mainChatTierLabelsFromTierSet(config.tier_set, activeProvider);
+        // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
+        // that provider), so the picker must label the CONSTRAINED set — otherwise it shows a
+        // model that never routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet).
+        const effectiveTierSet = isManagedTier ? applyManagedTierSetConstraints(config.tier_set) : config.tier_set;
+        const tierLabels = mainChatTierLabelsFromTierSet(effectiveTierSet, activeProvider);
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));

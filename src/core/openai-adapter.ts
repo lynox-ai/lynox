@@ -782,9 +782,13 @@ export class OpenAIAdapter {
       idleTimer = setTimeout(() => { idleAborted = true; ac.abort(); }, idleMs);
     };
     const caller = options?.signal;
+    // Named so it can be removed in the finally. `caller` is the reused per-RUN signal, so an
+    // anonymous {once:true} listener that never fires (the normal-completion path) accumulates
+    // one per _doStream call → MaxListenersExceededWarning past ~10 LLM calls in a turn.
+    const onCallerAbort = (): void => { ac.abort(caller?.reason); };
     if (caller) {
       if (caller.aborted) ac.abort(caller.reason);
-      else caller.addEventListener('abort', () => ac.abort(caller.reason), { once: true });
+      else caller.addEventListener('abort', onCallerAbort, { once: true });
     }
 
     try {
@@ -813,6 +817,7 @@ export class OpenAIAdapter {
       throw err;
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
+      caller?.removeEventListener('abort', onCallerAbort);
     }
   }
 }
