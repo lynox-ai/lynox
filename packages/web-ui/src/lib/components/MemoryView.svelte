@@ -3,6 +3,11 @@
 	import { t } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
+	// DK-UX: when durable memory is on, "Wissen" browses the ACTIVE knowledge_entries +
+	// profile/playbook blocks (read-only — changes go via chat) instead of the legacy
+	// memory-file namespaces. Default false → the legacy UI below renders unchanged.
+	const { hasDurableMemory = false }: { hasDurableMemory?: boolean } = $props();
+
 	const namespaces = ['knowledge', 'methods', 'status', 'learnings'] as const;
 	let selectedNs = $state<(typeof namespaces)[number]>('knowledge');
 	let content = $state<string | null>(null);
@@ -31,6 +36,34 @@
 			const res = await fetch(`${getApiBase()}/kg/stats`);
 			if (res.ok) kgStats = (await res.json()) as KgStats;
 		} catch { /* silent — stats are a non-critical header adornment */ }
+	}
+
+	// ── DK-UX read-surface state ──
+	interface DkEntry { id: string; subjectHint: string | null; kind: string; text: string; pinned: boolean; }
+	let dkEntries = $state<DkEntry[]>([]);
+	let dkProfile = $state('');
+	let dkPlaybook = $state('');
+	let dkLoading = $state(false);
+	let dkError = $state('');
+
+	async function loadDurable() {
+		dkLoading = true;
+		dkError = '';
+		try {
+			const [eRes, bRes] = await Promise.all([
+				fetch(`${getApiBase()}/knowledge/entries`),
+				fetch(`${getApiBase()}/knowledge/blocks`)
+			]);
+			if (!eRes.ok || !bRes.ok) throw new Error();
+			const eBody = (await eRes.json()) as { entries: DkEntry[] };
+			const bBody = (await bRes.json()) as { profile: string; playbook: string };
+			dkEntries = eBody.entries;
+			dkProfile = bBody.profile;
+			dkPlaybook = bBody.playbook;
+		} catch {
+			dkError = t('common.load_failed');
+		}
+		dkLoading = false;
 	}
 
 	async function loadNamespace() {
@@ -151,15 +184,71 @@
 	}
 
 	$effect(() => {
+		if (hasDurableMemory) { void loadDurable(); return; }
 		loadNamespace();
 		editingIdx = null;
 	});
 
-	// Load once on mount — KG stats are workspace-wide, not per-namespace.
-	$effect(() => { void loadKgStats(); });
+	// Load once on mount — KG stats are workspace-wide, not per-namespace. (Legacy only;
+	// the DK read-surface has its own entry count.)
+	$effect(() => { if (!hasDurableMemory) void loadKgStats(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
+{#if hasDurableMemory}
+	<!-- DK-UX read-surface: active durable knowledge, read-only. Changes go via chat. -->
+	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-2">
+		<h1 class="text-xl font-light tracking-tight">{t('memory.title')}</h1>
+		<span class="shrink-0 text-xs font-mono text-text-subtle">{dkEntries.length}&nbsp;{t('knowledge.active.count_label')}</span>
+	</div>
+	<p class="text-xs text-text-subtle mb-4">{t('knowledge.active.subtitle')}</p>
+
+	{#if dkError}
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{dkError}</div>
+	{/if}
+
+	{#if dkLoading}
+		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
+	{:else}
+		{#if dkProfile.trim() || dkPlaybook.trim()}
+			<div class="space-y-3 mb-5">
+				{#if dkProfile.trim()}
+					<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
+						<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle mb-2">{t('knowledge.active.profile')}</p>
+						<div class="text-sm text-text leading-relaxed memory-entry-md"><MarkdownRenderer content={dkProfile} /></div>
+					</div>
+				{/if}
+				{#if dkPlaybook.trim()}
+					<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4">
+						<p class="text-[10px] font-mono uppercase tracking-widest text-text-subtle mb-2">{t('knowledge.active.playbook')}</p>
+						<div class="text-sm text-text leading-relaxed memory-entry-md"><MarkdownRenderer content={dkPlaybook} /></div>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if dkEntries.length === 0}
+			<div class="text-text-subtle text-sm border border-dashed border-border rounded-[var(--radius-md)] px-4 py-6 text-center">
+				{t('knowledge.active.empty')}
+			</div>
+		{:else}
+			<div class="space-y-2">
+				{#each dkEntries as entry (entry.id)}
+					<div class="border border-border rounded-[var(--radius-md)] bg-bg-subtle p-3 space-y-1.5">
+						<div class="flex items-center gap-2 text-[10px] text-text-muted font-mono">
+							{#if entry.pinned}<span class="rounded-full bg-accent/15 text-accent-text px-1.5">{t('knowledge.active.pinned')}</span>{/if}
+							{#if entry.subjectHint}<span>→ {entry.subjectHint}</span>{/if}
+							<span>{entry.kind}</span>
+						</div>
+						<p class="text-sm text-text whitespace-pre-wrap leading-relaxed">{entry.text}</p>
+					</div>
+				{/each}
+			</div>
+		{/if}
+
+		<p class="text-xs text-text-subtle mt-5">{t('knowledge.active.edit_hint')}</p>
+	{/if}
+{:else}
 	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('memory.title')}</h1>
 		{#if kgStats && (kgStats.memoryCount > 0 || kgStats.entityCount > 0)}
@@ -314,4 +403,5 @@
 		</div>
 
 	</div>
+{/if}
 </div>

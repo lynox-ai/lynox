@@ -329,6 +329,72 @@ describe('KnowledgeStore review queue (DK.2)', () => {
   });
 });
 
+describe('KnowledgeStore read-surface (DK-UX — listActive / readSurfaceBlocks)', () => {
+  const tmpDirs: string[] = [];
+
+  function make(): { ks: KnowledgeStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ksa-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { ks: new KnowledgeStore(engine, new SubjectStore(engine)) };
+  }
+
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('listActive returns ONLY active entries — a pending untrusted write is excluded', () => {
+    const { ks } = make();
+    ks.write({ text: 'A trusted durable fact', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.write({ text: 'An untrusted capture awaiting review', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    const active = ks.listActive();
+    expect(active).toHaveLength(1);
+    expect(active[0]!.text).toBe('A trusted durable fact');
+    expect(active[0]!.status).toBe('active');
+  });
+
+  it('listActive orders pinned entries first', () => {
+    const { ks } = make();
+    ks.write({ text: 'an unpinned fact', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.write({ text: 'a pinned fact', sourceChannel: 'ui', sourceUntrusted: false, pin: true });
+    ks.write({ text: 'another unpinned fact', sourceChannel: 'ui', sourceUntrusted: false });
+    const active = ks.listActive();
+    expect(active).toHaveLength(3);
+    expect(active[0]!.pinned).toBe(true);
+    expect(active[0]!.text).toBe('a pinned fact');
+  });
+
+  it('listActive honours the limit by slicing', () => {
+    const { ks } = make();
+    for (let i = 0; i < 5; i++) ks.write({ text: `distinct durable fact number ${i}`, sourceChannel: 'ui', sourceUntrusted: false });
+    expect(ks.listActive(3)).toHaveLength(3);
+  });
+
+  it('listActive MASKS secret-shaped tokens in entry text (a display surface)', () => {
+    const { ks } = make();
+    ks.write({ text: 'Deploy key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 is set', sourceChannel: 'ui', sourceUntrusted: false });
+    const [entry] = ks.listActive();
+    expect(entry!.text).not.toContain('sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789');
+    expect(entry!.text).toContain('***');
+  });
+
+  it('readSurfaceBlocks returns profile + playbook, masking secret-shaped tokens', () => {
+    const { ks } = make();
+    ks.setBlockContent('profile', 'Owner prefers terse replies.');
+    // Blocks are edited without a write-side shape scan, so masking on this READ path matters.
+    ks.setBlockContent('playbook', 'Never paste sk-ant-api03-ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210 into a rule.');
+    const blocks = ks.readSurfaceBlocks();
+    expect(blocks.profile).toContain('terse replies');
+    expect(blocks.playbook).not.toContain('sk-ant-api03-ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210');
+    expect(blocks.playbook).toContain('***');
+  });
+
+  it('readSurfaceBlocks returns empty strings when no blocks are set', () => {
+    const { ks } = make();
+    expect(ks.readSurfaceBlocks()).toEqual({ profile: '', playbook: '' });
+  });
+});
+
 describe('KnowledgeStore retire (DK.2 — canSupersede gate)', () => {
   const tmpDirs: string[] = [];
 

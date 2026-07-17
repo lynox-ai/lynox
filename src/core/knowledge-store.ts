@@ -315,8 +315,7 @@ export class KnowledgeStore {
     // Bearer). `remember`d entries already passed the write-side shape reject, but the
     // profile/playbook blocks are edited via memory_block_edit (no write-side shape scan), so a
     // shaped credential pasted into a rule would otherwise render unmasked every turn.
-    const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(composed) : composed;
-    return maskSecretPatterns(tenantMasked);
+    return this._maskText(composed);
   }
 
   /** The stored block (profile/playbook), decrypted content + its char bound. */
@@ -387,6 +386,34 @@ export class KnowledgeStore {
       "SELECT * FROM knowledge_entries WHERE status = 'pending_review' ORDER BY created_at ASC LIMIT ?",
     ).all(capped) as KnowledgeRow[];
     return rows.map(r => this._rowToEntry(r));
+  }
+
+  /**
+   * Active knowledge for the read-surface (the "Wissen" browse tab, DK-UX). Unlike
+   * {@link recall} this is NOT query-ranked — a stable browse list: pinned first, then
+   * newest. A dedicated query (not `_selectActiveGlobal`, which is recall's 200-cap and
+   * would drop a pinned entry older than the 200 newest). Secrets are MASKED — the browse
+   * is a display surface, unlike the review queue ({@link listPending}) which shows raw
+   * text for human judgement. `limit` bounds the row count (1..500).
+   */
+  listActive(limit = 200): KnowledgeEntry[] {
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'active' ORDER BY pinned DESC, created_at DESC LIMIT ?",
+    ).all(capped) as KnowledgeRow[];
+    return rows.map(r => {
+      const e = this._rowToEntry(r);
+      return { ...e, text: this._maskText(e.text) };
+    });
+  }
+
+  /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
+   *  masked for display (the same two-layer masking as {@link renderBlocks}). */
+  readSurfaceBlocks(): { profile: string; playbook: string } {
+    return {
+      profile: this._maskText(this.getBlock('profile')?.content ?? ''),
+      playbook: this._maskText(this.getBlock('playbook')?.content ?? ''),
+    };
   }
 
   /**
@@ -640,6 +667,14 @@ export class KnowledgeStore {
   }
 
   // ── Small helpers ──
+
+  /** Two-layer secret masking for display surfaces (H7): tenant-known secret VALUES
+   *  (`maskSecrets`) then secret-SHAPED tokens (`maskSecretPatterns` — API keys, JWTs,
+   *  Bearer). Shared by {@link renderBlocks} and the read-surface reads. */
+  private _maskText(text: string): string {
+    const tenantMasked = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    return maskSecretPatterns(tenantMasked);
+  }
 
   private _overlap(queryTokens: Set<string>, docTokens: string[]): number {
     if (queryTokens.size === 0) return 0;

@@ -3435,6 +3435,25 @@ export class LynoxHTTPApi {
       }
     }));
 
+    // ── Knowledge read-surface (DK-UX) — the "Wissen" browse tab ──
+    // Present ONLY when `durable_memory_enabled` (getKnowledgeStore() null otherwise
+    // → requireService 503). Single-tenant, user scope: the tenant's OWN active memory.
+    // Unlike the review queue these reads are MASKED (a browse/display surface — the
+    // store applies the same two-layer H7 masking as the always-loaded block render).
+    this.addStatic('user', 'GET /api/knowledge/entries', async (req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 200, 500));
+      jsonResponse(res, 200, { entries: store.listActive(limit) });
+    });
+
+    this.addStatic('user', 'GET /api/knowledge/blocks', async (_req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      jsonResponse(res, 200, store.readSurfaceBlocks());
+    });
+
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
     // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint
     // return null otherwise → requireService 503). Single-tenant, user scope; every

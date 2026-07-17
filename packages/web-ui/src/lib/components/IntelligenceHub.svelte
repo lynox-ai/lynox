@@ -118,7 +118,7 @@
 	{/if}
 	<div class="flex-1 overflow-y-auto">
 		{#if tab === 'wissen'}
-			<MemoryView />
+			<MemoryView {hasDurableMemory} />
 		{:else if tab === 'graph'}
 			{#if graphSub === 'insights'}
 				<MemoryInsightsView />

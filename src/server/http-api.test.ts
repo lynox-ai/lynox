@@ -2981,6 +2981,48 @@ describe('LynoxHTTPApi', () => {
         expect(captured[1]![1]).toEqual({ limit: 50 });   // NaN → default
       });
     });
+
+    // ── Knowledge read-surface (DK-UX) — GET entries + blocks, flag-gated + masked-by-store ──
+
+    it('GET /api/knowledge/entries → 503 when durable memory is off (store absent)', async () => {
+      const res = await jsonFetch('/api/knowledge/entries'); // default mock getKnowledgeStore() → null
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/knowledge/entries → 200 returns active entries, threading the bounded limit', async () => {
+      const captured: number[] = [];
+      const entries = [{ id: 'k1', subjectHint: 'ACME', kind: 'fact', text: 'renews in March', pinned: true }];
+      await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return entries; } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries?limit=50');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ entries });
+        expect(captured[0]).toBe(50);
+      });
+    });
+
+    it('GET /api/knowledge/entries clamps the limit (600→500, abc→200)', async () => {
+      const captured: number[] = [];
+      await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return []; } }) }, async () => {
+        await jsonFetch('/api/knowledge/entries?limit=600');
+        await jsonFetch('/api/knowledge/entries?limit=abc');
+        expect(captured[0]).toBe(500); // over-cap clamped
+        expect(captured[1]).toBe(200); // NaN → default
+      });
+    });
+
+    it('GET /api/knowledge/blocks → 503 when durable memory is off', async () => {
+      const res = await jsonFetch('/api/knowledge/blocks');
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/knowledge/blocks → 200 returns profile + playbook', async () => {
+      const blocks = { profile: 'prefers terse replies', playbook: 'weekly reports on Mondays' };
+      await swapEngine({ getKnowledgeStore: () => ({ readSurfaceBlocks: () => blocks }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/blocks');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(blocks);
+      });
+    });
   });
 
   describe('thread debug-export (comprehensive)', () => {

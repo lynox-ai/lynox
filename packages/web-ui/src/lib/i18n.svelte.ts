@@ -104,6 +104,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
 	'knowledge.queue.reject': { de: 'Ablehnen', en: 'Reject' },
 	'knowledge.queue.reject_confirm': { de: 'Eintrag ablehnen? Er bleibt als abgelehnt protokolliert und wird dem Agenten nie gezeigt.', en: 'Reject this entry? It stays on record as rejected and is never shown to the agent.' },
+	// DK-UX read-surface ("Wissen"-Tab, active durable knowledge — browse only).
+	'knowledge.active.count_label': { de: 'aktive Einträge', en: 'active entries' },
+	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat. Änderungen besprichst du direkt im Chat.', en: 'What lynox has remembered about you and your work. Discuss any changes directly in chat.' },
+	'knowledge.active.profile': { de: 'Profil', en: 'Profile' },
+	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
+	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
+	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
+	'knowledge.active.edit_hint': { de: 'Etwas ändern oder löschen? Sag es lynox einfach im Chat.', en: 'Want to change or remove something? Just tell lynox in chat.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
