@@ -99,6 +99,24 @@ export const rememberTool: ToolEntry<RememberInput> = {
       sourceRunId: agent.currentRunId,
     });
 
+    // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
+    // "gemerkt · undo" confirmation, untrusted → a keep/discard review chip). Emitted for a
+    // NEW write only (never a dedup no-op). This is NOT the tool-result and is never folded
+    // into model context — the return string below stays deliberately minimal (line 103),
+    // and the event flows only to the web-ui via the SSE side-channel. For an untrusted
+    // (pending_review) write the event carries the raw text for the review chip.
+    if (result.deduped !== true && (result.status === 'active' || result.status === 'pending_review')) {
+      void agent.toolContext.streamHandler?.({
+        type: 'knowledge_write',
+        id: result.id,
+        subject: input.subject,
+        kind: input.kind,
+        status: result.status,
+        text,
+        agent: agent.name,
+      });
+    }
+
     if (result.status === 'pending_review') {
       // Do NOT echo the (possibly injected) text back into context.
       return 'Recorded for review: this turn read external content, so it is queued for your approval before it becomes active knowledge.';

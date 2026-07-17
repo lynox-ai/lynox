@@ -52,6 +52,7 @@
 		getRunInterrupted,
 		retryInterruptedRun,
 		dismissInterruptedRun,
+		retireKnowledge,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
@@ -2445,6 +2446,30 @@
 								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
 								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
+						{/if}
+						{#if msg.role === 'assistant' && msg.knowledgeWrites?.length}
+							<!-- DK-UX inline chips: a durable-knowledge write made this turn.
+							     Trusted → confirmation + undo. (Untrusted review chip: Slice C.) -->
+							<div class="flex flex-col gap-1 mt-2">
+								{#each msg.knowledgeWrites as kw (kw.id)}
+									{#if kw.status === 'active'}
+										<div class="flex items-center gap-2 text-[11px] text-text-muted">
+											<span class="inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
+												<span aria-hidden="true">✓</span>
+												{kw.subject ? t('chat.knowledge.saved_to').replace('{subject}', kw.subject) : t('chat.knowledge.saved')}
+											</span>
+											{#if kw.resolved === 'undone'}
+												<span class="text-text-subtle">· {t('chat.knowledge.undone')}</span>
+											{:else}
+												<button
+													class="text-text-subtle hover:text-text underline underline-offset-2"
+													onclick={() => retireKnowledge(msgIdx, kw.id)}
+												>{t('chat.knowledge.undo')}</button>
+											{/if}
+										</div>
+									{/if}
+								{/each}
+							</div>
 						{/if}
 					</div>
 				{/if}

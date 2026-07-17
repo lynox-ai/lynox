@@ -3454,6 +3454,22 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, store.readSurfaceBlocks());
     });
 
+    // Undo of a just-made trusted write (the inline "rückgängig" chip, DK-UX). A USER act
+    // via the UI (user_asserted tier) — NOT an agent tool, so it is not agent-self-approvable.
+    // retireEntry refuses when the entry is not active (already retired) or outranks the user
+    // channel; 404 for gone, 400 for a refusal.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/entries/:id/retire', async (_req, res, params) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      try {
+        const entry = store.retireEntry(params['id']!, 'user_asserted');
+        jsonResponse(res, 200, { entry });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Retire failed';
+        errorResponse(res, /no active entry/i.test(msg) ? 404 : 400, msg);
+      }
+    }));
+
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
     // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint
     // return null otherwise → requireService 503). Single-tenant, user scope; every

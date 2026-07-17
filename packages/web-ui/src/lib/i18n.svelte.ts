@@ -858,6 +858,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// EU AI Act Art. 50 §1 — persistent transparency disclosure on every assistant message
 	'chat.ai_generated_badge': { de: 'KI', en: 'AI' },
 	'chat.ai_generated_aria': { de: 'Von KI generiert', en: 'AI-generated' },
+	// DK-UX inline durable-knowledge chips (trusted write → confirmation + undo).
+	'chat.knowledge.saved_to': { de: 'gemerkt bei {subject}', en: 'saved to {subject}' },
+	'chat.knowledge.saved': { de: 'gemerkt', en: 'saved' },
+	'chat.knowledge.undo': { de: 'rückgängig', en: 'undo' },
+	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
+	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
 	// EU AI Act Art. 50 §1 — composer-level disclosure (interacting with AI) + §8 output caveat
 	'chat.ai_disclaimer': {
 		de: 'Antworten werden von KI generiert und können Fehler enthalten — wichtige Angaben bitte überprüfen.',

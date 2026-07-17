@@ -3023,6 +3023,29 @@ describe('LynoxHTTPApi', () => {
         expect(await res.json()).toEqual(blocks);
       });
     });
+
+    it('POST /api/knowledge/entries/:id/retire → 503 when durable memory is off', async () => {
+      const res = await jsonFetch('/api/knowledge/entries/k1/retire', { method: 'POST' });
+      expect(res.status).toBe(503);
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 200 retires the entry as user_asserted', async () => {
+      const captured: Array<[string, string]> = [];
+      const entry = { id: 'k1', status: 'superseded' };
+      await swapEngine({ getKnowledgeStore: () => ({ retireEntry: (id: string, tier: string) => { captured.push([id, tier]); return entry; } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries/k1/retire', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ entry });
+        expect(captured[0]).toEqual(['k1', 'user_asserted']); // the USER channel, not the agent's
+      });
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 404 when the entry is not active (already gone)', async () => {
+      await swapEngine({ getKnowledgeStore: () => ({ retireEntry: () => { throw new Error('No active entry with this id.'); } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries/gone/retire', { method: 'POST' });
+        expect(res.status).toBe(404);
+      });
+    });
   });
 
   describe('thread debug-export (comprehensive)', () => {
