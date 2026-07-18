@@ -19,7 +19,6 @@ import type {
   MemoryScopeType,
   DataStoreColumnDef,
 } from '../types/index.js';
-import { scopeWeight } from './scope-resolver.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
 import { resolveProviderApiKey, migrateLegacyEndpointKey } from './llm/provider-keys.js';
@@ -181,7 +180,7 @@ const MAX_BRIEFING_CHARS = 8_000;
 export async function generateInitBriefing(
   context: LynoxContext,
   runHistory: RunHistory | null,
-  activeScopes: MemoryScopeRef[],
+  _activeScopes: MemoryScopeRef[],
 ): Promise<BriefingResult> {
   if (context.source !== 'cli' || !context.localDir) {
     return { briefing: undefined, manifest: null };
@@ -212,17 +211,9 @@ export async function generateInitBriefing(
       parts.push(`<workspace>\nYour workspace directory is ${getWorkspaceDir()}. All file operations (read_file, write_file, batch_files) are sandboxed to this directory and /tmp. Bash commands default to this directory. The workspace persists across container restarts.\n</workspace>`);
     }
 
-    // Task overview for briefing (pure SQL, <10ms)
-    if (runHistory) {
-      try {
-        const { TaskManager } = await import('./task-manager.js');
-        const tm = new TaskManager(runHistory);
-        const taskBriefing = tm.getBriefingSummary(activeScopes);
-        if (taskBriefing) parts.push(taskBriefing);
-      } catch {
-        // Best-effort
-      }
-    }
+    // NB: the `<task_overview>` summary moved OUT of this CLI-gated function to
+    // Engine._initContextAndIdentity (unconditional, after scope resolution) so the
+    // PWA/managed surface gets it too — see the note there (2026-07-18).
 
     if (parts.length === 0) {
       return { briefing: undefined, manifest };
@@ -571,14 +562,13 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
 export interface ScopeResult {
   userId: string | null;
   scopes: MemoryScopeRef[];
-  briefingPart: string | undefined;
 }
 
 export function initScopes(
   userConfig: LynoxUserConfig,
   context: LynoxContext | null,
   runHistory: RunHistory | null,
-  memory: Memory | null,
+  _memory: Memory | null,
 ): ScopeResult {
   const userId = userConfig.user_id ?? null;
   const scopes = resolveActiveScopes({
@@ -609,17 +599,13 @@ export function initScopes(
     } catch { /* fire-and-forget */ }
   }
 
-  let briefingPart: string | undefined;
-  if (scopes.length > 0) {
-    const scopeList = scopes.map(s =>
-      `${s.type}:${s.id}${s.type === 'global' ? '' : ` (${scopeWeight(s.type)})`}`
-    ).join(', ');
-    const autoNote = (memory?.['_autoScope'] === true && scopes.length > 1)
-      ? ' Auto-scope active.' : '';
-    briefingPart = `<memory_scopes>${scopeList}${autoNote}</memory_scopes>`;
-  }
-
-  return { userId, scopes, briefingPart };
+  // The `<memory_scopes>` briefing block was removed 2026-07-18: it surfaced the
+  // internal transport scope label (`context:http-api`, a per-PWA constant, NOT a
+  // project) + numeric weights to the model, which reported it as "Fokus: http-api
+  // (Projekt/Kontext)" and confabulated a project around a meaningless label. Scopes
+  // are still resolved and used for retrieval — they are just no longer echoed to
+  // the model, for which they had zero user value.
+  return { userId, scopes };
 }
 
 // ── Memory ──────────────────────────────────────────────────────
