@@ -233,7 +233,74 @@ function parseUsage(raw: string | null): RenderedUsage | undefined {
   }
 }
 
-export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage[] {
+/** The interleaved-block view of an assistant message: its own `blocks` when it
+ *  has them, else a single synthesized text block from `content` (so a
+ *  string-content iteration still contributes to a merged block sequence). */
+function asBlocks(m: RenderedMessage): RenderedContentBlock[] {
+  if (m.blocks && m.blocks.length > 0) return m.blocks;
+  if (m.content) return [{ type: 'text', text: m.content }];
+  return [];
+}
+
+/**
+ * Merge one assistant iteration (`add`) into the running turn message (`into`).
+ * A multi-step turn is persisted as several assistant rows (text → tool_use →
+ * [tool_result carrier] → text → …); the carriers are already suppressed by the
+ * main loop, so consecutive assistant entries in the projection are iterations
+ * of ONE turn and must render as ONE bubble — matching the live stream, which
+ * accumulates them into a single message (chat.svelte.ts). Without this a
+ * resumed turn shows as N "assistant"-badged blocks with N footers (#4).
+ *
+ * - `blocks` are concatenated with `add`'s tool_call indices shifted past
+ *   `into`'s existing tool calls, and a text/text seam coalesced into one block
+ *   (same growing-text-block behaviour as the live path).
+ * - `content` gets the live `\n\n` separator when text follows a tool call.
+ * - `usage` takes `add`'s when present — only the FINAL row of a run carries the
+ *   cumulative rollup (ThreadStore.setMessageUsage), so last-non-null = the
+ *   turn's Σ total the live footer shows.
+ */
+function mergeAssistantInto(into: RenderedMessage, add: RenderedMessage): void {
+  const intoToolCount = into.toolCalls?.length ?? 0;
+  const intoBlocks = asBlocks(into);
+  const addBlocks = asBlocks(add).map((b) =>
+    b.type === 'tool_call' ? { type: 'tool_call' as const, index: b.index + intoToolCount } : b);
+
+  const mergedBlocks: RenderedContentBlock[] = intoBlocks.slice();
+  for (const b of addBlocks) {
+    const last = mergedBlocks[mergedBlocks.length - 1];
+    if (b.type === 'text' && last && last.type === 'text') {
+      mergedBlocks[mergedBlocks.length - 1] = { type: 'text', text: last.text + b.text };
+    } else {
+      mergedBlocks.push(b);
+    }
+  }
+
+  if (into.content && add.content) {
+    const lastIntoBlock = intoBlocks[intoBlocks.length - 1];
+    if (lastIntoBlock && lastIntoBlock.type === 'tool_call'
+      && !into.content.endsWith('\n') && !into.content.endsWith(' ')) {
+      into.content += '\n\n';
+    }
+  }
+  into.content += add.content;
+  if (mergedBlocks.length > 0) into.blocks = mergedBlocks;
+  if (add.toolCalls && add.toolCalls.length > 0) {
+    into.toolCalls = [...(into.toolCalls ?? []), ...add.toolCalls];
+  }
+  if (add.usage) into.usage = add.usage;
+}
+
+/**
+ * @param opts.mergeTurns — collapse a turn's consecutive assistant iterations
+ *   into one message (the UI-ready default). Pass `false` for a raw,
+ *   per-iteration view — the debug export wants the granular row-by-row truth,
+ *   not the merged bubble the chat renders (#4).
+ */
+export function projectMessages(
+  records: ThreadMessageRecord[],
+  opts?: { mergeTurns?: boolean },
+): RenderedMessage[] {
+  const mergeTurns = opts?.mergeTurns ?? true;
   const out: RenderedMessage[] = [];
   // Carries tool_use id → its RenderedToolCall, so later tool_result
   // carriers (possibly many messages later) can attach results by id.
@@ -339,6 +406,14 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     // REAL message and must NOT be dropped.
     const allBlocksAreText = content.every((b) => b.type === 'text');
     if (toolCalls.length === 0 && (textAccum === THINKING_ONLY_PLACEHOLDER || (textAccum.trim() === '' && allBlocksAreText))) {
+      // The suppressed row is dropped, but if it is the run's FINAL row it carries
+      // the cumulative usage rollup (setMessageUsage stamps the highest-seq
+      // assistant row). Hoist that onto the turn's last visible assistant message
+      // so the merged footer still shows the run's Σ total instead of losing it.
+      const prev = out[out.length - 1];
+      if (usage && prev !== undefined && prev.role === 'assistant' && prev.note === undefined) {
+        prev.usage = usage;
+      }
       continue;
     }
 
@@ -354,5 +429,24 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     out.push(msg);
   }
 
-  return out;
+  // Merge consecutive assistant iterations of the same turn into one message
+  // (#4). The main loop emits one entry per stored assistant ROW, but a
+  // multi-step turn is many rows; a real USER message (which pushes an entry)
+  // separates turns, while tool-result carriers between iterations were
+  // suppressed above — so adjacent assistant entries here belong to ONE turn.
+  // A B-full failure note (`note`) is a distinct localized element and never
+  // merges. The shared RenderedToolCall refs mean a carrier's later result
+  // update still reaches the merged message's tool call.
+  if (!mergeTurns) return out;
+  const merged: RenderedMessage[] = [];
+  for (const m of out) {
+    const last = merged[merged.length - 1];
+    if (m.role === 'assistant' && m.note === undefined
+      && last !== undefined && last.role === 'assistant' && last.note === undefined) {
+      mergeAssistantInto(last, m);
+    } else {
+      merged.push(m);
+    }
+  }
+  return merged;
 }
