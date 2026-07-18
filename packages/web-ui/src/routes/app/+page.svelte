@@ -10,13 +10,12 @@
 	// (sets the active thread + generation-guards concurrent switches), so it wins
 	// over the persisted-thread reconcile ChatView runs on mount.
 	onMount(() => {
-		if (typeof window === 'undefined') return;
 		const url = new URL(window.location.href);
 		const threadId = url.searchParams.get('thread');
 		if (!threadId) return;
 		void resumeThread(threadId);
 		url.searchParams.delete('thread');
-		window.history.replaceState({}, '', url.pathname + (url.search || '') + url.hash);
+		window.history.replaceState({}, '', url.pathname + url.search + url.hash);
 	});
 </script>
 
