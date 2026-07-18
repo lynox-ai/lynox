@@ -20,6 +20,20 @@ export type ChatContextRef =
   | { kind: 'mail-batch'; ids: string[] };
 
 /**
+ * Boundary sentinel the http-api seam appends AFTER a resolved preamble and
+ * BEFORE the user's own text (`${preamble}\n${LOADED_CONTEXT_END}\n\n${userText}`).
+ * Every preamble here OPENS with a `[Loaded …]` line; this closes the block. Two
+ * jobs: it gives the model a clear end-of-loaded-context delimiter, and it lets
+ * the chat UI strip the whole preamble on replay (the preamble is engine framing,
+ * not the user's words — same store-as-sent / strip-at-render contract as the
+ * `[Now:]` marker). Unforgeable by field content: every interpolated field passes
+ * {@link oneLine}, which collapses newlines, so only this template line can put
+ * the sentinel on its own line. MUST stay in exact sync with the web-ui matcher
+ * (`stripLoadedContext`, packages/web-ui/src/lib/utils/now-marker.ts).
+ */
+export const LOADED_CONTEXT_END = '[/loaded-context]';
+
+/**
  * The narrow read surface `resolveChatContext` needs to render a `mail`
  * context — structurally satisfied by `InboxStateDb` (which sits on the shared
  * mail-state.db connection, so it can also read the mail-owned

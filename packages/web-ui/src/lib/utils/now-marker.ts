@@ -20,3 +20,26 @@ export function stripNowMarker(text: string | undefined | null): string {
 	if (typeof text !== 'string') return '';
 	return text.replace(NOW_MARKER_AT_START, '');
 }
+
+/**
+ * Strip a leading chat-context preamble from a user message at render time.
+ *
+ * When a chat is opened ON an object ("💬 Bearbeiten"/"💬 Fixen"/"💬 Im Chat
+ * beantworten"), the engine prepends a `[Loaded …]` context block to the user's
+ * first message and stores the composed text as-sent (same store-as-sent /
+ * strip-at-render contract as the `[Now:]` marker). Without stripping, that
+ * engine framing leaks into the user's bubble when the thread is replayed on
+ * resume. The preamble is multi-paragraph (the mail kind has a blank line inside
+ * its body), so we can't anchor on `\n\n`; instead the server closes the block
+ * with an explicit `[/loaded-context]` sentinel (http-api.ts LOADED_CONTEXT_END),
+ * and we strip from the `[Loaded ` opener up to and including that sentinel.
+ * Anchored on BOTH markers so a user who merely types `[Loaded …]` is untouched.
+ *
+ * Apply AFTER stripNowMarker (the `[Now:]` marker sits outside the preamble).
+ */
+const LOADED_CONTEXT_AT_START = /^\[Loaded [\s\S]*?\n\[\/loaded-context\]\n\n/;
+
+export function stripLoadedContext(text: string | undefined | null): string {
+	if (typeof text !== 'string') return '';
+	return text.replace(LOADED_CONTEXT_AT_START, '');
+}
