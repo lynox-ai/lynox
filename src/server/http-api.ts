@@ -26,7 +26,7 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { readEnvAlias } from '../core/env.js';
-import { resolveChatContext, LOADED_CONTEXT_END, type ChatContextRef } from '../core/chat-context.js';
+import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
@@ -1967,18 +1967,18 @@ export class LynoxHTTPApi {
             engine.getInboxRuntime()?.state ?? null,
           );
           // Close the loaded-context block with an explicit boundary sentinel
-          // before the user's own text. Two jobs: (1) it gives the model a clear
-          // end-of-loaded-context marker (the block already OPENS with a
-          // `[Loaded …]` line from resolveChatContext); (2) it lets the chat UI
-          // strip the whole preamble on replay — the preamble is engine framing,
+          // before the user's own text (closeLoadedContext, the single source of
+          // this framing). Two jobs: (1) a clear end-of-loaded-context marker for
+          // the model (the block already OPENS with a `[Loaded …]` line); (2) the
+          // chat UI strips the whole preamble on replay — it's engine framing,
           // not the user's words, and without a boundary it leaks into the user
-          // bubble on resume (the [Now:] marker has the same store-as-sent /
-          // strip-at-render contract). The sentinel is UNFORGEABLE by field
-          // content: every interpolated field passes chat-context.oneLine(),
-          // which collapses newlines, so nothing but this template line can put
-          // `[/loaded-context]` on its own line. MUST stay in sync with the
+          // bubble on resume (the [Now:] marker shares this store-as-sent /
+          // strip-at-render contract). The sentinel can't be forged on its own
+          // line by the interpolated FREE-TEXT fields — they pass
+          // chat-context.oneLine(), which collapses newlines — and the id fields
+          // are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
-          if (preamble) contextPreamble = `${preamble}\n${LOADED_CONTEXT_END}\n\n`;
+          if (preamble) contextPreamble = closeLoadedContext(preamble);
         }
       }
       // Defense-in-depth: the client sanitises chat-over-bespoke framings, but

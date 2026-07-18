@@ -24,14 +24,50 @@ export type ChatContextRef =
  * BEFORE the user's own text (`${preamble}\n${LOADED_CONTEXT_END}\n\n${userText}`).
  * Every preamble here OPENS with a `[Loaded …]` line; this closes the block. Two
  * jobs: it gives the model a clear end-of-loaded-context delimiter, and it lets
- * the chat UI strip the whole preamble on replay (the preamble is engine framing,
- * not the user's words — same store-as-sent / strip-at-render contract as the
- * `[Now:]` marker). Unforgeable by field content: every interpolated field passes
- * {@link oneLine}, which collapses newlines, so only this template line can put
- * the sentinel on its own line. MUST stay in exact sync with the web-ui matcher
- * (`stripLoadedContext`, packages/web-ui/src/lib/utils/now-marker.ts).
+ * a downstream consumer strip the whole preamble on replay (the preamble is
+ * engine framing, not the user's words — same store-as-sent / strip-at-render
+ * contract as the `[Now:]` marker). The sentinel can't be forged on its own line
+ * by the interpolated fields: the untrusted FREE-TEXT ones (mail from/subject/
+ * body, workflow + step names, run error) all pass {@link oneLine}, which
+ * collapses newlines, and the remaining fields (ids, status, mode) are
+ * server-generated ids / enums with no newlines. Two consumers strip on it: the
+ * server-side title derivation ({@link stripLoadedContext}, used by session
+ * `generateThreadTitle`) and the web-ui bubble render (its own mirror of
+ * `stripLoadedContext`, packages/web-ui/src/lib/utils/now-marker.ts).
  */
 export const LOADED_CONTEXT_END = '[/loaded-context]';
+
+/**
+ * Matches a leading loaded-context block — `[Loaded …]` opener through the
+ * {@link LOADED_CONTEXT_END} sentinel + its `\n\n` separator. Anchored on BOTH
+ * markers so a user who merely types `[Loaded …]` is untouched. This is the
+ * canonical (core) matcher; the web-ui carries a byte-identical copy it can't
+ * import across the package boundary (guarded by the sentinel-value assertion in
+ * the boundary test). Single lazy quantifier + literal tail ⇒ linear, no ReDoS.
+ */
+const LOADED_CONTEXT_AT_START = /^\[Loaded [\s\S]*?\n\[\/loaded-context\]\n\n/;
+
+/**
+ * Strip a leading loaded-context preamble from a composed message. Used
+ * server-side where the composed text is consumed as if it were the user's own
+ * words — the thread title, which is derived from the first message. Returns the
+ * text unchanged when there is no preamble.
+ */
+export function stripLoadedContext(text: string): string {
+  return text.replace(LOADED_CONTEXT_AT_START, '');
+}
+
+/**
+ * Close a resolved preamble with the boundary sentinel + the separator before
+ * the user's own text. This is the SINGLE source of the loaded-context framing:
+ * the http-api seam calls it to build the prefix it prepends to the user's first
+ * message, and the boundary test calls the same function — so a change to the
+ * framing (e.g. dropping the sentinel) breaks the test instead of silently
+ * re-opening the leak. Pair with the web-ui `stripLoadedContext` matcher.
+ */
+export function closeLoadedContext(preamble: string): string {
+  return `${preamble}\n${LOADED_CONTEXT_END}\n\n`;
+}
 
 /**
  * The narrow read surface `resolveChatContext` needs to render a `mail`

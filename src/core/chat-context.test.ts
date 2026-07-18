@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveChatContext, LOADED_CONTEXT_END, type ChatInboxReader } from './chat-context.js';
+import { resolveChatContext, LOADED_CONTEXT_END, closeLoadedContext, stripLoadedContext, type ChatInboxReader } from './chat-context.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
@@ -315,25 +315,21 @@ describe('resolveChatContext (kind: mail-batch)', () => {
   });
 });
 
-// #6: the http-api seam appends LOADED_CONTEXT_END after the preamble, and the
-// web-ui strips the whole block on replay so it doesn't leak into the user
-// bubble. This guard proves the SERVER format and the CLIENT matcher agree \u2014
-// against the REAL preamble output of resolveChatContext, for every kind
-// (including mail, which has a blank line inside its body that a naive \n\n
-// anchor would trip on). The regex below is a MIRROR of the web-ui
-// stripLoadedContext (packages/web-ui/src/lib/utils/now-marker.ts); if they
-// drift, this fails. See http-api.ts (composedTask assembly).
-describe('#6 loaded-context boundary \u2014 server format \u2194 client strip agree', () => {
-  // Exact mirror of stripLoadedContext in the web-ui.
-  const STRIP = /^\[Loaded [\s\S]*?\n\[\/loaded-context\]\n\n/;
-  const compose = (preamble: string, userText: string): string =>
-    `${preamble}\n${LOADED_CONTEXT_END}\n\n${userText}`;
-
+// #6: the http-api seam closes a resolved preamble with closeLoadedContext, and
+// consumers strip that block back off on replay so it doesn't leak. This guard
+// drives the REAL compose (closeLoadedContext) \u2192 REAL strip (stripLoadedContext)
+// round-trip against the REAL preamble output of resolveChatContext, for every
+// kind \u2014 so a change to EITHER the sentinel or the matcher (e.g. dropping the
+// sentinel from closeLoadedContext) breaks it. Both http-api (bubble) and
+// session.generateThreadTitle (nav title) consume this same pair; the web-ui
+// carries a byte-identical strip copy it can't import (guarded by the
+// sentinel-value assertion below).
+describe('#6 loaded-context boundary \u2014 compose \u2194 strip round-trip', () => {
   it('sentinel value is the exact literal the web-ui matcher expects', () => {
     expect(LOADED_CONTEXT_END).toBe('[/loaded-context]');
   });
 
-  it('recovers the user text for a workflow preamble', () => {
+  it('strips back a workflow preamble to recover the user text', () => {
     const dir = mkdtempSync(join(tmpdir(), 'chat-ctx-b1-'));
     const history = new RunHistory(join(dir, 'h.db'));
     const engine = new EngineDb(join(dir, 'engine.db'));
@@ -341,19 +337,26 @@ describe('#6 loaded-context boundary \u2014 server format \u2194 client strip ag
     try {
       history.insertPlannedPipeline(makePlanned());
       const preamble = resolveChatContext(history, { kind: 'workflow', id: 'wf-1' })!;
-      const composed = compose(preamble, 'Add a step that emails the summary.');
-      expect(composed.replace(STRIP, '')).toBe('Add a step that emails the summary.');
+      const composed = closeLoadedContext(preamble) + 'Add a step that emails the summary.';
+      expect(stripLoadedContext(composed)).toBe('Add a step that emails the summary.');
     } finally {
       engine.close(); history.close(); rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('recovers the user text for a MAIL preamble (has its own blank line inside)', () => {
-    const reader = makeReader(makeInboxItem(), { uid: { uid: 42, folder: 'INBOX' }, bodyMd: 'Line one.\n\nLine two after a blank.' });
+  it('strips back a MAIL preamble whose template body block ends in a blank line', () => {
+    const reader = makeReader(makeInboxItem(), { uid: { uid: 42, folder: 'INBOX' }, bodyMd: 'Please confirm Thursday.' });
     const preamble = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!;
-    // Prove the naive anchor WOULD have been wrong: the preamble contains a blank line.
+    // The mail template writes `Message:\n<body>\n\n`, so the preamble contains a
+    // blank line \u2014 the exact case a naive "cut at the first \n\n" would break on.
+    // (The body itself is oneLine'd, so this blank line is the template's, not the
+    // body's.) The end sentinel is what makes the strip exact regardless.
     expect(preamble).toMatch(/\n\n/);
-    const composed = compose(preamble, 'Antworte kurz und freundlich.');
-    expect(composed.replace(STRIP, '')).toBe('Antworte kurz und freundlich.');
+    const composed = closeLoadedContext(preamble) + 'Antworte kurz und freundlich.';
+    expect(stripLoadedContext(composed)).toBe('Antworte kurz und freundlich.');
+  });
+
+  it('leaves a message with no preamble untouched', () => {
+    expect(stripLoadedContext('just my question')).toBe('just my question');
   });
 });

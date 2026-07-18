@@ -31,9 +31,12 @@ export function stripNowMarker(text: string | undefined | null): string {
  * engine framing leaks into the user's bubble when the thread is replayed on
  * resume. The preamble is multi-paragraph (the mail kind has a blank line inside
  * its body), so we can't anchor on `\n\n`; instead the server closes the block
- * with an explicit `[/loaded-context]` sentinel (http-api.ts LOADED_CONTEXT_END),
- * and we strip from the `[Loaded ` opener up to and including that sentinel.
- * Anchored on BOTH markers so a user who merely types `[Loaded …]` is untouched.
+ * with an explicit `[/loaded-context]` sentinel (LOADED_CONTEXT_END, defined in
+ * core `chat-context.ts`), and we strip from the `[Loaded ` opener up to and
+ * including that sentinel. Anchored on BOTH markers so a user who merely types
+ * `[Loaded …]` is untouched. This is a byte-identical copy of the core
+ * `stripLoadedContext` regex — the web-ui can't import across the package
+ * boundary (the boundary test in chat-context.test.ts asserts the shared literal).
  *
  * Apply AFTER stripNowMarker (the `[Now:]` marker sits outside the preamble).
  */
