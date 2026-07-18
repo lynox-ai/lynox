@@ -118,7 +118,15 @@
 				const data = (await providersRes.json()) as { providers: ProviderEntry[] };
 				providers = Array.isArray(data.providers) ? data.providers : [];
 				const primary = providers[0];
-				if (primary?.provider) providerName = primary.provider;
+				// Name ALL configured providers, not just the primary — in a hybrid
+				// tier setup (e.g. balanced=Mistral, deep=Anthropic) the footer must
+				// show both. Shorten "Mistral AI" → "Mistral" to keep the no-wrap
+				// mobile line compact.
+				const names = providers
+					.map((p) => p.provider)
+					.filter((n): n is string => Boolean(n))
+					.map((n) => n.replace(/\bMistral AI\b/, 'Mistral'));
+				if (names.length > 0) providerName = names.join(' · ');
 
 				// Aggregate worst-state across ALL configured providers — when one
 				// provider (e.g. Mistral with an expired key) is failing, the bar
@@ -345,7 +353,7 @@
 	produced wasted black space below the status text. The iOS Home Indicator
 	bar visually overlaps the bottom edge now, but the status text sits above
 	the indicator and stays legible. -->
-<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2">
+<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 whitespace-nowrap overflow-x-auto scrollbar-none">
 	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors" title={apiStatusTooltip || providerName}>
 		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
 		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
