@@ -630,8 +630,15 @@ describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
         .map((t) => t.definition.name),
     );
     // web_research is an INTEGRATION tool (integrations/search/web-search-tool.ts),
-    // not a builtin — the only legitimate non-builtin name inline steps reference.
-    const NON_BUILTIN_ALLOWED = new Set(['web_research']);
+    // not a builtin. Resolve its REAL registered name (the definition is provider-
+    // independent) rather than hard-coding the string — so a rename of the tool
+    // drifts LOUDLY here (INLINE_CORE_TOOLS's 'web_research' would no longer match)
+    // instead of being silently blind-allowlisted (the very typo class this guards).
+    const { createWebSearchTool } = await import('../integrations/search/web-search-tool.js');
+    // The factory interpolates `provider.name` into the description — a minimal
+    // stub is enough to read the (provider-independent) definition name.
+    const webResearchName = createWebSearchTool({ name: 'stub' } as unknown as never).definition.name;
+    const NON_BUILTIN_ALLOWED = new Set([webResearchName]);
     const unknown = [...INLINE_CORE_TOOLS].filter((n) => !builtinNames.has(n) && !NON_BUILTIN_ALLOWED.has(n));
     expect(unknown, `INLINE_CORE_TOOLS names with no registered tool: ${unknown.join(', ')}`).toEqual([]);
   });
