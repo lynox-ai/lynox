@@ -427,6 +427,26 @@ describe('Engine + Session (Orchestrator)', () => {
       const result = await engine.init();
       expect(result).toBe(engine);
     });
+
+    it('first-turn briefing (2026-07-18): drops scope-label + data-table leaks, wires task overview', async () => {
+      const { TaskManager } = await import('./task-manager.js');
+      const { engine } = await createEngineAndSession();
+      const briefing = engine.getBriefing() ?? '';
+
+      // #3b: the UNSCOPED <data_collections> dump is gone even though the DataStore
+      // mock returns a collection (pre-fix, this branch injected <data_collections>).
+      expect(briefing).not.toContain('<data_collections>');
+      // #3a: the <memory_scopes> transport-label leak is gone (scopes still resolve).
+      expect(briefing).not.toContain('<memory_scopes>');
+
+      // L2a: the engine computes <task_overview> UNCONDITIONALLY (not CLI-gated) —
+      // getBriefingSummary is invoked during init on this non-CLI path. The lift is
+      // what this asserts; the summary CONTENT is covered by task-manager.test.ts.
+      const summaryCalled = vi.mocked(TaskManager).mock.instances.some(
+        (inst) => (((inst as { getBriefingSummary?: { mock?: { calls: unknown[] } } }).getBriefingSummary?.mock?.calls.length) ?? 0) > 0,
+      );
+      expect(summaryCalled, 'Engine must call TaskManager.getBriefingSummary during init (L2a task-overview lift)').toBe(true);
+    });
   });
 
   // -- run() --

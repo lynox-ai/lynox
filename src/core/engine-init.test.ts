@@ -57,6 +57,7 @@ vi.mock('./project.js', () => ({
 }));
 
 import { generateInitBriefing, initMemoryInstance, configureBudgetAndRateLimits, initScopes } from './engine-init.js';
+import { resolveActiveScopes } from './scope-resolver.js';
 import { createToolContext } from './tool-context.js';
 import type { LynoxContext, LynoxConfig, LynoxUserConfig } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
@@ -128,13 +129,24 @@ describe('initScopes — no <memory_scopes> leak (2026-07-18)', () => {
     // The `context:http-api` transport scope label used to be echoed to the model
     // as `<memory_scopes>`, which it reported as "Fokus: http-api (Projekt/Kontext)"
     // and confabulated a project around. Scopes must still resolve — just not leak.
+    //
+    // Load-bearing setup: a NON-EMPTY scope so the OLD `if (scopes.length > 0)` leak
+    // branch WOULD have fired — otherwise (with the default []-mock) the assertion
+    // below passes on unpatched code too, which makes it worthless.
+    vi.mocked(resolveActiveScopes).mockReturnValueOnce([
+      { type: 'context', id: 'http-api' },
+      { type: 'user', id: 'u1' },
+    ] as unknown as ReturnType<typeof resolveActiveScopes>);
+
     const result = initScopes(
       { user_id: 'u1' } as unknown as LynoxUserConfig,
       cliContext,
       mockRunHistory,
       null,
     );
-    expect(Array.isArray(result.scopes)).toBe(true);
+    expect(result.scopes.length).toBeGreaterThan(0); // the leak branch's precondition held
+    // The scope id 'http-api' is legitimately RETURNED (it drives retrieval) — what
+    // must be gone is the `<memory_scopes>` briefing string built FROM it.
     expect(JSON.stringify(result)).not.toContain('memory_scopes');
     // The `briefingPart` field is gone from ScopeResult entirely.
     expect('briefingPart' in result).toBe(false);

@@ -53,7 +53,7 @@ Persistent structured storage for business data (KPIs, metrics, API records). Su
 - \`data_store_delete\`: Remove records matching a filter. Always requires a filter — cannot delete all records at once.
 - \`data_store_drop\`: Permanently remove an entire table including all records and its schema.
 - \`data_store_list\`: Browse tables and schemas.
-When \`<data_collections>\` appears in briefing, query existing data before re-fetching from APIs.
+Before fetching data from an external API, call \`data_store_list\` to check whether a matching table already exists and reuse it instead of re-fetching.
 When to use: Quantitative data that needs comparison, trends, or deltas across sessions. NOT for knowledge/preferences (use knowledge tools) or task tracking (use tasks).
 
 ### Proactive data discovery
