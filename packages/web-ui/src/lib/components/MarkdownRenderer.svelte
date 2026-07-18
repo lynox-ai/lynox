@@ -1367,6 +1367,12 @@
 	div :global(.artifact-fullscreen .artifact-close-btn) {
 		display: inline-flex;
 	}
+	/* In fullscreen the expand toggle and the close X both just exit fullscreen —
+	   redundant. The X is the clear exit affordance, so hide the expand toggle
+	   here and keep a single close control. */
+	div :global(.artifact-fullscreen [data-action="expand"]) {
+		display: none;
+	}
 
 	div :global(.artifact-source-wrap) {
 		padding: 0.75rem 1rem;
