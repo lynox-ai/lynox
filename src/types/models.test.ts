@@ -490,6 +490,21 @@ describe('ModelCapability registry', () => {
     expect(MODEL_CAPABILITIES['mistral-small-2603']!.features.extendedThinking).toBe(false);
     expect(MODEL_CAPABILITIES['mistral-small-2603']!.features.vision).toBe(false);
     expect(MODEL_CAPABILITIES['mistral-large-2512']!.features.toolUse).toBe(true);
+
+    // Gen-3 Mistral is multimodal (verified vs the live Mistral API 2026-07-18):
+    // the four -2512 ids the product tier-routes carry vision:true so an uploaded
+    // image reaches the model instead of tripping the openai-adapter throw (#2).
+    for (const id of ['ministral-3b-2512', 'ministral-8b-2512',
+                      'ministral-14b-2512', 'mistral-large-2512']) {
+      expect(MODEL_CAPABILITIES[id]!.features.vision, id).toBe(true);
+    }
+    // Legacy / opt-in Mistral stays vision:false by decision (rafael 2026-07-18) —
+    // codestral + nemo genuinely reject images; magistral/older ids aren't routed.
+    // A false-NO only yields the clear pre-flight error, never a silent unseen image.
+    for (const id of ['codestral-2508', 'open-mistral-nemo', 'magistral-medium-2509',
+                      'magistral-small-2509', 'ministral-8b-2410']) {
+      expect(MODEL_CAPABILITIES[id]!.features.vision, id).toBe(false);
+    }
   });
 
   it('exposes bench-only Mistral roster with tier:null + non-negative pricing', async () => {

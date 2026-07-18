@@ -484,6 +484,24 @@ const MISTRAL_FEATURES_SMALL: ModelFeatures = {
   pdfInput: false,
 };
 
+// Gen-3 Mistral (ministral-{3,8,14}b-2512, mistral-large-2512) are multimodal:
+// they accept an OpenAI `image_url` part and describe it. VERIFIED against the
+// live Mistral API 2026-07-18 (red/blue split PNG → correctly named both halves
+// on all four). This is the ONLY axis that separates them from MISTRAL_FEATURES_*
+// today, so it earns its own object rather than flipping the shared ones — the
+// legacy/opt-in roster (codestral, magistral, nemo, *-2410/2508/2603) stays
+// vision:false: codestral + nemo genuinely reject images ("Image input is not
+// enabled for this model"), and the reasoning/deprecated ids the product doesn't
+// tier-route are left unsupported by decision (rafael 2026-07-18) — a false-NO
+// only yields the clear pre-flight throw, never a silent answer to an unseen image.
+const MISTRAL_FEATURES_GEN3: ModelFeatures = {
+  vision: true,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
 const ONE_M_BETA: AnthropicBeta[] = ['context-1m-2025-08-07'];
 
 /**
@@ -651,7 +669,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 },
     uiLabel: 'Ministral 3B',
   },
@@ -663,7 +681,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
     uiLabel: 'Ministral 8B',
   },
@@ -678,7 +696,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.20, output: 0.20, cacheWrite: 0.20, cacheRead: 0.02 },
     uiLabel: 'Ministral 14B',
   },
@@ -694,7 +712,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_LARGE,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
     uiLabel: 'Mistral Large 3',
   },
