@@ -1114,8 +1114,23 @@ export class Engine {
     const scopeResult = initScopes(this.userConfig, this.context, this.runHistory, this.memory);
     this.userId = scopeResult.userId;
     this.activeScopes = scopeResult.scopes;
-    if (scopeResult.briefingPart) {
-      this.briefing = this.briefing ? `${this.briefing}\n\n${scopeResult.briefingPart}` : scopeResult.briefingPart;
+
+    // First-turn briefing: surface the operator's overdue / due tasks
+    // deterministically (pure SQL, <10ms, NO LLM call) on EVERY surface. This
+    // lived inside `generateInitBriefing`, which early-returns on the non-CLI
+    // (PWA/managed) path — so the primary product surface never got the
+    // `<task_overview>` the system prompt tells the agent to check, and the agent
+    // fell back to calling `task_list` (an extra Sonnet round-trip). Lifting it
+    // here — after `initScopes` resolves `activeScopes` — fixes both the miss and
+    // the stale scopes it had at the earlier (pre-scope-resolution) call site.
+    if (this.runHistory) {
+      try {
+        const { TaskManager } = await import('./task-manager.js');
+        const taskBriefing = new TaskManager(this.runHistory).getBriefingSummary(this.activeScopes);
+        if (taskBriefing) {
+          this.briefing = this.briefing ? `${this.briefing}\n\n${taskBriefing}` : taskBriefing;
+        }
+      } catch { /* best-effort — a briefing failure must never break bring-up */ }
     }
   }
 
@@ -1301,11 +1316,13 @@ export class Engine {
       const collections = this._dataStore.listCollections();
       if (collections.length > 0) {
         this.registerDataStoreTools();
-        const lines = collections.map(c =>
-          `${c.name} (${c.scopeType}${c.scopeId ? ':' + c.scopeId : ''}) — ${c.recordCount} records, updated ${c.updatedAt.slice(0, 10)}`
-        );
-        const dataBlock = `<data_collections>\n${lines.join('\n')}\n</data_collections>`;
-        this.briefing = this.briefing ? `${this.briefing}\n\n${dataBlock}` : dataBlock;
+        // The always-injected `<data_collections>` briefing block was removed
+        // 2026-07-18: `listCollections()` is UNSCOPED, so it dumped EVERY project's
+        // tables (a single tenant's laser-clinic, weather, SEO collections, …) into
+        // every thread's first turn — cross-project bleed, and the specific fake-
+        // "project" contents the model confabulated under the "http-api" label. The
+        // agent enumerates tables on demand via `data_store_list` instead (DK's
+        // default-injection-dies / retrieve-on-demand principle).
       }
     } catch (err) {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
