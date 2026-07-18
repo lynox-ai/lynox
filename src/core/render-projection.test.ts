@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -81,6 +81,37 @@ describe('projectMessages', () => {
       status: 'done',
       result: 'Found it.',
     });
+  });
+
+  it('suppresses the extended-tool-guidance carrier block (merged, never a bubble)', () => {
+    const assistant = [
+      { type: 'tool_use', id: 'tu_1', name: 'artifact_save', input: { title: 't', content: 'c' } },
+    ];
+    // The carrier the agent pushes on first use of a tool with detailedGuidance:
+    // the tool_result + a model-only guidance text block + the continuation hint.
+    const carrier = [
+      { type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact.' },
+      { type: 'text', text: `${TOOL_GUIDANCE_MARKER} artifact_save: never wrap raw CSV in a markdown artifact.` },
+      { type: 'text', text: TOOL_RESULT_CONTINUATION_HINT },
+    ];
+
+    const out = projectMessages([
+      rec(0, 'user', 'save it'),
+      rec(1, 'assistant', assistant),
+      rec(2, 'user', carrier),
+    ]);
+
+    // Carrier is merged into the assistant turn — no extra user bubble ...
+    expect(out).toHaveLength(2);
+    expect(out[1]?.toolCalls?.[0]).toMatchObject({
+      name: 'artifact_save',
+      status: 'done',
+      result: 'Saved artifact.',
+    });
+    // ... and neither the guidance marker nor its text ever surfaces as rendered content.
+    const rendered = JSON.stringify(out);
+    expect(rendered).not.toContain(TOOL_GUIDANCE_MARKER);
+    expect(rendered).not.toContain('never wrap raw CSV');
   });
 
   it('strips safety markers from tool-result text', () => {
