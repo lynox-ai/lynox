@@ -64,9 +64,11 @@ function redBluePngBase64(): string {
   return png.toString('base64');
 }
 
-// The three tier-routed gen-3 ids (fast / balanced / deep). Dated snapshots so
-// modelCapability resolves the real entry the flag lives on.
-const GEN3_ROUTED = ['ministral-8b-2512', 'ministral-14b-2512', 'mistral-large-2512'] as const;
+// All four tier-routed gen-3 ids (ministral-3b + -8b are both tier:'fast';
+// -14b balanced; large deep). Dated snapshots so modelCapability resolves the
+// real entry the flag lives on — every id that carries vision:true gets a live
+// guard, not just the flag-level unit assert (fb_skip_ne_pass_green).
+const GEN3_ROUTED = ['ministral-3b-2512', 'ministral-8b-2512', 'ministral-14b-2512', 'mistral-large-2512'] as const;
 
 describeOnline('Mistral gen-3 vision capability (#2)', () => {
   beforeAll(async () => {

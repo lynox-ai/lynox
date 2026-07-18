@@ -2044,9 +2044,11 @@ export class LynoxHTTPApi {
       let task: string | unknown[];
       if (files.length > 0) {
         const content: unknown[] = [];
-        // Anthropic's vision endpoint enforces ≤5 MB on the base64 payload itself
-        // (not the decoded bytes). Reject earlier with a typed error so the user
-        // sees a friendly message instead of a raw provider 400.
+        // 5 MB base64-payload cap (not decoded bytes), applied to every provider
+        // as a conservative floor derived from Anthropic's vision limit. Reject
+        // earlier with a typed error so the user sees a friendly message instead
+        // of a raw provider 400. The frontend downscales to 1568px first, so a
+        // real photo/screenshot lands far under this on any provider.
         const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
         const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
@@ -2077,7 +2079,7 @@ export class LynoxHTTPApi {
             const sizeMb = (file.data.length / (1024 * 1024)).toFixed(1);
             const limitMb = (limit / (1024 * 1024)).toFixed(0);
             const reason = isImage
-              ? `Image too large: ${sizeMb} MB exceeds ${limitMb} MB Anthropic vision limit. Resize or compress before uploading.`
+              ? `Image too large: ${sizeMb} MB exceeds the ${limitMb} MB image limit. Resize or compress before uploading.`
               : `File too large: ${sizeMb} MB exceeds ${limitMb} MB limit.`;
             errorResponse(res, 413, reason);
             return;
