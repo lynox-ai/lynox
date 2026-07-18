@@ -251,7 +251,10 @@ function measureStaticPrefixTokens(): number {
 // header" rule move to on-use detailedGuidance). api_setup's serialized definition
 // drops from the historical ~992 to 765 tokens (it is no longer the per-tool-budget
 // offender). Cumulative −625 tokens off every turn's prefix from 4 split tools.
-const STATIC_PREFIX_BUDGET = 23100;
+// 2026-07-18: +214 for the Session-Start task-proactivity rewrite (prompts.ts) —
+// the guardrail against the agent autonomously sending mail / mutating tasks from
+// a briefing nudge. Cached (paid once per session); the safety fix justifies it.
+const STATIC_PREFIX_BUDGET = 23350;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
