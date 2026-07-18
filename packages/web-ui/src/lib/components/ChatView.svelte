@@ -70,7 +70,7 @@
 	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
-	import { stripNowMarker } from '../utils/now-marker.js';
+	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
@@ -2270,7 +2270,7 @@
 						</div>
 					</div>
 				{:else if msg.role === 'user'}
-					{@const userText = stripNowMarker(msg.content)}
+					{@const userText = stripLoadedContext(stripNowMarker(msg.content))}
 					<div class="flex justify-end items-start gap-1.5">
 						<!-- Timestamp on the operator's own row, pushed hard-left (mr-auto)
 						     so it sits opposite the right-aligned bubble on the same line.

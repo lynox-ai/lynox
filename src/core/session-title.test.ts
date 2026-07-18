@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeLLMTitle } from './session.js';
+import { sanitizeLLMTitle, generateThreadTitle } from './session.js';
+import { closeLoadedContext } from './chat-context.js';
 
 describe('sanitizeLLMTitle', () => {
   it('passes a clean title through unchanged', () => {
@@ -34,5 +35,32 @@ describe('sanitizeLLMTitle', () => {
     expect(sanitizeLLMTitle('')).toBe('');
     expect(sanitizeLLMTitle('   ')).toBe('');
     expect(sanitizeLLMTitle('""')).toBe('');
+  });
+});
+
+describe('generateThreadTitle', () => {
+  it('titles a plain message from its first line', () => {
+    expect(generateThreadTitle('Wie ist der Umsatz im Q3?')).toBe('Wie ist der Umsatz im Q3?');
+  });
+
+  it('#6: does NOT title a context-chat from the [Loaded …] preamble', () => {
+    // A "💬 Im Chat beantworten" chat: the first message carries a loaded-context
+    // preamble closed by the sentinel, then the user's own words. The nav title
+    // must be the user's words — not "[Loaded mail for reply — …]".
+    const preamble =
+      '[Loaded mail for reply — item: item-1]\n' +
+      'From: Markus <markus@acme.example>\nSubject: "Angebot"\n' +
+      'Message:\nKoennt ihr ein Angebot schicken?\n\n' +
+      'To reply, call mail_reply with uid: 42, account: "acme". Draft a reply, confirm the send with the user, then send it.';
+    const first = closeLoadedContext(preamble) + 'Antworte freundlich und frag nach dem Budget.';
+    expect(generateThreadTitle(first)).toBe('Antworte freundlich und frag nach dem Budget.');
+  });
+
+  it('still strips the onboarding prefix (regression)', () => {
+    expect(generateThreadTitle('[ONBOARDING 1/3] Welcome!\n\nHelp me set up email.')).toBe('Help me set up email.');
+  });
+
+  it('falls back to "New Chat" for an empty message', () => {
+    expect(generateThreadTitle('')).toBe('New Chat');
   });
 });

@@ -61,6 +61,7 @@ import {
   withCurrentTimePrefix,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
+import { stripLoadedContext } from './chat-context.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
@@ -987,6 +988,13 @@ export class Session {
             });
           }
           if (startMessageCount === 0) {
+            // Derive the title from the user's OWN words, not the engine framing:
+            // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
+            // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that
+            // would otherwise surface as the nav title (a server-side leak the
+            // web-ui strip can't reach). generateThreadTitle self-strips the
+            // preamble; strip it for the LLM-title path too. Both are no-ops when
+            // there is no preamble.
             const title = generateThreadTitle(taskText);
             threadStore.updateThread(this.sessionId, { title });
             // Upgrade to an LLM-written title on the `fast` tier (a cheap inline
@@ -994,7 +1002,7 @@ export class Session {
             // never blocks the run, skipped in private mode, and never clobbers a
             // manual rename (the method re-checks the title before writing).
             if (taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
-              void this._generateLLMTitle(taskText, title);
+              void this._generateLLMTitle(stripLoadedContext(taskText), title);
             }
           }
           // Stamp this run's token/cost totals onto its final assistant
@@ -2204,10 +2212,14 @@ export class Session {
   }
 }
 
-/** Generate a short thread title from the first user message. */
-function generateThreadTitle(taskText: string): string {
-  // Strip system context prefixes (e.g. onboarding prompts)
-  let title = taskText.replace(/^\[ONBOARDING \d+\/\d+\][\s\S]*?\n\n/i, '');
+/** Generate a short thread title from the first user message. Exported for
+ *  unit-testing the framing-strip (a context-chat's `[Loaded …]` preamble must
+ *  not become the nav title). */
+export function generateThreadTitle(taskText: string): string {
+  // Strip engine framing that isn't the user's words: the loaded-context preamble
+  // (context-opened chats) and onboarding prompts. stripLoadedContext no-ops when
+  // there is no preamble.
+  let title = stripLoadedContext(taskText).replace(/^\[ONBOARDING \d+\/\d+\][\s\S]*?\n\n/i, '');
 
   // Strip markdown, trim, and take first meaningful line
   title = title
