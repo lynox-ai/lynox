@@ -25,8 +25,15 @@ const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 // + memory_update + memory_list are read-or-tenant-scoped and safe in the
 // inline sandbox. memory_delete + memory_promote stay opt-in via per-step
 // allowTools because they're destructive / confidence-changing.
+// `http_request` + `web_research` are the external-fetch tools a workflow step
+// needs to call an API or research the web. `http_request` was listed as `'http'`
+// here since v1.2.2 (2026-04-20) — but the registered tool is `http_request`, so
+// the name never matched and the filter SILENTLY stripped it out of every inline
+// step (a workflow that called an external API got "tool not available", not a
+// security block). `web_research` was never added at all. Both are read-only /
+// SSRF- and network-policy-gated, so they are safe in the inline sandbox.
 export const INLINE_CORE_TOOLS = new Set([
-  'bash', 'read_file', 'write_file', 'http', 'ask_user',
+  'bash', 'read_file', 'write_file', 'http_request', 'web_research', 'ask_user',
   'data_store_query', 'data_store_insert',
   'memory_recall', 'memory_store', 'memory_update', 'memory_list',
   // Durable Knowledge Substrate (DK.1): only the READ side (recall) is inline-safe. `remember`

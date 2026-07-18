@@ -611,10 +611,29 @@ describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
     expect(INLINE_CORE_TOOLS.has('knowledge_search')).toBe(false);
   });
 
-  it('still includes the foundational core tools', () => {
-    for (const name of ['bash', 'read_file', 'write_file', 'http', 'ask_user', 'data_store_query', 'data_store_insert']) {
+  it('still includes the foundational core tools + the external-fetch tools a workflow step needs', () => {
+    for (const name of ['bash', 'read_file', 'write_file', 'http_request', 'web_research', 'ask_user', 'data_store_query', 'data_store_insert']) {
       expect(INLINE_CORE_TOOLS.has(name)).toBe(true);
     }
+    // The old typo: `'http'` matched no registered tool, so http_request was
+    // silently stripped from every inline step since v1.2.2. Lock it out.
+    expect(INLINE_CORE_TOOLS.has('http')).toBe(false);
+  });
+
+  it('every INLINE_CORE_TOOLS name resolves to a real registered tool (catches the http/http_request typo class)', async () => {
+    const builtins = await import('../tools/builtin/index.js');
+    const builtinNames = new Set(
+      Object.values(builtins)
+        .filter((v): v is { definition: { name: string } } =>
+          typeof v === 'object' && v !== null && 'definition' in v &&
+          typeof (v as { definition?: unknown }).definition === 'object')
+        .map((t) => t.definition.name),
+    );
+    // web_research is an INTEGRATION tool (integrations/search/web-search-tool.ts),
+    // not a builtin — the only legitimate non-builtin name inline steps reference.
+    const NON_BUILTIN_ALLOWED = new Set(['web_research']);
+    const unknown = [...INLINE_CORE_TOOLS].filter((n) => !builtinNames.has(n) && !NON_BUILTIN_ALLOWED.has(n));
+    expect(unknown, `INLINE_CORE_TOOLS names with no registered tool: ${unknown.join(', ')}`).toEqual([]);
   });
 });
 
