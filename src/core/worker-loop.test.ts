@@ -105,7 +105,7 @@ function makeSession(result: string | Error = 'Done.'): Session {
   const runFn = result instanceof Error
     ? vi.fn<(task: string) => Promise<string>>().mockRejectedValue(result)
     : vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result);
-  return { run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+  return { sessionId: 'thread-worker-test', run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
 }
 
 function makeEngine(opts?: {
@@ -358,6 +358,9 @@ describe('WorkerLoop', () => {
         body: 'All done.',
         taskId: task.id,
         priority: 'normal',
+        // #13: the completion notification deep-links to the run's thread so a
+        // tap opens the result, not a blank new chat.
+        data: expect.objectContaining({ threadId: 'thread-worker-test' }) as Record<string, string>,
       }),
     );
   });
@@ -661,6 +664,7 @@ describe('WorkerLoop', () => {
 
     // Session that triggers a prompt during run, then waits forever
     const session = {
+      sessionId: 'thread-worker-test',
       run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
       _recreateAgent: vi.fn(),
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
@@ -685,6 +689,14 @@ describe('WorkerLoop', () => {
       // This creates pending input
       void session.promptUser('Approve this?', ['Yes', 'No']);
       await vi.advanceTimersByTimeAsync(0);
+      // #13: the question notification deep-links to the asking thread so a tap
+      // lands where the answer is expected — same wiring as the completion notify.
+      expect(router.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inquiry: expect.objectContaining({ question: 'Approve this?' }) as { question: string },
+          data: expect.objectContaining({ threadId: 'thread-worker-test' }) as Record<string, string>,
+        }),
+      );
     }
 
     // Verify pending input exists

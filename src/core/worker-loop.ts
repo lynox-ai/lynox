@@ -492,6 +492,9 @@ export class WorkerLoop {
           body: question,
           taskId: task.id,
           priority: 'high',
+          // Deep-link to the asking thread so a tap opens the conversation where
+          // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
+          data: { threadId: session.sessionId },
           inquiry: { question, options },
         });
       });
@@ -519,6 +522,10 @@ export class WorkerLoop {
         body: truncatedResult,
         taskId: task.id,
         priority: 'normal',
+        // Deep-link the notification to THIS run's chat thread so a tap opens the
+        // result instead of a blank new chat (the service worker routes
+        // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
+        data: { threadId: session.sessionId },
         followUps: [
           { label: 'Details', task: `Show me more details about: ${task.title}` },
           { label: 'Run again', task: task.description ?? task.title },

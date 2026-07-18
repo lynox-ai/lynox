@@ -2770,8 +2770,12 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 		if (data.contextWindow) contextWindow = data.contextWindow;
 
-		// Load thread metadata (extraction flag)
-		const threadRes = await fetch(`${getApiBase()}/threads/${threadId}`, {
+		// Load thread metadata (extraction flag). `threadId` can originate from a
+		// notification deep-link (`/app?thread=…`), so encode it into the path —
+		// consistent with the service worker, and defensive even though it's
+		// same-origin + single-tenant.
+		const encThreadId = encodeURIComponent(threadId);
+		const threadRes = await fetch(`${getApiBase()}/threads/${encThreadId}`, {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return;
@@ -2783,7 +2787,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 
 		// Load messages for display
-		const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`, {
+		const msgRes = await fetch(`${getApiBase()}/threads/${encThreadId}/messages`, {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
@@ -2971,8 +2975,13 @@ export async function reconcileThread(): Promise<void> {
 		// Mirror resumeThread's mid-persist guard: only swap when the server
 		// has caught up to the local snapshot. A shorter server list means a
 		// turn is still being persisted; keep local until it lands.
+		// AND only when the active thread hasn't changed since this fetch began
+		// (`tid === sessionId`) — the same guard the activeRun re-attach below
+		// already uses. Without it, a thread switch mid-fetch (a notification
+		// deep-link `resumeThread`, or a manual click) would clobber the newly
+		// opened thread's messages with the stale thread's server transcript.
 		let adopted = false;
-		if (serverMessages.length >= messages.length) {
+		if (tid === sessionId && serverMessages.length >= messages.length) {
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();
