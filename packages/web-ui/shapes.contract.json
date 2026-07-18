@@ -38,7 +38,7 @@
       "source": "src/lib/components/ChatView.svelte",
       "evidence": {
         "classes": [
-          "rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+          "rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
         ]
       },
       "preview": {
