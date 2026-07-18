@@ -105,7 +105,7 @@ function makeSession(result: string | Error = 'Done.'): Session {
   const runFn = result instanceof Error
     ? vi.fn<(task: string) => Promise<string>>().mockRejectedValue(result)
     : vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result);
-  return { run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+  return { sessionId: 'thread-worker-test', run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
 }
 
 function makeEngine(opts?: {
@@ -358,6 +358,9 @@ describe('WorkerLoop', () => {
         body: 'All done.',
         taskId: task.id,
         priority: 'normal',
+        // #13: the completion notification deep-links to the run's thread so a
+        // tap opens the result, not a blank new chat.
+        data: expect.objectContaining({ threadId: 'thread-worker-test' }) as Record<string, string>,
       }),
     );
   });
