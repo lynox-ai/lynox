@@ -611,10 +611,36 @@ describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
     expect(INLINE_CORE_TOOLS.has('knowledge_search')).toBe(false);
   });
 
-  it('still includes the foundational core tools', () => {
-    for (const name of ['bash', 'read_file', 'write_file', 'http', 'ask_user', 'data_store_query', 'data_store_insert']) {
+  it('still includes the foundational core tools + the external-fetch tools a workflow step needs', () => {
+    for (const name of ['bash', 'read_file', 'write_file', 'http_request', 'web_research', 'ask_user', 'data_store_query', 'data_store_insert']) {
       expect(INLINE_CORE_TOOLS.has(name)).toBe(true);
     }
+    // The old typo: `'http'` matched no registered tool, so http_request was
+    // silently stripped from every inline step since v1.2.2. Lock it out.
+    expect(INLINE_CORE_TOOLS.has('http')).toBe(false);
+  });
+
+  it('every INLINE_CORE_TOOLS name resolves to a real registered tool (catches the http/http_request typo class)', async () => {
+    const builtins = await import('../tools/builtin/index.js');
+    const builtinNames = new Set(
+      Object.values(builtins)
+        .filter((v): v is { definition: { name: string } } =>
+          typeof v === 'object' && v !== null && 'definition' in v &&
+          typeof (v as { definition?: unknown }).definition === 'object')
+        .map((t) => t.definition.name),
+    );
+    // web_research is an INTEGRATION tool (integrations/search/web-search-tool.ts),
+    // not a builtin. Resolve its REAL registered name (the definition is provider-
+    // independent) rather than hard-coding the string — so a rename of the tool
+    // drifts LOUDLY here (INLINE_CORE_TOOLS's 'web_research' would no longer match)
+    // instead of being silently blind-allowlisted (the very typo class this guards).
+    const { createWebSearchTool } = await import('../integrations/search/web-search-tool.js');
+    // The factory interpolates `provider.name` into the description — a minimal
+    // stub is enough to read the (provider-independent) definition name.
+    const webResearchName = createWebSearchTool({ name: 'stub' } as unknown as never).definition.name;
+    const NON_BUILTIN_ALLOWED = new Set([webResearchName]);
+    const unknown = [...INLINE_CORE_TOOLS].filter((n) => !builtinNames.has(n) && !NON_BUILTIN_ALLOWED.has(n));
+    expect(unknown, `INLINE_CORE_TOOLS names with no registered tool: ${unknown.join(', ')}`).toEqual([]);
   });
 });
 
