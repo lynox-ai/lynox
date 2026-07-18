@@ -2862,7 +2862,17 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// keep the local copy — it probably contains the in-flight
 			// user turn that the server hasn't persisted yet. Equal-or-more
 			// means the server caught up; use it.
-			if (serverMessages.length >= localMessages.length) {
+			//
+			// Exception: a SETTLED thread (no active run) with no unpersisted
+			// local message (`failed`/`queued`) whose server transcript is merely
+			// SHORTER — the projection legitimately collapsed it, e.g. the #4
+			// multi-step-turn merge. Without this, a thread cached with the old
+			// (longer, fragmented) shape would never adopt the merged transcript,
+			// so the fix wouldn't reach already-viewed threads. `failed`/`queued`
+			// rows are local-only + unrecoverable, so their presence keeps local.
+			const hasUnpersistedLocal = localMessages.some((m) => m.failed || m.queued);
+			if (serverMessages.length >= localMessages.length
+				|| (!resumeActiveRun && !hasUnpersistedLocal)) {
 				messages = serverMessages;
 				adoptedServer = true;
 			}
@@ -2980,8 +2990,14 @@ export async function reconcileThread(): Promise<void> {
 		// already uses. Without it, a thread switch mid-fetch (a notification
 		// deep-link `resumeThread`, or a manual click) would clobber the newly
 		// opened thread's messages with the stale thread's server transcript.
+		// Exception (mirrors resumeThread): a settled thread (no active run) with
+		// no unpersisted local message adopts a merely-shorter server transcript
+		// too, so a thread cached with the old fragmented shape picks up the #4
+		// merged projection instead of staying stale forever.
+		const hasUnpersistedLocal = messages.some((m) => m.failed || m.queued);
 		let adopted = false;
-		if (tid === sessionId && serverMessages.length >= messages.length) {
+		if (tid === sessionId
+			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();
