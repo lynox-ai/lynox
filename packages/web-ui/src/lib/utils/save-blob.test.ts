@@ -4,6 +4,8 @@ import { __resetIosSafariCache } from './ios-safari.js';
 
 const IPHONE_UA =
 	'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+const ANDROID_UA =
+	'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36';
 const DESKTOP_UA =
 	'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
@@ -46,6 +48,20 @@ describe('saveOrShareBlob', () => {
 		expect(shareFn).toHaveBeenCalledOnce();
 		expect(shareFn.mock.calls[0]![0]).toHaveProperty('files');
 		expect(createElement).not.toHaveBeenCalled(); // the iOS bug this fixes
+	});
+
+	it('Android + shareable → Web Share sheet, NO anchor download', async () => {
+		setup({ ua: ANDROID_UA, canShare: true });
+		await saveOrShareBlob(pngBlob(), 'a.png');
+		expect(shareFn).toHaveBeenCalledOnce();
+		expect(createElement).not.toHaveBeenCalled();
+	});
+
+	it('Android WITHOUT Web Share (older) → falls back to download', async () => {
+		setup({ ua: ANDROID_UA, canShare: false });
+		await saveOrShareBlob(pngBlob(), 'a.png');
+		expect(shareFn).not.toHaveBeenCalled();
+		expect(anchor.click).toHaveBeenCalledOnce();
 	});
 
 	it('desktop → anchor download, Web Share NOT used', async () => {
