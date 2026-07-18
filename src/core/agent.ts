@@ -38,7 +38,7 @@ import type { ToolCallTracker } from './output-guard.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
-import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
+import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { readFileSync } from 'node:fs';
@@ -189,6 +189,15 @@ export class Agent implements IAgent {
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   readonly spawnDepth: number;
+
+  /**
+   * Tracks which tools' `detailedGuidance` has already been injected into the
+   * current thread, so the extended-description-on-use guidance fires at most
+   * once per (thread, tool). Keyed `${threadId}::${toolName}`. In-memory: on a
+   * fresh session resuming a thread the guidance may re-inject once (harmless —
+   * it's idempotent model-only text); within a session it fires exactly once.
+   */
+  private readonly _guidanceInjected = new Set<string>();
 
   private readonly client: Anthropic;
   /** True for vertex/custom/openai — strips features only supported by direct Anthropic API */
@@ -1138,8 +1147,26 @@ export class Agent implements IAgent {
         // degenerate `tool_use` stop with zero dispatched blocks (some
         // openai-compat providers) must not produce a hint-only carrier, and an
         // endsTurn tool has no follow-up model turn to read the hint.
+        // Extended-tool-description-on-use: the first time (per thread) a tool
+        // carrying `detailedGuidance` is called — success OR error, it's in
+        // `results` either way — inject its guidance as a model-only carrier
+        // block. Rides the same post-breakpoint carrier as the continuation hint
+        // → cache-safe (never in the cached prefix), render-suppressed, and
+        // provider-agnostic. Fires at most once per (thread, tool).
+        const guidanceBlocks: Array<{ type: 'text'; text: string }> = [];
+        if (results.length > 0 && !endsTurn) {
+          const threadKey = this.currentThreadId ?? '';
+          for (const b of toolUses) {
+            const guidance = this.tools.find(t => t.definition.name === b.name)?.detailedGuidance;
+            if (guidance === undefined || guidance === '') continue;
+            const key = `${threadKey}::${b.name}`;
+            if (this._guidanceInjected.has(key)) continue;
+            this._guidanceInjected.add(key);
+            guidanceBlocks.push({ type: 'text', text: `${TOOL_GUIDANCE_MARKER} ${b.name}: ${guidance}` });
+          }
+        }
         const carrier = (results.length > 0 && !endsTurn)
-          ? [...results, { type: 'text' as const, text: TOOL_RESULT_CONTINUATION_HINT }]
+          ? [...results, ...guidanceBlocks, { type: 'text' as const, text: TOOL_RESULT_CONTINUATION_HINT }]
           : results;
         this.messages.push({ role: 'user', content: carrier });
         // Same checkpoint after tool_results — see above.

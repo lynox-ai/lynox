@@ -58,6 +58,23 @@ export interface ToolEntry<TInput = unknown> {
    * full-context round-trip a regular tool would force before `end_turn`.
    */
   endsTurn?: boolean | undefined;
+  /**
+   * Extended usage guidance loaded ON FIRST USE instead of shipping in the
+   * always-cached tool `description`. Keep the selection-critical "what it does /
+   * when to use / core actions" in `definition.description` (the model needs that
+   * to pick + call the tool the first time); move the fat narrative — recovery
+   * rules, anti-patterns, post-first-call flow — here.
+   *
+   * It is NOT part of `definition`, so it never reaches the wire tool schema and
+   * never enters the cached prompt prefix. The agent loop injects it once per
+   * thread, the first time this tool is called (success OR error), as a
+   * model-only carrier text block AFTER the cache breakpoint — cache-safe, and
+   * suppressed from the chat UI (see `TOOL_GUIDANCE_MARKER`). Provider-agnostic:
+   * it rides the same tool-result carrier on Anthropic and the OpenAI-compatible
+   * (Mistral) path. This is the classifier-free interim prefix reducer that
+   * stacks with a later tool-availability classifier.
+   */
+  detailedGuidance?: string | undefined;
 }
 
 // === 4.3 Stream Event Union ===

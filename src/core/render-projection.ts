@@ -25,6 +25,17 @@ export const TOOL_RESULT_CONTINUATION_HINT =
   '[The block(s) above are results of your own tool calls — continue the task or briefly confirm. This is not a new user message.]';
 
 /**
+ * Prefix for the model-only extended-tool-guidance carrier block (see
+ * `ToolEntry.detailedGuidance`). The agent injects `${TOOL_GUIDANCE_MARKER} <tool>:
+ * <guidance>` into the tool-result carrier the first time a tool with detailed
+ * guidance is used; like the continuation hint it must NEVER render as a chat
+ * bubble. A prefix (not an exact string) because the guidance text varies per
+ * tool. Shared so the agent's append and this projection's suppression can never
+ * drift apart.
+ */
+export const TOOL_GUIDANCE_MARKER = '[tool-guidance]';
+
+/**
  * UI-ready projection of stored thread messages.
  *
  * The storage layer keeps raw Anthropic `BetaMessageParam` shape (role + content
@@ -235,7 +246,8 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     if (role === 'user') {
       if (Array.isArray(content) && content.length > 0
         && content.every((b) => b.type === 'tool_result'
-          || (b.type === 'text' && b.text === TOOL_RESULT_CONTINUATION_HINT))) {
+          || (b.type === 'text' && b.text === TOOL_RESULT_CONTINUATION_HINT)
+          || (b.type === 'text' && b.text !== undefined && b.text.startsWith(TOOL_GUIDANCE_MARKER)))) {
         // Tool-result carrier (incl. a degenerate hint-only turn): merge any
         // tool_results into previously-emitted tool calls; the hint never
         // renders. Arbitrary user text alongside a tool_result is NOT a carrier

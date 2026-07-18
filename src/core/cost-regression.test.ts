@@ -235,7 +235,23 @@ function measureStaticPrefixTokens(): number {
 // was rewritten in place (text-block → tool directive, net ~neutral). The
 // residual is one genuine new tool schema — the whole point of the change — and
 // is cache-read priced. Tight headroom by design: the next tool add re-trips it.
-const STATIC_PREFIX_BUDGET = 23685;
+// 2026-07-18: RE-BASELINE DOWN 23685 → 23300 (measured 23273) — extended-tool-
+// description-on-use v1. artifact_save / ask_secret / memory_recall move their fat
+// NARRATIVE prose (recovery rules, anti-patterns, post-first-call flow) out of the
+// always-cached `definition.description` into `ToolEntry.detailedGuidance`, which
+// is injected once per thread ON FIRST USE as a post-breakpoint carrier (cache-safe,
+// render-suppressed, provider-agnostic) — NOT part of the wire schema. Net −398
+// tokens off every turn's prefix from 3 tools; the classifier-free interim reducer
+// that stacks with a later tool-availability classifier. Budget lowered to LOCK the
+// win (not raised) — accidental re-bloat now re-trips against the new floor.
+// 2026-07-18b: RE-BASELINE DOWN 23300 → 23100 (measured 23046) — extended-tool-
+// description v2 splits api_setup too (the action-ROUTING lines — bootstrap/create/
+// refine/fetch_token — stay in the short cached description; the OpenAPI-vs-docs
+// mechanics + the OAuth fetch_token flow + the post-fetch_token "don't set the auth
+// header" rule move to on-use detailedGuidance). api_setup's serialized definition
+// drops from the historical ~992 to 765 tokens (it is no longer the per-tool-budget
+// offender). Cumulative −625 tokens off every turn's prefix from 4 split tools.
+const STATIC_PREFIX_BUDGET = 23100;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
@@ -279,4 +295,38 @@ describe('Tier-1 cost-regression guard', () => {
         `in cost-regression.test.ts.`,
     ).toEqual([]);
   });
+});
+
+describe('extended-tool-description-on-use split invariants', () => {
+  const byName = (n: string): ToolEntry => {
+    const t = BUILTIN_TOOLS.find((x) => x.definition.name === n);
+    if (!t) throw new Error(`tool ${n} not found in BUILTIN_TOOLS`);
+    return t;
+  };
+
+  // For each split tool: a distinctive phrase that was MOVED from the cached
+  // `description` into the on-use `detailedGuidance` — the split's fingerprint.
+  const TARGETS = [
+    { name: 'artifact_save', movedPhrase: 'Web Speech API' },
+    { name: 'ask_secret', movedPhrase: 'dead end' },
+    { name: 'memory_recall', movedPhrase: 'may be stale' },
+    { name: 'api_setup', movedPhrase: 'auto-attached' },
+  ] as const;
+
+  for (const { name, movedPhrase } of TARGETS) {
+    it(`${name}: detailedGuidance holds the moved prose and never reaches the wire schema`, () => {
+      const tool = byName(name);
+      expect(tool.detailedGuidance, `${name} must carry detailedGuidance`).toBeTypeOf('string');
+      expect((tool.detailedGuidance ?? '').length).toBeGreaterThan(50);
+
+      const wire = serializeToolDefinition(tool);
+      // `detailedGuidance` is a ToolEntry field, NOT part of the wire `definition`
+      // → it never enters the cached prompt prefix.
+      expect(wire).not.toContain('detailedGuidance');
+      // The fat prose moved OUT of the always-cached description ...
+      expect(wire).not.toContain(movedPhrase);
+      // ... and is preserved in the on-use guidance (no prose lost, just relocated).
+      expect(tool.detailedGuidance).toContain(movedPhrase);
+    });
+  }
 });
