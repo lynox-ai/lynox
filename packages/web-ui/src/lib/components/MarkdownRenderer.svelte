@@ -12,6 +12,7 @@
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
+	import { saveOrShareBlob } from '../utils/save-blob.js';
 
 	interface Props {
 		content: string;
@@ -408,23 +409,13 @@
 		const md = decodeDataMd(container);
 		if (!md) { addToast('Download failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'artifact';
-		const filename = `${title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '')}.md`;
-		const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-		const a = document.createElement('a');
-		a.href = URL.createObjectURL(blob);
-		a.download = filename || 'artifact.md';
-		a.click();
-		URL.revokeObjectURL(a.href);
+		const filename = `${title.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '')}.md` || 'artifact.md';
+		void saveOrShareBlob(new Blob([md], { type: 'text/markdown;charset=utf-8' }), filename);
 	}
 
 	/** Trigger a browser download of `content` as a file. */
 	function downloadBlob(content: string, filename: string, mime: string) {
-		const blob = new Blob([content], { type: `${mime};charset=utf-8` });
-		const a = document.createElement('a');
-		a.href = URL.createObjectURL(blob);
-		a.download = filename;
-		a.click();
-		URL.revokeObjectURL(a.href);
+		void saveOrShareBlob(new Blob([content], { type: `${mime};charset=utf-8` }), filename);
 	}
 
 	/** Slugify the artifact title into a safe `<base>.<ext>` filename. */
@@ -510,10 +501,10 @@
 			c.fillStyle = getResolvedTheme() === 'light' ? '#ffffff' : '#0c0c20';
 			c.fillRect(0, 0, bbox.width, bbox.height);
 			c.drawImage(img, 0, 0, bbox.width, bbox.height);
-			const a = document.createElement('a');
-			a.href = canvas.toDataURL('image/png');
-			a.download = `diagram-${Date.now()}.png`;
-			a.click();
+			canvas.toBlob(blob => {
+				if (!blob) { addToast('Export failed', 'error'); return; }
+				void saveOrShareBlob(blob, `diagram-${Date.now()}.png`);
+			}, 'image/png');
 		};
 		img.src = dataUrl;
 	}
@@ -646,12 +637,8 @@
 		if (!canvas) { addToast('Export failed', 'error'); return; }
 		canvas.toBlob(blob => {
 			if (!blob) { addToast('Export failed', 'error'); return; }
-			const a = document.createElement('a');
-			a.href = URL.createObjectURL(blob);
 			const title = container.dataset['title'] ?? 'artifact';
-			a.download = `${title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
-			a.click();
-			URL.revokeObjectURL(a.href);
+			void saveOrShareBlob(blob, `${title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`);
 		}, 'image/png');
 	}
 
@@ -663,12 +650,10 @@
 			navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
 				addToast('Screenshot copied', 'success');
 			}).catch(() => {
-				// Fallback: download if clipboard unavailable
-				const a = document.createElement('a');
-				a.href = URL.createObjectURL(blob);
-				a.download = `artifact-${Date.now()}.png`;
-				a.click();
-				URL.revokeObjectURL(a.href);
+				// Fallback: share/download when clipboard-image write is unavailable
+				// (the common case on iOS Safari) → the share sheet lets the user
+				// save the image to Photos instead of a dead click.
+				void saveOrShareBlob(blob, `artifact-${Date.now()}.png`);
 			});
 		}, 'image/png');
 	}
