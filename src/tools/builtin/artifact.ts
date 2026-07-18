@@ -19,7 +19,7 @@ interface ArtifactDeleteInput {
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
   definition: {
     name: 'artifact_save',
-    description: 'Save, create, or update a persistent document, note, file, or artifact. Displays inline in the chat AND persists to the Artifacts gallery. PREFER `type: "markdown"` for comparison tables, tier overviews, recommendations, structured prose — it renders fast, costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view. For data the user will want to open in another program, use a data type — `csv` or `tsv` for tabular/spreadsheet data, `json` for structured data, `text` for plain-text files/logs: these render as a downloadable file, so never wrap raw CSV/TSV/JSON in a markdown or html artifact. Reserve `type: "html"` ONLY for genuinely interactive output: clickable prototypes, dashboards with charts, time-series visualizations, mini-apps. Make any HTML (incl. slide decks) mobile-ready — fluid %/max-width, never a fixed page-px width — and light unless the user asked for dark. Never embed Web Speech API, TTS, audio controls, or media players in HTML artifacts — the chat UI already provides audio output. Use `id` to update an existing artifact.',
+    description: 'Save, create, or update a persistent document, note, file, or artifact. Displays inline in the chat AND persists to the Artifacts gallery. PREFER `type: "markdown"` for comparison tables, tier overviews, recommendations, structured prose. Use a data type — `csv`/`tsv` for tabular/spreadsheet data, `json` for structured data, `text` for plain-text files/logs — for anything the user will open in another program (renders as a downloadable file). Reserve `type: "html"` ONLY for genuinely interactive output: dashboards with charts, clickable prototypes, time-series visualizations, mini-apps. Use `id` to update an existing artifact.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -33,6 +33,8 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       required: ['title', 'content'],
     },
   },
+  detailedGuidance:
+    'markdown renders fast and costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view — prefer it for anything prose-shaped. Never wrap raw CSV/TSV/JSON in a markdown or html artifact; emit it as the matching data type so it downloads as a file. When you DO use html (incl. slide decks): make it mobile-ready — fluid %/max-width, never a fixed page-px width — and light unless the user asked for dark. Never embed Web Speech API, TTS, audio controls, or media players in html artifacts — the chat UI already provides audio output.',
   handler: async (input: ArtifactSaveInput, agent: IAgent): Promise<string> => {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';

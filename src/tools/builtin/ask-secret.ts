@@ -15,12 +15,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     description:
       'Securely collect a secret (API key, token, password) from the user. ' +
       'The secret is stored encrypted in the vault and NEVER enters the conversation. ' +
-      'Use this instead of ask_user whenever the answer is a credential. ' +
-      'For a third-party API/integration credential, first confirm the consuming integration exists — ' +
-      'you created/bootstrapped its api_setup profile this turn, or api_setup({action:"list"|"view"}) shows it registered. ' +
-      'Asking before the integration is set up is a dead end (you do not yet know the auth scheme or key format, ' +
-      'and the user has nothing to plug it into). This applies only to a credential a specific api_setup integration ' +
-      'will consume — not to standalone keys (an LLM provider key, or a token used directly via http_request).',
+      'Use this instead of ask_user whenever the answer is a credential.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -51,6 +46,12 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       required: [],
     },
   },
+  detailedGuidance:
+    'For a third-party API/integration credential, first confirm the consuming integration exists — ' +
+    'you created/bootstrapped its api_setup profile this turn, or api_setup({action:"list"|"view"}) shows it registered. ' +
+    'Asking before the integration is set up is a dead end (you do not yet know the auth scheme or key format, ' +
+    'and the user has nothing to plug it into). This applies only to a credential a specific api_setup integration ' +
+    'will consume — not to standalone keys (an LLM provider key, or a token used directly via http_request).',
   handler: async (input: AskSecretInput, agent: IAgent): Promise<string> => {
     const action = input.action ?? 'collect';
 
