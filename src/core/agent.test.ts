@@ -58,7 +58,7 @@ vi.mock('./observability.js', () => ({
 
 import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
-import { TOOL_RESULT_CONTINUATION_HINT } from './render-projection.js';
+import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -513,6 +513,51 @@ describe('Agent', () => {
       expect(result).toBe('Done');
       expect(tool.handler).toHaveBeenCalledWith({ x: 1 }, agent);
       expect(mockProcess).toHaveBeenCalledTimes(2);
+    });
+
+    it('detailedGuidance: injects on first use, exactly once per thread', async () => {
+      // Extended-tool-description-on-use: a tool's fat prose lives in
+      // `detailedGuidance` (NOT the cached wire description) and is injected once
+      // per thread the first time the tool is called, as a model-only carrier
+      // block. Using the tool a second time in the same thread must NOT re-inject.
+      const guidedTool: ToolEntry = {
+        definition: {
+          name: 'guided_tool',
+          description: 'short selection-critical desc',
+          input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
+        },
+        detailedGuidance: 'the fat recovery prose that loads only on use',
+        handler: vi.fn().mockResolvedValue('ok'),
+      };
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'guided_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'))
+        // second turn, SAME thread: tool used again → guidance must NOT re-inject
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_2', name: 'guided_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done again'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [guidedTool] });
+      await agent.send('use it');
+      await agent.send('use it again');
+
+      const wire = JSON.stringify(agent.getMessages());
+      // Fires exactly once across both uses in the same thread ...
+      const occurrences = wire.split(TOOL_GUIDANCE_MARKER).length - 1;
+      expect(occurrences).toBe(1);
+      // ... and the guidance prose rode along on that one carrier.
+      expect(wire).toContain('the fat recovery prose that loads only on use');
+    });
+
+    it('detailedGuidance: a tool WITHOUT guidance injects nothing', async () => {
+      const plainTool = makeTool('plain_tool');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'plain_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [plainTool] });
+      await agent.send('use it');
+
+      expect(JSON.stringify(agent.getMessages())).not.toContain(TOOL_GUIDANCE_MARKER);
     });
 
     it('endsTurn tool: ends the turn after the tool_result, NO extra model call', async () => {

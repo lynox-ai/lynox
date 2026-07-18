@@ -288,7 +288,7 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
 export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
   definition: {
     name: 'memory_recall',
-    description: 'Look up previously saved knowledge by searching for relevant content. Pass a `query` describing what you need — this returns the matching memory lines (bounded by a token budget so the most recent matches are preferred when there are many). Omitting `query` returns only a bounded, recency-ranked sample of the namespace (not everything), so always prefer passing a query when you know what you are after. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
+    description: 'Look up previously saved knowledge by searching for relevant content. Pass a `query` describing what you need — this returns the matching memory lines. Only call this when the CURRENT user message clearly needs prior context to answer — do NOT call it on short follow-ups ("ok", "ja", one-word replies), topic continuations, or when the visible conversation already contains what you need.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -310,6 +310,8 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
       required: ['namespace'],
     },
   },
+  detailedGuidance:
+    'Results are bounded by a token budget so the most recent matches are preferred when there are many. Omitting `query` returns only a bounded, recency-ranked sample of the namespace (not everything), so always prefer passing a query when you know what you are after. Recalled entries can be from arbitrary past sessions and may be stale; do not treat them as "what to do next" unless the user has just said so this turn.',
   handler: async (input: MemoryRecallInput, agent: IAgent): Promise<string> => {
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
