@@ -17,6 +17,25 @@ jobs:
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with: { version: '10' }
       - run: pnpm install --frozen-lockfile
+      # Dep-scan gate: the osv-scanner HIGH/CRITICAL check lives in ci.yml's test
+      # job but NOT here, so a release could ship a vulnerable lockfile even while
+      # ci.yml is red. Mirror the scan so the release build refuses to publish a
+      # HIGH/CRITICAL dep (closes the "vuln creeps into a release" gap, 2026-07-18).
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
+          chmod +x /tmp/osv-scanner
+          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+      - name: Scan dependencies (high+critical hard-fail)
+        run: |
+          set -euo pipefail
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
+          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
+          if [ "${HIGH}" -gt 0 ]; then
+            echo "::error::${HIGH} high/critical dependency vulnerability(ies) — refusing to build a release"
+            osv-scanner scan source --lockfile=pnpm-lock.yaml || true
+            exit 1
+          fi
       - run: pnpm run typecheck
       - run: pnpm exec vitest run
 

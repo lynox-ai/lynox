@@ -1,0 +1,105 @@
+name: dep-scan-daily
+
+# Between-release dependency vulnerability watch.
+#
+# The `test` job in ci.yml runs osv-scanner against pnpm-lock.yaml and hard-fails
+# on HIGH/CRITICAL — but only on push/PR. osv-scanner queries the LIVE OSV.dev
+# database, so a newly-DISCLOSED advisory against an already-pinned dependency
+# flips every open PR's `test` job red the moment the advisory drops, with no code
+# change on our side (2026-07: adm-zip GHSA-xcpc-8h2w-3j85, transitive via
+# onnxruntime-node). Between releases, with no PR traffic, such an advisory can sit
+# unnoticed.
+#
+# This runs the SAME scan daily against main and funnels the result into ONE
+# deduplicated tracking issue (found by the `dep-scan` label, never by re-opening a
+# fresh issue each day). The issue auto-closes when the count returns to zero.
+#
+# The install + scan command are mirrored verbatim from ci.yml's `test` job so the
+# two never drift. osv-scanner reads pnpm-lock.yaml natively, so no node/pnpm setup
+# is required here (ci.yml only installs pnpm because that job later runs
+# lint/typecheck/vitest).
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # daily ~06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dep-scan-daily
+  cancel-in-progress: true
+
+jobs:
+  dep-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Scheduled runs check out the default branch (main) by default.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Mirror of ci.yml `test` job, "Install osv-scanner" step.
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
+          chmod +x /tmp/osv-scanner
+          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      - name: Scan dependencies and sync tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: '🔴 Dependency vulnerability (HIGH/CRITICAL) detected on main'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # --- Scan (same command as ci.yml's test job) ---
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
+          osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1 || true
+
+          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
+          TOTAL=$(jq '[.results[]?.packages[]?.vulnerabilities[]?] | length' /tmp/osv.json)
+          STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
+          echo "total=${TOTAL} high_or_critical=${HIGH}"
+
+          # --- Ensure the dedup label exists (idempotent) ---
+          gh label create dep-scan \
+            --color B60205 \
+            --description 'Automated daily dependency vulnerability scan' \
+            2>/dev/null || true
+
+          # --- Find the single existing open tracking issue (by label, not title) ---
+          EXISTING=$(gh issue list --label dep-scan --state open --json number --jq '.[0].number // empty')
+
+          if [ "${HIGH}" -gt 0 ]; then
+            {
+              echo "A daily \`osv-scanner\` scan of \`pnpm-lock.yaml\` on \`main\` found **${HIGH}** HIGH/CRITICAL dependency vulnerability(ies) (of ${TOTAL} total)."
+              echo ""
+              echo "This issue is opened and kept up to date automatically by \`.github/workflows/dep-scan-daily.yml\`. It closes itself when the HIGH/CRITICAL count returns to zero. **Do not rename it** — the workflow finds it by the \`dep-scan\` label, not the title."
+              echo ""
+              echo "_Last scan: ${STAMP} · [workflow run](${RUN_URL})_"
+              echo ""
+              echo '```'
+              cat /tmp/osv-table.txt
+              echo '```'
+            } > /tmp/issue-body.md
+
+            if [ -n "${EXISTING}" ]; then
+              echo "Updating existing tracking issue #${EXISTING}"
+              gh issue edit "${EXISTING}" --body-file /tmp/issue-body.md
+            else
+              echo "Opening new tracking issue"
+              gh issue create --title "${TITLE}" --label dep-scan --body-file /tmp/issue-body.md
+            fi
+          else
+            if [ -n "${EXISTING}" ]; then
+              echo "No HIGH/CRITICAL remaining — closing tracking issue #${EXISTING}"
+              gh issue close "${EXISTING}" \
+                --comment "No HIGH/CRITICAL dependency vulnerabilities as of ${STAMP}. Auto-closed by dep-scan-daily · [workflow run](${RUN_URL})"
+            else
+              echo "No HIGH/CRITICAL and no open tracking issue — nothing to do."
+            fi
+          fi
