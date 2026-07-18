@@ -8,8 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight, computeFitZoom, clearArtifactFitStyles } from '../utils/artifact-frame.js';
-	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
+	import { deckFrameHeight } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
@@ -160,15 +159,12 @@
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		return `<div class="artifact-container artifact-md artifact-collapsed" data-md="${encodedMd}" data-title="${safeTitle}"${idAttr}>
+		return `<div class="artifact-container artifact-md artifact-collapsed" data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-title">${safeTitle}</span>
-				<button class="artifact-btn" data-action="open-gallery" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>
-				<button class="artifact-btn" data-action="download-md" title="Download as .md">${ICON_DOWNLOAD}</button>
-				<button class="artifact-btn" data-action="print-pdf" title="Print / Save as PDF">${ICON_PRINT}</button>
-				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
+				${artifactActionBtns()}
 			</div>
 			<div class="artifact-md-body prose prose-invert max-w-none">${rendered}</div>
 		</div>`;
@@ -193,7 +189,7 @@
 	 *  produces a real Blob with the right extension and MIME type. The full
 	 *  body is embedded as `data-raw` so the download is the exact file, not
 	 *  the truncated preview. */
-	function buildDataArtifact(code: string, type: string): string {
+	function buildDataArtifact(code: string, type: string, artifactId = ''): string {
 		const meta = DATA_ARTIFACT_META[type] ?? DATA_ARTIFACT_META['text']!;
 		const { title, clean } = extractTitle(code);
 		// Anchored: only strip the leading marker we ourselves prepended, never
@@ -203,13 +199,13 @@
 		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
 		const lines = body.split('\n');
 		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
-		return `<div class="artifact-container artifact-data artifact-collapsed" data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}">
+		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		return `<div class="artifact-container artifact-data artifact-collapsed" data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}" data-artifact-type="${type}"${idAttr}>
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(type)}</span>
 				<span class="artifact-label">${meta.label}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				<button class="artifact-btn" data-action="download-data" title="Download .${meta.ext}">${ICON_DOWNLOAD}</button>
-				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
+				${artifactActionBtns()}
 			</div>
 			<pre class="artifact-data-body"><code>${preview}</code></pre>
 		</div>`;
@@ -223,7 +219,7 @@
 		const { artifactId, src } = resolveArtifactRender(code);
 		if (isMarkdownArtifact(src)) return buildMarkdownArtifact(src, artifactId);
 		const dataType = artifactDataType(src);
-		if (dataType) return buildDataArtifact(src, dataType);
+		if (dataType) return buildDataArtifact(src, dataType, artifactId);
 		const { title, clean } = extractTitle(src);
 		// PRD-LIGHT-MODE PR 2a — srcdoc is sandboxed; CSS-vars from parent don't
 		// inherit into the iframe document. Read the theme at render time and
@@ -255,55 +251,39 @@
 		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
 		const typeLabel = typeKey.toUpperCase();
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		// Already saved (has a gallery id) → offer "open in gallery" instead of a
-		// "pin" that would save a second copy.
-		const galleryBtn = artifactId
-			? `<button class="artifact-btn" data-action="pin" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>`
-			: `<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>`;
-		// html2canvas can't rasterize the sandboxed iframe on iOS Safari — the
-		// image export/screenshot buttons dead-click there, so hide them on iOS.
-		// The .html-source download still works (it routes through the iOS share
-		// sheet), so on iOS it wears a share icon + label, not the desktop "code" one.
-		const ios = isIosSafari();
-		const imageBtns = ios ? '' :
-			`<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
-				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>`;
-		const sourceBtn = ios
-			? `<button class="artifact-btn" data-action="download-html" title="Share">${ICON_SHARE}</button>`
-			: `<button class="artifact-btn" data-action="download-html" title="Download .html source">${ICON_CODE}</button>`;
 
-		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}"${idAttr}>
+		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				${imageBtns}
-				<button class="artifact-btn" data-action="print-pdf" title="Save as PDF">${ICON_PRINT}</button>
-				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
-				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
-				${sourceBtn}
-				${galleryBtn}
-				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
+				${artifactActionBtns()}
 			</div>
 			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
-			<div class="artifact-source-wrap hidden"></div>
 		</div>`;
+	}
+
+	/** The shared, minimal artifact-pill actions: expand → the coherent gallery
+	 *  big-view (the ONE full view — renders every type incl. interactive HTML),
+	 *  share/export the source file, and the collapse chevron. Full print +
+	 *  download options live in the gallery view. On mobile the export button
+	 *  uses the iOS share glyph (it opens the native share sheet). Every builder
+	 *  (html/svg, markdown, data) uses this so the pill is identical everywhere. */
+	function artifactActionBtns(): string {
+		const shareIcon = isIosSafari() ? ICON_SHARE : ICON_DOWNLOAD;
+		return `<button class="artifact-btn" data-action="expand" title="Expand">${ICON_EXPAND}</button>
+				<button class="artifact-btn" data-action="share" title="Share">${shareIcon}</button>
+				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>`;
 	}
 
 	// ── Icons ────────────────────────────────────────────────
 
 	const ICON_DOWNLOAD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 10.5L4 6.5h3V2h2v4.5h3L8 10.5zM3 12.5h10v1H3v-1z" fill="currentColor"/></svg>`;
-	const ICON_CODE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	// iOS-style share glyph (arrow rising out of a tray) — used on iOS where the
 	// download buttons route through the native share sheet.
 	const ICON_SHARE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 10V2M8 2L5.5 4.5M8 2l2.5 2.5M3.5 7.5H3a1 1 0 00-1 1V13a1 1 0 001 1h10a1 1 0 001-1V8.5a1 1 0 00-1-1h-.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
-	const ICON_CLIPBOARD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 3A1.5 1.5 0 017 1.5h2A1.5 1.5 0 0110.5 3M5.5 3H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V4a1 1 0 00-1-1h-1.5M5.5 3h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-	const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
-	const ICON_PRINT = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 2.5h7v3.5M4.5 11.5H3A1.5 1.5 0 011.5 10V7A1.5 1.5 0 013 5.5h10A1.5 1.5 0 0114.5 7v3a1.5 1.5 0 01-1.5 1.5h-1.5M4.5 9.5h7V14h-7V9.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-	// External-link / "open in another view" icon — arrow exiting a frame.
-	const ICON_OPEN_GALLERY = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 2h5v5M14 2L8 8M11 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V6a1 1 0 011-1h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	// Chevron — the universal expand/collapse affordance on the pill row;
 	// rotates 90° when the artifact is expanded (CSS).
 	const ICON_CHEVRON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -393,23 +373,45 @@
 				requestAnimationFrame(() => resizeArtifactFrame(container));
 			}
 
-			if (action === 'pin') handleArtifactSave(container);
-			else if (action === 'screenshot') handleArtifactScreenshot(container);
-			else if (action === 'source') handleArtifactSource(container);
-			else if (action === 'expand') handleArtifactExpand(container);
-			else if (action === 'close') handleArtifactExpand(container);
-			else if (action === 'export') handleArtifactExport(container);
-			else if (action === 'download-html') handleHtmlDownload(container);
-			else if (action === 'download-data') handleDataDownload(container);
-			else if (action === 'download-md') handleMarkdownDownload(container);
-			// One "Save as PDF" action for both document types — HTML artifacts
-			// (data-html) print their rendered source, markdown its rendered body.
-			else if (action === 'print-pdf') {
-				if (container.dataset['html']) handleHtmlPrint(container);
-				else handleMarkdownPrint(container);
-			}
-			else if (action === 'open-gallery') void handleMarkdownOpenGallery(container);
+			if (action === 'expand') void handleOpenBig(container);
+			else if (action === 'share') handleShare(container);
 		}
+	}
+
+	/** The ONE "big view" action: open the artifact in the full gallery view
+	 *  (ArtifactsView renders every type incl. interactive HTML). A saved artifact
+	 *  (has a gallery id) navigates straight there; an unsaved inline artifact is
+	 *  saved first, then opened. Replaces the old in-app fullscreen + the separate
+	 *  open-gallery/pin buttons with a single coherent full view. */
+	async function handleOpenBig(container: HTMLElement) {
+		const existingId = container.dataset['artifactId'];
+		if (existingId) { await goto(`/app/artifacts?id=${encodeURIComponent(existingId)}`); return; }
+		const title = container.dataset['title'] ?? 'Artifact';
+		const type = (container.dataset['artifactType'] ?? 'html') as
+			'html' | 'svg' | 'markdown' | 'mermaid' | 'csv' | 'tsv' | 'json' | 'text';
+		const content = container.dataset['md'] !== undefined
+			? decodeDataMd(container)
+			: decodeB64(container.dataset['raw'] ?? container.dataset['html'] ?? '');
+		if (!content) { addToast('Open failed', 'error'); return; }
+		const result = await saveArtifact({ title, content, type });
+		if (!result) { addToast('Open failed', 'error'); return; }
+		await goto(`/app/artifacts?id=${encodeURIComponent(result.id)}`);
+	}
+
+	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE
+	 *  file, dispatched by embedded data. Full print/download live in the gallery
+	 *  big view. Reuses the iOS-aware download handlers (Web Share on iOS). */
+	function handleShare(container: HTMLElement) {
+		if (container.dataset['md'] !== undefined) handleMarkdownDownload(container);
+		else if (container.dataset['raw'] !== undefined) handleDataDownload(container);
+		else handleHtmlDownload(container);
+	}
+
+	/** Decode a base64 `data-*` payload (the inline artifact source). */
+	function decodeB64(encoded: string): string {
+		if (!encoded) return '';
+		try { return decodeURIComponent(escape(atob(encoded))); }
+		catch { return ''; }
 	}
 
 	function decodeDataMd(container: HTMLElement): string {
@@ -461,33 +463,6 @@
 		downloadBlob(html, artifactFilename(container, 'html'), 'text/html');
 	}
 
-	/** Open the rendered markdown in a fresh popup with a print-friendly
-	 *  stylesheet, then auto-trigger the browser's print dialog. User picks
-	 *  "Save as PDF" (Desktop) or "Save to Files" (iOS Safari share sheet).
-	 *  Pure-browser flow — no dependency, PDF output has selectable text,
-	 *  tables render natively. */
-	function handleMarkdownPrint(container: HTMLElement) {
-		const md = decodeDataMd(container);
-		if (!md) { addToast('PDF export failed', 'error'); return; }
-		const title = container.dataset['title'] ?? 'Artifact';
-		if (!printMarkdownDocument(md, title)) {
-			addToast('Popup blocked — allow popups for this site to print', 'error');
-		}
-	}
-
-	/** Print an HTML artifact via the browser print pipeline (selectable PDF on
-	 *  desktop). The source is sanitized (scripts stripped) but keeps its styles. */
-	function handleHtmlPrint(container: HTMLElement) {
-		const encoded = container.dataset['html'] ?? '';
-		let raw = '';
-		try { raw = encoded ? decodeURIComponent(escape(atob(encoded))) : ''; }
-		catch { raw = ''; }
-		if (!raw) { addToast('PDF export failed', 'error'); return; }
-		if (!printHtmlDocument(raw)) {
-			addToast('Popup blocked — allow popups for this site to print', 'error');
-		}
-	}
-
 	function exportMermaidPng(btn: Element) {
 		const svg = btn.closest('.mermaid-diagram')?.querySelector(':scope > svg') as SVGSVGElement | null;
 		if (!svg) return;
@@ -530,207 +505,6 @@
 		try { iframe.contentWindow?.postMessage('lynox-measure', '*'); } catch { /* cross-origin safe */ }
 	}
 
-	function handleArtifactSource(container: HTMLElement) {
-		const sourceWrap = container.querySelector('.artifact-source-wrap') as HTMLElement;
-		const iframe = container.querySelector('.artifact-frame') as HTMLElement;
-		if (!sourceWrap || !iframe) return;
-
-		const isHidden = sourceWrap.classList.contains('hidden');
-		if (isHidden) {
-			// Populate source on first open
-			if (!sourceWrap.textContent) {
-				const encoded = container.dataset['html'] ?? '';
-				const html = decodeURIComponent(escape(atob(encoded)));
-				sourceWrap.textContent = html;
-			}
-			sourceWrap.classList.remove('hidden');
-			iframe.classList.add('hidden');
-		} else {
-			sourceWrap.classList.add('hidden');
-			iframe.classList.remove('hidden');
-		}
-	}
-
-	function handleArtifactExpand(container: HTMLElement) {
-		const entering = !container.classList.contains('artifact-fullscreen');
-		container.classList.toggle('artifact-fullscreen');
-		document.body.style.overflow = entering ? 'hidden' : '';
-		const iframe = container.querySelector('.artifact-frame') as HTMLIFrameElement | null;
-		if (iframe) applyFullscreenFit(iframe, entering);
-	}
-
-	/** Revert the fit-to-width styles applyFullscreenFit may have set. Idempotent —
-	 *  safe on collapse, on ESC, and on the no-fit branch. Crucially does NOT clear
-	 *  `iframe.style.height`: that height is owned by the resize-message handler
-	 *  (the measured content height the scrolling fullscreen container needs).
-	 *  Clearing it collapsed the frame to the 150px iframe default, so a document
-	 *  that already fits the fullscreen width (cw ≤ frameW → no zoom) rendered as a
-	 *  thin clipped strip instead of the full page. See clearArtifactFitStyles. */
-	function clearFullscreenFit(iframe: HTMLIFrameElement) {
-		clearArtifactFitStyles(iframe.style);
-	}
-
-	/** Fit a wide artifact (e.g. an A4-print HTML doc) to the fullscreen frame
-	 *  width so the whole page is visible on a narrow phone instead of being
-	 *  clipped. Uses `transform: scale()` (NOT CSS `zoom`, which iOS-Safari
-	 *  ignores → the prior fix didn't work on iPhone). A CSS transform is
-	 *  paint-only and does NOT shrink the element's layout box, so we lay the
-	 *  frame out at its intrinsic size, scale from the top-left, then pull the
-	 *  reclaimed width/height back with NEGATIVE MARGINS — otherwise the
-	 *  intrinsic-width box overflows the container horizontally (the exact
-	 *  clipping we're fixing) and leaves dead scroll space below. Reverted on
-	 *  collapse; a no-op for content that already fits. */
-	function applyFullscreenFit(iframe: HTMLIFrameElement, entering: boolean) {
-		if (!entering) {
-			clearFullscreenFit(iframe);
-			return;
-		}
-		// rAF so the fullscreen layout (frame width) is settled before measuring.
-		requestAnimationFrame(() => {
-			const cw = Number(iframe.dataset['cw'] ?? 0);
-			// Intrinsic content height = the height the resize handler already set
-			// on the inline frame (the fullscreen CSS doesn't override it). Read it
-			// BEFORE we mutate height below.
-			const ch = parseFloat(iframe.style.height) || 0;
-			const frameW = iframe.parentElement?.clientWidth ?? iframe.clientWidth;
-			const scale = computeFitZoom(cw, frameW);
-			if (scale === null) {
-				// Already fits — clear any stale fit from a previous open.
-				clearFullscreenFit(iframe);
-				return;
-			}
-			iframe.style.width = `${cw}px`;
-			iframe.style.transformOrigin = 'top left';
-			iframe.style.transform = `scale(${scale})`;
-			// Collapse the unscaled layout box to the scaled size so the container
-			// sees exactly frameW × (ch·scale): no horizontal overflow, no dead gap.
-			iframe.style.marginRight = `${-(cw - cw * scale)}px`;
-			if (ch > 0) {
-				iframe.style.height = `${ch}px`;
-				iframe.style.marginBottom = `${-(ch - ch * scale)}px`;
-			}
-		});
-	}
-
-	/** Render artifact to canvas via html2canvas in a temporary iframe */
-	async function renderArtifactToCanvas(container: HTMLElement): Promise<HTMLCanvasElement | null> {
-		const encoded = container.dataset['html'] ?? '';
-		if (!encoded) return null;
-		const rawHtml = decodeURIComponent(escape(atob(encoded)));
-		// Security: strip all scripts via DOMPurify so allow-same-origin is safe
-		const html = DOMPurify.sanitize(rawHtml, { WHOLE_DOCUMENT: true, ADD_TAGS: ['style', 'link', 'meta'] });
-
-		const tmp = document.createElement('iframe');
-		tmp.setAttribute('sandbox', 'allow-same-origin');
-		tmp.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:600px;border:none';
-		tmp.srcdoc = html;
-		document.body.appendChild(tmp);
-
-		try {
-			await new Promise<void>((resolve) => { tmp.onload = () => resolve(); });
-			await new Promise(r => setTimeout(r, 500));
-
-			const doc = tmp.contentDocument;
-			if (!doc) return null;
-			const { default: html2canvas } = await import('html2canvas');
-			return await html2canvas(doc.body, {
-				backgroundColor: getResolvedTheme() === 'light' ? '#ffffff' : '#0a0a1a',
-				scale: 2,
-				useCORS: true,
-				width: 800,
-			});
-		} catch {
-			return null;
-		} finally {
-			document.body.removeChild(tmp);
-		}
-	}
-
-	async function handleArtifactExport(container: HTMLElement) {
-		const canvas = await renderArtifactToCanvas(container);
-		if (!canvas) { addToast('Export failed', 'error'); return; }
-		canvas.toBlob(blob => {
-			if (!blob) { addToast('Export failed', 'error'); return; }
-			const title = container.dataset['title'] ?? 'artifact';
-			void saveOrShareBlob(blob, `${title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`);
-		}, 'image/png');
-	}
-
-	async function handleArtifactScreenshot(container: HTMLElement) {
-		const canvas = await renderArtifactToCanvas(container);
-		if (!canvas) { addToast('Screenshot failed', 'error'); return; }
-		canvas.toBlob(blob => {
-			if (!blob) { addToast('Screenshot failed', 'error'); return; }
-			navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
-				addToast('Screenshot copied', 'success');
-			}).catch(() => {
-				// Fallback: share/download when clipboard-image write is unavailable
-				// (the common case on iOS Safari) → the share sheet lets the user
-				// save the image to Photos instead of a dead click.
-				void saveOrShareBlob(blob, `artifact-${Date.now()}.png`);
-			});
-		}, 'image/png');
-	}
-
-	function handleArtifactSave(container: HTMLElement) {
-		const existingId = container.dataset['artifactId'];
-		if (existingId) {
-			// artifact_save already persisted this to the gallery — open that entry
-			// instead of saving a duplicate.
-			void goto(`/app/artifacts?id=${encodeURIComponent(existingId)}`);
-			return;
-		}
-		const encoded = container.dataset['html'] ?? '';
-		const html = decodeURIComponent(escape(atob(encoded)));
-		const defaultTitle = container.dataset['title'] ?? 'Artifact';
-		const title = prompt('Titel:', defaultTitle) ?? defaultTitle;
-		saveArtifact({ title, content: html, type: 'html' }).then(result => {
-			if (result) addToast(t('artifacts.saved'), 'success');
-		});
-	}
-
-	/**
-	 * Open the markdown artifact in the dedicated /app/artifacts gallery
-	 * view. When the inline card already carries the saved gallery id (the
-	 * common case — artifact_save persisted it), navigate straight to that
-	 * entry. Only the legacy no-id path saves a snapshot first (agent title
-	 * used as-is, no prompt) — that path can still duplicate on repeat clicks.
-	 */
-	async function handleMarkdownOpenGallery(container: HTMLElement) {
-		const existingId = container.dataset['artifactId'];
-		if (existingId) {
-			await goto(`/app/artifacts?id=${encodeURIComponent(existingId)}`);
-			return;
-		}
-		const md = decodeDataMd(container);
-		if (!md) { addToast('Open failed', 'error'); return; }
-		const title = container.dataset['title'] ?? 'Artifact';
-		const result = await saveArtifact({ title, content: md, type: 'markdown' });
-		if (!result) { addToast('Open failed', 'error'); return; }
-		// Client-side nav so the chat scroll position, streaming SSE,
-		// and the wider app shell don't blow away on a full reload.
-		await goto(`/app/artifacts?id=${encodeURIComponent(result.id)}`);
-	}
-
-	// ── Escape key for fullscreen artifacts ──────────────────
-	$effect(() => {
-		function handleEscape(e: KeyboardEvent) {
-			if (e.key !== 'Escape') return;
-			const fs = document.querySelector('.artifact-fullscreen') as HTMLElement | null;
-			if (fs) {
-				fs.classList.remove('artifact-fullscreen');
-				document.body.style.overflow = '';
-				// Revert the fit-to-width transform/width/margins — otherwise the
-				// now-inline frame is left scaled + overflowing (button-collapse
-				// reverts via handleArtifactExpand; ESC must too).
-				const iframe = fs.querySelector('.artifact-frame') as HTMLIFrameElement | null;
-				if (iframe) applyFullscreenFit(iframe, false);
-			}
-		}
-		window.addEventListener('keydown', handleEscape);
-		return () => window.removeEventListener('keydown', handleEscape);
-	});
-
 	// ── PostMessage listener for iframe height ────────────────
 	$effect(() => {
 		function handleMessage(e: MessageEvent) {
@@ -748,10 +522,6 @@
 					// a wide doc (e.g. an A4-print artifact) instead of clipping it.
 					if (typeof w === 'number' && w > 0) {
 						iframe.dataset['cw'] = String(w);
-						// If the artifact is ALREADY fullscreen, a late width measurement
-						// (expand fired before the first resize message → cw was 0 → no fit)
-						// lets us fit-to-width now instead of leaving the doc clipped.
-						if (iframe.closest('.artifact-fullscreen')) applyFullscreenFit(iframe, true);
 					}
 					if (deck) {
 						// 100vh slide-decks: size by 16:9 of the rendered width instead of
@@ -1375,86 +1145,9 @@
 	div :global(.artifact-collapsed .artifact-btn) {
 		display: none;
 	}
-	div :global(.artifact-close-btn) {
-		display: none;
-	}
-	div :global(.artifact-fullscreen .artifact-close-btn) {
-		display: inline-flex;
-	}
-	/* In fullscreen the expand toggle and the close X both just exit fullscreen —
-	   redundant. The X is the clear exit affordance, so hide the expand toggle
-	   here and keep a single close control. */
-	div :global(.artifact-fullscreen [data-action="expand"]) {
-		display: none;
-	}
-
-	div :global(.artifact-source-wrap) {
-		padding: 0.75rem 1rem;
-		font-size: 0.75rem;
-		font-family: var(--font-mono, ui-monospace, monospace);
-		line-height: 1.6;
-		color: var(--color-text-muted);
-		white-space: pre-wrap;
-		word-break: break-all;
-		max-height: 420px;
-		overflow-y: auto;
-		scrollbar-width: thin;
-		scrollbar-color: var(--color-border) transparent;
-	}
 
 	div :global(.hidden) {
 		display: none !important;
 	}
 
-	/* Fullscreen overlay */
-	div :global(.artifact-fullscreen) {
-		position: fixed;
-		inset: 0;
-		/* inset:0 stretches the height, but the card keeps its inline content
-		   width (~290px) so "fullscreen" rendered as a narrow left strip. Force
-		   full width so the overlay actually covers the viewport. */
-		width: 100%;
-		z-index: 9999;
-		margin: 0;
-		border-radius: 0;
-		border: none;
-		display: flex;
-		flex-direction: column;
-		/* The container itself scrolls (sticky toolbar stays pinned) so a wide
-		   artifact scaled-to-fit-width via transform on the frame drives THIS
-		   scroll area — the scaled box is exactly the viewport width, so no
-		   horizontal clipping, and a tall doc scrolls vertically. */
-		overflow-y: auto;
-		-webkit-overflow-scrolling: touch;
-		/* Clear the iOS status bar / Dynamic Island + home indicator — without
-		   this the toolbar (and its close button) render UNDER the notch on
-		   mobile and become unreachable ("no way back"). bg fills the inset. */
-		background: var(--color-bg);
-		padding-top: env(safe-area-inset-top, 0px);
-		padding-bottom: env(safe-area-inset-bottom, 0px);
-		padding-left: env(safe-area-inset-left, 0px);
-		padding-right: env(safe-area-inset-right, 0px);
-	}
-	/* Keep the toolbar pinned + give the close button a real mobile tap target. */
-	div :global(.artifact-fullscreen .artifact-toolbar) {
-		position: sticky;
-		top: 0;
-		flex-shrink: 0;
-	}
-	div :global(.artifact-fullscreen .artifact-close-btn) {
-		min-width: 2.5rem;
-		min-height: 2.5rem;
-	}
-	div :global(.artifact-fullscreen .artifact-frame) {
-		/* flex:none so the inline content-height (set by the resize handler) wins
-		   and the CONTAINER scrolls, not the frame. width:100% by default; the
-		   fit-to-width path overrides width + transform-scale. */
-		flex: none;
-		width: 100%;
-	}
-	div :global(.artifact-fullscreen .artifact-source-wrap) {
-		flex: 1;
-		height: auto;
-		max-height: none;
-	}
 </style>
