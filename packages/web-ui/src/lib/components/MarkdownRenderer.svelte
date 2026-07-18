@@ -11,6 +11,7 @@
 	import { deckFrameHeight, computeFitZoom, clearArtifactFitStyles } from '../utils/artifact-frame.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
+	import { extractArtifactId, stripArtifactIdMarker } from '../utils/artifact-inline.js';
 
 	interface Props {
 		content: string;
@@ -149,14 +150,15 @@
 	 *  The raw markdown source is embedded as `data-md` so the toolbar
 	 *  buttons can produce a .md download and a print-to-PDF popup from the
 	 *  original text (not the rendered HTML). */
-	function buildMarkdownArtifact(code: string): string {
+	function buildMarkdownArtifact(code: string, artifactId = ''): string {
 		const { title, clean } = extractTitle(code);
 		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
-		return `<div class="artifact-container artifact-md artifact-collapsed" data-md="${encodedMd}" data-title="${safeTitle}">
+		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		return `<div class="artifact-container artifact-md artifact-collapsed" data-md="${encodedMd}" data-title="${safeTitle}"${idAttr}>
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
@@ -212,10 +214,16 @@
 	}
 
 	function buildArtifact(code: string): string {
-		if (isMarkdownArtifact(code)) return buildMarkdownArtifact(code);
-		const dataType = artifactDataType(code);
-		if (dataType) return buildDataArtifact(code, dataType);
-		const { title, clean } = extractTitle(code);
+		// The inline card threads the already-saved gallery id in as a marker.
+		// Pull it out and strip it from the body so it can't leak into the
+		// rendered prose / data preview, then hand it to the builder so the pill
+		// links to the existing entry instead of re-saving a duplicate.
+		const artifactId = extractArtifactId(code);
+		const src = artifactId ? stripArtifactIdMarker(code) : code;
+		if (isMarkdownArtifact(src)) return buildMarkdownArtifact(src, artifactId);
+		const dataType = artifactDataType(src);
+		if (dataType) return buildDataArtifact(src, dataType);
+		const { title, clean } = extractTitle(src);
 		// PRD-LIGHT-MODE PR 2a — srcdoc is sandboxed; CSS-vars from parent don't
 		// inherit into the iframe document. Read the theme at render time and
 		// inject matching styles. Theme-flip invalidates richCache (downstream
@@ -242,11 +250,17 @@
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		const typeMatch = code.match(/<!--\s*type:\s*([a-z]+)\s*-->/i);
+		const typeMatch = src.match(/<!--\s*type:\s*([a-z]+)\s*-->/i);
 		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
 		const typeLabel = typeKey.toUpperCase();
+		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
+		// Already saved (has a gallery id) → offer "open in gallery" instead of a
+		// "pin" that would save a second copy.
+		const galleryBtn = artifactId
+			? `<button class="artifact-btn" data-action="pin" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>`
+			: `<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>`;
 
-		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}">
+		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}"${idAttr}>
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
@@ -257,7 +271,7 @@
 				<button class="artifact-btn" data-action="print-pdf" title="Save as PDF">${ICON_PRINT}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
-				<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>
+				${galleryBtn}
 				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>
 			</div>
 			<iframe class="artifact-frame" srcdoc="${escaped}" sandbox="allow-scripts" scrolling="no" loading="lazy"></iframe>
@@ -632,7 +646,7 @@
 		const canvas = await renderArtifactToCanvas(container);
 		if (!canvas) { addToast('Export failed', 'error'); return; }
 		canvas.toBlob(blob => {
-			if (!blob) return;
+			if (!blob) { addToast('Export failed', 'error'); return; }
 			const a = document.createElement('a');
 			a.href = URL.createObjectURL(blob);
 			const title = container.dataset['title'] ?? 'artifact';
@@ -646,7 +660,7 @@
 		const canvas = await renderArtifactToCanvas(container);
 		if (!canvas) { addToast('Screenshot failed', 'error'); return; }
 		canvas.toBlob(blob => {
-			if (!blob) return;
+			if (!blob) { addToast('Screenshot failed', 'error'); return; }
 			navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
 				addToast('Screenshot copied', 'success');
 			}).catch(() => {
@@ -661,6 +675,13 @@
 	}
 
 	function handleArtifactSave(container: HTMLElement) {
+		const existingId = container.dataset['artifactId'];
+		if (existingId) {
+			// artifact_save already persisted this to the gallery — open that entry
+			// instead of saving a duplicate.
+			void goto(`/app/artifacts?id=${encodeURIComponent(existingId)}`);
+			return;
+		}
 		const encoded = container.dataset['html'] ?? '';
 		const html = decodeURIComponent(escape(atob(encoded)));
 		const defaultTitle = container.dataset['title'] ?? 'Artifact';
@@ -672,13 +693,17 @@
 
 	/**
 	 * Open the markdown artifact in the dedicated /app/artifacts gallery
-	 * view. Saves a snapshot to the ArtifactStore first (no prompt — the
-	 * agent's title is used as-is to keep the click fast), then navigates.
-	 * If the user already triggered this on the same artifact, they'll get
-	 * a duplicate row in the gallery — acceptable cost; dedup-by-content
-	 * is a future improvement.
+	 * view. When the inline card already carries the saved gallery id (the
+	 * common case — artifact_save persisted it), navigate straight to that
+	 * entry. Only the legacy no-id path saves a snapshot first (agent title
+	 * used as-is, no prompt) — that path can still duplicate on repeat clicks.
 	 */
 	async function handleMarkdownOpenGallery(container: HTMLElement) {
+		const existingId = container.dataset['artifactId'];
+		if (existingId) {
+			await goto(`/app/artifacts?id=${encodeURIComponent(existingId)}`);
+			return;
+		}
 		const md = decodeDataMd(container);
 		if (!md) { addToast('Open failed', 'error'); return; }
 		const title = container.dataset['title'] ?? 'Artifact';

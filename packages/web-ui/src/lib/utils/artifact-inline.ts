@@ -35,3 +35,37 @@ export function isArtifactContentInline(
 	if (needle.length === 0) return false;
 	return textBlocks.some((t) => normalizeWhitespace(t).includes(needle));
 }
+
+// ── Inline artifact ↔ gallery linking ─────────────────────────────────
+//
+// artifact_save persists to the gallery server-side and returns the id in its
+// result string ("… (id: <id>, v<n>)."). The chat threads that id into the
+// rendered artifact fence as a `<!-- id: X -->` marker so the inline card LINKS
+// to the existing gallery entry instead of re-saving a duplicate row on every
+// pin/open click. These helpers keep the marker format in ONE place so the
+// writer (ChatView) and the readers (MarkdownRenderer) can't drift.
+
+/** Pull the saved artifact id out of an `artifact_save` tool result string.
+ *  '' when the result carries no id (error strings, older results). */
+export function parseArtifactIdFromResult(result: string | undefined): string {
+	if (!result) return '';
+	const m = result.match(/\(id:\s*([^,)\s]+)\s*,\s*v\d+\)/);
+	return m ? m[1]! : '';
+}
+
+/** The fence marker that carries the gallery id, or '' when there is no id. */
+export function artifactIdMarker(id: string): string {
+	return id ? `<!-- id: ${id} -->\n` : '';
+}
+
+/** Read the gallery id back out of a fence body. '' when absent. */
+export function extractArtifactId(code: string): string {
+	const m = code.match(/<!--\s*id:\s*([^\s>]+)\s*-->/i);
+	return m ? m[1]! : '';
+}
+
+/** Remove the id marker from a fence body so it can't leak into rendered prose
+ *  or a data preview. Idempotent; a no-op when no marker is present. */
+export function stripArtifactIdMarker(code: string): string {
+	return code.replace(/<!--\s*id:\s*[^\s>]+\s*-->\s*/i, '');
+}

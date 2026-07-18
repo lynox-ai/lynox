@@ -75,7 +75,7 @@
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
-	import { isArtifactContentInline } from '../utils/artifact-inline.js';
+	import { isArtifactContentInline, parseArtifactIdFromResult, artifactIdMarker } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -352,8 +352,10 @@
 	}
 
 	/** Artifact types that carry a `<!-- type: X -->` marker so MarkdownRenderer
-	 *  dispatches them to a non-iframe renderer (markdown prose, data download). */
-	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'csv', 'tsv', 'json', 'text']);
+	 *  renders + labels them correctly. markdown/csv/tsv/json/text route to a
+	 *  non-iframe renderer; svg still renders in the iframe but needs the marker
+	 *  so the pill reads "SVG" instead of defaulting to "HTML". */
+	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'svg', 'csv', 'tsv', 'json', 'text']);
 	/** Tool calls that get special rendering (not grouped with regular tools) */
 	const SPECIAL_TOOLS = new Set(['plan_task']);
 
@@ -457,9 +459,14 @@
 					if (content && !isArtifactContentInline(content, artifactTextBlocks)) {
 						const title = String(inp?.['title'] ?? 'Artifact');
 						const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
+						// artifact_save persists to the gallery server-side and returns
+						// the id in its result string. Thread it into the fence so the
+						// inline card LINKS to that existing entry instead of re-saving on
+						// pin/open — the re-save added a duplicate gallery row per click.
+						const idMarker = artifactIdMarker(parseArtifactIdFromResult(tc.result));
 						const header = TYPED_ARTIFACT_FENCE.has(artifactType)
-							? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n`
-							: `<!-- title: ${title} -->\n`;
+							? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n${idMarker}`
+							: `<!-- title: ${title} -->\n${idMarker}`;
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
 					continue;
