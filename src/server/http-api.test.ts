@@ -2292,10 +2292,13 @@ describe('LynoxHTTPApi', () => {
         expect(am!['tier']).toBe('deep');
         expect(am!['contextWindow']).toBe(256_000);
         expect(am!['uiLabel']).toBe('Mistral Large 3');
-        // Mistral lineage carries different feature flags than Claude.
+        // Mistral lineage carries different feature flags than Claude:
+        // no Anthropic-style extended-thinking toggle, but gen-3 Mistral
+        // (mistral-large-2512) IS multimodal — verified vs the live Mistral
+        // API 2026-07-18 (see MISTRAL_FEATURES_GEN3 in models.ts).
         const features = am!['features'] as Record<string, boolean>;
         expect(features['extendedThinking']).toBe(false);
-        expect(features['vision']).toBe(false);
+        expect(features['vision']).toBe(true);
         expect(features['toolUse']).toBe(true);
       } finally {
         providerSpy.mockRestore();

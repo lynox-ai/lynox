@@ -211,8 +211,11 @@ function translateTools(tools: Anthropic.Tool[]): OpenAITool[] {
  * got a confident answer to an image the model never saw, DEF-0073):
  *  - `true` / `undefined` (unknown or custom model) → translate the image to an
  *    OpenAI `image_url` data-URI part (works for a vision-capable endpoint).
- *  - `false` (a known non-vision model, e.g. every current Mistral) → throw a
- *    clear, actionable error instead of a silent drop or a cryptic provider 400.
+ *  - `false` (a known non-vision model, e.g. codestral / open-mistral-nemo, and
+ *    the legacy Mistral ids the product doesn't tier-route) → throw a clear,
+ *    actionable error instead of a silent drop or a cryptic provider 400.
+ *    (Gen-3 Mistral — ministral-*-2512, mistral-large-2512 — ARE vision-capable
+ *    and carry vision:true, so they take the translate path above.)
  */
 export function translateMessages(
   system: unknown,
@@ -723,8 +726,9 @@ export class OpenAIAdapter {
     const model = requestedModel && !looksAnthropic ? requestedModel : this.modelId;
 
     // Gate image handling on the resolved model's vision capability (DEF-0073):
-    // a known non-vision model (every current Mistral) → a clear error instead of
-    // a silent image drop; a vision or unknown/custom model → translate it.
+    // a known non-vision model (codestral / nemo / legacy Mistral) → a clear error
+    // instead of a silent image drop; a vision-capable (gen-3 Mistral) or
+    // unknown/custom model → translate it.
     const visionSupport = modelCapability(model)?.features?.vision;
     const openaiMessages = translateMessages(params.system, params.messages, { visionSupport, modelLabel: model });
     const openaiTools = params.tools ? translateTools(params.tools) : undefined;

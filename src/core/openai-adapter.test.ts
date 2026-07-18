@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages } from './openai-adapter.js';
+import { modelCapability } from '../types/models.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
@@ -1156,12 +1157,40 @@ describe('translateMessages — user content is never silently dropped', () => {
   });
 
   it('DEF-0073: throws a clear error for a known non-vision model instead of silently dropping', () => {
+    // Use a genuinely non-vision id: gen-3 Mistral (mistral-large-2512 etc.) is
+    // now vision:true, so codestral — a code model that rejects images — is the
+    // honest example of the visionSupport:false path.
     expect(() =>
       translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
         visionSupport: false,
-        modelLabel: 'mistral-large-2512',
+        modelLabel: 'codestral-2508',
       }),
-    ).toThrow(/mistral-large-2512.*cannot process images/i);
+    ).toThrow(/codestral-2508.*cannot process images/i);
+  });
+
+  // #2 CI guard: the online test proves registry→adapter against the real
+  // Mistral API but is skipped in CI (no MISTRAL_API_KEY). This drives the SAME
+  // wiring the production path uses — modelCapability(datedId).features.vision
+  // feeding translateMessages — so a flag flip-back is caught in CI too, not
+  // only in the (skipped) online guard.
+  it('#2: gen-3 Mistral resolves vision:true from the registry → adapter translates the image', () => {
+    for (const id of ['ministral-3b-2512', 'ministral-8b-2512', 'ministral-14b-2512', 'mistral-large-2512']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(true);
+      const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport, modelLabel: id,
+      });
+      const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+      expect(parts.some((p) => p.type === 'image_url'), id).toBe(true);
+    }
+  });
+
+  it('#2: a non-vision Mistral id (codestral) resolves vision:false → adapter throws', () => {
+    const visionSupport = modelCapability('codestral-2508')?.features?.vision;
+    expect(visionSupport).toBe(false);
+    expect(() =>
+      translateMessages(undefined, [{ role: 'user', content: [IMG] }], { visionSupport, modelLabel: 'codestral-2508' }),
+    ).toThrow(/cannot process images/i);
   });
 
   it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
