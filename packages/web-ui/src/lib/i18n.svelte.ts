@@ -24,6 +24,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.save_pdf': { de: 'Als PDF', en: 'Save as PDF' },
 	'artifacts.print': { de: 'Drucken', en: 'Print' },
 	'artifacts.download_file': { de: 'Datei', en: 'Download' },
+	'artifacts.share': { de: 'Teilen', en: 'Share' },
 	'artifacts.popup_blocked': { de: 'Popup blockiert — erlaube Popups, um zu drucken', en: 'Popup blocked — allow popups to print' },
 	'artifacts.toggle_preview': { de: 'Vorschau ein-/ausklappen', en: 'Toggle preview' },
 	'artifacts.back_to_chat': { de: 'Zurück zum Chat', en: 'Back to chat' },
