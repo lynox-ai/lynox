@@ -273,6 +273,101 @@ describe('projectMessages', () => {
     expect(out[1]?.usage?.tokensOut).toBe(88);
   });
 
+  it('#4: usage is LAST-NON-NULL, not unconditional-final (survives a null final row)', () => {
+    // Proves the merge keeps an earlier row's usage when a later iteration's is
+    // null — i.e. `if (add.usage)`, not "take the final row's usage".
+    const out = projectMessages([
+      rec(0, 'user', 'go'),
+      recU(1, 'assistant', [{ type: 'tool_use', id: 'a', name: 't', input: {} }], null),
+      rec(2, 'user', [{ type: 'tool_result', tool_use_id: 'a', content: 'R' }]),
+      recU(3, 'assistant', [{ type: 'text', text: 'mid' }, { type: 'tool_use', id: 'b', name: 't', input: {} }],
+        JSON.stringify({ tokensIn: 777, tokensOut: 5, costUsd: 0.01 })),
+      rec(4, 'user', [{ type: 'tool_result', tool_use_id: 'b', content: 'R2' }]),
+      recU(5, 'assistant', [{ type: 'text', text: 'end' }], null),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(out[1]?.usage?.tokensIn).toBe(777); // the middle row's, not the null final's
+  });
+
+  it('#4: two consecutive text-only iterations coalesce into one text block', () => {
+    const out = projectMessages([
+      rec(0, 'user', 'go'),
+      rec(1, 'assistant', [{ type: 'text', text: 'A' }]),
+      rec(2, 'assistant', [{ type: 'text', text: 'B' }]),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);
+    // text/text seam coalesces to one block, no tool-boundary separator.
+    expect(out[1]?.blocks).toEqual([{ type: 'text', text: 'AB' }]);
+    expect(out[1]?.content).toBe('AB');
+  });
+
+  it('#4: a string-content iteration merges via synthesized text block', () => {
+    const out = projectMessages([
+      rec(0, 'user', 'go'),
+      rec(1, 'assistant', 'plain'), // string content → no blocks
+      rec(2, 'assistant', [{ type: 'tool_use', id: 'a', name: 't', input: {} }]),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);
+    // 'plain' synthesized to a leading text block, then the tool_call.
+    expect(out[1]?.blocks).toEqual([{ type: 'text', text: 'plain' }, { type: 'tool_call', index: 0 }]);
+    expect(out[1]?.content).toBe('plain');
+    expect(out[1]?.toolCalls).toHaveLength(1);
+  });
+
+  it('#4: a note BETWEEN two iterations breaks the merge on both sides', () => {
+    const out = projectMessages([
+      rec(0, 'user', 'go'),
+      rec(1, 'assistant', [{ type: 'text', text: 'before' }]),
+      rec(2, 'assistant', buildDisplayNoteContent('provider_error')),
+      rec(3, 'assistant', [{ type: 'text', text: 'after' }]),
+    ]);
+    // Three separate bubbles: before | note | after (the note is not fused).
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant', 'assistant']);
+    expect(out[1]?.content).toBe('before');
+    expect(out[2]?.note?.code).toBe('provider_error');
+    expect(out[3]?.content).toBe('after');
+  });
+
+  it('#4: an orphan tool_result between iterations is dropped, turn stays one bubble', () => {
+    const out = projectMessages([
+      rec(0, 'user', 'go'),
+      rec(1, 'assistant', [{ type: 'text', text: 'one' }]),
+      rec(2, 'user', [{ type: 'tool_result', tool_use_id: 'ghost', content: 'X' }]), // no matching tool_use
+      rec(3, 'assistant', [{ type: 'text', text: 'two' }]),
+    ]);
+    // The orphan carrier renders nothing; the two text iterations still merge.
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(out[1]?.content).toBe('onetwo');
+  });
+
+  it('#4: a thinking-only FINAL row hoists its usage onto the merged turn', () => {
+    // The last iteration is a suppressed `[…]` placeholder that carries the run
+    // rollup; the merged footer must still show the Σ, not lose it.
+    const out = projectMessages([
+      rec(0, 'user', 'go'),
+      recU(1, 'assistant', [{ type: 'text', text: 'answer' }], null),
+      recU(2, 'assistant', [{ type: 'text', text: '[…]' }], JSON.stringify({ tokensIn: 999, tokensOut: 3, costUsd: 0.05 })),
+    ]);
+    // The […] row is dropped; its usage is hoisted onto 'answer'.
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(out[1]?.content).toBe('answer');
+    expect(out[1]?.usage?.tokensIn).toBe(999);
+  });
+
+  it('#4: mergeTurns:false keeps the raw per-iteration rows (debug export view)', () => {
+    const records = [
+      rec(0, 'user', 'go'),
+      rec(1, 'assistant', [{ type: 'tool_use', id: 'a', name: 't', input: {} }]),
+      rec(2, 'user', [{ type: 'tool_result', tool_use_id: 'a', content: 'RA' }]),
+      rec(3, 'assistant', [{ type: 'text', text: 'done' }]),
+    ];
+    // Default (UI): merged to one bubble.
+    expect(projectMessages(records).map((m) => m.role)).toEqual(['user', 'assistant']);
+    // Debug export: raw, one entry per stored assistant iteration.
+    expect(projectMessages(records, { mergeTurns: false }).map((m) => m.role))
+      .toEqual(['user', 'assistant', 'assistant']);
+  });
+
   it('#4: a display-only failure note never merges into an adjacent assistant', () => {
     const out = projectMessages([
       rec(0, 'user', 'go'),

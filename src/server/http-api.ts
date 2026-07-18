@@ -3207,7 +3207,10 @@ export class LynoxHTTPApi {
       const thread = threadStore.getThread(id);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
 
-      const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }));
+      // Raw per-iteration view: the debug export exists to reveal the row-by-row
+      // truth (incl. what the merged chat bubble hides), so it must NOT collapse
+      // a turn's assistant iterations the way the UI /messages endpoint does.
+      const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }), { mergeTurns: false });
 
       const history = engine.getRunHistory();
       const runs = history

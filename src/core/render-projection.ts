@@ -290,7 +290,17 @@ function mergeAssistantInto(into: RenderedMessage, add: RenderedMessage): void {
   if (add.usage) into.usage = add.usage;
 }
 
-export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage[] {
+/**
+ * @param opts.mergeTurns — collapse a turn's consecutive assistant iterations
+ *   into one message (the UI-ready default). Pass `false` for a raw,
+ *   per-iteration view — the debug export wants the granular row-by-row truth,
+ *   not the merged bubble the chat renders (#4).
+ */
+export function projectMessages(
+  records: ThreadMessageRecord[],
+  opts?: { mergeTurns?: boolean },
+): RenderedMessage[] {
+  const mergeTurns = opts?.mergeTurns ?? true;
   const out: RenderedMessage[] = [];
   // Carries tool_use id → its RenderedToolCall, so later tool_result
   // carriers (possibly many messages later) can attach results by id.
@@ -396,6 +406,14 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
     // REAL message and must NOT be dropped.
     const allBlocksAreText = content.every((b) => b.type === 'text');
     if (toolCalls.length === 0 && (textAccum === THINKING_ONLY_PLACEHOLDER || (textAccum.trim() === '' && allBlocksAreText))) {
+      // The suppressed row is dropped, but if it is the run's FINAL row it carries
+      // the cumulative usage rollup (setMessageUsage stamps the highest-seq
+      // assistant row). Hoist that onto the turn's last visible assistant message
+      // so the merged footer still shows the run's Σ total instead of losing it.
+      const prev = out[out.length - 1];
+      if (usage && prev !== undefined && prev.role === 'assistant' && prev.note === undefined) {
+        prev.usage = usage;
+      }
       continue;
     }
 
@@ -419,6 +437,7 @@ export function projectMessages(records: ThreadMessageRecord[]): RenderedMessage
   // A B-full failure note (`note`) is a distinct localized element and never
   // merges. The shared RenderedToolCall refs mean a carrier's later result
   // update still reaches the merged message's tool call.
+  if (!mergeTurns) return out;
   const merged: RenderedMessage[] = [];
   for (const m of out) {
     const last = merged[merged.length - 1];
