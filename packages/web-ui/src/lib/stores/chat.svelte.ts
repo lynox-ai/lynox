@@ -2684,6 +2684,30 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	}
 }
 
+/**
+ * Prepare a server transcript for display before it replaces the local copy.
+ * The server persists the agent's RAW output, so the last assistant turn still
+ * carries the `<follow_ups>` / bare-JSON trailer in its content — rendering it
+ * verbatim leaks that JSON into the bubble and the pills never reappear. Strip
+ * it, then re-derive the pills from a `suggest_follow_ups` tool call on the last
+ * assistant turn (structured pills win over the text fallback). Shared by BOTH
+ * adopt paths (resumeThread + reconcileThread) — reconcile used to skip it, so a
+ * settled shorter (#4-merged) transcript adopted on mount leaked the trailer.
+ */
+function hydrateServerTranscript(serverMessages: ChatMessage[]): void {
+	stripFollowUpsFromHistory(serverMessages);
+	for (let i = serverMessages.length - 1; i >= 0; i -= 1) {
+		const m = serverMessages[i];
+		if (!m || m.role !== 'assistant') continue;
+		const tc = m.toolCalls?.find((t) => t.name === 'suggest_follow_ups');
+		if (tc) {
+			const fu = followUpsFromToolInput(tc.input);
+			if (fu.length > 0) m.followUps = fu;
+		}
+		break; // only the last assistant turn carries the current pills
+	}
+}
+
 export async function resumeThread(threadId: string): Promise<void> {
 	// Race-condition guard: if another resumeThread call starts, this one aborts
 	const gen = ++_resumeGeneration;
@@ -2833,27 +2857,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 					return cm;
 				}),
 			);
-			// Follow-ups are stripped from the DISPLAY at stream-completion (client-side), but the
-			// server persists the agent's RAW output — the `<follow_ups>` / bare-JSON trailer is
-			// still in each assistant turn's content. Re-rendering the server transcript verbatim
-			// leaks the raw `[{"label":…,"task":…}]` into the bubble and the pills never reappear
-			// (the engine re-entry bug). Re-apply the strip on resume; pills land on the last turn.
-			stripFollowUpsFromHistory(serverMessages);
-			// Structured pills WIN over the text fallback: if the last assistant turn
-			// called suggest_follow_ups, derive the chips from that tool input (the
-			// tool_use block the server persisted verbatim — see render-projection).
-			// This is the resume counterpart to the live tool_call handler; the tool
-			// row itself is hidden via HIDDEN_TOOLS so it never renders as a card.
-			for (let i = serverMessages.length - 1; i >= 0; i -= 1) {
-				const m = serverMessages[i];
-				if (!m || m.role !== 'assistant') continue;
-				const tc = m.toolCalls?.find((t) => t.name === 'suggest_follow_ups');
-				if (tc) {
-					const fu = followUpsFromToolInput(tc.input);
-					if (fu.length > 0) m.followUps = fu;
-				}
-				break; // only the last assistant turn carries the current pills
-			}
+			// Strip the raw follow-up trailer + re-derive the pills before rendering
+			// the server transcript (see hydrateServerTranscript).
+			hydrateServerTranscript(serverMessages);
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts
@@ -2862,7 +2868,18 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// keep the local copy — it probably contains the in-flight
 			// user turn that the server hasn't persisted yet. Equal-or-more
 			// means the server caught up; use it.
-			if (serverMessages.length >= localMessages.length) {
+			//
+			// Exception: a SETTLED thread (no active run) with no unpersisted
+			// local message (`failed`/`queued`) whose server transcript is merely
+			// SHORTER — the projection legitimately collapsed it, e.g. the #4
+			// multi-step-turn merge. Without this, a thread cached with the old
+			// (longer, fragmented) shape would never adopt the merged transcript,
+			// so the fix wouldn't reach already-viewed threads. `failed`/`queued`
+			// rows are local-only + unrecoverable, so their presence keeps local.
+			const hasUnpersistedLocal = localMessages.some((m) =>
+				m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
+			if (serverMessages.length >= localMessages.length
+				|| (!resumeActiveRun && !hasUnpersistedLocal)) {
 				messages = serverMessages;
 				adoptedServer = true;
 			}
@@ -2972,6 +2989,10 @@ export async function reconcileThread(): Promise<void> {
 				return cm;
 			}),
 		);
+		// Strip the raw follow-up trailer + re-derive pills, exactly as
+		// resumeThread does — reconcile adopts the same server transcript and must
+		// not leak the raw JSON / drop the pills when it swaps in a settled thread.
+		hydrateServerTranscript(serverMessages);
 		// Mirror resumeThread's mid-persist guard: only swap when the server
 		// has caught up to the local snapshot. A shorter server list means a
 		// turn is still being persisted; keep local until it lands.
@@ -2980,8 +3001,15 @@ export async function reconcileThread(): Promise<void> {
 		// already uses. Without it, a thread switch mid-fetch (a notification
 		// deep-link `resumeThread`, or a manual click) would clobber the newly
 		// opened thread's messages with the stale thread's server transcript.
+		// Exception (mirrors resumeThread): a settled thread (no active run) with
+		// no unpersisted local message adopts a merely-shorter server transcript
+		// too, so a thread cached with the old fragmented shape picks up the #4
+		// merged projection instead of staying stale forever.
+		const hasUnpersistedLocal = messages.some((m) =>
+			m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
 		let adopted = false;
-		if (tid === sessionId && serverMessages.length >= messages.length) {
+		if (tid === sessionId
+			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();
