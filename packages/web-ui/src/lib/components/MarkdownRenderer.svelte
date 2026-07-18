@@ -13,6 +13,7 @@
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
+	import { isIosSafari } from '../utils/ios-safari.js';
 
 	interface Props {
 		content: string;
@@ -259,15 +260,25 @@
 		const galleryBtn = artifactId
 			? `<button class="artifact-btn" data-action="pin" title="Open in Artifacts">${ICON_OPEN_GALLERY}</button>`
 			: `<button class="artifact-btn" data-action="pin" title="Pin to Artifacts">${ICON_SAVE}</button>`;
+		// html2canvas can't rasterize the sandboxed iframe on iOS Safari — the
+		// image export/screenshot buttons dead-click there, so hide them on iOS.
+		// The .html-source download still works (it routes through the iOS share
+		// sheet), so on iOS it wears a share icon + label, not the desktop "code" one.
+		const ios = isIosSafari();
+		const imageBtns = ios ? '' :
+			`<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
+				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>`;
+		const sourceBtn = ios
+			? `<button class="artifact-btn" data-action="download-html" title="Share">${ICON_SHARE}</button>`
+			: `<button class="artifact-btn" data-action="download-html" title="Download .html source">${ICON_CODE}</button>`;
 
 		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}"${idAttr}>
 			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
 				<span class="artifact-title">${safeTitle}</span>
-				<button class="artifact-btn" data-action="screenshot" title="Copy as image">${ICON_CLIPBOARD}</button>
-				<button class="artifact-btn" data-action="export" title="Download image">${ICON_DOWNLOAD}</button>
-				<button class="artifact-btn" data-action="download-html" title="Download .html source">${ICON_CODE}</button>
+				${imageBtns}
+				${sourceBtn}
 				<button class="artifact-btn" data-action="print-pdf" title="Save as PDF">${ICON_PRINT}</button>
 				<button class="artifact-btn" data-action="expand" title="Fullscreen">${ICON_EXPAND}</button>
 				<button class="artifact-btn artifact-close-btn" data-action="close" title="Close">${ICON_CLOSE}</button>
@@ -283,6 +294,9 @@
 
 	const ICON_DOWNLOAD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 10.5L4 6.5h3V2h2v4.5h3L8 10.5zM3 12.5h10v1H3v-1z" fill="currentColor"/></svg>`;
 	const ICON_CODE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+	// iOS-style share glyph (arrow rising out of a tray) — used on iOS where the
+	// download buttons route through the native share sheet.
+	const ICON_SHARE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 10V2M8 2L5.5 4.5M8 2l2.5 2.5M3.5 7.5H3a1 1 0 00-1 1V13a1 1 0 001 1h10a1 1 0 001-1V8.5a1 1 0 00-1-1h-.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 	const ICON_SAVE = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2h8l3 3v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.5"/><path d="M5 2v4h5V2M5 14v-4h6v4" stroke="currentColor" stroke-width="1.2"/></svg>`;
 	const ICON_CLIPBOARD = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5.5 3A1.5 1.5 0 017 1.5h2A1.5 1.5 0 0110.5 3M5.5 3H4a1 1 0 00-1 1v9a1 1 0 001 1h8a1 1 0 001-1V4a1 1 0 00-1-1h-1.5M5.5 3h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
