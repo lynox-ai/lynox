@@ -11,7 +11,7 @@
 	import { deckFrameHeight, computeFitZoom, clearArtifactFitStyles } from '../utils/artifact-frame.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
-	import { extractArtifactId, stripArtifactIdMarker } from '../utils/artifact-inline.js';
+	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 
 	interface Props {
 		content: string;
@@ -218,8 +218,7 @@
 		// Pull it out and strip it from the body so it can't leak into the
 		// rendered prose / data preview, then hand it to the builder so the pill
 		// links to the existing entry instead of re-saving a duplicate.
-		const artifactId = extractArtifactId(code);
-		const src = artifactId ? stripArtifactIdMarker(code) : code;
+		const { artifactId, src } = resolveArtifactRender(code);
 		if (isMarkdownArtifact(src)) return buildMarkdownArtifact(src, artifactId);
 		const dataType = artifactDataType(src);
 		if (dataType) return buildDataArtifact(src, dataType);

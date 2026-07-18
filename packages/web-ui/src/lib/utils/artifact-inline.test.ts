@@ -3,9 +3,16 @@ import {
 	isArtifactContentInline,
 	parseArtifactIdFromResult,
 	artifactIdMarker,
+	artifactFenceHeader,
 	extractArtifactId,
 	stripArtifactIdMarker,
+	resolveArtifactRender,
 } from './artifact-inline.js';
+
+// The exact multi-line shape artifact_save returns (src/tools/builtin/artifact.ts:52-55).
+function saveResult(id: string, title = 'Report', action = 'Saved', v = 1): string {
+	return `${action} artifact "${title}" (id: ${id}, v${v}).\nFile: /x/${id}.html`;
+}
 
 describe('isArtifactContentInline', () => {
 	const html = '<!DOCTYPE html><html><body><h1>Report</h1></body></html>';
@@ -47,14 +54,19 @@ describe('isArtifactContentInline', () => {
 });
 
 describe('parseArtifactIdFromResult', () => {
-	// The exact shape artifact_save returns (src/tools/builtin/artifact.ts):
-	//   `Saved artifact "Title" (id: <id>, v1).`
-	it('pulls the id out of a real save result', () => {
-		expect(parseArtifactIdFromResult('Saved artifact "Report" (id: art_9fk2, v1).')).toBe('art_9fk2');
+	// Fresh ids are randomUUID().slice(0,8) — 8 hex chars (artifact-store.ts:257).
+	it('pulls the id out of a real (multi-line) save result', () => {
+		expect(parseArtifactIdFromResult(saveResult('3f9a1c07'))).toBe('3f9a1c07');
 	});
 
 	it('pulls the id out of an UPDATE result (edit case — #14a)', () => {
-		expect(parseArtifactIdFromResult('Updated artifact "Report" (id: art_9fk2, v3).')).toBe('art_9fk2');
+		expect(parseArtifactIdFromResult(saveResult('3f9a1c07', 'Report', 'Updated', 3))).toBe('3f9a1c07');
+	});
+
+	it('does NOT take an id echoed inside the TITLE — the real id is at line end', () => {
+		// Title-injection guard: a title containing "(id: evil, v1)" precedes the
+		// real trailing id on the first line; first-match would return "evil".
+		expect(parseArtifactIdFromResult(saveResult('3f9a1c07', 'x (id: evil, v9)'))).toBe('3f9a1c07');
 	});
 
 	it('is empty for a result with no id (error / store-unavailable strings)', () => {
@@ -63,32 +75,48 @@ describe('parseArtifactIdFromResult', () => {
 		expect(parseArtifactIdFromResult('')).toBe('');
 	});
 
-	it('does not mis-parse a stray "id:" without the (…, v<n>) shape', () => {
+	it('does not mis-parse a stray "id:" without the (…, v<n>). shape', () => {
 		expect(parseArtifactIdFromResult('the id: is not set')).toBe('');
 	});
 });
 
-describe('artifact id marker round-trip', () => {
-	it('marker written by the writer is read back by the reader', () => {
-		const marker = artifactIdMarker('art_9fk2');
-		expect(marker).toBe('<!-- id: art_9fk2 -->\n');
-		const fence = `<!-- title: Report -->\n${marker}<h1>Hi</h1>`;
-		expect(extractArtifactId(fence)).toBe('art_9fk2');
+describe('artifact fence header ↔ render round-trip', () => {
+	// Drives the ACTUAL writer (ChatView calls artifactFenceHeader) and reader
+	// (MarkdownRenderer calls resolveArtifactRender) — not the low-level helpers
+	// in isolation. Reverting the strip in the reader fails these.
+	it('writer emits the id; reader extracts it and strips it from the body', () => {
+		const header = artifactFenceHeader({ title: 'Report', type: 'html', id: '3f9a1c07', typed: false });
+		const fence = header + '<h1>Hi</h1>';
+		const { artifactId, src } = resolveArtifactRender(fence);
+		expect(artifactId).toBe('3f9a1c07');
+		expect(src).not.toContain('lynox-artifact-id'); // marker must NOT leak into render
+		expect(src).toContain('<!-- title: Report -->');
+		expect(src).toContain('<h1>Hi</h1>');
 	});
 
-	it('emits no marker (and reads back empty) when there is no id', () => {
+	it('typed fence keeps the type marker but drops the id marker', () => {
+		const header = artifactFenceHeader({ title: 'Data', type: 'csv', id: '3f9a1c07', typed: true });
+		const { artifactId, src } = resolveArtifactRender(header + 'a,b\n1,2');
+		expect(artifactId).toBe('3f9a1c07');
+		expect(src).toContain('<!-- type: csv -->');
+		expect(src).not.toContain('lynox-artifact-id');
+	});
+
+	it('no id → no marker, reader returns the body unchanged and empty id', () => {
+		const header = artifactFenceHeader({ title: 'Report', type: 'html', id: '', typed: false });
 		expect(artifactIdMarker('')).toBe('');
-		expect(extractArtifactId('<!-- title: Report -->\n<h1>Hi</h1>')).toBe('');
+		const fence = header + '<h1>Hi</h1>';
+		const { artifactId, src } = resolveArtifactRender(fence);
+		expect(artifactId).toBe('');
+		expect(src).toBe(fence);
 	});
 
-	it('strips the marker so it cannot leak into rendered prose / a data preview', () => {
-		const body = `<!-- id: art_9fk2 -->\nname,value\na,1`;
-		expect(stripArtifactIdMarker(body)).toBe('name,value\na,1');
-		// extractArtifactId still sees it BEFORE the strip
-		expect(extractArtifactId(body)).toBe('art_9fk2');
-	});
-
-	it('strip is a no-op when no marker is present', () => {
-		expect(stripArtifactIdMarker('name,value\na,1')).toBe('name,value\na,1');
+	it('does NOT treat an ordinary <!-- id: … --> comment in agent content as a gallery id', () => {
+		// The collision the namespaced marker fixes: an agent-authored html fence
+		// whose content has a plain HTML comment must render untouched.
+		const fence = '<div>\n<!-- id: main-header -->\n<h1>Hi</h1>\n</div>';
+		const { artifactId, src } = resolveArtifactRender(fence);
+		expect(artifactId).toBe('');
+		expect(src).toBe(fence); // comment preserved, nothing stripped
 	});
 });

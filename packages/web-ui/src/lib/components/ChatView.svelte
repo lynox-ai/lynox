@@ -75,7 +75,7 @@
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
-	import { isArtifactContentInline, parseArtifactIdFromResult, artifactIdMarker } from '../utils/artifact-inline.js';
+	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
@@ -463,10 +463,12 @@
 						// the id in its result string. Thread it into the fence so the
 						// inline card LINKS to that existing entry instead of re-saving on
 						// pin/open — the re-save added a duplicate gallery row per click.
-						const idMarker = artifactIdMarker(parseArtifactIdFromResult(tc.result));
-						const header = TYPED_ARTIFACT_FENCE.has(artifactType)
-							? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n${idMarker}`
-							: `<!-- title: ${title} -->\n${idMarker}`;
+						const header = artifactFenceHeader({
+							title,
+							type: artifactType,
+							id: parseArtifactIdFromResult(tc.result),
+							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
+						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
 					continue;
