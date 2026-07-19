@@ -61,11 +61,4 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.features.vision).toBe(false);
     expect(m.provenance).toBe('CN');
   });
-
-  it('the CN-provenance models are text-only (so the adapter vision gate throws, never silently drops)', () => {
-    for (const id of ['accounts/fireworks/models/glm-5p2', 'accounts/fireworks/models/deepseek-v4-pro']) {
-      expect(MODEL_CAPABILITIES[id]!.features.vision).toBe(false);
-      expect(MODEL_CAPABILITIES[id]!.provenance).toBe('CN');
-    }
-  });
 });

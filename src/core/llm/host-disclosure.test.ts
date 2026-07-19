@@ -37,8 +37,25 @@ describe('host-disclosure (model-presets P1b)', () => {
     expect(shown).not.toContain('SOC2');
   });
 
-  it('a confirmed host DOES show its posture', () => {
+  it('a confirmed host shows its posture verbatim — including a sensitive one', () => {
     expect(displayPosture('api.mistral.ai')).toBe('EU-resident (France)');
+    // Anthropic's posture IS contract-confirmed, so the sensitive claim passes
+    // through verbatim — proving the gate lets a confirmed claim show, not just
+    // that it blocks (Mistral's posture has no sensitive token to prove that).
+    expect(displayPosture('api.anthropic.com')).toBe('US · zero-retention (API default) · SOC2');
+  });
+
+  it('R2 gate is STRUCTURAL: no exported surface leaks the unconfirmed Fireworks claim', () => {
+    // The gate must live in the DATA, not only in displayPosture — a W3/W4 consumer
+    // reading .posture off the object/map directly must still get the gated value.
+    for (const posture of [
+      hostDisclosure('api.fireworks.ai')!.posture,
+      HOST_DISCLOSURES['api.fireworks.ai']!.posture,
+    ]) {
+      expect(posture).toContain(UNCONFIRMED_POSTURE);
+      expect(posture).not.toContain('zero-retention');
+      expect(posture).not.toContain('SOC2');
+    }
   });
 
   it('returns undefined for an unknown host', () => {

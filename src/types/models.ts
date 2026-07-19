@@ -422,9 +422,9 @@ export interface ModelFeatures {
 
 /** Where a model's WEIGHTS originate (supply-chain provenance) — axis (c) of the
  *  model-presets three-axis disclosure. Distinct from where the DATA is processed
- *  (the HOST, see {@link file://./../core/llm/host-disclosure.ts}): a CN-weights
- *  model served from a Western host (e.g. GLM via Fireworks/US) is still CN by
- *  weights. `US`/`EU`/`CN` cover the current roster; extend as the fleet grows. */
+ *  (the HOST — see `host-disclosure.ts`): a CN-weights model served from a Western
+ *  host (e.g. GLM via Fireworks/US) is still CN by weights. `US`/`EU`/`CN` cover
+ *  the current roster; extend as the fleet grows. */
 export type WeightsOrigin = 'US' | 'EU' | 'CN';
 
 /**
@@ -466,8 +466,10 @@ export interface ModelCapability {
    */
   charsPerToken?: number | undefined;
   /** Model weights-origin for the presets supply-chain disclosure (axis c).
-   *  Absent = not annotated (host-implied / non-sensitive). Set on models whose
-   *  weights-origin the disclosure must surface regardless of host — notably CN. */
+   *  Set on the models a preset SURFACES, so the disclosure carries a per-model
+   *  weights-origin for each (incl. US/EU, not only CN — the picker renders all
+   *  three axes per model). Absent on models the presets don't surface, where the
+   *  host implies it. */
   provenance?: WeightsOrigin | undefined;
 }
 
@@ -927,10 +929,13 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // CN-provenance weights served from a WESTERN fixed host (Fireworks/US), never a
   // direct CN API — the affirmative sourcing rule (host residency US, weights CN).
   // Pricing VERIFIED against the Fireworks model pages (2026-07-19): the harness
-  // estimates were ~2.5-4× low. Both are text-only (Fireworks: "image input: not
-  // supported"). Reached via provider:'openai' + api_base_url=api.fireworks.ai +
-  // the full `accounts/fireworks/models/*` id; no Fireworks tier map yet (they are
-  // preset-slot models, tier:null — a preset's tier_set pins them explicitly).
+  // estimates were ~2.5-4× low. cacheRead = $0.14 is the PUBLISHED Fireworks
+  // cached-input rate for BOTH models (a flat rate, NOT input×0.1) — so DeepSeek's
+  // 0.14 (≠ 1.74×0.1 = 0.174) is correct as read from its page, not a copy of GLM's.
+  // Both are text-only (Fireworks: "image input: not supported"). Reached via
+  // provider:'openai' + api_base_url=api.fireworks.ai + the full
+  // `accounts/fireworks/models/*` id; no Fireworks tier map yet (they are preset
+  // -slot models, tier:null — a preset's tier_set pins them explicitly).
   'accounts/fireworks/models/glm-5p2': {
     id: 'accounts/fireworks/models/glm-5p2',
     provider: 'openai',
