@@ -41,6 +41,7 @@ const OVERRIDES: Record<string, { contextWindow: number; pricing: { input: numbe
   'openai/gpt-5.2': { contextWindow: 400_000, pricing: { input: 1.75, output: 14, cacheRead: 0.175 } }, // vision, frontier
   'deepseek/deepseek-v4-pro': { contextWindow: 1_048_576, pricing: { input: 0.43, output: 0.87, cacheRead: 0.043 } }, // text, cheap 1M
   'deepseek/deepseek-v4-flash': { contextWindow: 1_048_576, pricing: { input: 0.10, output: 0.20, cacheRead: 0.01 } }, // text, ultra-cheap 1M
+  'accounts/fireworks/models/deepseek-v4-pro': { contextWindow: 1_048_576, pricing: { input: 0.43, output: 0.87, cacheRead: 0.043 } }, // Fireworks-hosted (valid key), pricing est.
 };
 
 /** Native context window (tokens) for a candidate — read from lynox's OWN model
@@ -125,6 +126,10 @@ export const COMPARATORS: readonly Candidate[] = [
     prefilter: 'cheap 1M text reasoner ($0.43/$0.87 — cheaper than GLM); deep/big-context candidate' },
   { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek v4 Flash', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: null,
     prefilter: 'ULTRA-cheap 1M text ($0.10/$0.20); efficient-preset deep candidate' },
+  // Same DeepSeek v4 Pro but via FIREWORKS (valid key) — testable now without
+  // the OpenRouter key. The cheap 1M-text deep alternative to GLM.
+  { id: 'accounts/fireworks/models/deepseek-v4-pro', label: 'DeepSeek v4 (FW)', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
+    prefilter: 'DeepSeek v4 Pro via Fireworks; cheap 1M text reasoner; deep/big-context candidate' },
 ];
 
 export const ALL_CANDIDATES: readonly Candidate[] = [...FLEET, ...COMPARATORS];
