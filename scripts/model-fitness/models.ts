@@ -30,9 +30,20 @@ export const FLEET: readonly Candidate[] = [
     prefilter: 'shipped Mistral fast tier' },
 ];
 
-/** Opt-in comparators — candidates we might QUALIFY into the fleet. Empty by
- *  default (keeps the default run to the fleet). Add a model here WITH a
- *  public-leaderboard reason before spending budget scoring it. */
-export const COMPARATORS: readonly Candidate[] = [];
+/** Opt-in comparators — candidates we might QUALIFY into the fleet. This is
+ *  where discrimination shows: a genuinely weaker/cheaper model FAILS the jobs
+ *  its tier would need, so the matrix says "unfit for tier X". Add a model here
+ *  WITH a public-leaderboard reason before spending budget scoring it.
+ *  `tierHint: null` = judge it for EVERY tier (where could it slot in?). */
+export const COMPARATORS: readonly Candidate[] = [
+  // Older, weaker Mistral — no vision (rejects images), weaker tool-use. A
+  // candidate for the cheapest fast slot only; the matrix should REFUSE it for
+  // balanced/deep (vision-gated). Demonstrates the harness discriminating.
+  { id: 'open-mistral-nemo', label: 'Mistral Nemo', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
+    prefilter: 'older/weaker Mistral; low public agentic scores; probe: no vision (400)' },
+  // The cheapest gen-3 — could it serve an even cheaper fast slot than 8B?
+  { id: 'ministral-3b-2512', label: 'Ministral 3B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
+    prefilter: 'cheapest gen-3 Mistral; candidate for a cheaper fast slot' },
+];
 
 export const ALL_CANDIDATES: readonly Candidate[] = [...FLEET, ...COMPARATORS];
