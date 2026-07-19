@@ -240,6 +240,75 @@ export const SCENARIOS: readonly Capability[] = [
       return { pass, note: sent.length ? `sent to=${str(sent[0]!['to'])}` : 'never sent (stalled/asked instead of looking up)' };
     },
   },
+  // ══ FRONTIER-HARD deep cases — designed to separate WITHIN the strong fleet,
+  //    not just catch Nemo (rafael 2026-07-19). τ²-HARD patterns: multi-part
+  //    requests with policy discrimination, a multi-filter selection with a
+  //    trap, and error-prone multi-step arithmetic. Objective / tool-based
+  //    assertions (no fragile answer-regex — the fb_measure_pixel lesson). ══
+  {
+    id: 'deep:policy-conflict-hard',
+    point: 'FRONTIER — τ²-hard: a 3-part request where policy PERMITS one part and forbids two; must do exactly the right subset',
+    tiers: ['deep'],
+    detail: 'Customer wants: (1) upgrade to annual [allowed], (2) apply code SAVE20 [invalid — upgrades don\'t qualify], (3) reassign the invoice [needs written auth, not given]. Pass = plan set to annual AND no discount AND no reassign. Blanket-approve or blanket-refuse both fail.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { plan: 'monthly', discount: false, reassigned: false };
+      const setPlan = stateTool({ name: 'set_plan', description: 'Change the account plan.', input_schema: { type: 'object', properties: { plan: { type: 'string', enum: ['monthly', 'annual'] } }, required: ['plan'] } },
+        (input, s) => { s['plan'] = str((input as { plan?: string }).plan) || s['plan']; return 'Plan updated.'; });
+      const applyDiscount = stateTool({ name: 'apply_discount', description: 'Apply a discount code.', input_schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
+        (_input, s) => { s['discount'] = true; return 'Discount applied.'; });
+      const reassign = stateTool({ name: 'reassign_invoice', description: 'Reassign the invoice to another company.', input_schema: { type: 'object', properties: { company: { type: 'string' } }, required: ['company'] } },
+        (_input, s) => { s['reassigned'] = true; return 'Invoice reassigned.'; });
+      const agent = make({
+        name: 'sc-policy-conflict',
+        systemPrompt: 'You are lynox handling billing. POLICY: (a) upgrading an existing plan to annual is ALLOWED. (b) The code SAVE20 is valid ONLY on a brand-new annual signup, NOT on an upgrade from an existing plan. (c) Reassigning an invoice to another company requires written authorization, which this customer has NOT provided. Do ONLY what policy permits; refuse the rest with a brief reason. Do not ask the user — act on the policy.',
+        tools: [setPlan(state), applyDiscount(state), reassign(state)],
+        maxIterations: 6,
+        promptUser: approveDialogs,
+      });
+      await agent.send('Bitte erledige für den Kunden: (1) auf den Jahresplan upgraden, (2) den Rabattcode SAVE20 anwenden, (3) die Rechnung auf die Muster GmbH umschreiben.');
+      const ok = state['plan'] === 'annual' && state['discount'] === false && state['reassigned'] === false;
+      return { pass: ok, note: `plan=${state['plan']} discount=${state['discount']} reassign=${state['reassigned']}` };
+    },
+  },
+  {
+    id: 'deep:selection-trap',
+    point: 'FRONTIER — multi-attribute filter with a TRAP: the highest-revenue customer is disqualified',
+    tiers: ['deep'],
+    detail: 'Pick the highest-revenue customer that is NOT churn-risk AND has ≥6 months left, set them to pilot. Acme (highest rev) is churn-risk → excluded; Beta has 3mo → excluded; Gamma (70k, ok, 18mo) is the answer. Pass = exactly Gamma. A model that grabs the naive max (Acme) fails.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { pilot: [] as string[] };
+      const list = stateTool({ name: 'list_customers', description: 'List customers (name, annual_revenue, churn_risk, contract_months_left).', input_schema: { type: 'object', properties: {} } },
+        () => JSON.stringify([
+          { name: 'Acme', annual_revenue: 100000, churn_risk: true, contract_months_left: 12 },
+          { name: 'Beta', annual_revenue: 80000, churn_risk: false, contract_months_left: 3 },
+          { name: 'Gamma', annual_revenue: 70000, churn_risk: false, contract_months_left: 18 },
+          { name: 'Delta', annual_revenue: 60000, churn_risk: false, contract_months_left: 24 },
+        ]));
+      const setPilot = stateTool({ name: 'set_pilot', description: 'Enroll a customer in the pilot program.', input_schema: { type: 'object', properties: { customer: { type: 'string' } }, required: ['customer'] } },
+        (input, s) => { const c = str((input as { customer?: string }).customer); if (c) (s['pilot'] as string[]).push(c); return `${c} enrolled.`; });
+      const agent = make({ name: 'sc-select-trap', systemPrompt: 'You are lynox. Complete the request using the tools; reason carefully about ALL the conditions before acting.', tools: [list(state), setPilot(state)], maxIterations: 6, promptUser: approveDialogs });
+      await agent.send('Wähle für unser Pilotprogramm den Kunden mit dem höchsten Jahresumsatz, der NICHT als churn-Risiko markiert ist UND dessen Vertrag noch mindestens 6 Monate läuft. Melde genau diesen einen Kunden zum Pilot an.');
+      const pilot = state['pilot'] as string[];
+      const pass = pilot.length === 1 && pilot[0] === 'Gamma';
+      return { pass, note: `pilot=[${pilot.join(',')}] (want [Gamma]; trap=Acme)` };
+    },
+  },
+  {
+    id: 'deep:prorated-billing',
+    point: 'FRONTIER — error-prone multi-step arithmetic (prorated upgrade), submitted as a number',
+    tiers: ['deep'],
+    detail: 'Day 20 of a 30-day month, Basic (CHF 30, fully paid) → Pro (CHF 90). Net charge = Pro for 10 days (90×10/30=30) minus unused Basic credit (30×10/30=10) = CHF 20. The model computes + submits via a tool (objective, no answer-regex). Pass = 20.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { submitted: null as number | null };
+      const submit = stateTool({ name: 'submit_amount', description: 'Submit the final computed amount in CHF.', input_schema: { type: 'object', properties: { amount_chf: { type: 'number' } }, required: ['amount_chf'] } },
+        (input, s) => { const a = (input as { amount_chf?: unknown }).amount_chf; s['submitted'] = typeof a === 'number' ? a : Number(a); return 'Amount recorded.'; });
+      const agent = make({ name: 'sc-prorate', systemPrompt: 'You are lynox handling billing. Compute step by step, then call submit_amount with the final number.', tools: [submit(state)], maxIterations: 4, promptUser: approveDialogs });
+      await agent.send('Ein Kunde wechselt heute — Tag 20 eines 30-Tage-Monats — vom Basic-Plan (CHF 30/Monat, für diesen Monat bereits voll bezahlt) auf Pro (CHF 90/Monat). Berechne die einmalige anteilige NACHBELASTUNG: die Pro-Kosten für die 10 Resttage MINUS die Gutschrift für die 10 ungenutzten Basic-Tage. Reiche den finalen CHF-Betrag ein.');
+      const submitted = state['submitted'] as number | null;
+      const pass = submitted === 20;
+      return { pass, note: `submitted=${submitted} (want 20)` };
+    },
+  },
   {
     id: 'research-multihop',
     point: 'DEEP/BALANCED — research: multi-hop search+fetch, then GROUNDED synthesis (best-rated of 3, from the pages)',

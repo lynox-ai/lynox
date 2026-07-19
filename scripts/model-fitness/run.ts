@@ -33,6 +33,7 @@ function arg(name: string, dflt: string): string {
 const REPEATS = Math.max(1, parseInt(arg('--repeats', '2'), 10) || 2);
 const ONLY = arg('--only', '').split(',').map((s) => s.trim()).filter(Boolean);
 const CANDIDATE = arg('--candidate', '').toLowerCase(); // label substring, for cheap targeted re-runs
+const PROVIDER = arg('--provider', '').toLowerCase(); // 'anthropic' | 'openai' — chunk a run by provider to dodge the duration KILL (Mistral 429-backoffs + judge latency compound over a full 8-candidate run)
 const SCENARIO_MODE = process.argv.includes('--scenarios');
 const SUITE = SCENARIO_MODE ? SCENARIOS : CAPABILITIES;
 
@@ -78,6 +79,7 @@ async function main(): Promise<void> {
   const caps = ONLY.length ? SUITE.filter((c) => ONLY.includes(c.id)) : SUITE;
   const candidates = ALL_CANDIDATES.filter((c) => {
     if (CANDIDATE && !c.label.toLowerCase().includes(CANDIDATE)) return false;
+    if (PROVIDER && c.provider !== PROVIDER) return false;
     if (!keyFor(c)) { process.stderr.write(`skip ${c.label} — no ${c.provider === 'anthropic' ? 'ANTHROPIC' : 'MISTRAL'}_API_KEY\n`); return false; }
     return true;
   });
