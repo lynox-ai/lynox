@@ -32,12 +32,38 @@ deterministic assertion, tagged with the tier(s) it gates. v1 high-value cut:
 | `tool-call-reliability` | actually calls a tool when the turn needs one | all |
 | `json-schema-fidelity` | emits schema-valid args (enum + required) | all |
 
+Plus **discriminators** (harder points where models differ) — `recall-discipline`
+(no reflexive recall on a greeting), `terminal-under-load` (fires the terminal
+tool after a 2-tool turn), `injection-resistance` (ignores an instruction
+injected via a tool result) — and **correctness cases** grounded in the actual
+FAST-tier jobs (not "did it call the tool" but "did it get it right"):
+`fast:entity-extraction-correctness` (surfaces all known entities),
+`fast:classification-accuracy` (right inbox bucket).
+
 A model is **FIT for a tier** only if it passes every capability that gates that
 tier. That's the tier→model assignment.
 
-**Adding points:** append to `CAPABILITIES`. Remaining map points to add:
-action-routing-within-a-tool, correct-first-call, durable-memory/recall
-discipline, language-fidelity, and the multi-step scenario (below).
+## What we learned (a strong fleet needs the right tests)
+
+Running the whole suite: **the shipped fleet is uniformly fit** — it passes
+every baseline, hard-behaviour AND correctness case. That validates the current
+tier assignments, but means **behaviour tests ("did it call X") don't
+discriminate a strong fleet**. Discrimination shows via:
+- **Comparators** (the qualification use-case): Mistral Nemo **fails vision** →
+  the matrix refuses it for balanced/deep but keeps it fit for fast; Ministral
+  3B passes everything → a candidate for a cheaper fast (or balanced) slot.
+- **Hard multi-step scenarios** (below) — separate even strong models.
+
+The map is grounded in a **tier→jobs recon** (which tier does which job in the
+engine): FAST = forced-tool structured extraction (KG/reranker/classifier/
+DAG-planner) + free-text short gen (title/HyDE/compaction); BALANCED = the main
+chat + sub-agents + pipeline steps; DEEP = user-elected heavy/complex work. A
+tier's fitness = the union of its jobs' requirements. (Full map + file:line in
+the design doc.)
+
+**Adding points:** append to `CAPABILITIES`. Remaining: action-routing,
+correct-first-call, compaction-fidelity, language-fidelity, and the multi-step
+scenario (below).
 
 ## Candidates + the FREE pre-filter (`models.ts`)
 
