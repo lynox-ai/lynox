@@ -18,8 +18,10 @@
  *    is NOT a registered provider descriptor, so a `provider:'fireworks'` slot
  *    would fall back to the anthropic wire — hence `'openai'` + the endpoint.
  *
- * CN-provenance models (GLM/DeepSeek) appear ONLY via the Fireworks host (US,
- * zero-retention) — the affirmative sourcing rule; never a direct-CN API.
+ * CN-provenance models (GLM/DeepSeek) appear ONLY via the Fireworks host (US) —
+ * the affirmative sourcing rule; never a direct-CN API. The host's data-processing
+ * posture (residency / retention) is disclosed separately + R2-gated in
+ * `host-disclosure.ts` — this module makes no retention claim.
  *
  * Model choice is driven by COST + SOVEREIGNTY + CONTEXT, not a quality claim:
  * the fitness harness cannot separate the strong fleet at reachable difficulty
@@ -27,22 +29,24 @@
  * are harness-equivalent to Sonnet 5 on lynox long-horizon jobs. The one
  * harness-measured pick is ⚖️ balanced = Ministral 14B (best lynox tool-router).
  */
-import type { ModelTier, TierSet } from '../types/index.js';
+import type { ModelTier, TierSet, TierSlot } from '../types/index.js';
+import { MISTRAL_API_BASE } from '../types/index.js';
 
-/** Endpoints — mirror the catalog `base_url_default` (catalog.ts). A test asserts
- *  every preset slot's endpoint is allowlisted, so a preset can't point off-vet. */
-const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1';
+/** Fireworks endpoint — mirrors the catalog `base_url_default` (catalog.ts). A
+ *  test asserts it equals the catalog value (catches a path drift the host-only
+ *  allowlist would miss) and that every preset endpoint is allowlisted. */
 const FIREWORKS_ENDPOINT = 'https://api.fireworks.ai/inference/v1';
 
-/** A named hybrid strategy: config-sugar over `{routing_mode, tier_set}`. */
+/** A named hybrid strategy: config-sugar over `{routing_mode, tier_set}`. Slots
+ *  omit `api_key` — self-host resolves it from the endpoint (pinnedVaultSlot). */
 export interface TierPreset {
   routing_mode: 'hybrid';
-  tier_set: Partial<Record<ModelTier, { provider: string; model_id: string; api_base_url?: string }>>;
+  tier_set: Partial<Record<ModelTier, Omit<TierSlot, 'api_key'>>>;
 }
 
-const anthropic = (model_id: string) => ({ provider: 'anthropic', model_id });
-const mistral = (model_id: string) => ({ provider: 'openai', model_id, api_base_url: MISTRAL_ENDPOINT });
-const fireworks = (model_id: string) => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_ENDPOINT });
+const anthropic = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'anthropic', model_id });
+const mistral = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: MISTRAL_API_BASE });
+const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_ENDPOINT });
 
 export const TIER_PRESETS: Record<string, TierPreset> = {
   // ⚡ efficient — cheapest coherent set: EU Mistral for fast/balanced, a cheap
@@ -81,5 +85,5 @@ export const TIER_PRESETS: Record<string, TierPreset> = {
 export function expandTierPreset(name: string): { routing_mode: 'hybrid'; tier_set: TierSet } | undefined {
   const preset = TIER_PRESETS[name];
   if (!preset) return undefined;
-  return { routing_mode: preset.routing_mode, tier_set: preset.tier_set as TierSet };
+  return { routing_mode: preset.routing_mode, tier_set: preset.tier_set };
 }

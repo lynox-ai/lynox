@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { TIER_PRESETS, expandTierPreset } from './tier-presets.js';
 import { MODEL_CAPABILITIES } from '../types/index.js';
 import { isAllowlistedEndpoint } from './llm/endpoint-allowlist.js';
+import { LLM_CATALOG } from './llm/catalog.js';
 
 /**
  * The shared `tier_preset` SoT (model-presets W2). These invariants are what let
@@ -51,6 +52,12 @@ describe('tier-presets (model-presets W2 SoT)', () => {
         expect(slot).not.toHaveProperty('api_key');
       }
     }
+  });
+
+  it('the Fireworks endpoint equals the catalog base_url_default (host-allowlist misses a path drift)', () => {
+    const fw = LLM_CATALOG.find((e) => e.preset_id === 'fireworks');
+    expect(fw?.base_url_default).toBeDefined();
+    expect(TIER_PRESETS.efficient!.tier_set.deep?.api_base_url).toBe(fw!.base_url_default);
   });
 
   it('expandTierPreset: known → {routing_mode, tier_set}; unknown → undefined', () => {

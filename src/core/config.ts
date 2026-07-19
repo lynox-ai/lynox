@@ -403,17 +403,21 @@ export function loadConfig(): LynoxUserConfig {
         `Unknown tier_preset "${merged.tier_preset}". Known presets: ${Object.keys(TIER_PRESETS).join(', ')}.`,
       );
     }
-    for (const slot of Object.values(expanded.tier_set)) {
-      if (slot && !modelCapability(slot.model_id)) {
-        throw new Error(
-          `tier_preset "${merged.tier_preset}" references an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
-        );
-      }
-    }
     // The preset is the base; an explicit config.json tier_set slot overrides it
     // per-slot, and the env block below overrides both (spread-last wins).
     merged.tier_set = { ...expanded.tier_set, ...merged.tier_set };
     merged.routing_mode = expanded.routing_mode;
+    // FAIL-CLOSED over the FINAL merged slots (not just the preset's): a config.json
+    // `tier_set` slot layered onto a preset must not smuggle an unregistered model
+    // past the guard into the Opus-rate FALLBACK_CAPABILITY (a ~9-100× misbill + a
+    // false disclosure).
+    for (const slot of Object.values(merged.tier_set)) {
+      if (slot && !modelCapability(slot.model_id)) {
+        throw new Error(
+          `tier_preset "${merged.tier_preset}" resolves to an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
+        );
+      }
+    }
   }
   // Hybrid Tier-Set delivered as JSON by the CP / op-provisioning
   // (LYNOX_TIER_SET_JSON) → deserialized into `tier_set` (+ routing_mode hybrid).

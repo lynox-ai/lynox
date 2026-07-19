@@ -136,6 +136,38 @@ describe('Config', () => {
       vi.doUnmock('./tier-presets.js');
     });
 
+    it('a config.json tier_set slot overrides the preset per-slot (preset < config)', async () => {
+      writeUserConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-4-8' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep?.model_id).toBe('claude-opus-4-8'); // config override won over the preset's sonnet-5
+      expect(config.tier_set?.balanced?.model_id).toBe('ministral-14b-2512'); // preset slot kept
+    });
+
+    it('a config tier_set override with an UNREGISTERED model FAILS CLOSED (post-merge guard)', async () => {
+      writeUserConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'openai', model_id: 'ghost-override-model' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "ghost-override-model"/);
+    });
+
+    it('expands the ⚡ efficient preset (Fireworks deep slot) end-to-end', async () => {
+      writeUserConfig({ tier_preset: 'efficient' });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/glm-5p2',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
+      expect(config.tier_set?.fast?.model_id).toBe('ministral-8b-2512');
+    });
+
     it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {
       const projectDir = join(fakeProject, '.lynox');
       mkdirSync(projectDir, { recursive: true });
