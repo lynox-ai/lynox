@@ -49,6 +49,8 @@ describe('Config', () => {
     delete process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
+    delete process.env['LYNOX_TIER_SET_JSON'];
+    delete process.env['LYNOX_BILLING_TIER'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
     delete process.env['LYNOX_API_BASE_URL'];
     delete process.env['LYNOX_MAX_TIER'];
@@ -82,6 +84,67 @@ describe('Config', () => {
     const config = loadConfig();
     expect(config.default_tier).toBe('balanced');
     expect(config.effort_level).toBe('high');
+  });
+
+  describe('tier_preset expansion (model-presets W2)', () => {
+    const writeUserConfig = (obj: Record<string, unknown>) => {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify(obj));
+    };
+
+    it('expands a config.json tier_preset to routing_mode:hybrid + the SoT tier_set', async () => {
+      writeUserConfig({ tier_preset: 'balanced' });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.routing_mode).toBe('hybrid');
+      // ⚖️ balanced main-chat slot = Ministral 14B via the Mistral endpoint.
+      expect(config.tier_set?.balanced).toEqual({
+        provider: 'openai',
+        model_id: 'ministral-14b-2512',
+        api_base_url: 'https://api.mistral.ai/v1',
+      });
+      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+    });
+
+    it('an env LYNOX_TIER_SET_JSON slot overrides the preset per-slot (env wins)', async () => {
+      writeUserConfig({ tier_preset: 'balanced' });
+      process.env['LYNOX_TIER_SET_JSON'] = JSON.stringify({
+        deep: { provider: 'openai', model_id: 'my-own-model', api_base_url: 'https://api.mistral.ai/v1' },
+      });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep?.model_id).toBe('my-own-model'); // env slot won
+      expect(config.tier_set?.balanced?.model_id).toBe('ministral-14b-2512'); // preset slot kept
+    });
+
+    it('an unknown tier_preset name FAILS CLOSED (throws, not a silent standard boot)', async () => {
+      writeUserConfig({ tier_preset: 'ultra-cheap' });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/Unknown tier_preset "ultra-cheap"/);
+    });
+
+    it('a preset referencing an UNREGISTERED model FAILS CLOSED (no Opus-rate FALLBACK misbill)', async () => {
+      const bad = { routing_mode: 'hybrid', tier_set: { deep: { provider: 'openai', model_id: 'ghost-model-not-registered' } } };
+      vi.doMock('./tier-presets.js', () => ({
+        TIER_PRESETS: { bad },
+        expandTierPreset: (name: string) => (name === 'bad' ? bad : undefined),
+      }));
+      writeUserConfig({ tier_preset: 'bad' });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "ghost-model-not-registered"/);
+      vi.doUnmock('./tier-presets.js');
+    });
+
+    it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ tier_preset: 'balanced' }));
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.routing_mode).not.toBe('hybrid');
+    });
   });
 
   it('project config overrides user config', async () => {

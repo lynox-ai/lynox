@@ -1,0 +1,85 @@
+/**
+ * `tier_preset` — the combinator, packaged (PRD `model-presets.md`, Wave 2).
+ *
+ * A named hybrid strategy that materializes to `{routing_mode:'hybrid', tier_set}`
+ * at config-load (the expander in `config.ts`). This module is the ONE shared
+ * source of truth for that mapping: the `loadConfig` expander (W2, self-host) AND
+ * the managed write-gate (W3) both import `TIER_PRESETS`, so the picker can never
+ * advertise a preset the engine routes differently (the false-compliance the
+ * write-gate exists to prevent).
+ *
+ * Slot shape — {provider, model_id, api_base_url?}:
+ *  - Anthropic slots name the native provider only (default endpoint).
+ *  - Mistral + Fireworks (openai-compat) slots pin `provider:'openai'` + an
+ *    explicit `api_base_url`: the openai wire needs the endpoint to reach the
+ *    right host (an omitted base URL defaults to OpenAI), and the self-host key
+ *    resolves from that endpoint via `pinnedVaultSlotForEndpoint` (catalog.ts) —
+ *    MISTRAL_API_KEY / FIREWORKS_API_KEY, no `api_key` in the preset. `'fireworks'`
+ *    is NOT a registered provider descriptor, so a `provider:'fireworks'` slot
+ *    would fall back to the anthropic wire — hence `'openai'` + the endpoint.
+ *
+ * CN-provenance models (GLM/DeepSeek) appear ONLY via the Fireworks host (US,
+ * zero-retention) — the affirmative sourcing rule; never a direct-CN API.
+ *
+ * Model choice is driven by COST + SOVEREIGNTY + CONTEXT, not a quality claim:
+ * the fitness harness cannot separate the strong fleet at reachable difficulty
+ * (`DEF-model-fitness-frontier-hard`), so the cheap CN-via-Fireworks deep models
+ * are harness-equivalent to Sonnet 5 on lynox long-horizon jobs. The one
+ * harness-measured pick is ⚖️ balanced = Ministral 14B (best lynox tool-router).
+ */
+import type { ModelTier, TierSet } from '../types/index.js';
+
+/** Endpoints — mirror the catalog `base_url_default` (catalog.ts). A test asserts
+ *  every preset slot's endpoint is allowlisted, so a preset can't point off-vet. */
+const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1';
+const FIREWORKS_ENDPOINT = 'https://api.fireworks.ai/inference/v1';
+
+/** A named hybrid strategy: config-sugar over `{routing_mode, tier_set}`. */
+export interface TierPreset {
+  routing_mode: 'hybrid';
+  tier_set: Partial<Record<ModelTier, { provider: string; model_id: string; api_base_url?: string }>>;
+}
+
+const anthropic = (model_id: string) => ({ provider: 'anthropic', model_id });
+const mistral = (model_id: string) => ({ provider: 'openai', model_id, api_base_url: MISTRAL_ENDPOINT });
+const fireworks = (model_id: string) => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_ENDPOINT });
+
+export const TIER_PRESETS: Record<string, TierPreset> = {
+  // ⚡ efficient — cheapest coherent set: EU Mistral for fast/balanced, a cheap
+  // 1M-context CN-via-Fireworks model for deep/big-context.
+  efficient: {
+    routing_mode: 'hybrid',
+    tier_set: {
+      fast: mistral('ministral-8b-2512'),
+      balanced: mistral('ministral-14b-2512'),
+      deep: fireworks('accounts/fireworks/models/glm-5p2'),
+    },
+  },
+  // ⚖️ balanced — the default hybrid: Ministral 14B is the harness-measured best
+  // lynox tool-router for the (tool-heavy) main chat; deep escalates to Sonnet 5.
+  balanced: {
+    routing_mode: 'hybrid',
+    tier_set: {
+      fast: anthropic('claude-haiku-4-5-20251001'),
+      balanced: mistral('ministral-14b-2512'),
+      deep: anthropic('claude-sonnet-5'),
+    },
+  },
+  // 💎 max-quality — all-Anthropic flagship set.
+  'max-quality': {
+    routing_mode: 'hybrid',
+    tier_set: {
+      fast: anthropic('claude-haiku-4-5-20251001'),
+      balanced: anthropic('claude-sonnet-5'),
+      deep: anthropic('claude-opus-4-8'),
+    },
+  },
+};
+
+/** Expand a `tier_preset` name to its `{routing_mode, tier_set}`, or `undefined`
+ *  if the name is unknown (the caller decides — the loadConfig expander throws). */
+export function expandTierPreset(name: string): { routing_mode: 'hybrid'; tier_set: TierSet } | undefined {
+  const preset = TIER_PRESETS[name];
+  if (!preset) return undefined;
+  return { routing_mode: preset.routing_mode, tier_set: preset.tier_set as TierSet };
+}
