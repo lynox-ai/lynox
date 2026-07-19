@@ -15,6 +15,7 @@ import type { Candidate } from './types.js';
 
 const MISTRAL_BASE = 'https://api.mistral.ai/v1';
 const FIREWORKS_BASE = 'https://api.fireworks.ai/inference/v1';
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
 /** Fitness floor for the context window (rafael 2026-07-19: "unter 200k ist zu
  *  wenig"). A model under this can't hold lynox's large-context jobs — tool
@@ -34,6 +35,12 @@ const OVERRIDES: Record<string, { contextWindow: number; pricing: { input: numbe
   // GLM 5.2 (Fireworks) — 1M ctx, a cheaper Opus replacement; ~$0.55 in / $2.19
   // out (≈10× under Opus $5/$25). VERIFY exact Fireworks pricing.
   'accounts/fireworks/models/glm-5p2': { contextWindow: 1_048_576, pricing: { input: 0.55, output: 2.19, cacheRead: 0.055 } },
+  // OpenRouter candidates (rafael 2026-07-19 — qualify more providers). Pricing
+  // from the OpenRouter models API; cacheRead estimated at ~10% of input.
+  'google/gemini-3.1-pro-preview': { contextWindow: 1_048_576, pricing: { input: 2, output: 12, cacheRead: 0.20 } }, // vision + 1M
+  'openai/gpt-5.2': { contextWindow: 400_000, pricing: { input: 1.75, output: 14, cacheRead: 0.175 } }, // vision, frontier
+  'deepseek/deepseek-v4-pro': { contextWindow: 1_048_576, pricing: { input: 0.43, output: 0.87, cacheRead: 0.043 } }, // text, cheap 1M
+  'deepseek/deepseek-v4-flash': { contextWindow: 1_048_576, pricing: { input: 0.10, output: 0.20, cacheRead: 0.01 } }, // text, ultra-cheap 1M
 };
 
 /** Native context window (tokens) for a candidate — read from lynox's OWN model
@@ -107,6 +114,17 @@ export const COMPARATORS: readonly Candidate[] = [
   // Data-residency caveat: Zhipu (CN) — for an EU-sovereign tenant that matters.
   { id: 'accounts/fireworks/models/glm-5p2', label: 'GLM 5.2', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
     prefilter: 'cheaper Opus replacement for deep; 1M ctx; independent 3rd family; ~$0.55/$2.19 (verify)' },
+  // OpenRouter roster (rafael 2026-07-19). The LMArena/BFCL leaderboards name
+  // Gemini 3 Pro (vision leader + big ctx), GPT-5.x (frontier), DeepSeek (cheap
+  // 1M reasoner) as the interesting untested candidates.
+  { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: null,
+    prefilter: 'LMArena vision leader + 1M ctx; the VISION specialist sub-agent; $2/$12 (US-hosted, non-sovereign)' },
+  { id: 'openai/gpt-5.2', label: 'GPT-5.2', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: 'deep',
+    prefilter: 'frontier reasoning; 400k ctx + vision; $1.75/$14 (US-hosted, non-sovereign)' },
+  { id: 'deepseek/deepseek-v4-pro', label: 'DeepSeek v4 Pro', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: 'deep',
+    prefilter: 'cheap 1M text reasoner ($0.43/$0.87 — cheaper than GLM); deep/big-context candidate' },
+  { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek v4 Flash', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: null,
+    prefilter: 'ULTRA-cheap 1M text ($0.10/$0.20); efficient-preset deep candidate' },
 ];
 
 export const ALL_CANDIDATES: readonly Candidate[] = [...FLEET, ...COMPARATORS];
