@@ -1,7 +1,7 @@
 /**
  * lynox model-fitness runner (v1, cheap).
  *
- *   MISTRAL_API_KEY=… ANTHROPIC_API_KEY=… npx tsx scripts/model-fitness/run.ts [--repeats N] [--only <capId,…>] [--scenarios]
+ *   MISTRAL_API_KEY=… ANTHROPIC_API_KEY=… npx tsx scripts/model-fitness/run.ts [--repeats N] [--only <capId,…>] [--candidate <label-substr>] [--scenarios]
  *
  * Runs the capability suite (capabilities.ts) across the candidate models
  * (models.ts) and prints a FITNESS MATRIX (capability × model → pass-rate) plus
@@ -14,16 +14,16 @@
  * turn), so it's an explicit opt-in, not part of the default pass.
  *
  * Cost: ~ (#capabilities × #candidates × repeats) short calls. Default repeats=2
- * over the 5-model fleet × 5 caps ≈ 50 calls ≈ a few cents. --scenarios runs
- * heavier; pair it with --repeats 1.
+ * over the 7 candidates × 11 caps ≈ 150 calls ≈ a few cents. Use --candidate to
+ * re-run one model cheaply. --scenarios runs heavier; pair it with --repeats 1.
  */
 import { Agent } from '../../src/core/agent.js';
 import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
-import { ALL_CANDIDATES } from './models.js';
+import { ALL_CANDIDATES, contextWindowOf, MIN_CONTEXT_WINDOW } from './models.js';
 import { CAPABILITIES } from './capabilities.js';
 import { SCENARIOS } from './scenarios.js';
-import type { Candidate, MakeAgent, MatrixCell, Tier } from './types.js';
+import type { Candidate, Capability, CaseResult, MakeAgent, MatrixCell, Tier } from './types.js';
 
 function arg(name: string, dflt: string): string {
   const i = process.argv.indexOf(name);
@@ -32,8 +32,27 @@ function arg(name: string, dflt: string): string {
 
 const REPEATS = Math.max(1, parseInt(arg('--repeats', '2'), 10) || 2);
 const ONLY = arg('--only', '').split(',').map((s) => s.trim()).filter(Boolean);
+const CANDIDATE = arg('--candidate', '').toLowerCase(); // label substring, for cheap targeted re-runs
 const SCENARIO_MODE = process.argv.includes('--scenarios');
 const SUITE = SCENARIO_MODE ? SCENARIOS : CAPABILITIES;
+
+/** Run a case, retrying ONLY on a rate-limit (429) with exponential backoff —
+ *  Mistral's tier limits are shallow (fb_mistral_stable_tag), and a 429 is an
+ *  infra artifact, NOT a capability failure; without this it pollutes the matrix
+ *  (a rate-limited model reads as unfit). Real errors still surface immediately. */
+async function runWithRetry(cap: Capability, make: MakeAgent): Promise<CaseResult> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try { return await cap.run(make); }
+    catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/429|rate.?limit|too many requests/i.test(msg)) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1s, 2s, 4s, 8s
+    }
+  }
+  throw lastErr;
+}
 
 function keyFor(c: Candidate): string | undefined {
   return c.provider === 'anthropic' ? process.env['ANTHROPIC_API_KEY'] : process.env['MISTRAL_API_KEY'];
@@ -58,6 +77,7 @@ function makeAgentFactory(c: Candidate, apiKey: string): MakeAgent {
 async function main(): Promise<void> {
   const caps = ONLY.length ? SUITE.filter((c) => ONLY.includes(c.id)) : SUITE;
   const candidates = ALL_CANDIDATES.filter((c) => {
+    if (CANDIDATE && !c.label.toLowerCase().includes(CANDIDATE)) return false;
     if (!keyFor(c)) { process.stderr.write(`skip ${c.label} — no ${c.provider === 'anthropic' ? 'ANTHROPIC' : 'MISTRAL'}_API_KEY\n`); return false; }
     return true;
   });
@@ -79,7 +99,7 @@ async function main(): Promise<void> {
       let passes = 0, errors = 0, lastNote: string | undefined;
       for (let r = 0; r < REPEATS; r++) {
         try {
-          const res = await cap.run(make);
+          const res = await runWithRetry(cap, make);
           if (res.pass) passes++;
           lastNote = res.note;
           process.stdout.write(res.pass ? '✓' : '·');
@@ -110,19 +130,29 @@ async function main(): Promise<void> {
     console.log(row);
   }
 
+  // ── Structural gate: context window (free, no API — read from the registry) ──
+  const ctxFit = (id: string): boolean => (contextWindowOf(id) ?? 0) >= MIN_CONTEXT_WINDOW;
+  console.log(`\n## Context-window gate (≥ ${(MIN_CONTEXT_WINDOW / 1000)}k — lynox large-context jobs; tool results are 74-96% of context)`);
+  for (const cand of candidates) {
+    const cw = contextWindowOf(cand.id);
+    const k = cw === undefined ? '??' : `${Math.round(cw / 1000)}k`;
+    console.log(`  ${pad(cand.label, 16)} ${pad(k, 8)} ${ctxFit(cand.id) ? '✓' : '✗ UNFIT (< floor)'}`);
+  }
+
   // ── Per-tier "which model does which job" read ──
-  console.log('\n## Tier fitness (a model is FIT for a tier only if it passes every capability that gates that tier)');
+  console.log('\n## Tier fitness (a model is FIT for a tier only if it clears the context gate AND passes every capability that gates that tier)');
   const tiers: Tier[] = ['fast', 'balanced', 'deep'];
   for (const tier of tiers) {
     const gating = caps.filter((c) => c.tiers.includes(tier));
     const fit = candidates.filter((cand) => {
       if (cand.tierHint && cand.tierHint !== tier) return false; // only judge a model for its own tier here
+      if (!ctxFit(cand.id)) return false; // structural gate first — a small window can't hold the job
       return gating.every((cap) => {
         const cell = cells.find((x) => x.capabilityId === cap.id && x.candidateId === cand.id);
         return cell && cell.passes === cell.runs && cell.errors === 0;
       });
     });
-    console.log(`  ${pad(tier, 9)} gated by [${gating.map((g) => g.id).join(', ')}]  →  FIT: ${fit.map((f) => f.label).join(', ') || '(none of its tier passed all)'}`);
+    console.log(`  ${pad(tier, 9)} gated by [ctx≥${MIN_CONTEXT_WINDOW / 1000}k, ${gating.map((g) => g.id).join(', ')}]  →  FIT: ${fit.map((f) => f.label).join(', ') || '(none of its tier passed all)'}`);
   }
 
   // JSON for machine consumption / a later report.

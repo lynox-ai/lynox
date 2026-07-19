@@ -61,6 +61,12 @@ export interface Capability {
   /** Which tier(s) this point gates — a fast-tier model that fails a
    *  fast-critical point is unfit for that tier. */
   readonly tiers: readonly Tier[];
+  /** The specific lynox JOB this point stands in for (e.g. 'kg-entity-extraction',
+   *  'inbox-classify', 'main-chat-multistep'), from the tier→jobs spine in the
+   *  design doc. Absent for cross-cutting capabilities (tool-call reliability,
+   *  schema fidelity, injection-resistance) that every job depends on. Lets the
+   *  map be read as "which jobs of tier X are covered". */
+  readonly job?: string;
   /** How it's asserted (deterministic where possible). */
   readonly detail: string;
   /** Run the case once against a candidate (via the injected Agent factory). */
