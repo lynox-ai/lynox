@@ -31,7 +31,7 @@ import { judgeQuality, judgeAvailable } from './judge.js';
 // ── The tier→jobs spine: EVERY job each tier runs, with its coverage. `covers`
 //    is the capability/scenario id that tests it, or null for a still-open gap.
 //    This is the "list all the jobs each tier takes on" map (rafael 2026-07-19). ──
-export interface JobEntry { readonly job: string; readonly what: string; readonly covers: string | null; }
+export interface JobEntry { readonly job: string; readonly what: string; readonly covers: string | null; readonly minContext?: number; }
 export const TIER_JOBS: Record<Tier | 'cross', readonly JobEntry[]> = {
   fast: [
     { job: 'kg-entity-extraction', what: 'forced-tool entity extraction (entity-extractor.ts)', covers: 'fast:entity-extraction-correctness' },
@@ -53,6 +53,13 @@ export const TIER_JOBS: Record<Tier | 'cross', readonly JobEntry[]> = {
   ],
   deep: [
     { job: 'heavy-multistep', what: 'user-elected heavy multi-step + policy work', covers: 'scenario:refund-policy-gate' },
+    // A SPECIALIZED deep job with its OWN context floor (rafael 2026-07-19):
+    // ingesting + retrieving from a huge input needs >1M ctx. This is NOT a
+    // blanket deep-tier requirement — it gates only this job (a candidate for it
+    // is a big-context SPECIALIST, likely a spawn/sub-agent, not the general
+    // deep model). Fitness here = RETRIEVAL fidelity over the big context
+    // (lost-in-the-middle), not reasoning depth.
+    { job: 'big-context-analysis', what: 'ingest + retrieve from a huge input (>1M ctx)', covers: 'big-context-retrieval', minContext: 1_000_000 },
   ],
   cross: [
     { job: 'tool-select', what: 'picks the right tool from a short description', covers: 'tool-select-short' },
@@ -382,6 +389,30 @@ export const CAPABILITIES: readonly Capability[] = [
       });
       if (!verdict) return { pass: true, note: 'judge unavailable/unparseable (soft-pass)' };
       return { pass: verdict.score >= 4, note: `judge=${verdict.score}/5 [${answer.slice(0, 30)}]` };
+    },
+  },
+
+  // ══ SPECIALIZED big-context job — its OWN context floor (minContext), gates no
+  //    general tier (tiers: []). Only models ≥1M ctx run it; the rest are
+  //    context-SKIPPED. Fitness = RETRIEVAL fidelity (lost-in-the-middle). ══
+  {
+    id: 'big-context-retrieval',
+    point: 'Big-context SPECIALIST — retrieval fidelity: find a needle buried in the MIDDLE of a huge input',
+    tiers: [],
+    job: 'big-context-analysis',
+    minContext: 1_000_000,
+    detail: 'A ~160k-token haystack of filler with ONE needle fact in the middle; the model must retrieve it. Tests lost-in-the-middle recall (the big-context specialist\'s real fitness), not reasoning. Only ≥1M-ctx models run it — the rest are context-skipped. On-demand (a big input costs input tokens).',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const needle = 'MERKSATZ: Das Notfall-Kennwort für Projekt Aurora lautet ZEBRA-4471-QX.';
+      const filler = (i: number): string => `Notiz ${i}: Routineeintrag zum internen Ablauf ${i % 37}, Status geprüft, keine Auffälligkeiten, Ablage im Quartalsordner ${i % 12}, Bearbeiter Team ${i % 8}.`;
+      const N = 5000; // ~5000 lines × ~130 chars ≈ 160k tokens — a genuinely large input.
+      const lines: string[] = [];
+      for (let i = 0; i < N; i++) { if (i === Math.floor(N / 2)) lines.push(needle); lines.push(filler(i)); }
+      const haystack = lines.join('\n');
+      const agent = make({ name: 'fit-bigctx', systemPrompt: 'You answer strictly from the provided document — do not guess.', tools: [], maxIterations: 1 });
+      const out = await agent.send(`Hier ist ein langes internes Dokument:\n\n${haystack}\n\nFrage: Wie lautet das Notfall-Kennwort für Projekt Aurora? Antworte nur mit dem Kennwort.`);
+      const pass = /ZEBRA-?4471(-?QX)?/i.test(out);
+      return { pass, note: pass ? 'found needle' : `MISSED [${out.slice(0, 40)}]` };
     },
   },
 ];

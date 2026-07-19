@@ -98,7 +98,16 @@ async function main(): Promise<void> {
     const apiKey = keyFor(cand)!;
     if (!providersInit.has(cand.provider)) { await initLLMProvider(cand.provider); providersInit.add(cand.provider); }
     const make = makeAgentFactory(cand, apiKey);
+    const candCtx = contextWindowOf(cand.id) ?? 0;
     for (const cap of caps) {
+      // Per-JOB context floor: a specialized case (big-context) is context-
+      // SKIPPED for a candidate whose window can't hold it — not run (saves API),
+      // recorded as runs:0 so it never counts as a pass OR a fail.
+      if (cap.minContext && candCtx < cap.minContext) {
+        cells.push({ capabilityId: cap.id, candidateId: cand.id, passes: 0, runs: 0, errors: 0, lastNote: `ctx<${Math.round(cap.minContext / 1000)}k — skipped` });
+        process.stdout.write('–');
+        continue;
+      }
       let passes = 0, errors = 0, lastNote: string | undefined;
       for (let r = 0; r < REPEATS; r++) {
         try {
@@ -119,7 +128,7 @@ async function main(): Promise<void> {
 
   // ── Fitness matrix ──
   const pad = (s: string, n: number) => s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length);
-  const rate = (c: MatrixCell) => `${c.passes}/${c.runs}${c.errors ? `!${c.errors}` : ''}`;
+  const rate = (c: MatrixCell) => c.runs === 0 ? 'skip' : `${c.passes}/${c.runs}${c.errors ? `!${c.errors}` : ''}`;
   console.log('\n\n## lynox model-fitness matrix (v1)  ·  ' + (SCENARIO_MODE ? 'MULTI-STEP scenarios' : 'capability probes') + '  ·  repeats=' + REPEATS);
   const header = pad('capability', 34) + candidates.map((c) => pad(c.label, 16)).join('');
   console.log('\n' + header);
@@ -173,6 +182,23 @@ async function main(): Promise<void> {
       return `${f.label}${f.tierHint === tier ? '*' : ''} (${cost}${k})`;
     });
     console.log(`  ${pad(`${tier} [${PRIORITY[tier]}]`, 24)} →  FIT: ${ranked.join('  ·  ') || '(none passed all)'}`);
+  }
+
+  // ── Specialized-job fitness: cases with their OWN context floor (minContext)
+  //    gate no general tier — they name a specialist job (e.g. big-context
+  //    ingestion, a spawn/sub-agent). A model is fit here only if its window
+  //    CLEARS the job's floor (others are context-skipped) AND it passes. ──
+  const specialized = caps.filter((c) => c.minContext);
+  if (specialized.length) {
+    console.log('\n## Specialized-job fitness (a PER-JOB context floor, not a tier gate — the big-context moat)');
+    for (const cap of specialized) {
+      const fit = candidates.filter((cand) => {
+        const cell = cells.find((x) => x.capabilityId === cap.id && x.candidateId === cand.id);
+        return cell && cell.runs > 0 && cell.passes === cell.runs && cell.errors === 0;
+      });
+      const skipped = candidates.filter((cand) => (contextWindowOf(cand.id) ?? 0) < cap.minContext!).map((c) => c.label);
+      console.log(`  ${cap.id} (needs ≥${Math.round(cap.minContext! / 1000)}k)  →  FIT: ${fit.map((f) => `${f.label} (${Math.round((contextWindowOf(f.id) ?? 0) / 1000)}k)`).join(', ') || '(none)'}${skipped.length ? `  ·  ctx-skipped: ${skipped.join(', ')}` : ''}`);
+    }
   }
 
   // JSON for machine consumption / a later report.

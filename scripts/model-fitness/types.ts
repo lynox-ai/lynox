@@ -73,6 +73,12 @@ export interface Capability {
   readonly job?: string;
   /** How it's asserted (deterministic where possible). */
   readonly detail: string;
+  /** A PER-JOB context floor (rafael 2026-07-19): a specialized job (e.g.
+   *  big-context ingestion/analysis) needs a bigger window than the tier's
+   *  general floor. A candidate below this is context-SKIPPED for this case (not
+   *  run — saves API). This is why >1M is NOT a blanket deep-tier requirement:
+   *  it lives on the specific JOB that needs it, not the whole tier. */
+  readonly minContext?: number;
   /** Run the case once against a candidate (via the injected Agent factory). */
   readonly run: (make: MakeAgent) => Promise<CaseResult>;
 }
