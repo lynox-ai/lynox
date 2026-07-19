@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { applyManagedTierSetConstraints } from './config.js';
 import { MISTRAL_API_BASE } from '../types/index.js';
+import { FIREWORKS_API_BASE } from './tier-presets.js';
 
 // PR-3d: the managed tier_set is a TENANT-WRITABLE surface. These assert the
 // ship-blocker security boundary — a managed tenant cannot point a slot at an
@@ -66,5 +67,46 @@ describe('applyManagedTierSetConstraints (PR-3d managed ship-blocker)', () => {
       fast: { provider: 'openai', model_id: 'm', api_base_url: 'https://api.mistral.ai.evil.com' },
     });
     expect(out.fast).toBeUndefined();
+  });
+
+  // model-presets W3 — the Fireworks canary opt-in. A Fireworks slot is kept ONLY
+  // under the operator flag + a CP key, matched by the EXACT canonical endpoint.
+  describe('Fireworks canary (LYNOX_MANAGED_FIREWORKS_ENABLED)', () => {
+    const savedFw = { k: process.env['FIREWORKS_API_KEY'], f: process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] };
+    beforeEach(() => { process.env['FIREWORKS_API_KEY'] = 'cp-fireworks-key'; });
+    afterEach(() => {
+      if (savedFw.k === undefined) delete process.env['FIREWORKS_API_KEY']; else process.env['FIREWORKS_API_KEY'] = savedFw.k;
+      if (savedFw.f === undefined) delete process.env['LYNOX_MANAGED_FIREWORKS_ENABLED']; else process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = savedFw.f;
+    });
+
+    const fwSlot: Parameters<typeof applyManagedTierSetConstraints>[0] = {
+      deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: FIREWORKS_API_BASE },
+    };
+
+    it('DROPS a Fireworks slot by default (flag off — broad managed stays Anthropic/Mistral)', () => {
+      delete process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
+      expect(applyManagedTierSetConstraints(fwSlot).deep).toBeUndefined();
+    });
+
+    it('KEEPS a Fireworks slot when the operator opts in (CP key + canonical base)', () => {
+      process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = 'true';
+      expect(applyManagedTierSetConstraints(fwSlot).deep).toEqual({
+        provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_key: 'cp-fireworks-key', api_base_url: FIREWORKS_API_BASE,
+      });
+    });
+
+    it('DROPS a Fireworks slot when opted-in but the CP key is absent (fail-closed)', () => {
+      process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = 'true';
+      delete process.env['FIREWORKS_API_KEY'];
+      expect(applyManagedTierSetConstraints(fwSlot).deep).toBeUndefined();
+    });
+
+    it('DROPS a Fireworks-host SPOOF even when opted-in (only the exact canonical endpoint)', () => {
+      process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = 'true';
+      const out = applyManagedTierSetConstraints({
+        deep: { provider: 'openai', model_id: 'x', api_base_url: 'https://api.fireworks.ai.evil.com' },
+      });
+      expect(out.deep).toBeUndefined();
+    });
   });
 });
