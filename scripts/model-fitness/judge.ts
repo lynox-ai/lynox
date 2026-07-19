@@ -1,11 +1,13 @@
 /**
- * Independent LLM-as-judge — GLM (Zhipu) via Fireworks.
+ * Independent LLM-as-judge — Kimi K2 (Moonshot) via Fireworks.
  *
- * WHY a third family: an LLM judge has a SELF-PREFERENCE bias — a Claude judge
- * scores Claude answers higher, a Mistral judge scores Mistral higher (rafael
- * 2026-07-19). Our candidates are Claude AND Mistral, so the judge MUST be
- * neither. GLM 5.2 (`accounts/fireworks/models/glm-5p2`) is from a third family,
- * reached over the Fireworks OpenAI-compatible endpoint with FIREWORKS_API_KEY.
+ * WHY independent: an LLM judge has a SELF-PREFERENCE bias — a Claude judge
+ * scores Claude higher, a Mistral judge scores Mistral higher (rafael
+ * 2026-07-19). The judge MUST share a family with NO candidate. The candidates
+ * are now Claude + Mistral + **GLM** (added as a cheaper-Opus deep candidate),
+ * so the judge moved OFF GLM to **Kimi K2** (`kimi-k2p6`), a 4th family — over
+ * the Fireworks OpenAI-compatible endpoint with FIREWORKS_API_KEY. (Invariant:
+ * if you add a candidate from Kimi's family, move the judge again.)
  *
  * Bias mitigations: ABSOLUTE rubric scoring (score each answer 1-5 against a
  * fixed rubric) — NOT pairwise A-vs-B — which sidesteps POSITION bias entirely.
@@ -15,7 +17,7 @@
  * signal for the subjective quality axis — the hard cases' objective state
  * assertions remain the primary, bias-free discriminator.
  */
-const JUDGE_MODEL = 'accounts/fireworks/models/glm-5p2';
+const JUDGE_MODEL = 'accounts/fireworks/models/kimi-k2p6';
 const JUDGE_BASE = 'https://api.fireworks.ai/inference/v1';
 
 /** True when an independent judge can run (FIREWORKS_API_KEY present). */
@@ -24,7 +26,7 @@ export function judgeAvailable(): boolean {
 }
 
 /** The judge model id + provider, for provenance in reports. */
-export const JUDGE_ID = 'GLM 5.2 (Fireworks, independent of Claude+Mistral)';
+export const JUDGE_ID = 'Kimi K2 (Fireworks, independent of Claude+Mistral+GLM)';
 
 interface OpenAIChatResponse {
   choices?: Array<{ message?: { content?: string } }>;

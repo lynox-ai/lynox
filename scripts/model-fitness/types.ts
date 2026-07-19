@@ -28,6 +28,10 @@ export interface Candidate {
   readonly label: string;
   readonly provider: 'anthropic' | 'openai';
   readonly apiBaseURL?: string;
+  /** Env var holding this candidate's API key. Defaults by provider (anthropic →
+   *  ANTHROPIC_API_KEY, openai → MISTRAL_API_KEY). Set for an OpenAI-compatible
+   *  host that is NOT Mistral — e.g. a Fireworks-hosted model → FIREWORKS_API_KEY. */
+  readonly keyEnv?: string;
   /** The lynox tier(s) this model is a candidate FOR. */
   readonly tierHint: Tier | null;
   /** Why it's a candidate — a public-leaderboard note or a known fact. */

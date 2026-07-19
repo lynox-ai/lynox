@@ -56,7 +56,8 @@ async function runWithRetry(cap: Capability, make: MakeAgent): Promise<CaseResul
 }
 
 function keyFor(c: Candidate): string | undefined {
-  return c.provider === 'anthropic' ? process.env['ANTHROPIC_API_KEY'] : process.env['MISTRAL_API_KEY'];
+  const env = c.keyEnv ?? (c.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'MISTRAL_API_KEY');
+  return process.env[env];
 }
 
 function makeAgentFactory(c: Candidate, apiKey: string): MakeAgent {
@@ -80,7 +81,7 @@ async function main(): Promise<void> {
   const candidates = ALL_CANDIDATES.filter((c) => {
     if (CANDIDATE && !c.label.toLowerCase().includes(CANDIDATE)) return false;
     if (PROVIDER && c.provider !== PROVIDER) return false;
-    if (!keyFor(c)) { process.stderr.write(`skip ${c.label} — no ${c.provider === 'anthropic' ? 'ANTHROPIC' : 'MISTRAL'}_API_KEY\n`); return false; }
+    if (!keyFor(c)) { process.stderr.write(`skip ${c.label} — no ${c.keyEnv ?? (c.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'MISTRAL_API_KEY')}\n`); return false; }
     return true;
   });
   if (!candidates.length) { process.stderr.write('No candidates runnable (missing keys).\n'); process.exit(1); }
