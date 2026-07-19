@@ -292,6 +292,15 @@ export interface LynoxUserConfig {
    */
   tier_set?: TierSet | undefined;
   /**
+   * Named hybrid strategy (`model-presets.md`). Config-sugar: materializes to
+   * `{routing_mode:'hybrid', tier_set}` from the shared `TIER_PRESETS` SoT at
+   * config-load (the `loadConfig` expander), before the env `tier_set` block (so
+   * an env slot still wins per-slot) and before managed hardening. NOT in
+   * PROJECT_SAFE_KEYS — a project/agents_dir-settable preset would be a
+   * standard→hybrid + reroute escalation.
+   */
+  tier_preset?: string | undefined;
+  /**
    * Whether the control plane supplies the LLM key (config mirror of
    * `cpSuppliesLLMKey` / billing-tier). Set from `LYNOX_BILLING_TIER`; the
    * managed tier_set allowlist (PR-3b) is gated on this.

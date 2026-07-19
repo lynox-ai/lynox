@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, TierSet } from '../types/index.js';
-import { isModelProfile, isTierSlot, MISTRAL_API_BASE } from '../types/index.js';
+import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
@@ -10,6 +10,7 @@ import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
 import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
+import { TIER_PRESETS, expandTierPreset } from './tier-presets.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
@@ -387,6 +388,37 @@ export function loadConfig(): LynoxUserConfig {
   // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
   // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
   if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
+  // Named hybrid strategy (model-presets, W2): a `tier_preset` from config.json
+  // materializes to {routing_mode:'hybrid', tier_set} from the shared TIER_PRESETS
+  // SoT. This is the config.json SOURCE path — placed BEFORE the LYNOX_TIER_SET_JSON
+  // env block (so an env slot still wins per-slot) and BEFORE the managed-hardening
+  // call (so a managed tenant's preset is still allowlist-gated). FAIL-CLOSED: an
+  // unknown preset name, or a preset referencing a model absent from
+  // MODEL_CAPABILITIES, THROWS — never a silent fallthrough to the Opus-rate
+  // FALLBACK_CAPABILITY (a ~9-100× misbill + a false disclosure).
+  if (merged.tier_preset) {
+    const expanded = expandTierPreset(merged.tier_preset);
+    if (!expanded) {
+      throw new Error(
+        `Unknown tier_preset "${merged.tier_preset}". Known presets: ${Object.keys(TIER_PRESETS).join(', ')}.`,
+      );
+    }
+    // The preset is the base; an explicit config.json tier_set slot overrides it
+    // per-slot, and the env block below overrides both (spread-last wins).
+    merged.tier_set = { ...expanded.tier_set, ...merged.tier_set };
+    merged.routing_mode = expanded.routing_mode;
+    // FAIL-CLOSED over the FINAL merged slots (not just the preset's): a config.json
+    // `tier_set` slot layered onto a preset must not smuggle an unregistered model
+    // past the guard into the Opus-rate FALLBACK_CAPABILITY (a ~9-100× misbill + a
+    // false disclosure).
+    for (const slot of Object.values(merged.tier_set)) {
+      if (slot && !modelCapability(slot.model_id)) {
+        throw new Error(
+          `tier_preset "${merged.tier_preset}" resolves to an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
+        );
+      }
+    }
+  }
   // Hybrid Tier-Set delivered as JSON by the CP / op-provisioning
   // (LYNOX_TIER_SET_JSON) → deserialized into `tier_set` (+ routing_mode hybrid).
   // Each slot is validated; a malformed slot is dropped (never reaches client

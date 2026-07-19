@@ -257,6 +257,11 @@ export const LynoxUserConfigSchema = z.object({
     balanced: TierSlotSchema.optional(),
     deep:     TierSlotSchema.optional(),
   }).strict().optional(),
+  // Named hybrid strategy (model-presets); the loadConfig expander materializes
+  // it to {routing_mode, tier_set}. Schema entry is mandatory: without it, a
+  // config.json carrying `tier_preset` fails `.strict()` and nulls the whole
+  // config. Bounded length; the expander validates the name against TIER_PRESETS.
+  tier_preset:             z.string().min(1).max(64).optional(),
   cp_supplied:             z.boolean().optional(),
   // Named non-Claude model profiles + the profile used for background tasks.
   // Both are on the interface AND loaded from env (LYNOX_MODEL_PROFILES_JSON /
