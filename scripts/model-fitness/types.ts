@@ -41,6 +41,9 @@ export type MakeAgent = (opts: {
   systemPrompt?: string;
   tools: ToolEntry[];
   maxIterations?: number;
+  /** Override the ask_user hook — a multi-step scenario passes a SIMULATED user
+   *  (an LLM answering the agent's clarifications from a persona/goal). */
+  promptUser?: (question: string, options?: string[]) => Promise<string>;
 }) => Agent;
 
 /** Outcome of ONE run of one capability case. */

@@ -1,21 +1,28 @@
 /**
  * lynox model-fitness runner (v1, cheap).
  *
- *   MISTRAL_API_KEY=… ANTHROPIC_API_KEY=… npx tsx scripts/model-fitness/run.ts [--repeats N] [--only <capId,…>]
+ *   MISTRAL_API_KEY=… ANTHROPIC_API_KEY=… npx tsx scripts/model-fitness/run.ts [--repeats N] [--only <capId,…>] [--scenarios]
  *
  * Runs the capability suite (capabilities.ts) across the candidate models
  * (models.ts) and prints a FITNESS MATRIX (capability × model → pass-rate) plus
  * a per-tier "which model does which job" read. Only candidates whose provider
  * key is present are run. Deterministic assertions; NO LLM judge in v1.
  *
+ * `--scenarios` swaps the cheap single-capability probes for the MULTI-STEP
+ * scenario substrate (scenarios.ts — τ-bench triad: task + simulated user +
+ * state assertion). Costlier (each case is a full tool-loop + maybe a sim-user
+ * turn), so it's an explicit opt-in, not part of the default pass.
+ *
  * Cost: ~ (#capabilities × #candidates × repeats) short calls. Default repeats=2
- * over the 5-model fleet × 5 caps ≈ 50 calls ≈ a few cents.
+ * over the 5-model fleet × 5 caps ≈ 50 calls ≈ a few cents. --scenarios runs
+ * heavier; pair it with --repeats 1.
  */
 import { Agent } from '../../src/core/agent.js';
 import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import { ALL_CANDIDATES } from './models.js';
 import { CAPABILITIES } from './capabilities.js';
+import { SCENARIOS } from './scenarios.js';
 import type { Candidate, MakeAgent, MatrixCell, Tier } from './types.js';
 
 function arg(name: string, dflt: string): string {
@@ -25,6 +32,8 @@ function arg(name: string, dflt: string): string {
 
 const REPEATS = Math.max(1, parseInt(arg('--repeats', '2'), 10) || 2);
 const ONLY = arg('--only', '').split(',').map((s) => s.trim()).filter(Boolean);
+const SCENARIO_MODE = process.argv.includes('--scenarios');
+const SUITE = SCENARIO_MODE ? SCENARIOS : CAPABILITIES;
 
 function keyFor(c: Candidate): string | undefined {
   return c.provider === 'anthropic' ? process.env['ANTHROPIC_API_KEY'] : process.env['MISTRAL_API_KEY'];
@@ -41,13 +50,13 @@ function makeAgentFactory(c: Candidate, apiKey: string): MakeAgent {
     maxIterations: opts.maxIterations ?? 3,
     toolContext: createToolContext({}),
     ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
-    promptUser: async () => 'ok',
-    promptSecret: async () => ({ status: 'canceled' as const }),
+    promptUser: opts.promptUser ?? (async () => 'ok'),
+    promptSecret: async () => 'canceled' as const,
   });
 }
 
 async function main(): Promise<void> {
-  const caps = ONLY.length ? CAPABILITIES.filter((c) => ONLY.includes(c.id)) : CAPABILITIES;
+  const caps = ONLY.length ? SUITE.filter((c) => ONLY.includes(c.id)) : SUITE;
   const candidates = ALL_CANDIDATES.filter((c) => {
     if (!keyFor(c)) { process.stderr.write(`skip ${c.label} — no ${c.provider === 'anthropic' ? 'ANTHROPIC' : 'MISTRAL'}_API_KEY\n`); return false; }
     return true;
@@ -55,6 +64,11 @@ async function main(): Promise<void> {
   if (!candidates.length) { process.stderr.write('No candidates runnable (missing keys).\n'); process.exit(1); }
 
   const providersInit = new Set<string>();
+  // The multi-step scenarios drive their simulated user through a fixed Haiku
+  // (Anthropic) call — so a MISTRAL candidate's scenario still needs the
+  // Anthropic provider initialised, not just its own. Init it up front in
+  // scenario mode whenever the key is present (harmless if unused).
+  if (SCENARIO_MODE && process.env['ANTHROPIC_API_KEY']) { await initLLMProvider('anthropic'); providersInit.add('anthropic'); }
   const cells: MatrixCell[] = [];
 
   for (const cand of candidates) {
@@ -75,7 +89,7 @@ async function main(): Promise<void> {
           process.stdout.write('E');
         }
       }
-      cells.push({ capabilityId: cap.id, candidateId: cand.id, passes, runs: REPEATS, errors, lastNote });
+      cells.push({ capabilityId: cap.id, candidateId: cand.id, passes, runs: REPEATS, errors, ...(lastNote !== undefined ? { lastNote } : {}) });
     }
     process.stdout.write(` ${cand.label}\n`);
   }
@@ -83,7 +97,7 @@ async function main(): Promise<void> {
   // ── Fitness matrix ──
   const pad = (s: string, n: number) => s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length);
   const rate = (c: MatrixCell) => `${c.passes}/${c.runs}${c.errors ? `!${c.errors}` : ''}`;
-  console.log('\n\n## lynox model-fitness matrix (v1)  ·  repeats=' + REPEATS);
+  console.log('\n\n## lynox model-fitness matrix (v1)  ·  ' + (SCENARIO_MODE ? 'MULTI-STEP scenarios' : 'capability probes') + '  ·  repeats=' + REPEATS);
   const header = pad('capability', 34) + candidates.map((c) => pad(c.label, 16)).join('');
   console.log('\n' + header);
   console.log('-'.repeat(header.length));
