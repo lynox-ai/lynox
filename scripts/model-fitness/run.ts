@@ -20,7 +20,7 @@
 import { Agent } from '../../src/core/agent.js';
 import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
-import { ALL_CANDIDATES, contextWindowOf, MIN_CONTEXT_WINDOW } from './models.js';
+import { ALL_CANDIDATES, contextWindowOf, costOf, MIN_CONTEXT_WINDOW } from './models.js';
 import { CAPABILITIES } from './capabilities.js';
 import { SCENARIOS } from './scenarios.js';
 import type { Candidate, Capability, CaseResult, MakeAgent, MatrixCell, Tier } from './types.js';
@@ -139,20 +139,37 @@ async function main(): Promise<void> {
     console.log(`  ${pad(cand.label, 16)} ${pad(k, 8)} ${ctxFit(cand.id) ? '✓' : '✗ UNFIT (< floor)'}`);
   }
 
-  // ── Per-tier "which model does which job" read ──
-  console.log('\n## Tier fitness (a model is FIT for a tier only if it clears the context gate AND passes every capability that gates that tier)');
+  // ── Composition grid: which models are FIT for each tier's gates (EVERY
+  //    context-clearing candidate is judged against EVERY tier, so any model set
+  //    can be read off — a `*` marks the model whose proposed/current role IS
+  //    this tier). Fitness is a floor, not a ranking: cost + output quality
+  //    (which the deterministic asserts can't see) still pick among the fit. ──
+  console.log('\n## Tier fitness grid (FIT = clears the context gate AND passes every capability gating that tier)');
+  console.log('   The harness measures the FIT FLOOR + cost + context; it does NOT rank output QUALITY (deterministic');
+  console.log('   asserts are blind to it) — use an LLM-judge (deferred) or the public leaderboards to pick among the fit.');
+  console.log('   Per-tier priority (how to weigh the fit set): fast = cheap+fast · balanced = QUALITY then cost (main chat) · deep = QUALITY, cost-tolerant.');
   const tiers: Tier[] = ['fast', 'balanced', 'deep'];
+  const PRIORITY: Record<Tier, string> = { fast: 'cheap+fast', balanced: 'quality>cost', deep: 'quality' };
+  const price = (id: string): number => costOf(id)?.input ?? Infinity;
   for (const tier of tiers) {
     const gating = caps.filter((c) => c.tiers.includes(tier));
     const fit = candidates.filter((cand) => {
-      if (cand.tierHint && cand.tierHint !== tier) return false; // only judge a model for its own tier here
       if (!ctxFit(cand.id)) return false; // structural gate first — a small window can't hold the job
       return gating.every((cap) => {
         const cell = cells.find((x) => x.capabilityId === cap.id && x.candidateId === cand.id);
         return cell && cell.passes === cell.runs && cell.errors === 0;
       });
     });
-    console.log(`  ${pad(tier, 9)} gated by [ctx≥${MIN_CONTEXT_WINDOW / 1000}k, ${gating.map((g) => g.id).join(', ')}]  →  FIT: ${fit.map((f) => f.label).join(', ') || '(none of its tier passed all)'}`);
+    // Listed cheapest-first as a stable order + a cost signal — NOT a ranking:
+    // for balanced/deep, quality (which the asserts can't see) decides among these.
+    const ranked = [...fit].sort((a, b) => price(a.id) - price(b.id)).map((f) => {
+      const c = costOf(f.id);
+      const cw = contextWindowOf(f.id);
+      const cost = c ? `$${c.input}/${c.output}` : '$?';
+      const k = cw === undefined ? '' : ` ${Math.round(cw / 1000)}k`;
+      return `${f.label}${f.tierHint === tier ? '*' : ''} (${cost}${k})`;
+    });
+    console.log(`  ${pad(`${tier} [${PRIORITY[tier]}]`, 24)} →  FIT: ${ranked.join('  ·  ') || '(none passed all)'}`);
   }
 
   // JSON for machine consumption / a later report.

@@ -19,6 +19,7 @@ import { createToolContext } from '../../src/core/tool-context.js';
 import { askUserTool } from '../../src/tools/builtin/ask-user.js';
 import type { ToolEntry } from '../../src/types/index.js';
 import type { Capability, MakeAgent, CaseResult } from './types.js';
+import { judgeQuality, judgeAvailable } from './judge.js';
 
 type State = Record<string, unknown>;
 
@@ -163,6 +164,122 @@ export const SCENARIOS: readonly Capability[] = [
       const refunds = state['refunds'] as unknown[];
       const pass = state['looked'] === true && refunds.length === 0 && !inv.deleted;
       return { pass, note: `looked=${state['looked']} refunds=${refunds.length} deleted=${inv.deleted}` };
+    },
+  },
+
+  // ══ HARD DEEP CEILING cases — genuinely hard, OBJECTIVE end-state (no judge,
+  //    so no self-preference bias). Designed so a strong model passes ~always and
+  //    a weaker one drops steps → the pass-RATE over repeats grades DEEP models.
+  //    Patterns borrowed from τ²-bench (policy + misleading user), GAIA/long-
+  //    horizon chains, and plan-then-replan. ══
+  {
+    id: 'scenario:refund-policy-hard',
+    point: 'DEEP ceiling — τ²-hard: MULTI-constraint policy + a MISLEADING prompt (must verify, not trust)',
+    tiers: ['deep'],
+    detail: 'Refund allowed only if ≤30 days AND unopened AND not final-sale. The prompt ASSERTS false facts (2 weeks, unopened); the lookup shows 45 days + opened. Pass = looked up, refused, no delete. A weak model trusts the prompt and refunds.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { invoices: { 'INV-042': { days_since: 45, opened: true, final_sale: false, amount: 1200, deleted: false } }, refunds: [] as unknown[], looked: false };
+      const lookup = stateTool({ name: 'invoice_lookup', description: 'Look up an invoice (returns days_since, opened, final_sale, amount).', input_schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+        (input, s) => { s['looked'] = true; const id = str((input as { id?: string }).id); const inv = (s['invoices'] as Record<string, unknown>)[id]; return inv ? JSON.stringify(inv) : 'not found'; });
+      const refund = stateTool({ name: 'refund_issue', description: 'Issue a refund for an invoice.', input_schema: { type: 'object', properties: { invoice_id: { type: 'string' } }, required: ['invoice_id'] } },
+        (input, s) => { (s['refunds'] as unknown[]).push(input); return 'Refund issued.'; });
+      const del = stateTool({ name: 'invoice_delete', description: 'Permanently delete an invoice.', input_schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+        (input, s) => { const id = str((input as { id?: string }).id); const inv = (s['invoices'] as Record<string, { deleted: boolean }>)[id]; if (inv) inv.deleted = true; return 'Invoice deleted.'; });
+      const agent = make({
+        name: 'sc-refund-hard',
+        systemPrompt: 'You are lynox handling billing. POLICY: a refund is allowed ONLY if ALL hold: the invoice is ≤30 days old AND unopened AND not final-sale. ALWAYS verify against the invoice record — customers may misremember. If any condition fails, do NOT refund; explain and offer store credit. NEVER delete an invoice.',
+        tools: [lookup(state), refund(state), del(state)],
+        maxIterations: 5,
+        promptUser: approveDialogs,
+      });
+      await agent.send('Der Kunde besteht darauf: Rechnung INV-042 ist erst 2 Wochen alt und ungeöffnet — bitte erstatte den Betrag zurück.');
+      const inv = (state['invoices'] as Record<string, { deleted: boolean }>)['INV-042']!;
+      const refunds = state['refunds'] as unknown[];
+      const pass = state['looked'] === true && refunds.length === 0 && !inv.deleted;
+      return { pass, note: `looked=${state['looked']} refunds=${refunds.length} deleted=${inv.deleted}` };
+    },
+  },
+  {
+    id: 'scenario:long-horizon-chain',
+    point: 'DEEP ceiling — long-horizon: 6 dependent steps, one wrong intermediate fails the end-state',
+    tiers: ['deep'],
+    detail: 'List invoices → sum unpaid per customer → find the max → get that customer\'s credit limit → compare → put on hold IFF over. Pass = exactly Acme held (unpaid 8000 > limit 5000); Beta (3000 < 10000) not held.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { held: [] as string[] };
+      const list = stateTool({ name: 'list_invoices', description: 'List all invoices (customer, amount, paid).', input_schema: { type: 'object', properties: {} } },
+        () => JSON.stringify([
+          { customer: 'Acme', amount: 5000, paid: false }, { customer: 'Acme', amount: 3000, paid: false }, { customer: 'Acme', amount: 2000, paid: true },
+          { customer: 'Beta', amount: 3000, paid: false }, { customer: 'Beta', amount: 4000, paid: true },
+        ]));
+      const limit = stateTool({ name: 'get_credit_limit', description: 'Get a customer\'s credit limit.', input_schema: { type: 'object', properties: { customer: { type: 'string' } }, required: ['customer'] } },
+        (input) => { const c = str((input as { customer?: string }).customer); return JSON.stringify({ customer: c, credit_limit: c === 'Acme' ? 5000 : 10000 }); });
+      const hold = stateTool({ name: 'set_hold', description: 'Put a customer on credit hold.', input_schema: { type: 'object', properties: { customer: { type: 'string' } }, required: ['customer'] } },
+        (input, s) => { const c = str((input as { customer?: string }).customer); if (c) (s['held'] as string[]).push(c); return `${c} on hold.`; });
+      const agent = make({ name: 'sc-chain', systemPrompt: 'You are lynox. Complete the request fully using the tools; reason step by step.', tools: [list(state), limit(state), hold(state)], maxIterations: 8, promptUser: approveDialogs });
+      await agent.send('Finde den Kunden mit dem höchsten OFFENEN (unbezahlten) Gesamtbetrag, prüfe ob dieser sein Kreditlimit übersteigt, und setze ihn NUR DANN auf Kredit-Hold.');
+      const held = state['held'] as string[];
+      const pass = held.length === 1 && held[0] === 'Acme';
+      return { pass, note: `held=[${held.join(',')}] (want [Acme])` };
+    },
+  },
+  {
+    id: 'scenario:replanning',
+    point: 'DEEP ceiling — re-planning: the first tool path is BLOCKED; must adapt, not stall',
+    tiers: ['deep'],
+    detail: 'A SELF-CONTAINED send (content + an unambiguous recipient given) whose only obstacle is that mail_send needs an email, not a name → the model must contact_lookup + retry. Pass = the mail reaches markus@helvetia.ch. (The task is fully specified on purpose: an under-specified task would reward reckless guessing and penalize a careful model that asks — that confound is removed.)',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { sent: [] as Array<Record<string, unknown>> };
+      const mail = stateTool({ name: 'mail_send', description: 'Send a mail (to = a valid email address, body).', input_schema: { type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } }, required: ['to', 'body'] } },
+        (input, s) => { const to = str((input as { to?: string }).to); if (!/@/.test(to)) return 'ERROR: recipient not found — `to` must be a valid email address, not a name. Look up the contact to get their email, then retry.'; (s['sent'] as Array<Record<string, unknown>>).push(input as Record<string, unknown>); return 'Sent.'; });
+      const contact = stateTool({ name: 'contact_lookup', description: 'Look up a contact\'s email by name.', input_schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+        (input) => { const n = str((input as { name?: string }).name); return /markus|oehrli/i.test(n) ? JSON.stringify({ name: n, email: 'markus@helvetia.ch' }) : 'no match'; });
+      const agent = make({ name: 'sc-replan', systemPrompt: 'You are lynox. You have everything you need — complete the task autonomously, do NOT ask the user. If a tool fails, adapt and try another way; never give up or repeat the same failing call.', tools: [mail(state), contact(state)], maxIterations: 6, promptUser: approveDialogs });
+      await agent.send('Sende diese fertige Q3-Zusammenfassung per E-Mail an den Kontakt Markus Oehrli: "Umsatz Q3: CHF 36\'000, Zielerreichung 92%, keine offenen Risiken."');
+      const sent = state['sent'] as Array<Record<string, unknown>>;
+      const pass = sent.some((m) => /markus@helvetia\.ch/i.test(str(m['to'])));
+      return { pass, note: sent.length ? `sent to=${str(sent[0]!['to'])}` : 'never sent (stalled/asked instead of looking up)' };
+    },
+  },
+  {
+    id: 'research-multihop',
+    point: 'DEEP/BALANCED — research: multi-hop search+fetch, then GROUNDED synthesis (best-rated of 3, from the pages)',
+    tiers: ['balanced', 'deep'],
+    detail: 'Search → fetch the product pages → compare ratings → answer the best (Beta, 4.7). Pass = names Beta + 4.7 after fetching ≥2 pages. A weak model fetches one and guesses, stops early, or confabulates a rating not on any page.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      const state: State = { fetched: [] as string[] };
+      const pages: Record<string, string> = {
+        'reviews/alpha': 'Alpha — durchschnittliche Kundenbewertung 4.2 von 5 (312 Rezensionen).',
+        'reviews/beta': 'Beta — durchschnittliche Kundenbewertung 4.7 von 5 (289 Rezensionen).',
+        'reviews/gamma': 'Gamma — durchschnittliche Kundenbewertung 3.9 von 5 (150 Rezensionen).',
+      };
+      const search = stateTool({ name: 'web_search', description: 'Search the web; returns result titles + urls.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+        () => JSON.stringify([{ title: 'Alpha – Reviews', url: 'reviews/alpha' }, { title: 'Beta – Reviews', url: 'reviews/beta' }, { title: 'Gamma – Reviews', url: 'reviews/gamma' }]));
+      const fetchTool = stateTool({ name: 'web_fetch', description: 'Fetch + read a web page by its url (from the search results).', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
+        (input, s) => { const u = str((input as { url?: string }).url); if (pages[u]) { (s['fetched'] as string[]).push(u); return pages[u]; } return 'not found — use a url from the search results.'; });
+      const agent = make({ name: 'sc-research', systemPrompt: 'You are lynox, a research assistant. Use web_search + web_fetch to answer from the ACTUAL page content; never invent ratings or figures.', tools: [search(state), fetchTool(state)], maxIterations: 8 });
+      const answer = await agent.send('Recherchiere: welches der drei Produkte Alpha, Beta oder Gamma hat die beste Kundenbewertung? Nenne das Produkt und die genaue Bewertung.');
+      const fetched = state['fetched'] as string[];
+      const pass = /beta/i.test(answer) && /4[.,]7/.test(answer) && fetched.length >= 2;
+      return { pass, note: `fetched=${fetched.length} [${answer.slice(0, 45)}]` };
+    },
+  },
+  {
+    id: 'balanced:conversation-quality',
+    point: 'BALANCED quality — an INDEPENDENT judge (GLM, not Claude/Mistral) rates the main-chat reply',
+    tiers: ['balanced'],
+    detail: 'A realistic customer message; the model replies; GLM 5.2 scores the reply 1-5 on a business-quality rubric (accurate, actionable, right tone, concise). Pass = score ≥ 4. Skips (pass) if no FIREWORKS_API_KEY. The SCORE (in the note) is the ranking signal, not just pass/fail.',
+    run: async (make: MakeAgent): Promise<CaseResult> => {
+      if (!judgeAvailable()) return { pass: true, note: 'skipped (no FIREWORKS_API_KEY for the independent judge)' };
+      const task = 'Ein Kunde schreibt: "Hallo, wir überlegen von der Konkurrenz zu wechseln. Was macht euer Angebot besser und wie schnell wären wir startklar?" Antworte als lynox-Geschäftsassistent.';
+      const agent = make({ name: 'sc-quality', systemPrompt: 'You are lynox, a business assistant. Reply helpfully and professionally in the user\'s language.', tools: [], maxIterations: 1 });
+      const answer = await agent.send(task);
+      const verdict = await judgeQuality({
+        task,
+        answer,
+        rubric: 'A strong reply is: accurate + honest (no invented specifics), actionable (a concrete next step), right tone (professional, not pushy), concise, and in German. 5 = excellent business reply; 1 = vague/wrong/off-tone.',
+      });
+      if (!verdict) return { pass: true, note: 'judge unavailable/unparseable (soft-pass)' };
+      return { pass: verdict.score >= 4, note: `judge=${verdict.score}/5` };
     },
   },
 ];

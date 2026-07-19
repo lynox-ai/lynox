@@ -30,20 +30,39 @@ export function contextWindowOf(id: string): number | undefined {
   return MODEL_CAPABILITIES[id]?.contextWindow;
 }
 
-/** The models lynox actually tier-routes today (the fleet we must keep fit). */
+/** Per-million-token price {input, output, cacheRead} for a candidate, from the
+ *  same registry. COST is a first-class axis for the BALANCED tier especially —
+ *  the main chat is the highest-VOLUME job (every user turn) + re-reads a large
+ *  cached prefix, so cacheRead + input dominate. Among the FIT models for a
+ *  cost-critical tier, pick the cheapest, not the strongest. */
+export function costOf(id: string): { input: number; output: number; cacheRead: number } | undefined {
+  const p = MODEL_CAPABILITIES[id]?.pricing;
+  return p ? { input: p.input, output: p.output, cacheRead: p.cacheRead } : undefined;
+}
+
+/** Candidates for the fleet + the models under active consideration. `tierHint`
+ *  is the role each is a candidate FOR (its current OR proposed slot) — it is a
+ *  LABEL, not a filter: the tier-fitness read judges EVERY context-clearing
+ *  candidate against EVERY tier's gates (the full composition grid), so a new
+ *  set (e.g. Large→balanced, Sonnet 5→deep) can be read off directly. */
 export const FLEET: readonly Candidate[] = [
   // Anthropic tier map (models.ts ANTHROPIC MAP).
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', provider: 'anthropic', tierHint: 'fast',
-    prefilter: 'shipped fast tier; strong BFCL/τ-bench tool-use for its size' },
+    prefilter: 'shipped fast tier; strong BFCL/τ-bench tool-use for its size; 200k ctx' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', provider: 'anthropic', tierHint: 'balanced',
-    prefilter: 'shipped balanced tier; top-tier agentic leaderboards' },
+    prefilter: 'shipped balanced tier; top-tier agentic leaderboards; 200k ctx' },
+  // Sonnet 5 — the PROPOSED deep model (rafael 2026-07-19): 1M native ctx + top
+  // output quality. The harness had recommended Large for deep only because
+  // Sonnet 5 was not a candidate; it belongs in the deep evaluation.
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', provider: 'anthropic', tierHint: 'deep',
+    prefilter: 'proposed deep tier; 1M native ctx; highest output quality of the Sonnet line' },
   // Mistral tier map (MISTRAL_MODEL_MAP), EU-sovereign path.
-  { id: 'mistral-large-2512', label: 'Mistral Large 3', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: 'deep',
-    prefilter: 'shipped Mistral deep tier; Set-Bench v4 Mistral leader' },
+  { id: 'mistral-large-2512', label: 'Mistral Large 3', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: 'balanced',
+    prefilter: 'shipped Mistral deep tier; PROPOSED as balanced (main chat); Set-Bench v4 Mistral leader; 256k ctx' },
   { id: 'ministral-14b-2512', label: 'Ministral 14B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: 'balanced',
-    prefilter: 'shipped Mistral balanced tier' },
+    prefilter: 'shipped Mistral balanced tier; 262k ctx' },
   { id: 'ministral-8b-2512', label: 'Ministral 8B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: 'fast',
-    prefilter: 'shipped Mistral fast tier' },
+    prefilter: 'shipped Mistral fast tier; 262k ctx' },
 ];
 
 /** Opt-in comparators — candidates we might QUALIFY into the fleet. This is

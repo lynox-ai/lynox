@@ -57,8 +57,60 @@ NOT threaten the Mistral commitment — the gen-3 Mistrals are 256-262k; only th
 older comparators fall under (Nemo = 128k → unfit on a THIRD axis, alongside
 vision + multi-turn).
 
-A model is **FIT for a tier** only if it clears the context gate AND passes every
-capability that gates that tier. That's the tier→model assignment.
+### Fitness is a floor — quality + cost pick among the fit (per-tier priority)
+
+Several models clear a tier's gates, and the deterministic asserts **cannot see
+output QUALITY** (which of two fit models writes better) — that is exactly the
+axis a pass/fail can't measure. So the run prints a **tier fitness GRID**: every
+context-clearing candidate judged against every tier's gates (not just its
+current role), annotated with cost ($/M input/output, from
+`MODEL_CAPABILITIES[id].pricing`) + context. It gives you the **fit set + cost +
+context**; you weigh **quality** (from an LLM-judge — deferred — or the public
+leaderboards) for the final pick. Per-tier priority (rafael 2026-07-19):
+
+- **FAST** — *cheap + fast, just clear the bar.* Correctness-sufficient; pick the
+  cheapest/fastest fit model.
+- **BALANCED = the main chat** — *output QUALITY first, then cost.* Highest-volume
+  job (every user turn) + re-reads a large cached prefix, so cost matters a lot —
+  but quality leads, cost breaks ties among the strong-enough.
+- **DEEP** — *output QUALITY, cost-tolerant.* User-elected heavy work.
+
+This is why the harness needs the right *candidates*: it first "recommended"
+Mistral Large for deep only because **Sonnet 5 wasn't a candidate** — a
+candidate-set artifact, not a quality verdict. Sonnet 5 (1M ctx, top quality) is
+now in the deep evaluation.
+
+### Floor vs CEILING — and the INDEPENDENT judge
+
+The single-capability probes + the first scenarios are **floor** tests: *does
+model X work for lynox's jobs at all* (pass/fail). The whole fleet clears the
+floor, so they don't grade the strongest tiers. Grading **deep** (and the
+strong end of **balanced**) needs **ceiling** tests: genuinely hard cases where
+even strong models partially fail, producing a *ranking*, not a pass/fail. Two
+mechanisms (`scenarios.ts`, `--scenarios`):
+
+1. **Hard deep cases with OBJECTIVE end-states** (no judge → no bias). Patterns
+   borrowed from the hard public benchmarks (τ²-bench, GAIA, PlanBench):
+   `refund-policy-hard` (multi-constraint policy + a *misleading* prompt the
+   model must verify against, not trust), `long-horizon-chain` (6 dependent
+   steps; one wrong intermediate fails the exact end-state), `replanning` (the
+   first tool path is blocked → adapt, don't stall). The pass-RATE over repeats
+   grades — a weaker model drops steps.
+
+2. **An INDEPENDENT LLM-judge** (`judge.ts`) for the subjective quality axis a
+   pass/fail can't reach (main-chat conversation quality). **Why independent:** an
+   LLM judge has a self-preference bias — a Claude judge scores Claude higher, a
+   Mistral judge scores Mistral higher (rafael 2026-07-19). Our candidates are
+   Claude AND Mistral, so the judge is **GLM 5.2 via Fireworks — a third family,
+   neither**. Bias mitigation: **absolute rubric scoring** (each answer scored
+   1-5 against a fixed rubric, NOT pairwise A-vs-B → no position bias); residual
+   verbosity/style bias is a documented caveat, and the objective cases above
+   stay the primary, bias-free discriminator. Needs `FIREWORKS_API_KEY`; the
+   judge case soft-passes (never fails a candidate) when absent.
+
+Public leaderboards stay the FREE pre-filter only — their scores are inflated
+5-15 pts by contamination/scaffolding and swing ~7 pts by harness, so they pick
+*candidates*, never the verdict. The verdict is these lynox-own hard cases.
 
 ## What we learned (the tests now discriminate)
 
