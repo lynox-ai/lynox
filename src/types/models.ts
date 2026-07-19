@@ -420,6 +420,13 @@ export interface ModelFeatures {
   pdfInput: boolean;
 }
 
+/** Where a model's WEIGHTS originate (supply-chain provenance) — axis (c) of the
+ *  model-presets three-axis disclosure. Distinct from where the DATA is processed
+ *  (the HOST — see `host-disclosure.ts`): a CN-weights model served from a Western
+ *  host (e.g. GLM via Fireworks/US) is still CN by weights. `US`/`EU`/`CN` cover
+ *  the current roster; extend as the fleet grows. */
+export type WeightsOrigin = 'US' | 'EU' | 'CN';
+
 /**
  * Single source of truth for per-model facts. Keyed by canonical provider
  * model id (no tier aliases). Replaces the pre-2026-05-18 scattered
@@ -458,6 +465,12 @@ export interface ModelCapability {
    * preserves byte-identical estimation for today's default fleet.
    */
   charsPerToken?: number | undefined;
+  /** Model weights-origin for the presets supply-chain disclosure (axis c).
+   *  Set on the models a preset SURFACES, so the disclosure carries a per-model
+   *  weights-origin for each (incl. US/EU, not only CN — the picker renders all
+   *  three axes per model). Absent on models the presets don't surface, where the
+   *  host implies it. */
+  provenance?: WeightsOrigin | undefined;
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -502,6 +515,19 @@ const MISTRAL_FEATURES_GEN3: ModelFeatures = {
   pdfInput: false,
 };
 
+// Fireworks-hosted openai-compat text models (GLM 5.2, DeepSeek v4 Pro). Text +
+// tool-use + prompt-cache; NO vision (Fireworks model pages state "image input:
+// not supported" for both — so vision:false yields a clean pre-flight throw on an
+// image-attach, never a silent drop). extendedThinking is the Anthropic-specific
+// mechanism → false on the openai wire.
+const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
+  vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
 const ONE_M_BETA: AnthropicBeta[] = ['context-1m-2025-08-07'];
 
 /**
@@ -527,6 +553,24 @@ export const CACHE_READ_MULTIPLIER = 0.1;
 
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // === Anthropic Claude (direct + custom proxy) ===
+  // Claude Opus 4.8 — the max-quality preset's deep model (model-presets P1).
+  // Additive: MODEL_MAP.deep stays opus-4-6 (re-pointing it is a deliberate
+  // behavior change, not this wave). Pricing verified against Anthropic's catalog
+  // (2026-06-24): $5/$25, 1M native ctx, vision. Shares the 4.7 tokenizer (no
+  // charsPerToken override). TTL contract: cacheWrite=input×2, cacheRead=input×0.1.
+  'claude-opus-4-8': {
+    id: 'claude-opus-4-8',
+    provider: 'anthropic',
+    tier: 'deep',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 4.8',
+    provenance: 'US',
+  },
   'claude-opus-4-7': {
     id: 'claude-opus-4-7',
     provider: 'anthropic',
@@ -799,6 +843,28 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.40, output: 2, cacheWrite: 0.40, cacheRead: 0.40 },
     uiLabel: 'Mistral Medium 3.1',
   },
+  // Mistral Medium 3.5 (2604) — model-presets candidate (Mistral standard-deep /
+  // balanced). 262k ctx (clears the 200k fitness floor, unlike 2508's 128k).
+  // Pricing VERIFIED against the Mistral model card: $1.50/$7.50 (the 2508 entry's
+  // $0.40/$2 was ~3.75× too low for this newer model). cacheRead is NOT published
+  // for Medium 3.5 → apply the gen-3 convention (cacheWrite=input, cacheRead=input
+  // ×0.1, as mistral-large-2512 does); verify against La Plateforme when available.
+  // vision:false per the verify-live-or-false convention (Mistral advertises Medium
+  // 3.5 as multimodal, but a live image check is owed before flipping to GEN3 —
+  // a false-NO is a clean pre-flight throw; a false-YES is a silent wrong answer).
+  'mistral-medium-2604': {
+    id: 'mistral-medium-2604',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_LARGE,
+    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
+    uiLabel: 'Mistral Medium 3.5',
+    provenance: 'EU',
+  },
   'mistral-medium-latest': {
     id: 'mistral-medium-latest',
     provider: 'openai',
@@ -858,6 +924,43 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_SMALL,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
     uiLabel: 'Magistral Small (latest)',
+  },
+  // === Fireworks-hosted (openai-compat) — model-presets hybrid deep/big-context ===
+  // CN-provenance weights served from a WESTERN fixed host (Fireworks/US), never a
+  // direct CN API — the affirmative sourcing rule (host residency US, weights CN).
+  // Pricing VERIFIED against the Fireworks model pages (2026-07-19): the harness
+  // estimates were ~2.5-4× low. cacheRead = $0.14 is the PUBLISHED Fireworks
+  // cached-input rate for BOTH models (a flat rate, NOT input×0.1) — so DeepSeek's
+  // 0.14 (≠ 1.74×0.1 = 0.174) is correct as read from its page, not a copy of GLM's.
+  // Both are text-only (Fireworks: "image input: not supported"). Reached via
+  // provider:'openai' + api_base_url=api.fireworks.ai + the full
+  // `accounts/fireworks/models/*` id; no Fireworks tier map yet (they are preset
+  // -slot models, tier:null — a preset's tier_set pins them explicitly).
+  'accounts/fireworks/models/glm-5p2': {
+    id: 'accounts/fireworks/models/glm-5p2',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 1.40, output: 4.40, cacheWrite: 1.40, cacheRead: 0.14 },
+    uiLabel: 'GLM 5.2',
+    provenance: 'CN',
+  },
+  'accounts/fireworks/models/deepseek-v4-pro': {
+    id: 'accounts/fireworks/models/deepseek-v4-pro',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 1.74, output: 3.48, cacheWrite: 1.74, cacheRead: 0.14 },
+    uiLabel: 'DeepSeek v4 Pro',
+    provenance: 'CN',
   },
 };
 
