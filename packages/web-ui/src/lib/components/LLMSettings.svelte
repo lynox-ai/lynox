@@ -32,6 +32,8 @@
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
+	import Icon from '../primitives/Icon.svelte';
+	import type { IconName } from '../primitives/icons.js';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
 	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
 	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
@@ -123,6 +125,10 @@
 		// Per-tier {provider, model_id} — only consulted by the engine when
 		// routing_mode === 'hybrid'. An unset tier falls back to the base provider.
 		tier_set?: TierSet;
+		// Named hybrid strategy (model-presets W4). Config-sugar: the engine expands
+		// it to {routing_mode:'hybrid', tier_set} at load. Returned verbatim by GET,
+		// so the "Modell-Strategie" cards read it to highlight the active preset.
+		tier_preset?: string;
 		// Server-persisted disclosure acceptances for non-allowlisted custom
 		// endpoints (host + timestamp). Read from /api/config; replaces the old
 		// per-tab sessionStorage flag so acceptance survives reload / new device.
@@ -161,7 +167,34 @@
 		// `requires_base_url === true` (OpenAI-compat, Anthropic-compat) are
 		// disabled.
 		custom_provider_endpoints?: { reason: string };
+		// model-presets W4: set on managed when the CP can't back a preset (e.g. ⚡
+		// efficient's Fireworks slot without the operator opt-in) → that card renders
+		// disabled with the contact CTA rather than silently downgrading.
+		tier_preset?: { reason: string; contact_cta?: { href: string; label: string } };
 	}
+
+	// The GET /api/config `available_tier_presets` signal (server-authoritative;
+	// web-ui can't import @lynox-ai/core). Per preset: the resolved per-tier model
+	// (+ catalog label + provenance + R2-gated host disclosure) and whether the
+	// instance can back it (managed drops a preset whose slot the CP lacks a key for).
+	interface PresetTierInfo {
+		tier: ModelTier;
+		model_id: string;
+		label: string;
+		provenance?: 'US' | 'EU' | 'CN';
+		residency?: string;
+		transferBasis?: string | null;
+		posture?: string;
+	}
+	interface PresetInfo {
+		name: string;
+		tiers: PresetTierInfo[];
+		available: boolean;
+	}
+	// The five strategy cards. 'standard' = one provider, lynox routes per turn;
+	// the three preset names are hybrid tier_presets; 'custom' = manual hybrid.
+	type Strategy = 'standard' | 'efficient' | 'balanced' | 'max-quality' | 'custom';
+	const PRESET_NAMES: ReadonlyArray<'efficient' | 'balanced' | 'max-quality'> = ['efficient', 'balanced', 'max-quality'];
 
 	let providers = $state<CatalogProvider[]>([]);
 	let config = $state<UserConfig>({});
@@ -200,6 +233,21 @@
 		balanced: { catalogKey: '', modelId: '' },
 		deep: { catalogKey: '', modelId: '' },
 	});
+
+	// ── model-presets W4 — "Modell-Strategie" cards ──
+	// `strategy` is the selected card; it drives routingMode + what persists.
+	// Derived from config on load (a stored tier_preset → that card; else hybrid →
+	// 'custom'; else 'standard'). The card the user clicks stages locally (no
+	// auto-save — rafael's explicit-save model); Save materializes it.
+	let strategy = $state<Strategy>('standard');
+	// Server signal: which presets exist + their resolved tiers + availability.
+	let availablePresets = $state<Record<string, PresetInfo>>({});
+	// Per-card "Details" expand state (the full three-axis disclosure).
+	let expandedDetails = $state<Record<string, boolean>>({});
+	// Explicit-save model (rafael): every change stages `dirty`; the Save button
+	// commits, the "Ungespeicherte Änderungen" bar shows meanwhile. No auto-save.
+	let dirty = $state(false);
+	function markDirty(): void { if (loaded) dirty = true; }
 
 	// Vault slot per provider — keeps existing keys when user switches.
 	// Each provider has a DISTINCT slot so flipping anthropic → custom → anthropic
@@ -308,9 +356,10 @@
 			if (!catRes.ok || !configRes.ok) throw new Error(`HTTP ${catRes.status} / ${configRes.status}`);
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
-			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks };
+			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo> };
 			config = configBody;
 			locks = configBody.locks ?? {};
+			availablePresets = configBody.available_tier_presets ?? {};
 			// F1b: when env-pinned the provider isn't on disk, so fall back to the
 			// effective `active_provider` the engine surfaces. An env-pinned
 			// provider IS an explicit choice (just made via env) → count it for
@@ -338,6 +387,13 @@
 			// per-tier {provider, model} slots from the saved tier_set (else defaults).
 			routingMode = configBody.routing_mode === 'hybrid' ? 'hybrid' : 'standard';
 			seedTierSlots(configBody.tier_set);
+			// Derive the active strategy card: a stored tier_preset wins (returned
+			// verbatim by GET); else a persisted hybrid tier_set is a manual "Eigene";
+			// else Standard. On a fresh load nothing is dirty.
+			strategy = (configBody.tier_preset && PRESET_NAMES.includes(configBody.tier_preset as typeof PRESET_NAMES[number]))
+				? (configBody.tier_preset as Strategy)
+				: routingMode === 'hybrid' ? 'custom' : 'standard';
+			dirty = false;
 			if (statusRes.ok) {
 				const status = (await statusRes.json()) as { configured?: { api_key?: boolean } };
 				apiKeyConfigured = status.configured?.api_key === true;
@@ -446,23 +502,59 @@
 		return set;
 	}
 
-	function setRoutingMode(mode: 'standard' | 'hybrid'): void {
-		if (routingMode === mode) return;
-		routingMode = mode;
-		if (mode === 'hybrid') seedTierSlots(config.tier_set);
-		if (loaded) void saveConfig();
+	// Pick a "Modell-Strategie" card. Stages locally (rafael's explicit-save model):
+	// a disabled preset (CP can't back it) is a no-op. Sets routingMode so the rest
+	// of the form (provider picker for Standard, per-tier editor for Eigene) adapts;
+	// what actually persists is decided in runSaveConfig from `strategy`.
+	//
+	// The five cards (order = Standard → cheap → flagship → manual). `key` is the
+	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
+	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 💎 Max-Quality ·
+	// sliders for the manual Eigene.
+	const STRATEGY_CARDS: ReadonlyArray<{ id: Strategy; key: string; icon: IconName; recommended?: boolean }> = [
+		{ id: 'standard', key: 'standard', icon: 'check_circle', recommended: true },
+		{ id: 'efficient', key: 'efficient', icon: 'bolt' },
+		{ id: 'balanced', key: 'balanced', icon: 'scale' },
+		{ id: 'max-quality', key: 'max_quality', icon: 'gem' },
+		{ id: 'custom', key: 'custom', icon: 'sliders' },
+	];
+	/** The server preset signal for a card, or undefined for Standard/Custom. */
+	function presetInfoFor(id: Strategy): PresetInfo | undefined {
+		return id !== 'standard' && id !== 'custom' ? availablePresets[id] : undefined;
+	}
+	/** A preset card the CP can't back → disabled (Standard/Custom always available). */
+	function cardDisabled(id: Strategy): boolean {
+		const p = presetInfoFor(id);
+		return !!p && !p.available;
+	}
+	function toggleDetails(id: string): void {
+		expandedDetails = { ...expandedDetails, [id]: !expandedDetails[id] };
+	}
+	// The active preset's resolved per-tier rows (for the inline detail panel).
+	const activePresetTiers = $derived(presetInfoFor(strategy)?.tiers ?? []);
+
+	function selectStrategy(next: Strategy): void {
+		if (next === strategy) return;
+		const preset = next !== 'standard' && next !== 'custom' ? availablePresets[next] : undefined;
+		if (preset && !preset.available) return; // disabled card — no-op
+		strategy = next;
+		routingMode = next === 'standard' ? 'standard' : 'hybrid';
+		// Entering Eigene seeds the per-tier editor from the current tier_set so the
+		// user starts from what routes today (e.g. tweak the balanced preset by hand).
+		if (next === 'custom') seedTierSlots(config.tier_set);
+		markDirty();
 	}
 
 	function setTierProvider(tier: ModelTier, catalogKey: string): void {
 		const entry = catalogEntryByKey(catalogKey);
 		const modelId = entry ? defaultTierModelId(entry, tier) : '';
 		tierSlots = { ...tierSlots, [tier]: { catalogKey, modelId } };
-		if (loaded) void saveConfig();
+		markDirty();
 	}
 
 	function setTierModel(tier: ModelTier, modelId: string): void {
 		tierSlots = { ...tierSlots, [tier]: { ...tierSlots[tier], modelId } };
-		if (loaded) void saveConfig();
+		markDirty();
 	}
 
 	// Distinct provider tiles used across the slots — drives the per-provider key
@@ -545,10 +637,12 @@
 		// openai_model_id. Auto-saving it fires a 400 the instant the user clicks
 		// the tile — before they have had any chance to type the model. So hold the
 		// save until the id is there, exactly as the free-text tiles do.
-		const modelIdMissing = freeTextModel && !config.openai_model_id;
-		if (!entry.requires_base_url && !modelIdMissing && loaded) {
-			void saveConfig();
-		}
+		// Explicit-save model (rafael W4): a tile click now STAGES the change; the
+		// "Ungespeicherte Änderungen" bar + Save button commit it — no surprise write
+		// on every click. Replaces the former tile-click auto-save (fear of silently
+		// navigating away on the old provider, HN-launch staging 2026-05-23); the
+		// unsaved bar makes the pending change visible instead.
+		markDirty();
 	}
 
 	// Custom-Endpoint Confirm-Banner (PRD Security Model): the SSRF guard
@@ -650,6 +744,14 @@
 		return (config.accepted_custom_endpoints ?? []).some((e) => e.host === host);
 	}
 
+	// Discard staged changes (explicit-save model): drop the unsaved key inputs and
+	// re-fetch the server truth, which re-derives strategy/routing/tierSlots + clears
+	// `dirty`. Cheaper than tracking a per-field snapshot for a settings page.
+	function discardChanges(): void {
+		keys = {};
+		void load();
+	}
+
 	async function saveConfig(): Promise<void> {
 		if (!activeProvider || !loaded) return;
 		if (shouldShowDisclosure(activeProvider, config.api_base_url)) {
@@ -709,23 +811,31 @@
 				(activeProvider === 'custom' || activeProvider === 'openai') &&
 				typeof url === 'string' && url.trim().length > 0 &&
 				!isAllowlistedEndpoint(url);
-			// PR-4: persist routing_mode + tier_set for BOTH self-host and managed.
-			// Managed is allow-listed for these fields (MANAGED_USER_WRITABLE_CONFIG)
-			// and sanitised server-side at config-load (applyManagedTierSetConstraints
-			// drops off-allowlist providers, strips tenant keys/base_urls, sources CP
-			// keys). The UI never sends a key in the slot — keys go to the vault. In
-			// standard mode CLEARS any previously-saved tier_set (sends `{}` — the
-			// schema rejects null, and an empty set is the "no per-tier slots"
-			// state) so switching Hybrid→Standard leaves no stale slots in
-			// config.json for a future reader to misinterpret. The engine ignores
-			// tier_set unless routing_mode === 'hybrid' regardless.
-			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet } = {
-				routing_mode: routingMode,
-			};
-			if (routingMode === 'hybrid') {
-				routingUpdate.tier_set = currentTierSet();
-			} else if (config.tier_set && Object.keys(config.tier_set).length > 0) {
+			// model-presets W4 — persist the chosen "Modell-Strategie" card. Managed is
+			// allow-listed for these fields (MANAGED_USER_WRITABLE_CONFIG) and sanitised
+			// server-side at load (applyManagedTierSetConstraints / the write-gate). The
+			// UI never sends a key in a slot — keys go to the vault.
+			//  · a PRESET persists by NAME (tier_preset); the engine expands it to
+			//    {hybrid, tier_set}. Send tier_set:{} so a stale explicit slot can't
+			//    shadow the preset per-tier (the loader spreads explicit-over-preset).
+			//  · CUSTOM (Eigene) persists the manual tier_set + clears tier_preset.
+			//  · STANDARD clears tier_preset (null → server deletes the key; without
+			//    that its mere presence force-sets hybrid at every load) and empties any
+			//    prior tier_set so no stale slots remain.
+			// `tier_preset:null` is why the schema is .nullable() (see schemas.ts).
+			const isPreset = strategy !== 'standard' && strategy !== 'custom';
+			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet; tier_preset?: string | null } = {};
+			if (isPreset) {
+				routingUpdate.tier_preset = strategy;
 				routingUpdate.tier_set = {};
+			} else if (strategy === 'custom') {
+				routingUpdate.routing_mode = 'hybrid';
+				routingUpdate.tier_set = currentTierSet();
+				routingUpdate.tier_preset = null;
+			} else {
+				routingUpdate.routing_mode = 'standard';
+				routingUpdate.tier_preset = null;
+				if (config.tier_set && Object.keys(config.tier_set).length > 0) routingUpdate.tier_set = {};
 			}
 			const body = needsConfirm
 				? { ...update, ...routingUpdate, confirm_custom_endpoint: true }
@@ -761,6 +871,11 @@
 					config.accepted_custom_endpoints = [...prior, { host, accepted_at: new Date().toISOString() }];
 				}
 			}
+			// Persist committed → clear the unsaved-changes state (explicit-save model)
+			// and mirror the chosen strategy into local config so a later re-derive
+			// (without a full reload) stays consistent with what was written.
+			dirty = false;
+			config.tier_preset = isPreset ? strategy : undefined;
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
@@ -786,13 +901,19 @@
 		providers.find((p) => catalogEntryKey(p) === activeCatalogKey)
 		?? providers.find((p) => p.provider === activeProvider),
 	);
+	// model-presets W4: the "Modell-Strategie" cards replace the Standard/Hybrid
+	// toggle. `presetSelected` = a fixed preset card is active (its tiers show
+	// read-only ON the card, so the provider picker + per-tier editor both hide).
+	// `hybridActive` = the manual "Eigene" card → the per-tier editor shows. The
+	// provider picker + main-model picker show ONLY for the Standard card.
+	const presetSelected = $derived(strategy !== 'standard' && strategy !== 'custom');
 	// Hybrid mode is active (managed OR self-host): the per-tier editor replaces
 	// the single-provider flow (tiles + one key + residency/test). The per-tier
 	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral), which
 	// is exactly the managed curated set — so managed hybrid reuses the same UI;
 	// only the per-provider key fields are self-host-only (managed: CP supplies,
 	// server-side `applyManagedTierSetConstraints` sources the keys at load).
-	const hybridActive = $derived(routingMode === 'hybrid');
+	const hybridActive = $derived(strategy === 'custom');
 	const providerLocked = $derived(!!locks.provider);
 	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
 	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
@@ -822,7 +943,7 @@
 		// picked option specifies one; leave the stored preference otherwise (so
 		// switching to Opus and back to a balanced pick remembers Sonnet 4.6/5).
 		if (opt.balanced_model) config.balanced_model = opt.balanced_model;
-		if (loaded) void saveConfig();
+		markDirty();
 	}
 
 	// Per-tile predicate — extracted to ../utils/llm-tile-lock.js so the
@@ -917,30 +1038,92 @@
 		</div>
 	{/if}
 
-	<!-- Model routing (PR-4) — the PRIMARY axis: decide Standard vs Hybrid
-	     FIRST, the model controls below adapt to it. Standard = one provider,
-	     lynox auto-routes per turn (zero knobs). Hybrid = each tier picks its own
-	     provider + model. Available on managed too: the provider choices are the
-	     curated allowlist (Anthropic + Mistral) and the CP supplies the keys
-	     (server-side `applyManagedTierSetConstraints` sanitises + sources them).
-	     NO capability gating (D8 2026-06-17). -->
+	<!-- Modell-Strategie (model-presets W4) — the PRIMARY axis. Replaces the
+	     Standard/Hybrid toggle with five cards: Standard (one provider, lynox routes
+	     per turn) · ⚡ Efficient · ⚖️ Balanced · 💎 Max-Quality (named hybrid presets)
+	     · Eigene (manual hybrid). A preset the CP can't back renders disabled with a
+	     lock reason (locks.tier_preset) — never a silent downgrade. The controls
+	     below adapt: Standard → provider picker + main-model; a preset → the inline
+	     tier detail below; Eigene → the per-tier editor. NO capability gating for the
+	     enabled set (D8 2026-06-17). -->
 	{#if loaded}
-		<section aria-labelledby="llm-routing-heading" class="space-y-2">
-			<h2 id="llm-routing-heading" class="text-lg font-medium">{t('llm.routing.heading')}</h2>
-			<div role="group" aria-label={t('llm.routing.heading')}
-				class="inline-flex rounded-md border border-border overflow-hidden text-sm">
-				<button type="button" aria-pressed={routingMode === 'standard'} disabled={providerLocked}
-					onclick={() => setRoutingMode('standard')}
-					class="px-4 py-1.5 transition-colors disabled:opacity-50 {routingMode === 'standard' ? 'bg-accent text-accent-fg' : 'bg-bg hover:bg-accent/5'}">
-					{t('llm.routing.standard')}
-				</button>
-				<button type="button" aria-pressed={routingMode === 'hybrid'} disabled={providerLocked}
-					onclick={() => setRoutingMode('hybrid')}
-					class="px-4 py-1.5 border-l border-border transition-colors disabled:opacity-50 {routingMode === 'hybrid' ? 'bg-accent text-accent-fg' : 'bg-bg hover:bg-accent/5'}">
-					{t('llm.routing.hybrid')}
-				</button>
+		<section aria-labelledby="llm-strategy-heading" class="space-y-3">
+			<div class="space-y-0.5">
+				<h2 id="llm-strategy-heading" class="text-lg font-medium">{t('llm.preset.heading')}</h2>
+				<p class="text-xs text-text-muted">{t('llm.preset.subheading')}</p>
 			</div>
-			<p class="text-xs text-text-muted">{routingMode === 'hybrid' ? t('llm.routing.hybrid_desc') : t('llm.routing.standard_desc')}</p>
+			<div role="radiogroup" aria-label={t('llm.preset.heading')}
+				class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+				{#each STRATEGY_CARDS as card (card.id)}
+					{@const disabled = cardDisabled(card.id)}
+					{@const active = strategy === card.id}
+					<button type="button" role="radio" aria-checked={active} disabled={disabled || providerLocked}
+						onclick={() => selectStrategy(card.id)}
+						class="text-left p-3 rounded-[var(--radius-md)] border-2 transition-colors flex flex-col gap-1.5 h-full
+							{active ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'}
+							disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-border">
+						<div class="flex items-center gap-2">
+							<Icon name={card.icon} size="sm" class={active ? 'text-accent' : 'text-text-muted'} />
+							<span class="font-medium text-sm">{t(`llm.preset.${card.key}`)}</span>
+							{#if card.recommended}
+								<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-accent/40 text-accent">
+									{t('llm.preset.recommended')}
+								</span>
+							{/if}
+						</div>
+						<p class="text-xs text-text-muted leading-snug">{t(`llm.preset.${card.key}_desc`)}</p>
+						{#if disabled}
+							<p class="text-[11px] text-warning mt-auto pt-1">{t('llm.preset.unavailable')}</p>
+						{/if}
+					</button>
+				{/each}
+			</div>
+
+			<!-- Inline tier detail for the active PRESET (rafael: "kompakt inline +
+			     Detail auf Klick"). Compact per-tier model + provenance chip; the
+			     "Details" toggle reveals the full three-axis, R2-gated disclosure. -->
+			{#if presetSelected && activePresetTiers.length > 0}
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3 space-y-2">
+					{#each activePresetTiers as tier (tier.tier)}
+						<div class="flex items-center gap-2 text-sm flex-wrap">
+							<span class="text-text-muted w-24 shrink-0">{t(`llm.tier.${tier.tier}`)}</span>
+							<span class="font-medium">{tier.label}</span>
+							{#if tier.provenance}
+								<span class="text-[10px] uppercase tracking-wide px-1.5 py-px rounded border border-border text-text-muted">
+									{t(`llm.preset.provenance.${tier.provenance}`)}
+								</span>
+							{/if}
+							{#if tier.residency}
+								<span class="text-[10px] px-1.5 py-px rounded bg-bg-muted text-text-subtle">{tier.residency}</span>
+							{/if}
+						</div>
+						{#if expandedDetails[strategy]}
+							<dl class="ml-24 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px] text-text-muted">
+								{#if tier.residency}
+									<dt>{t('llm.preset.disclosure.residency')}</dt><dd>{tier.residency}</dd>
+								{/if}
+								{#if tier.transferBasis}
+									<dt>{t('llm.preset.disclosure.transfer')}</dt><dd>{tier.transferBasis}</dd>
+								{/if}
+								{#if tier.provenance}
+									<dt>{t('llm.preset.disclosure.provenance')}</dt><dd>{t(`llm.preset.provenance.${tier.provenance}`)}</dd>
+								{/if}
+								{#if tier.posture}
+									<dt>{t('llm.preset.disclosure.posture')}</dt><dd>{tier.posture}</dd>
+								{/if}
+							</dl>
+						{/if}
+					{/each}
+					<div class="flex items-center justify-between pt-1">
+						<button type="button" onclick={() => toggleDetails(strategy)}
+							class="text-xs text-accent hover:underline flex items-center gap-1">
+							<Icon name={expandedDetails[strategy] ? 'chevron_up' : 'chevron_down'} size="xs" />
+							{expandedDetails[strategy] ? t('llm.preset.hide_details') : t('llm.preset.details')}
+						</button>
+						<span class="text-[11px] text-text-subtle">{t('llm.preset.applies_hint')}</span>
+					</div>
+				</div>
+			{/if}
 		</section>
 	{/if}
 
@@ -949,9 +1132,9 @@
 	     before the sub-route nav. Vertex is wired in the engine for legacy
 	     `provider: 'vertex'` config.json setups (see core CLAUDE.md) but no
 	     longer offered in-product per project_eu_providers_strategy — filter
-	     it out of the tile list. Hidden in self-host Hybrid: there each tier
-	     picks its OWN provider, so a single top-level picker doesn't apply. -->
-	{#if !hybridActive}
+	     it out of the tile list. Shown ONLY for the Standard strategy: a preset
+	     fixes its own per-tier providers, and Eigene picks a provider per tier. -->
+	{#if strategy === 'standard'}
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
@@ -995,7 +1178,11 @@
 	</nav>
 
 	{#if activeProviderEntry}
-		<!-- Per-provider config form -->
+		<!-- Per-provider config form — Standard (single provider: key/base/model/test)
+		     or Eigene (per-tier editor). Hidden for a fixed preset: its tiers show in
+		     the inline detail panel above and nothing here is editable; the Save row +
+		     Advanced below stay visible so a preset choice can still be committed. -->
+		{#if !presetSelected}
 		<section aria-labelledby="llm-config-heading" class="border-t border-border pt-6 space-y-4">
 			<h2 id="llm-config-heading" class="text-lg font-medium">{hybridActive ? t('llm.routing.per_tier_heading') : activeProviderEntry.display_name}</h2>
 			{#if !hybridActive && activeProviderEntry.notes}
@@ -1007,7 +1194,7 @@
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
 						placeholder={t('llm.api_key_placeholder')}
-						bind:value={keys[slotForEntry(activeProviderEntry)]}
+						bind:value={keys[slotForEntry(activeProviderEntry)]} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
@@ -1026,7 +1213,7 @@
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
 						placeholder="https://api.mistral.ai/v1"
-						bind:value={config.api_base_url}
+						bind:value={config.api_base_url} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 				</label>
 
@@ -1141,7 +1328,7 @@
 										<span class="block text-xs text-text-muted mb-1">{p.display_name}</span>
 										<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
 											placeholder={t('llm.api_key_placeholder')}
-											bind:value={keys[slotForEntry(p)]}
+											bind:value={keys[slotForEntry(p)]} oninput={markDirty}
 											class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 									</label>
 								{/if}
@@ -1198,7 +1385,7 @@
 					<span class="block text-sm font-medium mb-1">{t('llm.custom_model_id')}</span>
 					<input type="text" disabled={!loaded || providerLocked}
 						placeholder={activeProviderEntry?.model_placeholder ?? 'claude-3-5-sonnet-20241022'}
-						bind:value={config.openai_model_id}
+						bind:value={config.openai_model_id} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.custom_model_id_hint')}</span>
 				</label>
@@ -1229,16 +1416,29 @@
 			</div>
 			{/if}
 		</section>
+		{/if}
 
-		<!-- Save row — provider / model / custom-endpoint changes only. Memory
-		     still saves from its own sub-page (Foundation-Rework may re-home).
-		     Advanced (PR 4.6, 2026-05-19) collapses inline below. -->
-		<div class="flex justify-end">
-			<button type="button" onclick={saveConfig} disabled={saving || !loaded}
-				class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">
-				{saving ? t('llm.saving') : t('llm.save')}
-			</button>
-		</div>
+		<!-- Unsaved-changes bar (rafael W4 explicit-save model): the ONE save
+		     affordance. No auto-save anywhere — every change stages `dirty` and this
+		     bar appears with Discard + Save. Reserved for real intent; the per-field
+		     toast is gone. Shown for every strategy (a preset choice saves here too,
+		     since its card has no inline form). Sits inside the activeProviderEntry
+		     block (always truthy post-load), so a preset with no form still gets it. -->
+		{#if dirty}
+			<div class="sticky bottom-2 z-10 flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-accent/40 bg-accent/5 px-3 py-2 shadow-sm backdrop-blur-sm">
+				<span class="text-sm font-medium text-text">{t('llm.unsaved.title')}</span>
+				<div class="flex items-center gap-2">
+					<button type="button" onclick={discardChanges} disabled={saving}
+						class="px-3 py-1.5 text-sm border border-border rounded-[var(--radius-md)] hover:bg-bg-muted disabled:opacity-50">
+						{t('llm.unsaved.discard')}
+					</button>
+					<button type="button" onclick={saveConfig} disabled={saving || !loaded}
+						class="px-4 py-1.5 text-sm bg-accent text-accent-fg rounded-[var(--radius-md)] hover:opacity-90 disabled:opacity-50">
+						{saving ? t('llm.saving') : t('llm.save')}
+					</button>
+				</div>
+			</div>
+		{/if}
 
 		<!-- Settings v3 PR 4.6 (Items 3 + 5): Advanced sub-page collapsed inline
 		     as expandable section. The standalone /llm/advanced route stays for
