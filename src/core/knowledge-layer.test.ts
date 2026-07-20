@@ -6,6 +6,7 @@ import { KnowledgeLayer } from './knowledge-layer.js';
 import { LocalProvider, blobToEmbed, cosineSimilarity } from './embedding.js';
 import type { AgentMemoryDb } from './agent-memory-db.js';
 import type { MemoryScopeRef } from '../types/index.js';
+import type { HookHost } from './metered-request.js';
 
 /**
  * Integration tests for KnowledgeLayer.
@@ -444,5 +445,39 @@ describe('KnowledgeLayer', () => {
     const embOld = await provider.embed('The capital of France is Paris.');
     expect(cosineSimilarity(stored, embNew)).toBeGreaterThan(0.99);
     expect(cosineSimilarity(stored, embNew)).toBeGreaterThan(cosineSimilarity(stored, embOld));
+  });
+
+  it('fires the credit gate on the update_memory re-extraction (metered pool-key spend)', async () => {
+    // The re-extraction inside updateMemoryText is a metered LLM call on the pool key.
+    // The fix gates + debits it like store(); previously it never touched the metered
+    // host — an undebited managed spend that survived credit exhaustion (injection-loopable
+    // via the update_memory tool). A blocked (exhausted) gate → extraction is skipped, so
+    // there is no debit and no LLM spend, and the text edit itself still lands.
+    const s: MemoryScopeRef = { type: 'context', id: 'metered-update-scope' };
+    const onBeforeRun = vi.fn().mockRejectedValue(new Error('AI budget for this period reached.'));
+    const onAfterRun = vi.fn();
+    const host = { getHooks: () => [{ onBeforeRun, onAfterRun }], getContext: () => null } as unknown as HookHost;
+    const fakeClient = { beta: { messages: { stream: () => ({}) } } } as unknown as
+      import('@anthropic-ai/sdk').default;
+    layer.setAnthropicClient(fakeClient);
+    layer.setMeteredHost(host);
+    try {
+      const r = await layer.store('Acme is on the managed plan.', 'knowledge', s);
+      expect(r.memoryId).toBeTruthy();
+      onBeforeRun.mockClear();
+      onAfterRun.mockClear();
+
+      const ok = await layer.updateMemoryText(
+        'Acme is on the managed plan.', 'Acme is on the pro plan.', 'knowledge', s,
+      );
+      expect(ok).toBe(true);
+      // The fix fires the gate on the re-extraction (pre-fix: never called). Blocked →
+      // extraction skipped → no debit.
+      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect(onAfterRun).not.toHaveBeenCalled();
+    } finally {
+      layer.setMeteredHost(null);
+      layer.setAnthropicClient(undefined);
+    }
   });
 });

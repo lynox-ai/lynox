@@ -1540,16 +1540,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // re-resolves the subject linkage and re-upserts the stub; pre-cutover: the legacy
     // mention path, unchanged. The stub's TEXT is already refreshed above under the write
     // flag, independent of this read-gated (cost-bearing) re-extraction.
+    // The re-extraction is a metered LLM call on the (managed pool) key — gate it and
+    // debit its cost exactly like store(). Previously it ran unconditionally: an undebited
+    // managed spend that survived credit exhaustion and was injection-loopable via the
+    // `update_memory` tool. The text update itself (above) is local + always applies; only
+    // the LLM re-extraction is credit-gated, so an exhausted tenant's edit still lands.
+    const extractGate = this.meteredHost && this.anthropicClient
+      ? await fireBeforeRunGate(this.meteredHost, 'fast')
+      : null;
+    const extractionAllowed = !extractGate || extractGate.blockedReason === null;
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
-      // A text correction is not credit-gated (the legacy path re-extracts unconditionally).
       const createdAt = this.db.getMemoryCreatedAt(id);
       // Slice B: keep the memory's project/client anchor across a text edit — resolve
       // its SOURCE thread's anchor (not the current thread; this is an edit, not a new
       // write) so re-extraction doesn't silently revert the primary subject to the heuristic.
       const threadAnchorSubjectId = this._readThreadAnchor(this.db.getMemorySourceThread(id));
-      await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, true, threadAnchorSubjectId);
-    } else {
+      const extracted = await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, extractionAllowed, threadAnchorSubjectId);
+      if (extractGate && this.meteredHost && extracted.costUsd) {
+        reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
+      }
+    } else if (extractionAllowed) {
       const extraction = await extractEntities(newText, namespace, this.anthropicClient);
+      if (extractGate && this.meteredHost && extraction.costUsd) {
+        reportMeteredCost(this.meteredHost, extractGate.runId, extraction.costUsd, 'fast');
+      }
       for (const ext of extraction.entities) {
         const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true });
         if (entity) this.db.createMention(id, entity.id);
