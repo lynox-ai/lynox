@@ -1062,11 +1062,11 @@
 						class="text-left p-3 rounded-[var(--radius-md)] border-2 transition-colors flex flex-col gap-1.5 h-full
 							{active ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'}
 							disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-border">
-						<div class="flex items-center gap-2">
+						<div class="flex items-center gap-x-2 gap-y-1 flex-wrap">
 							<Icon name={card.icon} size="sm" class={active ? 'text-accent' : 'text-text-muted'} />
 							<span class="font-medium text-sm">{t(`llm.preset.${card.key}`)}</span>
 							{#if card.recommended}
-								<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-accent/40 text-accent">
+								<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-accent/40 text-accent whitespace-nowrap">
 									{t('llm.preset.recommended')}
 								</span>
 							{/if}
@@ -1088,12 +1088,17 @@
 						<div class="flex items-center gap-2 text-sm flex-wrap">
 							<span class="text-text-muted w-24 shrink-0">{t(`llm.tier.${tier.tier}`)}</span>
 							<span class="font-medium">{tier.label}</span>
+							<!-- Compact chips: the model's WEIGHTS origin (provenance) + where
+							     it's PROCESSED (residency). Show residency only when it differs
+							     from provenance — else an EU model on an EU host reads as a
+							     redundant "EU EU"; the meaningful case is divergence (GLM: China
+							     weights on a US host → "China" + "US"). Full detail in the expand. -->
 							{#if tier.provenance}
 								<span class="text-[10px] uppercase tracking-wide px-1.5 py-px rounded border border-border text-text-muted">
 									{t(`llm.preset.provenance.${tier.provenance}`)}
 								</span>
 							{/if}
-							{#if tier.residency}
+							{#if tier.residency && tier.residency !== tier.provenance}
 								<span class="text-[10px] px-1.5 py-px rounded bg-bg-muted text-text-subtle">{tier.residency}</span>
 							{/if}
 						</div>

@@ -631,6 +631,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
     uiLabel: 'Claude Sonnet 5',
     charsPerToken: 2.7,
+    provenance: 'US',
   },
   'claude-haiku-4-5-20251001': {
     id: 'claude-haiku-4-5-20251001',
@@ -643,6 +644,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.10 },
     uiLabel: 'Claude Haiku 4.5',
+    provenance: 'US',
   },
   // Vertex AI variant — same model, different id surface (no date suffix).
   'claude-haiku-4-5': {
@@ -728,6 +730,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
     uiLabel: 'Ministral 8B',
+    provenance: 'EU',
   },
   // Ministral 3 14B (Dec 2025): gen-3 mid model, text+vision, 262k context.
   // The `balanced` tier as of 2026-05-29 — Set-Bench v4 showed 100% pass and
@@ -743,6 +746,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.20, output: 0.20, cacheWrite: 0.20, cacheRead: 0.02 },
     uiLabel: 'Ministral 14B',
+    provenance: 'EU',
   },
   // Mistral Large 3 (Dec 2025): 256k context, $0.50/$1.50 (75% price cut vs Large 2),
   // multimodal input (text+image), structured-outputs, function-calling, prefix-cache.

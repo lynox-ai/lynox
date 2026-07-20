@@ -2293,6 +2293,26 @@ describe('LynoxHTTPApi', () => {
       expect(efficientDeep['residency']).toBe('US');
     });
 
+    it('GET main_chat_tiers reflects a tier_preset, not the standard provider map (W4 picker sync)', async () => {
+      // A tier_preset is config-sugar — the raw stored config carries neither
+      // routing_mode nor tier_set (the loader materializes them). So the picker's
+      // main_chat_tiers MUST be derived from the SAME expansion, else it shows the
+      // Anthropic default map (Sonnet/Opus) while the preset routes Ministral 14B —
+      // the exact stale-label class the composer picker hit. Real expandTierPreset +
+      // catalog run here (not mocked).
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ tier_preset: 'balanced', provider: 'anthropic', default_tier: 'balanced' });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
+      expect(tiers).toBeDefined();
+      // balanced preset's balanced tier = Ministral 14B (NOT a Sonnet default).
+      expect(tiers!['balanced']).toContain('Ministral');
+      expect(tiers!['balanced']).not.toContain('Sonnet');
+    });
+
     it('GET surfaces active_model with resolved capability data (Settings v3 Item 6)', async () => {
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);

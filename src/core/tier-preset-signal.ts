@@ -71,8 +71,14 @@ export function buildTierPresetSignal(opts: { isManagedTier: boolean }): Record<
     for (const tier of ['fast', 'balanced', 'deep'] as const) {
       const slot = expanded.tier_set[tier];
       if (!slot) continue;
-      const label = LLM_CATALOG.flatMap((e) => e.models).find((m) => m.id === slot.model_id)?.label ?? slot.model_id;
-      const provenance = modelCapability(slot.model_id)?.provenance;
+      // Prefer the provider-picker catalog label; fall back to the registry
+      // uiLabel (Fireworks preset-slot models like GLM/DeepSeek aren't in the
+      // provider catalog, but carry a friendly uiLabel) before the raw id.
+      const cap = modelCapability(slot.model_id);
+      const label = LLM_CATALOG.flatMap((e) => e.models).find((m) => m.id === slot.model_id)?.label
+        ?? cap?.uiLabel
+        ?? slot.model_id;
+      const provenance = cap?.provenance;
       const disc = hostDisclosure(slotHost(slot));
       tiers.push({
         tier,

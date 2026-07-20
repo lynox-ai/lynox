@@ -4001,12 +4001,21 @@ export class LynoxHTTPApi {
       // shows the active provider's default map (e.g. "Ausgewogen (Sonnet 5)")
       // while the tier actually routes to the slot's model (e.g. Mistral Large).
       // Standard routing keeps the single-provider derivation.
-      if (config.routing_mode === 'hybrid' && config.tier_set) {
+      //
+      // model-presets W4: a `tier_preset` is config-sugar — the loader materializes
+      // it to {routing_mode:'hybrid', tier_set} at load, so the RAW config here
+      // carries neither. Derive the effective tier_set from the SAME expansion, or
+      // the picker shows the standard provider map (Sonnet/Opus) while the preset
+      // actually routes Ministral 14B etc. (the exact stale-label class rafael hit).
+      const effectiveTierSet = config.tier_preset
+        ? expandTierPreset(config.tier_preset)?.tier_set
+        : (config.routing_mode === 'hybrid' ? config.tier_set : undefined);
+      if (effectiveTierSet) {
         // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
         // that provider), so the picker must label the CONSTRAINED set — otherwise it shows a
         // model that never routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet).
-        const effectiveTierSet = isManagedTier ? applyManagedTierSetConstraints(config.tier_set) : config.tier_set;
-        const tierLabels = mainChatTierLabelsFromTierSet(effectiveTierSet, activeProvider);
+        const constrained = isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet) : effectiveTierSet;
+        const tierLabels = mainChatTierLabelsFromTierSet(constrained, activeProvider);
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
