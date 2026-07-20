@@ -13,11 +13,21 @@ export type TierConfig = {
 
 // Module-level cache: config rarely changes and the pickers re-mount often, so
 // fetch /api/config once across BOTH the composer picker (new chat) and the
-// per-thread model control (P1 §5.1b). A settings change to default_tier/max_tier
-// takes effect on the next full page load — acceptable for a picker default. Only
+// per-thread model control (P1 §5.1b). A settings change is picked up by
+// `clearTierConfigCache()` (called on a successful settings save) so the pickers
+// re-fetch the new per-tier model LABELS without a full page reload — otherwise a
+// stale cache shows the OLD model for a tier the user just re-pointed (e.g. still
+// "Ausgewogen (Mistral Large 3)" after switching balanced to Ministral 14B). Only
 // a SUCCESSFUL response is cached, so a transient failure (engine not ready yet)
 // retries on the next call instead of pinning to "no ceiling".
 let _cache: TierConfig | null = null;
+
+/** Invalidate the cache so the next `loadTierConfig()` re-fetches. Call after a
+ *  settings save that changes routing/tier config, so the composer + header
+ *  pickers reflect the new per-tier models immediately (no full page reload). */
+export function clearTierConfigCache(): void {
+  _cache = null;
+}
 
 export async function loadTierConfig(): Promise<TierConfig> {
   if (_cache) return _cache;

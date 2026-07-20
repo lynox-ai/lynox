@@ -614,6 +614,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.communities': { de: 'Communities', en: 'Communities' },
 
 	'common.ok': { de: 'OK', en: 'OK' },
+	'common.dismiss': { de: 'Schließen', en: 'Dismiss' },
 
 	// Setup Banner & Wizard
 	'banner.api_key_missing': { de: 'Kein LLM-Provider konfiguriert — KI-Antworten sind deaktiviert.', en: 'No LLM provider configured — AI responses are disabled.' },
