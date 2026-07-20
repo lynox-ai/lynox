@@ -34,6 +34,10 @@
     defaultTier = normalizeTier(cfg.defaultTier) ?? 'balanced';
     // Default coerced into the balanced/deep set (a 'fast' default lands on balanced).
     selected = tiers.includes(defaultTier) ? defaultTier : (tiers[0] ?? 'balanced');
+    // If the coercion moved off the default (default_tier='fast'), turn 1 would
+    // otherwise route the un-set default while the header reads the coerced tier —
+    // pin the pending model so display and routing agree.
+    if (selected !== defaultTier) setPendingModel(selected);
     loaded = true;
   });
 

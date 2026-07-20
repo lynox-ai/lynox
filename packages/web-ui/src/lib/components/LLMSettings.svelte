@@ -34,6 +34,7 @@
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';
+	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
 	// Local enum mirror — the engine type lives in src/types/models.ts but
 	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
 	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
@@ -193,7 +194,8 @@
 	}
 	// The five strategy cards. 'standard' = one provider, lynox routes per turn;
 	// the three preset names are hybrid tier_presets; 'custom' = manual hybrid.
-	type Strategy = 'standard' | 'efficient' | 'balanced' | 'max-quality' | 'custom';
+	// `Strategy` + `buildRoutingUpdate` (the persistence mapping) live in a plain
+	// .ts helper so the body-building is unit-testable (this .svelte has no seam).
 	const PRESET_NAMES: ReadonlyArray<'efficient' | 'balanced' | 'max-quality'> = ['efficient', 'balanced', 'max-quality'];
 
 	let providers = $state<CatalogProvider[]>([]);
@@ -503,9 +505,9 @@
 	}
 
 	// Pick a "Modell-Strategie" card. Stages locally (rafael's explicit-save model):
-	// a disabled preset (CP can't back it) is a no-op. Sets routingMode so the rest
-	// of the form (provider picker for Standard, per-tier editor for Eigene) adapts;
-	// what actually persists is decided in runSaveConfig from `strategy`.
+	// a disabled preset (CP can't back it) is a no-op. `strategy` drives which
+	// controls show (provider picker for Standard, per-tier editor for Eigene, the
+	// inline detail for a preset); what persists is decided in runSaveConfig from it.
 	//
 	// The five cards (order = Standard → cheap → flagship → manual). `key` is the
 	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
@@ -538,9 +540,11 @@
 		const preset = next !== 'standard' && next !== 'custom' ? availablePresets[next] : undefined;
 		if (preset && !preset.available) return; // disabled card — no-op
 		strategy = next;
-		routingMode = next === 'standard' ? 'standard' : 'hybrid';
-		// Entering Eigene seeds the per-tier editor from the current tier_set so the
-		// user starts from what routes today (e.g. tweak the balanced preset by hand).
+		// Entering Eigene seeds the per-tier editor from the persisted tier_set (a
+		// manual hybrid the user saved before), else provider defaults. It does NOT
+		// carry a preset's slots — a just-selected preset persists tier_set:{}, and a
+		// Fireworks slot has no per-tier provider tile — so switching a preset→Eigene
+		// starts from defaults, not the preset's models.
 		if (next === 'custom') seedTierSlots(config.tier_set);
 		markDirty();
 	}
@@ -811,32 +815,17 @@
 				(activeProvider === 'custom' || activeProvider === 'openai') &&
 				typeof url === 'string' && url.trim().length > 0 &&
 				!isAllowlistedEndpoint(url);
-			// model-presets W4 — persist the chosen "Modell-Strategie" card. Managed is
-			// allow-listed for these fields (MANAGED_USER_WRITABLE_CONFIG) and sanitised
-			// server-side at load (applyManagedTierSetConstraints / the write-gate). The
-			// UI never sends a key in a slot — keys go to the vault.
-			//  · a PRESET persists by NAME (tier_preset); the engine expands it to
-			//    {hybrid, tier_set}. Send tier_set:{} so a stale explicit slot can't
-			//    shadow the preset per-tier (the loader spreads explicit-over-preset).
-			//  · CUSTOM (Eigene) persists the manual tier_set + clears tier_preset.
-			//  · STANDARD clears tier_preset (null → server deletes the key; without
-			//    that its mere presence force-sets hybrid at every load) and empties any
-			//    prior tier_set so no stale slots remain.
-			// `tier_preset:null` is why the schema is .nullable() (see schemas.ts).
+			// model-presets W4 — persist the chosen "Modell-Strategie" card. The
+			// strategy→body mapping (preset-by-name / clear-to-standard / custom hybrid,
+			// including the load-bearing tier_preset:null CLEAR) lives in the unit-tested
+			// `buildRoutingUpdate` helper. Managed is allow-listed for these fields
+			// (MANAGED_USER_WRITABLE_CONFIG) and sanitised server-side at load; the UI
+			// never sends a key in a slot — keys go to the vault.
 			const isPreset = strategy !== 'standard' && strategy !== 'custom';
-			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet; tier_preset?: string | null } = {};
-			if (isPreset) {
-				routingUpdate.tier_preset = strategy;
-				routingUpdate.tier_set = {};
-			} else if (strategy === 'custom') {
-				routingUpdate.routing_mode = 'hybrid';
-				routingUpdate.tier_set = currentTierSet();
-				routingUpdate.tier_preset = null;
-			} else {
-				routingUpdate.routing_mode = 'standard';
-				routingUpdate.tier_preset = null;
-				if (config.tier_set && Object.keys(config.tier_set).length > 0) routingUpdate.tier_set = {};
-			}
+			const routingUpdate = buildRoutingUpdate(strategy, {
+				existingTierSet: config.tier_set,
+				customTierSet: strategy === 'custom' ? currentTierSet() : {},
+			});
 			const body = needsConfirm
 				? { ...update, ...routingUpdate, confirm_custom_endpoint: true }
 				: { ...update, ...routingUpdate };
@@ -1078,6 +1067,18 @@
 					</button>
 				{/each}
 			</div>
+
+			<!-- Contact CTA for a preset the plan can't back — the card button is
+			     disabled (no interactive child allowed), so the action lives here.
+			     Server-driven: shown only when the CP sends locks.tier_preset. -->
+			{#if locks.tier_preset?.contact_cta}
+				<p class="text-xs text-text-muted">
+					{t('llm.preset.unavailable')}
+					<a href={locks.tier_preset.contact_cta.href} class="text-accent hover:underline ml-1">
+						{t('llm.preset.unavailable_cta')}
+					</a>
+				</p>
+			{/if}
 
 			<!-- Inline tier detail for the active PRESET (rafael: "kompakt inline +
 			     Detail auf Klick"). Compact per-tier model + provenance chip; the
@@ -1422,14 +1423,15 @@
 			{/if}
 		</section>
 		{/if}
+	{/if}
 
-		<!-- Unsaved-changes bar (rafael W4 explicit-save model): the ONE save
-		     affordance. No auto-save anywhere — every change stages `dirty` and this
-		     bar appears with Discard + Save. Reserved for real intent; the per-field
-		     toast is gone. Shown for every strategy (a preset choice saves here too,
-		     since its card has no inline form). Sits inside the activeProviderEntry
-		     block (always truthy post-load), so a preset with no form still gets it. -->
-		{#if dirty}
+	<!-- Unsaved-changes bar (rafael W4 explicit-save model): the ONE save
+	     affordance. No auto-save anywhere — every change stages `dirty` and this bar
+	     appears with Discard + Save. Reserved for real intent; the per-field toast is
+	     gone. Gated on `dirty` alone — NOT on activeProviderEntry — so the save path
+	     never disappears if the catalog fails to resolve a provider tile, and a
+	     preset choice (whose card has no inline form) still commits here. -->
+	{#if loaded && dirty}
 			<div class="sticky bottom-2 z-10 flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-accent/40 bg-accent/5 px-3 py-2 shadow-sm backdrop-blur-sm">
 				<span class="text-sm font-medium text-text">{t('llm.unsaved.title')}</span>
 				<div class="flex items-center gap-2">
@@ -1445,6 +1447,7 @@
 			</div>
 		{/if}
 
+	{#if activeProviderEntry}
 		<!-- Settings v3 PR 4.6 (Items 3 + 5): Advanced sub-page collapsed inline
 		     as expandable section. The standalone /llm/advanced route stays for
 		     back-compat with deep links; mounting LLMAdvancedView with

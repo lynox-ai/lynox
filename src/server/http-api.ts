@@ -4007,8 +4007,11 @@ export class LynoxHTTPApi {
       // carries neither. Derive the effective tier_set from the SAME expansion, or
       // the picker shows the standard provider map (Sonnet/Opus) while the preset
       // actually routes Ministral 14B etc. (the exact stale-label class rafael hit).
+      // Mirror the loader's explicit-over-preset precedence (config.ts: `{...expanded,
+      // ...config.tier_set}`) so a hand-edited config carrying BOTH a preset and an
+      // explicit tier_set slot labels what actually routes, not the bare preset.
       const effectiveTierSet = config.tier_preset
-        ? expandTierPreset(config.tier_preset)?.tier_set
+        ? { ...expandTierPreset(config.tier_preset)?.tier_set, ...(config.tier_set ?? {}) }
         : (config.routing_mode === 'hybrid' ? config.tier_set : undefined);
       if (effectiveTierSet) {
         // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
