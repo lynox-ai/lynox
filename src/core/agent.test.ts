@@ -3212,6 +3212,29 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawExternalContentTool).toBe(false);
   });
 
+  it('does NOT auto-extract on a turn that ran an external-content tool (web_research poison gate)', async () => {
+    // The legacy `_sawUntrustedData` marker is allowlist-by-omission — `web_research` does NOT
+    // set it — so gating the legacy extractor on the marker ALONE let web-derived answers get
+    // minted into business memory (measured poison, 2026-07-20). The hardened union
+    // (sawExternalContentTool) skips them. This FAILS if the gate reverts to the bare marker:
+    // with `!_sawUntrustedData` the web turn would still call maybeUpdate.
+    const memory = {
+      load: vi.fn(), save: vi.fn(), append: vi.fn(),
+      delete: vi.fn().mockResolvedValue(0), update: vi.fn().mockResolvedValue(false),
+      render: vi.fn().mockReturnValue(''), hasContent: vi.fn().mockReturnValue(false),
+      loadAll: vi.fn(), maybeUpdate: vi.fn(), appendScoped: vi.fn(), loadScoped: vi.fn(),
+      deleteScoped: vi.fn().mockResolvedValue(0), updateScoped: vi.fn().mockResolvedValue(false),
+    };
+    const web = makeTool('web_research', vi.fn().mockResolvedValue('AI agents trends 2026: ...'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'web_research', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Here is what I found about AI agents.'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', memory, tools: [web] });
+    await agent.send('research AI agents');
+    expect(agent.sawExternalContentTool).toBe(true);       // the turn IS external-content
+    expect(memory.maybeUpdate).not.toHaveBeenCalled();     // ...so the extractor is skipped (the fix)
+  });
+
   it('re-arms (resets to false) at the next run entry — a clean run is not tainted by a prior one', async () => {
     const fetchTool = makeTool('fetch_page', vi.fn().mockResolvedValue(
       wrapUntrustedData('The datacenter migration is scheduled for next Tuesday.', 'http'),
