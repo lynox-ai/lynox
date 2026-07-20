@@ -11,6 +11,7 @@
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { getApiBase, getContextPanelEnabled } from '../config.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
+	import HeaderModelPicker from './HeaderModelPicker.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
@@ -850,8 +851,17 @@
 					{@render cmdkHint()}
 				{/if}
 
-				<!-- Right: private toggle + locale dropdown + sign out -->
+				<!-- Right: model picker (new chat) + private toggle + locale + sign out -->
 				<div class="flex items-center gap-1">
+					<!-- Model picker (model-presets W4) — new-chat only, relocated here
+					     from above the composer to free composer space. Picks the tier
+					     (balanced/deep) for turn 1; once the chat starts it disappears and
+					     the per-thread control in the composer takes over. -->
+					{#if isActive('/app', true) && !getSessionId()}
+						<div class="hidden sm:block mr-1">
+							<HeaderModelPicker />
+						</div>
+					{/if}
 					<!-- Private mode toggle (chat page only) -->
 					{#if isActive('/app', true) && getSessionId()}
 						<button

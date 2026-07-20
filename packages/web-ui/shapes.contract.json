@@ -246,7 +246,7 @@
       "and the guard counted components + primitives in one bucket, so it could never fail on",
       "the sentence it existed to protect. It is five components and one primitive."
     ],
-    "components": 73,
+    "components": 74,
     "primitives": 2,
     "buttonComponent": false,
     "scopedStyleComponents": 5,
