@@ -29,6 +29,7 @@ import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
 import { channels, measureTool } from './observability.js';
+import { appendCaptureTelemetry } from './capture-telemetry.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
@@ -774,6 +775,31 @@ export class Agent implements IAgent {
   }
 
   /** Schedule a memory extraction, draining oldest if at concurrency cap. */
+  /**
+   * Turn-end capture hook. Legacy behaviour when the DK flag is OFF: auto-extract
+   * (skipped for untrusted/internal turns). When DK is ON the legacy extraction is
+   * gated off by design — here we instead emit a `capture_eligible` telemetry line
+   * (the DENOMINATOR of the capture fire-rate, DEF-dk-capture-observability), so
+   * "why is capture dead on the canary?" becomes a measured number. Preserves the
+   * exact prior gate: legacy extraction fires only when NOT untrusted AND DK OFF.
+   */
+  private _captureAtTurnEnd(text: string): void {
+    if (!this.memory || this.skipMemoryExtraction || this.isInternalRun) return;
+    if (this._durableMemoryEnabled) {
+      void appendCaptureTelemetry(true, {
+        ts: Date.now(),
+        event: 'capture_eligible',
+        thread: this.currentThreadId,
+        model: this.model,
+        untrusted: this._sawUntrustedData,
+      });
+      return;
+    }
+    if (this._sawUntrustedData) return;
+    const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
+  }
+
   private _scheduleMemoryExtraction(promise: Promise<void>): void {
     if (!promise) return; // guard: maybeUpdate can return void
     // Track settlement asynchronously so completed promises are drained on next call
@@ -1083,20 +1109,14 @@ export class Agent implements IAgent {
             await this.onStream({ type: 'cost_warning', snapshot: this.costGuard.snapshot(), agent: this.name });
           }
           const text = extractText(response.content);
-          if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun && !this._durableMemoryEnabled) {
-            const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
-          }
+          this._captureAtTurnEnd(text);
           return text;
         }
       }
 
       if (response.stop_reason === 'end_turn') {
         const text = extractText(response.content);
-        if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun && !this._durableMemoryEnabled) {
-          const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
-        }
+        this._captureAtTurnEnd(text);
         return text;
       }
 
@@ -1117,10 +1137,7 @@ export class Agent implements IAgent {
         // Continuation cap exhausted — surface a clear notice rather than an
         // empty bubble when the truncated turn produced no visible text.
         const text = extractText(response.content);
-        if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun && !this._durableMemoryEnabled) {
-          const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-          this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
-        }
+        this._captureAtTurnEnd(text);
         return text.trim().length > 0
           ? text
           : '[Response stopped: the output limit was reached before any text was produced — the task is likely too large for one turn. Try splitting it into smaller steps.]';
@@ -1175,10 +1192,7 @@ export class Agent implements IAgent {
           // Mirror the end_turn path exactly: return this turn's text and run the
           // same memory-extraction gate (skipped for untrusted/internal/durable).
           const text = extractText(response.content);
-          if (this.memory && !this.skipMemoryExtraction && !this._sawUntrustedData && !this.isInternalRun && !this._durableMemoryEnabled) {
-            const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-            this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
-          }
+          this._captureAtTurnEnd(text);
           return text;
         }
         continue;
