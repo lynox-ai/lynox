@@ -413,6 +413,19 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
         return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
       }
     }
+    // Write-accept ⟺ load-keep for the flag-gated Fireworks slot. The host check
+    // above does not see the CP KEY, but the loader (applyManagedTierSetConstraints)
+    // keeps a Fireworks slot only when FIREWORKS_API_KEY is also provisioned — so
+    // with the flag ON but the key UNSET the write would 200 while the loader drops
+    // the slot and silently reroutes deep to the base (costly Opus) model: the exact
+    // "picker advertises a preset the loader reroutes" false-compliance this gate
+    // exists to prevent. Reject it instead. (Anthropic/Mistral keys are always
+    // provisioned on managed, so only the opt-in Fireworks key needs this check.)
+    if (fireworksEnabled
+      && !process.env['FIREWORKS_API_KEY']
+      && Object.values(expanded.tier_set).some((s) => s?.api_base_url === FIREWORKS_API_BASE)) {
+      return `Managed instance: tier_preset '${tierPreset}' needs a Fireworks credential that is not provisioned (FIREWORKS_API_KEY) — it would silently fall back to the base model. Provision the key first.`;
+    }
   }
   return null;
 }

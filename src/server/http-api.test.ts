@@ -4052,18 +4052,41 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it('PUT /api/config ACCEPTS ⚡ efficient once the operator opts the instance in', async () => {
+      it('PUT /api/config ACCEPTS ⚡ efficient once the operator opts in AND provisions the key', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
         vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', 'cp-fireworks-key'); // the canary needs both the flag AND the key
         try {
           const res = await jsonFetch('/api/config', {
             method: 'PUT',
             body: JSON.stringify({ tier_preset: 'efficient' }),
           });
-          // The Fireworks host is now allowed → the write is ACCEPTED (a bare
+          // Fireworks host allowed + key provisioned → the write is ACCEPTED (a bare
           // not-403 check would pass vacuously if a later step silently dropped it).
           expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS ⚡ efficient when the flag is on but FIREWORKS_API_KEY is UNSET', async () => {
+        // The assembled-review seam: host-accept without key-check would 200 here,
+        // then the loader drops the Fireworks slot and reroutes deep to the costly
+        // base model (false compliance). The write-gate must reject it up front.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', ''); // flag on, key NOT provisioned
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'efficient' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('FIREWORKS_API_KEY');
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
