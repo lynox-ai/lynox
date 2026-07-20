@@ -3,6 +3,7 @@ import type { KnowledgeKind, MemoryBlockEditMode } from '../../types/memory.js';
 import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-store.js';
 import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
 
 /**
  * Durable Knowledge Substrate tools (DK.1). The always-on capture/read surface that
@@ -97,6 +98,18 @@ export const rememberTool: ToolEntry<RememberInput> = {
       sourceUntrusted,
       sourceThreadId: agent.currentThreadId,
       sourceRunId: agent.currentRunId,
+    });
+
+    // Capture telemetry (DEF-dk-capture-observability): the NUMERATOR of the fire
+    // -rate — the model actually recorded a durable fact, with the store outcome.
+    // Gated on the DK flag so it logs only where we measure (the canary).
+    void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
+      ts: Date.now(),
+      event: 'remember_invoked',
+      thread: agent.currentThreadId,
+      model: agent.model,
+      untrusted: sourceUntrusted,
+      outcome: result.deduped === true ? 'deduped' : result.status,
     });
 
     // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
