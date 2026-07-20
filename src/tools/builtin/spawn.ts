@@ -5,6 +5,7 @@ import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier } from '../
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, RunAbortedError } from '../../core/agent.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
@@ -566,8 +567,7 @@ async function executeThinker(
     // without this an injected write would launder to active+pinned through the child. Arm the
     // child's STICKY conversation latch (survives its send() per-run reset, unlike sawUntrustedData)
     // so any such write routes to pending_review. Over-taints in the safe direction only.
-    if (parentAgent.sawUntrustedData === true || parentAgent.sawExternalContentTool === true
-      || parentAgent.conversationSawUntrusted === true) {
+    if (deriveTurnUntrusted(parentAgent)) {
       childAgent.noteUntrustedData();
     }
 
@@ -578,9 +578,11 @@ async function executeThinker(
     // (`memory` above resolves to `parentAgent.memory` unless `isolated_memory`). If the
     // child read untrusted content, the SHARED Memory is now tainted for the parent too —
     // propagate the flag so the parent's own end-of-run extraction abstains. Without this
-    // the child's untrusted read is a fail-open hole in the parent's memory. No-op when
-    // the child ran with isolated memory (`memory === undefined`).
-    if (memory !== undefined && childAgent.sawUntrustedData) {
+    // the child's untrusted read is a fail-open hole in the parent's memory. Derive from the
+    // FULL union, not the bare marker — a child that read external content via a non-wrapping
+    // tool (web_research/mail/read_file) must taint the parent too, symmetric with the
+    // parent→child seed above. No-op when the child ran with isolated memory (`memory === undefined`).
+    if (memory !== undefined && deriveTurnUntrusted(childAgent)) {
       parentAgent.noteUntrustedData?.();
     }
 

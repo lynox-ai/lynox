@@ -467,6 +467,39 @@ describe('spawn_agent tool', () => {
     expect(child.noteUntrustedData).not.toHaveBeenCalled();
   });
 
+  // === S8 (reverse): a child that read external content back-taints the parent (shared memory) ===
+  // The child sets sawExternalContentTool (a non-wrapping external-content read), NOT the bare
+  // wrap marker — so this FAILS if child→parent propagation reverts to `childAgent.sawUntrustedData`.
+
+  it('S8: a child that read external content back-taints the parent when memory is shared', async () => {
+    const parentNote = vi.fn();
+    const agent = makeAgent({ memory: {} as IAgent['memory'], noteUntrustedData: parentNote } as Partial<IAgent>);
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true; // child read external content via a non-wrapping tool
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    expect(parentNote).toHaveBeenCalled();
+  });
+
+  it('S8: a clean child does NOT back-taint the parent', async () => {
+    const parentNote = vi.fn();
+    const agent = makeAgent({ memory: {} as IAgent['memory'], noteUntrustedData: parentNote } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    expect(parentNote).not.toHaveBeenCalled();
+  });
+
+  it('S8: an ISOLATED-memory child does NOT back-taint the parent even after reading external content', async () => {
+    const parentNote = vi.fn();
+    const agent = makeAgent({ memory: {} as IAgent['memory'], noteUntrustedData: parentNote } as Partial<IAgent>);
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true;
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work', isolated_memory: true }] }, agent);
+    expect(parentNote).not.toHaveBeenCalled();
+  });
+
   it('explicit spec fields override role defaults', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({

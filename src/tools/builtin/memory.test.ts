@@ -236,6 +236,37 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     );
     expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
   });
+
+  // memory_update's KG-mirror publish is knowledgeLayer-gated AND only on the fallback path
+  // (exact update miss → [SUPERSEDED] marker + append), so drive both: update() returns false
+  // and a knowledgeLayer is present.
+  const updateFallbackMemory = () => makeMockMemory({
+    load: vi.fn(async () => 'ProjectAlpha launch is in November'),
+    update: vi.fn(async () => false),
+    delete: vi.fn(async () => 1),
+    append: vi.fn(async () => undefined),
+  });
+  const withKg = (agent: IAgent): IAgent => ({ ...agent, toolContext: { ...createToolContext({}), knowledgeLayer: makeKg() } });
+
+  it('memory_update quarantines the KG-mirrored write when an external-content tool ran this turn', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = withKg(untrustedAgent(updateFallbackMemory(), { sawExternalContentTool: true }));
+    await memoryUpdateTool.handler(
+      { namespace: 'learnings', old_content: 'ProjectAlpha launch November', new_content: 'ProjectAlpha launch postponed to December' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_update keeps the KG-mirrored write trusted on a clean turn', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = withKg(untrustedAgent(updateFallbackMemory(), {}));
+    await memoryUpdateTool.handler(
+      { namespace: 'learnings', old_content: 'ProjectAlpha launch November', new_content: 'ProjectAlpha launch postponed to December' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: false }));
+  });
 });
 
 describe('memoryRecallTool', () => {
