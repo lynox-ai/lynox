@@ -26,6 +26,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
+	import { clearTierConfigCache } from '../utils/tier-config.js';
 	import { buildMainModelOptions, selectMainModelId, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
@@ -746,6 +747,11 @@
 				} catch { /* non-JSON body — keep the status string */ }
 				throw new Error(reason);
 			}
+			// The routing/tier config may have changed → drop the shared tier-config
+			// cache so the composer + header model pickers re-fetch the new per-tier
+			// model labels immediately (else they'd show the pre-save model, e.g. the
+			// "Mistral Large 3" stale-label after switching balanced to Ministral 14B).
+			clearTierConfigCache();
 			// Mirror the server-recorded acceptance locally so the modal doesn't
 			// re-fire for this host before the next config reload.
 			if (needsConfirm && typeof url === 'string') {
