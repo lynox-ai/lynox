@@ -26,6 +26,7 @@ import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
+import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -3886,6 +3887,13 @@ export class LynoxHTTPApi {
           ? { tier: 'managed', contact_for_quotas: true }
           : limitsMod.getHardLimits(),
       };
+      // model-presets W4: the per-preset "Modell-Strategie" signal the settings
+      // cards + header picker render from. Availability reuses the loader
+      // hardening (applyManagedTierSetConstraints), so a card is disabled iff the
+      // loader would actually drop a slot AND the write-gate would 403 — no false
+      // advertising. Computed once; feeds both the tier_preset lock below and the
+      // emitted `available_tier_presets` payload.
+      const tierPresetSignal = buildTierPresetSignal({ isManagedTier });
       // Lock metadata for every `can_set_X = false` decision. UI renders a
       // human-readable reason instead of an unexplained disabled input.
       const locks: CapabilityLocks = {};
@@ -3902,6 +3910,17 @@ export class LynoxHTTPApi {
           contact_cta: { href: 'mailto:support@lynox.ai?subject=Quota%20adjustment', label: 'Contact support' },
         };
         locks.custom_endpoints = { reason: 'managed-tier' };
+        // A managed instance without the Fireworks opt-in can't back the ⚡
+        // efficient preset (its deep slot has no CP key) — so the card is
+        // disabled, not silently downgraded. The lock carries the same support
+        // channel as the limits lock; the per-preset `available` flag says WHICH
+        // preset(s) are affected.
+        if (Object.values(tierPresetSignal).some((p) => !p.available)) {
+          locks.tier_preset = {
+            reason: 'managed-tier',
+            contact_cta: { href: 'mailto:support@lynox.ai?subject=Model%20preset%20availability', label: 'Contact support' },
+          };
+        }
       }
       redacted['locks'] = locks;
       // Settings v3 Item 6 (model-aware context-window radios): resolve the
@@ -3996,6 +4015,12 @@ export class LynoxHTTPApi {
           if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
         }
       }
+      // model-presets W4: the "Modell-Strategie" cards + the header picker render
+      // the resolved per-tier model, provenance chip, and R2-gated host
+      // disclosure per preset — plus the `available` flag that disables a preset
+      // the CP can't back. Server-authoritative so the client needs no
+      // @lynox-ai/core import and the disclosure gate stays honest.
+      redacted['available_tier_presets'] = tierPresetSignal;
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);

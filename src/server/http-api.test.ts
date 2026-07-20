@@ -2246,6 +2246,23 @@ describe('LynoxHTTPApi', () => {
       expect(body['locks']).toEqual({});
     });
 
+    it('GET emits available_tier_presets (model-presets W4) — all available + resolved on self-host', async () => {
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const presets = body['available_tier_presets'] as Record<string, { tiers: Array<Record<string, unknown>>; available: boolean }> | undefined;
+      expect(presets).toBeDefined();
+      // Self-host backs every preset (loader hardening never runs) → no tier_preset lock.
+      expect((body['locks'] as Record<string, unknown>)['tier_preset']).toBeUndefined();
+      for (const p of Object.values(presets!)) expect(p.available).toBe(true);
+      // Per-tier enrichment is server-side (web-ui has no @lynox-ai/core import):
+      // the ⚡ efficient deep slot resolves to the CN-via-Fireworks model + its host disclosure.
+      const efficientDeep = presets!['efficient']!.tiers.find((t) => t['tier'] === 'deep')!;
+      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(efficientDeep['provenance']).toBe('CN');
+      expect(efficientDeep['residency']).toBe('US');
+    });
+
     it('GET surfaces active_model with resolved capability data (Settings v3 Item 6)', async () => {
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
@@ -2458,6 +2475,43 @@ describe('LynoxHTTPApi', () => {
         }
       },
     );
+
+    it('GET on managed tier: an unavailable preset sets the tier_preset lock (W4 wiring)', async () => {
+      // config.js is module-mocked here (loader hardening = identity), so the REAL
+      // availability predicate is unit-tested in tier-preset-signal.test.ts. This
+      // test drives the http-api WIRING: when the loader drops a slot (⚡ efficient's
+      // Fireworks deep, no opt-in) the preset is unavailable → the card is disabled
+      // AND `locks.tier_preset` is set (mirrors the write-gate 403, not a silent
+      // downgrade). Override the mock to drop Fireworks slots for this case.
+      const { applyManagedTierSetConstraints } = await import('../core/config.js');
+      vi.mocked(applyManagedTierSetConstraints).mockImplementation((ts) => {
+        const kept: Record<string, unknown> = {};
+        for (const [tier, slot] of Object.entries(ts as Record<string, { api_base_url?: string }>)) {
+          if (!slot.api_base_url?.includes('fireworks.ai')) kept[tier] = slot;
+        }
+        return kept as ReturnType<typeof applyManagedTierSetConstraints>;
+      });
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const presets = body['available_tier_presets'] as Record<string, { available: boolean }>;
+        expect(presets['efficient']!.available).toBe(false); // Fireworks deep dropped
+        expect(presets['balanced']!.available).toBe(true);
+        expect(presets['max-quality']!.available).toBe(true);
+        // The lock mirrors the disabled card + the write-gate 403.
+        const locks = body['locks'] as Record<string, Record<string, unknown>>;
+        expect(locks['tier_preset']?.['reason']).toBe('managed-tier');
+        expect((locks['tier_preset']?.['contact_cta'] as Record<string, unknown>)?.['href']).toContain('mailto:support@lynox.ai');
+      } finally {
+        vi.mocked(applyManagedTierSetConstraints).mockImplementation((ts) => ts);
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
 
     it('PUT in managed mode allows no-op locked-field re-send (regression v1.3.5)', async () => {
       // Web UI re-sends every field on every save. A no-op write of `default_tier`

@@ -731,4 +731,4 @@ export interface CapabilityLock {
  * `custom_provider_endpoints`: free-text base_url tiles disabled (Managed).
  *   Mirror in code: catalog entries with `requires_base_url === true`.
  */
-export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort', CapabilityLock>>;
+export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort' | 'tier_preset', CapabilityLock>>;
