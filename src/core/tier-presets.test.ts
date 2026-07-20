@@ -66,4 +66,14 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     expect(expanded?.tier_set.balanced?.model_id).toBe('ministral-14b-2512');
     expect(expandTierPreset('does-not-exist')).toBeUndefined();
   });
+
+  it('expandTierPreset: a prototype-chain name is rejected, not resolved to a garbage expansion', () => {
+    // `TIER_PRESETS[name]` bracket access would return a truthy Object.prototype member
+    // for these, slipping past a truthy-check guard and expanding to
+    // {routing_mode: undefined, tier_set: undefined} — a silent routing wipe. Object.hasOwn
+    // rejects them cleanly (undefined → the loader's "Unknown tier_preset" throw).
+    for (const evil of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(expandTierPreset(evil)).toBeUndefined();
+    }
+  });
 });

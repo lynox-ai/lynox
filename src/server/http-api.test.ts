@@ -4282,6 +4282,28 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('PUT /api/config rejects an unknown tier_preset on self-host (400, never persisted → no boot crash-loop)', async () => {
+        // The config loader fail-closes on an unknown preset with a THROW and the engine
+        // ctor has no catch, so a persisted bad name would crash-loop the container. Reject
+        // it at write time on non-managed instances too (managed has its own 403 gate).
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+        try {
+          for (const bad of ['nonexistent-preset', '__proto__', 'constructor']) {
+            const res = await jsonFetch('/api/config', {
+              method: 'PUT',
+              body: JSON.stringify({ tier_preset: bad }),
+            });
+            expect(res.status).toBe(400);
+            const body = await res.json() as { error: string };
+            expect(body.error).toContain('Unknown tier_preset');
+          }
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it("PUT /api/config rejects provider:'openai' without openai_model_id (T2-P3)", async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');

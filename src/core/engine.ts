@@ -1115,23 +1115,13 @@ export class Engine {
     this.userId = scopeResult.userId;
     this.activeScopes = scopeResult.scopes;
 
-    // First-turn briefing: surface the operator's overdue / due tasks
-    // deterministically (pure SQL, <10ms, NO LLM call) on EVERY surface. This
-    // lived inside `generateInitBriefing`, which early-returns on the non-CLI
-    // (PWA/managed) path — so the primary product surface never got the
-    // `<task_overview>` the system prompt tells the agent to check, and the agent
-    // fell back to calling `task_list` (an extra Sonnet round-trip). Lifting it
-    // here — after `initScopes` resolves `activeScopes` — fixes both the miss and
-    // the stale scopes it had at the earlier (pre-scope-resolution) call site.
-    if (this.runHistory) {
-      try {
-        const { TaskManager } = await import('./task-manager.js');
-        const taskBriefing = new TaskManager(this.runHistory).getBriefingSummary(this.activeScopes);
-        if (taskBriefing) {
-          this.briefing = this.briefing ? `${this.briefing}\n\n${taskBriefing}` : taskBriefing;
-        }
-      } catch { /* best-effort — a briefing failure must never break bring-up */ }
-    }
+    // First-turn task overview (overdue / due tasks) is NOT frozen into the static
+    // briefing here — it is recomputed per-Session via `getTaskBriefing()` (called
+    // from the Session constructor). Freezing it at init served the boot-time snapshot
+    // to every new thread for the container's lifetime: completed tasks stayed flagged
+    // overdue and later-overdue tasks never appeared, and the agent (told to trust the
+    // briefing) acted on stale data. The compute is pure SQL (<10ms, no LLM), so a
+    // per-Session recompute is cheap and always current.
   }
 
   /** Memory, embedding provider, knowledge graph, DataStore↔KG bridge, KPI briefing injection, memory:store subscriber. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -1897,6 +1887,18 @@ export class Engine {
   getEngineDb(): EngineDb | null { return this.engineDb; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
+   *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.
+   *  Defaults to the engine's resolved scopes. Best-effort: never throws into bring-up. */
+  getTaskBriefing(scopes?: MemoryScopeRef[]): string | undefined {
+    const tm = this._taskManager;
+    if (!tm) return undefined;
+    try {
+      return tm.getBriefingSummary(scopes ?? this.activeScopes) || undefined;
+    } catch {
+      return undefined;
+    }
+  }
   getActiveScopes(): MemoryScopeRef[] { return this.activeScopes; }
   getUserId(): string | null { return this.userId; }
   getEmbeddingProvider(): EmbeddingProvider | null { return this.embeddingProvider; }

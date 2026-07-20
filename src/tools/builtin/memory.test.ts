@@ -267,6 +267,35 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     );
     expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: false }));
   });
+
+  // The EXACT-update path (memory.update returns true) mirrors to the KG via
+  // knowledgeLayer.updateMemoryText, which RE-EXTRACTS the new text into the trusted
+  // subject graph — so it too must be gated on the union, not run untainted (the residual
+  // the first write-trust pass left on this path).
+  const kgWithUpdate = () => {
+    const updateMemoryText = vi.fn().mockResolvedValue(undefined);
+    return { kg: { ...makeKg(), updateMemoryText } as unknown as IKnowledgeLayer, updateMemoryText };
+  };
+
+  it('memory_update EXACT path skips the KG re-extraction on an external-content turn', async () => {
+    const { kg, updateMemoryText } = kgWithUpdate();
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), { sawExternalContentTool: true }),
+      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+    };
+    await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
+    expect(updateMemoryText).not.toHaveBeenCalled();
+  });
+
+  it('memory_update EXACT path mirrors to the KG on a clean turn', async () => {
+    const { kg, updateMemoryText } = kgWithUpdate();
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
+      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+    };
+    await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
+    expect(updateMemoryText).toHaveBeenCalled();
+  });
 });
 
 describe('memoryRecallTool', () => {

@@ -98,6 +98,11 @@ export const TIER_PRESETS: Record<string, TierPreset> = {
 /** Expand a `tier_preset` name to its `{routing_mode, tier_set}`, or `undefined`
  *  if the name is unknown (the caller decides — the loadConfig expander throws). */
 export function expandTierPreset(name: string): { routing_mode: 'hybrid'; tier_set: TierSet } | undefined {
+  // `Object.hasOwn`, not a truthy `TIER_PRESETS[name]` lookup: a prototype-chain name
+  // (`__proto__`, `constructor`, `toString`) resolves to a truthy Object.prototype member
+  // via bracket access, which would slip past an unknown-name guard and expand to a
+  // garbage `{routing_mode: undefined, tier_set: undefined}` (a silent routing wipe).
+  if (!Object.hasOwn(TIER_PRESETS, name)) return undefined;
   const preset = TIER_PRESETS[name];
   if (!preset) return undefined;
   return { routing_mode: preset.routing_mode, tier_set: preset.tier_set };
