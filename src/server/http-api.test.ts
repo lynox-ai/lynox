@@ -2109,6 +2109,36 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    // model-presets W4 — the settings picker persists a preset choice by name.
+    it('PUT accepts a tier_preset and persists it (model-presets W4)', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ tier_preset: 'balanced' }),
+      });
+      expect(res.status).toBe(200);
+      const { saveUserConfig } = await import('../core/config.js');
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall![0]['tier_preset']).toBe('balanced');
+    });
+
+    it('PUT tier_preset:null CLEARS the field (switch back to Standard/Custom)', async () => {
+      // A persisted tier_preset force-sets routing_mode='hybrid' at load, so the
+      // ONLY way back to Standard is to physically delete the key. The schema is
+      // .nullable() precisely so `null` reaches the merge loop's delete branch;
+      // omission would preserve the stale preset. Seed an existing preset, then null it.
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ tier_preset: 'balanced', default_tier: 'deep' });
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ tier_preset: null, routing_mode: 'standard', tier_set: {} }),
+      });
+      expect(res.status).toBe(200);
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect('tier_preset' in lastCall![0]).toBe(false); // key deleted, not persisted as null
+      expect(lastCall![0]['routing_mode']).toBe('standard');
+    });
+
     it('PUT rejects a non-Sonnet balanced_model with 400 AND persists nothing (never routes balanced off-Sonnet)', async () => {
       // A real Claude id that is NOT a served Sonnet — passes the schema
       // string check but must be rejected by the served-Sonnet allowlist so

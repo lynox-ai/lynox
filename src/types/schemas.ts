@@ -261,7 +261,11 @@ export const LynoxUserConfigSchema = z.object({
   // it to {routing_mode, tier_set}. Schema entry is mandatory: without it, a
   // config.json carrying `tier_preset` fails `.strict()` and nulls the whole
   // config. Bounded length; the expander validates the name against TIER_PRESETS.
-  tier_preset:             z.string().min(1).max(64).optional(),
+  // `.nullable()` so the settings picker can CLEAR it (`PUT {tier_preset:null}`
+  // hits the merge loop's `value===null → delete` branch): its mere presence
+  // force-sets routing_mode='hybrid' at load, so switching back to Standard/Eigene
+  // requires physically deleting the key — omitting it only preserves the stale one.
+  tier_preset:             z.string().min(1).max(64).nullable().optional(),
   cp_supplied:             z.boolean().optional(),
   // Named non-Claude model profiles + the profile used for background tasks.
   // Both are on the interface AND loaded from env (LYNOX_MODEL_PROFILES_JSON /
