@@ -440,12 +440,27 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(briefing).not.toContain('<memory_scopes>');
 
       // L2a: the engine computes <task_overview> UNCONDITIONALLY (not CLI-gated) —
-      // getBriefingSummary is invoked during init on this non-CLI path. The lift is
-      // what this asserts; the summary CONTENT is covered by task-manager.test.ts.
+      // getBriefingSummary is invoked when the Session is built (via getTaskBriefing),
+      // on this non-CLI path. The lift is what this asserts; the summary CONTENT is
+      // covered by task-manager.test.ts.
       const summaryCalled = vi.mocked(TaskManager).mock.instances.some(
         (inst) => (((inst as { getBriefingSummary?: { mock?: { calls: unknown[] } } }).getBriefingSummary?.mock?.calls.length) ?? 0) > 0,
       );
-      expect(summaryCalled, 'Engine must call TaskManager.getBriefingSummary during init (L2a task-overview lift)').toBe(true);
+      expect(summaryCalled, 'Engine must call TaskManager.getBriefingSummary for the task overview (L2a lift)').toBe(true);
+    });
+
+    it('recomputes the task overview per Session (B2) — not frozen at engine boot', async () => {
+      const { engine } = await createEngineAndSession();
+      // getTaskBriefing() reads the live TaskManager on every call, so a later Session
+      // sees CURRENT tasks — not the boot snapshot the old init-time freeze served to
+      // every new thread for the container's lifetime.
+      const tm = (engine as unknown as { _taskManager: { getBriefingSummary: ReturnType<typeof vi.fn> } })._taskManager;
+      tm.getBriefingSummary.mockReturnValue('OVERVIEW-1');
+      expect(engine.getTaskBriefing()).toBe('OVERVIEW-1');
+      tm.getBriefingSummary.mockReturnValue('OVERVIEW-2');
+      expect(engine.getTaskBriefing()).toBe('OVERVIEW-2');
+      // The static briefing does NOT carry the (now per-Session) overview.
+      expect(engine.getBriefing() ?? '').not.toContain('OVERVIEW-1');
     });
   });
 
