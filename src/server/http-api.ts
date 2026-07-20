@@ -25,6 +25,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
+import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -303,6 +304,11 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // key. Persisting the raw value is inert; the load-time transform sanitizes.
   'routing_mode',
   'tier_set',
+  // model-presets W3: a named hybrid strategy. enforceManagedProviderConstraints
+  // EXPANDS it via the shared TIER_PRESETS SoT and 403s if any expanded slot is
+  // off the curated allowlist (never silent-strip); the loader then hardens the
+  // expanded tier_set the same way it does a raw one.
+  'tier_preset',
 ]);
 
 /**
@@ -336,6 +342,17 @@ const MANAGED_CURATED_HOSTS = new Set<string>([
 ]);
 
 function enforceManagedProviderConstraints(update: Record<string, unknown>): string | null {
+  // Effective curated HYBRID-SLOT hosts (model-presets W3): the Fireworks host
+  // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
+  // this managed instance in (LYNOX_MANAGED_FIREWORKS_ENABLED, default OFF — broad
+  // managed stays Anthropic/Mistral; Fireworks is a new sub-processor, DPA-gated;
+  // ON = the rafael canary). It is NOT added to the TOP-LEVEL provider/endpoint
+  // checks (sections 1-2) — Fireworks is reachable only as a hybrid slot, never as
+  // a standard-mode managed endpoint.
+  const fireworksEnabled = managedFireworksEnabled();
+  const slotHosts = fireworksEnabled
+    ? new Set<string>([...MANAGED_CURATED_HOSTS, FIREWORKS_API_BASE])
+    : MANAGED_CURATED_HOSTS;
   // 1. provider field present — must be in the curated allowlist (anthropic
   //    or openai-with-Mistral-host). 'custom' and 'vertex' are blocked outright.
   if ('provider' in update) {
@@ -374,8 +391,26 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
     for (const [tier, slot] of Object.entries(tierSet as Record<string, unknown>)) {
       if (!slot || typeof slot !== 'object') continue;
       const slotUrl = (slot as Record<string, unknown>)['api_base_url'];
-      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(slotUrl)) {
+      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
         return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
+      }
+    }
+  }
+  // 4. tier_preset (model-presets W3) — EXPAND via the same TIER_PRESETS SoT the
+  //    loader uses and validate each expanded slot's host against the effective
+  //    allowlist. An honest 403 (never a silent strip): a preset whose slot routes
+  //    off-allowlist is rejected at WRITE time, so the picker can never advertise a
+  //    preset the loader would reroute (the false-compliance this gate prevents).
+  const tierPreset = update['tier_preset'];
+  if (typeof tierPreset === 'string' && tierPreset.length > 0) {
+    const expanded = expandTierPreset(tierPreset);
+    if (!expanded) {
+      return `Managed instance: unknown tier_preset '${tierPreset}'.`;
+    }
+    for (const [tier, slot] of Object.entries(expanded.tier_set)) {
+      const slotUrl = slot?.api_base_url;
+      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
       }
     }
   }

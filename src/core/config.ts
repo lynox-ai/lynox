@@ -10,7 +10,7 @@ import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
 import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
-import { TIER_PRESETS, expandTierPreset } from './tier-presets.js';
+import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from './tier-presets.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
@@ -30,6 +30,13 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
   const out: TierSet = {};
   const anthropicKey = process.env['ANTHROPIC_API_KEY'];
   const mistralKey = process.env['MISTRAL_API_KEY'];
+  // Canary (model-presets W3): a Fireworks slot (⚡ efficient's deep model) is kept
+  // ONLY when the operator opts this managed instance in via the flag AND the CP
+  // supplies FIREWORKS_API_KEY. Default OFF → the slot drops like any off-allowlist
+  // host (broad managed stays Anthropic/Mistral). The base_url is forced to the
+  // canonical FIREWORKS_API_BASE (no host spoof), mirroring the Mistral branch.
+  const fireworksEnabled = managedFireworksEnabled();
+  const fireworksKey = process.env['FIREWORKS_API_KEY'];
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
     const slot = tierSet[tier];
     if (!slot) continue;
@@ -40,10 +47,17 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
     // ALWAYS forced to the canonical MISTRAL_API_BASE (no host spoof).
     const isMistral = slot.provider === 'mistral'
       || (slot.provider === 'openai' && isMistralHost(slot.api_base_url));
+    // Fireworks (openai wire) — accepted only under the flag, matched by the EXACT
+    // canonical endpoint (no fuzzy host match / no spoof surface).
+    const isFireworks = fireworksEnabled
+      && slot.provider === 'openai'
+      && slot.api_base_url === FIREWORKS_API_BASE;
     if (slot.provider === 'anthropic' && anthropicKey) {
       out[tier] = { provider: 'anthropic', model_id: slot.model_id, api_key: anthropicKey };
     } else if (isMistral && mistralKey) {
       out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
+    } else if (isFireworks && fireworksKey) {
+      out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: fireworksKey, api_base_url: FIREWORKS_API_BASE };
     }
     // else: off-allowlist provider or missing CP key → drop (falls back to base).
   }

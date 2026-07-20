@@ -32,10 +32,25 @@
 import type { ModelTier, TierSet, TierSlot } from '../types/index.js';
 import { MISTRAL_API_BASE } from '../types/index.js';
 
-/** Fireworks endpoint — mirrors the catalog `base_url_default` (catalog.ts). A
- *  test asserts it equals the catalog value (catches a path drift the host-only
- *  allowlist would miss) and that every preset endpoint is allowlisted. */
-const FIREWORKS_ENDPOINT = 'https://api.fireworks.ai/inference/v1';
+/** Canonical Fireworks endpoint — mirrors the catalog `base_url_default`
+ *  (catalog.ts). Exported so the managed write-gate + load-hardening (W3) pin the
+ *  SAME host. A test asserts it equals the catalog value (catches a path drift the
+ *  host-only allowlist would miss) and that every preset endpoint is allowlisted. */
+export const FIREWORKS_API_BASE = 'https://api.fireworks.ai/inference/v1';
+
+/**
+ * Canary opt-in (model-presets W3): a MANAGED instance may route a preset's
+ * Fireworks-hosted slot (⚡ efficient's deep model) ONLY when the operator sets
+ * `LYNOX_MANAGED_FIREWORKS_ENABLED` in the CP env. Default OFF → broad managed
+ * stays Anthropic/Mistral-only (Fireworks is a new sub-processor, DPA-gated); ON =
+ * the rafael canary. Read via direct `process.env` (mirrors the config.ts boolean
+ * -flag cluster); it is NOT a config field, so a tenant's project config cannot
+ * self-grant it. Self-host is unaffected — this gate only runs on cp_supplied.
+ */
+export function managedFireworksEnabled(): boolean {
+  const v = process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
+  return v === 'true' || v === '1';
+}
 
 /** A named hybrid strategy: config-sugar over `{routing_mode, tier_set}`. Slots
  *  omit `api_key` — self-host resolves it from the endpoint (pinnedVaultSlot). */
@@ -46,7 +61,7 @@ export interface TierPreset {
 
 const anthropic = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'anthropic', model_id });
 const mistral = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: MISTRAL_API_BASE });
-const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_ENDPOINT });
+const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_API_BASE });
 
 export const TIER_PRESETS: Record<string, TierPreset> = {
   // ⚡ efficient — cheapest coherent set: EU Mistral for fast/balanced, a cheap

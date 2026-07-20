@@ -4031,6 +4031,78 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      // model-presets W3 — managed tier_preset write-gate. The gate EXPANDS the
+      // preset via the shared SoT and 403s honestly (never silent-strip) when a
+      // slot routes off the curated allowlist.
+      it('PUT /api/config REJECTS the Fireworks-hosted ⚡ efficient preset on managed by default', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'efficient' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('tier_preset');
+          expect(body.error).toContain('efficient');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS ⚡ efficient once the operator opts the instance in', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'efficient' }),
+          });
+          // The Fireworks host is now allowed → the write is ACCEPTED (a bare
+          // not-403 check would pass vacuously if a later step silently dropped it).
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS the all-Anthropic 💎 max-quality preset on managed (no flag needed)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'max-quality' }),
+          });
+          // All-Anthropic preset — accepted on managed with no flag.
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS an unknown tier_preset on managed', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'nonexistent-preset' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('unknown tier_preset');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       // Starter (BYOK) — provider/api_base_url/cost-caps are NOT locked.
       // Customer owns their LLM, owns the config. Config-lock gate must
       // skip them entirely.
