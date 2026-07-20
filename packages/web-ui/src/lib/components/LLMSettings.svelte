@@ -186,6 +186,7 @@
 		residency?: string;
 		transferBasis?: string | null;
 		posture?: string;
+		pricing?: { input: number; output: number };
 	}
 	interface PresetInfo {
 		name: string;
@@ -1101,6 +1102,14 @@
 							{/if}
 							{#if tier.residency && tier.residency !== tier.provenance}
 								<span class="text-[10px] px-1.5 py-px rounded bg-bg-muted text-text-subtle">{tier.residency}</span>
+							{/if}
+							<!-- Cost feel (rafael): input/output $/M, right-aligned. Same
+							     "$X/M in · $Y/M out" format as the standard main-model picker
+							     (in/out is universal token-pricing notation — hardcoded there too). -->
+							{#if tier.pricing}
+								<span class="text-[11px] text-text-subtle ml-auto tabular-nums whitespace-nowrap">
+									${tier.pricing.input}/M in · ${tier.pricing.output}/M out
+								</span>
 							{/if}
 						</div>
 						{#if expandedDetails[strategy]}

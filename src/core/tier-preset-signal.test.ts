@@ -93,6 +93,14 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     expect(bal.residency).toBe('EU');
   });
 
+  it('carries per-tier input/output pricing (the cost feel) from the registry', () => {
+    const sig = buildTierPresetSignal({ isManagedTier: false });
+    const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
+    expect(bal.pricing).toEqual({ input: 0.20, output: 0.20 }); // Ministral 14B
+    const deep = sig['balanced']!.tiers.find((t) => t.tier === 'deep')!;
+    expect(deep.pricing).toEqual({ input: 3, output: 15 }); // Sonnet 5 — visibly pricier
+  });
+
   it('never emits an unconfirmed Fireworks posture as a confirmed claim (R2 gate)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const deep = sig['efficient']!.tiers.find((t) => t.tier === 'deep')!;

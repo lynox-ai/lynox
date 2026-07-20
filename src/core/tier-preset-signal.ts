@@ -31,6 +31,8 @@ export interface TierPresetTierInfo {
   transferBasis?: string | null;
   /** R2-gated posture string (never an unconfirmed claim). */
   posture?: string;
+  /** Per-million-token USD price ({input, output}) for a cost feel on the card. */
+  pricing?: { input: number; output: number };
 }
 
 export interface TierPresetInfo {
@@ -80,12 +82,16 @@ export function buildTierPresetSignal(opts: { isManagedTier: boolean }): Record<
         ?? slot.model_id;
       const provenance = cap?.provenance;
       const disc = hostDisclosure(slotHost(slot));
+      // Surface input/output only — the cost FEEL for the card, not a full rate
+      // sheet (cache rates are advanced). Absent for a model with no registry entry.
+      const pricing = cap ? { input: cap.pricing.input, output: cap.pricing.output } : undefined;
       tiers.push({
         tier,
         model_id: slot.model_id,
         label,
         ...(provenance ? { provenance } : {}),
         ...(disc ? { residency: disc.residency, transferBasis: disc.transferBasis, posture: disc.posture } : {}),
+        ...(pricing ? { pricing } : {}),
       });
     }
     out[name] = { name, tiers, available };
