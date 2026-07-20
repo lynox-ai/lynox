@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.9.0 — 2026-07-21
+
+This release makes model choice a **named strategy** you pick, not a per-tier fiddle. A model preset (a "Modell-Strategie") maps each routing tier to a specific provider's model in one step — chosen from cards in settings or a compact picker in the chat header — with the backing host disclosed so you always know where a turn runs; Fireworks joins as a new provider option, gated off until its key is provisioned. Under that, the durable-knowledge capture path is hardened at the source so a poisoned or low-value fact is stopped and metered before it can enter memory, and the agent's tool prefix shrinks by loading heavy tool guidance only on first use (cache-safe, behaviour-identical). The rest is chat- and rendering-correctness: a resumed multi-step turn renders as one bubble, the first-turn briefing is clean and current, and vision works on gen-3 Mistral models. **No engine.db migration** — the engine store stays at schema v7. **Rollback caveat:** an instance that has adopted a model preset must switch its strategy back to Standard (clear `tier_preset`) *before* rolling back to 2.8.0 — the 2.8.0 engine rejects the unknown `tier_preset` key under a strict config parse and would discard the whole config file. Instances that never picked a preset roll back as a clean image swap.
+
+New env vars (both optional, managed-only, default off): `FIREWORKS_API_KEY`, `LYNOX_MANAGED_FIREWORKS_ENABLED`.
+
+### Added
+- **Pick a named model strategy (Modell-Strategie).** A model preset maps each routing tier to a specific provider's model in one step — selected from cards in settings or a compact picker in the chat header — and the backing host is disclosed so you can see where each tier runs. An unknown or unregistered preset fails closed: it won't silently fall back to a mis-billed default. (#1022, #1023, #1024, #1028)
+- **Fireworks as a provider option.** Fireworks-hosted models can back a tier, gated off until the key is provisioned — a preset that needs Fireworks is rejected rather than run against a missing key. (#1024, #1026)
+
+### Changed
+- **Smaller tool prefix — heavy guidance loads on first use.** The verbose narrative for four tools (recovery rules, anti-patterns) moved out of the always-cached prefix into a model-only block injected once per thread on first use, trimming the static prefix without changing which tools the model picks (confirmed by a real-API A/B). (#1006)
+- **Workflow inline steps can browse and fetch.** Inline workflow steps now have `http_request` and `web_research` available. (#1009)
+
+### Fixed
+- **A resumed multi-step turn renders as one bubble.** Reopening a thread mid-run no longer explodes a single multi-step turn into N separate bubbles; a settled thread adopts the merged, shorter server transcript instead of the longer local one; and reopening a thread while a turn is in flight no longer drops the just-sent message. (#1018, #1019, #1032)
+- **Clean, current first-turn briefing.** The opening briefing drops the internal scope/data-transport leaks and keeps the loaded-context preamble out of your message bubble; the overdue/due-today task overview it surfaces is recomputed per thread (not a stale boot snapshot), and the agent no longer auto-acts on a task it merely surfaced. (#1011, #1014, #1016, #1032)
+- **Notification tap opens the right thread.** Tapping a task notification opens that task's thread. (#1017)
+- **Vision on gen-3 Mistral models.** Image input is enabled on gen-3 Mistral models. (#1015)
+- **Chat + artifact UI polish.** Opaque toasts, the composer's model picker reflects a settings change immediately, user bubbles pre-wrap long content, the hybrid-routing footer and keys row no longer overflow, the artifact card gained export feedback and a gallery link, and the Mermaid PNG export surfaces an error instead of a silent dead click. (#1012, #1013, #1027, #1032)
+
+### Notes
+- **Durable-knowledge capture hardened at the source.** The durable-knowledge path now stops a poisoned or low-value fact before it enters memory, with telemetry on what was caught. On **managed** plans, an `update_memory` re-extraction is now credit-gated and debited like any other model call (self-hosted is unaffected — no metering). This strengthens the substrate that remains **opt-in per instance** (default off; enabled on selected instances only). (#1029, #1030)
+- **Memory write-trust hardening.** The explicit memory tools (store/update/promote) now treat a write made on a turn that read external content (a web page, a mail, a file) with the same caution as the automatic capture path — such a write is routed to the review queue rather than recorded as a trusted fact, on both the fallback and the exact-edit path. The parent↔child taint signal for spawned sub-agents was made symmetric, and the first-turn briefing is fenced against injected instructions in task titles. (#1031, #1032)
+- **Supply-chain + CI.** A daily dependency scan now gates the release build, and two vulnerable transitive dependencies (adm-zip, brace-expansion) were pinned to patched versions. (#1007, #1010, #1031)
+
 ## 2.8.0 — 2026-07-17
 
 This release lands the **Durable Knowledge** substrate: a second, archival memory tier that keeps durable facts without the byte-cap and oldest-first eviction of the working store, with a review queue and curation tools for what lynox learns, and an in-chat surface to see and correct it as it happens. The whole substrate ships **dormant** behind a per-tenant flag — default off, byte-identical engine behaviour — and is turned on per instance by an operator, not by this release. Separately, the follow-up "what next" suggestions now arrive through a structured tool instead of parsed text, so they can no longer leak as raw JSON and they survive a thread reload; the managed control plane gains a per-run cost ceiling and a live balance mirror; and the secret vault reconciles near-identical key names instead of stashing a duplicate. **No active engine.db migration** on the default fleet — the durable-knowledge table only materializes once the flag is on. Rollback to 2.7.1 is a clean image swap.
