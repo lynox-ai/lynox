@@ -2878,8 +2878,14 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// rows are local-only + unrecoverable, so their presence keeps local.
 			const hasUnpersistedLocal = localMessages.some((m) =>
 				m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
+			// The shorter-transcript adoption must NOT fire while a turn is streaming: the
+			// fetch above awaited a round-trip, and a turn sent in that window is in local
+			// `messages` but not yet on the server (activeRun null, not failed/queued), so
+			// adopting the shorter server list would wipe the in-flight user bubble +
+			// placeholder. The `>=` path stays unguarded — a thread switch that legitimately
+			// loads an equal-or-longer transcript is unaffected.
 			if (serverMessages.length >= localMessages.length
-				|| (!resumeActiveRun && !hasUnpersistedLocal)) {
+				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
 				messages = serverMessages;
 				adoptedServer = true;
 			}
@@ -3008,7 +3014,14 @@ export async function reconcileThread(): Promise<void> {
 		const hasUnpersistedLocal = messages.some((m) =>
 			m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
 		let adopted = false;
-		if (tid === sessionId
+		// RE-CHECK isStreaming HERE, not just at entry: the fetch above awaited a full
+		// round-trip, during which the user may have sent a turn (tapped a follow-up pill
+		// on remount). That turn is in local `messages` + streaming, but the server does
+		// not know its run yet (activeRun null) and it is not failed/queued — so the
+		// `(!data.activeRun && !hasUnpersistedLocal)` disjunct would adopt the shorter
+		// server transcript and WIPE the just-sent user bubble + streaming placeholder.
+		// Never adopt while a turn is in flight.
+		if (tid === sessionId && !isStreaming
 			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
 			messages = serverMessages;
 			adopted = true;

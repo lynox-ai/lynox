@@ -485,8 +485,13 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       : await agent.memory.update(input.namespace, input.old_content, input.new_content);
 
     if (exactOk) {
-      // Mirror to KG so entity re-extraction picks up the corrected text.
-      if (agent.toolContext.knowledgeLayer) {
+      // Mirror to KG so entity re-extraction picks up the corrected text — but NOT on a
+      // turn that read external content. `updateMemoryText` re-extracts entities into the
+      // trusted subject graph; on an untrusted turn (deriveTurnUntrusted) that would launder
+      // attacker-influenced `new_content` into the KG untainted. The flat-file line is already
+      // updated above (it edits content the user can already see); the trust-sensitive KG
+      // re-extraction is skipped — the KG keeps its prior extraction until a clean-turn edit.
+      if (agent.toolContext.knowledgeLayer && !deriveTurnUntrusted(agent)) {
         const defaultScope: MemoryScopeRef = scopeRef
           ?? agent.activeScopes?.[0]
           ?? { type: 'context', id: '' };

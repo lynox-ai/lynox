@@ -343,8 +343,14 @@ export class Session {
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
     this._systemPrompt = engine.config.systemPrompt;
-    // Truncate briefing to prevent prompt bloat (~2K tokens max)
-    const rawBriefing = opts?.briefing ?? engine.getBriefing();
+    // Truncate briefing to prevent prompt bloat (~2K tokens max). The task overview
+    // (overdue / due tasks) is recomputed FRESH per Session — never the frozen boot
+    // snapshot — and appended to the static briefing on the default (non-override) path.
+    const rawBriefing = opts?.briefing ?? (() => {
+      const base = engine.getBriefing();
+      const task = engine.getTaskBriefing();
+      return base && task ? `${base}\n\n${task}` : (task ?? base);
+    })();
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;

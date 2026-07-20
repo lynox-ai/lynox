@@ -4116,6 +4116,19 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // tier_preset name validation for NON-managed (self-host / BYOK) instances: reject an
+      // unknown or prototype-chain name at WRITE time so it can never persist into config.json.
+      // The loader fail-closes on an unknown preset with a THROW and the engine ctor's
+      // loadConfig() has no catch — so a persisted bad name would crash-loop the container
+      // until a hand-edit. Managed instances are already covered by the stricter gate below
+      // (which also validates slot hosts + the Fireworks opt-in key and returns 403).
+      if (!requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        const incomingTierPreset = (parsed.data as Record<string, unknown>)['tier_preset'];
+        if (typeof incomingTierPreset === 'string' && incomingTierPreset.length > 0 && !expandTierPreset(incomingTierPreset)) {
+          errorResponse(res, 400, `Unknown tier_preset '${incomingTierPreset}'.`);
+          return;
+        }
+      }
       // Managed-pool tiers (managed / managed_pro / eu): CP locks provider +
       // cost-caps + integrations. Starter BYOK is NOT gated here — customer
       // owns their LLM, owns their config. The Web UI re-sends every field on

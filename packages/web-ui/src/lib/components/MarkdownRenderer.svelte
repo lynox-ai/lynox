@@ -495,6 +495,8 @@
 				void saveOrShareBlob(blob, `diagram-${Date.now()}.png`);
 			}, 'image/png');
 		};
+		// An undecodable serialized SVG never fires onload — surface it instead of a dead click.
+		img.onerror = () => addToast('Export failed', 'error');
 		img.src = dataUrl;
 	}
 
