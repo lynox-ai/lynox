@@ -349,7 +349,8 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
   // ON = the rafael canary). It is NOT added to the TOP-LEVEL provider/endpoint
   // checks (sections 1-2) — Fireworks is reachable only as a hybrid slot, never as
   // a standard-mode managed endpoint.
-  const slotHosts = managedFireworksEnabled()
+  const fireworksEnabled = managedFireworksEnabled();
+  const slotHosts = fireworksEnabled
     ? new Set<string>([...MANAGED_CURATED_HOSTS, FIREWORKS_API_BASE])
     : MANAGED_CURATED_HOSTS;
   // 1. provider field present — must be in the curated allowlist (anthropic
@@ -409,7 +410,7 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
     for (const [tier, slot] of Object.entries(expanded.tier_set)) {
       const slotUrl = slot?.api_base_url;
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${managedFireworksEnabled() ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
       }
     }
   }

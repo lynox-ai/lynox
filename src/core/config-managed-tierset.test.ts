@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { applyManagedTierSetConstraints } from './config.js';
-import { MISTRAL_API_BASE } from '../types/index.js';
-import { FIREWORKS_API_BASE } from './tier-presets.js';
+import { MISTRAL_API_BASE, type TierSet } from '../types/index.js';
+import { FIREWORKS_API_BASE, TIER_PRESETS } from './tier-presets.js';
 
 // PR-3d: the managed tier_set is a TENANT-WRITABLE surface. These assert the
 // ship-blocker security boundary — a managed tenant cannot point a slot at an
@@ -107,6 +107,25 @@ describe('applyManagedTierSetConstraints (PR-3d managed ship-blocker)', () => {
         deep: { provider: 'openai', model_id: 'x', api_base_url: 'https://api.fireworks.ai.evil.com' },
       });
       expect(out.deep).toBeUndefined();
+    });
+
+    // Two-gate consistency: the LOAD hardening must agree with the WRITE gate.
+    // Under the flag (+ all CP keys) every shipped preset's slots survive the load
+    // hardening (so an accepted write actually routes); without it, exactly the
+    // Fireworks slots drop (so a rejected preset never persists a reroute).
+    it('two-gate consistency: flag ON keeps every preset slot; flag OFF drops only Fireworks', () => {
+      for (const [name, preset] of Object.entries(TIER_PRESETS)) {
+        process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = 'true';
+        const keptOn = applyManagedTierSetConstraints(preset.tier_set as TierSet);
+        expect(Object.keys(keptOn).length, `${name} @ flag ON`).toBe(Object.keys(preset.tier_set).length);
+
+        delete process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
+        const keptOff = applyManagedTierSetConstraints(preset.tier_set as TierSet);
+        for (const [tier, slot] of Object.entries(preset.tier_set)) {
+          const isFireworks = slot?.api_base_url === FIREWORKS_API_BASE;
+          expect(tier in keptOff, `${name}.${tier} @ flag OFF (isFireworks=${isFireworks})`).toBe(!isFireworks);
+        }
+      }
     });
   });
 });

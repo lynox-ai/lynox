@@ -4061,11 +4061,9 @@ describe('LynoxHTTPApi', () => {
             method: 'PUT',
             body: JSON.stringify({ tier_preset: 'efficient' }),
           });
-          // The Fireworks host is now allowed, so the gate must not 403 on the preset.
-          if (res.status === 403) {
-            const body = await res.json() as { error: string };
-            expect(body.error).not.toContain('tier_preset');
-          }
+          // The Fireworks host is now allowed → the write is ACCEPTED (a bare
+          // not-403 check would pass vacuously if a later step silently dropped it).
+          expect(res.status).toBe(200);
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -4080,10 +4078,8 @@ describe('LynoxHTTPApi', () => {
             method: 'PUT',
             body: JSON.stringify({ tier_preset: 'max-quality' }),
           });
-          if (res.status === 403) {
-            const body = await res.json() as { error: string };
-            expect(body.error).not.toContain('tier_preset');
-          }
+          // All-Anthropic preset — accepted on managed with no flag.
+          expect(res.status).toBe(200);
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
