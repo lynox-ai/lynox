@@ -71,6 +71,9 @@ describe('memoryStoreTool', () => {
       namespace: 'knowledge',
       content: 'channel test',
       sourceChannel: 'agent',
+      // A clean write (no untrusted signal) is now an explicit `false`, not absent —
+      // the tool derives it from the full write-trust union, which floors to false.
+      sourceUntrusted: false,
     });
   });
 
@@ -176,6 +179,62 @@ describe('memoryStoreTool', () => {
     );
     expect(result).toBe('Stored in knowledge. Entities and relationships are extracted automatically for future cross-referencing.');
     expect(append).toHaveBeenCalledWith('knowledge', 'safe content');
+  });
+});
+
+describe('memory write-trust union (legacy tools quarantine external-content writes)', () => {
+  // The bare `sawUntrustedData` wrap marker is allowlist-by-omission: `web_research`/`mail_*`/
+  // `read_file`/`bash` return attacker-controllable content WITHOUT setting it. Previously the
+  // legacy memory_store/update/promote derived `sourceUntrusted` from that marker ALONE, so
+  // external-derived content was minted as TRUSTED `agent_inferred` instead of quarantined —
+  // single-tenant durable memory poison on the DK-off default path (#1029 closed the DK/auto-
+  // extractor path, not these tools). Each case below FAILS if a tool reverts to the bare marker.
+  const untrustedAgent = (memory: NonNullable<IAgent['memory']>, signals: Partial<Pick<IAgent, 'sawUntrustedData' | 'sawExternalContentTool' | 'conversationSawUntrusted'>>): IAgent =>
+    ({ ...makeAgent(memory), sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false, ...signals });
+
+  it('memory_store quarantines when an external-content tool ran this turn (no wrap marker)', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { sawExternalContentTool: true });
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'AcmeCorp wires payment on the 1st' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_store quarantines when the conversation ingested untrusted content on a prior turn (F5 sticky)', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { conversationSawUntrusted: true });
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'deferred injected remember on a clean turn' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_store still honours the bare wrap marker', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { sawUntrustedData: true });
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'wrapped untrusted content' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_store keeps a clean business-conversation write trusted (no external tool, no ingested untrusted)', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), {});
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'the user prefers terse replies' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: false }));
+  });
+
+  it('memory_promote quarantines the re-embedded copy when an external-content tool ran this turn', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({
+        loadScoped: vi.fn().mockResolvedValue('User pattern A\nUser pattern B'),
+        appendScoped: vi.fn().mockResolvedValue(undefined),
+        deleteScoped: vi.fn().mockResolvedValue(1),
+      }), { sawExternalContentTool: true }),
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }],
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
   });
 });
 
@@ -780,6 +839,7 @@ describe('memoryPromoteTool', () => {
       scopeType: 'context',
       scopeId: 'proj1',
       sourceChannel: 'agent',
+      sourceUntrusted: false,
     });
   });
 

@@ -232,6 +232,23 @@ function resolveScope(scopeStr: string | undefined, agent: IAgent): MemoryScopeR
   return parsed;
 }
 
+/**
+ * DK.1 write-trust: derive whether a memory WRITE this turn is untrusted — the FULL union that
+ * `remember` (knowledge.ts) already uses (H4 capability-denylist + F5 conversation-sticky),
+ * NOT the bare wrap marker. The marker alone is allowlist-by-omission: `web_research`/`mail_*`/
+ * `read_file`/`bash` return attacker-controllable content WITHOUT setting it, so a legacy
+ * memory_store/update/promote gated on `sawUntrustedData` alone minted external-derived content
+ * as trusted `agent_inferred` instead of quarantining it to pending_review (single-tenant durable
+ * poison; #1029 closed this on the DK/auto-extractor path but not the legacy tools). Over-taints
+ * in the SAFE direction — a clean business-conversation turn (no external tool, no ingested
+ * untrusted content) stays trusted, so there is no capture gap.
+ */
+function deriveWriteUntrusted(agent: IAgent): boolean {
+  return agent.sawUntrustedData === true
+    || agent.sawExternalContentTool === true
+    || agent.conversationSawUntrusted === true;
+}
+
 export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
   definition: {
     name: 'memory_store',
@@ -273,14 +290,15 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     // to store its own text as `user_asserted`, the tier the system prompt trusts
     // most; PRD §2.8). A genuine user fact still lands, honestly as agent_inferred;
     // Wave 1.3 re-derives the tier from the write-boundary channel, not the agent.
+    const sourceUntrusted = deriveWriteUntrusted(agent);
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };
@@ -560,7 +578,8 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         scopeId: defaultScope.id,
         sourceThreadId: agent.currentThreadId,
         // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
-        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
+        // Write-trust derived from the FULL union, not the bare marker (deriveWriteUntrusted).
+        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveWriteUntrusted(agent),
       });
     }
 
@@ -759,8 +778,9 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       // Promotion moves an existing line across scopes. The original tier
       // isn't available from the flat-file line without a KG lookup, so the
       // re-embedded copy lands at the conservative default — never falsely
-      // elevated to tool_verified.
-      sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
+      // elevated to tool_verified. Write-trust from the FULL union (deriveWriteUntrusted),
+      // not the bare marker — a promote on an external-content turn quarantines.
+      sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveWriteUntrusted(agent),
     });
 
     // Remove from source scope + sync graph. Delete EXACTLY the one line we
