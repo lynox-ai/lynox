@@ -340,6 +340,40 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.confirm_cancel':     { de: 'Abbrechen',                                                                 en: 'Cancel' },
 	'llm.confirm_proceed':    { de: 'Verstanden, fortfahren',                                                    en: 'Understood, proceed' },
 
+	// model-presets W4 — the "Modell-Strategie" cards + per-tier disclosure. Model
+	// choice is framed by COST + SOVEREIGNTY + CONTEXT, never a quality claim about
+	// any single model (positioning-guard). DE + EN written natively.
+	'llm.preset.heading':        { de: 'Modell-Strategie',                                                        en: 'Model strategy' },
+	'llm.preset.subheading':     { de: 'Wähle eine fertige Strategie oder stelle jede Stufe selbst ein.',         en: 'Pick a ready-made strategy, or tune each tier yourself.' },
+	'llm.preset.recommended':    { de: 'empfohlen',                                                               en: 'recommended' },
+	'llm.preset.standard':       { de: 'Standard',                                                                en: 'Standard' },
+	'llm.preset.standard_desc':  { de: 'Ein Anbieter bedient jede Stufe — lynox wählt das Modell pro Aufgabe.',   en: 'One provider serves every tier — lynox picks the model per task.' },
+	'llm.preset.efficient':      { de: 'Effizient',                                                               en: 'Efficient' },
+	'llm.preset.efficient_desc': { de: 'Günstigste kohärente Kombi: EU-Mistral für den Alltag, ein großes Kontextfenster für tiefe Aufgaben.', en: 'Cheapest coherent mix: EU Mistral for everyday work, a large context window for deep tasks.' },
+	'llm.preset.balanced':       { de: 'Ausgewogen',                                                              en: 'Balanced' },
+	'llm.preset.balanced_desc':  { de: 'Der ausgewogene Mix — schnelles Tool-Routing im Haupt-Chat, starke Modelle für die Tiefe.', en: 'The balanced mix — fast tool-routing in the main chat, strong models for depth.' },
+	'llm.preset.max_quality':    { de: 'Max-Qualität',                                                            en: 'Max quality' },
+	'llm.preset.max_quality_desc': { de: 'Durchgehend die stärksten Modelle — der höchste Kostenrahmen.',         en: 'The strongest models across every tier — the highest cost.' },
+	'llm.preset.custom':         { de: 'Eigene',                                                                  en: 'Custom' },
+	'llm.preset.custom_desc':    { de: 'Weise jeder Stufe manuell ein Modell zu.',                                en: 'Assign a model to each tier yourself.' },
+	'llm.preset.details':        { de: 'Details',                                                                 en: 'Details' },
+	'llm.preset.hide_details':   { de: 'Details ausblenden',                                                      en: 'Hide details' },
+	'llm.preset.applies_hint':   { de: 'Gilt für neue Unterhaltungen. Laufende behalten ihr Modell.',             en: 'Applies to new conversations. Ongoing ones keep their model.' },
+	'llm.preset.unavailable':    { de: 'Im aktuellen Plan nicht verfügbar.',                                      en: 'Not available on your current plan.' },
+	'llm.preset.unavailable_cta':{ de: 'Support kontaktieren',                                                    en: 'Contact support' },
+	// Per-tier disclosure (three axes — where data is processed, transfer basis,
+	// where the model weights originate). R2-gated posture comes from the server.
+	'llm.preset.disclosure.residency':  { de: 'Verarbeitung',                                                     en: 'Processing' },
+	'llm.preset.disclosure.transfer':   { de: 'Übermittlung',                                                     en: 'Transfer basis' },
+	'llm.preset.disclosure.provenance': { de: 'Modell-Herkunft',                                                  en: 'Model origin' },
+	'llm.preset.disclosure.posture':    { de: 'Daten-Umgang',                                                     en: 'Data handling' },
+	'llm.preset.provenance.US':  { de: 'USA',                                                                     en: 'USA' },
+	'llm.preset.provenance.EU':  { de: 'EU',                                                                      en: 'EU' },
+	'llm.preset.provenance.CN':  { de: 'China',                                                                   en: 'China' },
+	// Explicit-save model (rafael): no auto-save; a bar appears on change.
+	'llm.unsaved.title':         { de: 'Ungespeicherte Änderungen',                                               en: 'Unsaved changes' },
+	'llm.unsaved.discard':       { de: 'Verwerfen',                                                               en: 'Discard' },
+
 	// Wave 5d — BYOK custom-endpoint disclosure modal (i18n keys per the
 	// PRD-HN-LAUNCH-HARDENING spec; surface text per `feedback_native_language`
 	// rule — DE and EN written natively, never translated word-for-word).

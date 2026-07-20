@@ -3182,9 +3182,14 @@
 
 		<!-- Model picker: only on an empty chat (before turn 1). Once the chat has a
 		     session, the per-thread control below takes over — D18 makes a pick sticky
-		     and re-pickable mid-conversation, reversing D1 ("model fixed"). -->
+		     and re-pickable mid-conversation, reversing D1 ("model fixed").
+		     model-presets W4: on desktop the new-chat picker moved to the nav header
+		     (frees composer space); it stays here on mobile (sm:hidden) where the
+		     header is too cramped for it. The mid-thread control is unchanged. -->
 		{#if currentSessionId === null}
-			<ComposerModelPicker />
+			<div class="sm:hidden">
+				<ComposerModelPicker />
+			</div>
 		{:else}
 			<ThreadModelControl />
 		{/if}

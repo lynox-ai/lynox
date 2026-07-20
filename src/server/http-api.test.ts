@@ -2109,6 +2109,36 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    // model-presets W4 — the settings picker persists a preset choice by name.
+    it('PUT accepts a tier_preset and persists it (model-presets W4)', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ tier_preset: 'balanced' }),
+      });
+      expect(res.status).toBe(200);
+      const { saveUserConfig } = await import('../core/config.js');
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall![0]['tier_preset']).toBe('balanced');
+    });
+
+    it('PUT tier_preset:null CLEARS the field (switch back to Standard/Custom)', async () => {
+      // A persisted tier_preset force-sets routing_mode='hybrid' at load, so the
+      // ONLY way back to Standard is to physically delete the key. The schema is
+      // .nullable() precisely so `null` reaches the merge loop's delete branch;
+      // omission would preserve the stale preset. Seed an existing preset, then null it.
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ tier_preset: 'balanced', default_tier: 'deep' });
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ tier_preset: null, routing_mode: 'standard', tier_set: {} }),
+      });
+      expect(res.status).toBe(200);
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect('tier_preset' in lastCall![0]).toBe(false); // key deleted, not persisted as null
+      expect(lastCall![0]['routing_mode']).toBe('standard');
+    });
+
     it('PUT rejects a non-Sonnet balanced_model with 400 AND persists nothing (never routes balanced off-Sonnet)', async () => {
       // A real Claude id that is NOT a served Sonnet — passes the schema
       // string check but must be rejected by the served-Sonnet allowlist so
@@ -2244,6 +2274,43 @@ describe('LynoxHTTPApi', () => {
       expect(hl['default_context_window_tokens']).toBe(200_000);
       // Self-host: locks is empty
       expect(body['locks']).toEqual({});
+    });
+
+    it('GET emits available_tier_presets (model-presets W4) — all available + resolved on self-host', async () => {
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const presets = body['available_tier_presets'] as Record<string, { tiers: Array<Record<string, unknown>>; available: boolean }> | undefined;
+      expect(presets).toBeDefined();
+      // Self-host backs every preset (loader hardening never runs) → no tier_preset lock.
+      expect((body['locks'] as Record<string, unknown>)['tier_preset']).toBeUndefined();
+      for (const p of Object.values(presets!)) expect(p.available).toBe(true);
+      // Per-tier enrichment is server-side (web-ui has no @lynox-ai/core import):
+      // the ⚡ efficient deep slot resolves to the CN-via-Fireworks model + its host disclosure.
+      const efficientDeep = presets!['efficient']!.tiers.find((t) => t['tier'] === 'deep')!;
+      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(efficientDeep['provenance']).toBe('CN');
+      expect(efficientDeep['residency']).toBe('US');
+    });
+
+    it('GET main_chat_tiers reflects a tier_preset, not the standard provider map (W4 picker sync)', async () => {
+      // A tier_preset is config-sugar — the raw stored config carries neither
+      // routing_mode nor tier_set (the loader materializes them). So the picker's
+      // main_chat_tiers MUST be derived from the SAME expansion, else it shows the
+      // Anthropic default map (Sonnet/Opus) while the preset routes Ministral 14B —
+      // the exact stale-label class the composer picker hit. Real expandTierPreset +
+      // catalog run here (not mocked).
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ tier_preset: 'balanced', provider: 'anthropic', default_tier: 'balanced' });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
+      expect(tiers).toBeDefined();
+      // balanced preset's balanced tier = Ministral 14B (NOT a Sonnet default).
+      expect(tiers!['balanced']).toContain('Ministral');
+      expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 
     it('GET surfaces active_model with resolved capability data (Settings v3 Item 6)', async () => {
@@ -2458,6 +2525,43 @@ describe('LynoxHTTPApi', () => {
         }
       },
     );
+
+    it('GET on managed tier: an unavailable preset sets the tier_preset lock (W4 wiring)', async () => {
+      // config.js is module-mocked here (loader hardening = identity), so the REAL
+      // availability predicate is unit-tested in tier-preset-signal.test.ts. This
+      // test drives the http-api WIRING: when the loader drops a slot (⚡ efficient's
+      // Fireworks deep, no opt-in) the preset is unavailable → the card is disabled
+      // AND `locks.tier_preset` is set (mirrors the write-gate 403, not a silent
+      // downgrade). Override the mock to drop Fireworks slots for this case.
+      const { applyManagedTierSetConstraints } = await import('../core/config.js');
+      vi.mocked(applyManagedTierSetConstraints).mockImplementation((ts) => {
+        const kept: Record<string, unknown> = {};
+        for (const [tier, slot] of Object.entries(ts as Record<string, { api_base_url?: string }>)) {
+          if (!slot.api_base_url?.includes('fireworks.ai')) kept[tier] = slot;
+        }
+        return kept as ReturnType<typeof applyManagedTierSetConstraints>;
+      });
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const presets = body['available_tier_presets'] as Record<string, { available: boolean }>;
+        expect(presets['efficient']!.available).toBe(false); // Fireworks deep dropped
+        expect(presets['balanced']!.available).toBe(true);
+        expect(presets['max-quality']!.available).toBe(true);
+        // The lock mirrors the disabled card + the write-gate 403.
+        const locks = body['locks'] as Record<string, Record<string, unknown>>;
+        expect(locks['tier_preset']?.['reason']).toBe('managed-tier');
+        expect((locks['tier_preset']?.['contact_cta'] as Record<string, unknown>)?.['href']).toContain('mailto:support@lynox.ai');
+      } finally {
+        vi.mocked(applyManagedTierSetConstraints).mockImplementation((ts) => ts);
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
 
     it('PUT in managed mode allows no-op locked-field re-send (regression v1.3.5)', async () => {
       // Web UI re-sends every field on every save. A no-op write of `default_tier`
