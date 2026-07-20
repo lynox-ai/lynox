@@ -28,6 +28,7 @@ import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
+import { deriveTurnUntrusted } from './untrusted-signals.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import { isDangerous } from '../tools/permission-guard.js';
@@ -785,15 +786,14 @@ export class Agent implements IAgent {
    */
   private _captureAtTurnEnd(text: string): void {
     if (!this.memory || this.skipMemoryExtraction || this.isInternalRun) return;
-    // The FULL untrusted union — marker OR an external-content tool ran this turn OR
-    // the conversation ingested untrusted content — mirroring `remember`'s H4
-    // derivation (`knowledge.ts`). The bare `_sawUntrustedData` marker is allowlist-
-    // by-omission (`web_research`/`bash`/`read_file` return external content WITHOUT
-    // setting it), so gating the legacy extractor on the marker ALONE let web/mail/
-    // file-derived answers get minted into business memory on every DK-off instance
-    // (measured poison, 2026-07-20). The union closes that: external-content turns are
-    // skipped; clean business-conversation turns still auto-capture — no capture gap.
-    const turnUntrusted = this.sawUntrustedData || this.sawExternalContentTool || this.conversationSawUntrusted;
+    // The FULL untrusted union (deriveTurnUntrusted) — marker OR an external-content tool ran
+    // this turn OR the conversation ingested untrusted content. The bare `_sawUntrustedData`
+    // marker is allowlist-by-omission (`web_research`/`bash`/`read_file` return external content
+    // WITHOUT setting it), so gating the legacy extractor on the marker ALONE let web/mail/
+    // file-derived answers get minted into business memory on every DK-off instance (measured
+    // poison, 2026-07-20). The union closes that: external-content turns are skipped; clean
+    // business-conversation turns still auto-capture — no capture gap.
+    const turnUntrusted = deriveTurnUntrusted(this);
     if (this._durableMemoryEnabled) {
       void appendCaptureTelemetry(true, {
         ts: Date.now(),

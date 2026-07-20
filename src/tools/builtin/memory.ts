@@ -4,6 +4,7 @@ import { channels } from '../../core/observability.js';
 import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
@@ -273,14 +274,15 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     // to store its own text as `user_asserted`, the tier the system prompt trusts
     // most; PRD §2.8). A genuine user fact still lands, honestly as agent_inferred;
     // Wave 1.3 re-derives the tier from the write-boundary channel, not the agent.
+    const sourceUntrusted = deriveTurnUntrusted(agent);
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };
@@ -560,7 +562,8 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         scopeId: defaultScope.id,
         sourceThreadId: agent.currentThreadId,
         // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
-        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
+        // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
+        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
       });
     }
 
@@ -759,8 +762,9 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       // Promotion moves an existing line across scopes. The original tier
       // isn't available from the flat-file line without a KG lookup, so the
       // re-embedded copy lands at the conservative default — never falsely
-      // elevated to tool_verified.
-      sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: agent.sawUntrustedData,
+      // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
+      // not the bare marker — a promote on an external-content turn quarantines.
+      sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
     });
 
     // Remove from source scope + sync graph. Delete EXACTLY the one line we
