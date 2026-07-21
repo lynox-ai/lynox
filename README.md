@@ -142,7 +142,7 @@ If something breaks, an [issue](https://github.com/lynox-ai/lynox/issues) lands 
 
 - [GitHub Discussions](https://github.com/lynox-ai/lynox/discussions) — Questions, ideas, show & tell
 - [GitHub Issues](https://github.com/lynox-ai/lynox/issues) — Bug reports, feature requests
-- [Contributing](CONTRIBUTING.md) — Bug reports and docs/test/integration-scaffold PRs welcome; feature PRs are issue-first
+- [Contributing](CONTRIBUTING.md) — Bug reports and docs/test PRs welcome; integration scaffolds and features are issue-first
 - [Security](SECURITY.md) — Responsible disclosure
 
 ## Disclaimer

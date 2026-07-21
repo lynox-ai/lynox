@@ -142,18 +142,28 @@ CATALOG='src/core/llm/catalog.ts'
 README_MAIN='README.md'
 
 # "display_name<TAB>verification" per preset, in source order.
+presets_block="$(awk '/const OPENAI_COMPAT_PRESETS/{f=1} f && /^\] *(as const)? *;/{exit} f{print}' "$CATALOG")"
 preset_pairs="$(
-  awk '/const OPENAI_COMPAT_PRESETS/{f=1} f && /^\];/{exit} f{print}' "$CATALOG" \
+  printf '%s\n' "$presets_block" \
     | grep -E "^[[:space:]]*(display_name|verification):" \
     | sed -E "s/^[[:space:]]*(display_name|verification): '([^']*)'.*/\1=\2/" \
     | awk -F= '/^display_name=/{n=$2} /^verification=/{if (n != "") {printf "%s\t%s\n", n, $2; n=""}}' \
     || true
 )"
+# Cardinality assert: a quote-style change or display_name/verification field
+# reorder drops entries from the pairing awk SILENTLY (the 0-presets failsafe
+# only catches total loss) — so every display_name must yield exactly one pair.
+dn_count="$(printf '%s\n' "$presets_block" | grep -cE '^[[:space:]]*display_name:' || true)"
+pair_count=0
+[ -n "$preset_pairs" ] && pair_count="$(wc -l <<< "$preset_pairs" | tr -d '[:space:]')"
 
 readme_clauses="$(awk '{ gsub(/[.;]/, "\n"); gsub(/—/, "\n"); print }' "$README_MAIN")"
 
 if [ -z "$preset_pairs" ]; then
   echo "❌ D/provider-matrix: extracted 0 presets from $CATALOG — array/field shape changed; fix the extraction (this check must not pass silently)."
+  violations=$((violations + 1))
+elif [ "$dn_count" != "$pair_count" ]; then
+  echo "❌ D/provider-matrix: $dn_count display_name entries in $CATALOG but only $pair_count name/verification pairs extracted — a quote-style or field-order change is silently dropping presets; fix the extraction."
   violations=$((violations + 1))
 else
   verified_seen=0
@@ -161,7 +171,9 @@ else
     [ -n "$name" ] || continue
     short="$(printf '%s' "$name" | sed -E 's/ \([^)]*\)$//; s/ AI$//')"
     name_clauses="$(grep -F -- "$short" <<< "$readme_clauses" || true)"
-    verified_claims="$(grep -E '(^|[^A-Za-z])[Vv]erified' <<< "$name_clauses" || true)"
+    # "not/never … verified" is a denial, not a claim — exclude it, or a README
+    # clause denying verification would satisfy the verified requirement.
+    verified_claims="$(grep -E '(^|[^A-Za-z])[Vv]erified' <<< "$name_clauses" | grep -Ev '(^|[^A-Za-z])([Nn]ot|[Nn]ever)[^A-Za-z].*[Vv]erified' || true)"
     case "$verif" in
       verified)
         verified_seen=$((verified_seen + 1))
@@ -174,7 +186,7 @@ else
         bad="$(grep -Ev '(^|[^A-Za-z])[Ee]xperimental' <<< "$verified_claims" || true)"
         if [ -n "$bad" ]; then
           echo "❌ D/provider-matrix: '$name' is verification:'experimental' in $CATALOG but a $README_MAIN clause presents '$short' as verified:"
-          echo "     $(printf '%s\n' "$bad" | head -1)"
+          printf '     %s\n' "$(printf '%s\n' "$bad" | head -1)"
           violations=$((violations + 1))
         fi
         ;;
