@@ -173,7 +173,7 @@ else
     name_clauses="$(grep -F -- "$short" <<< "$readme_clauses" || true)"
     # "not/never … verified" is a denial, not a claim — exclude it, or a README
     # clause denying verification would satisfy the verified requirement.
-    verified_claims="$(grep -E '(^|[^A-Za-z])[Vv]erified' <<< "$name_clauses" | grep -Ev '(^|[^A-Za-z])([Nn]ot|[Nn]ever)[^A-Za-z].*[Vv]erified' || true)"
+    verified_claims="$(grep -E '(^|[^A-Za-z])[Vv]erified' <<< "$name_clauses" | grep -Ev '(^|[^A-Za-z])([Nn]ot|[Nn]ever|[Cc]annot|[Uu]nable)[^A-Za-z].*[Vv]erified' || true)"
     case "$verif" in
       verified)
         verified_seen=$((verified_seen + 1))
