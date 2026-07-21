@@ -57,10 +57,12 @@ import {
   DURABLE_MEMORY_PROMPT_SUFFIX,
   currentDateContext,
   modelIdentityContext,
+  proactiveDeepGuidance,
   providerFamilyLabel,
   withCurrentTimePrefix,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
+import { isFeatureEnabled } from './features.js';
 import { stripLoadedContext } from './chat-context.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
@@ -757,7 +759,7 @@ export class Session {
       : basePrompt;
     const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? snapshotBase + this.agentOverrides.systemPromptSuffix
-      : snapshotBase) + runIdentityContext + currentDateContext();
+      : snapshotBase) + runIdentityContext + this._proactiveDeepSuffix(runBaseProvider) + currentDateContext();
     const promptHash = hashPrompt(effectivePrompt);
 
     // Record run start
@@ -1922,6 +1924,22 @@ export class Session {
     });
   }
 
+  /**
+   * Feature-gated proactive-deep escalation suffix. Resolves the deep-slot
+   * provider so the Anthropic (premium) cost-gate applies. Empty unless the
+   * `proactive-deep` flag is on AND the deep slot is cheap (or the Anthropic
+   * flag is also on). Appended to BOTH the live agent prompt AND the
+   * snapshot/hash via this single helper so the two never diverge (mirrors the
+   * DURABLE_MEMORY_PROMPT_SUFFIX pattern — see the run-snapshot note).
+   */
+  private _proactiveDeepSuffix(baseProvider: LLMProvider): string {
+    return proactiveDeepGuidance({
+      proactiveDeep: isFeatureEnabled('proactive-deep'),
+      proactiveDeepAnthropic: isFeatureEnabled('proactive-deep-anthropic'),
+      deepSlotProvider: resolveTierModel('deep', baseProvider).provider,
+    });
+  }
+
   private _createAgent(): void {
     const engine = this.engine;
     const userConfig = engine.getUserConfig();
@@ -2047,7 +2065,7 @@ export class Session {
     );
     const systemPrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
-      : basePrompt) + identityContext + currentDateContext();
+      : basePrompt) + identityContext + this._proactiveDeepSuffix(baseProvider) + currentDateContext();
 
     // Apply hook-based tool filtering (for Pro extensions)
     let effectiveTools = tools;

@@ -263,6 +263,32 @@ export function modelIdentityContext(
 }
 
 /**
+ * Proactive-deep escalation guidance (feature-gated). Returns a system-prompt
+ * block telling the agent to proactively spawn/offer the deep tier for
+ * deep-worthy sub-tasks — or '' when the behaviour is off for this instance.
+ *
+ * Gate (mirrors the `proactive-deep` / `proactive-deep-anthropic` flags): OFF
+ * unless `proactiveDeep` is on AND the resolved deep slot is either non-Anthropic
+ * (cheap — Fireworks/Mistral) OR `proactiveDeepAnthropic` is on (premium opt-in).
+ * This lets proactive escalation run on cheap deeps without inflating Anthropic
+ * (Fable/Opus) spend. The main chat's model is never changed — escalation is
+ * always a sub-agent on the higher tier.
+ */
+export function proactiveDeepGuidance(opts: {
+  proactiveDeep: boolean;
+  proactiveDeepAnthropic: boolean;
+  deepSlotProvider: string | undefined;
+}): string {
+  if (!opts.proactiveDeep) return '';
+  const deepIsAnthropic = opts.deepSlotProvider === 'anthropic';
+  if (deepIsAnthropic && !opts.proactiveDeepAnthropic) return '';
+  const costLine = deepIsAnthropic
+    ? 'The deep tier on this instance is a PREMIUM model — use it judiciously, only for genuinely deep work.'
+    : 'The deep tier on this instance is inexpensive — escalate to it freely whenever it helps.';
+  return `\n\n**Proactive deep escalation**: When a sub-task involves hard multi-step reasoning, deep analysis, or long-horizon work that the balanced main model would handle worse, do NOT wait to be asked. For a CLEAR case, spawn a deep sub-agent for it directly (it carries its own budget + context); for a BORDERLINE case, briefly OFFER it ("this would benefit from the deep model — want me to run it there?"). Never switch THIS conversation's model — escalation is always a sub-agent on the higher tier. ${costLine}`;
+}
+
+/**
  * Hour-truncated current datetime + weekday for the cached system prompt.
  * Hour granularity keeps Anthropic prompt caching effective (the cache key
  * breaks hourly, not per minute). For sub-hour precision the agent reads
@@ -457,7 +483,7 @@ Never over-deliver on a simple question. A "danke" does not need a 3-paragraph r
 
 **Ground figures AND tailored advice in THIS case's data.** State a metric (price, volume, keyword difficulty, CPC, rank) or a case-specific recommendation (which channel/strategy fits here) only from a tool result or research you actually ran — never extrapolated from a tangential call or a generic playbook dressed as case-specific analysis. Labelled estimates («estimate»/«geschätzt») are fine; an estimate or generic playbook presented as verified data or researched advice is not.
 
-**Delegation**: Do it yourself unless delegation helps. For complex, multi-step work: \`plan_task\` presents a plan and on approval returns a \`workflow_id\` — \`plan_task\` NEVER runs the plan itself. Emit one short "starting now" line, then call \`run_workflow(workflow_id)\` to execute it; every step runs as an isolated sub-agent. Small or quick tasks need no plan — just do them directly. \`spawn_agent\` for truly independent parallel tasks. When a sub-task needs a deeper model than this chat runs on, escalate by spawning a sub-agent on the higher tier (it carries its own budget + context) — never by trying to change THIS conversation's model; the chat's model is the user's to set. Roles: researcher (balanced tier with adaptive-thinking, deep research; deep tier opt-in only on Managed-Pro accounts), creator (balanced tier, content), operator (fast tier, fast status), collector (fast tier, Q&A). Sub-agents share NO context — include everything in \`task\` + \`context\`. When the sub-task hinges on specific facts, pass the **real source or verbatim excerpts** (file paths, quoted figures, the actual \`<fact>\` text), not your paraphrase — a child that only gets your summary will ground in a guess. Use \`spawn_agent\` when: 3+ independent research sources needed in parallel, or distinct skill profiles per sub-task.
+**Delegation**: Do it yourself unless delegation helps. For complex, multi-step work: \`plan_task\` presents a plan and on approval returns a \`workflow_id\` — \`plan_task\` NEVER runs the plan itself. Emit one short "starting now" line, then call \`run_workflow(workflow_id)\` to execute it; every step runs as an isolated sub-agent. Small or quick tasks need no plan — just do them directly. \`spawn_agent\` for truly independent parallel tasks. When a sub-task needs a deeper model than this chat runs on, escalate by spawning a sub-agent on the higher tier (it carries its own budget + context) — never by trying to change THIS conversation's model; the chat's model is the user's to set. Roles: researcher (balanced tier with adaptive-thinking, deep research; the deep tier is available on any account — its cost is bounded by the included budget, not a tier lock), creator (balanced tier, content), operator (fast tier, fast status), collector (fast tier, Q&A). Sub-agents share NO context — include everything in \`task\` + \`context\`. When the sub-task hinges on specific facts, pass the **real source or verbatim excerpts** (file paths, quoted figures, the actual \`<fact>\` text), not your paraphrase — a child that only gets your summary will ground in a guess. Use \`spawn_agent\` when: 3+ independent research sources needed in parallel, or distinct skill profiles per sub-task.
 
 ## Tools
 
