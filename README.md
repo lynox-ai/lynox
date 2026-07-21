@@ -2,13 +2,13 @@
 
 [![npm version](https://img.shields.io/npm/v/@lynox-ai/core)](https://www.npmjs.com/package/@lynox-ai/core)
 [![CI](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml/badge.svg)](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)](#testing-and-security)
+[![Tests](https://img.shields.io/badge/tests-7000%2B-brightgreen)](#testing-and-security)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
 **Run your business. Not your tools.**
 
-One source-available (ELv2) agent that learns your business — connects any API, runs your workflows, researches the web, and monitors for changes. Persistent knowledge graph, workflow capture, sub-agents, background worker. Bring your own LLM — **Anthropic Claude** and **Mistral** are natively supported and tested on every release. Other OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, LiteLLM) and Google Vertex AI are wired but not regularly tested. Self-hosted, no vendor lock-in.
+One source-available (ELv2) agent that learns your business — connects any API, runs your workflows, researches the web, and monitors for changes. Persistent knowledge graph, workflow capture, sub-agents, background worker. Bring your own LLM — **Anthropic Claude** and **Mistral** are natively supported and tested on every release, and **Ollama** and **Fireworks AI** are verified with a real end-to-end tool-calling run. Other OpenAI-compatible endpoints (LM Studio, vLLM, LocalAI, Groq, Together AI, OpenAI itself, LiteLLM) and Google Vertex AI are wired but experimental. Self-hosted, no vendor lock-in.
 
 > [!IMPORTANT]
 > **lynox is a CLI, not a library.** Run `npx @lynox-ai/core`, not `npm install @lynox-ai/core`. The npm page sidebar suggests `npm i` by default, but that only installs lynox as a dependency without running anything.
@@ -18,7 +18,7 @@ One source-available (ELv2) agent that learns your business — connects any API
 - **"Check my emails and tell me what's important"** — lynox reads your inbox, prioritizes, drafts replies in your tone. Tomorrow it remembers your style.
 - **"Summarize this PDF"** — Drop a file, get structured key points. lynox saves the context for later.
 - **"Research [topic] and give me the key points"** — Plans research phases, searches the web, cites sources, stores findings in the knowledge graph.
-- **"Same as last Monday"** — lynox recognizes the pattern. "Want me to do this every Monday?" One tap, it's automated.
+- **"Do this every Monday"** — teach lynox the workflow once, save it as a template, schedule it. Next Monday it runs on its own.
 - **"What changed on competitor.com?"** — Started as a one-time check. Now runs weekly and notifies you when something shifts.
 
 ## Quick start
@@ -27,7 +27,7 @@ One source-available (ELv2) agent that learns your business — connects any API
 npx @lynox-ai/core
 ```
 
-You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic** or **Mistral** are the natively-supported options; the OpenAI-compatible **Custom** path lets you point at anything else — OpenAI itself, Ollama, LM Studio, LiteLLM, Groq, vLLM — but those targets are experimental), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000).
+You need Node.js 22+, Docker, and an LLM credential. The interactive installer walks you through provider choice (**Anthropic** or **Mistral** are the natively-supported options; the OpenAI-compatible **Custom** path lets you point at anything else), generates a `docker-compose.yml`, pulls the image, and opens the Web UI at [localhost:3000](http://localhost:3000). In the Web UI's LLM settings, one-click presets cover Ollama, LM Studio, vLLM, LocalAI, Groq, Together AI, and Fireworks — Ollama and Fireworks are verified end-to-end with a real tool-calling run; the rest are experimental, and each tile says which.
 
 Prefer to edit `.env` yourself before the first run? Jump to [manual Docker](#docker) below.
 
@@ -55,13 +55,13 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 ┌──────▼─────────┐  ┌──────────▼────────┐
 │   Your LLM     │  │     Your Data     │
 │  Anthropic ·   │  │ Gmail · Sheets ·  │
-│  Mistral       │  │ Drive · Calendar  │
-│  (others wired │  │ Files · APIs ·    │
-│  but untested) │  │ Databases         │
+│  Mistral ·     │  │ Drive · Calendar  │
+│  Ollama · more │  │ Files · APIs ·    │
+│  via presets   │  │ Databases         │
 └────────────────┘  └───────────────────┘
 ```
 
-**BYOK** — You provide your LLM credential (Anthropic or Mistral are the natively-supported and tested paths; OpenAI-compatible / LiteLLM / Vertex are wired but experimental). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via `LYNOX_BUGSINK_DSN` for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
+**BYOK** — You provide your LLM credential (Anthropic and Mistral are the natively-supported and tested paths; Ollama and Fireworks are verified end-to-end; other OpenAI-compatible endpoints / LiteLLM / Vertex are wired but experimental). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via `LYNOX_BUGSINK_DSN` for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
 
 ## Key capabilities
 
@@ -69,9 +69,10 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Web UI** — Primary interface. Chat, knowledge browser, run history, settings, integrations. Installable as PWA. QR code login for instant phone access.
 - **Activity Bar** — Every tool call streams live with its current sub-phase (e.g. "Reading API docs..." → "Extracting auth..."). No mysterious 30-second waits.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
-- **Mobile Access** — Voice input (Whisper STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
+- **Mobile Access** — Voice input (Whisper or Voxtral STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
 - **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
-- **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it.
+- **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it. Export a workflow to a versioned format and import it on another instance — secrets and trusted hosts are re-approved on import, never carried over implicitly.
+- **Model Choice** — Pick the model per chat, or set a named model strategy that maps each routing tier to a specific provider's model — with the backing host always disclosed.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
 - **Security** — AES-256 encrypted vault, permission guard, input/output scanning, SSRF protection.
 
@@ -81,7 +82,7 @@ Honest about today's gaps, so you can decide if it's the right fit:
 
 - **Voice in / out is functional, not polished.** Whisper STT + browser TTS work, but iOS Safari has Web Audio quirks (use Chrome on iOS for now). Hands-free workflows still need keyboard fallback.
 - **Native calendar integration is on the roadmap.** CalDAV reads + ICS imports are spec'd (Phase 0 spike done) but not yet shipped; until then, calendar tasks flow through Google Workspace OAuth.
-- **No multi-user / team accounts.** lynox is single-user today. One vault, one workflow library, one knowledge graph per instance. Multi-tenant teams happen on the Managed tier; self-hosted is solo.
+- **No multi-user / team accounts.** lynox is single-user today — one vault, one workflow library, one knowledge graph per instance, whether self-hosted or managed. In a team, each person runs their own instance; shared multi-user instances are something we're exploring, with no promised timeline.
 - **The LLM is not deterministic.** Like every agent built on Claude / Mistral, output quality varies run-to-run. lynox mitigates with the knowledge graph + workflow templates, but if you need 100%-reproducible automation, a script beats lynox.
 
 ## Install
@@ -127,7 +128,7 @@ Open [localhost:3000](http://localhost:3000) on your phone and use your browser'
 
 ## Testing and security
 
-- 5000+ tests across the engine, tools, and orchestrator. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
+- 7000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
 - Layered defenses: input-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit, plus tool-result injection scanning. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — DNS resolves once, the connection is pinned to the validated IP at TCP-connect time (rebind-safe), and each redirect hop is re-validated.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 
@@ -141,7 +142,7 @@ If something breaks, an [issue](https://github.com/lynox-ai/lynox/issues) lands 
 
 - [GitHub Discussions](https://github.com/lynox-ai/lynox/discussions) — Questions, ideas, show & tell
 - [GitHub Issues](https://github.com/lynox-ai/lynox/issues) — Bug reports, feature requests
-- [Contributing](CONTRIBUTING.md) — Bug reports, feature requests (no external PRs at this time)
+- [Contributing](CONTRIBUTING.md) — Bug reports and docs/test/integration-scaffold PRs welcome; feature PRs are issue-first
 - [Security](SECURITY.md) — Responsible disclosure
 
 ## Disclaimer
