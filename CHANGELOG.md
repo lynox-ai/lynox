@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.9.1 — 2026-07-21
+
+A targeted patch on 2.9.0. It stops an end-of-turn loop where a reply that ended with follow-up suggestions could re-run the model several times before finishing — a slow, token-burning turn that affected instances with plugins active (the default). It also drops the unused bundled npm/corepack from the runtime image, shrinking it and clearing a base-image dependency scan. **No migration** — clean image swap in both directions.
+
+### Fixed
+- **Follow-up suggestions end the turn instead of looping.** On plugin-enabled instances (the default), the terminal `suggest_follow_ups` step had lost its "ends the turn" marker inside a tool wrapper, so a reply that closed with suggestions re-ran the model several times before stopping. The wrapper now preserves every tool property, so the turn ends cleanly after one set of suggestions. (#1034)
+
+### Changed
+- **Smaller, hardened runtime image.** The bundled npm and corepack package managers — never used at runtime — are removed from the production image, reducing its size and attack surface and clearing a base-image dependency scan. (#1035)
+
 ## 2.9.0 — 2026-07-21
 
 This release makes model choice a **named strategy** you pick, not a per-tier fiddle. A model preset (a "Modell-Strategie") maps each routing tier to a specific provider's model in one step — chosen from cards in settings or a compact picker in the chat header — with the backing host disclosed so you always know where a turn runs; Fireworks joins as a new provider option, gated off until its key is provisioned. Under that, the durable-knowledge capture path is hardened at the source so a poisoned or low-value fact is stopped and metered before it can enter memory, and the agent's tool prefix shrinks by loading heavy tool guidance only on first use (cache-safe, behaviour-identical). The rest is chat- and rendering-correctness: a resumed multi-step turn renders as one bubble, the first-turn briefing is clean and current, and vision works on gen-3 Mistral models. **No engine.db migration** — the engine store stays at schema v7. **Rollback caveat:** an instance that has adopted a model preset must switch its strategy back to Standard (clear `tier_preset`) *before* rolling back to 2.8.0 — the 2.8.0 engine rejects the unknown `tier_preset` key under a strict config parse and would discard the whole config file. Instances that never picked a preset roll back as a clean image swap.
