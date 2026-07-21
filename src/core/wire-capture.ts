@@ -198,3 +198,69 @@ export function captureWireSnapshot(
   writeWireSnapshot(snapshot, env);
   return snapshot;
 }
+
+// --- Raw body sink (eval / wire-replay path) ----------------------------------
+
+const DEFAULT_RAW_GATE_FILE = '/tmp/wire-sink-raw-on';
+const DEFAULT_RAW_SINK_DIR = join(tmpdir(), 'lynox-wire-sink-raw');
+
+/**
+ * The FULL, UNREDACTED agent-level assembled request — the faithful, replayable representation
+ * of what the model saw, captured BEFORE the provider client translates it to the Anthropic /
+ * openai wire. The redacted `WireSnapshot` is for the operator diagnostic path; this is the
+ * eval path: the model-fitness wire-replay re-sends this exact request to each candidate model
+ * (through that candidate's own client), so the provider-specific translation stays faithful.
+ *
+ * ⚠️ Contains the FULL secrets catalog (names + last-4), memory blocks, and KG — it is NOT
+ * redacted (redacting would defeat replay fidelity). Therefore it is DEV/STAGING-EVAL ONLY, on
+ * the owner's OWN instance, behind a SEPARATE, more deliberate gate (`/tmp/wire-sink-raw-on`) —
+ * never the operator export, never a customer/production instance (see [[DEF-wire-capture-prod-gate]]).
+ */
+export interface RawWireBody {
+  runId: string | undefined;
+  turnIndex: number;
+  model: string;
+  provider: string;
+  /** The assembled system blocks, outbound messages, and offered tools — verbatim (unredacted). */
+  system: unknown;
+  messages: unknown;
+  tools: unknown;
+  maxTokens: number;
+  capturedAt: number;
+}
+
+/** Raw-body capture is enabled ONLY by its OWN file-gate (distinct from the redacted sink), so
+ *  the more-sensitive unredacted dump is a separate, deliberate opt-in. */
+export function isRawWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const gate = env['LYNOX_DEBUG_WIRE_RAW_GATE_FILE'] ?? DEFAULT_RAW_GATE_FILE;
+  return existsSync(gate);
+}
+
+/** The raw-body sink dir — `LYNOX_DEBUG_WIRE_RAW_SINK` when set, else a default under tmpdir. */
+export function rawWireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env['LYNOX_DEBUG_WIRE_RAW_SINK'] ?? DEFAULT_RAW_SINK_DIR;
+}
+
+/** Best-effort 0600 write of the raw body. NEVER throws into the hot path. */
+export function writeRawWireBody(body: RawWireBody, env: NodeJS.ProcessEnv = process.env): void {
+  try {
+    const dir = rawWireSinkDir(env);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const safeRun = (body.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
+    const file = join(dir, `raw-${safeRun}-t${body.turnIndex}-${body.capturedAt}.json`);
+    writeFileSync(file, JSON.stringify(body, null, 2), { mode: 0o600 });
+  } catch {
+    // swallow — eval diagnostics must never break a turn
+  }
+}
+
+/** Convenience: write the raw body when its gate is on. Returns the body, or null if gated off. */
+export function captureRawWireBody(
+  body: Omit<RawWireBody, 'capturedAt'> & { capturedAt?: number },
+  env: NodeJS.ProcessEnv = process.env,
+): RawWireBody | null {
+  if (!isRawWireSinkEnabled(env)) return null;
+  const full: RawWireBody = { ...body, capturedAt: body.capturedAt ?? Date.now() };
+  writeRawWireBody(full, env);
+  return full;
+}

@@ -11,7 +11,12 @@ import {
   wireSinkDir,
   writeWireSnapshot,
   captureWireSnapshot,
+  isRawWireSinkEnabled,
+  rawWireSinkDir,
+  writeRawWireBody,
+  captureRawWireBody,
   type WireSnapshotInput,
+  type RawWireBody,
 } from './wire-capture.js';
 
 // The engine emits `<secrets>secret:NAME (***last4), …</secrets>`. Exercising the
@@ -247,5 +252,61 @@ describe('writeWireSnapshot / captureWireSnapshot', () => {
     writeFileSync(asFile, '');
     const snap = buildWireSnapshot(baseInput());
     expect(() => writeWireSnapshot(snap, { LYNOX_DEBUG_WIRE_SINK: join(asFile, 'sub') })).not.toThrow();
+  });
+});
+
+describe('raw-body sink (eval / wire-replay path)', () => {
+  const rawBase = (): Omit<RawWireBody, 'capturedAt'> => ({
+    runId: 'run-raw',
+    turnIndex: 2,
+    model: 'ministral-14b-2512',
+    provider: 'openai',
+    system: [{ type: 'text', text: 'SYSTEM' }],
+    messages: [{ role: 'user', content: 'task\n<secrets>secret:K (***9999)</secrets>' }],
+    tools: [{ name: 'spawn_agent' }],
+    maxTokens: 8192,
+  });
+
+  it('has its OWN gate — independent of the redacted sink', () => {
+    const dir = mkTmp();
+    const rawGate = join(dir, 'raw-on');
+    const redGate = join(dir, 'red-on');
+    writeFileSync(redGate, ''); // redacted gate on, raw gate absent
+    expect(isRawWireSinkEnabled({ LYNOX_DEBUG_WIRE_RAW_GATE_FILE: rawGate })).toBe(false);
+    expect(isWireSinkEnabled({ LYNOX_DEBUG_WIRE_GATE_FILE: redGate })).toBe(true);
+    writeFileSync(rawGate, '');
+    expect(isRawWireSinkEnabled({ LYNOX_DEBUG_WIRE_RAW_GATE_FILE: rawGate })).toBe(true);
+  });
+
+  it('rawWireSinkDir defaults under tmpdir, or uses the override', () => {
+    expect(rawWireSinkDir({})).toContain('lynox-wire-sink-raw');
+    expect(rawWireSinkDir({ LYNOX_DEBUG_WIRE_RAW_SINK: '/x/raw' })).toBe('/x/raw');
+  });
+
+  it('writes the FULL UNREDACTED body 0600 (replay fidelity — secrets retained verbatim)', () => {
+    const dir = mkTmp();
+    const body: RawWireBody = { ...rawBase(), capturedAt: 111 };
+    writeRawWireBody(body, { LYNOX_DEBUG_WIRE_RAW_SINK: dir });
+    const files = readdirSync(dir).filter(f => f.startsWith('raw-') && f.endsWith('.json'));
+    expect(files.length).toBe(1);
+    const full = join(dir, files[0]!);
+    expect(statSync(full).mode & 0o077).toBe(0);
+    const txt = readFileSync(full, 'utf8');
+    // the raw body is deliberately NOT redacted — the eval needs the real request
+    expect(txt).toContain('9999');
+    expect(txt).toContain('SYSTEM');
+    expect(txt).toContain('spawn_agent');
+  });
+
+  it('captureRawWireBody is a no-op when its gate is off, writes + stamps capturedAt when on', () => {
+    const dir = mkTmp();
+    const gate = join(dir, 'gate'); // not 'raw-*' so it never matches the body filter below
+    expect(captureRawWireBody(rawBase(), { LYNOX_DEBUG_WIRE_RAW_SINK: dir, LYNOX_DEBUG_WIRE_RAW_GATE_FILE: gate })).toBeNull();
+    expect(readdirSync(dir).filter(f => f.endsWith('.json')).length).toBe(0);
+    writeFileSync(gate, '');
+    const res = captureRawWireBody(rawBase(), { LYNOX_DEBUG_WIRE_RAW_SINK: dir, LYNOX_DEBUG_WIRE_RAW_GATE_FILE: gate });
+    expect(res).not.toBeNull();
+    expect(typeof res?.capturedAt).toBe('number');
+    expect(readdirSync(dir).filter(f => f.startsWith('raw-') && f.endsWith('.json')).length).toBe(1);
   });
 });

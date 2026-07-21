@@ -37,7 +37,7 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
-import { captureWireSnapshot, extractWireFields, isWireSinkEnabled } from './wire-capture.js';
+import { captureWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -1531,6 +1531,26 @@ export class Agent implements IAgent {
         });
       } catch {
         // dev capture must never break a real turn
+      }
+    }
+
+    // Raw-body capture (eval / wire-replay path) — the FULL unredacted agent-level request
+    // for the Session-faithful model-fitness eval to re-send to candidate models. Separate,
+    // louder gate; dev/staging-eval only. See wire-capture.ts + extended-debug-capture.md.
+    if (isRawWireSinkEnabled()) {
+      try {
+        captureRawWireBody({
+          runId: this.currentRunId,
+          turnIndex: outboundMessages.length,
+          model: this.model,
+          provider: this.provider,
+          system: systemBlocks,
+          messages: outboundMessages,
+          tools: toolsDef,
+          maxTokens: this.maxTokens,
+        });
+      } catch {
+        // eval capture must never break a real turn
       }
     }
 
