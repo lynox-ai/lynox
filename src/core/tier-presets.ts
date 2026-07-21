@@ -84,13 +84,16 @@ export const TIER_PRESETS: Record<string, TierPreset> = {
       deep: anthropic('claude-sonnet-5'),
     },
   },
-  // 💎 max-quality — all-Anthropic flagship set.
+  // 💎 max-quality — all-Anthropic flagship set. Deep = Fable 5, Anthropic's most
+  // capable model (demanding reasoning + long-horizon agentic work); it is invoked
+  // deliberately (sub-agent escalation), never the main chat, so its $10/$50 rate is
+  // bounded. Opus stays selectable as a deep option in the catalog for those who prefer it.
   'max-quality': {
     routing_mode: 'hybrid',
     tier_set: {
       fast: anthropic('claude-haiku-4-5-20251001'),
       balanced: anthropic('claude-sonnet-5'),
-      deep: anthropic('claude-opus-4-8'),
+      deep: anthropic('claude-fable-5'),
     },
   },
 };

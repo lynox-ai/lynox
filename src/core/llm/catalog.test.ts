@@ -123,13 +123,17 @@ describe('LLM_CATALOG', () => {
 
   it('anthropic models pin Sonnet/Opus/Haiku with provider-specific IDs', () => {
     const entry = getCatalogForProvider('anthropic')!;
-    // Two balanced Sonnets (4.6 default + opt-in Sonnet 5), one deep, one fast.
+    // Two balanced Sonnets (4.6 default + opt-in Sonnet 5), two deep (Opus 4.6 +
+    // Fable 5 — the max-quality flagship), one fast.
     const tiers = entry.models.map((m) => m.tier).sort();
-    expect(tiers).toEqual(['balanced', 'balanced', 'deep', 'fast']);
+    expect(tiers).toEqual(['balanced', 'balanced', 'deep', 'deep', 'fast']);
     const byId = Object.fromEntries(entry.models.map((m) => [m.id, m]));
     expect(byId['claude-sonnet-4-6']?.tier).toBe('balanced');
     expect(byId['claude-sonnet-5']?.tier).toBe('balanced');
     expect(byId['claude-opus-4-6']?.tier).toBe('deep');
+    expect(byId['claude-fable-5']?.tier).toBe('deep');
+    expect(byId['claude-fable-5']?.pricing).toEqual({ input: 10, output: 50 });
+    expect(byId['claude-fable-5']?.context_window).toBe(1_000_000);
     // Haiku ID has date suffix on Anthropic Direct, NOT on Vertex — pin both.
     expect(byId['claude-haiku-4-5-20251001']?.tier).toBe('fast');
     // Canonical pricing (mirrors MODEL_CAPABILITIES — the pre-existing Opus

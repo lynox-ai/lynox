@@ -10,9 +10,10 @@ import { MODEL_CAPABILITIES } from './models.js';
  * rate) = a ~9-100× mis-bill + a mis-trim, which is exactly what P1 exists to fix.
  */
 describe('model-presets Wave 1 — new model registrations', () => {
-  it('registers all four preset models', () => {
+  it('registers all preset models', () => {
     for (const id of [
       'claude-opus-4-8',
+      'claude-fable-5',
       'mistral-medium-2604',
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
@@ -27,6 +28,16 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.tier).toBe('deep');
     expect(m.contextWindow).toBe(1_000_000);
     expect(m.pricing).toEqual({ input: 5, output: 25, cacheWrite: 10, cacheRead: 0.5 });
+    expect(m.features.vision).toBe(true);
+    expect(m.provenance).toBe('US');
+  });
+
+  it('Claude Fable 5 — verified $10/$50, 1M ctx, vision, US, deep (max-quality deep slot)', () => {
+    const m = MODEL_CAPABILITIES['claude-fable-5']!;
+    expect(m.provider).toBe('anthropic');
+    expect(m.tier).toBe('deep');
+    expect(m.contextWindow).toBe(1_000_000);
+    expect(m.pricing).toEqual({ input: 10, output: 50, cacheWrite: 20, cacheRead: 1.0 });
     expect(m.features.vision).toBe(true);
     expect(m.provenance).toBe('US');
   });
