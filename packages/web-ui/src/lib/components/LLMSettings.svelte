@@ -910,6 +910,24 @@
 	// reload + backend 403s the save). Drives the read-only tile state below.
 	const providerEnvPinned = $derived(!!config.env_overrides?.provider);
 
+	// On CP-supplied managed tiers (managed / managed_pro) the provider is capped to
+	// the curated set {Anthropic, Mistral}: the backend `enforceManagedProviderConstraints`
+	// rejects anything else on save. Every BYOK/self-host preset carries a
+	// `base_url_default` (so `requires_base_url` is false), which means the
+	// `customEndpointsLocked` tile-lock never covers them — they showed as fully
+	// selectable and a save just 403'd. Filter them OUT of the tile list entirely so a
+	// managed customer is never offered a provider whose save can't land. Hosted-BYOK
+	// (customer's own key, `cpSuppliesLLMKey() === false`) keeps the full list.
+	const isManagedCuratedProvider = (p: CatalogProvider): boolean =>
+		p.provider === 'anthropic' || (p.provider === 'openai' && p.preset_id === 'mistral');
+	const providersForDisplay = $derived(
+		providers.filter((p) => {
+			if (p.provider === 'vertex' && activeProvider !== 'vertex') return false;
+			if (cpSuppliesLLMKey() && !isManagedCuratedProvider(p)) return false;
+			return true;
+		}),
+	);
+
 	// ── Standard-mode "Main chat model" picker (PR model-select · arch-v2 Simple
 	// view). The main chat runs on `default_tier` (+ the Anthropic `balanced_model`
 	// variant); this select lets the user set it directly instead of hiding the
@@ -1153,7 +1171,7 @@
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
-			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
+			{#each providersForDisplay as p (catalogEntryKey(p))}
 				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={isTileLocked(p)}
 					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
 					<div class="font-medium text-sm flex items-center gap-1.5">
