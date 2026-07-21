@@ -244,6 +244,16 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
  */
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
+    id: 'mistral-medium-2604',
+    tier: 'deep',
+    label: 'Mistral Medium 3.5',
+    context_window: 262_144,
+    pricing: { input: 1.50, output: 7.50 },
+    capabilities: ['tool_use'],
+    residency: 'EU-Paris (Mistral SAS)',
+    notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis (Large is being deprecated to legacy). 262k context, native prompt-cache. Text-only (no vision). Note Mistral has no 1M-context deep.',
+  },
+  {
     id: 'mistral-large-2512',
     tier: 'deep',
     label: 'Mistral Large 3',
@@ -251,7 +261,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 0.50, output: 1.50 },
     capabilities: ['vision', 'tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Mistral quality leader — the deep tier. Set-Bench v4 top Mistral scorer on the open-ended analysis axes; no Mistral model beats it. 256k context, native prompt-cache, multimodal input.',
+    notes: 'Being deprecated to legacy — Medium 3.5 is the stronger deep now. Cheaper ($0.50/$1.50) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache.',
   },
   {
     id: 'ministral-14b-2512',
