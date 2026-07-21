@@ -26,8 +26,13 @@
  * Model choice is driven by COST + SOVEREIGNTY + CONTEXT, not a quality claim:
  * the fitness harness cannot separate the strong fleet at reachable difficulty
  * (`DEF-model-fitness-frontier-hard`), so the cheap CN-via-Fireworks deep models
- * are harness-equivalent to Sonnet 5 on lynox long-horizon jobs. The one
- * harness-measured pick is ⚖️ balanced = Ministral 14B (best lynox tool-router).
+ * are harness-equivalent to Sonnet 5 on lynox long-horizon jobs. The main/balanced
+ * slot, however, is now measured DIRECTLY (WS2 Session-faithful wire-replay, 2026-07-21):
+ * Ministral 14B was the best tool-ROUTER but is BELOW the R1/R3 orchestration floor — on a
+ * faithful replay of the real managed request it answers deep-worthy tasks INLINE (2/22
+ * escalate across 3 tasks) instead of delegating. The main is now mistral-medium (clears
+ * R1/R3 22/22 + R9 artefact quality, the fastest floor-clearer measured); this raises the
+ * R8 per-turn cost since the main runs every turn.
  */
 import type { ModelTier, TierSet, TierSlot } from '../types/index.js';
 import { MISTRAL_API_BASE } from '../types/index.js';
@@ -64,23 +69,27 @@ const mistral = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'o
 const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_API_BASE });
 
 export const TIER_PRESETS: Record<string, TierPreset> = {
-  // ⚡ efficient — cheapest coherent set: EU Mistral for fast/balanced, a cheap
-  // 1M-context CN-via-Fireworks model for deep/big-context.
+  // ⚡ efficient — cheapest coherent set: EU Mistral fast + the cheapest R1/R3+R9
+  // floor-clearing main (mistral-medium; Ministral 14B was BELOW the floor — WS2), a
+  // cheap 1M-context CN-via-Fireworks model for deep/big-context.
   efficient: {
     routing_mode: 'hybrid',
     tier_set: {
       fast: mistral('ministral-8b-2512'),
-      balanced: mistral('ministral-14b-2512'),
+      balanced: mistral('mistral-medium-2604'),
       deep: fireworks('accounts/fireworks/models/glm-5p2'),
     },
   },
-  // ⚖️ balanced — the default hybrid: Ministral 14B is the harness-measured best
-  // lynox tool-router for the (tool-heavy) main chat; deep escalates to Sonnet 5.
+  // ⚖️ balanced — the default hybrid: Anthropic Haiku fast + an EU-Mistral main that
+  // clears the R1/R3 orchestration floor (mistral-medium; Ministral 14B did NOT — WS2) +
+  // Sonnet 5 deep. haiku-4.5 also clears the floor and is the Anthropic alternative for
+  // the main, but that would collapse fast==main — mistral-medium keeps a genuine
+  // fast→main→deep ladder and an EU-sovereign main.
   balanced: {
     routing_mode: 'hybrid',
     tier_set: {
       fast: anthropic('claude-haiku-4-5-20251001'),
-      balanced: mistral('ministral-14b-2512'),
+      balanced: mistral('mistral-medium-2604'),
       deep: anthropic('claude-sonnet-5'),
     },
   },

@@ -2297,7 +2297,7 @@ describe('LynoxHTTPApi', () => {
       // A tier_preset is config-sugar — the raw stored config carries neither
       // routing_mode nor tier_set (the loader materializes them). So the picker's
       // main_chat_tiers MUST be derived from the SAME expansion, else it shows the
-      // Anthropic default map (Sonnet/Opus) while the preset routes Ministral 14B —
+      // Anthropic default map (Sonnet/Opus) while the preset routes mistral-medium —
       // the exact stale-label class the composer picker hit. Real expandTierPreset +
       // catalog run here (not mocked).
       const { readUserConfig } = await import('../core/config.js');
@@ -2308,8 +2308,8 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
       expect(tiers).toBeDefined();
-      // balanced preset's balanced tier = Ministral 14B (NOT a Sonnet default).
-      expect(tiers!['balanced']).toContain('Ministral');
+      // balanced preset's balanced tier = mistral-medium (WS2; NOT a Sonnet default).
+      expect(tiers!['balanced']).toContain('Mistral Medium');
       expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 

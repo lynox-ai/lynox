@@ -2206,7 +2206,7 @@ function extractText(content: BetaContentBlock[]): string {
     .join('');
 }
 
-function isRetryable(err: unknown): boolean {
+export function isRetryable(err: unknown): boolean {
   if (err instanceof APIError) {
     // HTTP status-based: 429 rate limit, 529 overloaded, 500+ server errors
     if (err.status === 429 || err.status === 529 || (err.status !== undefined && err.status >= 500 && err.status < 600)) {
@@ -2228,11 +2228,23 @@ function isRetryable(err: unknown): boolean {
       return true;
     }
   }
-  // Network / connection errors
+  // Network / connection + stream-transport errors. A dropped/reset provider stream on a
+  // LONG output (observed on Fireworks glm-5p2 deep turns — the efficient preset's deep slot)
+  // surfaces NOT as an APIError but as a `TransformError` or a 'terminated' TypeError from the
+  // fetch/undici stream, so the status/body checks above miss it. Without this the Agent would
+  // fail the whole turn instead of retrying the transient drop (DEF-fireworks-longstream-retry).
   if (err instanceof Error) {
     const msg = err.message;
-    if (msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed')
-      || msg.includes('ECONNREFUSED') || msg.includes('socket hang up')) {
+    if (err.name === 'TransformError'
+      || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed')
+      || msg.includes('ECONNREFUSED') || msg.includes('socket hang up')
+      || msg.includes('terminated') || msg.includes('other side closed')) {
+      return true;
+    }
+    // undici commonly wraps the transport failure in `.cause`.
+    const cause = (err as { cause?: unknown }).cause;
+    if (cause instanceof Error
+      && (cause.message.includes('ECONNRESET') || cause.message.includes('terminated') || cause.message.includes('other side closed'))) {
       return true;
     }
   }
