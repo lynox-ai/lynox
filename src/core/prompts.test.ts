@@ -4,6 +4,7 @@ import {
   withCurrentTimePrefix,
   SYSTEM_PROMPT,
   modelIdentityContext,
+  proactiveDeepGuidance,
   providerFamilyLabel,
   NO_WEB_SEARCH_PROMPT_SUFFIX,
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
@@ -18,6 +19,38 @@ import { getModelId, type LLMProvider, type ModelTier } from '../types/index.js'
 // poison the next case's `new Date()` reads.
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('proactiveDeepGuidance — feature-gated proactive deep escalation', () => {
+  it('is OFF (empty) when the proactive-deep flag is off', () => {
+    expect(proactiveDeepGuidance({ proactiveDeep: false, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' })).toBe('');
+    expect(proactiveDeepGuidance({ proactiveDeep: false, proactiveDeepAnthropic: true, deepSlotProvider: 'anthropic' })).toBe('');
+  });
+
+  it('fires on a CHEAP (non-Anthropic) deep slot with the flag on — "inexpensive → escalate freely"', () => {
+    const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
+    expect(out).toContain('Proactive deep escalation');
+    expect(out).toContain('inexpensive');
+    expect(out).not.toContain('PREMIUM');
+  });
+
+  it('is SUPPRESSED on an Anthropic (premium) deep slot unless the anthropic flag is also on', () => {
+    // gate: proactive-deep on but deep slot is Anthropic + anthropic flag off → empty
+    expect(proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'anthropic' })).toBe('');
+  });
+
+  it('fires on an Anthropic deep slot ONLY with the anthropic flag on — "PREMIUM → judiciously"', () => {
+    const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: true, deepSlotProvider: 'anthropic' });
+    expect(out).toContain('Proactive deep escalation');
+    expect(out).toContain('PREMIUM');
+    expect(out).toContain('judiciously');
+  });
+
+  it('always keeps escalation on a sub-agent, never switching the main chat model', () => {
+    const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
+    expect(out).toContain('sub-agent');
+    expect(out).toContain('Never switch THIS conversation');
+  });
 });
 
 describe('GROUNDING_PROMPT_BLOCK', () => {

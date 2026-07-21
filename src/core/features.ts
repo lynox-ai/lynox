@@ -13,7 +13,9 @@ export type FeatureFlag =
   | 'flat-file-memory'
   | 'unified-inbox'
   | 'api-setup-v2'
-  | 'api-cost-display';
+  | 'api-cost-display'
+  | 'proactive-deep'
+  | 'proactive-deep-anthropic';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -22,6 +24,8 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'unified-inbox': 'LYNOX_FEATURE_UNIFIED_INBOX',
   'api-setup-v2': 'LYNOX_FEATURE_API_SETUP_V2',
   'api-cost-display': 'LYNOX_FEATURE_API_COST_DISPLAY',
+  'proactive-deep': 'LYNOX_FEATURE_PROACTIVE_DEEP',
+  'proactive-deep-anthropic': 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -45,6 +49,18 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // public demo (which routes only through Meridian seed + bundled web_search,
   // never paid APIs like DataForSEO) emit no cost events and incur no charges.
   'api-cost-display': true,
+  // Proactive deep escalation: when ON, the agent may proactively spawn a deep
+  // sub-agent (or offer to) for deep-worthy sub-tasks instead of waiting to be
+  // asked. Default OFF — deep stays a deliberate, user-initiated escalation.
+  // Gated on cost via the sibling flag below: with `proactive-deep` ON, the
+  // behaviour still fires ONLY when the resolved deep slot is CHEAP (non-Anthropic,
+  // e.g. Fireworks/Mistral); an Anthropic (premium) deep slot additionally
+  // requires `proactive-deep-anthropic`. This lets us validate the behaviour on
+  // cheap deeps without inflating Anthropic spend.
+  'proactive-deep': false,
+  // Allow proactive deep escalation even when the resolved deep slot is Anthropic
+  // (premium — Fable/Opus). Default OFF. No-op unless `proactive-deep` is also ON.
+  'proactive-deep-anthropic': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags
