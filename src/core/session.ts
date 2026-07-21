@@ -199,6 +199,28 @@ export interface RunUsageSummary {
 }
 
 /**
+ * Wrap each tool's handler with the plugin tool-gate, preserving the REST of the
+ * ToolEntry via a spread. Spreading `...entry` — not cherry-picking a field subset —
+ * is load-bearing: an earlier `{definition, requiresConfirmation, handler}` reconstruction
+ * silently dropped `endsTurn`, so a terminal tool (suggest_follow_ups) resolved
+ * endsTurn=false, its turn never ended and the agent looped on the tool-result carrier;
+ * it also dropped `detailedGuidance`, so #1006's on-use guidance never fired on a
+ * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
+ */
+export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
+  return entries.map(entry => ({
+    ...entry,
+    handler: async (input: unknown, agent: IAgent): Promise<string> => {
+      const gate = await pluginManager.fireToolGate(entry.definition.name, input);
+      if (gate === false) {
+        throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
+      }
+      return entry.handler(input, agent);
+    },
+  }));
+}
+
+/**
  * Session — per-conversation state.
  * Holds Agent, messages, mode, callbacks, and run tracking.
  * Created via engine.createSession().
@@ -1933,19 +1955,10 @@ export class Session {
       ? slotCfg.provider
       : (this._profileOverride?.provider ?? userConfig.provider);
     const entries = registry.getEntries();
-    const tools = pluginManager
-      ? entries.map(entry => ({
-          definition: entry.definition,
-          requiresConfirmation: entry.requiresConfirmation,
-          handler: async (input: unknown, agent: IAgent): Promise<string> => {
-            const gate = await pluginManager.fireToolGate(entry.definition.name, input);
-            if (gate === false) {
-              throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
-            }
-            return entry.handler(input, agent);
-          },
-        }))
-      : entries;
+    // Wrap handlers with the plugin gate while PRESERVING every ToolEntry field
+    // (endsTurn, detailedGuidance, …) — see applyPluginToolGate for why the spread
+    // is load-bearing (a dropped endsTurn made suggest_follow_ups loop).
+    const tools = pluginManager ? applyPluginToolGate(entries, pluginManager) : entries;
 
     const streamHandler: StreamHandler = async (event: StreamEvent) => {
       if (event.type === 'turn_end') {
