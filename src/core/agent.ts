@@ -37,6 +37,7 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
+import { captureWireSnapshot, isWireSinkEnabled } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -1506,6 +1507,33 @@ export class Agent implements IAgent {
       ...getBetasForProvider(this.provider),
       ...(lazyToolsActive ? ['advanced-tool-use-2025-11-20' as AnthropicBeta] : []),
     ];
+
+    // Extended debug capture (Surface B / dev sink) — a provider-agnostic snapshot of
+    // the fully-assembled outbound request (system + the FULL user message incl. the
+    // ephemeral tail + the offered tools + params), for the faithful model-fitness
+    // eval's wire-replay and (step 2) the operator debug export. Gated OFF by default
+    // (env + file-gate), so this whole block is skipped on a normal turn. Captured ONCE
+    // per turn (before the retry loop); never throws into the hot path. See
+    // wire-capture.ts + pro docs/internal/prd/extended-debug-capture.md.
+    if (isWireSinkEnabled()) {
+      const lastUser = [...outboundMessages].reverse().find(m => m.role === 'user');
+      const userText = !lastUser
+        ? ''
+        : typeof lastUser.content === 'string'
+          ? lastUser.content
+          : lastUser.content.map(b => (b.type === 'text' ? b.text : `[${b.type}]`)).join('\n');
+      captureWireSnapshot({
+        runId: this.currentRunId,
+        turnIndex: outboundMessages.length,
+        model: this.model,
+        provider: this.provider,
+        systemText: systemBlocks.map(b => b.text).join('\n'),
+        userMessage: userText,
+        toolNames: toolsDef.map(t => t.name),
+        maxTokens: this.maxTokens,
+        ephemeralTailChars: ephemeralBlocks.length > 0 ? JSON.stringify(ephemeralBlocks).length : 0,
+      });
+    }
 
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
       try {
