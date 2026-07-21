@@ -353,18 +353,26 @@
 	produced wasted black space below the status text. The iOS Home Indicator
 	bar visually overlaps the bottom edge now, but the status text sits above
 	the indicator and stays legible. -->
-<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 whitespace-nowrap overflow-x-auto scrollbar-none">
-	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors" title={apiStatusTooltip || providerName}>
-		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
-		<span class="text-border mx-1">|</span>
-		<!-- Aggregated worst-state across all configured providers (mobile mirror
-		     of the desktop pill). Pre-fix this used providers[0] only, so a
-		     failing Mistral was invisible on mobile too. -->
-		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
-		{providerName} · {apiStatusLabel()}
-		<span class="text-border mx-1">|</span>
-		{formatCost(todayCost)}
+<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 whitespace-nowrap overflow-x-hidden scrollbar-none">
+	<!-- Status is conveyed VISUALLY by the two colored dots (engine + aggregated
+	     API worst-state), NOT spelled out as text. The old "OK · Anthropic ·
+	     Mistral · API beeinträchtigt" line overflowed and clipped on both edges
+	     on narrow phones (justify-center + overflow). Dropping the text status
+	     labels — and truncating a long hybrid provider list — keeps the line
+	     inside the viewport; the full wording lives in the tooltip/aria-label and
+	     the tap-through panel. Mirrors the desktop bar, which is already dot-only. -->
+	<button
+		onclick={togglePanel}
+		class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors min-w-0"
+		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {formatCost(todayCost)}"
+		title="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}"
+	>
+		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+		<span class="text-border">|</span>
+		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {apiStatusClass()}"></span>
+		<span class="truncate">{providerName}</span>
+		<span class="text-border shrink-0">|</span>
+		<span class="shrink-0">{formatCost(todayCost)}</span>
 	</button>
 	{@render voiceAutoSendBtn()}
 	{@render autoSpeakBtn()}
