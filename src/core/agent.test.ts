@@ -57,6 +57,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import type { WireSnapshot } from './wire-capture.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { getBetasForProvider } from '../types/index.js';
@@ -279,6 +280,42 @@ describe('Agent', () => {
       const messages = agent.getMessages();
       expect(messages[0]).toEqual({ role: 'user', content: 'Hi' });
       expect(messages[1]).toMatchObject({ role: 'assistant' });
+    });
+
+    it('extended debug capture: emits a redacted WireSnapshot per turn to onWireSnapshot', async () => {
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const captured: WireSnapshot[] = [];
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [makeTool('recall'), makeTool('web_research')],
+        onWireSnapshot: (s) => captured.push(s),
+      });
+      agent.currentRunId = 'run-xyz';
+      // The raw message carries a secrets catalog — it must be redacted at capture.
+      await agent.send('summarise revenue <secrets>secret:ANTHROPIC_API_KEY (***FgAA)</secrets>');
+
+      expect(captured).toHaveLength(1);
+      const snap = captured[0]!;
+      expect(snap.runId).toBe('run-xyz');
+      expect(snap.provider).toBeTruthy();
+      expect(snap.userMessage).toContain('summarise revenue');
+      // Redaction ran through the REAL seam: no secret name / last-4 survives.
+      expect(snap.userMessage).not.toContain('***FgAA');
+      expect(snap.userMessage).not.toContain('secret:ANTHROPIC_API_KEY');
+      expect(snap.userMessage).toContain('names+last4 redacted');
+      // The offered tools are captured.
+      expect(snap.toolNames).toEqual(expect.arrayContaining(['recall', 'web_research']));
+      expect(snap.toolCount).toBeGreaterThanOrEqual(2);
+      expect(snap.userMessageChars).toBe(snap.userMessage.length);
+    });
+
+    it('extended debug capture: no snapshot when onWireSnapshot is not set (default off)', async () => {
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      // No onWireSnapshot + dev sink off → the whole capture block is skipped.
+      // The turn completes normally (byte-identical hot path).
+      await expect(agent.send('hello')).resolves.toBe('done');
     });
 
     it('resets continuationCount on each send', async () => {

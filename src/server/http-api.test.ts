@@ -3183,6 +3183,7 @@ describe('LynoxHTTPApi', () => {
         getRunToolCalls: () => [{ tool_name: 'http_request', input_json: `{"k":"${KEY}"}`, output_json: 'ok', duration_ms: 5, sequence_order: 0 }],
         getPromptSnapshot: () => ({ prompt_text: `system ${KEY}` }),
         getCompactionEventsBySession: () => [],
+        getWireSnapshotsForRun: () => [],
       };
       await swapEngine({
         // KEY also in the thread title → proves the whole-bundle scrub covers
@@ -3196,7 +3197,7 @@ describe('LynoxHTTPApi', () => {
           schema: string; thread: { id: string };
           runs: Array<{ provider: string; tool_calls: Array<{ tool_name: string }>; prompt_snapshot: string }>;
         };
-        expect(body.schema).toBe('thread-debug-export/v2');
+        expect(body.schema).toBe('thread-debug-export/v3');
         expect(body.thread.id).toBe('t1');
         expect(body.runs).toHaveLength(1);
         // The per-run telemetry the thin export never carried:
@@ -3220,7 +3221,7 @@ describe('LynoxHTTPApi', () => {
       };
       await swapEngine({
         getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
-        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [] }),
+        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
         getKnowledgeLayer: () => kg,
       }, async () => {
         const res = await jsonFetch('/api/threads/t1/debug-export');
@@ -3241,6 +3242,88 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('bundles wire snapshots + the typed-vs-assembled diff + at-a-glance summary (extended debug capture)', async () => {
+      const typed = 'summarise Q3 revenue';
+      // What the model actually saw: a [Now:] prefix + the typed task + the injected
+      // ephemeral tail (retrieved_context / task_overview / redacted secrets count).
+      const prefix = '[Now:2026-07-22] ';
+      const tail = ' <retrieved_context>kg facts</retrieved_context><task_overview>propose work</task_overview><secrets>2 secrets available (names+last4 redacted)</secrets>';
+      const assembled = `${prefix}${typed}${tail}`;
+      const runHistory = {
+        getRunsBySession: () => [{
+          id: 'run-1', session_id: 't1', task_text: typed, response_text: 'ok', prompt_hash: '',
+          provider: 'openai', status: 'completed', cost_usd: 0.01,
+          tokens_in: 100, tokens_out: 10, tokens_cache_read: 0, tokens_cache_write: 0,
+          composition_json: null, error_text: null,
+        }],
+        getRunToolCalls: () => [],
+        getPromptSnapshot: () => null,
+        getCompactionEventsBySession: () => [],
+        getWireSnapshotsForRun: () => [{
+          run_id: 'run-1', turn_index: 1, model: 'ministral-14b-2512', provider: 'openai',
+          system_prompt_hash: 'sph1', user_message: assembled, user_message_chars: assembled.length,
+          tool_names: ['recall', 'spawn_agent'], tool_count: 2, tool_choice: null, temperature: 0.7,
+          max_tokens: 8192, ephemeral_tail_present: true, ephemeral_tail_chars: 3050, captured_at: 1_700_000_000_000,
+        }],
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => runHistory,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          schema: string;
+          runs: Array<{ wire_snapshots: Array<{
+            user_message: string; tool_count: number; tool_names: string[];
+            wire_diff: { typed_found: boolean; typed_chars: number; assembled_chars: number; injected_chars: number; injected_prefix?: string; injected_suffix?: string };
+          }> }>;
+          wire_capture_summary: { turn_count: number; turns: Array<{ turn_index: number; typed_chars: number; assembled_chars: number; injected_chars: number; tool_count: number; ephemeral_tail_present: boolean }> } | null;
+        };
+        expect(body.schema).toBe('thread-debug-export/v3');
+        const snap = body.runs[0]!.wire_snapshots[0]!;
+        // The snapshot rides the run.
+        expect(snap.tool_count).toBe(2);
+        expect(snap.tool_names).toEqual(['recall', 'spawn_agent']);
+        expect(snap.user_message).toBe(assembled);
+        // Step-3 diff: the typed task is found inside the assembled message → clean split.
+        expect(snap.wire_diff.typed_found).toBe(true);
+        expect(snap.wire_diff.typed_chars).toBe(typed.length);
+        expect(snap.wire_diff.assembled_chars).toBe(assembled.length);
+        expect(snap.wire_diff.injected_chars).toBe(assembled.length - typed.length);
+        expect(snap.wire_diff.injected_prefix).toBe(prefix);      // the [Now:] prefix
+        expect(snap.wire_diff.injected_suffix).toBe(tail);        // the ephemeral tail
+        // At-a-glance summary across the thread.
+        expect(body.wire_capture_summary?.turn_count).toBe(1);
+        expect(body.wire_capture_summary?.turns[0]!.turn_index).toBe(1);
+        expect(body.wire_capture_summary?.turns[0]!.injected_chars).toBe(assembled.length - typed.length);
+        expect(body.wire_capture_summary?.turns[0]!.ephemeral_tail_present).toBe(true);
+      });
+    });
+
+    it('wire_capture_summary is null when no run captured snapshots (setting off)', async () => {
+      const runHistory = {
+        getRunsBySession: () => [{
+          id: 'run-1', session_id: 't1', task_text: 'x', response_text: 'ok', prompt_hash: '',
+          provider: 'anthropic', status: 'completed', cost_usd: 0, tokens_in: 1, tokens_out: 1,
+          tokens_cache_read: 0, tokens_cache_write: 0, composition_json: null, error_text: null,
+        }],
+        getRunToolCalls: () => [],
+        getPromptSnapshot: () => null,
+        getCompactionEventsBySession: () => [],
+        getWireSnapshotsForRun: () => [],
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => runHistory,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        const body = await res.json() as { wire_capture_summary: unknown; runs: Array<{ wire_snapshots: unknown[] }> };
+        expect(body.wire_capture_summary).toBeNull();
+        expect(body.runs[0]!.wire_snapshots).toEqual([]);
+      });
+    });
+
     it('Tier 2: parses composition, derives cache-hit, surfaces compaction events + cost rollup', async () => {
       const composition = { messageCount: 12, totalBytes: 480_000, categories: { toolResult: 400_000 } };
       const runHistory = {
@@ -3256,6 +3339,7 @@ describe('LynoxHTTPApi', () => {
         getCompactionEventsBySession: () => [
           { id: 'c1', session_id: 't1', run_id: 'run-1', trigger: 'auto', occupancy_before: 160000, occupancy_after: 8000, messages_before: 12, messages_after: 3, summary_chars: 900, created_at: '2026-06-19T00:00:00Z' },
         ],
+        getWireSnapshotsForRun: () => [],
       };
       await swapEngine({
         getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),

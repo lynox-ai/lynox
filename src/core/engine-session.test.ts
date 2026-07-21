@@ -46,6 +46,9 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor — capture the Session-owned blob store
     // so compaction tests can assert recall round-trips through the real store.
     this.toolResultBlobStore = config?.toolResultBlobStore;
+    // @ts-expect-error mock constructor — capture the extended-debug-capture persist
+    // sink so a test can assert Session wires it iff debug_wire_capture is on.
+    this.onWireSnapshot = (config as { onWireSnapshot?: unknown })?.onWireSnapshot;
     // @ts-expect-error mock constructor
     this.send = mockSend;
     // @ts-expect-error mock constructor
@@ -314,6 +317,7 @@ vi.mock('./project.js', () => ({
 
 const mockInsertRun = vi.fn().mockReturnValue('run-123');
 const mockInsertPromptSnapshot = vi.fn();
+const mockInsertWireSnapshot = vi.fn();
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -321,6 +325,8 @@ vi.mock('./run-history.js', () => ({
     this.insertRun = mockInsertRun;
     // @ts-expect-error mock constructor
     this.insertPromptSnapshot = mockInsertPromptSnapshot;
+    // @ts-expect-error mock constructor — extended debug capture persist sink.
+    this.insertWireSnapshot = mockInsertWireSnapshot;
     // @ts-expect-error mock constructor
     this.updateRun = vi.fn();
     // @ts-expect-error mock constructor — per-thread rollup source (session.ts:776).
@@ -482,6 +488,36 @@ describe('Engine + Session (Orchestrator)', () => {
         // succeeded so the identity-based eager-persist won't duplicate the row.
         expect.objectContaining({ suppressTools: false }),
       );
+    });
+
+    it('extended debug capture: wires onWireSnapshot → insertWireSnapshot when debug_wire_capture is ON', async () => {
+      // userConfig is loaded from disk, not the engine ctor — mutate it BEFORE the
+      // session's _createAgent reads it (the flag gates the callback at build time).
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().debug_wire_capture = true;
+      const session = engine.createSession();
+      try {
+        // Session passed a persist sink to the Agent (the flag is on).
+        const agent = (session as unknown as { agent: { onWireSnapshot?: (s: unknown) => void } }).agent;
+        expect(typeof agent.onWireSnapshot).toBe('function');
+        // Invoking it routes to RunHistory.insertWireSnapshot (the operator persist path).
+        const snap = { runId: 'run-123', turnIndex: 1, userMessage: 'x' };
+        agent.onWireSnapshot!(snap);
+        expect(mockInsertWireSnapshot).toHaveBeenCalledWith(snap);
+      } finally {
+        // loadConfig() memoizes a singleton — reset so the flag doesn't leak into
+        // later tests (see the mutation-leak note in this file's compaction tests).
+        delete engine.getUserConfig().debug_wire_capture;
+      }
+    });
+
+    it('extended debug capture: does NOT wire onWireSnapshot when the flag is OFF (default)', async () => {
+      const { session } = await createEngineAndSession();
+      mockSend.mockResolvedValueOnce('ok');
+      await session.run('Hello');
+      const agent = (session as unknown as { agent: { onWireSnapshot?: unknown } }).agent;
+      expect(agent.onWireSnapshot).toBeUndefined();   // byte-identical hot path
     });
 
     it('Tier 2: a failed run records raw error detail (error_text) for failure-class triage', async () => {

@@ -13,15 +13,19 @@
 	let saving = $state(false);
 	let bugsinkEnabled = $state(true);
 	let bugsinkDsnConfigured = $state(false);
+	// Extended debug capture (operator surface) — opt-in, default OFF.
+	let debugWireCapture = $state(false);
+	let savingWire = $state(false);
 
 	async function load(): Promise<void> {
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			const body = (await res.json()) as { managed?: string; bugsink_enabled?: boolean; bugsink_dsn_configured?: boolean };
+			const body = (await res.json()) as { managed?: string; bugsink_enabled?: boolean; bugsink_dsn_configured?: boolean; debug_wire_capture?: boolean };
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
 			bugsinkEnabled = body.bugsink_enabled !== false;
 			bugsinkDsnConfigured = body.bugsink_dsn_configured === true;
+			debugWireCapture = body.debug_wire_capture === true;
 			loaded = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('privacy.load_failed'), 'error', 5000);
@@ -42,6 +46,26 @@
 			addToast(e instanceof Error ? e.message : t('privacy.save_failed'), 'error', 5000);
 		} finally {
 			saving = false;
+		}
+	}
+
+	async function saveDebugWireCapture(): Promise<void> {
+		savingWire = true;
+		try {
+			const res = await fetch(`${getApiBase()}/config`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ debug_wire_capture: debugWireCapture }),
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			addToast(t('privacy.saved'), 'success', 3000);
+		} catch (e) {
+			// Roll the checkbox back to the persisted value on failure so the UI
+			// never claims an unsaved state is saved.
+			debugWireCapture = !debugWireCapture;
+			addToast(e instanceof Error ? e.message : t('privacy.save_failed'), 'error', 5000);
+		} finally {
+			savingWire = false;
 		}
 	}
 
@@ -101,6 +125,21 @@
 				<span class="text-sm">{t('privacy.bugsink_label')}</span>
 			</label>
 		{/if}
+	</section>
+
+	<!-- Extended debug capture (operator surface) — opt-in, default OFF. Persists a
+	     REDACTED per-turn snapshot of the fully-assembled request ("what the model
+	     received", secrets scrubbed) to this instance's OWN history.db, bundled into
+	     the OWN debug export. Owner-scoped, same data-retention class as the Bugsink
+	     toggle. See pro docs/internal/prd/extended-debug-capture.md. -->
+	<section class="border-t border-border pt-6 space-y-3">
+		<h2 class="text-lg font-medium">{t('privacy.wire_capture_heading')}</h2>
+		<p class="text-xs text-text-muted">{t('privacy.wire_capture_subtitle')}</p>
+		<label class="flex items-center gap-2 cursor-pointer">
+			<input type="checkbox" disabled={!loaded || savingWire} bind:checked={debugWireCapture}
+				onchange={saveDebugWireCapture} class="w-4 h-4" />
+			<span class="text-sm">{t('privacy.wire_capture_label')}</span>
+		</label>
 	</section>
 
 	<!-- Account delete (Stop-Gap mailto, PRD Phase 3) -->
