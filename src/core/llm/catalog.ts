@@ -179,6 +179,16 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
     notes: 'Highest capability; ~1.7× the cost of Sonnet — reserve for deep reasoning.',
   },
   {
+    id: 'claude-fable-5',
+    tier: 'deep',
+    label: 'Fable 5',
+    context_window: 1_000_000,
+    pricing: { input: 10, output: 50 },
+    capabilities: ['vision', 'tool_use', 'extended_thinking'],
+    residency: 'US (Anthropic; DPA + GDPR)',
+    notes: 'Flagship — most capable model for demanding reasoning + long-horizon agentic work (1M context, up to 128k output). Priciest tier at $10/$50 per M — the max-quality deep slot; reserve for deliberate deep escalation, not the main chat.',
+  },
+  {
     id: 'claude-haiku-4-5-20251001',
     tier: 'fast',
     label: 'Haiku 4.5',
