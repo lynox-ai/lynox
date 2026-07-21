@@ -15,7 +15,13 @@ import type { PassResult, SetBenchScenario, ToolCallTrace } from './types.js';
 import { inspectFlakyAttempts, inspectMemory, inspectWorkflow, seedMemory } from './mock-tools.js';
 // The proactive-deep axis tests the REAL shipped guidance, imported (not copied)
 // so tuning the guidance in prompts.ts automatically re-tests here — no drift.
-import { proactiveDeepGuidance } from '../../src/core/prompts.js';
+// It also embeds the REAL base system prompt + grounding block, because the axis
+// measures instruction-adherence UNDER REALISTIC LOAD: with a short isolated
+// preamble every model (even ministral-3b) trivially escalates — the axis
+// ceilings and contradicts staging (where ministral-14b stays inline). Burying
+// the guidance at the end of the full ~real prompt reproduces the staging
+// condition so the discriminator is valid. See main-model-requirements.md.
+import { proactiveDeepGuidance, SYSTEM_PROMPT, GROUNDING_PROMPT_BLOCK } from '../../src/core/prompts.js';
 
 // Preamble for the ceiling-free reasoning axes. Unlike the default harness
 // preamble (which bans narration to keep structured-output axes clean), this
@@ -683,19 +689,22 @@ export const SCENARIO_DEEP_DESIGN: SetBenchScenario = {
 // on the balanced model = fail. Measured on staging: mistral-medium escalates,
 // ministral-14b stays inline on identical guidance. See main-model requirements.
 
-// Unlike the default harness preamble (which bans narration), this permits the
-// model to speak/offer — the BORDERLINE path IS a spoken offer, so suppressing
-// narration would erase half the signal. Composes a compact spawn_agent brief
-// with the REAL guidance string (cheap/non-Anthropic deep variant → the
-// "escalate freely" wording, which is the flip we default-gate for cheap deeps).
+// Reproduces the staging condition: the REAL base system prompt (which already
+// carries the delegation section, grounding, tool guidance, etc. — the "noise"
+// the proactive-deep instruction must survive) + the grounding block, with the
+// REAL guidance appended LAST, exactly as session.ts assembles it. The full
+// prompt does not ban narration, so the BORDERLINE spoken-offer path stays
+// observable. deepSlotProvider:'openai' → the cheap "escalate freely" variant
+// (the flip we default-gate for cheap deeps). A one-line note names the
+// spawn_agent `model` field so the escalation is expressible against the mock
+// tool. Length + competing instructions here are the POINT — a compact preamble
+// ceilings the axis (see the import note + main-model-requirements.md).
 const PROACTIVE_DEEP_PREAMBLE = [
-  'You are the balanced main-chat model of an AI agent product, in a real conversation with a user.',
-  'You have a `spawn_agent` tool: it delegates a sub-task to a fresh sub-agent and returns that',
-  'sub-agent\'s answer. It takes a `model` field — "fast", "balanced", or "deep" — selecting the',
-  'sub-agent\'s capability tier; "deep" runs a stronger, reasoning-heavy model. Speak to the user',
-  'naturally: you may explain, ask, and propose. Do the right thing per the guidance below.',
+  SYSTEM_PROMPT,
+  GROUNDING_PROMPT_BLOCK,
+  'Note: your `spawn_agent` tool takes a `model` field — "fast", "balanced", or "deep" — selecting the sub-agent\'s capability tier.',
   proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' }).trim(),
-].join(' ');
+].join('\n\n');
 
 /**
  * Deterministic pass-check for the proactive-deep axis. PASS iff the model
