@@ -139,6 +139,25 @@ describe('RunHistory wire_snapshots', () => {
     h.close();
   });
 
+  it('degrades a malformed tool_names JSON row to an empty list (keeps the rest)', () => {
+    const dir = freshDir();
+    const dbPath = join(dir, 'wire.db');
+    const h = new RunHistory(dbPath);
+    h.insertWireSnapshot(mkSnapshot({ turnIndex: 1 }));
+    // Corrupt the tool_names JSON column directly (a real row can't produce this —
+    // insertWireSnapshot always JSON.stringifies — but a DB-level corruption should
+    // not fail the whole export).
+    new BetterSqlite3(dbPath)
+      .prepare('UPDATE wire_snapshots SET tool_names = ? WHERE run_id = ? AND turn_index = ?')
+      .run('{not valid json', 'run-1', 1);
+
+    const rows = h.getWireSnapshotsForRun('run-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tool_names).toEqual([]);          // degraded, not thrown
+    expect(rows[0]!.model).toBe('ministral-14b-2512'); // rest of the snapshot intact
+    h.close();
+  });
+
   it('reEncryptAll rotates user_message to the new key', () => {
     const dir = freshDir();
     const dbPath = join(dir, 'rot.db');

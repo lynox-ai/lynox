@@ -3259,12 +3259,22 @@ describe('LynoxHTTPApi', () => {
         getRunToolCalls: () => [],
         getPromptSnapshot: () => null,
         getCompactionEventsBySession: () => [],
-        getWireSnapshotsForRun: () => [{
-          run_id: 'run-1', turn_index: 1, model: 'ministral-14b-2512', provider: 'openai',
-          system_prompt_hash: 'sph1', user_message: assembled, user_message_chars: assembled.length,
-          tool_names: ['recall', 'spawn_agent'], tool_count: 2, tool_choice: null, temperature: 0.7,
-          max_tokens: 8192, ephemeral_tail_present: true, ephemeral_tail_chars: 3050, captured_at: 1_700_000_000_000,
-        }],
+        getWireSnapshotsForRun: () => [
+          {
+            run_id: 'run-1', turn_index: 1, model: 'ministral-14b-2512', provider: 'openai',
+            system_prompt_hash: 'sph1', user_message: assembled, user_message_chars: assembled.length,
+            tool_names: ['recall', 'spawn_agent'], tool_count: 2, tool_choice: null, temperature: 0.7,
+            max_tokens: 8192, ephemeral_tail_present: true, ephemeral_tail_chars: 3050, captured_at: 1_700_000_000_000,
+          },
+          {
+            // Turn 2: a later agent iteration — the last user message is a short
+            // tool_result, NOT the typed task, so the typed task is NOT found in it.
+            run_id: 'run-1', turn_index: 2, model: 'ministral-14b-2512', provider: 'openai',
+            system_prompt_hash: 'sph1', user_message: '[tool_result]', user_message_chars: 13,
+            tool_names: ['recall', 'spawn_agent'], tool_count: 2, tool_choice: null, temperature: 0.7,
+            max_tokens: 8192, ephemeral_tail_present: false, ephemeral_tail_chars: 0, captured_at: 1_700_000_000_001,
+          },
+        ],
       };
       await swapEngine({
         getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
@@ -3276,9 +3286,9 @@ describe('LynoxHTTPApi', () => {
           schema: string;
           runs: Array<{ wire_snapshots: Array<{
             user_message: string; tool_count: number; tool_names: string[];
-            wire_diff: { typed_found: boolean; typed_chars: number; assembled_chars: number; injected_chars: number; injected_prefix?: string; injected_suffix?: string };
+            wire_diff: { typed_found: boolean; typed_chars: number; assembled_chars: number; injected_chars: number | null; injected_prefix?: string; injected_suffix?: string };
           }> }>;
-          wire_capture_summary: { turn_count: number; turns: Array<{ turn_index: number; typed_chars: number; assembled_chars: number; injected_chars: number; tool_count: number; ephemeral_tail_present: boolean }> } | null;
+          wire_capture_summary: { turn_count: number; turns: Array<{ turn_index: number; typed_chars: number; assembled_chars: number; injected_chars: number | null; tool_count: number; ephemeral_tail_present: boolean }> } | null;
         };
         expect(body.schema).toBe('thread-debug-export/v3');
         const snap = body.runs[0]!.wire_snapshots[0]!;
@@ -3286,18 +3296,27 @@ describe('LynoxHTTPApi', () => {
         expect(snap.tool_count).toBe(2);
         expect(snap.tool_names).toEqual(['recall', 'spawn_agent']);
         expect(snap.user_message).toBe(assembled);
-        // Step-3 diff: the typed task is found inside the assembled message → clean split.
+        // Step-3 diff (turn 1): the typed task is found inside the assembled message → clean split.
         expect(snap.wire_diff.typed_found).toBe(true);
         expect(snap.wire_diff.typed_chars).toBe(typed.length);
         expect(snap.wire_diff.assembled_chars).toBe(assembled.length);
         expect(snap.wire_diff.injected_chars).toBe(assembled.length - typed.length);
         expect(snap.wire_diff.injected_prefix).toBe(prefix);      // the [Now:] prefix
         expect(snap.wire_diff.injected_suffix).toBe(tail);        // the ephemeral tail
-        // At-a-glance summary across the thread.
-        expect(body.wire_capture_summary?.turn_count).toBe(1);
+        // Step-3 diff (turn 2): typed task NOT found → no split, and injected_chars is
+        // NULL (assembled − typed would go negative and mean nothing), not a misleading number.
+        const snap2 = body.runs[0]!.wire_snapshots[1]!;
+        expect(snap2.wire_diff.typed_found).toBe(false);
+        expect(snap2.wire_diff.injected_chars).toBeNull();
+        expect(snap2.wire_diff.injected_prefix).toBeUndefined();
+        expect(snap2.wire_diff.assembled_chars).toBe('[tool_result]'.length);
+        // At-a-glance summary across the thread — both turns, turn 2 injected null.
+        expect(body.wire_capture_summary?.turn_count).toBe(2);
         expect(body.wire_capture_summary?.turns[0]!.turn_index).toBe(1);
         expect(body.wire_capture_summary?.turns[0]!.injected_chars).toBe(assembled.length - typed.length);
         expect(body.wire_capture_summary?.turns[0]!.ephemeral_tail_present).toBe(true);
+        expect(body.wire_capture_summary?.turns[1]!.turn_index).toBe(2);
+        expect(body.wire_capture_summary?.turns[1]!.injected_chars).toBeNull();
       });
     });
 

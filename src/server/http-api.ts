@@ -3269,6 +3269,17 @@ export class LynoxHTTPApi {
       const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }), { mergeTurns: false });
 
       const history = engine.getRunHistory();
+      // Extended debug capture (step-3 at-a-glance view): a flat per-turn table across
+      // the whole thread so the injected delta is one glance away without walking the
+      // nested per-run snapshots. Collected from the strongly-typed WireSnapshotRecord
+      // as the per-run snapshots are built (below), so it needs no re-parse. `null`
+      // (empty) when no run captured wire snapshots (setting off for this thread) so a
+      // consumer can cheaply tell "was capture on?". PRD §8/§9.
+      const wireSummaryRows: Array<{
+        run_id: string; turn_index: number; model: string; provider: string;
+        typed_chars: number; assembled_chars: number; injected_chars: number | null;
+        tool_count: number; ephemeral_tail_present: boolean; ephemeral_tail_chars: number;
+      }> = [];
       const runs = history
         ? history.getRunsBySession(id).map((run) => {
             // Tier 2: parse the per-run composition (stored as a JSON string) into
@@ -3308,17 +3319,27 @@ export class LynoxHTTPApi {
               // split; on later agent iterations the last user message is a tool_result,
               // not the typed task, so `typed_found` is false and only the counts show.
               // That delta is the whole diagnostic value (it is what flips a weak model).
-              // See pro docs/internal/prd/extended-debug-capture.md §9 steps 2-3.
+              // NB `indexOf` takes the FIRST occurrence, and `typed` (task_text) is
+              // un-redacted while `assembled` is secrets-scrubbed — so a typed task that
+              // is echoed earlier in the tail, or carries a secret-shaped token, can miss
+              // the match; that only degrades to the `typed_found:false` shape (raw sizes,
+              // no split), never a wrong number. See pro docs …/extended-debug-capture.md.
               wire_snapshots: history.getWireSnapshotsForRun(run.id).map((snap) => {
                 const typed = rest.task_text ?? '';
                 const assembled = snap.user_message;
                 const idx = typed.length > 0 ? assembled.indexOf(typed) : -1;
-                const wire_diff = idx >= 0
+                const typedFound = idx >= 0;
+                // `injected_chars` (assembled − typed) is meaningful ONLY when the typed
+                // task is found inside the assembled message. On later agent iterations
+                // the last user message is a short tool_result, so assembled − typed goes
+                // NEGATIVE and means nothing → `null` (don't emit a misleading number).
+                const injectedChars = typedFound ? assembled.length - typed.length : null;
+                const wire_diff = typedFound
                   ? {
                       typed_found: true,
                       typed_chars: typed.length,
                       assembled_chars: assembled.length,
-                      injected_chars: assembled.length - typed.length,
+                      injected_chars: injectedChars,
                       injected_prefix: assembled.slice(0, idx),
                       injected_suffix: assembled.slice(idx + typed.length),
                     }
@@ -3326,8 +3347,14 @@ export class LynoxHTTPApi {
                       typed_found: false,
                       typed_chars: typed.length,
                       assembled_chars: assembled.length,
-                      injected_chars: assembled.length - typed.length,
+                      injected_chars: injectedChars,   // null — not measurable this turn
                     };
+                wireSummaryRows.push({
+                  run_id: snap.run_id, turn_index: snap.turn_index, model: snap.model, provider: snap.provider,
+                  typed_chars: typed.length, assembled_chars: assembled.length, injected_chars: injectedChars,
+                  tool_count: snap.tool_count, ephemeral_tail_present: snap.ephemeral_tail_present,
+                  ephemeral_tail_chars: snap.ephemeral_tail_chars,
+                });
                 return { ...snap, wire_diff };
               }),
             };
@@ -3399,37 +3426,11 @@ export class LynoxHTTPApi {
         } catch { memory = { error: 'memory snapshot unavailable' }; }
       }
 
-      // Extended debug capture (step-3 at-a-glance view): a flat per-turn table across
-      // the whole thread so the injected delta is one glance away without walking the
-      // nested per-run snapshots. Null when no run captured wire snapshots (setting off
-      // for this thread) so a consumer can cheaply tell "was capture on?". PRD §8/§9.
-      const wireCaptureSummary = (() => {
-        const rowsOut: Array<{
-          run_id: string; turn_index: number; model: string; provider: string;
-          typed_chars: number; assembled_chars: number; injected_chars: number;
-          tool_count: number; ephemeral_tail_present: boolean; ephemeral_tail_chars: number;
-        }> = [];
-        for (const r of runs) {
-          const snaps = (r as { wire_snapshots?: Array<Record<string, unknown>> }).wire_snapshots ?? [];
-          for (const snap of snaps) {
-            const diff = (snap['wire_diff'] ?? {}) as { typed_chars?: number; assembled_chars?: number; injected_chars?: number };
-            rowsOut.push({
-              run_id: String(snap['run_id'] ?? r.id),
-              turn_index: Number(snap['turn_index'] ?? 0),
-              model: String(snap['model'] ?? ''),
-              provider: String(snap['provider'] ?? ''),
-              typed_chars: diff.typed_chars ?? 0,
-              assembled_chars: diff.assembled_chars ?? 0,
-              injected_chars: diff.injected_chars ?? 0,
-              tool_count: Number(snap['tool_count'] ?? 0),
-              ephemeral_tail_present: snap['ephemeral_tail_present'] === true,
-              ephemeral_tail_chars: Number(snap['ephemeral_tail_chars'] ?? 0),
-            });
-          }
-        }
-        if (rowsOut.length === 0) return null;
-        return { turn_count: rowsOut.length, turns: rowsOut };
-      })();
+      // Assembled from the strongly-typed `wireSummaryRows` collected during the per-run
+      // snapshot build above — no re-parse of the emitted bundle.
+      const wireCaptureSummary = wireSummaryRows.length > 0
+        ? { turn_count: wireSummaryRows.length, turns: wireSummaryRows }
+        : null;
 
       const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
       const bundle = {
