@@ -16,6 +16,7 @@
  * no Anthropic-SDK dependency and is reusable by the eval's wire-replay consumer.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
 
@@ -100,18 +101,25 @@ export function buildWireSnapshot(input: WireSnapshotInput): WireSnapshot {
 // --- Dev file-sink (Surface B) ------------------------------------------------
 
 const DEFAULT_GATE_FILE = '/tmp/wire-sink-on';
+const DEFAULT_SINK_DIR = join(tmpdir(), 'lynox-wire-sink');
 
 /**
- * The dev/eval sink is enabled only when BOTH hold: the env var names a target dir AND
- * a runtime file-gate exists (spike parity). Two gates so a stray env var alone never
- * starts writing model context to disk. This is the DEV/STAGING path only — the operator
- * capture path (step 2) is an explicit settings toggle, never an env var.
+ * The dev/eval sink is enabled by a single deliberate on-switch: the runtime FILE-GATE
+ * (default `/tmp/wire-sink-on`), matching the original spike. A file-gate — NOT an env var
+ * — is the switch precisely so no stray env var can ever silently start writing model
+ * context to disk; creating the gate file requires deliberate in-container access. The env
+ * var only CUSTOMIZES the destination dir (see `wireSinkDir`); it never enables capture. So
+ * enabling on any box is one `touch` (local, staging, or a canary container), no restart.
+ * DEV/STAGING path only — the operator capture path (step 2) is a persisted settings toggle.
  */
 export function isWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const dir = env.LYNOX_DEBUG_WIRE_SINK;
-  if (!dir) return false;
   const gate = env.LYNOX_DEBUG_WIRE_GATE_FILE ?? DEFAULT_GATE_FILE;
   return existsSync(gate);
+}
+
+/** The sink destination dir — `LYNOX_DEBUG_WIRE_SINK` when set, else a default under tmpdir. */
+export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.LYNOX_DEBUG_WIRE_SINK ?? DEFAULT_SINK_DIR;
 }
 
 /**
@@ -120,8 +128,7 @@ export function isWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean
  */
 export function writeWireSnapshot(snapshot: WireSnapshot, env: NodeJS.ProcessEnv = process.env): void {
   try {
-    const dir = env.LYNOX_DEBUG_WIRE_SINK;
-    if (!dir) return;
+    const dir = wireSinkDir(env);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const safeRun = (snapshot.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `wire-${safeRun}-t${snapshot.turnIndex}-${snapshot.capturedAt}.json`);

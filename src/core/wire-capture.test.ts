@@ -7,6 +7,7 @@ import {
   redactWireUserMessage,
   buildWireSnapshot,
   isWireSinkEnabled,
+  wireSinkDir,
   writeWireSnapshot,
   captureWireSnapshot,
   type WireSnapshotInput,
@@ -113,21 +114,34 @@ describe('buildWireSnapshot', () => {
   });
 });
 
-describe('isWireSinkEnabled', () => {
-  it('is false when the env var is unset (default / prod)', () => {
-    expect(isWireSinkEnabled({})).toBe(false);
-  });
-
-  it('is false when the dir is set but the file-gate is absent', () => {
+describe('isWireSinkEnabled (file-gate is the sole on-switch)', () => {
+  it('is false when the file-gate is absent (default / prod)', () => {
     const dir = mkTmp();
-    expect(isWireSinkEnabled({ LYNOX_DEBUG_WIRE_SINK: dir, LYNOX_DEBUG_WIRE_GATE_FILE: join(dir, 'nope') })).toBe(false);
+    // point the gate at a path that does not exist so we never read the real /tmp/wire-sink-on
+    expect(isWireSinkEnabled({ LYNOX_DEBUG_WIRE_GATE_FILE: join(dir, 'absent') })).toBe(false);
   });
 
-  it('is true only when BOTH the dir env AND the file-gate are present', () => {
+  it('is true when the file-gate is present — no env var required', () => {
     const dir = mkTmp();
     const gate = join(dir, 'on');
     writeFileSync(gate, '');
-    expect(isWireSinkEnabled({ LYNOX_DEBUG_WIRE_SINK: dir, LYNOX_DEBUG_WIRE_GATE_FILE: gate })).toBe(true);
+    expect(isWireSinkEnabled({ LYNOX_DEBUG_WIRE_GATE_FILE: gate })).toBe(true);
+  });
+
+  it('an env var alone (no gate file) never enables capture', () => {
+    const dir = mkTmp();
+    expect(isWireSinkEnabled({ LYNOX_DEBUG_WIRE_SINK: dir, LYNOX_DEBUG_WIRE_GATE_FILE: join(dir, 'absent') })).toBe(false);
+  });
+});
+
+describe('wireSinkDir', () => {
+  it('uses LYNOX_DEBUG_WIRE_SINK when set', () => {
+    expect(wireSinkDir({ LYNOX_DEBUG_WIRE_SINK: '/custom/sink' })).toBe('/custom/sink');
+  });
+
+  it('falls back to a default dir under tmpdir when unset', () => {
+    const d = wireSinkDir({});
+    expect(d).toContain('lynox-wire-sink');
   });
 });
 
