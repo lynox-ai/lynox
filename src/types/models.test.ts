@@ -207,7 +207,7 @@ describe('Mistral tier-set', () => {
     // `*-latest` silently which would change behaviour mid-billing-period.
     expect(MISTRAL_MODEL_MAP.fast).toBe('ministral-8b-2512');
     expect(MISTRAL_MODEL_MAP.balanced).toBe('ministral-14b-2512');
-    expect(MISTRAL_MODEL_MAP.deep).toBe('mistral-large-2512');
+    expect(MISTRAL_MODEL_MAP.deep).toBe('mistral-medium-2604');
     expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
   });
 
@@ -282,7 +282,7 @@ describe('getModelId for openai provider', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
     expect(getModelId('fast', 'openai')).toBe('ministral-8b-2512');
     expect(getModelId('balanced', 'openai')).toBe('ministral-14b-2512');
-    expect(getModelId('deep', 'openai')).toBe('mistral-large-2512');
+    expect(getModelId('deep', 'openai')).toBe('mistral-medium-2604');
   });
 
   it('falls back to fallbackModelId when no map but fallback is set', () => {

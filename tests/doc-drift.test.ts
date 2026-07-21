@@ -43,7 +43,7 @@ describe('doc<->code drift: Mistral tier map (src/types/models.ts)', () => {
     // If you change these, update the JSDoc above MISTRAL_MODEL_MAP AND
     // docs/setup/llm-providers.md in the same commit.
     expect(MISTRAL_MODEL_MAP).toEqual({
-      deep: 'mistral-large-2512',
+      deep: 'mistral-medium-2604',
       balanced: 'ministral-14b-2512',
       fast: 'ministral-8b-2512',
     });

@@ -2352,20 +2352,20 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as Record<string, unknown>;
         const am = body['active_model'] as Record<string, unknown> | undefined;
         expect(am).toBeDefined();
-        // Fixture default_tier='deep' → Mistral 'mistral-large-2512'
-        // (2026-05-29 refresh; was magistral-medium-2509 before it was deprecated).
-        expect(am!['id']).toBe('mistral-large-2512');
+        // Fixture default_tier='deep' → Mistral 'mistral-medium-2604' (Medium 3.5,
+        // the stronger deep; Large 3 was deprecated to a legacy option).
+        expect(am!['id']).toBe('mistral-medium-2604');
         expect(am!['provider']).toBe('openai');
         expect(am!['tier']).toBe('deep');
-        expect(am!['contextWindow']).toBe(256_000);
-        expect(am!['uiLabel']).toBe('Mistral Large 3');
-        // Mistral lineage carries different feature flags than Claude:
-        // no Anthropic-style extended-thinking toggle, but gen-3 Mistral
-        // (mistral-large-2512) IS multimodal — verified vs the live Mistral
-        // API 2026-07-18 (see MISTRAL_FEATURES_GEN3 in models.ts).
+        expect(am!['contextWindow']).toBe(262_144);
+        expect(am!['uiLabel']).toBe('Mistral Medium 3.5');
+        // Mistral lineage carries different feature flags than Claude: no
+        // Anthropic-style extended-thinking toggle, and Medium 3.5
+        // (mistral-medium-2604) is TEXT-ONLY (no vision) — see
+        // MISTRAL_FEATURES_LARGE in models.ts.
         const features = am!['features'] as Record<string, boolean>;
         expect(features['extendedThinking']).toBe(false);
-        expect(features['vision']).toBe(true);
+        expect(features['vision']).toBe(false);
         expect(features['toolUse']).toBe(true);
       } finally {
         providerSpy.mockRestore();

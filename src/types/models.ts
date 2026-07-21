@@ -134,21 +134,26 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * and behaviour-drift in managed-EU tenants.
  *   fast     → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
  *   balanced → ministral-14b-2512     (near-large quality at ~6× lower cost)
- *   deep     → mistral-large-2512     (Mistral quality leader, tool-use)
+ *   deep     → mistral-medium-2604    (Medium 3.5 — the stronger Mistral deep; Large 3 → legacy)
  * (Keep this block in sync with MISTRAL_MODEL_MAP below — the values are
  *  pinned by tests/doc-drift.test.ts.)
  *
  * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
  * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
-// Refreshed 2026-05-29 (Set-Bench v4, fair judge panel): Mistral deprecated
-// the Magistral reasoning family (magistral-medium-2509 retires 2026-07-31),
-// so `deep` moves to mistral-large-2512 — the Mistral quality leader, which
-// medium-2604 (the nominal Magistral successor) never beats at 6× the cost.
-// `balanced` adopts ministral-14b-2512 (100% pass, near-large quality at ~6×
-// lower cost), giving a clean fast→balanced→deep capability ladder.
+// Refreshed 2026-07-21: `deep` moves to mistral-medium-2604 (Mistral Medium
+// 3.5). Mistral Large 3 (2512) is being deprecated to a legacy option and is
+// the weaker deep; Medium 3.5 is a newer, stronger generation for deep
+// reasoning — pricier ($1.50/$7.50 vs Large's $0.50/$1.50) and text-only (no
+// vision), the quality tradeoff. Mistral still has no 1M-context deep (262k
+// ceiling). `balanced` stays ministral-14b-2512, giving a fast→balanced→deep ladder.
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
-  'deep':     'mistral-large-2512',
+  // deep → mistral-medium-2604 (Mistral Medium 3.5): the stronger Mistral for
+  // deep reasoning. Mistral Large 3 (2512) is being deprecated to legacy and is
+  // the weaker deep; Medium 3.5 is a newer generation that beats it on analysis
+  // (pricier at $1.50/$7.50 vs Large's $0.50/$1.50 — the quality tradeoff). Note
+  // Mistral has no 1M-context deep — 262k is the ceiling here.
+  'deep':     'mistral-medium-2604',
   'balanced': 'ministral-14b-2512',
   'fast':     'ministral-8b-2512',
 };
@@ -872,7 +877,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   'mistral-medium-2604': {
     id: 'mistral-medium-2604',
     provider: 'openai',
-    tier: null,
+    tier: 'deep',
     contextWindow: 262_144,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,

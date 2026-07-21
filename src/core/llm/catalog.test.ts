@@ -182,6 +182,7 @@ describe('LLM_CATALOG', () => {
     // Updated 2026-05-24: mistral-small-2603 retired, replaced by gen-3
     // ministrals in haiku slot; Large 3 ctx 256k + new $0.50/$1.50 pricing.
     expect(entry.models.map((m) => m.id)).toEqual([
+      'mistral-medium-2604',
       'mistral-large-2512',
       'ministral-14b-2512',
       'ministral-3b-2512',
@@ -198,6 +199,9 @@ describe('LLM_CATALOG', () => {
     expect(byId['ministral-3b-2512']?.tier).toBe('fast');
     expect(byId['ministral-8b-2512']?.tier).toBe('fast');
     expect(byId['ministral-14b-2512']?.tier).toBe('balanced');
+    // Deep default is now Medium 3.5 (Large 3 kept as legacy option, still deep-tier).
+    expect(byId['mistral-medium-2604']?.tier).toBe('deep');
+    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.50, output: 7.50 });
     expect(byId['mistral-large-2512']?.tier).toBe('deep');
     // Mistral Large 3 pricing — 75% cut vs Large 2
     expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
@@ -283,7 +287,7 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
     expect(entry.main_chat_models).toEqual([
       { id: 'ministral-8b-2512', tier: 'fast' },
       { id: 'ministral-14b-2512', tier: 'balanced' },
-      { id: 'mistral-large-2512', tier: 'deep' },
+      { id: 'mistral-medium-2604', tier: 'deep' },
     ]);
     const ids = (entry.main_chat_models ?? []).map((o) => o.id);
     expect(ids).not.toContain('ministral-3b-2512');
@@ -369,7 +373,7 @@ describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hid
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
       fast: 'Ministral 8B',
       balanced: 'Ministral 14B',
-      deep: 'Mistral Large 3',
+      deep: 'Mistral Medium 3.5',
     });
   });
 
