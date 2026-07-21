@@ -49,7 +49,18 @@ export type SetBenchAxis =
   // lean into that: no binary right answer, a stringent per-scenario rubric,
   // quality 1–5 is the discriminator (passCheck is a sanity gate only).
   | 'deep-strategy-tradeoff'
-  | 'deep-ambiguous-design';
+  | 'deep-ambiguous-design'
+  // Delegation-judgment / instruction-adherence axis (added 2026-07-21). The
+  // main-chat model gets the REAL proactive-deep guidance in its system prompt
+  // + a clearly deep-worthy task, and NO instruction to spawn. Measures whether
+  // it ACTS on the guidance — spawns a deep sub-agent (CLEAR) or offers the deep
+  // tier (BORDERLINE) — vs grinding the analysis out inline on the balanced
+  // model. This is the discriminator that separated a capable main model
+  // (mistral-medium: escalates) from a weak one (ministral-14b: inert on the
+  // same guidance) where tool-ROUTING accuracy did not. See the main-model
+  // requirements spec (docs) — it measures requirement R1 (instruction
+  // adherence) + R3 (delegation judgment), the "main-model floor".
+  | 'proactive-deep-escalation';
 
 export const ALL_AXES: readonly SetBenchAxis[] = [
   'multi-turn-loop-completion',
@@ -64,6 +75,7 @@ export const ALL_AXES: readonly SetBenchAxis[] = [
   'multi-hop-quant-chain',
   'deep-strategy-tradeoff',
   'deep-ambiguous-design',
+  'proactive-deep-escalation',
 ];
 
 export interface SetBenchScenario {

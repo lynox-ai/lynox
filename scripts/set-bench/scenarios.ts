@@ -13,6 +13,9 @@
 
 import type { PassResult, SetBenchScenario, ToolCallTrace } from './types.js';
 import { inspectFlakyAttempts, inspectMemory, inspectWorkflow, seedMemory } from './mock-tools.js';
+// The proactive-deep axis tests the REAL shipped guidance, imported (not copied)
+// so tuning the guidance in prompts.ts automatically re-tests here — no drift.
+import { proactiveDeepGuidance } from '../../src/core/prompts.js';
 
 // Preamble for the ceiling-free reasoning axes. Unlike the default harness
 // preamble (which bans narration to keep structured-output axes clean), this
@@ -671,6 +674,82 @@ export const SCENARIO_DEEP_DESIGN: SetBenchScenario = {
   timeoutMs: 120_000,
 };
 
+// ── 13. proactive-deep-escalation ──────────────────────────────
+// Delegation-judgment / instruction-adherence. The model is the balanced main
+// chat, gets the REAL proactive-deep guidance in its system prompt + a clearly
+// deep-worthy task, and is NOT told to spawn. It passes iff it ACTS on the
+// guidance: spawns a `spawn_agent{model:"deep"}` sub-agent (CLEAR path) OR offers
+// to run it on the deep tier (BORDERLINE path). Grinding the analysis out inline
+// on the balanced model = fail. Measured on staging: mistral-medium escalates,
+// ministral-14b stays inline on identical guidance. See main-model requirements.
+
+// Unlike the default harness preamble (which bans narration), this permits the
+// model to speak/offer — the BORDERLINE path IS a spoken offer, so suppressing
+// narration would erase half the signal. Composes a compact spawn_agent brief
+// with the REAL guidance string (cheap/non-Anthropic deep variant → the
+// "escalate freely" wording, which is the flip we default-gate for cheap deeps).
+const PROACTIVE_DEEP_PREAMBLE = [
+  'You are the balanced main-chat model of an AI agent product, in a real conversation with a user.',
+  'You have a `spawn_agent` tool: it delegates a sub-task to a fresh sub-agent and returns that',
+  'sub-agent\'s answer. It takes a `model` field — "fast", "balanced", or "deep" — selecting the',
+  'sub-agent\'s capability tier; "deep" runs a stronger, reasoning-heavy model. Speak to the user',
+  'naturally: you may explain, ask, and propose. Do the right thing per the guidance below.',
+  proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' }).trim(),
+].join(' ');
+
+/**
+ * Deterministic pass-check for the proactive-deep axis. PASS iff the model
+ * escalated: a `spawn_agent` call carrying `model:"deep"` (CLEAR), or a spoken
+ * offer to run it on the deep tier (BORDERLINE). Grinding it out inline = FAIL.
+ * Exported so the offline unit test can validate the MEASUREMENT against
+ * synthetic traces before any model is ever called.
+ */
+export function proactiveDeepPassCheck(
+  finalText: string,
+  toolCalls: readonly ToolCallTrace[],
+): PassResult {
+  const spawnedDeep = toolCalls.some((t) => {
+    if (t.name !== 'spawn_agent') return false;
+    const m = (t.input as { model?: unknown } | null)?.model;
+    return typeof m === 'string' && /^\s*deep\s*$/i.test(m);
+  });
+  if (spawnedDeep) return { pass: true, reason: 'CLEAR: spawned a deep sub-agent (model:"deep")' };
+
+  // BORDERLINE: a spoken offer to escalate. Require BOTH a deep-tier mention AND
+  // an offer/intent marker (or a turn that ends on a question) so a descriptive
+  // mention inside an inline answer does not false-positive.
+  const mentionsDeep = /\bdeep[-\s]?(tier|model)\b/i.test(finalText);
+  // Precise offer OPENERS — these appear in a spoken offer but not in a
+  // declarative inline analysis, so they don't false-positive on a model that
+  // merely echoes the guidance's "deep tier" wording while grinding on inline.
+  const offersIntent = /\b(want me to|shall i|shall we|should i|would you like|do you want)\b/i.test(finalText);
+  const endsOnQuestion = /\?\s*$/.test(finalText.trim());
+  if (mentionsDeep && (offersIntent || endsOnQuestion)) {
+    return { pass: true, reason: 'BORDERLINE: offered to run it on the deep tier' };
+  }
+  return { pass: false, reason: 'answered inline — no deep escalation (no spawn, no offer)' };
+}
+
+export const SCENARIO_PROACTIVE_DEEP: SetBenchScenario = {
+  id: 'proactive-deep-escalation.outbox-vs-kafka',
+  axis: 'proactive-deep-escalation',
+  description:
+    'Instruction-adherence / delegation judgment: with the real proactive-deep guidance in the system prompt and NO spawn instruction, does the main model escalate a clearly deep-worthy analysis (spawn model:"deep" OR offer the deep tier) rather than grind it out inline?',
+  prompt: [
+    'I need to decide the event-processing backbone for a small product. Give me a rigorous',
+    'trade-off analysis of a PostgreSQL outbox with LISTEN/NOTIFY versus a Kafka log — compare',
+    'ordering guarantees, exactly-once vs at-least-once, backpressure, failure recovery, and the',
+    'operational burden for a 2-person team, then commit to a well-justified recommendation.',
+    'This is a hard, multi-step analysis.',
+  ].join('\n'),
+  passCheck: proactiveDeepPassCheck,
+  systemPreambleOverride: PROACTIVE_DEEP_PREAMBLE,
+  // Enough loop room for: escalate → mock deep result → final synthesis. The
+  // borderline (offer) path ends in a single turn.
+  maxIterations: 4,
+  timeoutMs: 120_000,
+};
+
 // ── registry ──────────────────────────────────────────────────
 
 export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
@@ -686,4 +765,5 @@ export const SET_BENCH_SCENARIOS: readonly SetBenchScenario[] = [
   SCENARIO_MULTI_HOP_QUANT,
   SCENARIO_DEEP_STRATEGY,
   SCENARIO_DEEP_DESIGN,
+  SCENARIO_PROACTIVE_DEEP,
 ];

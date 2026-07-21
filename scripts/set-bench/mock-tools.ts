@@ -160,14 +160,25 @@ const SUB_AGENT_RESPONSES: Record<string, string> = {
   results: 'The Transformer achieves 28.4 BLEU on WMT 2014 English-to-German translation, improving over the previous best ensemble by 2.0 BLEU. On English-to-French, the single-model big-Transformer scores 41.0 BLEU after 3.5 days of training on 8 GPUs.',
 };
 
+// Canned deep-tier analysis result for the proactive-deep-escalation axis. The
+// axis measures whether the main model DELEGATES a hard analysis to a deep
+// sub-agent — not the child's answer quality — so a plausible stub is enough to
+// let the parent produce a final turn after it escalates.
+const DEEP_ANALYSIS_RESULT =
+  'Deep analysis complete. Postgres outbox + LISTEN/NOTIFY: transactional (exactly-once with the write), simplest ops for a 2-person team, but throughput-bounded and NOTIFY is at-least-once on reconnect so consumers must be idempotent. Kafka log: durable partitioned ordering + replay + high throughput, at-least-once by default (exactly-once needs the transactional producer + idempotent consumers), at the cost of a cluster to operate. Recommendation for a 2-person team: start with the Postgres outbox (idempotent consumers, a relay poller as the NOTIFY-miss backstop); move to Kafka only when throughput or multi-consumer fan-out actually forces it.';
+
 export const SPAWN_AGENT_TOOL: BetaTool = {
   name: 'spawn_agent',
-  description: 'Spawn a sub-agent for a focused research task. Returns the sub-agent\'s final answer. Use this to parallelise research: spawn 3 sub-agents, each handles one sub-question.',
+  description: 'Spawn a sub-agent for a focused task. Returns the sub-agent\'s final answer. Use it to parallelise research (spawn one per sub-question), or to escalate a hard sub-task to a higher capability tier via the `model` field.',
   input_schema: {
     type: 'object' as const,
     properties: {
       task: { type: 'string' as const, description: 'One specific question or task for the sub-agent.' },
       topic: { type: 'string' as const, description: 'Short topic tag (authors / methodology / results).' },
+      // Capability tier for the child. Mirrors the real spawn_agent tool so the
+      // proactive-deep-escalation axis can observe an explicit `model:"deep"`
+      // escalation in the tool-call trace.
+      model: { type: 'string' as const, enum: ['fast', 'balanced', 'deep'], description: 'Capability tier for the sub-agent: fast (cheap/quick), balanced (default), deep (reasoning-heavy). Omit for the default tier.' },
     },
     required: ['task'],
   },
@@ -184,6 +195,11 @@ export function handleSpawnAgent(input: unknown): string {
     if (topic.includes(key) || task.includes(key)) {
       return SUB_AGENT_RESPONSES[key]!;
     }
+  }
+  // proactive-deep-escalation axis: the escalated sub-task is the outbox-vs-Kafka
+  // trade-off analysis. Return a plausible deep result so the parent can finish.
+  if (/\b(outbox|kafka|listen\/notify|event[- ]?(processing|log)|exactly-once)\b/.test(task)) {
+    return DEEP_ANALYSIS_RESULT;
   }
   return 'Sub-agent could not identify the requested topic. Seeded topics: authors, methodology, results.';
 }

@@ -129,6 +129,7 @@ const AXIS_DISPLAY: Record<SetBenchAxis, string> = {
   'multi-hop-quant-chain': 'Multi-hop quant chain (closed — CoT-equalised, ceilings)',
   'deep-strategy-tradeoff': 'Deep strategy trade-off (judge-scored)',
   'deep-ambiguous-design': 'Deep ambiguous design (judge-scored)',
+  'proactive-deep-escalation': 'Proactive deep escalation (delegation judgment — spawn/offer vs inline)',
 };
 
 const AXIS_ORDER: readonly SetBenchAxis[] = ALL_AXES;
