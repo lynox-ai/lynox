@@ -283,9 +283,12 @@ export function proactiveDeepGuidance(opts: {
   const deepIsAnthropic = opts.deepSlotProvider === 'anthropic';
   if (deepIsAnthropic && !opts.proactiveDeepAnthropic) return '';
   const costLine = deepIsAnthropic
-    ? 'The deep tier on this instance is a PREMIUM model — use it judiciously, only for genuinely deep work.'
-    : 'The deep tier on this instance is inexpensive — escalate to it freely whenever it helps.';
-  return `\n\n**Proactive deep escalation**: When a sub-task involves hard multi-step reasoning, deep analysis, or long-horizon work that the balanced main model would handle worse, do NOT wait to be asked. For a CLEAR case, spawn a deep sub-agent for it directly (it carries its own budget + context); for a BORDERLINE case, briefly OFFER it ("this would benefit from the deep model — want me to run it there?"). Never switch THIS conversation's model — escalation is always a sub-agent on the higher tier. ${costLine}`;
+    ? 'The deep tier here is a PREMIUM model — use it judiciously, only for genuinely deep work — but when the task IS that, escalating beats a weaker inline answer.'
+    : 'The deep tier here is inexpensive, so escalate freely — a stronger result costs little and there is no reason to grind through hard analysis on the balanced model.';
+  return `\n\n**Proactive deep escalation — act, don't just answer inline.** The deep tier exists for the hard cases: rigorous multi-factor analysis, architecture / design / technology trade-off decisions, careful multi-step reasoning, or long-horizon work that the balanced model you are running on handles noticeably worse. When the current request — or a distinct hard part of it — is clearly one of these, do NOT simply work through it yourself: your inline answer will be weaker than what the deep tier produces. Instead:
+- CLEAR deep-worthy case → say one short line that you're bringing in the deep model, then call \`spawn_agent\` with \`model: "deep"\` (role \`researcher\`) and hand it the full task + the real source/context it needs; it runs on the higher tier with its own budget, and you present and build on its result.
+- BORDERLINE (you could do it, but deep would be meaningfully better) → briefly OFFER first ("this would benefit from the deep model — want me to run it there?") and wait.
+This is about a genuinely hard task, not every question — a quick factual answer or a simple edit stays inline. Never switch THIS conversation's own model; escalation is ALWAYS a \`spawn_agent\` sub-agent on the deep tier, never a switch of the main chat. ${costLine}`;
 }
 
 /**
