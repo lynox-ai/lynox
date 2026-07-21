@@ -37,7 +37,7 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
-import { captureWireSnapshot, isWireSinkEnabled } from './wire-capture.js';
+import { captureWireSnapshot, extractWireFields, isWireSinkEnabled } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -1516,23 +1516,22 @@ export class Agent implements IAgent {
     // per turn (before the retry loop); never throws into the hot path. See
     // wire-capture.ts + pro docs/internal/prd/extended-debug-capture.md.
     if (isWireSinkEnabled()) {
-      const lastUser = [...outboundMessages].reverse().find(m => m.role === 'user');
-      const userText = !lastUser
-        ? ''
-        : typeof lastUser.content === 'string'
-          ? lastUser.content
-          : lastUser.content.map(b => (b.type === 'text' ? b.text : `[${b.type}]`)).join('\n');
-      captureWireSnapshot({
-        runId: this.currentRunId,
-        turnIndex: outboundMessages.length,
-        model: this.model,
-        provider: this.provider,
-        systemText: systemBlocks.map(b => b.text).join('\n'),
-        userMessage: userText,
-        toolNames: toolsDef.map(t => t.name),
-        maxTokens: this.maxTokens,
-        ephemeralTailChars: ephemeralBlocks.length > 0 ? JSON.stringify(ephemeralBlocks).length : 0,
-      });
+      try {
+        const { userMessage, systemText, toolNames } = extractWireFields(outboundMessages, systemBlocks, toolsDef);
+        captureWireSnapshot({
+          runId: this.currentRunId,
+          turnIndex: outboundMessages.length,
+          model: this.model,
+          provider: this.provider,
+          systemText,
+          userMessage,
+          toolNames,
+          maxTokens: this.maxTokens,
+          ephemeralTailChars: ephemeralBlocks.length > 0 ? JSON.stringify(ephemeralBlocks).length : 0,
+        });
+      } catch {
+        // dev capture must never break a real turn
+      }
     }
 
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {

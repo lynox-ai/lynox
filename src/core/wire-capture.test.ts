@@ -6,6 +6,7 @@ import { sha256Short } from './utils.js';
 import {
   redactWireUserMessage,
   buildWireSnapshot,
+  extractWireFields,
   isWireSinkEnabled,
   wireSinkDir,
   writeWireSnapshot,
@@ -84,6 +85,18 @@ describe('redactWireUserMessage', () => {
     const t = 'just a normal message with <retrieved_context>kg</retrieved_context>';
     expect(redactWireUserMessage(t)).toBe(t);
   });
+
+  it('an empty catalog is reported as "0 secrets"', () => {
+    expect(redactWireUserMessage('<secrets></secrets>')).toContain('<secrets>0 secrets available (names+last4 redacted)</secrets>');
+  });
+
+  it('masks a raw secret-shaped value that survives outside the catalog (defense in depth)', () => {
+    // a provider key pasted into the message body / memory tail — not inside <secrets>
+    const rawKey = 'sk-ant-' + 'A'.repeat(40);
+    const out = redactWireUserMessage(`my key is ${rawKey} btw`);
+    expect(out).not.toContain(rawKey);
+    expect(out).toContain('***'); // masked, last-4 retained by maskSecretPatterns
+  });
 });
 
 describe('buildWireSnapshot', () => {
@@ -111,6 +124,55 @@ describe('buildWireSnapshot', () => {
     expect(s.model).toBe('ministral-14b-2512');
     expect(s.provider).toBe('openai');
     expect(s.maxTokens).toBe(8192);
+  });
+
+  it('passes optional toolChoice/temperature through, or leaves them undefined', () => {
+    const set = buildWireSnapshot(baseInput({ toolChoice: 'auto', temperature: 0 }));
+    expect(set.toolChoice).toBe('auto');
+    expect(set.temperature).toBe(0);
+    const unset = buildWireSnapshot(baseInput());
+    expect(unset.toolChoice).toBeUndefined();
+    expect(unset.temperature).toBeUndefined();
+  });
+});
+
+describe('extractWireFields (the agent.ts seam mapping — SDK-free)', () => {
+  const sys = [{ text: 'A' }, { text: 'B' }];
+  const tools = [{ name: 'spawn_agent' }, { name: 'remember' }];
+
+  it('returns the last user message when content is a plain string', () => {
+    const r = extractWireFields(
+      [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'LAST typed + tail' }],
+      sys, tools,
+    );
+    expect(r.userMessage).toBe('LAST typed + tail');
+    expect(r.systemText).toBe('A\nB');
+    expect(r.toolNames).toEqual(['spawn_agent', 'remember']);
+  });
+
+  it('flattens a block-array user message, placeholder-ing non-text blocks', () => {
+    const r = extractWireFields(
+      [{ role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'x', content: 'result' },
+        { type: 'text', text: 'the task' },
+        { type: 'image', source: {} },
+      ] }],
+      sys, tools,
+    );
+    expect(r.userMessage).toBe('[tool_result]\nthe task\n[image]');
+  });
+
+  it('returns "" when there is no user message', () => {
+    expect(extractWireFields([{ role: 'assistant', content: 'hi' }], sys, tools).userMessage).toBe('');
+    expect(extractWireFields([], sys, tools).userMessage).toBe('');
+  });
+
+  it('picks the LAST user turn, not the first', () => {
+    const r = extractWireFields(
+      [{ role: 'user', content: 'A' }, { role: 'user', content: 'B' }],
+      sys, tools,
+    );
+    expect(r.userMessage).toBe('B');
   });
 });
 
@@ -171,9 +233,19 @@ describe('writeWireSnapshot / captureWireSnapshot', () => {
     const dir = mkTmp();
     const gate = join(dir, 'on');
     writeFileSync(gate, '');
-    const res = captureWireSnapshot(baseInput(), { LYNOX_DEBUG_WIRE_SINK: dir, LYNOX_DEBUG_WIRE_GATE_FILE: gate });
-    expect(res).not.toBeNull();
+    const res = captureWireSnapshot(baseInput({ toolNames: ['a', 'b'] }), { LYNOX_DEBUG_WIRE_SINK: dir, LYNOX_DEBUG_WIRE_GATE_FILE: gate });
+    expect(res?.toolCount).toBe(2);
+    expect(res?.model).toBe('ministral-14b-2512');
     expect(readdirSync(dir).filter(f => f.endsWith('.json')).length).toBe(1);
     expect(existsSync(gate)).toBe(true);
+  });
+
+  it('swallows a write failure — never throws into the turn', () => {
+    const base = mkTmp();
+    // make the sink path uncreatable: its parent is a FILE, so mkdirSync(recursive) fails
+    const asFile = join(base, 'blocker');
+    writeFileSync(asFile, '');
+    const snap = buildWireSnapshot(baseInput());
+    expect(() => writeWireSnapshot(snap, { LYNOX_DEBUG_WIRE_SINK: join(asFile, 'sub') })).not.toThrow();
   });
 });

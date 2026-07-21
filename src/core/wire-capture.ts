@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
+import { maskSecretPatterns } from './secret-store.js';
 
 /** One captured outbound request. `userMessage` is REDACTED (see `redactWireUserMessage`). */
 export interface WireSnapshot {
@@ -61,19 +62,63 @@ export interface WireSnapshotInput {
 }
 
 /**
- * Redact the engine-built `<secrets>…</secrets>` catalog from a captured user message.
- * The block has a fixed engine shape (`<secrets>secret:NAME (***last4), …</secrets>`,
- * built in `engine-init.ts`) — reduce it to a bare count so neither the secret NAMES nor
- * the last-4 mask survive the capture (PRD §4). Whitespace-tolerant, case-insensitive,
- * dot-all; handles multiple blocks. Targeted at the one known engine-built leak — a broad
- * secret-value scan (for an unmasked key pasted into a message/memory) is a step-2 concern.
+ * Redact secrets from a captured user message. Two layers:
+ *  1. The engine-built `<secrets>…</secrets>` catalog (fixed shape
+ *     `<secrets>secret:NAME (***last4), …</secrets>`, built in `engine-init.ts`) is reduced
+ *     to a bare count so neither the secret NAMES nor the last-4 mask survive. Whitespace-
+ *     tolerant, case-insensitive, dot-all; handles multiple blocks.
+ *  2. Defense in depth: a raw secret-shaped value that survives OUTSIDE the catalog (an API
+ *     key pasted into the message, memory blocks, or the KG tail) is masked via the engine's
+ *     own scrubber. This covers the KNOWN provider-key formats `maskSecretPatterns` recognizes
+ *     — best-effort, not a guarantee for arbitrary high-entropy strings; it closes the
+ *     pasted-key leak the catalog reduction alone misses (PRD §4).
+ * Owner KG/memory content is deliberately retained (diagnostic signal, owner's own data).
  */
 export function redactWireUserMessage(text: string): string {
-  return text.replace(/<\s*secrets\s*>([\s\S]*?)<\s*\/\s*secrets\s*>/gi, (_m, inner: string) => {
+  const withoutCatalog = text.replace(/<\s*secrets\s*>([\s\S]*?)<\s*\/\s*secrets\s*>/gi, (_m, inner: string) => {
     const count = (inner.match(/secret:/gi) ?? []).length;
     const label = count === 1 ? '1 secret' : `${count} secrets`;
     return `<secrets>${label} available (names+last4 redacted)</secrets>`;
   });
+  return maskSecretPatterns(withoutCatalog);
+}
+
+/**
+ * Extract the snapshot's derived fields from the assembled outbound request — the FULL last
+ * user message text (incl. the ephemeral tail), the concatenated system text, and the offered
+ * tool names. Pure + structurally typed (SDK-free) so the agent.ts seam mapping is unit-tested
+ * rather than only proven by a manual staging smoke.
+ */
+export function extractWireFields(
+  messages: ReadonlyArray<{ role: string; content: unknown }>,
+  systemBlocks: ReadonlyArray<{ text: string }>,
+  tools: ReadonlyArray<{ name: string }>,
+): { userMessage: string; systemText: string; toolNames: string[] } {
+  const lastUser = [...messages].reverse().find(m => m.role === 'user');
+  return {
+    userMessage: extractMessageText(lastUser?.content),
+    systemText: systemBlocks.map(b => b.text).join('\n'),
+    toolNames: tools.map(t => t.name),
+  };
+}
+
+/** Flatten a message's content to text: a string as-is; a block array as its text-block text,
+ *  with a `[type]` placeholder for non-text blocks (tool_result, image, …); '' otherwise. */
+function extractMessageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map(b => {
+      if (b !== null && typeof b === 'object' && 'type' in b) {
+        const type = (b as { type: unknown }).type;
+        if (type === 'text' && typeof (b as { text?: unknown }).text === 'string') {
+          return (b as { text: string }).text;
+        }
+        return `[${String(type)}]`;
+      }
+      return '';
+    })
+    .join('\n');
 }
 
 /** Build a redacted `WireSnapshot` from the assembled outbound-request primitives (pure). */
@@ -104,22 +149,27 @@ const DEFAULT_GATE_FILE = '/tmp/wire-sink-on';
 const DEFAULT_SINK_DIR = join(tmpdir(), 'lynox-wire-sink');
 
 /**
- * The dev/eval sink is enabled by a single deliberate on-switch: the runtime FILE-GATE
- * (default `/tmp/wire-sink-on`), matching the original spike. A file-gate — NOT an env var
- * — is the switch precisely so no stray env var can ever silently start writing model
- * context to disk; creating the gate file requires deliberate in-container access. The env
- * var only CUSTOMIZES the destination dir (see `wireSinkDir`); it never enables capture. So
- * enabling on any box is one `touch` (local, staging, or a canary container), no restart.
- * DEV/STAGING path only — the operator capture path (step 2) is a persisted settings toggle.
+ * The dev/eval sink is enabled by a single on-switch: the runtime FILE-GATE (default
+ * `/tmp/wire-sink-on`), matching the original spike. A file-gate — not an env var — is the
+ * switch so no stray env var can silently start writing model context to disk; the env var
+ * only CUSTOMIZES the destination dir (see `wireSinkDir`), it never enables capture. Enabling
+ * is one `touch`, no restart, on a box the OPERATOR controls for debugging (local or a staging
+ * container).
+ *
+ * This is an operator DEBUGGING tool, NOT an auth boundary: the gate file is a convenience, not
+ * a permission (`/tmp` is world-writable), so it must NOT be enabled on a customer/production
+ * instance — that would write their (secret-scrubbed but still personal) data to disk. Real
+ * per-instance consent + non-`/tmp` at-rest live in the step-2 operator surface; here the
+ * boundary is operator discipline (see [[DEF-wire-capture-prod-gate]]).
  */
 export function isWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const gate = env.LYNOX_DEBUG_WIRE_GATE_FILE ?? DEFAULT_GATE_FILE;
+  const gate = env['LYNOX_DEBUG_WIRE_GATE_FILE'] ?? DEFAULT_GATE_FILE;
   return existsSync(gate);
 }
 
 /** The sink destination dir — `LYNOX_DEBUG_WIRE_SINK` when set, else a default under tmpdir. */
 export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env.LYNOX_DEBUG_WIRE_SINK ?? DEFAULT_SINK_DIR;
+  return env['LYNOX_DEBUG_WIRE_SINK'] ?? DEFAULT_SINK_DIR;
 }
 
 /**
