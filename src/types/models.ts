@@ -4,42 +4,21 @@ import type { ProviderDescriptor, ProviderKey, CacheProfile } from './provider-r
 // === 4.1 Model Tiers & Providers ===
 
 /**
- * Provider-agnostic capability tiers. Renamed 2026-05-29 from the legacy
- * Anthropic-brand names (`opus`/`sonnet`/`haiku`) because lynox is now
- * provider-agnostic — the brand names leaked into tool schemas + config and
- * caused models on non-Anthropic providers to mislabel themselves (a Mistral
- * tenant reporting its `balanced` tier as "Sonnet"). The tier names describe
- * the cost/capability band; each provider resolves them to a concrete model
- * via the `*_MODEL_MAP`s below.
- *   fast     — cheapest/lowest-latency (status checks, formatting)
- *   balanced — default workhorse (data queries, content, tool use)
- *   deep     — reasoning-heavy (strategy, multi-source analysis)
- * Legacy names are still accepted at input boundaries via {@link normalizeTier}.
+ * Provider-agnostic capability tiers (`fast`/`balanced`/`deep`; renamed
+ * 2026-05-29 from the legacy Anthropic-brand names). The tier vocabulary +
+ * `normalizeTier` are WIRE CONTRACT — the control plane emits tier values into
+ * tenant envs — so their single source of truth lives in `src/contract/vocab.ts`
+ * (K-W1, PRD-CORE-PRO-CONTRACT / DEF-0030). Re-exported here as a pure shim to
+ * keep the public `@lynox-ai/core/types` surface unchanged. `ModelTierSchema`
+ * in types/schemas.ts reuses `LEGACY_TIER_ALIASES`.
  */
-export type ModelTier = 'deep' | 'balanced' | 'fast';
+import { LEGACY_TIER_ALIASES, normalizeTier } from '../contract/vocab.js';
+import type { ModelTier, LLMProvider } from '../contract/vocab.js';
+import { isModelProfile } from '../contract/shapes.js';
+import type { ModelProfile } from '../contract/shapes.js';
 
-/** Legacy Anthropic-brand tier aliases → provider-agnostic names. Single
- *  source of truth; also reused by `ModelTierSchema` in types/schemas.ts. */
-export const LEGACY_TIER_ALIASES: Record<string, ModelTier> = {
-  opus: 'deep',
-  sonnet: 'balanced',
-  haiku: 'fast',
-};
-
-/**
- * Normalize a tier string to the canonical provider-agnostic name, accepting
- * both the current names (`fast`/`balanced`/`deep`) and the legacy
- * Anthropic-brand names (`haiku`/`sonnet`/`opus`). Returns `undefined` for
- * anything unrecognized so callers can fall back to their own default.
- * Applied at every input boundary (config load, env vars, tool inputs) so
- * persisted `config.json` files and `LYNOX_DEFAULT_TIER` env vars written
- * before the rename keep working.
- */
-export function normalizeTier(value: string | undefined): ModelTier | undefined {
-  if (value === undefined) return undefined;
-  if (value === 'fast' || value === 'balanced' || value === 'deep') return value;
-  return LEGACY_TIER_ALIASES[value];
-}
+export { LEGACY_TIER_ALIASES, normalizeTier, isModelProfile };
+export type { ModelTier, LLMProvider, ModelProfile };
 
 /**
  * Provenance of a thread's persisted `model_tier` (arc:model-selector Wave P1,
@@ -68,47 +47,6 @@ export type ThreadModelSource = 'user' | 'default' | 'unknown';
  */
 export function normalizeThreadModelSource(value: unknown): ThreadModelSource | undefined {
   return value === 'user' || value === 'default' || value === 'unknown' ? value : undefined;
-}
-
-export type LLMProvider = 'anthropic' | 'vertex' | 'custom' | 'openai';
-
-/** Named model profile for non-Claude providers (Mistral, Gemini, Grok, etc.). */
-export interface ModelProfile {
-  /** Provider type — always 'openai' (OpenAI-compatible API). */
-  provider: 'openai';
-  /** API base URL (e.g. 'https://api.mistral.ai/v1'). */
-  api_base_url: string;
-  /** API key for this provider. Ignored if `auth: 'google-vertex'` (OAuth token generated from service account). */
-  api_key: string;
-  /** Authentication mode. 'static' (default) uses api_key as-is. 'google-vertex' generates OAuth tokens from GOOGLE_APPLICATION_CREDENTIALS. */
-  auth?: 'static' | 'google-vertex' | undefined;
-  /** Model ID to send in requests (e.g. 'mistral-large-2512'). */
-  model_id: string;
-  /** Context window size in tokens. Default: 200000. */
-  context_window?: number | undefined;
-  /** Max output tokens. Default: 16000. */
-  max_tokens?: number | undefined;
-  /** Max continuation attempts. Default: 5. */
-  max_continuations?: number | undefined;
-}
-
-/**
- * Runtime guard for a {@link ModelProfile}. Checks only the REQUIRED fields the
- * downstream LLM client dereferences (`provider`, `api_base_url`, `api_key`,
- * `model_id`) — optional fields are left to their defaults. Used at every
- * untrusted boundary that ingests a profile (the `LYNOX_MODEL_PROFILES_JSON`
- * env blob, spawn `profile` inputs) so a malformed entry is dropped rather than
- * reaching the openai-adapter as `Bearer undefined` and crashing the run.
- */
-export function isModelProfile(value: unknown): value is ModelProfile {
-  if (value === null || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  return (
-    v['provider'] === 'openai' &&
-    typeof v['api_base_url'] === 'string' &&
-    typeof v['api_key'] === 'string' &&
-    typeof v['model_id'] === 'string'
-  );
 }
 
 export const MODEL_MAP: Record<ModelTier, string> = {
