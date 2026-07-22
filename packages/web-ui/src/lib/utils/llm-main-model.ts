@@ -84,29 +84,91 @@ export function buildMainModelOptions(
 }
 
 /**
- * The option id currently selected — matched from `default_tier` (normalised,
+ * Tier-qualified identity for a picker option — `${tier}:${id}`. The catalog's
+ * `main_chat_models` is deliberately NOT deduped, so two options can share a
+ * model `id` when a provider's balanced and deep bands resolve to the SAME model
+ * (Mistral: balanced == deep == Mistral Medium 3.5). The bare `id` is therefore
+ * NOT a unique identity — two `<option value>`s / keyed-`{#each}` keys would
+ * collide (Svelte throws `each_key_duplicate`; the browser makes the second
+ * unselectable and a first-match `find` on `id` silently resolves the wrong
+ * band). The `(tier, id)` pair is unique GIVEN the catalog emits each model at
+ * most once per band — `buildMainChatModels` constructs one entry per tier, and
+ * the test suite pins composite-key uniqueness for the colliding-id case, but
+ * nothing here dedupes a hypothetically malformed catalog.
+ */
+export function mainModelOptionKey(opt: { tier: ModelTier; id: string }): string {
+  return `${opt.tier}:${opt.id}`;
+}
+
+/**
+ * The option currently selected — matched from `default_tier` (normalised,
  * legacy aliases accepted) plus `balanced_model` to disambiguate the two
  * Anthropic balanced variants (Sonnet 4.6 vs 5). An unset/legacy `default_tier`
  * resolves to the balanced band (the engine default). If a provider has no
  * option for the resolved tier (a future catalogued provider missing that band),
- * fall back to the first option rather than `''` — an empty value would leave
- * the `<select>` silently showing its first option while the engine routes to a
- * different default.
+ * fall back to the first option rather than `undefined` — leaving the `<select>`
+ * unmatched would silently show its first option while the engine routes to a
+ * different default. Returns `undefined` only for an empty option list.
+ *
+ * Resolution is BY TIER, never by raw id: when balanced and deep share a model
+ * id, matching on tier is the only way to select the RIGHT band's option.
+ */
+export function resolveMainModelOption(
+  options: MainModelOption[],
+  defaultTier: string | undefined,
+  balancedModel: string | undefined,
+): MainModelOption | undefined {
+  if (options.length === 0) return undefined;
+  const tier = normalizeTier(defaultTier) ?? 'balanced';
+  if (tier === 'balanced') {
+    return options.find((o) => o.tier === 'balanced' && o.balanced_model === balancedModel)
+      ?? options.find((o) => o.tier === 'balanced' && o.balanced_model === undefined)
+      ?? options.find((o) => o.tier === 'balanced')
+      ?? options[0];
+  }
+  return options.find((o) => o.tier === tier) ?? options[0];
+}
+
+/**
+ * The tier-qualified KEY currently selected (the `<select value>` + keyed-each
+ * identity). Tier-aware via {@link resolveMainModelOption}, so when balanced and
+ * deep resolve to the same model id the RIGHT band's option is selected — the
+ * bare id would match whichever `<option>` renders first (always balanced). `''`
+ * for an empty option list.
+ */
+export function selectMainModelKey(
+  options: MainModelOption[],
+  defaultTier: string | undefined,
+  balancedModel: string | undefined,
+): string {
+  const opt = resolveMainModelOption(options, defaultTier, balancedModel);
+  return opt ? mainModelOptionKey(opt) : '';
+}
+
+/**
+ * The option whose tier-qualified key equals `key`, or `undefined`. The set
+ * path resolves the user's `<select>` choice through this so the picked BAND is
+ * honoured exactly — never collapsed to the first option that shares its id.
+ */
+export function findMainModelOptionByKey(
+  options: MainModelOption[],
+  key: string,
+): MainModelOption | undefined {
+  return options.find((o) => mainModelOptionKey(o) === key);
+}
+
+/**
+ * The option id currently selected — thin id-returning wrapper over
+ * {@link resolveMainModelOption}, retained for the existing id-level tests. The
+ * picker itself keys off {@link selectMainModelKey} because a bare id is not a
+ * unique `<option>`/each identity (see {@link mainModelOptionKey}).
  */
 export function selectMainModelId(
   options: MainModelOption[],
   defaultTier: string | undefined,
   balancedModel: string | undefined,
 ): string {
-  if (options.length === 0) return '';
-  const tier = normalizeTier(defaultTier) ?? 'balanced';
-  if (tier === 'balanced') {
-    const match = options.find((o) => o.tier === 'balanced' && o.balanced_model === balancedModel)
-      ?? options.find((o) => o.tier === 'balanced' && o.balanced_model === undefined)
-      ?? options.find((o) => o.tier === 'balanced');
-    return match?.id ?? options[0]?.id ?? '';
-  }
-  return options.find((o) => o.tier === tier)?.id ?? options[0]?.id ?? '';
+  return resolveMainModelOption(options, defaultTier, balancedModel)?.id ?? '';
 }
 
 /**

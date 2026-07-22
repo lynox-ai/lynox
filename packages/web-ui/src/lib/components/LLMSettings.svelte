@@ -27,7 +27,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { clearTierConfigCache } from '../utils/tier-config.js';
-	import { buildMainModelOptions, selectMainModelId, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
+	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -939,12 +939,19 @@
 	const mainModelOptions = $derived.by<MainModelOption[]>(
 		() => buildMainModelOptions(activeProviderEntry, config.max_tier),
 	);
+	// Tier-qualified key (`${tier}:${id}`), not a bare id: a provider whose
+	// balanced and deep bands resolve to the SAME model (Mistral Medium 3.5) emits
+	// two options sharing an id, so a bare-id `<select value>`/each-key collides
+	// (Svelte `each_key_duplicate` crash; the deep option unselectable). The
+	// composite keeps each option a distinct, selectable identity.
 	const mainModelSelection = $derived.by<string>(
-		() => selectMainModelId(mainModelOptions, config.default_tier, config.balanced_model),
+		() => selectMainModelKey(mainModelOptions, config.default_tier, config.balanced_model),
 	);
 
-	function setMainModel(id: string): void {
-		const opt = mainModelOptions.find((o) => o.id === id);
+	function setMainModel(key: string): void {
+		// Resolve BY TIER-QUALIFIED KEY — a bare-id `find` would collapse a deep
+		// pick onto the first (balanced) option when they share a model id.
+		const opt = findMainModelOptionByKey(mainModelOptions, key);
 		if (!opt || opt.overCeiling) return;
 		config.default_tier = opt.tier;
 		// Only the Anthropic balanced band carries a variant. Set it when the
@@ -1389,8 +1396,8 @@
 							onchange={(e) => setMainModel(e.currentTarget.value)}
 							aria-label={t('llm.main_model.heading')}
 							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-							{#each mainModelOptions as opt (opt.id)}
-								<option value={opt.id} disabled={opt.overCeiling}>
+							{#each mainModelOptions as opt (mainModelOptionKey(opt))}
+								<option value={mainModelOptionKey(opt)} disabled={opt.overCeiling}>
 									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
 								</option>
 							{/each}
