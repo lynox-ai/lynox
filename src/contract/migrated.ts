@@ -23,7 +23,7 @@ export interface MigratedSymbol {
   /** Exported symbol name. */
   name: string;
   /** Contract file that owns it now. */
-  contractFile: 'vocab.ts' | 'shapes.ts';
+  contractFile: 'vocab.ts' | 'shapes.ts' | 'env-registry.ts';
   /** The declaration pattern the orphan-twin test hunts (regex source, applied per line). */
   twinPattern: string;
 }
@@ -49,4 +49,10 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'NetworkPolicy', contractFile: 'vocab.ts', twinPattern: typeTwin('NetworkPolicy') },
   { name: 'ModelProfile', contractFile: 'shapes.ts', twinPattern: typeTwin('ModelProfile') },
   { name: 'isModelProfile', contractFile: 'shapes.ts', twinPattern: valueTwin('isModelProfile') },
+  // Not migrated FROM anywhere (born in the contract), but vendored downstream —
+  // a local re-declaration would be the same silent-divergence failure mode.
+  { name: 'ENV_REGISTRY', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY') },
+  { name: 'ENV_REGISTRY_BY_NAME', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY_BY_NAME') },
+  { name: 'SELF_HOST_ONLY', contractFile: 'env-registry.ts', twinPattern: valueTwin('SELF_HOST_ONLY') },
+  { name: 'PREFIX_FAMILIES', contractFile: 'env-registry.ts', twinPattern: valueTwin('PREFIX_FAMILIES') },
 ];
