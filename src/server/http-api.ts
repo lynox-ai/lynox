@@ -3194,6 +3194,10 @@ export class LynoxHTTPApi {
       // Also clean up in-memory session
       this.sessionStore.reset(params['id']!);
       threadStore.deleteThread(params['id']!);
+      // Extended debug capture: drop the thread's captured wire_snapshots too (the
+      // runs stay — they are the cost ledger). Without this the redacted-but-personal
+      // snapshots outlive their deleted thread with no other prune path.
+      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -4112,7 +4116,20 @@ export class LynoxHTTPApi {
       // Symmetric for any future env override we add to the same screen.
       redacted['env_overrides'] = {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
+        // LYNOX_DEBUG_WIRE_CAPTURE wins over config.json at load (config.ts), so the
+        // raw disk value spread above can read OFF while capture actually runs — which
+        // makes the Privacy toggle show the wrong state and its write a silent no-op.
+        // Report the field as env-pinned (same shape as `provider`) and overwrite the
+        // emitted value with the EFFECTIVE state below, so the UI shows the truth and
+        // disables the toggle instead of writing a dead disk value.
+        debug_wire_capture: !!process.env['LYNOX_DEBUG_WIRE_CAPTURE'],
       };
+      const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
+      if (wireCaptureEnv === 'true' || wireCaptureEnv === '1') {
+        redacted['debug_wire_capture'] = true;
+      } else if (wireCaptureEnv === 'false' || wireCaptureEnv === '0') {
+        redacted['debug_wire_capture'] = false;
+      }
 
       // F1b: when the provider is env-pinned it never lands in config.json, so
       // `provider`/`api_base_url` are absent from the spread above and the

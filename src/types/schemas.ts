@@ -244,8 +244,10 @@ export const LynoxUserConfigSchema = z.object({
   // scrubbed, the offered tools + params) to history.db, and the debug chat export
   // bundles it. This IS the owner-consent gate for the operator path (the dev file-
   // gate is a separate DEV-only switch). Default off; owner-scoped, per-instance.
-  // Operator-only per-tenant flip — NOT in PROJECT_SAFE_KEYS, never agent-settable
-  // (an injected agent must not be able to start capturing what the model saw).
+  // Owner-writable with consent (in MANAGED_USER_WRITABLE_CONFIG) + the CP can pin it
+  // per-tenant via LYNOX_DEBUG_WIRE_CAPTURE, which overrides the on-disk value at load.
+  // NOT in PROJECT_SAFE_KEYS, never agent-settable (an injected agent must not be able
+  // to start capturing what the model saw).
   debug_wire_capture:      z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),

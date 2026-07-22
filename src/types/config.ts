@@ -529,9 +529,11 @@ export interface LynoxUserConfig {
    * dig (see pro `docs/internal/prd/extended-debug-capture.md`). Default false =
    * capture off, byte-identical hot path. THIS is the owner-consent gate for the
    * operator path (the DEV file-sink of Step 1 is a separate, DEV-only switch).
-   * Owner-scoped, per-instance. Operator-only per-tenant flip; intentionally NOT in
-   * PROJECT_SAFE_KEYS — never agent-settable (an injected agent must not be able to
-   * turn on content capture).
+   * Owner-scoped, per-instance: the instance owner can write it with consent (it is
+   * in MANAGED_USER_WRITABLE_CONFIG, same class as `bugsink_enabled`), and the CP can
+   * pin it per-tenant via `LYNOX_DEBUG_WIRE_CAPTURE`, which OVERRIDES the on-disk value
+   * at load. Intentionally NOT in PROJECT_SAFE_KEYS — never agent-settable (an injected
+   * agent must not be able to turn on content capture).
    */
   debug_wire_capture?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
