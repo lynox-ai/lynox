@@ -41,7 +41,7 @@ If you're building on top of lynox as a library:
 
 ```typescript
 import { Engine, Session, ToolRegistry } from '@lynox-ai/core';
-import type { ToolDefinition } from '@lynox-ai/core/types';
+import type { ToolEntry } from '@lynox-ai/core/types';
 ```
 
 The main exports include:
