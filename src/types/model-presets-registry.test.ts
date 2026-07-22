@@ -42,15 +42,15 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('US');
   });
 
-  it('Mistral Medium 3.5 — verified $1.50/$7.50, 262k ctx, vision:false, EU', () => {
+  it('Mistral Medium 3.5 — verified $1.50/$7.50, 262k ctx, vision, EU', () => {
     const m = MODEL_CAPABILITIES['mistral-medium-2604']!;
     expect(m.provider).toBe('openai');
     expect(m.contextWindow).toBe(262_144);
     expect(m.pricing.input).toBe(1.5);
     expect(m.pricing.output).toBe(7.5);
-    // vision:false per the verify-live-or-false convention (advertised multimodal,
-    // live image check owed before flipping to a vision feature-set).
-    expect(m.features.vision).toBe(false);
+    // vision verified live 2026-07-22 (two image probes described correctly),
+    // completing the check the verify-live-or-false convention owed here.
+    expect(m.features.vision).toBe(true);
     expect(m.provenance).toBe('EU');
   });
 
