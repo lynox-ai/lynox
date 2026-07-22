@@ -49,6 +49,19 @@ describe('doc<->code drift: Mistral tier map (src/types/models.ts)', () => {
       fast: 'ministral-8b-2512',
     });
   });
+
+  // The model-identity system prompt (src/core/prompts.ts) carries a hardcoded
+  // `tier`→`model` example string for when THIS instance can't render a live tier
+  // map — a 4th copy of the MISTRAL_MODEL_MAP truth. Pin every literal to the
+  // canonical map so the next model swap can't silently strand this copy.
+  describe('prompts.ts Mistral fallback example stays in sync (src/core/prompts.ts)', () => {
+    const prompts = read('src/core/prompts.ts');
+    for (const tier of ['fast', 'balanced', 'deep'] as const) {
+      it(`states \`${tier}\`→\`${MISTRAL_MODEL_MAP[tier]}\``, () => {
+        expect(prompts).toContain(`\`${tier}\`→\`${MISTRAL_MODEL_MAP[tier]}\``);
+      });
+    }
+  });
 });
 
 describe('doc<->code drift: LLM provider framing (src/types/models.ts LLMProvider)', () => {

@@ -3194,6 +3194,10 @@ export class LynoxHTTPApi {
       // Also clean up in-memory session
       this.sessionStore.reset(params['id']!);
       threadStore.deleteThread(params['id']!);
+      // Extended debug capture: drop the thread's captured wire_snapshots too (the
+      // runs stay — they are the cost ledger). Without this the redacted-but-personal
+      // snapshots outlive their deleted thread with no other prune path.
+      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -4110,9 +4114,26 @@ export class LynoxHTTPApi {
       // refreshes — still on Anthropic because env trumps disk). Tell the UI
       // so it can render a banner instead of accepting the click in silence.
       // Symmetric for any future env override we add to the same screen.
+      // LYNOX_DEBUG_WIRE_CAPTURE wins over config.json at load (config.ts) — but
+      // only for the exact enum the loader parses ('true'/'1'/'false'/'0'). The
+      // pinned marker must use the SAME enum: any other value is ignored by the
+      // loader and the field stays owner-writable, so reporting mere env PRESENCE
+      // would lock the Privacy toggle over a value that doesn't actually pin.
+      const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
+      const wireCaptureEnvOn = wireCaptureEnv === 'true' || wireCaptureEnv === '1';
+      const wireCaptureEnvOff = wireCaptureEnv === 'false' || wireCaptureEnv === '0';
       redacted['env_overrides'] = {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
+        // Env-pinned marker for the Privacy toggle: the raw disk value spread
+        // above can read OFF while capture actually runs, so the UI needs both
+        // the pin (disable the toggle) and the EFFECTIVE value (overwritten below).
+        debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
       };
+      if (wireCaptureEnvOn) {
+        redacted['debug_wire_capture'] = true;
+      } else if (wireCaptureEnvOff) {
+        redacted['debug_wire_capture'] = false;
+      }
 
       // F1b: when the provider is env-pinned it never lands in config.json, so
       // `provider`/`api_base_url` are absent from the spread above and the

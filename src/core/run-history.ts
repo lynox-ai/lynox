@@ -1200,8 +1200,10 @@ const MIGRATIONS: string[] = [
   // (redactWireUserMessage) AND encrypted at rest (this._enc, like runs.task_text) —
   // it is redacted-but-personal owner data. `system_prompt_hash` points into
   // prompt_snapshots (the big system text is not duplicated per turn). Written ONLY
-  // when the owner-consent `debug_wire_capture` setting is on; pruned with the run
-  // (deleteRun) so retention rides the existing run-history window.
+  // when the owner-consent `debug_wire_capture` setting is on. Pruned when the thread
+  // is deleted (DELETE /api/threads/:id → deleteWireSnapshotsForThread) or when a run
+  // is explicitly removed (deleteRun cascade); there is no time-based prune, so a live
+  // thread's snapshots persist for as long as the thread does.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
    CREATE TABLE IF NOT EXISTS wire_snapshots (
      run_id TEXT NOT NULL,
@@ -2919,6 +2921,26 @@ export class RunHistory {
       this.deleteRun(row.id);
     }
     return rows.length;
+  }
+
+  /**
+   * Delete the wire_snapshots captured for a thread's runs — WITHOUT touching the
+   * runs themselves (they are the cost ledger and must survive thread deletion).
+   * A thread's runs are its `session_id` rows (session id == thread id), and
+   * wire_snapshots are keyed by run_id, so this scopes by that run set. Called when
+   * a thread is deleted via the HTTP route so captured snapshots don't linger on
+   * disk after their thread is gone. Returns the number of snapshot rows removed.
+   */
+  deleteWireSnapshotsForThread(threadId: string): number {
+    const runIds = this.db.prepare('SELECT id FROM runs WHERE session_id = ?').all(threadId) as Array<{ id: string }>;
+    if (runIds.length === 0) return 0;
+    const del = this.db.prepare('DELETE FROM wire_snapshots WHERE run_id = ?');
+    const tx = this.db.transaction(() => {
+      let removed = 0;
+      for (const { id } of runIds) removed += del.run(id).changes;
+      return removed;
+    });
+    return tx();
   }
 
   /**

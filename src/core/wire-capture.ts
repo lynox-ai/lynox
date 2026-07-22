@@ -149,12 +149,13 @@ const DEFAULT_GATE_FILE = '/tmp/wire-sink-on';
 const DEFAULT_SINK_DIR = join(tmpdir(), 'lynox-wire-sink');
 
 /**
- * The dev/eval sink is enabled by a single on-switch: the runtime FILE-GATE (default
- * `/tmp/wire-sink-on`), matching the original spike. A file-gate — not an env var — is the
- * switch so no stray env var can silently start writing model context to disk; the env var
- * only CUSTOMIZES the destination dir (see `wireSinkDir`), it never enables capture. Enabling
- * is one `touch`, no restart, on a box the OPERATOR controls for debugging (local or a staging
- * container).
+ * The dev/eval sink is armed by a runtime FILE-GATE: a file must exist at the gate path
+ * (default `/tmp/wire-sink-on`), matching the original spike. Arming is a deliberate `touch`,
+ * not a value flip — but the invariant is the FILE's existence, not "env can't reach it":
+ * both the gate path (`LYNOX_DEBUG_WIRE_GATE_FILE`) and the destination dir
+ * (`LYNOX_DEBUG_WIRE_SINK`, see `wireSinkDir`) are env-configurable, so the environment
+ * participates in arming rather than being unable to. One `touch`, no restart, on a box the
+ * OPERATOR controls for debugging (local or a staging container).
  *
  * This is an operator DEBUGGING tool, NOT an auth boundary: the gate file is a convenience, not
  * a permission (`/tmp` is world-writable), so it must NOT be enabled on a customer/production

@@ -16,16 +16,23 @@
 	// Extended debug capture (operator surface) — opt-in, default OFF.
 	let debugWireCapture = $state(false);
 	let savingWire = $state(false);
+	// LYNOX_DEBUG_WIRE_CAPTURE pins the field via env and wins over config.json, so
+	// the toggle must show the effective state and disable itself (writing disk would
+	// be a silent no-op). Mirrors the provider env-override pattern in LLMSettings.
+	let wireCaptureEnvPinned = $state(false);
 
 	async function load(): Promise<void> {
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			const body = (await res.json()) as { managed?: string; bugsink_enabled?: boolean; bugsink_dsn_configured?: boolean; debug_wire_capture?: boolean };
+			const body = (await res.json()) as { managed?: string; bugsink_enabled?: boolean; bugsink_dsn_configured?: boolean; debug_wire_capture?: boolean; env_overrides?: { debug_wire_capture?: boolean } };
 			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
 			bugsinkEnabled = body.bugsink_enabled !== false;
 			bugsinkDsnConfigured = body.bugsink_dsn_configured === true;
+			// The server surfaces the EFFECTIVE value (env override applied), so this
+			// reflects what actually runs even when config.json says otherwise.
 			debugWireCapture = body.debug_wire_capture === true;
+			wireCaptureEnvPinned = body.env_overrides?.debug_wire_capture === true;
 			loaded = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('privacy.load_failed'), 'error', 5000);
@@ -135,11 +142,14 @@
 	<section class="border-t border-border pt-6 space-y-3">
 		<h2 class="text-lg font-medium">{t('privacy.wire_capture_heading')}</h2>
 		<p class="text-xs text-text-muted">{t('privacy.wire_capture_subtitle')}</p>
-		<label class="flex items-center gap-2 cursor-pointer">
-			<input type="checkbox" disabled={!loaded || savingWire} bind:checked={debugWireCapture}
+		<label class="flex items-center gap-2" class:cursor-pointer={!wireCaptureEnvPinned}>
+			<input type="checkbox" disabled={!loaded || savingWire || wireCaptureEnvPinned} bind:checked={debugWireCapture}
 				onchange={saveDebugWireCapture} class="w-4 h-4" />
 			<span class="text-sm">{t('privacy.wire_capture_label')}</span>
 		</label>
+		{#if wireCaptureEnvPinned}
+			<p class="text-xs text-warning">{t('privacy.wire_capture_env_pinned')}</p>
+		{/if}
 	</section>
 
 	<!-- Account delete (Stop-Gap mailto, PRD Phase 3) -->

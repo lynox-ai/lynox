@@ -128,6 +128,34 @@ describe('RunHistory wire_snapshots', () => {
     h.close();
   });
 
+  it('deleteWireSnapshotsForThread prunes a thread\'s snapshots but keeps its runs', () => {
+    const dir = freshDir();
+    const h = new RunHistory(join(dir, 'wire.db'));
+    // Thread A: two runs (session_id == thread id), each with snapshots.
+    const a1 = h.insertRun({ sessionId: 'thread-A', taskText: 't1', modelTier: 'balanced', modelId: 'm' });
+    const a2 = h.insertRun({ sessionId: 'thread-A', taskText: 't2', modelTier: 'balanced', modelId: 'm' });
+    h.insertWireSnapshot(mkSnapshot({ runId: a1, turnIndex: 1 }));
+    h.insertWireSnapshot(mkSnapshot({ runId: a1, turnIndex: 2 }));
+    h.insertWireSnapshot(mkSnapshot({ runId: a2, turnIndex: 1 }));
+    // Thread B: one run + snapshot — must be untouched.
+    const b1 = h.insertRun({ sessionId: 'thread-B', taskText: 't3', modelTier: 'balanced', modelId: 'm' });
+    h.insertWireSnapshot(mkSnapshot({ runId: b1, turnIndex: 1 }));
+
+    const removed = h.deleteWireSnapshotsForThread('thread-A');
+    expect(removed).toBe(3);
+
+    // Snapshots gone for thread A's runs...
+    expect(h.getWireSnapshotsForRun(a1)).toEqual([]);
+    expect(h.getWireSnapshotsForRun(a2)).toEqual([]);
+    // ...but the runs themselves survive (the cost ledger is not deleted).
+    expect(h.getRunsBySession('thread-A')).toHaveLength(2);
+
+    // Thread B fully isolated (both snapshots and runs).
+    expect(h.getWireSnapshotsForRun(b1)).toHaveLength(1);
+    expect(h.getRunsBySession('thread-B')).toHaveLength(1);
+    h.close();
+  });
+
   it('isolates snapshots by run and returns empty for an unknown run', () => {
     const dir = freshDir();
     const h = new RunHistory(join(dir, 'wire.db'));
