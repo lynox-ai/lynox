@@ -212,7 +212,7 @@ describe('Mistral tier-set', () => {
     // Reproducibility guarantee for managed-EU tenants — Mistral rolls
     // `*-latest` silently which would change behaviour mid-billing-period.
     expect(MISTRAL_MODEL_MAP.fast).toBe('ministral-8b-2512');
-    expect(MISTRAL_MODEL_MAP.balanced).toBe('ministral-14b-2512');
+    expect(MISTRAL_MODEL_MAP.balanced).toBe('mistral-medium-2604');
     expect(MISTRAL_MODEL_MAP.deep).toBe('mistral-medium-2604');
     expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
   });
@@ -287,7 +287,7 @@ describe('getModelId for openai provider', () => {
   it('returns Mistral tier-set when the mistral map is registered', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
     expect(getModelId('fast', 'openai')).toBe('ministral-8b-2512');
-    expect(getModelId('balanced', 'openai')).toBe('ministral-14b-2512');
+    expect(getModelId('balanced', 'openai')).toBe('mistral-medium-2604');
     expect(getModelId('deep', 'openai')).toBe('mistral-medium-2604');
   });
 
@@ -302,7 +302,7 @@ describe('getModelId for openai provider', () => {
 
   it('prefers map over fallback when both are set', () => {
     setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP, fallbackModelId: 'should-be-ignored' });
-    expect(getModelId('balanced', 'openai')).toBe('ministral-14b-2512');
+    expect(getModelId('balanced', 'openai')).toBe('mistral-medium-2604');
   });
 
   it('still resolves Anthropic/Vertex providers correctly when openai resolver is set', () => {

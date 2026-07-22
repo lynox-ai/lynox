@@ -71,7 +71,7 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
  * and behaviour-drift in managed-EU tenants.
  *   fast     → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
- *   balanced → ministral-14b-2512     (near-large quality at ~6× lower cost)
+ *   balanced → mistral-medium-2604    (WS2: the 14B main fell below the R1/R3 floor)
  *   deep     → mistral-medium-2604    (Medium 3.5 — the stronger Mistral deep; Large 3 → legacy)
  * (Keep this block in sync with MISTRAL_MODEL_MAP below — the values are
  *  pinned by tests/doc-drift.test.ts.)
@@ -84,7 +84,7 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
 // the weaker deep; Medium 3.5 is a newer, stronger generation for deep
 // reasoning — pricier ($1.50/$7.50 vs Large's $0.50/$1.50) and text-only (no
 // vision), the quality tradeoff. Mistral still has no 1M-context deep (262k
-// ceiling). `balanced` stays ministral-14b-2512, giving a fast→balanced→deep ladder.
+// ceiling).
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   // deep → mistral-medium-2604 (Mistral Medium 3.5): the stronger Mistral for
   // deep reasoning. Mistral Large 3 (2512) is being deprecated to legacy and is
@@ -92,7 +92,14 @@ export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   // (pricier at $1.50/$7.50 vs Large's $0.50/$1.50 — the quality tradeoff). Note
   // Mistral has no 1M-context deep — 262k is the ceiling here.
   'deep':     'mistral-medium-2604',
-  'balanced': 'ministral-14b-2512',
+  // balanced → mistral-medium-2604 too: the WS2 wire-replay measured Ministral
+  // 14B BELOW the R1/R3 orchestration floor (answers deep-worthy tasks inline,
+  // 2/22 escalate over 3 tasks) — the same finding that moved the managed
+  // presets (#1045). Mistral has nothing between 14B and Medium 3.5 (Large 3 is
+  // the WEAKER deep, going legacy), so balanced==deep here — honest for a
+  // provider whose best model is the ladder's ceiling; deep escalation on
+  // BYOK-Mistral changes budget/framing, not the model.
+  'balanced': 'mistral-medium-2604',
   'fast':     'ministral-8b-2512',
 };
 

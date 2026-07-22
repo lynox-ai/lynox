@@ -271,7 +271,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 0.20, output: 0.20 },
     capabilities: ['vision', 'tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended balanced default. Gen-3 mid model, text+vision. 100% pass on every Set-Bench axis at near-Large quality and ~6× lower cost.',
+    notes: 'Gen-3 mid model, text+vision. Strong tool-ROUTER (100% Set-Bench) but below the R1/R3 orchestration floor as a main — the balanced tier now resolves to Medium 3.5 (WS2); 14B stays a catalog extra.',
   },
   {
     id: 'ministral-3b-2512',
@@ -759,6 +759,11 @@ function buildMainChatModels(entry: CatalogProviderEntry): MainChatModel[] | und
   } else if (has(map.balanced)) {
     out.push({ id: map.balanced, tier: 'balanced' });
   }
+  // Deliberately NOT deduped when balanced == deep (Mistral: both are Medium 3.5
+  // since the 14B main fell below the orchestration floor and Mistral has nothing
+  // stronger): the composer's per-TIER labels read this same array, so dropping
+  // the deep row would strip the deep band's model name. Two rows sharing one id
+  // is honest — the bands differ (default_tier semantics), the model does not.
   if (has(map.deep)) out.push({ id: map.deep, tier: 'deep' });
   return out.length > 0 ? out : undefined;
 }
