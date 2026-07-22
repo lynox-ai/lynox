@@ -4114,20 +4114,24 @@ export class LynoxHTTPApi {
       // refreshes — still on Anthropic because env trumps disk). Tell the UI
       // so it can render a banner instead of accepting the click in silence.
       // Symmetric for any future env override we add to the same screen.
+      // LYNOX_DEBUG_WIRE_CAPTURE wins over config.json at load (config.ts) — but
+      // only for the exact enum the loader parses ('true'/'1'/'false'/'0'). The
+      // pinned marker must use the SAME enum: any other value is ignored by the
+      // loader and the field stays owner-writable, so reporting mere env PRESENCE
+      // would lock the Privacy toggle over a value that doesn't actually pin.
+      const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
+      const wireCaptureEnvOn = wireCaptureEnv === 'true' || wireCaptureEnv === '1';
+      const wireCaptureEnvOff = wireCaptureEnv === 'false' || wireCaptureEnv === '0';
       redacted['env_overrides'] = {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
-        // LYNOX_DEBUG_WIRE_CAPTURE wins over config.json at load (config.ts), so the
-        // raw disk value spread above can read OFF while capture actually runs — which
-        // makes the Privacy toggle show the wrong state and its write a silent no-op.
-        // Report the field as env-pinned (same shape as `provider`) and overwrite the
-        // emitted value with the EFFECTIVE state below, so the UI shows the truth and
-        // disables the toggle instead of writing a dead disk value.
-        debug_wire_capture: !!process.env['LYNOX_DEBUG_WIRE_CAPTURE'],
+        // Env-pinned marker for the Privacy toggle: the raw disk value spread
+        // above can read OFF while capture actually runs, so the UI needs both
+        // the pin (disable the toggle) and the EFFECTIVE value (overwritten below).
+        debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
       };
-      const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
-      if (wireCaptureEnv === 'true' || wireCaptureEnv === '1') {
+      if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
-      } else if (wireCaptureEnv === 'false' || wireCaptureEnv === '0') {
+      } else if (wireCaptureEnvOff) {
         redacted['debug_wire_capture'] = false;
       }
 

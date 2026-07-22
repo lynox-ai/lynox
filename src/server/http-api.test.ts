@@ -57,6 +57,7 @@ const mockHistoryGetRecentRuns = vi.fn().mockReturnValue([{ id: 'run-1', task_te
 const mockHistorySearchRuns = vi.fn().mockReturnValue([]);
 const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'test' });
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
+const mockDeleteWireSnapshotsForThread = vi.fn().mockReturnValue(0);
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
 const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
@@ -141,6 +142,7 @@ vi.mock('../core/engine.js', () => ({
       searchRuns: mockHistorySearchRuns,
       getRun: mockHistoryGetRun,
       getRunToolCalls: mockHistoryGetRunToolCalls,
+      deleteWireSnapshotsForThread: mockDeleteWireSnapshotsForThread,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
       getUsageSummary: mockHistoryGetUsageSummary,
@@ -2459,6 +2461,44 @@ describe('LynoxHTTPApi', () => {
       expect((body['env_overrides'] as Record<string, unknown>)['provider']).toBe(false);
     });
 
+    it('GET reports debug_wire_capture env-pinned + the EFFECTIVE value over a stale disk value', async () => {
+      // The env var wins over config.json at load, so the raw disk value (false)
+      // must be overwritten in the response and the pin reported — otherwise the
+      // Privacy toggle shows OFF while capture runs and its write is a dead no-op.
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ debug_wire_capture: false });
+      vi.stubEnv('LYNOX_DEBUG_WIRE_CAPTURE', 'true');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['debug_wire_capture']).toBe(true);
+        expect(body['debug_wire_capture']).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('GET does NOT report debug_wire_capture env-pinned for a non-enum env value', async () => {
+      // config.ts only honors 'true'/'1'/'false'/'0'; anything else is ignored at
+      // load and the field stays owner-writable — reporting mere presence would
+      // lock the toggle over a value that doesn't actually pin anything.
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ debug_wire_capture: true });
+      vi.stubEnv('LYNOX_DEBUG_WIRE_CAPTURE', 'yes');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['debug_wire_capture']).toBe(false);
+        expect(body['debug_wire_capture']).toBe(true); // disk value untouched
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('GET surfaces LYNOX_STRIPE_PORTAL_LOGIN_URL when set + valid (v1.6.0 billing stopgap)', async () => {
       vi.stubEnv('LYNOX_STRIPE_PORTAL_LOGIN_URL', 'https://billing.stripe.com/p/login/test_xxx');
       try {
@@ -3050,6 +3090,20 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { messages: unknown[]; threadMissing?: boolean };
         expect(body.threadMissing).toBeUndefined();
         expect(body.messages).toEqual([]);
+      });
+    });
+
+    it('DELETE /api/threads/:id deletes the thread AND prunes its wire snapshots', async () => {
+      // Drives the ROUTE wiring, not just the run-history method: dropping the
+      // deleteWireSnapshotsForThread call from the handler must fail this test —
+      // the snapshots would otherwise silently outlive their deleted thread.
+      const deleteThread = vi.fn();
+      mockDeleteWireSnapshotsForThread.mockClear();
+      await withThreadStore({ getThread: () => ({ id: 't-del' }), deleteThread }, async () => {
+        const res = await jsonFetch('/api/threads/t-del', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(deleteThread).toHaveBeenCalledWith('t-del');
+        expect(mockDeleteWireSnapshotsForThread).toHaveBeenCalledWith('t-del');
       });
     });
   });
