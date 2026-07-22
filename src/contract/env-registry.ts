@@ -3,11 +3,11 @@
  * variable that crosses the control-plane → engine wire (K-W1 §3.2,
  * PRD-CORE-PRO-CONTRACT / DEF-0030).
  *
- * VENDORED DOWNSTREAM — edit ONLY here. The private control plane compiles a
- * byte-identical vendored copy and drives its emit-matrix test off these rows;
- * core generates forward (row → real read site) and reverse (read → row) drift
- * tests from them (`tests/contract-env.test.ts`). Dependency-light by design
- * (imports only `vocab.ts`).
+ * VENDORED DOWNSTREAM — edit ONLY here. The private control plane vendors a
+ * byte-identical copy (its emit-matrix test re-seats onto these rows in the
+ * K-W1 pro wave); core generates forward (row → real read site) and reverse
+ * (read → row) drift tests from them (`tests/contract-env.test.ts`).
+ * Imports nothing outside `src/contract/` (only `vocab.ts`).
  *
  * WHY: the emit side lives in the private control plane, the consume side in
  * this repo; each repo only tested its own half, which is how three real bugs
@@ -73,6 +73,13 @@ export interface EngineConsumption {
   readSite?: string;
   /** Additional read sites the forward test also asserts (e.g. web-ui next to core). */
   alsoReadAt?: string[];
+  /**
+   * For `features` rows: the flag slug + a real consumer call-site. The forward
+   * test asserts BOTH the env-name map entry in features.ts AND
+   * `isFeatureEnabled('<slug>')` at the consumer — a dead flag whose map entry
+   * survives no longer passes.
+   */
+  featureFlag?: { slug: string; consumerSite: string };
 }
 
 export interface EnvRegistryRow {
@@ -99,7 +106,7 @@ const MANAGED_TIERS: BillingTier[] = ['managed', 'managed_pro'];
 export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   // ── Base secrets (all tiers) ──────────────────────────────────────────────
   { name: 'LYNOX_HTTP_SECRET', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, secret: { redact: 'exact-name', preserveAcrossSyncEnv: true }, engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts', alsoReadAt: ['packages/web-ui/src/hooks.server.ts'] }, note: 'Cookie/session signing; the web-ui server hooks read it too (web-ui runs in the engine process).' },
-  { name: 'LYNOX_HTTP_ADMIN_SECRET', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' }, note: 'Two-tier auth admin scope. DB-retrievable CP-side, so re-emitted (not preserved) on sync-env.' },
+  { name: 'LYNOX_HTTP_ADMIN_SECRET', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' }, note: 'Two-tier auth admin scope. Re-emitted (not preserved) on sync-env.' },
   { name: 'LYNOX_VAULT_KEY', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, secret: { redact: 'exact-name', preserveAcrossSyncEnv: true }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' } },
   { name: 'LYNOX_ONBOARDING_TOKEN', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, secret: { redact: 'exact-name', preserveAcrossSyncEnv: true }, engineConsumed: { kind: 'web-ui', readSite: 'packages/web-ui/src/routes/login/+page.server.ts' } },
 
@@ -109,9 +116,9 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'ORIGIN', valueKind: 'url', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/index.ts' }, note: 'CSRF origin.' },
 
   // ── CP-link metadata (all tiers) ──────────────────────────────────────────
-  { name: 'LYNOX_MANAGED_INSTANCE_ID', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/core/managed-hook.ts' } },
-  { name: 'LYNOX_MANAGED_CONTROL_PLANE_URL', valueKind: 'url', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/core/managed-hook.ts' } },
-  { name: 'LYNOX_MANAGED_CUSTOMER_EMAIL', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'web-ui', readSite: 'packages/web-ui/src/routes/login/+page.server.ts', alsoReadAt: ['packages/web-ui/src/routes/auth/passkey/+server.ts'] }, note: 'NOT an orphan — web-ui auth reads it.' },
+  { name: 'LYNOX_MANAGED_INSTANCE_ID', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/core/managed-hook.ts', alsoReadAt: ['packages/web-ui/src/routes/login/+page.server.ts'] } },
+  { name: 'LYNOX_MANAGED_CONTROL_PLANE_URL', valueKind: 'url', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/core/managed-hook.ts', alsoReadAt: ['packages/web-ui/src/routes/login/+page.server.ts'] } },
+  { name: 'LYNOX_MANAGED_CUSTOMER_EMAIL', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'web-ui', readSite: 'packages/web-ui/src/routes/login/+page.server.ts', alsoReadAt: ['packages/web-ui/src/routes/auth/passkey/+server.ts'] }, note: 'NOT an orphan — web-ui auth reads it. PII (customer email) → masked in the env-preview.' },
 
   // ── Tier / account / billing axis ─────────────────────────────────────────
   { name: 'LYNOX_BILLING_TIER', valueKind: 'billing-tier', emitPolicy: 'always', requiredForTier: ALL_TIERS, legacyReadAliases: ['LYNOX_MANAGED_MODE'], engineConsumed: { kind: 'env-alias', readSite: 'src/server/http-api.ts', alsoReadAt: ['src/core/engine.ts'] }, note: 'Canonical name; the engine reads it first and falls back to the legacy LYNOX_MANAGED_MODE alias forever.' },
@@ -132,8 +139,8 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map.' },
   { name: 'FIREWORKS_API_KEY', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/config.ts' }, note: 'Emitted only when the CP pool holds a Fireworks key (opt-in Efficient preset).' },
   { name: 'LYNOX_MANAGED_FIREWORKS_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/core/tier-presets.ts' }, note: 'Unlocks the Fireworks slot for managed; emitted only alongside FIREWORKS_API_KEY (DPA-gated sub-processor).' },
-  { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts' }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
-  { name: 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts' }, note: 'Allows proactive deep even on an Anthropic deep slot (premium).' },
+  { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep', consumerSite: 'src/core/session.ts' } }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
+  { name: 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep-anthropic', consumerSite: 'src/core/session.ts' } }, note: 'Allows proactive deep even on an Anthropic deep slot (premium).' },
 
   // ── Worker / model-profiles bridge ────────────────────────────────────────
   { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },
@@ -151,7 +158,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'LYNOX_DURABLE_MEMORY_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Per-tenant; OFF = byte-identical engine.' },
   { name: 'LYNOX_STRIPE_PORTAL_LOGIN_URL', valueKind: 'url', emitPolicy: 'when-non-default', engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' } },
   { name: 'LYNOX_KG_EXTRACTOR', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/core/knowledge-layer.ts' } },
-  { name: 'LYNOX_FEATURE_UNIFIED_INBOX', valueKind: 'bool', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'features', readSite: 'src/core/features.ts' } },
+  { name: 'LYNOX_FEATURE_UNIFIED_INBOX', valueKind: 'bool', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'unified-inbox', consumerSite: 'src/core/engine.ts' } } },
   { name: 'LYNOX_MIGRATION_TOKEN', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' }, note: 'Only when the instance receives a migration.' },
 
   // ── Outbound egress posture ───────────────────────────────────────────────
@@ -160,7 +167,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Operator-only reads (the CP must NOT emit these) ─────────────────────
   { name: 'LYNOX_LLM_PROVIDER', valueKind: 'llm-provider', emitPolicy: 'operator-only', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Self-host/BYOK operators set it themselves; the CP stopped emitting it with the eu-sovereign retirement (2026-06-13).' },
-  { name: 'LYNOX_TIER_SET_JSON', valueKind: 'json', emitPolicy: 'operator-only', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Operator tier-set override. A future CP emit is a normal registry change (+ valueSchema hook).' },
+  { name: 'LYNOX_TIER_SET_JSON', valueKind: 'json', emitPolicy: 'operator-only', secret: { redact: 'whole-value' }, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Operator tier-set override. Slots may embed per-tier api_key values → whole-value redaction, same class as LYNOX_MODEL_PROFILES_JSON. A future CP emit is a normal registry change (+ valueSchema hook).' },
   { name: 'LYNOX_DEBUG_WIRE_CAPTURE', valueKind: 'bool', emitPolicy: 'operator-only', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Debug wire capture — operator-flipped per instance, never fleet-emitted.' },
   { name: 'LYNOX_PUBLIC_DEMO', valueKind: 'bool', emitPolicy: 'operator-only', engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' }, note: 'Public-demo hardening switch — operator-flipped on the demo host only.' },
 

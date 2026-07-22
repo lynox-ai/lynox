@@ -15,7 +15,9 @@ copies of these files:
 | control plane (private repo, `packages/managed/src/vendor/contract/`) | SHA-pinned (`CONTRACT.lock`, git tree hash) | required `contract-sync` CI job + a release-path freshness gate | <!-- drift-guard:allow: path lives in the private lynox-pro repo (created by its contract-sync wave) -->
 
 Rules:
-- **Dependency-free.** Pure literals, types, and functions only — consumers
+- **Dependency-free.** Pure literals, types, and functions; no imports from
+  outside `src/contract/` (intra-contract imports like `env-registry.ts` →
+  `vocab.ts` are fine — the whole directory is vendored together). Consumers
   compile these files standalone.
 - **Membership**: an item belongs here ONLY if the wire depends on both sides
   agreeing on it. Value-equality alone is not membership; single-owner values

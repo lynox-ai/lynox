@@ -46,7 +46,9 @@ function readForms(row: EnvRegistryRow): RegExp[] {
     case 'config':
       return [new RegExp(`process\\.env\\[['"]${n}['"]\\]`)];
     case 'features':
-      return [new RegExp(`['"]${n}['"]`)];
+      // The env-name MAP ENTRY form (`'slug': 'LYNOX_FEATURE_X'`), not any
+      // quoted mention — a literal surviving in a comment must not pass.
+      return [new RegExp(`:\\s*['"]${n}['"]`)];
     case 'env-alias':
       return [new RegExp(`(readEnvAlias|envTier)\\(['"]${n}['"]\\)`)];
     case 'env-float':
@@ -96,6 +98,14 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
         ).toBe(true);
       });
     }
+    const flag = row.engineConsumed.featureFlag;
+    if (flag) {
+      it(`${row.name}: isFeatureEnabled('${flag.slug}') is called at ${flag.consumerSite}`, () => {
+        // A dead flag whose map entry survives must not pass — pin a real
+        // consumer call-site alongside the map entry.
+        expect(read(flag.consumerSite)).toMatch(new RegExp(`isFeatureEnabled\\(['"]${esc(flag.slug)}['"]\\)`));
+      });
+    }
     if (row.legacyReadAliases?.length) {
       it(`${row.name} keeps its legacy read-aliases in src/core/env.ts`, () => {
         const env = read('src/core/env.ts');
@@ -125,35 +135,55 @@ function walk(dir: string, out: string[]): string[] {
   return out;
 }
 
-/** Read forms the sweep recognizes. Group 2/3/4-style captures collect the name. */
+/**
+ * Read forms the sweep recognizes; every pattern captures the var name as
+ * group 1. Captures are NOT restricted to LYNOX_* — the coverage assertion
+ * filters, so non-prefixed denylist rows (e.g. OPENAI_BASE_URL) still get a
+ * meaningful absence check.
+ */
 const READ_PATTERNS: readonly RegExp[] = [
-  /process\.env\.(LYNOX_[A-Z0-9_]+)/g,
-  /process\.env\[['"](LYNOX_[A-Z0-9_]+)['"]\]/g,
+  /process\.env\.([A-Z][A-Z0-9_]{2,})/g,
+  /process\.env\[['"]([A-Z][A-Z0-9_]{2,})['"]\]/g,
   /\benv\.(LYNOX_[A-Z0-9_]+)/g, // SvelteKit `$env/dynamic/private` reads in web-ui
   /\benv\[['"](LYNOX_[A-Z0-9_]+)['"]\]/g,
-  /readEnvAlias\(['"](LYNOX_[A-Z0-9_]+)['"]\)/g,
-  /envTier\(['"](LYNOX_[A-Z0-9_]+)['"]\)/g,
-  /envFloat\(['"](LYNOX_[A-Z0-9_]+)['"]\)/g,
+  /readEnvAlias\(['"]([A-Z][A-Z0-9_]{2,})['"]\)/g,
+  /envTier\(['"]([A-Z][A-Z0-9_]{2,})['"]\)/g,
+  /envFloat\(['"]([A-Z][A-Z0-9_]{2,})['"]\)/g,
+  // managed-hook's local int-env helper (reads process.env[name] internally).
+  // If the helper is renamed, its vars go stale in SELF_HOST_ONLY and the
+  // allowlist-rot guard fires — update this pattern then.
+  /parsePositiveIntEnv\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
 ];
 
-function collectReads(): Map<string, string[]> {
+/** Read forms the sweep is BLIND to — banned in swept files so a new read cannot hide. */
+const BLIND_FORMS: readonly [RegExp, string][] = [
+  [/\{[^}]*\}\s*=\s*process\.env\b/, 'destructuring `const { X } = process.env`'],
+  [/\$env\/static\/private/, "`$env/static/private` import (compile-time env read)"],
+];
+
+function collectReads(): { reads: Map<string, string[]>; blind: string[] } {
   const found = new Map<string, string[]>();
+  const blind: string[] = [];
   const roots = ['src', 'packages/web-ui/src'];
   for (const root of roots) {
     for (const file of walk(resolve(repoRoot, root), [])) {
       const src = readFileSync(file, 'utf8');
+      const rel = relative(repoRoot, file);
       for (const pattern of READ_PATTERNS) {
         for (const m of src.matchAll(pattern)) {
           const name = m[1];
           if (!name) continue;
           const sites = found.get(name) ?? [];
-          sites.push(relative(repoRoot, file));
+          sites.push(rel);
           found.set(name, sites);
         }
       }
+      for (const [form, label] of BLIND_FORMS) {
+        if (form.test(src)) blind.push(`${rel}: ${label}`);
+      }
     }
   }
-  return found;
+  return { reads: found, blind };
 }
 
 const registryNames = new Set(ENV_REGISTRY.map((r) => r.name));
@@ -171,13 +201,18 @@ function isCovered(name: string): boolean {
 }
 
 describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
-  const reads = collectReads();
+  const { reads, blind } = collectReads();
 
   it('the sweep sees a plausible inventory (guard against a silently-empty scan)', () => {
     expect(reads.size).toBeGreaterThan(20);
   });
 
+  it('no swept file uses a read form the sweep is blind to', () => {
+    expect(blind, 'rewrite as a sweep-visible read (process.env[…] / $env/dynamic/private) or teach READ_PATTERNS the form').toEqual([]);
+  });
+
   for (const [name, sites] of [...reads.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (!name.startsWith('LYNOX_')) continue; // non-prefixed reads: honest residual (membership review line)
     it(`${name} is covered (registry row / legacy alias / SELF_HOST_ONLY / prefix family)`, () => {
       expect(
         isCovered(name),
@@ -185,6 +220,17 @@ describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
       ).toBe(true);
     });
   }
+
+  it('every SELF_HOST_ONLY entry still has a live read (allowlist rot guard)', () => {
+    const stale: string[] = [];
+    for (const entry of SELF_HOST_ONLY) {
+      const alive = entry.endsWith('*')
+        ? [...reads.keys()].some((n) => n.startsWith(entry.slice(0, -1)))
+        : reads.has(entry);
+      if (!alive) stale.push(entry);
+    }
+    expect(stale, 'no read in src/ or packages/web-ui/src matches these SELF_HOST_ONLY entries — remove them (or fix the read they were meant to cover)').toEqual([]);
+  });
 
   it('denylisted phantoms are not read anywhere (none-kind rows stay dead)', () => {
     for (const row of ENV_REGISTRY) {
