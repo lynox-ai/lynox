@@ -63,7 +63,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
   it('expandTierPreset: known → {routing_mode, tier_set}; unknown → undefined', () => {
     const expanded = expandTierPreset('balanced');
     expect(expanded?.routing_mode).toBe('hybrid');
-    expect(expanded?.tier_set.balanced?.model_id).toBe('ministral-14b-2512');
+    expect(expanded?.tier_set.balanced?.model_id).toBe('mistral-medium-2604');
     expect(expandTierPreset('does-not-exist')).toBeUndefined();
   });
 

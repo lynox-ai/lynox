@@ -99,10 +99,11 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.routing_mode).toBe('hybrid');
-      // ⚖️ balanced main-chat slot = Ministral 14B via the Mistral endpoint.
+      // ⚖️ balanced main-chat slot = mistral-medium via the Mistral endpoint
+      // (WS2 wire-replay: Ministral 14B was below the R1/R3 orchestration floor).
       expect(config.tier_set?.balanced).toEqual({
         provider: 'openai',
-        model_id: 'ministral-14b-2512',
+        model_id: 'mistral-medium-2604',
         api_base_url: 'https://api.mistral.ai/v1',
       });
       expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
@@ -116,7 +117,7 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('my-own-model'); // env slot won
-      expect(config.tier_set?.balanced?.model_id).toBe('ministral-14b-2512'); // preset slot kept
+      expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
     });
 
     it('an unknown tier_preset name FAILS CLOSED (throws, not a silent standard boot)', async () => {
@@ -145,7 +146,7 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('claude-opus-4-8'); // config override won over the preset's sonnet-5
-      expect(config.tier_set?.balanced?.model_id).toBe('ministral-14b-2512'); // preset slot kept
+      expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
     });
 
     it('a config tier_set override with an UNREGISTERED model FAILS CLOSED (post-merge guard)', async () => {

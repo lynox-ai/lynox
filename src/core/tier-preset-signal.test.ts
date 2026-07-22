@@ -86,17 +86,17 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     expect(deep.residency).toBe('US'); // Fireworks host residency (weights CN, host US)
   });
 
-  it('resolves an EU Mistral slot host disclosure (balanced tier = Ministral 14B)', () => {
+  it('resolves an EU Mistral slot host disclosure (balanced tier = mistral-medium)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.model_id).toBe('ministral-14b-2512');
+    expect(bal.model_id).toBe('mistral-medium-2604');
     expect(bal.residency).toBe('EU');
   });
 
   it('carries per-tier input/output pricing (the cost feel) from the registry', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.pricing).toEqual({ input: 0.20, output: 0.20 }); // Ministral 14B
+    expect(bal.pricing).toEqual({ input: 1.50, output: 7.50 }); // mistral-medium (R8: pricier than Ministral 14B's 0.20/0.20 — the main runs every turn)
     const deep = sig['balanced']!.tiers.find((t) => t.tier === 'deep')!;
     expect(deep.pricing).toEqual({ input: 3, output: 15 }); // Sonnet 5 — visibly pricier
   });
