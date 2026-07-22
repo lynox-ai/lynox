@@ -24,7 +24,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 {
   "provider": "anthropic",
   "api_base_url": "https://api.mistral.ai/v1",
-  "openai_model_id": "mistral-large-2512"
+  "openai_model_id": "mistral-medium-2604"
 }
 ```
 
@@ -32,11 +32,11 @@ Project configs cannot override security-sensitive fields like API keys or vault
 |---------|--------|---------|
 | `provider` | `anthropic` (tested), `openai` (Mistral tested; Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini experimental), `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) | `anthropic` |
 | `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
-| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-2512`, `llama3.2`) | — |
+| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-medium-2604`, `llama3.2`) | — |
 
 Only **anthropic** and **openai with the Mistral endpoint** are exercised on every release. The other paths work in principle but are not regularly tested — see [LLM Providers](/setup/llm-providers/) for full details.
 
-> Prefer pinned model IDs (`mistral-large-2512`) over floating tags like `mistral-large-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
+> Prefer pinned model IDs (`mistral-medium-2604`) over floating tags like `mistral-medium-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
 
 ### Model & Intelligence
 
@@ -169,6 +169,7 @@ Controls the agent's outbound network access for the `http_request`, `api_setup`
 - `allow-all` (default) — no restriction; existing behavior.
 - `deny-all` — block all outbound requests from these tools.
 - `allow-list` — allow only the hosts listed in `network_allowed_hosts`.
+- `guarded` — surface-aware lockdown: discovery surfaces stay open, while full-control requests reach only the vetted baseline hosts, the operator floor, and hosts you have explicitly accepted for a connected API.
 
 Override with the `LYNOX_NETWORK_POLICY` and `LYNOX_NETWORK_ALLOWED_HOSTS` (comma-separated) environment variables.
 
@@ -221,7 +222,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `MISTRAL_API_KEY` | Mistral API key — primary slot for `provider: openai` with the Mistral endpoint (natively supported). |
 | `OPENAI_API_KEY` | Bearer for generic OpenAI-compatible endpoints (experimental). Secondary slot — `MISTRAL_API_KEY` is also accepted. Leave blank for local Ollama / LM Studio without auth. |
-| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-2512` (prefer pinned over `-latest`), `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
+| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-medium-2604` (prefer pinned over `-latest`), `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
 | `ANTHROPIC_BASE_URL` | Provider base URL — see [LLM Providers](/setup/llm-providers/) for the value per backend |
 
 ### Legacy: Google Vertex AI (experimental)
