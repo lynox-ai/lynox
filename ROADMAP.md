@@ -10,17 +10,17 @@ This roadmap is intentionally short. The Managed-hosting tier funds the project,
 - Calendar Integration (CalDAV + ICS imports, then create)
 - OpenAI Native Provider (first-class, alongside Anthropic + Mistral)
 - MCP Client (connect to Smithery catalog + custom servers)
-- STT Provider Multiplexing (Whisper / Voxtral / Gladia.io in evaluation)
 - OAuth Authorization-Code Callbacks (closes api_setup OAuth gap)
-- Cross-thread Memory Unification (memory compounds across every conversation)
+- Durable Knowledge rollout (archival memory tier — shipped opt-in, being enabled per instance)
 
 ## later
 - Browser Use / Playwright Tool (automate sites without APIs)
-- PDF / Image Multimodal first-class (drag-and-drop document understanding)
+- Deeper multimodal document understanding (server-side PDF/Word extraction + image input are shipped; a first-class multimodal pipeline is next)
 - Inbound Webhook Receivers (Stripe / GitHub / Twilio events trigger workflows)
 
 ## under evaluation
 - iOS / Android native apps (PWA exists today — gauging demand)
+- Gladia.io as an additional STT provider (Whisper + Voxtral are shipped)
 
 ## beyond
 (focus is on items above)
