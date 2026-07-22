@@ -30,14 +30,14 @@
 	import { buildMainModelOptions, selectMainModelId, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
-	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { isManaged, cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';
 	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
-	// Local enum mirror — the engine type lives in src/types/models.ts but
-	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
-	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
+	// Shared vocabulary from the vendored wire-contract copy (byte-identical to
+	// core `src/contract/vocab.ts`) — replaces the old local enum mirrors.
+	import type { LLMProvider, ModelTier } from '../contract/vocab.js';
 
 	interface CatalogModel {
 		id: string;
@@ -93,8 +93,8 @@
 
 	// Provider-agnostic routing (PR-4). Canonical tier band — the catalog and
 	// the engine both speak 'fast' | 'balanced' | 'deep' (legacy haiku/sonnet/opus
-	// only survive as normaliser input). Display + iteration order is cheap→deep.
-	type ModelTier = 'fast' | 'balanced' | 'deep';
+	// only survive as normaliser input; `ModelTier` imported from the contract
+	// copy above). Display + iteration order is cheap→deep.
 	const TIER_ORDER: ReadonlyArray<ModelTier> = ['fast', 'balanced', 'deep'];
 
 	// One tier's provider+model assignment in a hybrid Tier-Set. Mirrors
@@ -732,7 +732,7 @@
 		// starter (BYOK) go through the gate per the comment intent.
 		// Pre-fix this used isManaged() which incorrectly returned true for
 		// `starter` BYOK too, dropping the gate where it was needed.
-		if (cpSuppliesLLMKey()) return false;
+		if (cpSuppliesLLMKeyForInstance()) return false;
 		if (provider !== 'custom' && provider !== 'openai') return false;
 		if (!url || url.trim().length === 0) return false;
 		if (isAllowlistedEndpoint(url)) return false;
@@ -917,13 +917,13 @@
 	// `customEndpointsLocked` tile-lock never covers them — they showed as fully
 	// selectable and a save just 403'd. Filter them OUT of the tile list entirely so a
 	// managed customer is never offered a provider whose save can't land. Hosted-BYOK
-	// (customer's own key, `cpSuppliesLLMKey() === false`) keeps the full list.
+	// (customer's own key, `cpSuppliesLLMKeyForInstance() === false`) keeps the full list.
 	const isManagedCuratedProvider = (p: CatalogProvider): boolean =>
 		p.provider === 'anthropic' || (p.provider === 'openai' && p.preset_id === 'mistral');
 	const providersForDisplay = $derived(
 		providers.filter((p) => {
 			if (p.provider === 'vertex' && activeProvider !== 'vertex') return false;
-			if (cpSuppliesLLMKey() && !isManagedCuratedProvider(p)) return false;
+			if (cpSuppliesLLMKeyForInstance() && !isManagedCuratedProvider(p)) return false;
 			return true;
 		}),
 	);
@@ -1222,7 +1222,7 @@
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotForEntry(activeProviderEntry) && !cpSuppliesLLMKey() && !hybridActive}
+			{#if slotForEntry(activeProviderEntry) && !cpSuppliesLLMKeyForInstance() && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
@@ -1231,7 +1231,7 @@
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
-			{:else if cpSuppliesLLMKey() && !hybridActive}
+			{:else if cpSuppliesLLMKeyForInstance() && !hybridActive}
 				<!-- v1.5.2: on managed tiers, the CP supplies the LLM key — the
 				     input would be misleading-disabled. Replace with a short
 				     note so the user knows why the field is missing. (Hidden in
@@ -1351,7 +1351,7 @@
 				     into the tier_set in config.json; the engine injects each slot's
 				     key at config-load. On managed the CP supplies the keys, so a
 				     short note replaces the fields. -->
-				{#if !cpSuppliesLLMKey()}
+				{#if !cpSuppliesLLMKeyForInstance()}
 					{#if usedHybridProviders.length > 0}
 						<div class="space-y-2 border-t border-border/50 pt-4">
 							<span class="block text-sm font-medium">{t('llm.hybrid_keys_heading')}</span>
@@ -1435,7 +1435,7 @@
 			<!-- Connection-test row — hidden on managed (CP-supplied key, can't
 			     be re-tested by the customer; the engine probe still runs on
 			     server start) and in Hybrid (no single provider to probe). -->
-			{#if !cpSuppliesLLMKey() && !hybridActive}
+			{#if !cpSuppliesLLMKeyForInstance() && !hybridActive}
 			<div class="flex items-center gap-3">
 				<button type="button" onclick={testConnection} disabled={testing || providerLocked || !loaded}
 					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">

@@ -7,22 +7,17 @@
 // `balanced_model` variant) from a server-computed catalog field
 // (`main_chat_models`), so the UI never mirrors the tier→model map.
 
-export type ModelTier = 'fast' | 'balanced' | 'deep';
+// Tier name + normaliser come from the vendored wire-contract copy (single
+// source of truth, byte-identical to core `src/contract/vocab.ts`) — the old
+// hand-mirrored twin of core's `normalizeTier` lived here and is retired.
+// The web-ui must still NEVER mirror the tier→model MAP (arch-v2: options come
+// from the catalog so new providers get them for free).
+import { normalizeTier } from '../contract/vocab.js';
+import type { ModelTier } from '../contract/vocab.js';
+export { normalizeTier };
+export type { ModelTier };
 
 const TIER_RANK: Record<ModelTier, number> = { fast: 0, balanced: 1, deep: 2 };
-
-// Mirrors `normalizeTier` / `LEGACY_TIER_ALIASES` in core `src/types/models.ts`
-// — keep in lockstep. This is a tier-NAME normaliser only; the web-ui must NEVER
-// mirror the tier→model MAP (arch-v2: options come from the catalog so new
-// providers get them for free). The legacy alias set is frozen history.
-export function normalizeTier(t: string | undefined): ModelTier | undefined {
-  switch (t) {
-    case 'fast': case 'haiku': return 'fast';
-    case 'balanced': case 'sonnet': return 'balanced';
-    case 'deep': case 'opus': return 'deep';
-    default: return undefined;
-  }
-}
 
 /**
  * A model is "expensive" (⚡) when its output price is in Opus territory

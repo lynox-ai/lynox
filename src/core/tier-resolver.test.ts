@@ -1,8 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { resolveRunModel, resolveCrossProviderSlotCreds, setTierSetResolver } from './tier-resolver.js';
 import { getModelId, type ModelTier, type LLMProvider } from '../types/index.js';
-
-type AccountTier = 'standard' | 'pro' | undefined;
+import type { AccountTier } from '../contract/vocab.js';
 
 describe('resolveRunModel — gate → clamp → provider, the single chokepoint', () => {
   // Exhaustive tier-resolution table. modelId is asserted indirectly via
@@ -11,7 +10,7 @@ describe('resolveRunModel — gate → clamp → provider, the single chokepoint
     name: string;
     requested: string | undefined;
     defaultTier: ModelTier;
-    accountTier: AccountTier;
+    accountTier: AccountTier | undefined;
     maxTier: ModelTier | undefined;
     expectTier: ModelTier;
   }> = [

@@ -5,6 +5,8 @@
  */
 
 import type { ModelTier, EffortLevel, AutonomyLevel } from '../types/index.js';
+// Wire contract (CP emits `LYNOX_ACCOUNT_TIER`) — SoT in src/contract/vocab.ts.
+import type { AccountTier } from '../contract/vocab.js';
 
 export interface RoleConfig {
   readonly model: ModelTier;
@@ -65,7 +67,7 @@ export function getRoleNames(): string[] {
   return Object.keys(BUILTIN_ROLES);
 }
 
-export type AccountTier = 'standard' | 'pro';
+export type { AccountTier };
 
 /**
  * Resolve an explicit model override. Historically this GATED the `deep` tier

@@ -1,29 +1,41 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeBillingTier, isHostedInstance, cpSuppliesLLMKey, keepSettingsItem } from './billing-tier.js';
+import { LEGACY_BILLING_TIER_ALIASES, CANONICAL_BILLING_TIERS } from '../contract/vocab.js';
 
-// Drift guard: this web-ui mirror must agree with the control-plane's canonical
-// billing-tier module and the core-side mirror. Same TRUTH rows in all three.
-const TRUTH: Array<[string | undefined | null, string | undefined, boolean, boolean]> = [
-	// input,        canonical,     isHosted, cpSuppliesLLMKey
-	['starter', 'hosted', true, false],
-	['hosted', 'hosted', true, false],
-	['eu', 'managed', true, true],
-	['managed', 'managed', true, true],
-	['managed_pro', 'managed_pro', true, true],
-	['', undefined, false, false],
-	[undefined, undefined, false, false],
-	[null, undefined, false, false],
-	['garbage', undefined, false, false],
-];
+// Behaviour spec for the shim. The old hand-maintained TRUTH table (a third
+// copy of the alias rows) is gone: the shared vocabulary now has ONE source of
+// truth (`src/contract/vocab.ts`, vendored here byte-identically and guarded by
+// `tests/contract-drift.test.ts`), so drift is caught structurally, not by
+// duplicated literals. The semantic literals themselves are pinned in core's
+// contract tests.
+describe('web-ui billing-tier shim', () => {
+	it('accepts every canonical tier as itself', () => {
+		for (const tier of CANONICAL_BILLING_TIERS) {
+			expect(normalizeBillingTier(tier)).toBe(tier);
+			expect(isHostedInstance(tier)).toBe(true);
+		}
+	});
 
-describe('web-ui billing-tier mirror', () => {
-	for (const [input, canonical, hosted, supplies] of TRUTH) {
-		it(`tier ${JSON.stringify(input)}`, () => {
-			expect(normalizeBillingTier(input)).toBe(canonical);
-			expect(isHostedInstance(input)).toBe(hosted);
-			expect(cpSuppliesLLMKey(input)).toBe(supplies);
-		});
-	}
+	it('maps every legacy alias to its canonical tier', () => {
+		for (const [legacy, canonical] of Object.entries(LEGACY_BILLING_TIER_ALIASES)) {
+			expect(normalizeBillingTier(legacy)).toBe(canonical);
+			expect(isHostedInstance(legacy)).toBe(true);
+		}
+	});
+
+	it('cpSuppliesLLMKey is true exactly for the CP-key tiers', () => {
+		expect(cpSuppliesLLMKey('managed')).toBe(true);
+		expect(cpSuppliesLLMKey('managed_pro')).toBe(true);
+		expect(cpSuppliesLLMKey('hosted')).toBe(false); // BYOK
+	});
+
+	it('empty / null / unknown values mean self-host', () => {
+		for (const input of ['', undefined, null, 'garbage'] as const) {
+			expect(normalizeBillingTier(input)).toBeUndefined();
+			expect(isHostedInstance(input)).toBe(false);
+			expect(cpSuppliesLLMKey(input)).toBe(false);
+		}
+	});
 });
 
 describe('keepSettingsItem (shared SettingsIndex + CommandPalette tier gate)', () => {

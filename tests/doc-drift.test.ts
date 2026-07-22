@@ -14,6 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { BUILTIN_ROLES } from '../src/core/roles.js';
 import { MISTRAL_MODEL_MAP } from '../src/types/models.js';
 import { normalizeBillingTier } from '../src/server/billing-tier.js';
+import { CANONICAL_BILLING_TIERS, LEGACY_BILLING_TIER_ALIASES } from '../src/contract/vocab.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p: string): string => readFileSync(resolve(repoRoot, p), 'utf8');
@@ -76,24 +77,25 @@ describe('doc<->code drift: LLM provider framing (src/types/models.ts LLMProvide
   });
 });
 
-describe('cross-repo drift: billing-tier canonical spec (core/pro pin the same frozen literal)', () => {
-  // FROZEN canonical spec — the SAME literals are pinned emitter-side in pro
-  // (packages/managed/src/domain/env-abi-contract.test.ts). Core cannot import
-  // pro (separate repo; CI checks out one at a time), so each repo asserts its
-  // OWN billing-tier.ts against this shared literal: this catches CORE drifting
-  // from the spec, and pro's mirror catches pro drifting — together they keep
-  // the two modules in lockstep without a cross-repo fs read (the equality
-  // guard that was previously missing).
-  const CANONICAL_TIERS = ['hosted', 'managed', 'managed_pro'] as const;
-  const CANONICAL_ALIASES: Record<string, string> = { starter: 'hosted', eu: 'managed' };
-
-  for (const t of CANONICAL_TIERS) {
-    it(`\`${t}\` normalizes to itself`, () => {
-      expect(normalizeBillingTier(t)).toBe(t);
-    });
-  }
-  it('legacy aliases map exactly as the frozen spec', () => {
-    for (const [legacy, canonical] of Object.entries(CANONICAL_ALIASES)) {
+describe('billing-tier canonical spec (src/contract/vocab.ts is the single source of truth)', () => {
+  // The frozen-literal twin this block used to carry is retired: the shared
+  // vocabulary now lives ONCE in `src/contract/vocab.ts`, and the CROSS-repo
+  // lockstep is enforced on pro's side against its vendored byte-identical copy
+  // (contract-sync CI job + CONTRACT.lock). What core still pins here is the
+  // SEMANTIC spec itself — the wire values the CP emits — so a contract edit
+  // that changes them fails CI until it is made deliberately, in this file, in
+  // the same commit.
+  it('canonical tiers are exactly hosted/managed/managed_pro', () => {
+    expect([...CANONICAL_BILLING_TIERS].sort()).toEqual(['hosted', 'managed', 'managed_pro'].sort());
+  });
+  it('legacy aliases are exactly starter→hosted and eu→managed', () => {
+    expect(LEGACY_BILLING_TIER_ALIASES).toEqual({ starter: 'hosted', eu: 'managed' });
+  });
+  it('the src/server/billing-tier.ts shim re-exports the contract behavior', () => {
+    // `normalizeBillingTier` here is imported from the SHIM path — this asserts
+    // the shim actually delegates to the contract module.
+    for (const t of CANONICAL_BILLING_TIERS) expect(normalizeBillingTier(t)).toBe(t);
+    for (const [legacy, canonical] of Object.entries(LEGACY_BILLING_TIER_ALIASES)) {
       expect(normalizeBillingTier(legacy)).toBe(canonical);
     }
   });
