@@ -26,6 +26,8 @@ A model-strategy release. The measured finding behind it: a 14B-class main model
 - **Forward upgrade needs nothing.** Engine schema v50 (`wire_snapshots`) is additive and applies on boot; no control-plane migrations ship in this release.
 - **Rolling back to 2.9.1:** (1) first reset any custom `tier_set` slot pinned to `claude-fable-5` — 2.9.1 either prices it at generic fallback rates or, for preset-plus-override configs, refuses to boot; (2) delete `wire_snapshots` rows — 2.9.1's data-wipe and key-rotation paths don't know the table; (3) a config saved by 2.10.0 that contains the new `debug_wire_capture` key is ignored as a whole by 2.9.1 until re-saved (self-healing, matches the 2.9.0 caveat).
 
+## 2.9.1 — 2026-07-21
+
 A targeted patch on 2.9.0. It stops an end-of-turn loop where a reply that ended with follow-up suggestions could re-run the model several times before finishing — a slow, token-burning turn that affected instances with plugins active (the default). It also drops the unused bundled npm/corepack from the runtime image, shrinking it and clearing a base-image dependency scan. **No migration** — clean image swap in both directions.
 
 ### Fixed
