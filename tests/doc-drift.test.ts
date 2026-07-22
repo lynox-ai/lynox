@@ -106,33 +106,9 @@ describe('billing-tier canonical spec (src/contract/vocab.ts is the single sourc
   });
 });
 
-describe('env-ABI consume-side: loadConfig reads the engine-consumed var names (src/core/config.ts)', () => {
-  // The CP emits these EXACT names (pinned emitter-side in pro
-  // env-abi-contract.test.ts). If a consume-side rename drops one here, the ABI
-  // silently breaks — the ACCOUNT_TIER-unset / worker-profile-dead bug class.
-  // Match the actual `process.env['NAME']` read (not a bare substring) so a
-  // renamed read fails CI even if a comment still mentions the old name; a
-  // future rename window must add the new read-alias to keep this green.
-  const config = read('src/core/config.ts');
-  const ENGINE_CONSUMED = [
-    'LYNOX_ACCOUNT_TIER',
-    'LYNOX_WORKER_PROFILE',
-    'LYNOX_MODEL_PROFILES_JSON',
-    // LYNOX_LLM_MODE retired 2026-06-13 with the eu-sovereign axis — the engine
-    // no longer reads it (Mistral is selected via provider+endpoint). Kept out
-    // of this consume-pin on purpose; do not re-add.
-    'LYNOX_LLM_PROVIDER',
-    // LYNOX_MAX_TIER / LYNOX_DEFAULT_TIER / ANTHROPIC_BASE_URL now read through
-    // the canonical-first alias registry in src/core/env.ts (the rename window).
-    // Their consume-side pin moved to the ENV_ALIASES block below — do not
-    // re-add them here as bare process.env literals.
-  ];
-  for (const name of ENGINE_CONSUMED) {
-    it(`reads ${name} via process.env`, () => {
-      expect(config).toMatch(new RegExp(`process\\.env\\['${name}'\\]`));
-    });
-  }
-});
+// The former ENGINE_CONSUMED block (loadConfig read pins) is retired: the
+// generated forward test in tests/contract-env.test.ts asserts every registry
+// row's read form at its real site, driven by src/contract/env-registry.ts.
 
 describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/core/env.ts)', () => {
   // Renamed CP→engine / self-host vars route through the ENV_ALIASES registry
@@ -180,25 +156,5 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
   }
 });
 
-describe('env-ABI consume-side: behavior-critical vars are read at their engine consumer', () => {
-  // CP-emitted vars that drive engine BEHAVIOR (cost caps, feature flags,
-  // capability switches) must actually be READ at their consumer — a B2-class
-  // "the CP emits it but the engine silently stops reading it" drop (e.g. a
-  // dropped cost-cap read → uncapped spend) is a money / capability bug a
-  // value-equality test never catches. Each row pins the real read FORM at the
-  // real FILE, so a renamed/removed read fails CI even if the manifest + a
-  // comment still name it. Add a row when the CP starts emitting a new
-  // behavior-affecting var.
-  const BEHAVIOR_CONSUMERS: ReadonlyArray<readonly [name: string, file: string, readPattern: string]> = [
-    ['LYNOX_MAX_SESSION_COST_USD',  'src/core/engine-init.ts',     "envFloat\\('LYNOX_MAX_SESSION_COST_USD'\\)"],
-    ['LYNOX_MAX_DAILY_COST_USD',    'src/core/engine-init.ts',     "envFloat\\('LYNOX_MAX_DAILY_COST_USD'\\)"],
-    ['LYNOX_MAX_MONTHLY_COST_USD',  'src/core/engine-init.ts',     "envFloat\\('LYNOX_MAX_MONTHLY_COST_USD'\\)"],
-    ['LYNOX_KG_EXTRACTOR',          'src/core/knowledge-layer.ts', "process\\.env\\['LYNOX_KG_EXTRACTOR'\\]"],
-    ['LYNOX_FEATURE_UNIFIED_INBOX', 'src/core/features.ts',        "'LYNOX_FEATURE_UNIFIED_INBOX'"],
-  ];
-  for (const [name, file, readPattern] of BEHAVIOR_CONSUMERS) {
-    it(`${file} reads ${name}`, () => {
-      expect(read(file)).toMatch(new RegExp(readPattern));
-    });
-  }
-});
+// The former BEHAVIOR_CONSUMERS block (#830) is retired the same way — its five
+// triples are registry rows now, asserted by the generated forward test.
