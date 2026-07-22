@@ -3,11 +3,13 @@
  * variable that crosses the control-plane → engine wire (K-W1 §3.2,
  * PRD-CORE-PRO-CONTRACT / DEF-0030).
  *
- * VENDORED DOWNSTREAM — edit ONLY here. The private control plane vendors a
- * byte-identical copy (its emit-matrix test re-seats onto these rows in the
- * K-W1 pro wave); core generates forward (row → real read site) and reverse
- * (read → row) drift tests from them (`tests/contract-env.test.ts`).
- * Imports nothing outside `src/contract/` (only `vocab.ts`).
+ * VENDORED DOWNSTREAM — edit ONLY here (`core/src/contract/`; a vendored copy
+ * of this file is read-only, synced via the consumer's sync script). The
+ * private control plane vendors a byte-identical copy and drives its
+ * emit-matrix test off these rows; core generates forward (row → real read
+ * site) and reverse (read → row) drift tests from them
+ * (`tests/contract-env.test.ts`). Imports nothing outside `src/contract/`
+ * (only `vocab.ts`).
  *
  * WHY: the emit side lives in the private control plane, the consume side in
  * this repo; each repo only tested its own half, which is how three real bugs
