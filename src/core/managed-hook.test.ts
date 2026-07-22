@@ -389,6 +389,14 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     JSON.parse(readFileSync(resolve(fixturesDir, name), 'utf8'));
 
   let fetchSpy: ReturnType<typeof vi.fn>;
+  // Hooks whose onInit started real intervals — shut down in afterEach even
+  // when an assertion rejects mid-test, so no live timer pins the worker.
+  let liveHooks: Array<ReturnType<typeof createManagedHook>> = [];
+  const mkHook = (): ReturnType<typeof createManagedHook> => {
+    const hook = createManagedHook();
+    liveHooks.push(hook);
+    return hook;
+  };
 
   beforeEach(() => {
     process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
@@ -397,7 +405,9 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const hook of liveHooks) await hook.onShutdown?.();
+    liveHooks = [];
     vi.unstubAllGlobals();
     delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
     delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
@@ -407,7 +417,7 @@ describe('managed-hook contract fixtures (K-W2)', () => {
   it('the REAL flush serializer produces exactly the usage-flush-request fixture (generator test)', async () => {
     fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
     vi.stubGlobal('fetch', fetchSpy);
-    const hook = createManagedHook();
+    const hook = mkHook();
     // Seed the two runs the fixture describes: 3c on `balanced`, 12c on `deep`.
     hook.onAfterRun?.('TEST-RUN-0001', 0.03, { modelTier: 'balanced' } as unknown as RunContext);
     hook.onAfterRun?.('TEST-RUN-0002', 0.12, { modelTier: 'deep' } as unknown as RunContext);
@@ -428,7 +438,7 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     // be refused, and this test would fail (the rename-fails-both-sides probe).
     fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => load('usage-flush-response.json') });
     vi.stubGlobal('fetch', fetchSpy);
-    const hook = createManagedHook();
+    const hook = mkHook();
     hook.onAfterRun?.('TEST-RUN-0001', 0.03, CTX);
     await hook.onShutdown?.(); // flushes through the fixture response → allowed=true, fresh
     await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).resolves.toBeUndefined();
@@ -443,7 +453,7 @@ describe('managed-hook contract fixtures (K-W2)', () => {
       return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
     });
     vi.stubGlobal('fetch', fetchSpy);
-    const hook = createManagedHook();
+    const hook = mkHook();
     await hook.onInit?.();
     // Fixture says allowed:true, balance 2985c → a run is admitted.
     await expect(hook.onBeforeRun!('TEST-RUN-0001', CTX)).resolves.toBeUndefined();
@@ -463,7 +473,7 @@ describe('managed-hook contract fixtures (K-W2)', () => {
       return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
     });
     vi.stubGlobal('fetch', fetchSpy);
-    const hook = createManagedHook();
+    const hook = mkHook();
     await hook.onInit?.();
     // allowed:true + balance null (BYOK/hosted): no mirror, spend never refuses.
     hook.onAfterRun?.('TEST-RUN-0001', 100, CTX);

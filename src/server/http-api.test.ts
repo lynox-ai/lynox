@@ -445,12 +445,24 @@ describe('LynoxHTTPApi', () => {
         }
         return typeof v;
       };
-      const liveStructure = JSON.parse(JSON.stringify(structure(live))) as Record<string, unknown>;
+      // Contract-OPTIONAL leaves (HealthBody: disk_* absent when statfs('/')
+      // fails) are dropped from both sides so an exotic host can't flake this
+      // test; when the live host DOES serve them, their type is still pinned.
+      const dropOptional = (s: Record<string, unknown>): Record<string, unknown> => {
+        const system = { ...(s['system'] as Record<string, unknown>) };
+        delete system['disk_total_gb'];
+        delete system['disk_used_gb'];
+        return { ...s, system };
+      };
+      const liveSystem = (live['system'] ?? {}) as Record<string, unknown>;
+      if ('disk_total_gb' in liveSystem) expect(typeof liveSystem['disk_total_gb']).toBe('number');
+      if ('disk_used_gb' in liveSystem) expect(typeof liveSystem['disk_used_gb']).toBe('number');
+      const liveStructure = dropOptional(structure(live) as Record<string, unknown>);
       if (liveStructure['build_sha'] === 'string') liveStructure['build_sha'] = 'null|string';
 
       for (const name of ['health-body.json', 'health-body.with-sha.json']) {
         const fixture = JSON.parse(readFileSync(resolvePath(fixturesDir, name), 'utf8')) as unknown;
-        const fixtureStructure = JSON.parse(JSON.stringify(structure(fixture))) as Record<string, unknown>;
+        const fixtureStructure = dropOptional(structure(fixture) as Record<string, unknown>);
         if (fixtureStructure['build_sha'] === 'string') fixtureStructure['build_sha'] = 'null|string';
         expect(liveStructure, `live /health diverges from fixtures/${name}`).toEqual(fixtureStructure);
       }

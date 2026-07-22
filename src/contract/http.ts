@@ -24,7 +24,11 @@
 /** One run's cost report inside a usage flush batch. */
 export interface UsageReportRun {
   run_id: string;
-  /** Model tier that served the run (`vocab.ts` ModelTier at today's call site). */
+  /**
+   * Deliberately `string`, not `vocab.ts` ModelTier: the parse side treats it
+   * as an opaque label (unknown values are legal on the wire) even though
+   * today's emit site sends a ModelTier.
+   */
   model: string;
   /** Whole USD cents; the engine carries sub-cent remainders locally. */
   cost_cents: number;
@@ -32,12 +36,6 @@ export interface UsageReportRun {
 
 export interface UsageFlushRequest {
   runs: UsageReportRun[];
-  /**
-   * Legacy body-auth fallback still ACCEPTED by the control plane for
-   * pre-header engines. Current engines authenticate via the
-   * `x-instance-secret` header only and never send this field.
-   */
-  secret?: string | undefined;
 }
 
 export interface UsageFlushResponse {
@@ -52,13 +50,19 @@ export interface UsageFlushResponse {
 /**
  * High-frequency liveness/credit poll. `balance_cents` is `null` for
  * non-managed providers (BYOK/hosted — no CP entitlement to report).
+ * Both branches have always emitted every non-optional field below; the
+ * engine still dereferences only `allowed` + `balance_cents` (parse-tolerant).
  */
 export interface UsageStatusResponse {
   allowed: boolean;
   balance_cents: number | null;
   /** Absent on the non-managed branch. */
   included_budget_cents?: number | undefined;
-  /** `vocab.ts` BillingTier (the CP normalizes before emitting). */
+  /**
+   * Deliberately `string`, not `vocab.ts` BillingTier: the emit site falls
+   * back to the raw stored tier when normalization fails, so non-canonical
+   * values are legal on the wire.
+   */
   tier: string;
 }
 
@@ -77,6 +81,7 @@ export interface UsageSummaryPeriod {
  */
 export interface UsageSummaryResponse {
   managed: boolean;
+  /** Raw stored tier (not normalized) — same tolerance as UsageStatusResponse.tier. */
   tier?: string | undefined;
   /** Included (subscription) budget this period. */
   budget_cents?: number | undefined;

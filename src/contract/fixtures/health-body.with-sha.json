@@ -1,7 +1,7 @@
 {
   "status": "ok",
   "version": "0.0.0-test",
-  "build_sha": "aaaaaaaabbbbbbbbccccccccdddddddd00000000",
+  "build_sha": "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd",
   "uptime_s": 123,
   "process": {
     "memory_used_mb": 100,
