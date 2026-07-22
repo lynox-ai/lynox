@@ -74,8 +74,9 @@
     if (tier === defaultTier) return `${base} · ${t('chat.model_picker.recommended')}`;
     // The "pricier" marker is a cost signal — suppress it where the user does not
     // bear the LLM cost (demo / CP-paid), mirroring the usage-footer's
-    // `!getDemoMode()` gate so cost framing stays consistent across the UI.
-    if (tier === 'deep' && !getDemoMode()) return `${base} · ${t('chat.model_picker.pricier')}`;
+    // `!getDemoMode()` gate so cost framing stays consistent across the UI; and
+    // where the ladder tops out at balanced (deep == balanced model, no surcharge).
+    if (tier === 'deep' && !getDemoMode() && modelNames?.deep !== modelNames?.balanced) return `${base} · ${t('chat.model_picker.pricier')}`;
     return base;
   }
 

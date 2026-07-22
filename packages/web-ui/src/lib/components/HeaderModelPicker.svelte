@@ -91,7 +91,8 @@
               <span class="flex-1 truncate">{tierLabel(tier)}</span>
               {#if tier === defaultTier}
                 <span class="text-[10px] text-text-subtle">{t('chat.model_picker.recommended')}</span>
-              {:else if tier === 'deep'}
+              {:else if tier === 'deep' && modelNames?.deep !== modelNames?.balanced}
+                <!-- no "pricier" badge when the ladder tops out at balanced (same model) -->
                 <span class="text-[10px] text-text-subtle">{t('chat.model_picker.pricier')}</span>
               {/if}
             </button>

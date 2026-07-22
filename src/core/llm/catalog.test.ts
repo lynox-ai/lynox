@@ -286,7 +286,10 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
     const entry = getCatalogEntryByKey('mistral')!;
     expect(entry.main_chat_models).toEqual([
       { id: 'ministral-8b-2512', tier: 'fast' },
-      { id: 'ministral-14b-2512', tier: 'balanced' },
+      // balanced == deep == Medium 3.5 (WS2: the 14B main fell below the R1/R3
+      // floor; Mistral has nothing stronger) — two bands, one model, NOT deduped
+      // so the composer's deep band keeps its model label.
+      { id: 'mistral-medium-2604', tier: 'balanced' },
       { id: 'mistral-medium-2604', tier: 'deep' },
     ]);
     const ids = (entry.main_chat_models ?? []).map((o) => o.id);
@@ -372,7 +375,7 @@ describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hid
     const entry = getCatalogEntryByKey('mistral')!;
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
       fast: 'Ministral 8B',
-      balanced: 'Ministral 14B',
+      balanced: 'Mistral Medium 3.5',
       deep: 'Mistral Medium 3.5',
     });
   });

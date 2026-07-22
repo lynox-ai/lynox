@@ -45,7 +45,7 @@ describe('doc<->code drift: Mistral tier map (src/types/models.ts)', () => {
     // docs/setup/llm-providers.md in the same commit.
     expect(MISTRAL_MODEL_MAP).toEqual({
       deep: 'mistral-medium-2604',
-      balanced: 'ministral-14b-2512',
+      balanced: 'mistral-medium-2604',
       fast: 'ministral-8b-2512',
     });
   });

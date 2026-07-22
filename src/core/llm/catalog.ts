@@ -759,6 +759,11 @@ function buildMainChatModels(entry: CatalogProviderEntry): MainChatModel[] | und
   } else if (has(map.balanced)) {
     out.push({ id: map.balanced, tier: 'balanced' });
   }
+  // Deliberately NOT deduped when balanced == deep (Mistral: both are Medium 3.5
+  // since the 14B main fell below the orchestration floor and Mistral has nothing
+  // stronger): the composer's per-TIER labels read this same array, so dropping
+  // the deep row would strip the deep band's model name. Two rows sharing one id
+  // is honest — the bands differ (default_tier semantics), the model does not.
   if (has(map.deep)) out.push({ id: map.deep, tier: 'deep' });
   return out.length > 0 ? out : undefined;
 }

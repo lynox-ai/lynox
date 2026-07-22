@@ -57,7 +57,10 @@
     const model = modelNames?.[tier];
     const base = model ? `${t(`llm.tier.${tier}`)} (${model})` : t(`llm.tier.${tier}`);
     if (tier === defaultTier) return `${base} · ${t('chat.model_picker.recommended')}`;
-    if (tier === 'deep') return `${base} · ${t('chat.model_picker.pricier')}`;
+    // "pricier" only when deep actually runs a different model than balanced — a
+    // ladder that tops out at its balanced pick (Mistral: both Medium 3.5) would
+    // otherwise claim a surcharge that does not exist.
+    if (tier === 'deep' && modelNames?.deep !== modelNames?.balanced) return `${base} · ${t('chat.model_picker.pricier')}`;
     return base;
   }
 </script>
