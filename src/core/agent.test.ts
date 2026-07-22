@@ -1311,6 +1311,29 @@ describe('Agent', () => {
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
     });
 
+    it('retries the send loop on a non-APIError stream-transport failure (TransformError)', async () => {
+      // Drives the REAL retry wiring in _sendWithRetry — not just the isRetryable
+      // predicate: a dropped provider stream on a long output surfaces as a plain
+      // Error named TransformError (no APIError status/body), and the loop must
+      // still retry it (DEF-fireworks-longstream-retry).
+      (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;
+
+      mockProcess
+        .mockRejectedValueOnce(Object.assign(new Error('x'), { name: 'TransformError' }))
+        .mockResolvedValueOnce(endTurnResponse('Recovered'));
+
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', onStream });
+      const result = await agent.send('Hello');
+      expect(result).toBe('Recovered');
+      expect(mockProcess).toHaveBeenCalledTimes(2);
+      const retryCalls = onStream.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { type: string }).type === 'retry',
+      );
+      expect(retryCalls).toHaveLength(1);
+      (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
+    });
+
     it('retries on SSE overloaded_error (status undefined)', async () => {
       const { APIError: MockAPIError } = await import('@anthropic-ai/sdk');
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;

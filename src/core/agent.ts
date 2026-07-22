@@ -2264,6 +2264,7 @@ function extractText(content: BetaContentBlock[]): string {
     .join('');
 }
 
+/** Exported for tests. */
 export function isRetryable(err: unknown): boolean {
   if (err instanceof APIError) {
     // HTTP status-based: 429 rate limit, 529 overloaded, 500+ server errors
@@ -2292,21 +2293,33 @@ export function isRetryable(err: unknown): boolean {
   // fetch/undici stream, so the status/body checks above miss it. Without this the Agent would
   // fail the whole turn instead of retrying the transient drop (DEF-fireworks-longstream-retry).
   if (err instanceof Error) {
-    const msg = err.message;
-    if (err.name === 'TransformError'
-      || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('fetch failed')
-      || msg.includes('ECONNREFUSED') || msg.includes('socket hang up')
-      || msg.includes('terminated') || msg.includes('other side closed')) {
-      return true;
-    }
-    // undici commonly wraps the transport failure in `.cause`.
-    const cause = (err as { cause?: unknown }).cause;
-    if (cause instanceof Error
-      && (cause.message.includes('ECONNRESET') || cause.message.includes('terminated') || cause.message.includes('other side closed'))) {
-      return true;
-    }
+    return isTransportError(err, 0);
   }
   return false;
+}
+
+const TRANSIENT_MSG_PARTS = ['ECONNRESET', 'ETIMEDOUT', 'fetch failed', 'ECONNREFUSED', 'socket hang up'] as const;
+
+function isTransportError(err: Error, depth: number): boolean {
+  if (depth > 3) return false;
+  const msg = err.message;
+  // The OpenAI-compat adapter throws plain Errors shaped
+  // "OpenAI-compatible API error <status>: <untrusted provider body>". Classify those
+  // by the STATUS they carry — never by the body text, which is attacker-influencable
+  // and must not make a deterministic failure look transient (a paid replay ×MAX_RETRIES).
+  const adapterHttp = /^OpenAI-compatible API error (\d{3})/.exec(msg);
+  if (adapterHttp) {
+    const status = Number(adapterHttp[1]);
+    return status === 429 || status >= 500;
+  }
+  if (err.name === 'TransformError') return true;
+  // undici's dropped-stream shapes: literally `TypeError: terminated`, with the
+  // socket detail ('other side closed') either in the message or in `.cause`.
+  if (msg === 'terminated' || msg.includes('other side closed')) return true;
+  if (TRANSIENT_MSG_PARTS.some((s) => msg.includes(s))) return true;
+  // undici commonly wraps the transport failure in `.cause` (typed on Error since ES2022);
+  // walk the chain with the SAME matcher, depth-bounded.
+  return err.cause instanceof Error && isTransportError(err.cause, depth + 1);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

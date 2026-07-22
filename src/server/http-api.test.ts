@@ -2356,8 +2356,11 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
       expect(tiers).toBeDefined();
-      // balanced preset's balanced tier = mistral-medium (WS2; NOT a Sonnet default).
-      expect(tiers!['balanced']).toContain('Mistral Medium');
+      // balanced preset's balanced tier = mistral-medium-2604 exactly (WS2; NOT a Sonnet
+      // default). Exact catalog-label match — a bare 'Mistral Medium' substring would also
+      // match 'Mistral Medium 3.1' (128k, below the context floor) and 'Mistral Medium
+      // (latest)' (the forbidden -latest tag).
+      expect(tiers!['balanced']).toBe('Mistral Medium 3.5');
       expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 

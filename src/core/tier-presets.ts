@@ -31,8 +31,9 @@
  * Ministral 14B was the best tool-ROUTER but is BELOW the R1/R3 orchestration floor — on a
  * faithful replay of the real managed request it answers deep-worthy tasks INLINE (2/22
  * escalate across 3 tasks) instead of delegating. The main is now mistral-medium (clears
- * R1/R3 22/22 + R9 artefact quality, the fastest floor-clearer measured); this raises the
- * R8 per-turn cost since the main runs every turn.
+ * R1/R3 22/22 + R9 artefact quality, and the fastest floor-clearer in the replay —
+ * ~6s mean vs ~14s haiku-4.5 / ~40s glm-5p2); this raises the R8 per-turn cost since
+ * the main runs every turn.
  */
 import type { ModelTier, TierSet, TierSlot } from '../types/index.js';
 import { MISTRAL_API_BASE } from '../types/index.js';
