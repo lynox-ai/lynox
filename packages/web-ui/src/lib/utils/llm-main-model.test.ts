@@ -262,4 +262,33 @@ describe('tier-qualified identity (balanced == deep collision, Mistral Medium 3.
     const key = selectMainModelKey(opts, 'deep', undefined);
     expect(findMainModelOptionByKey(opts, key)?.tier).toBe('deep');
   });
+
+  it('an unknown key resolves to undefined — the set-path must no-op, not fall back', () => {
+    // setMainModel early-returns on undefined; a `?? options[0]` fallback here
+    // would silently rewrite the config to the first (fast) option.
+    expect(findMainModelOptionByKey(opts, 'deep:no-such-model')).toBeUndefined();
+    expect(findMainModelOptionByKey(opts, 'not-a-composite')).toBeUndefined();
+  });
+
+  it('an empty option list selects the empty key (no throw, select stays unmatched)', () => {
+    expect(selectMainModelKey([], 'balanced', undefined)).toBe('');
+  });
+
+  it('balanced rung 2: an unknown balanced_model falls back to the NO-VARIANT balanced option, not the first balanced', () => {
+    // Fixture ordering puts a variant-carrying balanced option FIRST so that
+    // deleting the middle `balanced_model === undefined` rung is observable:
+    // without it, an unknown variant would land on the variant option instead.
+    const variants: ProviderLike = {
+      main_chat_models: [
+        { id: 'a-variant', tier: 'balanced', balanced_model: 'a-variant' },
+        { id: 'a-plain', tier: 'balanced' },
+      ],
+      models: [
+        { id: 'a-variant', label: 'A (variant)' },
+        { id: 'a-plain', label: 'A' },
+      ],
+    };
+    const vOpts = buildMainModelOptions(variants, 'deep');
+    expect(selectMainModelKey(vOpts, 'balanced', 'no-such-variant')).toBe('balanced:a-plain');
+  });
 });

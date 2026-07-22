@@ -91,8 +91,10 @@ export function buildMainModelOptions(
  * NOT a unique identity — two `<option value>`s / keyed-`{#each}` keys would
  * collide (Svelte throws `each_key_duplicate`; the browser makes the second
  * unselectable and a first-match `find` on `id` silently resolves the wrong
- * band). The `(tier, id)` pair IS unique per provider — within a band a model
- * appears once — so composing them yields a stable, collision-free identity.
+ * band). The `(tier, id)` pair is unique GIVEN the catalog emits each model at
+ * most once per band — `buildMainChatModels` constructs one entry per tier, and
+ * the test suite pins composite-key uniqueness for the colliding-id case, but
+ * nothing here dedupes a hypothetically malformed catalog.
  */
 export function mainModelOptionKey(opt: { tier: ModelTier; id: string }): string {
   return `${opt.tier}:${opt.id}`;
@@ -143,9 +145,11 @@ export function selectMainModelKey(
   return opt ? mainModelOptionKey(opt) : '';
 }
 
-/** The option whose tier-qualified key equals `key`, or `undefined`. The set
- *  path resolves the user's `<select>` choice through this so the picked BAND is
- *  honoured exactly — never collapsed to the first option that shares its id. */
+/**
+ * The option whose tier-qualified key equals `key`, or `undefined`. The set
+ * path resolves the user's `<select>` choice through this so the picked BAND is
+ * honoured exactly — never collapsed to the first option that shares its id.
+ */
 export function findMainModelOptionByKey(
   options: MainModelOption[],
   key: string,
@@ -155,9 +159,9 @@ export function findMainModelOptionByKey(
 
 /**
  * The option id currently selected — thin id-returning wrapper over
- * {@link resolveMainModelOption}. Retained for callers/tests that reason about
- * the model id; the picker itself keys off {@link selectMainModelKey} because a
- * bare id is not a unique `<option>`/each identity (see {@link mainModelOptionKey}).
+ * {@link resolveMainModelOption}, retained for the existing id-level tests. The
+ * picker itself keys off {@link selectMainModelKey} because a bare id is not a
+ * unique `<option>`/each identity (see {@link mainModelOptionKey}).
  */
 export function selectMainModelId(
   options: MainModelOption[],
