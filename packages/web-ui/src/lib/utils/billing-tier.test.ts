@@ -20,6 +20,7 @@ describe('web-ui billing-tier shim', () => {
 		for (const [legacy, canonical] of Object.entries(LEGACY_BILLING_TIER_ALIASES)) {
 			expect(normalizeBillingTier(legacy)).toBe(canonical);
 			expect(isHostedInstance(legacy)).toBe(true);
+			expect(cpSuppliesLLMKey(legacy)).toBe(canonical === 'managed' || canonical === 'managed_pro');
 		}
 	});
 
@@ -29,8 +30,8 @@ describe('web-ui billing-tier shim', () => {
 		expect(cpSuppliesLLMKey('hosted')).toBe(false); // BYOK
 	});
 
-	it('empty / null / unknown values mean self-host', () => {
-		for (const input of ['', undefined, null, 'garbage'] as const) {
+	it('empty / null / unknown values mean self-host (incl. Object.prototype keys — hasOwn guard)', () => {
+		for (const input of ['', undefined, null, 'garbage', 'toString', '__proto__'] as const) {
 			expect(normalizeBillingTier(input)).toBeUndefined();
 			expect(isHostedInstance(input)).toBe(false);
 			expect(cpSuppliesLLMKey(input)).toBe(false);

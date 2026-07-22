@@ -35,7 +35,11 @@ export const CANONICAL_BILLING_TIERS: ReadonlySet<string> = new Set<BillingTier>
 export function normalizeBillingTier(value: string | undefined | null): BillingTier | undefined {
   if (!value) return undefined;
   if (CANONICAL_BILLING_TIERS.has(value)) return value as BillingTier;
-  return LEGACY_BILLING_TIER_ALIASES[value];
+  // hasOwn guard: a bare index would return inherited Object.prototype members
+  // (truthy!) for hostile keys like 'toString' / '__proto__'.
+  return Object.hasOwn(LEGACY_BILLING_TIER_ALIASES, value)
+    ? LEGACY_BILLING_TIER_ALIASES[value]
+    : undefined;
 }
 
 /** True for every CP-provisioned instance (BYOK `hosted` included). */
@@ -68,7 +72,8 @@ export const LEGACY_TIER_ALIASES: Record<string, ModelTier> = {
 export function normalizeTier(value: string | undefined): ModelTier | undefined {
   if (value === undefined) return undefined;
   if (value === 'fast' || value === 'balanced' || value === 'deep') return value;
-  return LEGACY_TIER_ALIASES[value];
+  // hasOwn guard: see normalizeBillingTier.
+  return Object.hasOwn(LEGACY_TIER_ALIASES, value) ? LEGACY_TIER_ALIASES[value] : undefined;
 }
 
 // === Account tier (managed entitlement axis) ===

@@ -49,9 +49,6 @@ export function normalizeThreadModelSource(value: unknown): ThreadModelSource | 
   return value === 'user' || value === 'default' || value === 'unknown' ? value : undefined;
 }
 
-// `LLMProvider`, `ModelProfile`, `isModelProfile` migrated to the wire-contract
-// module (`src/contract/`) — re-exported above.
-
 export const MODEL_MAP: Record<ModelTier, string> = {
   'deep':     'claude-opus-4-6',
   'balanced': 'claude-sonnet-4-6',

@@ -84,6 +84,12 @@ describe('normalizeTier', () => {
     expect(normalizeTier('gpt-5')).toBeUndefined();
     expect(normalizeTier('')).toBeUndefined();
   });
+
+  it('rejects inherited Object.prototype keys (hasOwn guard, not a bare lookup)', () => {
+    expect(normalizeTier('toString')).toBeUndefined();
+    expect(normalizeTier('constructor')).toBeUndefined();
+    expect(normalizeTier('__proto__')).toBeUndefined();
+  });
 });
 
 describe('isModelProfile', () => {

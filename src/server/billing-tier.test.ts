@@ -30,8 +30,8 @@ describe('src/server/billing-tier.ts shim', () => {
     expect(cpSuppliesLLMKey('starter')).toBe(false); // legacy alias of hosted
   });
 
-  it('empty / null / unknown values mean self-host', () => {
-    for (const input of ['', undefined, null, 'garbage'] as const) {
+  it('empty / null / unknown values mean self-host (incl. Object.prototype keys — hasOwn guard)', () => {
+    for (const input of ['', undefined, null, 'garbage', 'toString', '__proto__'] as const) {
       expect(normalizeBillingTier(input)).toBeUndefined();
       expect(isHostedInstance(input)).toBe(false);
       expect(cpSuppliesLLMKey(input)).toBe(false);

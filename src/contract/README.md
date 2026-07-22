@@ -11,7 +11,7 @@ copies of these files:
 
 | Consumer | Copy | Guard |
 |---|---|---|
-| web-ui (`packages/web-ui/src/lib/contract/`) | in-repo | file-equality test in `tests/contract-drift.test.ts` |
+| web-ui (`packages/web-ui/src/lib/contract/`) | in-repo, currently `vocab.ts` only | every file present there must be byte-equal to its twin here (`tests/contract-drift.test.ts`) |
 | control plane (private repo, `packages/managed/src/vendor/contract/`) | SHA-pinned (`CONTRACT.lock`, git tree hash) | required `contract-sync` CI job + a release-path freshness gate | <!-- drift-guard:allow: path lives in the private lynox-pro repo (created by its contract-sync wave) -->
 
 Rules:
@@ -23,8 +23,10 @@ Rules:
 - **Public-exposure check** per addition: is the downstream detail this
   publishes already public via this repo, or inferable from it? (This repo is
   public; the control plane is not.)
-- **No eol-normalization / no `.gitattributes` on this path** — the vendored
-  tree-hash equality depends on byte-identical content.
+- **No eol-normalization / no `.gitattributes` / no reformatting on this path**
+  — the vendored tree-hash equality depends on byte-identical content, so the
+  copies keep core's indentation style even inside the tab-indented web-ui
+  package. Never run a formatter over a vendored copy.
 - Symbols that migrated here are listed in `migrated.ts`; redefining one
   locally anywhere else fails CI (pure re-export shims are the permitted form).
 

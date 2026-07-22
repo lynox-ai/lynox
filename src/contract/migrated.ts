@@ -7,6 +7,17 @@
  *
  * Add a row when a symbol migrates into the contract; never remove one without
  * migrating the symbol back out deliberately.
+ *
+ * Pattern rules (each `twinPattern` is a regex source, applied per line):
+ * - Anchored on a DECLARATION keyword (`type`/`interface`, `function`/`const`/
+ *   `let`/`var`) so re-export shims (`export { X } from …`) and call sites
+ *   never match.
+ * - Anchored past the name (`=`, `(`, `:`, or a word boundary) so a
+ *   deliberately-differently-named delegating helper (e.g. web-ui's
+ *   `cpSuppliesLLMKeyForInstance`) is not a prefix false-positive.
+ * - Known limitation: an object/class METHOD named like a migrated function
+ *   (`normalizeTier(v) { … }`) is not hunted — any pattern for it would also
+ *   match ordinary call sites. The sweep is a drift tripwire, not a parser.
  */
 export interface MigratedSymbol {
   /** Exported symbol name. */
@@ -17,21 +28,25 @@ export interface MigratedSymbol {
   twinPattern: string;
 }
 
+// Anchored past the name on a declaration continuation (`=`, `{`, `<`,
+// `extends`) so inline type-imports (`import { type BillingTier } from …`)
+// never match.
+const typeTwin = (name: string): string => `\\b(?:type|interface)\\s+${name}\\s*(?:=|\\{|<|extends\\b)`;
+const valueTwin = (name: string): string => `\\b(?:function|const|let|var)\\s+${name}\\s*[=(:]`;
+
 export const MIGRATED: readonly MigratedSymbol[] = [
-  { name: 'BillingTier', contractFile: 'vocab.ts', twinPattern: 'type\\s+BillingTier\\s*=' },
-  // Function/const patterns are anchored past the name (`(`, `=` or `:`) so a
-  // deliberately-differently-named delegating helper (e.g. web-ui's
-  // `cpSuppliesLLMKeyForInstance`) is not a prefix false-positive.
-  { name: 'LEGACY_BILLING_TIER_ALIASES', contractFile: 'vocab.ts', twinPattern: 'const\\s+LEGACY_BILLING_TIER_ALIASES\\s*[=:]' },
-  { name: 'normalizeBillingTier', contractFile: 'vocab.ts', twinPattern: 'function\\s+normalizeBillingTier\\s*\\(' },
-  { name: 'isHostedInstance', contractFile: 'vocab.ts', twinPattern: 'function\\s+isHostedInstance\\s*\\(' },
-  { name: 'cpSuppliesLLMKey', contractFile: 'vocab.ts', twinPattern: 'function\\s+cpSuppliesLLMKey\\s*\\(' },
-  { name: 'ModelTier', contractFile: 'vocab.ts', twinPattern: 'type\\s+ModelTier\\s*=' },
-  { name: 'LEGACY_TIER_ALIASES', contractFile: 'vocab.ts', twinPattern: 'const\\s+LEGACY_TIER_ALIASES\\s*[=:]' },
-  { name: 'normalizeTier', contractFile: 'vocab.ts', twinPattern: 'function\\s+normalizeTier\\s*\\(' },
-  { name: 'AccountTier', contractFile: 'vocab.ts', twinPattern: 'type\\s+AccountTier\\s*=' },
-  { name: 'LLMProvider', contractFile: 'vocab.ts', twinPattern: 'type\\s+LLMProvider\\s*=' },
-  { name: 'NetworkPolicy', contractFile: 'vocab.ts', twinPattern: 'type\\s+NetworkPolicy\\s*=' },
-  { name: 'ModelProfile', contractFile: 'shapes.ts', twinPattern: 'interface\\s+ModelProfile\\s' },
-  { name: 'isModelProfile', contractFile: 'shapes.ts', twinPattern: 'function\\s+isModelProfile\\s*\\(' },
+  { name: 'BillingTier', contractFile: 'vocab.ts', twinPattern: typeTwin('BillingTier') },
+  { name: 'LEGACY_BILLING_TIER_ALIASES', contractFile: 'vocab.ts', twinPattern: valueTwin('LEGACY_BILLING_TIER_ALIASES') },
+  { name: 'CANONICAL_BILLING_TIERS', contractFile: 'vocab.ts', twinPattern: valueTwin('CANONICAL_BILLING_TIERS') },
+  { name: 'normalizeBillingTier', contractFile: 'vocab.ts', twinPattern: valueTwin('normalizeBillingTier') },
+  { name: 'isHostedInstance', contractFile: 'vocab.ts', twinPattern: valueTwin('isHostedInstance') },
+  { name: 'cpSuppliesLLMKey', contractFile: 'vocab.ts', twinPattern: valueTwin('cpSuppliesLLMKey') },
+  { name: 'ModelTier', contractFile: 'vocab.ts', twinPattern: typeTwin('ModelTier') },
+  { name: 'LEGACY_TIER_ALIASES', contractFile: 'vocab.ts', twinPattern: valueTwin('LEGACY_TIER_ALIASES') },
+  { name: 'normalizeTier', contractFile: 'vocab.ts', twinPattern: valueTwin('normalizeTier') },
+  { name: 'AccountTier', contractFile: 'vocab.ts', twinPattern: typeTwin('AccountTier') },
+  { name: 'LLMProvider', contractFile: 'vocab.ts', twinPattern: typeTwin('LLMProvider') },
+  { name: 'NetworkPolicy', contractFile: 'vocab.ts', twinPattern: typeTwin('NetworkPolicy') },
+  { name: 'ModelProfile', contractFile: 'shapes.ts', twinPattern: typeTwin('ModelProfile') },
+  { name: 'isModelProfile', contractFile: 'shapes.ts', twinPattern: valueTwin('isModelProfile') },
 ];
