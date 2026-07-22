@@ -37,6 +37,7 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
+import { captureWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -1506,6 +1507,52 @@ export class Agent implements IAgent {
       ...getBetasForProvider(this.provider),
       ...(lazyToolsActive ? ['advanced-tool-use-2025-11-20' as AnthropicBeta] : []),
     ];
+
+    // Extended debug capture (Surface B / dev sink) — a provider-agnostic snapshot of
+    // the fully-assembled outbound request (system + the FULL user message incl. the
+    // ephemeral tail + the offered tools + params), for the faithful model-fitness
+    // eval's wire-replay and (step 2) the operator debug export. Gated OFF by default
+    // (env + file-gate), so this whole block is skipped on a normal turn. Captured ONCE
+    // per turn (before the retry loop); never throws into the hot path. See
+    // wire-capture.ts + pro docs/internal/prd/extended-debug-capture.md.
+    if (isWireSinkEnabled()) {
+      try {
+        const { userMessage, systemText, toolNames } = extractWireFields(outboundMessages, systemBlocks, toolsDef);
+        captureWireSnapshot({
+          runId: this.currentRunId,
+          turnIndex: outboundMessages.length,
+          model: this.model,
+          provider: this.provider,
+          systemText,
+          userMessage,
+          toolNames,
+          maxTokens: this.maxTokens,
+          ephemeralTailChars: ephemeralBlocks.length > 0 ? JSON.stringify(ephemeralBlocks).length : 0,
+        });
+      } catch {
+        // dev capture must never break a real turn
+      }
+    }
+
+    // Raw-body capture (eval / wire-replay path) — the FULL unredacted agent-level request
+    // for the Session-faithful model-fitness eval to re-send to candidate models. Separate,
+    // louder gate; dev/staging-eval only. See wire-capture.ts + extended-debug-capture.md.
+    if (isRawWireSinkEnabled()) {
+      try {
+        captureRawWireBody({
+          runId: this.currentRunId,
+          turnIndex: outboundMessages.length,
+          model: this.model,
+          provider: this.provider,
+          system: systemBlocks,
+          messages: outboundMessages,
+          tools: toolsDef,
+          maxTokens: this.maxTokens,
+        });
+      } catch {
+        // eval capture must never break a real turn
+      }
+    }
 
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
       try {
