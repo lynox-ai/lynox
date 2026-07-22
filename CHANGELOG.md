@@ -1,6 +1,30 @@
 # Changelog
 
-## 2.9.1 — 2026-07-21
+## 2.10.0 — 2026-07-22
+
+A model-strategy release. The measured finding behind it: a 14B-class main model answers deep-worthy tasks inline instead of delegating them, so the every-turn main on the managed Efficient and Balanced presets — and the BYOK-Mistral balanced tier — moves up to Mistral Medium 3.5. Claude Fable 5 becomes the max-quality preset's deep slot. The release also introduces a shared wire-contract module (one source of truth for tier vocabulary, env-ABI and wire shapes across engine, web UI and the managed control plane), opt-in extended debug capture, and feature-gated proactive deep escalation (default off). Engine schema moves to v50 (additive).
+
+### Added
+- **Floor-clearing main model for tier presets.** The Efficient and Balanced managed presets run Mistral Medium 3.5 as the every-turn main; Ministral 14B measured below the orchestration floor (it answered deep-worthy tasks inline, 2/22 escalations over the replay set). (#1045)
+- **Extended debug capture, opt-in and default off.** Wire-level snapshot capture with triple redaction, encrypted at rest, bundled into debug exports with a typed wire-diff view; Settings toggle with consent copy. Deleting a thread removes its captured snapshots. (#1044, #1046, #1058)
+- **Proactive deep escalation, feature-gated and default off.** (#1041, #1042)
+- **Claude Fable 5 as the max-quality preset's deep slot.** (#1039)
+- **Wire-contract module `src/contract/`.** Canonical tier vocabulary, env-ABI registry and money/health wire shapes with golden fixtures — the single source of truth for core, the web UI and the managed control plane, guarded by byte-equality checks on every consumer. (#1049, #1050, #1051, #1052)
+
+### Fixed
+- **Mistral deep tier moves to Mistral Medium 3.5**; Mistral Large 3 becomes a legacy catalog option. The BYOK-Mistral balanced tier is lifted to Medium 3.5 as well. (#1040, #1053)
+- **Image input works on the Mistral balanced and deep tiers.** Medium 3.5's vision capability is verified live; without the flip every image message on a Mistral main failed with a pre-flight error. (#1056)
+- **Main-model picker handles providers whose balanced and deep bands share one model.** Options are keyed and selected per band, so the settings page renders correctly and a deep selection stays deep. (#1057)
+- **Debug-capture toggle reflects operator environment overrides** instead of silently writing a dead value; the CLI installer recommends the current Mistral default. (#1058)
+- **Long streaming responses retry on dropped provider connections.** Adapter HTTP errors are classified by status code, never by response body text. (#1045)
+- **Managed provider tile no longer lists internal providers; mobile status footer unclipped.** (#1037)
+
+### Changed
+- README/ROADMAP claim refresh with drift-guard fact checks (#1043); Fireworks AI added to the sub-processor list for the managed Efficient preset's deep tier (#1038); sharp overridden to >=0.35.0 (#1047); behavior-critical control-plane env vars pinned to their engine consumers (#830).
+
+### Upgrade and rollback notes
+- **Forward upgrade needs nothing.** Engine schema v50 (`wire_snapshots`) is additive and applies on boot; no control-plane migrations ship in this release.
+- **Rolling back to 2.9.1:** (1) first reset any custom `tier_set` slot pinned to `claude-fable-5` — 2.9.1 either prices it at generic fallback rates or, for preset-plus-override configs, refuses to boot; (2) delete `wire_snapshots` rows — 2.9.1's data-wipe and key-rotation paths don't know the table; (3) a config saved by 2.10.0 that contains the new `debug_wire_capture` key is ignored as a whole by 2.9.1 until re-saved (self-healing, matches the 2.9.0 caveat).
 
 A targeted patch on 2.9.0. It stops an end-of-turn loop where a reply that ended with follow-up suggestions could re-run the model several times before finishing — a slow, token-burning turn that affected instances with plugins active (the default). It also drops the unused bundled npm/corepack from the runtime image, shrinking it and clearing a base-image dependency scan. **No migration** — clean image swap in both directions.
 
