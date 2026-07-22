@@ -3,7 +3,8 @@ import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { LynoxHooks } from '../core/engine.js';
 
 // === Mock dependencies ===
@@ -418,6 +419,53 @@ describe('LynoxHTTPApi', () => {
         version: expect.any(String),
         uptime_s: expect.any(Number),
       });
+    });
+
+    // Contract fixture pair (K-W2): the REAL health serializer's key tree +
+    // leaf types must match the golden fixture the control plane's rollout
+    // gate / health monitor parse. Values are live (uptime, memory), so the
+    // comparison is structural: same nested key paths, same JS type per leaf.
+    // A field rename on either side fails this or the CP-side pair test.
+    it('matches the contract health-body fixture structurally (both variants)', async () => {
+      const fixturesDir = resolvePath(dirname(fileURLToPath(import.meta.url)), '../contract/fixtures');
+      const res = await fetch(`${baseUrl}/health`);
+      expect(res.status).toBe(200);
+      const live = await res.json() as Record<string, unknown>;
+
+      // Leaf-type witness: `null` in a fixture admits `null | string`
+      // (build_sha is the only such leaf — dev serves null, prod a hex SHA).
+      const structure = (v: unknown): unknown => {
+        if (v === null) return 'null|string';
+        if (Array.isArray(v)) return v.map(structure);
+        if (typeof v === 'object') {
+          return Object.fromEntries(
+            Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+              .map(([k, val]) => [k, structure(val)]),
+          );
+        }
+        return typeof v;
+      };
+      // Contract-OPTIONAL leaves (HealthBody: disk_* absent when statfs('/')
+      // fails) are dropped from both sides so an exotic host can't flake this
+      // test; when the live host DOES serve them, their type is still pinned.
+      const dropOptional = (s: Record<string, unknown>): Record<string, unknown> => {
+        const system = { ...(s['system'] as Record<string, unknown>) };
+        delete system['disk_total_gb'];
+        delete system['disk_used_gb'];
+        return { ...s, system };
+      };
+      const liveSystem = (live['system'] ?? {}) as Record<string, unknown>;
+      if ('disk_total_gb' in liveSystem) expect(typeof liveSystem['disk_total_gb']).toBe('number');
+      if ('disk_used_gb' in liveSystem) expect(typeof liveSystem['disk_used_gb']).toBe('number');
+      const liveStructure = dropOptional(structure(live) as Record<string, unknown>);
+      if (liveStructure['build_sha'] === 'string') liveStructure['build_sha'] = 'null|string';
+
+      for (const name of ['health-body.json', 'health-body.with-sha.json']) {
+        const fixture = JSON.parse(readFileSync(resolvePath(fixturesDir, name), 'utf8')) as unknown;
+        const fixtureStructure = dropOptional(structure(fixture) as Record<string, unknown>);
+        if (fixtureStructure['build_sha'] === 'string') fixtureStructure['build_sha'] = 'null|string';
+        expect(liveStructure, `live /health diverges from fixtures/${name}`).toEqual(fixtureStructure);
+      }
     });
   });
 

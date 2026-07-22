@@ -27,7 +27,7 @@ export interface MigratedSymbol {
   /** Exported symbol name. */
   name: string;
   /** Contract file that owns it now. */
-  contractFile: 'vocab.ts' | 'shapes.ts' | 'env-registry.ts';
+  contractFile: 'vocab.ts' | 'shapes.ts' | 'env-registry.ts' | 'http.ts' | 'fixtures/mirrors.ts';
   /** The declaration pattern the orphan-twin test hunts (regex source, applied per line). */
   twinPattern: string;
 }
@@ -59,4 +59,14 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'ENV_REGISTRY_BY_NAME', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY_BY_NAME') },
   { name: 'SELF_HOST_ONLY', contractFile: 'env-registry.ts', twinPattern: valueTwin('SELF_HOST_ONLY') },
   { name: 'PREFIX_FAMILIES', contractFile: 'env-registry.ts', twinPattern: valueTwin('PREFIX_FAMILIES') },
+  // K-W2 — money-HTTP + health wire shapes (born in the contract; a local
+  // re-declaration downstream is the same silent-divergence failure mode).
+  { name: 'UsageReportRun', contractFile: 'http.ts', twinPattern: typeTwin('UsageReportRun') },
+  { name: 'UsageFlushRequest', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushRequest') },
+  { name: 'UsageFlushResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushResponse') },
+  { name: 'UsageStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageStatusResponse') },
+  { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
+  { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
+  { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
+  { name: 'TYPED_MIRRORS', contractFile: 'fixtures/mirrors.ts', twinPattern: valueTwin('TYPED_MIRRORS') },
 ];
