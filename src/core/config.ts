@@ -269,6 +269,17 @@ export function loadConfig(): LynoxUserConfig {
   } else if (durableMemory === 'false' || durableMemory === '0') {
     merged.durable_memory_enabled = false;
   }
+  // Extended debug capture (operator surface). Lets the CP flip it per-tenant via env
+  // (rafael canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/
+  // '0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to
+  // start persisting the fully-assembled request (an agent-writable flag would let
+  // injected content enable capture of what every subsequent turn sent to the model).
+  const debugWireCapture = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
+  if (debugWireCapture === 'true' || debugWireCapture === '1') {
+    merged.debug_wire_capture = true;
+  } else if (debugWireCapture === 'false' || debugWireCapture === '0') {
+    merged.debug_wire_capture = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default

@@ -287,6 +287,13 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
   'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
   'context_cost_log',           // Diagnostic: opt-in content-free per-turn composition log to the instance's own data dir. Shapes only the user's own session, writes no content, never widens blast radius.
+  // Extended debug capture (operator surface): opt-in, owner-scoped persistence of
+  // the REDACTED per-turn assembled request to the instance's OWN history.db, bundled
+  // into the owner's OWN debug export. Same class as `bugsink_enabled` — the owner
+  // consenting to retain more of their OWN (secret-scrubbed) data, exported only by
+  // their own action; no cross-tenant reach, no blast-radius widening. A managed owner
+  // must be able to arm it for a bug report, so the allowlist accepts it here.
+  'debug_wire_capture',
   // P3-FOLLOWUP-HOTFIX: provider switching between curated managed providers
   // (Anthropic + Mistral; future: openai-native). The value-range guard at
   // `enforceManagedProviderConstraints()` below caps the allowed set —
@@ -3262,6 +3269,17 @@ export class LynoxHTTPApi {
       const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }), { mergeTurns: false });
 
       const history = engine.getRunHistory();
+      // Extended debug capture (step-3 at-a-glance view): a flat per-turn table across
+      // the whole thread so the injected delta is one glance away without walking the
+      // nested per-run snapshots. Collected from the strongly-typed WireSnapshotRecord
+      // as the per-run snapshots are built (below), so it needs no re-parse. `null`
+      // (empty) when no run captured wire snapshots (setting off for this thread) so a
+      // consumer can cheaply tell "was capture on?". PRD §8/§9.
+      const wireSummaryRows: Array<{
+        run_id: string; turn_index: number; model: string; provider: string;
+        typed_chars: number; assembled_chars: number; injected_chars: number | null;
+        tool_count: number; ephemeral_tail_present: boolean; ephemeral_tail_chars: number;
+      }> = [];
       const runs = history
         ? history.getRunsBySession(id).map((run) => {
             // Tier 2: parse the per-run composition (stored as a JSON string) into
@@ -3290,6 +3308,55 @@ export class LynoxHTTPApi {
                 sequence_order: tc.sequence_order,
               })),
               prompt_snapshot: run.prompt_hash ? (history.getPromptSnapshot(run.prompt_hash)?.prompt_text ?? null) : null,
+              // Extended debug capture (operator surface + step-3 diff): the REDACTED
+              // per-turn wire snapshots for this run — "what the model actually saw" —
+              // present only when the owner-consent `debug_wire_capture` setting was on
+              // during the run. Each snapshot carries a `wire_diff` that isolates the
+              // injected ephemeral tail: the operator TYPED `run.task_text`, the model
+              // SAW `user_message` (the FULL assembled request incl. `[Now:]` /
+              // <retrieved_context> / <task_overview> / <secrets>-count). On turn 1 the
+              // typed task is found inside the assembled message → clean prefix/suffix
+              // split; on later agent iterations the last user message is a tool_result,
+              // not the typed task, so `typed_found` is false and only the counts show.
+              // That delta is the whole diagnostic value (it is what flips a weak model).
+              // NB `indexOf` takes the FIRST occurrence, and `typed` (task_text) is
+              // un-redacted while `assembled` is secrets-scrubbed — so a typed task that
+              // is echoed earlier in the tail, or carries a secret-shaped token, can miss
+              // the match; that only degrades to the `typed_found:false` shape (raw sizes,
+              // no split), never a wrong number. See pro docs …/extended-debug-capture.md.
+              wire_snapshots: history.getWireSnapshotsForRun(run.id).map((snap) => {
+                const typed = rest.task_text ?? '';
+                const assembled = snap.user_message;
+                const idx = typed.length > 0 ? assembled.indexOf(typed) : -1;
+                const typedFound = idx >= 0;
+                // `injected_chars` (assembled − typed) is meaningful ONLY when the typed
+                // task is found inside the assembled message. On later agent iterations
+                // the last user message is a short tool_result, so assembled − typed goes
+                // NEGATIVE and means nothing → `null` (don't emit a misleading number).
+                const injectedChars = typedFound ? assembled.length - typed.length : null;
+                const wire_diff = typedFound
+                  ? {
+                      typed_found: true,
+                      typed_chars: typed.length,
+                      assembled_chars: assembled.length,
+                      injected_chars: injectedChars,
+                      injected_prefix: assembled.slice(0, idx),
+                      injected_suffix: assembled.slice(idx + typed.length),
+                    }
+                  : {
+                      typed_found: false,
+                      typed_chars: typed.length,
+                      assembled_chars: assembled.length,
+                      injected_chars: injectedChars,   // null — not measurable this turn
+                    };
+                wireSummaryRows.push({
+                  run_id: snap.run_id, turn_index: snap.turn_index, model: snap.model, provider: snap.provider,
+                  typed_chars: typed.length, assembled_chars: assembled.length, injected_chars: injectedChars,
+                  tool_count: snap.tool_count, ephemeral_tail_present: snap.ephemeral_tail_present,
+                  ephemeral_tail_chars: snap.ephemeral_tail_chars,
+                });
+                return { ...snap, wire_diff };
+              }),
             };
           })
         : [];
@@ -3359,17 +3426,24 @@ export class LynoxHTTPApi {
         } catch { memory = { error: 'memory snapshot unavailable' }; }
       }
 
+      // Assembled from the strongly-typed `wireSummaryRows` collected during the per-run
+      // snapshot build above — no re-parse of the emitted bundle.
+      const wireCaptureSummary = wireSummaryRows.length > 0
+        ? { turn_count: wireSummaryRows.length, turns: wireSummaryRows }
+        : null;
+
       const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
       const bundle = {
         exported_at: new Date().toISOString(),
         exported_by: 'lynox debug-export',
-        schema: 'thread-debug-export/v2',
+        schema: 'thread-debug-export/v3',
         engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
         // The export is the user's own data, exported by their own action; it contains PII
         // (kept — scrubbing it would destroy the diagnostic value) with SECRETS masked below.
         sharing_notice: 'This export contains your own conversation data — including personal information and stored memories — with secrets masked. Share it only with recipients you trust.',
         thread,
         debug_summary: debugSummary,
+        wire_capture_summary: wireCaptureSummary,
         messages,
         runs,
         compaction_events: compactionEvents,

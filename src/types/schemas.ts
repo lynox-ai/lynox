@@ -238,6 +238,15 @@ export const LynoxUserConfigSchema = z.object({
   // setting, not just these). Same discipline as `llm_mode` below.
   verb_graph_enabled:      z.boolean().optional(),
   verb_graph_reads:        z.boolean().optional(),
+  // Extended debug capture (operator surface). When true, the engine persists a
+  // REDACTED per-turn WireSnapshot (the fully-assembled outbound request — system
+  // hash, the FULL user message incl. the ephemeral tail with the secrets catalog
+  // scrubbed, the offered tools + params) to history.db, and the debug chat export
+  // bundles it. This IS the owner-consent gate for the operator path (the dev file-
+  // gate is a separate DEV-only switch). Default off; owner-scoped, per-instance.
+  // Operator-only per-tenant flip — NOT in PROJECT_SAFE_KEYS, never agent-settable
+  // (an injected agent must not be able to start capturing what the model saw).
+  debug_wire_capture:      z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
   transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),

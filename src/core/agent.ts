@@ -37,7 +37,8 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
-import { captureWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
+import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
+import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -185,6 +186,8 @@ export class Agent implements IAgent {
       await this.onMessageCheckpoint();
     } catch { /* fire-and-forget — persistence failures must not break the loop */ }
   }
+  /** See `AgentConfig.onWireSnapshot` — operator extended-debug-capture persist sink. */
+  private readonly onWireSnapshot?: ((snapshot: WireSnapshot) => void) | undefined;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -575,6 +578,7 @@ export class Agent implements IAgent {
     this.tools = config.tools ?? [];
     this.onStream = config.onStream ?? null;
     this.onMessageCheckpoint = config.onMessageCheckpoint;
+    this.onWireSnapshot = config.onWireSnapshot;
     this.promptUser = config.promptUser;
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
@@ -1508,17 +1512,22 @@ export class Agent implements IAgent {
       ...(lazyToolsActive ? ['advanced-tool-use-2025-11-20' as AnthropicBeta] : []),
     ];
 
-    // Extended debug capture (Surface B / dev sink) — a provider-agnostic snapshot of
-    // the fully-assembled outbound request (system + the FULL user message incl. the
-    // ephemeral tail + the offered tools + params), for the faithful model-fitness
-    // eval's wire-replay and (step 2) the operator debug export. Gated OFF by default
-    // (env + file-gate), so this whole block is skipped on a normal turn. Captured ONCE
-    // per turn (before the retry loop); never throws into the hot path. See
+    // Extended debug capture — a provider-agnostic REDACTED snapshot of the fully-
+    // assembled outbound request (system + the FULL user message incl. the ephemeral
+    // tail + the offered tools + params). Two consumers off ONE build:
+    //   • Surface B / dev sink — the faithful model-fitness eval's wire-replay, gated
+    //     by the dev file-gate (`isWireSinkEnabled`, default OFF).
+    //   • Surface A / operator — persisted to history.db for the debug export, gated by
+    //     the owner-consent `debug_wire_capture` setting (the Session passes
+    //     `onWireSnapshot` only when it is on; undefined here = off).
+    // Both gated OFF by default, so the whole block is skipped on a normal turn. Built
+    // ONCE per turn (before the retry loop); never throws into the hot path. See
     // wire-capture.ts + pro docs/internal/prd/extended-debug-capture.md.
-    if (isWireSinkEnabled()) {
+    const wantWireSink = isWireSinkEnabled();
+    if (wantWireSink || this.onWireSnapshot) {
       try {
         const { userMessage, systemText, toolNames } = extractWireFields(outboundMessages, systemBlocks, toolsDef);
-        captureWireSnapshot({
+        const snapshot = buildWireSnapshot({
           runId: this.currentRunId,
           turnIndex: outboundMessages.length,
           model: this.model,
@@ -1529,8 +1538,10 @@ export class Agent implements IAgent {
           maxTokens: this.maxTokens,
           ephemeralTailChars: ephemeralBlocks.length > 0 ? JSON.stringify(ephemeralBlocks).length : 0,
         });
+        if (wantWireSink) writeWireSnapshot(snapshot);
+        if (this.onWireSnapshot) this.onWireSnapshot(snapshot);
       } catch {
-        // dev capture must never break a real turn
+        // debug capture must never break a real turn
       }
     }
 

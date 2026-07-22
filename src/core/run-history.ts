@@ -8,6 +8,7 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
+import type { WireSnapshot } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
@@ -212,6 +213,30 @@ export interface PromptSnapshotRecord {
   profile_name: string;
   prompt_text: string;
   first_seen_at: string;
+}
+
+/**
+ * A persisted redacted wire snapshot (extended debug capture, operator surface).
+ * snake_case to match the debug-export bundle convention (runs / tool_calls). The
+ * `user_message` is REDACTED at capture (secrets catalog scrubbed) and DECRYPTED here
+ * for the owner's own export. See {@link import('./wire-capture.js').WireSnapshot}.
+ */
+export interface WireSnapshotRecord {
+  run_id: string;
+  turn_index: number;
+  model: string;
+  provider: string;
+  system_prompt_hash: string;
+  user_message: string;
+  user_message_chars: number;
+  tool_names: string[];
+  tool_count: number;
+  tool_choice: string | null;
+  temperature: number | null;
+  max_tokens: number;
+  ephemeral_tail_present: boolean;
+  ephemeral_tail_chars: number;
+  captured_at: number;
 }
 
 function generateId(): string {
@@ -1166,6 +1191,36 @@ const MIGRATIONS: string[] = [
      done INTEGER NOT NULL DEFAULT 0
    );
    INSERT OR IGNORE INTO model_provenance_backfill_marker (id, done) VALUES (1, 0);`,
+
+  // v50 — Extended debug capture, operator surface (pro
+  // docs/internal/prd/extended-debug-capture.md §9 step 2). Mirrors prompt_snapshots:
+  // per (run_id, turn_index) it stores the REDACTED fully-assembled outbound request
+  // — "what the model actually saw". `user_message` is the FULL last user message
+  // incl. the ephemeral tail with the <secrets> catalog scrubbed at capture time
+  // (redactWireUserMessage) AND encrypted at rest (this._enc, like runs.task_text) —
+  // it is redacted-but-personal owner data. `system_prompt_hash` points into
+  // prompt_snapshots (the big system text is not duplicated per turn). Written ONLY
+  // when the owner-consent `debug_wire_capture` setting is on; pruned with the run
+  // (deleteRun) so retention rides the existing run-history window.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
+   CREATE TABLE IF NOT EXISTS wire_snapshots (
+     run_id TEXT NOT NULL,
+     turn_index INTEGER NOT NULL,
+     model TEXT NOT NULL,
+     provider TEXT NOT NULL,
+     system_prompt_hash TEXT NOT NULL,
+     user_message TEXT NOT NULL,
+     user_message_chars INTEGER NOT NULL,
+     tool_names TEXT NOT NULL,
+     tool_count INTEGER NOT NULL,
+     tool_choice TEXT,
+     temperature REAL,
+     max_tokens INTEGER NOT NULL,
+     ephemeral_tail_present INTEGER NOT NULL,
+     ephemeral_tail_chars INTEGER NOT NULL,
+     captured_at INTEGER NOT NULL,
+     PRIMARY KEY (run_id, turn_index)
+   );`,
 ];
 
 export class RunHistory {
@@ -2237,6 +2292,87 @@ export class RunHistory {
     return persistence.getPromptSnapshot(this.db, hash);
   }
 
+  /**
+   * Persist a REDACTED per-turn wire snapshot (extended debug capture, operator
+   * surface). Called only when the owner-consent `debug_wire_capture` setting is on,
+   * once per outbound turn from the Agent seam (via the Session `onWireSnapshot`
+   * callback). `user_message` is already secrets-redacted by `buildWireSnapshot`; it
+   * is additionally ENCRYPTED at rest here (like runs.task_text) since it is personal
+   * owner data. A snapshot without a runId is dropped — it cannot be keyed or exported.
+   * INSERT OR REPLACE so a rare (run_id, turn_index) re-fire overwrites rather than
+   * throwing into the (swallowed) capture path.
+   */
+  insertWireSnapshot(snapshot: WireSnapshot): void {
+    if (!snapshot.runId) return;
+    this.db.prepare(
+      `INSERT OR REPLACE INTO wire_snapshots
+        (run_id, turn_index, model, provider, system_prompt_hash, user_message,
+         user_message_chars, tool_names, tool_count, tool_choice, temperature,
+         max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      snapshot.runId,
+      snapshot.turnIndex,
+      snapshot.model,
+      snapshot.provider,
+      snapshot.systemPromptHash,
+      this._enc(snapshot.userMessage),
+      snapshot.userMessageChars,
+      JSON.stringify(snapshot.toolNames),
+      snapshot.toolCount,
+      snapshot.toolChoice ?? null,
+      snapshot.temperature ?? null,
+      snapshot.maxTokens,
+      snapshot.ephemeralTailPresent ? 1 : 0,
+      snapshot.ephemeralTailChars,
+      snapshot.capturedAt,
+    );
+  }
+
+  /**
+   * Read the persisted wire snapshots for a run, decrypted + turn-ordered, for the
+   * owner's own debug export. `tool_names` is parsed back from its JSON column; a
+   * malformed row degrades to an empty list rather than failing the whole export.
+   */
+  getWireSnapshotsForRun(runId: string): WireSnapshotRecord[] {
+    const rows = this.db.prepare(
+      `SELECT run_id, turn_index, model, provider, system_prompt_hash, user_message,
+              user_message_chars, tool_names, tool_count, tool_choice, temperature,
+              max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at
+       FROM wire_snapshots WHERE run_id = ? ORDER BY turn_index ASC`,
+    ).all(runId) as Array<{
+      run_id: string; turn_index: number; model: string; provider: string;
+      system_prompt_hash: string; user_message: string; user_message_chars: number;
+      tool_names: string; tool_count: number; tool_choice: string | null;
+      temperature: number | null; max_tokens: number; ephemeral_tail_present: number;
+      ephemeral_tail_chars: number; captured_at: number;
+    }>;
+    return rows.map((r) => {
+      let toolNames: string[] = [];
+      try {
+        const parsed: unknown = JSON.parse(r.tool_names);
+        if (Array.isArray(parsed)) toolNames = parsed.filter((n): n is string => typeof n === 'string');
+      } catch { /* malformed row → empty tool list, keep the rest of the snapshot */ }
+      return {
+        run_id: r.run_id,
+        turn_index: r.turn_index,
+        model: r.model,
+        provider: r.provider,
+        system_prompt_hash: r.system_prompt_hash,
+        user_message: this._dec(r.user_message),
+        user_message_chars: r.user_message_chars,
+        tool_names: toolNames,
+        tool_count: r.tool_count,
+        tool_choice: r.tool_choice,
+        temperature: r.temperature,
+        max_tokens: r.max_tokens,
+        ephemeral_tail_present: r.ephemeral_tail_present === 1,
+        ephemeral_tail_chars: r.ephemeral_tail_chars,
+        captured_at: r.captured_at,
+      };
+    });
+  }
+
   insertScope(id: string, type: string, name: string, parentId?: string | undefined): void {
     persistence.insertScope(this.db, id, type, name, parentId);
   }
@@ -2754,6 +2890,9 @@ export class RunHistory {
         this.db.prepare('DELETE FROM pipeline_step_results WHERE pipeline_run_id = ?').run(pr.id);
       }
       this.db.prepare('DELETE FROM pipeline_runs WHERE parent_run_id = ?').run(id);
+      // Extended debug capture: wire snapshots are keyed by run_id, so retention
+      // rides run deletion (the PRD §5 rolling window). No-op when capture is off.
+      this.db.prepare('DELETE FROM wire_snapshots WHERE run_id = ?').run(id);
       const result = this.db.prepare('DELETE FROM runs WHERE id = ?').run(id);
       return result.changes > 0;
     });
@@ -2799,7 +2938,7 @@ export class RunHistory {
     const tables = [
       'run_tool_calls', 'run_spawns', 'prompt_snapshots', 'memory_embeddings',
       'pre_approval_sets', 'pre_approval_events', 'pipeline_runs', 'pipeline_step_results',
-      'advisor_suggestions', 'tasks', 'security_events', 'processes', 'runs',
+      'advisor_suggestions', 'tasks', 'security_events', 'processes', 'wire_snapshots', 'runs',
     ];
     this.db.pragma('foreign_keys = OFF');
     for (const table of tables) {
@@ -2862,6 +3001,23 @@ export class RunHistory {
         inputJson ? encWithKey(inputJson, newEncKey) : row.input_json,
         outputJson ? encWithKey(outputJson, newEncKey) : row.output_json,
         row.id,
+      );
+      count++;
+    }
+
+    // Re-encrypt wire snapshots (user_message) — the redacted-but-personal assembled
+    // request. Keyed by (run_id, turn_index); only present when debug_wire_capture ran.
+    const wireRows = this.db.prepare(
+      `SELECT run_id, turn_index, user_message FROM wire_snapshots WHERE user_message LIKE ?`,
+    ).all(encPrefix) as Array<{ run_id: string; turn_index: number; user_message: string }>;
+
+    const updateWire = this.db.prepare('UPDATE wire_snapshots SET user_message = ? WHERE run_id = ? AND turn_index = ?');
+    for (const row of wireRows) {
+      const userMessage = this._dec(row.user_message);
+      updateWire.run(
+        userMessage ? encWithKey(userMessage, newEncKey) : row.user_message,
+        row.run_id,
+        row.turn_index,
       );
       count++;
     }

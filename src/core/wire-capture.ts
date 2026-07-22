@@ -188,7 +188,13 @@ export function writeWireSnapshot(snapshot: WireSnapshot, env: NodeJS.ProcessEnv
   }
 }
 
-/** Convenience: build + write when the sink gate is on. Returns the snapshot, or null if gated off. */
+/**
+ * Convenience: gate-check + build + write in one call. Returns the snapshot, or null if
+ * gated off. The single-sink dev/eval entry point — the Agent seam does NOT use it (it
+ * inlines `buildWireSnapshot` + `writeWireSnapshot` so ONE build fans out to both the dev
+ * file-sink AND the operator `onWireSnapshot` callback without redacting/building twice);
+ * this stays the standalone one-shot for callers that only need the file sink.
+ */
 export function captureWireSnapshot(
   input: WireSnapshotInput,
   env: NodeJS.ProcessEnv = process.env,
