@@ -9,6 +9,12 @@ against its real route handlers by the private repo's pair tests (this repo's
 CI still pins each of those fixtures' exact key tree + types via the typed
 mirrors in `tests/contract-http.test.ts`).
 
+`mirrors.ts` carries the `satisfies`-typed mirror of every fixture — the
+compile-checked weld between fixture bytes and the `http.ts`/`shapes.ts`
+types (it lives in the contract, not in a test, because test files are
+outside the root tsc scope). It ships compiled in `dist/`; the JSON + MD
+files here stay source-only.
+
 Value rules (PRD-CORE-PRO-CONTRACT S4): canonical obviously-fake values only
 (short `TEST-…` tokens, `*.invalid` hosts, repeated-pattern SHAs) — no
 entropy-realistic tokens, no real subdomains or customer names, no

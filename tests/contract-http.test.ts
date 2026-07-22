@@ -5,12 +5,13 @@
  * (`src/core/managed-hook.test.ts`, `src/core/managed-usage-summary.test.ts`,
  * `src/server/http-api.test.ts`); this file guards the fixture SET itself:
  *
- * (a) TYPED MIRRORS: every fixture deep-equals a literal typed `satisfies` its
- *     `http.ts`/`shapes.ts` shape. This is the core-side rename tripwire for
- *     fields the engine's tolerant parsers never dereference (`accepted`,
- *     `tier`, `included_budget_cents`, …): renaming a key in a fixture breaks
- *     the deep-equal here, and renaming a field in `http.ts` breaks the
- *     literal's compile — so a drift cannot ride on parse-tolerance.
+ * (a) TYPED MIRRORS (`src/contract/fixtures/mirrors.ts`): every fixture
+ *     deep-equals a literal typed `satisfies` its `http.ts`/`shapes.ts` shape.
+ *     This is the core-side rename tripwire for fields the engine's tolerant
+ *     parsers never dereference (`accepted`, `tier`, `included_budget_cents`,
+ *     …): renaming a key in a fixture breaks the deep-equal here, and renaming
+ *     a field in `http.ts` breaks the mirror's compile (root tsc covers
+ *     src/contract) — so a drift cannot ride on parse-tolerance.
  * (b) README completeness: every fixture file has a generator-ref TABLE ROW,
  *     and every documented fixture exists.
  * (c) S4 value rules, mechanically: every string leaf is an OBVIOUSLY-fake
@@ -27,14 +28,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { isModelProfile } from '../src/contract/shapes.js';
-import type { ModelProfile } from '../src/contract/shapes.js';
-import type {
-  UsageFlushRequest,
-  UsageFlushResponse,
-  UsageStatusResponse,
-  UsageSummaryResponse,
-  HealthBody,
-} from '../src/contract/http.js';
+import type { UsageSummaryResponse } from '../src/contract/http.js';
+// The typed mirrors live INSIDE the contract (src/contract/fixtures/mirrors.ts)
+// so their `satisfies` welds are checked by root tsc — this test dir is outside
+// the tsc scope, so a `satisfies` here would never be type-checked (vitest
+// strips types without checking them).
+import { TYPED_MIRRORS } from '../src/contract/fixtures/mirrors.js';
 
 const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src/contract/fixtures');
 const fixtureFiles = readdirSync(fixturesDir).filter((f) => f.endsWith('.json')).sort();
@@ -42,81 +41,6 @@ const readme = readFileSync(resolve(fixturesDir, 'README.md'), 'utf8');
 
 const load = (name: string): unknown =>
   JSON.parse(readFileSync(resolve(fixturesDir, name), 'utf8'));
-
-// ── (a) Typed mirrors — one `satisfies`-checked literal per fixture ─────────
-// The literal IS the fixture (deep-equal below); `satisfies` welds it to the
-// contract type, so fixture-bytes ↔ http.ts cannot drift apart silently.
-
-const HEALTH_BASE = {
-  status: 'ok',
-  version: '0.0.0-test',
-  uptime_s: 123,
-  process: { memory_used_mb: 100, memory_rss_mb: 200, cpu_user_ms: 1000, cpu_system_ms: 500 },
-  system: {
-    memory_total_mb: 16384,
-    memory_free_mb: 8192,
-    load_avg_1m: 0.5,
-    load_avg_5m: 0.25,
-    disk_total_gb: 100,
-    disk_used_gb: 50,
-  },
-  engine: { active_sessions: 0, total_threads: 0 },
-};
-
-const TYPED_MIRRORS: Record<string, unknown> = {
-  'usage-flush-request.json': {
-    runs: [
-      { run_id: 'TEST-RUN-0001', model: 'balanced', cost_cents: 3 },
-      { run_id: 'TEST-RUN-0002', model: 'deep', cost_cents: 12 },
-    ],
-  } satisfies UsageFlushRequest,
-  'usage-flush-response.json': {
-    accepted: 2,
-    balance_cents: 2985,
-    allowed: true,
-  } satisfies UsageFlushResponse,
-  'usage-status-response.managed.json': {
-    balance_cents: 2985,
-    included_budget_cents: 3000,
-    allowed: true,
-    tier: 'managed',
-  } satisfies UsageStatusResponse,
-  'usage-status-response.hosted.json': {
-    balance_cents: null,
-    allowed: true,
-    tier: 'hosted',
-  } satisfies UsageStatusResponse,
-  'usage-summary-response.managed.json': {
-    managed: true,
-    tier: 'managed',
-    budget_cents: 3000,
-    topup_cents: 500,
-    available_cents: 3500,
-    used_cents: 515,
-    balance_cents: 2985,
-    period: {
-      start_iso: '2026-01-01T00:00:00.000Z',
-      end_iso: '2026-02-01T00:00:00.000Z',
-      source: 'stripe-billing',
-    },
-  } satisfies UsageSummaryResponse,
-  'usage-summary-response.not-managed.json': {
-    managed: false,
-  } satisfies UsageSummaryResponse,
-  'health-body.json': { ...HEALTH_BASE, build_sha: null } satisfies HealthBody,
-  'health-body.with-sha.json': {
-    ...HEALTH_BASE,
-    build_sha: 'aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd',
-  } satisfies HealthBody,
-  'model-profile.json': {
-    provider: 'openai',
-    api_base_url: 'https://llm.example.invalid/v1',
-    api_key: 'TEST-API-KEY',
-    model_id: 'test-model-1',
-    context_window: 128000,
-    max_tokens: 16000,
-  } satisfies ModelProfile,
-};
 
 // ── (c) S4 allowlist — one pattern per obviously-fake value class. Keep this
 // tight: widening it to admit a "realistic" value defeats the rule. The

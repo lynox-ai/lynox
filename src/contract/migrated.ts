@@ -27,7 +27,7 @@ export interface MigratedSymbol {
   /** Exported symbol name. */
   name: string;
   /** Contract file that owns it now. */
-  contractFile: 'vocab.ts' | 'shapes.ts' | 'env-registry.ts' | 'http.ts';
+  contractFile: 'vocab.ts' | 'shapes.ts' | 'env-registry.ts' | 'http.ts' | 'fixtures/mirrors.ts';
   /** The declaration pattern the orphan-twin test hunts (regex source, applied per line). */
   twinPattern: string;
 }
@@ -68,4 +68,5 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
   { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
+  { name: 'TYPED_MIRRORS', contractFile: 'fixtures/mirrors.ts', twinPattern: valueTwin('TYPED_MIRRORS') },
 ];
