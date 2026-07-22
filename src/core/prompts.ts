@@ -257,7 +257,7 @@ export function modelIdentityContext(
     .map((e) => `- \`${e.id}\` — the \`${e.tier}\` tier (${e.family})`);
   const tierGuidance = tierLines.length > 0
     ? `\n\nOn THIS instance the tiers resolve as follows — use THIS map when you plan which tier runs which model, never a generic mapping:\n${tierLines.join('\n')}\n\n`
-    : ' Each resolves to a different concrete model per provider (e.g. on Mistral `balanced`→`ministral-14b-2512`, `fast`→`ministral-8b-2512`, `deep`→`mistral-medium-2604`; on Anthropic to the Claude models).';
+    : ' Each resolves to a different concrete model per provider (e.g. on Mistral `balanced`→`mistral-medium-2604`, `fast`→`ministral-8b-2512`, `deep`→`mistral-medium-2604`; on Anthropic to the Claude models).';
 
   return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id. \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
 }

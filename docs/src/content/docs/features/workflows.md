@@ -16,7 +16,7 @@ lynox has four built-in roles, each optimized for a different type of work:
 | **Operator** | `fast` | Fast status checks, concise reporting | Tool-restricted (bash + read tools allowed; no write tools) |
 | **Collector** | `fast` | Structured Q&A, data gathering | Minimal tools — memory and user interaction only |
 
-Tiers are provider-agnostic (`deep` / `balanced` / `fast`) and resolve to the active provider's models — e.g. on Mistral `balanced` → `ministral-14b-2512`. They are **not** tied to Anthropic model names.
+Tiers are provider-agnostic (`deep` / `balanced` / `fast`) and resolve to the active provider's models — e.g. on Mistral `balanced` → `mistral-medium-2604`. They are **not** tied to Anthropic model names.
 
 ### Switching roles
 

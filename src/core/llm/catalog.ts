@@ -271,7 +271,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 0.20, output: 0.20 },
     capabilities: ['vision', 'tool_use'],
     residency: 'EU-Paris (Mistral SAS)',
-    notes: 'Recommended balanced default. Gen-3 mid model, text+vision. 100% pass on every Set-Bench axis at near-Large quality and ~6× lower cost.',
+    notes: 'Gen-3 mid model, text+vision. Strong tool-ROUTER (100% Set-Bench) but below the R1/R3 orchestration floor as a main — the balanced tier now resolves to Medium 3.5 (WS2); 14B stays a catalog extra.',
   },
   {
     id: 'ministral-3b-2512',
