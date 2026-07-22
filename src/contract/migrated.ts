@@ -1,6 +1,10 @@
 /**
- * Symbols whose SINGLE SOURCE OF TRUTH moved into `src/contract/`. The
- * orphan-twin drift test (`tests/contract-drift.test.ts`) fails CI when any of
+ * Symbols whose SINGLE SOURCE OF TRUTH moved into `src/contract/`.
+ *
+ * VENDORED DOWNSTREAM — edit ONLY here (`core/src/contract/`); a vendored
+ * copy of this file is read-only for its consumer.
+ *
+ * The orphan-twin drift test (`tests/contract-drift.test.ts`) fails CI when any of
  * these is REDEFINED locally anywhere in `src/` or `packages/web-ui/src/`
  * outside the contract dirs — pure re-export shims (export-from statements
  * only, no local declaration) are the one permitted form.
