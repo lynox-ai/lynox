@@ -12,6 +12,9 @@ import {
   isExpensiveModel,
   buildMainModelOptions,
   selectMainModelId,
+  selectMainModelKey,
+  mainModelOptionKey,
+  findMainModelOptionByKey,
   availableComposerTiers,
   type ProviderLike,
   type MainModelOption,
@@ -196,5 +199,67 @@ describe('selectMainModelId', () => {
     expect(selectMainModelId(noBalanced, 'deep', undefined)).toBe('q-deep');
     // a tier with no representative (balanced) also falls back to first, not '':
     expect(selectMainModelId(noBalanced, 'balanced', undefined)).toBe('q-fast');
+  });
+});
+
+// Regression: a provider whose balanced AND deep bands resolve to the SAME model
+// id — the live Mistral case (balanced == deep == Mistral Medium 3.5 since the
+// 14B main fell below the orchestration floor). `main_chat_models` is NOT deduped
+// by design, so the picker receives two options sharing an id. Keying the
+// `<select>`/each by the bare id then (1) crashes Svelte with `each_key_duplicate`,
+// (2) makes the deep `<option>` unselectable (two share a value), and (3) collapses
+// a deep pick onto the first-matching (balanced) option. Tier-qualified identity
+// fixes all three.
+describe('tier-qualified identity (balanced == deep collision, Mistral Medium 3.5)', () => {
+  const mistralCollide: ProviderLike = {
+    main_chat_models: [
+      { id: 'ministral-8b-2512', tier: 'fast' },
+      { id: 'mistral-medium-2604', tier: 'balanced' },
+      { id: 'mistral-medium-2604', tier: 'deep' },
+    ],
+    models: [
+      { id: 'ministral-8b-2512', label: 'Ministral 8B', pricing: { input: 0.15, output: 0.15 } },
+      { id: 'mistral-medium-2604', label: 'Mistral Medium 3.5', pricing: { input: 1.5, output: 7.5 } },
+    ],
+  };
+  const opts = buildMainModelOptions(mistralCollide, 'deep');
+
+  it('sanity: the fixture reproduces the duplicate-id list buildMainChatModels emits', () => {
+    // Two distinct options carry the SAME model id — the exact shape catalog.ts
+    // ships (no-dedupe by design). If this ever stops holding, the bug is moot.
+    const ids = opts.map((o) => o.id);
+    expect(ids.filter((id) => id === 'mistral-medium-2604')).toHaveLength(2);
+  });
+
+  it('(a) tier-qualified keys AND <option> values are unique despite the shared id', () => {
+    const keys = opts.map(mainModelOptionKey);
+    expect(keys).toEqual(['fast:ministral-8b-2512', 'balanced:mistral-medium-2604', 'deep:mistral-medium-2604']);
+    expect(new Set(keys).size).toBe(keys.length); // no duplicate → no each_key_duplicate crash
+  });
+
+  it('(b) tier-aware selection returns the DEEP option for default_tier=deep, BALANCED for balanced', () => {
+    // The select value is the composite key, so it lands on the right <option>
+    // even though both share the model id.
+    expect(selectMainModelKey(opts, 'deep', undefined)).toBe('deep:mistral-medium-2604');
+    expect(selectMainModelKey(opts, 'balanced', undefined)).toBe('balanced:mistral-medium-2604');
+    // legacy aliases resolve the same
+    expect(selectMainModelKey(opts, 'opus', undefined)).toBe('deep:mistral-medium-2604');
+  });
+
+  it('(c) the set-path maps a DEEP selection to the deep tier (no first-match collapse to balanced)', () => {
+    // The component does `config.default_tier = findMainModelOptionByKey(opts, key).tier`.
+    // Choosing the deep <option> must yield tier 'deep', not the balanced option
+    // that shares the id and renders first.
+    const deepKey = mainModelOptionKey({ tier: 'deep', id: 'mistral-medium-2604' });
+    const picked = findMainModelOptionByKey(opts, deepKey);
+    expect(picked?.tier).toBe('deep');
+
+    const balancedKey = mainModelOptionKey({ tier: 'balanced', id: 'mistral-medium-2604' });
+    expect(findMainModelOptionByKey(opts, balancedKey)?.tier).toBe('balanced');
+  });
+
+  it('round-trips: a deep config → deep key → back to the deep option', () => {
+    const key = selectMainModelKey(opts, 'deep', undefined);
+    expect(findMainModelOptionByKey(opts, key)?.tier).toBe('deep');
   });
 });
