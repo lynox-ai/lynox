@@ -816,9 +816,11 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // $0.40/$2 was ~3.75× too low for this newer model). cacheRead is NOT published
   // for Medium 3.5 → apply the gen-3 convention (cacheWrite=input, cacheRead=input
   // ×0.1, as mistral-large-2512 does); verify against La Plateforme when available.
-  // vision:false per the verify-live-or-false convention (Mistral advertises Medium
-  // 3.5 as multimodal, but a live image check is owed before flipping to GEN3 —
-  // a false-NO is a clean pre-flight throw; a false-YES is a silent wrong answer).
+  // vision VERIFIED live vs the Mistral API 2026-07-22 (two probes: red/blue split
+  // PNG and green/yellow quadrant PNG — colors and positions named correctly on
+  // both), completing the check the verify-live-or-false convention owed here →
+  // GEN3. Medium 3.5 carries both the balanced and deep Mistral tiers, so a
+  // false-NO would hard-block every image message on the BYOK-Mistral main.
   'mistral-medium-2604': {
     id: 'mistral-medium-2604',
     provider: 'openai',
@@ -827,7 +829,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_LARGE,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
     uiLabel: 'Mistral Medium 3.5',
     provenance: 'EU',

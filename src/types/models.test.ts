@@ -497,11 +497,15 @@ describe('ModelCapability registry', () => {
     expect(MODEL_CAPABILITIES['mistral-small-2603']!.features.vision).toBe(false);
     expect(MODEL_CAPABILITIES['mistral-large-2512']!.features.toolUse).toBe(true);
 
-    // Gen-3 Mistral is multimodal (verified vs the live Mistral API 2026-07-18):
-    // the four -2512 ids the product tier-routes carry vision:true so an uploaded
-    // image reaches the model instead of tripping the openai-adapter throw (#2).
+    // Gen-3 Mistral is multimodal (verified vs the live Mistral API: -2512 ids
+    // 2026-07-18, mistral-medium-2604 2026-07-22): every id the product
+    // tier-routes carries vision:true so an uploaded image reaches the model
+    // instead of tripping the openai-adapter throw (#2). mistral-medium-2604 is
+    // load-bearing — it is BOTH the balanced and deep Mistral tier, so a stale
+    // vision:false here hard-errors every image message on the Mistral main.
     for (const id of ['ministral-3b-2512', 'ministral-8b-2512',
-                      'ministral-14b-2512', 'mistral-large-2512']) {
+                      'ministral-14b-2512', 'mistral-large-2512',
+                      'mistral-medium-2604']) {
       expect(MODEL_CAPABILITIES[id]!.features.vision, id).toBe(true);
     }
     // Legacy / opt-in Mistral stays vision:false by decision (rafael 2026-07-18) —

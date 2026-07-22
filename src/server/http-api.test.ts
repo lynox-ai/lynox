@@ -2411,12 +2411,12 @@ describe('LynoxHTTPApi', () => {
         expect(am!['contextWindow']).toBe(262_144);
         expect(am!['uiLabel']).toBe('Mistral Medium 3.5');
         // Mistral lineage carries different feature flags than Claude: no
-        // Anthropic-style extended-thinking toggle, and Medium 3.5
-        // (mistral-medium-2604) is TEXT-ONLY (no vision) — see
-        // MISTRAL_FEATURES_LARGE in models.ts.
+        // Anthropic-style extended-thinking toggle. Medium 3.5
+        // (mistral-medium-2604) is multimodal — vision verified live 2026-07-22,
+        // see MISTRAL_FEATURES_GEN3 in models.ts.
         const features = am!['features'] as Record<string, boolean>;
         expect(features['extendedThinking']).toBe(false);
-        expect(features['vision']).toBe(false);
+        expect(features['vision']).toBe(true);
         expect(features['toolUse']).toBe(true);
       } finally {
         providerSpy.mockRestore();
