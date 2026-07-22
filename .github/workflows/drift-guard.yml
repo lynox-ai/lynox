@@ -4,14 +4,8 @@ name: Drift Guard
 # public-repo-guard don't: committed merge-conflict markers, removed features
 # reappearing in live docs, and dead path references in CLAUDE.md / docs /
 # READMEs. The lefthook pre-push hook runs the same scan locally; this job is the
-# gate — `git push --no-verify` skips the hook, not this. It IS a required status
+# gate — `git push --no-verify` skips the hook, not this. It is a required status
 # check on main.
-#
-# It is not, however, "unbypassable", which this comment used to claim:
-# `enforce_admins` is false on this repo, so `gh pr merge --admin` overrides every
-# required check, and that is a merge path the project uses deliberately. Say what
-# the guard actually does — a guard described as stronger than it is buys a false
-# sense of safety, which is worse than a guard known to be partial.
 
 on:
   pull_request:

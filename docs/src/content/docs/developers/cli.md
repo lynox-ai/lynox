@@ -9,11 +9,11 @@ The `lynox` CLI is the **installer + server entrypoint**. All interactive featur
 live in the Web UI. All scripted/agent workflows go through the HTTP API
 (`lynox --http-api`).
 
-Pre-HN-launch we trimmed the power-user CLI modes (single-task invocation,
+In a recent release we trimmed the power-user CLI modes (single-task invocation,
 file-watch, manifest runner, background-task creator, output redirect). They
 were undocumented in the user-facing surface, had no external callers, and were
-not exercised by CI. We will revisit them once OSS-launch traffic shape tells
-us which (if any) are missed.
+not exercised by CI. We will revisit them if usage shows which (if any) are
+missed.
 
 ## Entry Modes
 

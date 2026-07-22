@@ -23,7 +23,7 @@ In the Web UI, **double-tap ⌘ (macOS) or Ctrl (Windows/Linux)** to start or st
 | **Mistral Voxtral**   | ~2 s              | ~10 % on mixed DE/EN          | $0.003/min  | Mistral La Plateforme (Paris) | Default for cloud and BYOK setups. Fast, EU-hosted, no training on your audio. |
 | **whisper.cpp**       | several seconds (CPU) | ~23 % on mixed DE/EN      | free        | Local (your server)        | Air-gapped self-host. OSS fallback when no Mistral key is set.    |
 
-Numbers come from the Phase 0 spike on ten self-recorded German-business-speech clips (see PRD `voice-transcription-v2.md`). whisper.cpp uses the ggml-base model on CPU.
+Numbers come from an internal spike on ten self-recorded German-business-speech clips (from an internal design review). whisper.cpp uses the ggml-base model on CPU.
 
 ## Configuration
 

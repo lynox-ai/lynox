@@ -202,7 +202,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
       // Era 1: flag OFF — contacts land in ds_contacts only, never mirrored.
       const crmOff = new CRM(ds, { engineDb: engine, subjectGraphEnabled: false });
-      crmOff.upsertContact({ name: 'Beatrice Vogt', email: 'bea@helvetia.ch', phone: '+41790000001', company: 'Helvetia AG', type: 'customer' });
+      crmOff.upsertContact({ name: 'Beatrice Vogt', email: 'bea@example-insurer.example', phone: '+41790000001', company: 'Example Insurer AG', type: 'customer' });
       crmOff.upsertContact({ name: 'Quentin Zephyr', email: 'q@zephyr.io', company: 'Zephyr Robotics' });
       expect(new SubjectStore(engine).listSubjects()).toHaveLength(0); // nothing mirrored yet
 
@@ -213,10 +213,10 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
       const subs = new SubjectStore(engine);
       expect(subs.listSubjects().map(s => s.name).sort())
-        .toEqual(['Beatrice Vogt', 'Helvetia AG', 'Quentin Zephyr', 'Zephyr Robotics']);
+        .toEqual(['Beatrice Vogt', 'Example Insurer AG', 'Quentin Zephyr', 'Zephyr Robotics']);
       const bea = subs.findCanonical('Beatrice Vogt', 'person')!;
       const detail = subs.getPersonDetail(bea.id)!;
-      expect(detail.email).toBe('bea@helvetia.ch');     // decrypts
+      expect(detail.email).toBe('bea@example-insurer.example');     // decrypts
       expect(detail.phone).toBe('+41790000001');
       const rawEmail = (engine.getDb().prepare('SELECT email FROM people WHERE subject_id = ?').get(bea.id) as { email: string }).email;
       expect(rawEmail).toMatch(/^enc:/);                  // encrypted at rest

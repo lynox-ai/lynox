@@ -224,7 +224,7 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  *
  * **Deny-list — admin-only patterns** (cookie users get 403 for these):
  *  - `LYNOX_*`        engine-internal infra (HTTP_SECRET, VAULT_KEY, BUGSINK_DSN, etc.)
- *  - `MANAGED_*`      CP-managed control-plane secrets
+ *  - `MANAGED_*`      infrastructure-managed secrets (hosted deployments)
  *  - `MAIL_ACCOUNT_*` channel-managed via Mail settings UI (writes race the
  *                     dedicated mail-account form — they have their own path)
  *  - `GOOGLE_OAUTH_*` channel-managed via Google OAuth flow

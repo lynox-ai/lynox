@@ -34,10 +34,8 @@ pre-push:
         - merge
         - rebase
     positioning-guard:
-      # Keep public hero/landing copy + the npm description aligned with
-      # POSITIONING.md (Vocabulary → Avoid): no legacy category labels
-      # ("AI engine", "agent runtime"), no OSI-flavoured "open source", no
-      # tired "The AI that…" patterns. Tightly scoped to copy surfaces.
+      # Checks public copy against the internal positioning source.
+      # Tightly scoped to copy surfaces.
       run: bash scripts/positioning-guard.sh
       skip:
         - merge
@@ -64,8 +62,8 @@ pre-commit:
       run: npm run typecheck
       stage_fixed: true
     hex-guard:
-      # PRD-LIGHT-MODE PR 3 — fail if a web-ui change introduces hardcoded
-      # 6-digit hex outside the allowlisted asset-export / categorical paths.
+      # Fail if a web-ui change introduces hardcoded 6-digit hex outside the
+      # allowlisted asset-export / categorical paths.
       run: bash packages/web-ui/scripts/hex-guard.sh
       skip:
         - merge
