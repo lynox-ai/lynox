@@ -4,10 +4,11 @@ One JSON file per wire shape (`http.ts` + `shapes.ts`). Never hand-edit a
 fixture; change the serializer (a wire-contract change) and let the pair tests
 tell you the new golden bytes. Verification is split by who owns the
 serializer: shapes the ENGINE emits are captured/shape-verified against the
-real serializer in this repo's CI; shapes the control plane emits are verified
-against its real route handlers by the private repo's pair tests (this repo's
-CI still pins each of those fixtures' exact key tree + types via the typed
-mirrors in `tests/contract-http.test.ts`).
+real serializer in this repo's CI; shapes the control plane emits are the
+private repo's responsibility — its pair tests drive them against its real
+route handlers. Independently of either side's pair tests, this repo's CI
+pins every fixture's exact key tree + types via the typed mirrors in
+`fixtures/mirrors.ts`.
 
 `mirrors.ts` carries the `satisfies`-typed mirror of every fixture — the
 compile-checked weld between fixture bytes and the `http.ts`/`shapes.ts`

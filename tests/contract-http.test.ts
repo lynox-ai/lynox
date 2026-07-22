@@ -83,6 +83,8 @@ describe('contract fixtures: typed mirrors (fixture bytes ≡ contract types)', 
   }
 
   it('the managed summary fixture is internally consistent (available = budget + topup; used = available - balance)', () => {
+    // Reads the mirror; binds to the fixture bytes transitively via the
+    // deep-equal test above.
     const f = TYPED_MIRRORS['usage-summary-response.managed.json'] as UsageSummaryResponse;
     expect(f.available_cents).toBe(f.budget_cents! + f.topup_cents!);
     expect(f.used_cents).toBe(f.available_cents! - f.balance_cents!);
