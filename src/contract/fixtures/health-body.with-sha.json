@@ -1,0 +1,24 @@
+{
+  "status": "ok",
+  "version": "0.0.0-test",
+  "build_sha": "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd",
+  "uptime_s": 123,
+  "process": {
+    "memory_used_mb": 100,
+    "memory_rss_mb": 200,
+    "cpu_user_ms": 1000,
+    "cpu_system_ms": 500
+  },
+  "system": {
+    "memory_total_mb": 16384,
+    "memory_free_mb": 8192,
+    "load_avg_1m": 0.5,
+    "load_avg_5m": 0.25,
+    "disk_total_gb": 100,
+    "disk_used_gb": 50
+  },
+  "engine": {
+    "active_sessions": 0,
+    "total_threads": 0
+  }
+}

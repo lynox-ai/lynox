@@ -47,6 +47,7 @@ describe('Config', () => {
     delete process.env['LYNOX_MEMORY_SCORING_V2'];
     delete process.env['LYNOX_RETRIEVAL_SHADOW_LOG'];
     delete process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'];
+    delete process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     delete process.env['LYNOX_TIER_SET_JSON'];
@@ -362,6 +363,40 @@ describe('Config', () => {
     process.env['LYNOX_MEMORY_SCORING_V2'] = 'yes';
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().memory_scoring_v2).toBeUndefined(); // non-enum ignored, never coerced
+  });
+
+  it('reads debug_wire_capture from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_DEBUG_WIRE_CAPTURE'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().debug_wire_capture).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_DEBUG_WIRE_CAPTURE'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().debug_wire_capture).toBe(false);
+    }
+    // a non-enum value is ignored (never coerced to true — an errant env must not
+    // silently enable content capture for a tenant)
+    vi.resetModules();
+    process.env['LYNOX_DEBUG_WIRE_CAPTURE'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().debug_wire_capture).toBeUndefined();
+  });
+
+  it('keeps debug_wire_capture from config.json (not stripped by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      debug_wire_capture: true,
+    }));
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.debug_wire_capture).toBe(true);
+    expect(config.default_tier).toBe('balanced'); // config not nulled by the new key
   });
 
   it('reads retrieval_shadow_log from env explicitly (true/1 vs false/0, no coerce)', async () => {

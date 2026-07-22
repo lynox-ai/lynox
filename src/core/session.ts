@@ -2097,6 +2097,18 @@ export class Session {
       // checkpoint reads existingCount from SQLite and only appends the
       // delta, so duplicate fires are no-ops.
       onMessageCheckpoint: () => this._persistMessages(),
+      // Extended debug capture (operator surface). Gated by the owner-consent
+      // `debug_wire_capture` setting: pass the persist sink ONLY when it is on, so a
+      // normal turn never builds the snapshot (the Agent seam checks callback presence).
+      // Resolves RunHistory lazily at emit time so it always targets the live store; a
+      // persist failure is swallowed — debug capture must never break a real turn.
+      // See pro docs/internal/prd/extended-debug-capture.md §9 step 2.
+      onWireSnapshot: userConfig.debug_wire_capture === true
+        ? (snapshot) => {
+            try { engine.getRunHistory()?.insertWireSnapshot(snapshot); }
+            catch { /* never break a turn on a debug-capture persist failure */ }
+          }
+        : undefined,
       promptUser: this._promptUser
         ? (q: string, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
         : undefined,

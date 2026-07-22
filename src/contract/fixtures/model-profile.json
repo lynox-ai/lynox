@@ -1,0 +1,8 @@
+{
+  "provider": "openai",
+  "api_base_url": "https://llm.example.invalid/v1",
+  "api_key": "TEST-API-KEY",
+  "model_id": "test-model-1",
+  "context_window": 128000,
+  "max_tokens": 16000
+}

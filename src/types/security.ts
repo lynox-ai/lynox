@@ -1,6 +1,8 @@
 // === Sealed Secrets ===
 
 import type { MemoryScopeRef } from './memory.js';
+// Wire contract (CP emits `LYNOX_NETWORK_POLICY`) — SoT in src/contract/vocab.ts.
+import type { NetworkPolicy } from '../contract/vocab.js';
 
 export type SecretScope = 'http_header' | 'http_body' | 'bash_env' | 'any';
 
@@ -50,7 +52,7 @@ export interface PipelineCostEstimate {
 // === Isolation & Tenants (Phase 3) ===
 
 export type IsolationLevel = 'shared' | 'scoped' | 'sandboxed' | 'air-gapped';
-export type NetworkPolicy = 'allow-all' | 'allow-list' | 'deny-all' | 'guarded';
+export type { NetworkPolicy };
 export type HistoryAccess = 'none' | 'own' | 'all';
 
 // === Isolation (shared types — enforcement in lynox-pro) ===

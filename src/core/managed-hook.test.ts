@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createManagedHook } from './managed-hook.js';
 import type { RunContext } from './engine.js';
 
@@ -369,5 +372,112 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     // isStale() is evaluated first, so the message is the staleness one — the mirror
     // term (mirror ≤ 0) is never reached even though it would refuse.
     await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/control plane temporarily unreachable/i);
+  });
+});
+
+/**
+ * Contract fixture pair (K-W2, PRD-CORE-PRO-CONTRACT §2.3 #1/#2).
+ *
+ * The golden fixtures in `src/contract/fixtures/` are shared bytes: the control
+ * plane's pair tests assert its REAL route handlers accept/produce them, and
+ * these tests drive the engine's REAL serializer/parser against the same files.
+ * A field rename on either side fails one of the two suites before it ships.
+ */
+describe('managed-hook contract fixtures (K-W2)', () => {
+  const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), '../contract/fixtures');
+  const load = (name: string): unknown =>
+    JSON.parse(readFileSync(resolve(fixturesDir, name), 'utf8'));
+
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  // Hooks whose onInit started real intervals — shut down in afterEach even
+  // when an assertion rejects mid-test, so no live timer pins the worker.
+  let liveHooks: Array<ReturnType<typeof createManagedHook>> = [];
+  const mkHook = (): ReturnType<typeof createManagedHook> => {
+    const hook = createManagedHook();
+    liveHooks.push(hook);
+    return hook;
+  };
+
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+  });
+
+  afterEach(async () => {
+    for (const hook of liveHooks) await hook.onShutdown?.();
+    liveHooks = [];
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  it('the REAL flush serializer produces exactly the usage-flush-request fixture (generator test)', async () => {
+    fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    // Seed the two runs the fixture describes: 3c on `balanced`, 12c on `deep`.
+    hook.onAfterRun?.('TEST-RUN-0001', 0.03, { modelTier: 'balanced' } as unknown as RunContext);
+    hook.onAfterRun?.('TEST-RUN-0002', 0.12, { modelTier: 'deep' } as unknown as RunContext);
+    await hook.onShutdown?.(); // final flush
+    const flushCall = fetchSpy.mock.calls.find(([url]) => {
+      const u = String(url);
+      return u.includes('/internal/usage/') && !u.endsWith('/status');
+    });
+    expect(flushCall).toBeDefined();
+    const body = JSON.parse(String((flushCall![1] as { body: string }).body)) as unknown;
+    expect(body).toEqual(load('usage-flush-request.json'));
+  });
+
+  it('the REAL flush parser dereferences `allowed` off the usage-flush-response fixture', async () => {
+    // No onInit: the hook starts allowed=false + stale. The ONLY state writer
+    // in this test is flush() parsing the fixture — if the fixture's `allowed`
+    // key were renamed, `data.allowed` would be undefined, the run below would
+    // be refused, and this test would fail (the rename-fails-both-sides probe).
+    fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => load('usage-flush-response.json') });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    hook.onAfterRun?.('TEST-RUN-0001', 0.03, CTX);
+    await hook.onShutdown?.(); // flushes through the fixture response → allowed=true, fresh
+    await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).resolves.toBeUndefined();
+  });
+
+  it('the REAL /status parser consumes the managed fixture: allowed + balance anchor the mirror', async () => {
+    fetchSpy = vi.fn().mockImplementation((url: unknown) => {
+      const u = String(url);
+      if (u.endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => load('usage-status-response.managed.json') });
+      }
+      return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    await hook.onInit?.();
+    // Fixture says allowed:true, balance 2985c → a run is admitted.
+    await expect(hook.onBeforeRun!('TEST-RUN-0001', CTX)).resolves.toBeUndefined();
+    // The mirror anchored on the fixture's balance_cents: spending past it
+    // (2985c = $29.85 → $30 spend drives the mirror ≤ 0) refuses the next run.
+    hook.onAfterRun?.('TEST-RUN-0002', 30, CTX);
+    await expect(hook.onBeforeRun!('TEST-RUN-0003', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await hook.onShutdown?.();
+  });
+
+  it('the REAL /status parser consumes the hosted fixture: null balance leaves the mirror inert', async () => {
+    fetchSpy = vi.fn().mockImplementation((url: unknown) => {
+      const u = String(url);
+      if (u.endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => load('usage-status-response.hosted.json') });
+      }
+      return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    await hook.onInit?.();
+    // allowed:true + balance null (BYOK/hosted): no mirror, spend never refuses.
+    hook.onAfterRun?.('TEST-RUN-0001', 100, CTX);
+    await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
   });
 });

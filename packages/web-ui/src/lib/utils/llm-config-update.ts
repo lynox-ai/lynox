@@ -9,7 +9,10 @@
 // in this logic; the unit tests below pin the contract so a future refactor
 // can't re-introduce the leak.
 
-export type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
+// Provider vocabulary from the vendored wire-contract copy (single source of
+// truth, byte-identical to core `src/contract/vocab.ts`).
+import type { LLMProvider } from '../contract/vocab.js';
+export type { LLMProvider };
 
 export interface CatalogModel {
   id: string;

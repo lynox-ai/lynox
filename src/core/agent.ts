@@ -37,6 +37,8 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
+import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
+import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -184,6 +186,8 @@ export class Agent implements IAgent {
       await this.onMessageCheckpoint();
     } catch { /* fire-and-forget — persistence failures must not break the loop */ }
   }
+  /** See `AgentConfig.onWireSnapshot` — operator extended-debug-capture persist sink. */
+  private readonly onWireSnapshot?: ((snapshot: WireSnapshot) => void) | undefined;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -574,6 +578,7 @@ export class Agent implements IAgent {
     this.tools = config.tools ?? [];
     this.onStream = config.onStream ?? null;
     this.onMessageCheckpoint = config.onMessageCheckpoint;
+    this.onWireSnapshot = config.onWireSnapshot;
     this.promptUser = config.promptUser;
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
@@ -1506,6 +1511,59 @@ export class Agent implements IAgent {
       ...getBetasForProvider(this.provider),
       ...(lazyToolsActive ? ['advanced-tool-use-2025-11-20' as AnthropicBeta] : []),
     ];
+
+    // Extended debug capture — a provider-agnostic REDACTED snapshot of the fully-
+    // assembled outbound request (system + the FULL user message incl. the ephemeral
+    // tail + the offered tools + params). Two consumers off ONE build:
+    //   • Surface B / dev sink — the faithful model-fitness eval's wire-replay, gated
+    //     by the dev file-gate (`isWireSinkEnabled`, default OFF).
+    //   • Surface A / operator — persisted to history.db for the debug export, gated by
+    //     the owner-consent `debug_wire_capture` setting (the Session passes
+    //     `onWireSnapshot` only when it is on; undefined here = off).
+    // Both gated OFF by default, so the whole block is skipped on a normal turn. Built
+    // ONCE per turn (before the retry loop); never throws into the hot path. See
+    // wire-capture.ts + pro docs/internal/prd/extended-debug-capture.md.
+    const wantWireSink = isWireSinkEnabled();
+    if (wantWireSink || this.onWireSnapshot) {
+      try {
+        const { userMessage, systemText, toolNames } = extractWireFields(outboundMessages, systemBlocks, toolsDef);
+        const snapshot = buildWireSnapshot({
+          runId: this.currentRunId,
+          turnIndex: outboundMessages.length,
+          model: this.model,
+          provider: this.provider,
+          systemText,
+          userMessage,
+          toolNames,
+          maxTokens: this.maxTokens,
+          ephemeralTailChars: ephemeralBlocks.length > 0 ? JSON.stringify(ephemeralBlocks).length : 0,
+        });
+        if (wantWireSink) writeWireSnapshot(snapshot);
+        if (this.onWireSnapshot) this.onWireSnapshot(snapshot);
+      } catch {
+        // debug capture must never break a real turn
+      }
+    }
+
+    // Raw-body capture (eval / wire-replay path) — the FULL unredacted agent-level request
+    // for the Session-faithful model-fitness eval to re-send to candidate models. Separate,
+    // louder gate; dev/staging-eval only. See wire-capture.ts + extended-debug-capture.md.
+    if (isRawWireSinkEnabled()) {
+      try {
+        captureRawWireBody({
+          runId: this.currentRunId,
+          turnIndex: outboundMessages.length,
+          model: this.model,
+          provider: this.provider,
+          system: systemBlocks,
+          messages: outboundMessages,
+          tools: toolsDef,
+          maxTokens: this.maxTokens,
+        });
+      } catch {
+        // eval capture must never break a real turn
+      }
+    }
 
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
       try {

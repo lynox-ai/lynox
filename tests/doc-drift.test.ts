@@ -14,6 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { BUILTIN_ROLES } from '../src/core/roles.js';
 import { MISTRAL_MODEL_MAP } from '../src/types/models.js';
 import { normalizeBillingTier } from '../src/server/billing-tier.js';
+import { CANONICAL_BILLING_TIERS, LEGACY_BILLING_TIER_ALIASES } from '../src/contract/vocab.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p: string): string => readFileSync(resolve(repoRoot, p), 'utf8');
@@ -76,24 +77,25 @@ describe('doc<->code drift: LLM provider framing (src/types/models.ts LLMProvide
   });
 });
 
-describe('cross-repo drift: billing-tier canonical spec (core/pro pin the same frozen literal)', () => {
-  // FROZEN canonical spec — the SAME literals are pinned emitter-side in pro
-  // (packages/managed/src/domain/env-abi-contract.test.ts). Core cannot import
-  // pro (separate repo; CI checks out one at a time), so each repo asserts its
-  // OWN billing-tier.ts against this shared literal: this catches CORE drifting
-  // from the spec, and pro's mirror catches pro drifting — together they keep
-  // the two modules in lockstep without a cross-repo fs read (the equality
-  // guard that was previously missing).
-  const CANONICAL_TIERS = ['hosted', 'managed', 'managed_pro'] as const;
-  const CANONICAL_ALIASES: Record<string, string> = { starter: 'hosted', eu: 'managed' };
-
-  for (const t of CANONICAL_TIERS) {
-    it(`\`${t}\` normalizes to itself`, () => {
-      expect(normalizeBillingTier(t)).toBe(t);
-    });
-  }
-  it('legacy aliases map exactly as the frozen spec', () => {
-    for (const [legacy, canonical] of Object.entries(CANONICAL_ALIASES)) {
+describe('billing-tier canonical spec (src/contract/vocab.ts is the single source of truth)', () => {
+  // The frozen-literal twin this block used to carry is retired: the shared
+  // vocabulary now lives ONCE in `src/contract/vocab.ts`, and the CROSS-repo
+  // lockstep is enforced on pro's side against its vendored byte-identical copy
+  // (contract-sync CI job + CONTRACT.lock). What core still pins here is the
+  // SEMANTIC spec itself — the wire values the CP emits — so a contract edit
+  // that changes them fails CI until it is made deliberately, in this file, in
+  // the same commit.
+  it('canonical tiers are exactly hosted/managed/managed_pro', () => {
+    expect([...CANONICAL_BILLING_TIERS].sort()).toEqual(['hosted', 'managed', 'managed_pro'].sort());
+  });
+  it('legacy aliases are exactly starter→hosted and eu→managed', () => {
+    expect(LEGACY_BILLING_TIER_ALIASES).toEqual({ starter: 'hosted', eu: 'managed' });
+  });
+  it('the src/server/billing-tier.ts shim re-exports the contract behavior', () => {
+    // `normalizeBillingTier` here is imported from the SHIM path — this asserts
+    // the shim actually delegates to the contract module.
+    for (const t of CANONICAL_BILLING_TIERS) expect(normalizeBillingTier(t)).toBe(t);
+    for (const [legacy, canonical] of Object.entries(LEGACY_BILLING_TIER_ALIASES)) {
       expect(normalizeBillingTier(legacy)).toBe(canonical);
     }
   });
@@ -104,33 +106,9 @@ describe('cross-repo drift: billing-tier canonical spec (core/pro pin the same f
   });
 });
 
-describe('env-ABI consume-side: loadConfig reads the engine-consumed var names (src/core/config.ts)', () => {
-  // The CP emits these EXACT names (pinned emitter-side in pro
-  // env-abi-contract.test.ts). If a consume-side rename drops one here, the ABI
-  // silently breaks — the ACCOUNT_TIER-unset / worker-profile-dead bug class.
-  // Match the actual `process.env['NAME']` read (not a bare substring) so a
-  // renamed read fails CI even if a comment still mentions the old name; a
-  // future rename window must add the new read-alias to keep this green.
-  const config = read('src/core/config.ts');
-  const ENGINE_CONSUMED = [
-    'LYNOX_ACCOUNT_TIER',
-    'LYNOX_WORKER_PROFILE',
-    'LYNOX_MODEL_PROFILES_JSON',
-    // LYNOX_LLM_MODE retired 2026-06-13 with the eu-sovereign axis — the engine
-    // no longer reads it (Mistral is selected via provider+endpoint). Kept out
-    // of this consume-pin on purpose; do not re-add.
-    'LYNOX_LLM_PROVIDER',
-    // LYNOX_MAX_TIER / LYNOX_DEFAULT_TIER / ANTHROPIC_BASE_URL now read through
-    // the canonical-first alias registry in src/core/env.ts (the rename window).
-    // Their consume-side pin moved to the ENV_ALIASES block below — do not
-    // re-add them here as bare process.env literals.
-  ];
-  for (const name of ENGINE_CONSUMED) {
-    it(`reads ${name} via process.env`, () => {
-      expect(config).toMatch(new RegExp(`process\\.env\\['${name}'\\]`));
-    });
-  }
-});
+// The former ENGINE_CONSUMED block (loadConfig read pins) is retired: the
+// generated forward test in tests/contract-env.test.ts asserts every registry
+// row's read form at its real site, driven by src/contract/env-registry.ts.
 
 describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/core/env.ts)', () => {
   // Renamed CP→engine / self-host vars route through the ENV_ALIASES registry
@@ -177,3 +155,6 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
     });
   }
 });
+
+// The former BEHAVIOR_CONSUMERS block (#830) is retired the same way — its five
+// triples are registry rows now, asserted by the generated forward test.

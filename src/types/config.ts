@@ -124,6 +124,17 @@ export interface AgentConfig {
    */
   onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
   /**
+   * Extended debug capture (operator surface). When set, the Agent builds a REDACTED
+   * per-turn {@link import('../core/wire-capture.js').WireSnapshot} at the outbound
+   * seam and emits it here so the Session can persist it to `history.db`
+   * (RunHistory.insertWireSnapshot) for the debug export. The callback's PRESENCE is
+   * the gate — the Session passes it only when the owner-consent `debug_wire_capture`
+   * setting is on, so on a normal turn this is undefined and the whole capture block
+   * is skipped. Fire-and-forget: the hook must never throw or block the loop (the
+   * Agent wraps the call, and a persist failure must not affect a real turn).
+   */
+  onWireSnapshot?: ((snapshot: import('../core/wire-capture.js').WireSnapshot) => void) | undefined;
+  /**
    * H-024 shadow mode: per-conversation `ToolCallTracker` for anomaly
    * observability. The Session owns one instance so the rolling 20-call
    * window survives Agent recreation (setModel / setEffort / _recreateAgent).
@@ -507,6 +518,22 @@ export interface LynoxUserConfig {
    * NOT in PROJECT_SAFE_KEYS — never agent-settable.
    */
   durable_memory_enabled?: boolean | undefined;
+  /**
+   * Extended debug capture (operator surface). When true, the engine persists a
+   * REDACTED per-turn {@link import('../core/wire-capture.js').WireSnapshot} — the
+   * fully-assembled outbound request (system-prompt hash, the FULL last user message
+   * incl. the ephemeral tail with the `<secrets>` catalog scrubbed, the offered tool
+   * names/count, tool_choice/temperature/max_tokens) — to `history.db`, and the debug
+   * chat export bundles it per run. Surfaces "what the model actually SAW" so a
+   * behaves-differently-than-expected report becomes a read, not an instrumentation
+   * dig (see pro `docs/internal/prd/extended-debug-capture.md`). Default false =
+   * capture off, byte-identical hot path. THIS is the owner-consent gate for the
+   * operator path (the DEV file-sink of Step 1 is a separate, DEV-only switch).
+   * Owner-scoped, per-instance. Operator-only per-tenant flip; intentionally NOT in
+   * PROJECT_SAFE_KEYS — never agent-settable (an injected agent must not be able to
+   * turn on content capture).
+   */
+  debug_wire_capture?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */

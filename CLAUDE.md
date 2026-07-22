@@ -79,7 +79,10 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Key Patterns
 
-- Types: single source of truth in src/types/index.ts — never duplicate
+- Types: single source of truth in src/types/index.ts — never duplicate. EXCEPT the cross-repo
+  wire contract: everything in `src/contract/` (tier vocabulary, env-ABI registry, wire shapes)
+  is the SoT for core AND its vendored consumers (web-ui in-repo copy, the private control plane)
+  — changes there are wire-contract changes, see `src/contract/README.md`.
 - Tools: ToolRegistry + ToolContext dependency injection
 - Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`) + malicious-write scan (`checkWriteContent` in `output-guard.ts`, wired into `write_file`/`edit_file`) + configurable outbound network policy (`network_policy`: allow-all default / deny-all / allow-list, gates `http_request`/`api_setup`/`web_research`). `ToolCallTracker` (tool-call anomaly detector) is wired via `Session._toolCallTracker`. Env vars always override vault (priority: env > vault > config).
 - Cost & rate limits: Session $50, daily $100, monthly $500 (all configurable via config.json). HTTP tool: 200 req/hr, 2000 req/day default. Per-session: 100 HTTP requests, 500 max agent iterations. Spawn depth: 5 levels, $5 default budget per spawn.
