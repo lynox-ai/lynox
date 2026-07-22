@@ -22,7 +22,16 @@ const MISTRAL_BASE = 'https://api.mistral.ai/v1';
 const FIREWORKS_BASE = 'https://api.fireworks.ai/inference/v1';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, 'artefact-out');
-const FIXTURES = '/Users/rafaelburlet/projects/lynox-workspace/pro/docs/internal/prd/fixtures/artefact-quality';
+
+/** Directory holding the good/bad artefact-quality anchor fixtures. Not shipped
+ *  in this repo; point the env var at your local anchor set. */
+function anchorFixturesDir(): string {
+  const dir = process.env['LYNOX_ARTEFACT_ANCHOR_DIR'];
+  if (!dir) {
+    throw new Error('LYNOX_ARTEFACT_ANCHOR_DIR is not set — point it at the artefact-quality anchor fixtures directory');
+  }
+  return dir;
+}
 
 const BRIEF = `Erstelle ein schönes, modernes, self-contained HTML-Artefakt zum Thema "KI-Agenten-Trends 2026: Technologien, Anwendungen & Zukunft".
 
@@ -115,6 +124,7 @@ async function generate(c: Candidate, key: string): Promise<string> {
 async function main(): Promise<void> {
   const runs = Number(process.argv[process.argv.indexOf('--runs') + 1]) || 2;
   const keys = loadKeys();
+  const FIXTURES = anchorFixturesDir();
   mkdirSync(OUT_DIR, { recursive: true });
   const judgeKey = keys.anthropic;
   if (!judgeKey) { console.error('need anthropic key for the judge'); process.exit(1); }

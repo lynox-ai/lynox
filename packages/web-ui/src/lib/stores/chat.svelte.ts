@@ -2938,7 +2938,7 @@ export async function resumeThread(threadId: string): Promise<void> {
  * currently streaming, refetch the canonical message list from the server
  * and swap it in when it's at least as long as the local snapshot.
  *
- * Why this exists (F13, rafael HN-launch QA 2026-05-27): when the user
+ * Why this exists (F13, demo-walk hardening): when the user
  * navigates away from /app mid-stream (e.g. clicks Settings), ChatView
  * unmounts + the SSE listener is torn down. The engine finishes the run
  * server-side, persists the assistant message to history, and bills the

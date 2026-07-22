@@ -294,7 +294,7 @@
 	onMount(() => {
 		void loadDisplayName();
 		loadOnboardingState();
-		// F13 (rafael HN-launch QA 2026-05-27): if the user navigated away
+		// F13 (demo-walk hardening): if the user navigated away
 		// mid-stream and came back, the SSE listener got torn down with the
 		// previous ChatView while the engine kept running the turn and
 		// persisted the assistant reply to history. The in-memory chat store
@@ -1071,8 +1071,8 @@
 			// OpenAI-compatible vs straight Anthropic) — pre-fix this hardcoded
 			// "sk-ant-..." and console.anthropic.com regardless of active provider,
 			// confusing every Hosted-BYOK tenant who picked Mistral in Settings →
-			// LLM and was then asked to paste an Anthropic key (caught on staging
-			// meridian-demo walk 2026-05-27).
+			// LLM and was then asked to paste an Anthropic key (caught on a
+			// staging meridian-demo walk).
 			try {
 				const cfg = await fetch(`${getApiBase()}/config`).then(r => r.json()) as { api_base_url?: string };
 				activeApiBaseUrl = cfg.api_base_url ?? '';
@@ -2310,7 +2310,7 @@
 					<!-- EU AI Act Art. 50 §1: persistent visible disclosure that the
 					     message is AI-generated. data-ai-generated exposes the same
 					     fact machine-readably for assistive tech / regulators.
-					     Layout 2026-05-27: badge floats inline with the FIRST
+					     Layout: badge floats inline with the FIRST
 					     TEXT block — not the first block of any type. A turn
 					     that opens with ▸THINKING + tool_calls (Anthropic
 					     extended-thinking + tool-use path) previously stranded

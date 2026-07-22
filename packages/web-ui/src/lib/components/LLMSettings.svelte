@@ -139,8 +139,8 @@
 		// different provider tile + Save will succeed against config.json but
 		// have zero runtime effect because `LYNOX_LLM_PROVIDER` keeps winning
 		// on the next reload. Surface this so we can render a banner instead
-		// of accepting the click in silence (rafael self-found 2026-05-27 while
-		// verifying #42 — turned the provider-switch fix into a silent no-op
+		// of accepting the click in silence (found during demo-walk hardening
+		// while verifying a provider switch — turned the fix into a silent no-op
 		// under the env-recommending docs path).
 		env_overrides?: { provider?: boolean };
 		// F1b: effective active provider + base, surfaced ONLY when env-pinned
@@ -870,7 +870,7 @@
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
 			// footer keeps showing the previous provider after a switch and the user
-			// thinks the save didn't take (rafael 2026-05-27/29 Anthropic↔Mistral).
+			// thinks the save didn't take (found during demo-walk hardening, Anthropic↔Mistral).
 			if (typeof window !== 'undefined') {
 				window.dispatchEvent(new CustomEvent('lynox:provider-changed'));
 			}

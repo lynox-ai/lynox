@@ -10,9 +10,7 @@ name: no-ai-attribution
 # trailer is a worse trade than living with it. So this asserts only that the commits
 # a PR ADDS are clean, and the history heals going forward.
 #
-# Honesty note: this is only a gate if it is a REQUIRED status check — otherwise it is
-# a suggestion. And with `enforce_admins: false` on this repo, even a required check
-# yields to `gh pr merge --admin`.
+# This job is a required status check on main.
 
 on:
   pull_request:

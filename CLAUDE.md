@@ -125,9 +125,7 @@ bypass any of them — that is what makes them gates rather than suggestions. (`
 `pnpm typecheck` is `tsc --noEmit` over `src` and never touched the SvelteKit package — 1038 files
 that nothing checked.)
 
-One honest limit remains: `enforce_admins` is **false** on this repo, so `gh pr merge --admin`
-overrides *every* required check. That merge path is used deliberately, so do not call a guard
-unbypassable while it exists.
+Commits/PRs merge only through the required CI checks.
 
 - Commits: English, imperative, first line ≤72 chars
 - **No AI attribution** — enforced by the commit-msg hook above. It is self-promotion and does

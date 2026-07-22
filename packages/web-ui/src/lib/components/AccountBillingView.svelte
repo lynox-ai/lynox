@@ -103,8 +103,8 @@
 		     copy is only honest when a portal URL is actually wired. For
 		     Hosted-BYOK demo tenants without LYNOX_STRIPE_PORTAL_LOGIN_URL set,
 		     fall back to a neutral "Plan-Status und Support-Kontakt" line so
-		     we don't promise something the page can't deliver. Found 2026-05-27
-		     during meridian-demo HN-readiness walk. -->
+		     we don't promise something the page can't deliver. Found during a
+		     meridian-demo demo-walk hardening pass. -->
 		<p class="text-sm text-text-muted">
 			{stripePortalUrl ? t('account.billing.subtitle') : t('account.billing.subtitle_no_portal')}
 		</p>

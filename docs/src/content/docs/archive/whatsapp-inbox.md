@@ -1,6 +1,6 @@
 ---
 title: WhatsApp Inbox (removed)
-description: WhatsApp Business integration — removed pre-HN-launch pending staging E2E coverage. This doc is kept as a historical reference only.
+description: WhatsApp Business integration — removed in a recent release pending staging E2E coverage. This doc is kept as a historical reference only.
 sidebar:
   hidden: true
 ---
