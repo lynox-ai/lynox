@@ -3,8 +3,9 @@
 Everything in this directory is **wire contract**: values and shapes that the
 engine (this repo), the web-ui package, and the private control plane
 (`lynox-pro`) must agree on because they are parsed off the wire — env vars the
-control plane writes into tenant containers, JSON blobs inside them, and (in
-later waves) HTTP request/response bodies and the capability boot-marker.
+control plane writes into tenant containers, JSON blobs inside them, the
+money/health HTTP bodies (`http.ts`), and (in a later wave) the capability
+boot-marker.
 
 **A change here is never local.** Two consumers compile byte-identical vendored
 copies of these files:
@@ -31,6 +32,11 @@ Rules:
   package. Never run a formatter over a vendored copy.
 - Symbols that migrated here are listed in `migrated.ts`; redefining one
   locally anywhere else fails CI (pure re-export shims are the permitted form).
+- **Fixtures** (`fixtures/`): golden JSON per HTTP/wire-JSON shape, generated
+  from the real serializers — never hand-edited; generator refs + value rules
+  (obviously-fake only) in `fixtures/README.md`. Source-only: plain tsc copies
+  no JSON/MD into `dist/`, so fixture-consuming tests read from
+  `src/contract/fixtures/`.
 
 Design + wave plan: `lynox-pro` `docs/internal/PRD-CORE-PRO-CONTRACT.md` <!-- drift-guard:allow: doc lives in the private lynox-pro repo -->
 (ROOT A / DEF-0030).

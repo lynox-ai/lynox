@@ -42,6 +42,7 @@ import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
+import type { HealthBody, UsageSummaryResponse } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -640,7 +641,7 @@ export class LynoxHTTPApi {
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
-  private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
+  private healthCache: { data: HealthBody; expiresAt: number } | null = null;
   // 30 s TTL per (period, windowStart) key. Usage Dashboard typically re-opens
   // the tab with the same window multiple times in quick succession — this
   // keeps repeated SQLite scans off the hot path without stale-data risk, since
@@ -709,8 +710,10 @@ export class LynoxHTTPApi {
     return null;
   }
 
-  /** Collect system + process metrics for the health endpoint. Cached 10s. */
-  private async _collectHealthMetrics(): Promise<Record<string, unknown>> {
+  /** Collect system + process metrics for the health endpoint. Cached 10s.
+   *  The body is a WIRE SHAPE (`src/contract/http.ts` HealthBody) — the
+   *  control plane's rollout gate parses `version`/`build_sha` off it. */
+  private async _collectHealthMetrics(): Promise<HealthBody> {
     const now = Date.now();
     if (this.healthCache && this.healthCache.expiresAt > now) return this.healthCache.data;
 
@@ -741,7 +744,7 @@ export class LynoxHTTPApi {
     // misconfigured docker-compose file) that would otherwise surface as a
     // non-null garbage SHA and force every rollout into the rollback path.
     const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
-    const data: Record<string, unknown> = {
+    const data: HealthBody = {
       status: 'ok',
       version: PKG_VERSION,
       build_sha: buildSha.length > 0 ? buildSha : null,
@@ -1081,17 +1084,7 @@ export class LynoxHTTPApi {
     const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
     const isManagedTier = cpSuppliesLLMKey(tier);
 
-    interface CpSummary {
-      managed: boolean;
-      tier?: string;
-      budget_cents?: number;
-      topup_cents?: number;
-      available_cents?: number;
-      used_cents?: number;
-      balance_cents?: number;
-      period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
-    }
-    let cpSummary: CpSummary | null = null;
+    let cpSummary: UsageSummaryResponse | null = null;
     if (isManagedTier && period === 'current') {
       const { fetchControlPlaneUsageSummary } = await import('../core/managed-usage-summary.js');
       cpSummary = await fetchControlPlaneUsageSummary();

@@ -20,18 +20,12 @@
  */
 
 import type { LynoxHooks, RunContext } from './engine.js';
-
-interface UsageReport {
-  run_id: string;
-  model: string;
-  cost_cents: number;
-}
-
-interface FlushResponse {
-  accepted: number;
-  balance_cents: number;
-  allowed: boolean;
-}
+import type {
+  UsageReportRun,
+  UsageFlushRequest,
+  UsageFlushResponse,
+  UsageStatusResponse,
+} from '../contract/http.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_BATCH_SIZE = 10;
@@ -99,7 +93,7 @@ export function createManagedHook(): LynoxHooks {
     30_000,
     Math.min(DEFAULT_RESYNC_INTERVAL_MS, Math.floor(staleThresholdMs / 2)),
   );
-  const pending: UsageReport[] = [];
+  const pending: UsageReportRun[] = [];
   let flushTimer: ReturnType<typeof setInterval> | null = null;
   let resyncTimer: ReturnType<typeof setInterval> | null = null;
   let flushing = false;
@@ -146,7 +140,7 @@ export function createManagedHook(): LynoxHooks {
    * Bugsink so the loss shows up in monitoring instead of silently eroding
    * margin. Best-effort itself — monitoring must never throw into the caller.
    */
-  function reportDrop(dropped: UsageReport[], reason: string): void {
+  function reportDrop(dropped: UsageReportRun[], reason: string): void {
     if (dropped.length === 0) return;
     const cents = dropped.reduce((n, r) => n + (Number.isFinite(r.cost_cents) ? r.cost_cents : 0), 0);
     droppedReports += dropped.length;
@@ -171,7 +165,7 @@ export function createManagedHook(): LynoxHooks {
   }
 
   /** Σ the whole-cent reports in a list — a mirror in-flight bucket sum. */
-  function sumReportCents(reports: UsageReport[]): number {
+  function sumReportCents(reports: UsageReportRun[]): number {
     return reports.reduce((n, r) => n + (Number.isFinite(r.cost_cents) ? r.cost_cents : 0), 0);
   }
 
@@ -192,12 +186,12 @@ export function createManagedHook(): LynoxHooks {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
-        body: JSON.stringify({ runs: batch }),
+        body: JSON.stringify({ runs: batch } satisfies UsageFlushRequest),
         signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
       });
 
       if (res.ok) {
-        const data = (await res.json()) as FlushResponse;
+        const data = (await res.json()) as UsageFlushResponse;
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
       } else {
@@ -217,7 +211,7 @@ export function createManagedHook(): LynoxHooks {
   }
 
   /** Put failed batch back, respecting the max queue size. */
-  function requeueBatch(batch: UsageReport[]): void {
+  function requeueBatch(batch: UsageReportRun[]): void {
     const available = MAX_PENDING - pending.length;
     if (available <= 0) {
       reportDrop(batch, 'requeue-queue-full'); // Queue full, whole batch lost
@@ -240,7 +234,9 @@ export function createManagedHook(): LynoxHooks {
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (res.ok) {
-        const data = (await res.json()) as { allowed: boolean; balance_cents?: number | null };
+        // Parse-tolerant: only `allowed` + `balance_cents` are dereferenced —
+        // the contract type documents the full emitted shape.
+        const data = (await res.json()) as UsageStatusResponse;
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
         // Re-anchor the mirror off the AUTHORITATIVE /status balance (flush's

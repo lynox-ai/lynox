@@ -88,7 +88,7 @@ export interface EnvRegistryRow {
   /** The exact env-var name on the wire. */
   name: string;
   valueKind: EnvValueKind;
-  /** For `json` rows: the `shapes.ts` type both sides round-trip (fixture lands in K-W2). */
+  /** For `json` rows: the `shapes.ts` type both sides round-trip (fixture: `fixtures/model-profile.json`). */
   valueSchema?: 'ModelProfile';
   emitPolicy: EmitPolicy;
   engineConsumed: EngineConsumption;
