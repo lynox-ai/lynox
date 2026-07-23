@@ -292,3 +292,30 @@ describe('tier-qualified identity (balanced == deep collision, Mistral Medium 3.
     expect(selectMainModelKey(vOpts, 'balanced', 'no-such-variant')).toBe('balanced:a-plain');
   });
 });
+
+describe('tier_models providers through the selection helpers (per-tier picker fix)', () => {
+  // A tier_models entry (Fireworks) ships `models: []` + NO `main_chat_models`
+  // — its per-tier options must NOT leak into the standard-mode main picker,
+  // and the helpers must degrade cleanly (no crash, no fake options) when the
+  // active provider is such an entry. Both tier_models models are `tier: null`
+  // in the registry, so any option the helpers invented would fake a band.
+  const fireworksLike: ProviderLike = {
+    models: [],
+    // main_chat_models deliberately absent — mirrors the real catalog entry.
+  };
+
+  it('buildMainModelOptions yields NO options (picker hides, free-text stays)', () => {
+    expect(buildMainModelOptions(fireworksLike, undefined)).toEqual([]);
+  });
+
+  it('selectMainModelKey / selectMainModelId return empty for the empty option list', () => {
+    const opts = buildMainModelOptions(fireworksLike, undefined);
+    expect(selectMainModelKey(opts, 'deep', undefined)).toBe('');
+    expect(selectMainModelId(opts, 'deep', undefined)).toBe('');
+  });
+
+  it('findMainModelOptionByKey resolves nothing for a tier-qualified tier_models id', () => {
+    const opts = buildMainModelOptions(fireworksLike, undefined);
+    expect(findMainModelOptionByKey(opts, 'deep:accounts/fireworks/models/glm-5p2')).toBeUndefined();
+  });
+});

@@ -4343,6 +4343,76 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      // RAW Fireworks tier_set slots — the per-tier picker persists these
+      // directly (provider:'openai' + the canonical Fireworks base), so the
+      // write-gate must mirror the loader for them too: off by default, accepted
+      // only under flag+key, honestly rejected (never silently dropped at load)
+      // when the flag is on but the key is not provisioned.
+      it('PUT /api/config REJECTS a raw Fireworks tier_set slot on managed by default (no flag)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('tier_set');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS a raw Fireworks tier_set slot once the operator opts in AND provisions the key', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', 'cp-fireworks-key');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+            }),
+          });
+          // A hard 200: write-accept ⟺ load-keep — the loader keeps this exact
+          // slot under flag+key, so the gate must accept it (a bare not-403 check
+          // would pass vacuously if a later step rejected it).
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS a raw Fireworks tier_set slot when the flag is on but FIREWORKS_API_KEY is UNSET', async () => {
+        // Same false-compliance seam as the tier_preset variant below: the host
+        // check alone would 200, then the loader drops the slot and the tier
+        // silently reroutes to the base model. The gate must reject up front.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', ''); // flag on, key NOT provisioned
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('FIREWORKS_API_KEY');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       // model-presets W3 — managed tier_preset write-gate. The gate EXPANDS the
       // preset via the shared SoT and 403s honestly (never silent-strip) when a
       // slot routes off the curated allowlist.
