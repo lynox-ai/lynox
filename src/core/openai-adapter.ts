@@ -543,10 +543,29 @@ async function* translateStream(
       }
     }
 
+    // A final `data:` frame with no trailing newline stays in `buffer` after
+    // the read loop — for providers that end the stream right after the
+    // trailing usage frame, that IS the usage. Flush it through the same
+    // usage parse (choices/content in a torn final frame are not recoverable).
+    const tail = (buffer + decoder.decode()).trim();
+    if (tail.startsWith('data: ')) {
+      const data = tail.slice(6).trim();
+      if (data !== '[DONE]') {
+        try {
+          const chunk = JSON.parse(data) as OpenAIStreamChunk;
+          if (chunk.usage) {
+            totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
+            totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
+            totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
+          }
+        } catch { /* torn frame — keep accumulated totals */ }
+      }
+    }
+
     // Terminal events, deferred until all chunks (incl. a trailing usage-only
-    // chunk) are consumed so the token totals are complete. Anthropic event
-    // order is preserved: content_block_stop (at finish_reason time above) →
-    // message_delta → message_stop.
+    // chunk) are consumed so the token totals are complete. Ordering stays
+    // content_block_stop (at finish_reason time above) → message_delta →
+    // message_stop.
     if (finishStopReason !== null) {
       yield {
         type: 'message_delta',
