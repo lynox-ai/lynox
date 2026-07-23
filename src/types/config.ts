@@ -281,6 +281,15 @@ export interface LynoxUserConfig {
   /** Maximum allowed model tier — the cost ceiling. Requests for a higher tier (pipeline steps, run-options) are clamped via `clampTier`. Post-D8 this is the sole tier cap (the budget caps spend); managed + managed_pro set `'deep'`. */
   max_tier?: ModelTier | undefined;
   /**
+   * Operator/CP model blocklist: model-id PREFIXES (e.g. `claude-opus-`) the
+   * engine refuses to run, matched case-insensitively (`isBlockedModelId`).
+   * Orthogonal to `max_tier` (a cost band): this locks specific models. Like
+   * `max_tier`, the env form (`LYNOX_BLOCKED_MODEL_IDS`, comma-separated) WINS
+   * over config.json — it is a lock, not a seed. Empty/unset = nothing blocked
+   * (byte-identical default path).
+   */
+  blocked_model_ids?: string[] | undefined;
+  /**
    * Account-level plan tier, independent of LLM model tier. Post-D8
    * (2026-06) it NO LONGER gates model/tier selection — `applyTierGate`
    * (roles.ts) is a pass-through, so the `max_tier` clamp + the budget are

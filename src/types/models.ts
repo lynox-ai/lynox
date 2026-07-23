@@ -1148,3 +1148,33 @@ export function modelIdExceedsMaxTier(modelId: string, maxTier: ModelTier | unde
   if (tier === null) return maxTier !== 'deep';
   return clampTier(tier, maxTier) !== tier;
 }
+
+/**
+ * Parse the `LYNOX_BLOCKED_MODEL_IDS` wire value (or a config field) into a
+ * clean prefix list: comma-separated, trimmed, empties dropped. Pure; an
+ * unset/blank input yields `[]` (nothing blocked).
+ */
+export function parseBlockedModelIds(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Is this model id blocked by the operator/CP model blocklist? The list holds
+ * model-id PREFIXES (e.g. `claude-opus-`), matched case-insensitively so an id
+ * cannot dodge the lock by casing. An empty/absent list blocks nothing — the
+ * default path stays byte-identical. Orthogonal to {@link modelIdExceedsMaxTier}
+ * (cost band): this is a per-model lock, enforced at config load (tier_set slot
+ * drop), config write (403), and tier resolution (`resolveRunModel`).
+ */
+export function isBlockedModelId(modelId: string, blockedPrefixes: readonly string[] | undefined): boolean {
+  if (!blockedPrefixes || blockedPrefixes.length === 0) return false;
+  const id = modelId.toLowerCase();
+  return blockedPrefixes.some((p) => {
+    const prefix = p.trim().toLowerCase();
+    return prefix.length > 0 && id.startsWith(prefix);
+  });
+}

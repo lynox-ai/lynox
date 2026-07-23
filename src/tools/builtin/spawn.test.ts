@@ -184,6 +184,51 @@ describe('spawn_agent tool', () => {
     expect(result).toContain('ran on `claude-sonnet-4-6`');
   });
 
+  // Model blocklist (LYNOX_BLOCKED_MODEL_IDS → blocked_model_ids): the spawn
+  // path resolves through the same chokepoint, so a deep-tier child under a
+  // blocklist must land on the fast model — never on a blocked id.
+  it('a deep-tier spawn under a blocklist resolves to the fast model, NOT a blocked id', async () => {
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_BLOCKED_MODEL_IDS', 'claude-sonnet-,claude-opus-,claude-fable-');
+    reloadConfig(); // loadConfig caches; drop the cache so the stubbed env applies
+    try {
+      const agent = makeAgent();
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'worker', task: 'Analyze this data', model: 'deep' }] },
+        agent,
+      );
+      // deep → claude-opus-4-6 is blocked → fast fallback (Haiku), reported
+      // truthfully in the section header.
+      expect(result).toContain('ran on `claude-haiku-4-5-20251001`');
+      expect(result).not.toMatch(/claude-(sonnet|opus|fable)-/);
+    } finally {
+      vi.unstubAllEnvs();
+      const { reloadConfig } = await import('../../core/config.js');
+      reloadConfig(); // drop the blocklist-bearing cache for sibling tests
+    }
+  });
+
+  it('REFUSES a spawn profile pinning a blocked model (cannot be substituted)', async () => {
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+    }));
+    vi.stubEnv('LYNOX_BLOCKED_MODEL_IDS', 'claude-fable-');
+    reloadConfig(); // loadConfig caches; drop the cache so the stubbed env applies
+    try {
+      const agent = makeAgent();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'worker', task: 'Analyze', profile: 'pinned' }] },
+          agent,
+        ),
+      ).rejects.toThrow(/model blocklist/);
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig(); // drop the blocklist-bearing cache for sibling tests
+    }
+  });
+
   it('publishes spawnStart and spawnEnd events', async () => {
     const agent = makeAgent({ currentRunId: 'run123' });
     await spawnAgentTool.handler(

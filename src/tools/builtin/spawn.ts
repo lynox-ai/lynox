@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
-import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier } from '../../types/index.js';
+import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, RunAbortedError } from '../../core/agent.js';
@@ -327,6 +327,13 @@ async function executeThinker(
     const band = modelCapability(profile.model_id)?.tier;
     throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
   }
+  // Model blocklist (blocked_model_ids): a profile pinning a blocked model is
+  // refused the same way — a pinned endpoint cannot be substituted, so REFUSE,
+  // not clamp. Same checkpoint as the ceiling guard above (write-accept ⟺
+  // load-keep ⟺ resolve symmetry for the profile raw-id path).
+  if (profile && isBlockedModelId(profile.model_id, userConfig.blocked_model_ids)) {
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: the model is blocked by the operator model blocklist. A profile pins a specific endpoint and cannot be substituted, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a subagent on a permitted model.`);
+  }
 
   // Single chokepoint: the override gate (now a pass-through, D8) THEN CLAMP to
   // the cost ceiling THEN map to the provider's model id. Routing through
@@ -344,6 +351,7 @@ async function executeThinker(
     defaultTier: (resolved?.model ?? 'balanced') as ModelTier,
     accountTier: userConfig.account_tier,
     maxTier: userConfig.max_tier,
+    blockedModelIds: userConfig.blocked_model_ids,
     provider: baseProvider,
   });
   const modelTier = resolvedRun.tier;
@@ -751,6 +759,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         defaultTier: (roleDefault ?? cfgTier ?? 'balanced') as ModelTier,
         accountTier: cfg.account_tier,
         maxTier: cfg.max_tier,
+        blockedModelIds: cfg.blocked_model_ids,
         provider,
       }).modelId;
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;

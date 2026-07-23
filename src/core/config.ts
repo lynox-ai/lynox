@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, TierSet } from '../types/index.js';
-import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability } from '../types/index.js';
+import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
@@ -26,7 +26,7 @@ const LYNOX_DIR = '.lynox';
  * outside the curated set. Self-host (not cp_supplied) never runs this — its
  * slots legitimately carry their own keys.
  */
-export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
+export function applyManagedTierSetConstraints(tierSet: TierSet, blockedModelIds?: readonly string[]): TierSet {
   const out: TierSet = {};
   const anthropicKey = process.env['ANTHROPIC_API_KEY'];
   const mistralKey = process.env['MISTRAL_API_KEY'];
@@ -40,6 +40,11 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
     const slot = tierSet[tier];
     if (!slot) continue;
+    // Model blocklist (LYNOX_BLOCKED_MODEL_IDS): a slot naming a blocked model
+    // is dropped in-memory (the tier falls back to the base provider, where the
+    // tier-resolver enforces the same blocklist). config.json is untouched —
+    // clearing the blocklist restores the user's choice on the next reload.
+    if (isBlockedModelId(slot.model_id, blockedModelIds)) continue;
     // Mistral is the registry-canonical 'mistral' OR the LLMProvider form the
     // settings UI persists ('openai' + a Mistral host — same as standard mode).
     // A non-Mistral host on 'openai' (a tenant trying to sneak a free-text
@@ -352,6 +357,15 @@ export function loadConfig(): LynoxUserConfig {
   // are clamped): `LYNOX_MAX_MODEL_TIER` (canonical) / legacy `LYNOX_MAX_TIER`.
   const maxTier = envTier('LYNOX_MAX_MODEL_TIER');
   if (maxTier) merged.max_tier = maxTier;
+  // Model blocklist: comma-separated model-id PREFIXES the engine refuses to
+  // run (`LYNOX_BLOCKED_MODEL_IDS`, e.g. "claude-opus-"). Mirrors `max_tier`:
+  // env WINS unconditionally over config.json — it is a lock, not a seed.
+  // Unset/blank env leaves any file-config value in place; no value at all =
+  // nothing blocked (byte-identical default path).
+  const blockedModelIdsRaw = process.env['LYNOX_BLOCKED_MODEL_IDS'];
+  if (blockedModelIdsRaw !== undefined && blockedModelIdsRaw.trim() !== '') {
+    merged.blocked_model_ids = parseBlockedModelIds(blockedModelIdsRaw);
+  }
   // Compaction summarizer tier (Slice A, issue #72 cost). A cost-control knob,
   // not a user preference (no UI picker) — mirrors `max_tier` above: env WINS
   // unconditionally rather than only seeding an unset value, so the CP can
@@ -408,6 +422,17 @@ export function loadConfig(): LynoxUserConfig {
   // worker on the main provider is a graceful degrade; failing every task is not.
   if (merged.worker_profile && !merged.model_profiles?.[merged.worker_profile]) {
     merged.worker_profile = undefined;
+  }
+  // Model blocklist × worker profile: background tasks run on the profile's raw
+  // model_id WITHOUT passing through the tier-resolver chokepoint, so a blocked
+  // worker profile must be cleared here (graceful degrade to the main provider,
+  // where the resolver enforces the same blocklist) — same shape as the
+  // dangling-profile guard above.
+  if (merged.worker_profile) {
+    const workerProfile = merged.model_profiles?.[merged.worker_profile];
+    if (workerProfile && isBlockedModelId(workerProfile.model_id, merged.blocked_model_ids)) {
+      merged.worker_profile = undefined;
+    }
   }
   // Provider-agnostic routing (PR-3d): cp_supplied mirrors the billing-tier
   // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
@@ -471,7 +496,7 @@ export function loadConfig(): LynoxUserConfig {
   // config-load (the PRD ship-blocker) — allowlist + CP key-custody. If every
   // slot is dropped, fall back to standard mode.
   if (merged.cp_supplied && merged.tier_set) {
-    merged.tier_set = applyManagedTierSetConstraints(merged.tier_set);
+    merged.tier_set = applyManagedTierSetConstraints(merged.tier_set, merged.blocked_model_ids);
     if (Object.keys(merged.tier_set).length === 0) {
       merged.tier_set = undefined;
       merged.routing_mode = 'standard';

@@ -19,7 +19,7 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier } from '../types/index.js';
+import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, type LynoxUserConfig, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
 import { channels } from './observability.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
@@ -40,6 +40,16 @@ export interface RunModelRequest {
   accountTier: AccountTier | undefined;
   /** Cost ceiling — the resolved tier is clamped down to it. */
   maxTier: ModelTier | undefined;
+  /**
+   * Operator/CP model blocklist (`blocked_model_ids` — model-id prefixes,
+   * case-insensitive). A pinned blocked id is REFUSED (like an over-ceiling
+   * id); a tier whose effective model is blocked falls back to the `fast`
+   * tier of the same provider (or throws when that is blocked too).
+   * Deliberately a REQUIRED property (`undefined` allowed) so every call
+   * site makes an explicit choice — pass the loaded config's
+   * `blocked_model_ids`. Empty/undefined = nothing blocked (byte-identical).
+   */
+  blockedModelIds: readonly string[] | undefined;
   /** Active LLM provider — selects the concrete model id for the resolved tier. */
   provider: LLMProvider;
 }
@@ -75,14 +85,22 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   // the ceiling the id passes through verbatim; the tier is derived (clamped) from
   // the default so callers that need a cost band still get one.
   if (requested !== undefined && normalized === undefined) {
+    // The id can be an operator/agent-authored manifest string; bound + strip
+    // control chars before it enters an error surface (defense against a crafted
+    // step.model poisoning a downstream context).
+    const shownId = requested.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
     if (modelIdExceedsMaxTier(requested, req.maxTier)) {
       const band = modelCapability(requested)?.tier;
-      // The id can be an operator/agent-authored manifest string; bound + strip
-      // control chars before it enters an error surface (defense against a crafted
-      // step.model poisoning a downstream context).
-      const shownId = requested.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
       throw new Error(
         `Model "${shownId}" is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown, treated as deep)'} exceeds the max tier "${req.maxTier ?? ''}". A specific model id cannot be clamped down, so it is refused — request a tier (fast/balanced/deep) instead, which is clamped to the ceiling.`,
+      );
+    }
+    // Model blocklist: a pinned id naming a blocked model is REFUSED — like an
+    // over-ceiling id, a specific id cannot be substituted, so there is nothing
+    // to fall back to (a tier request IS the fallback form).
+    if (isBlockedModelId(requested, req.blockedModelIds)) {
+      throw new Error(
+        `Model "${shownId}" is not permitted on this instance: it is blocked by the operator model blocklist. A specific model id cannot be substituted, so it is refused — request a tier (fast/balanced/deep) instead, which resolves to a permitted model.`,
       );
     }
     return { tier: clampTier(req.defaultTier, req.maxTier), modelId: requested };
@@ -95,7 +113,66 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   // skipped (which let a run reach a model past a lower max_tier).
   const gatedOverride = normalized !== undefined ? applyTierGate(normalized, req.accountTier) : undefined;
   const tier = clampTier(gatedOverride ?? req.defaultTier, req.maxTier);
+  // Model blocklist: the resolved tier must not land on a blocked model. Judge
+  // the EFFECTIVE model — under hybrid routing the tier's slot model is what
+  // actually runs, and an allowed hybrid slot must NOT be falsely downgraded
+  // just because the base provider's mapping for the tier is blocked. A blocked
+  // effective model falls back to the `fast` tier (the cheapest rung); when even
+  // that is blocked, refuse — never run a blocked model silently. NOTE: the
+  // slot lookup makes this branch read the configured tier-set resolver state
+  // (setTierSetResolver); with an empty/absent blocklist the function stays
+  // pure and byte-identical to before.
+  if (req.blockedModelIds && req.blockedModelIds.length > 0) {
+    if (isBlockedModelId(effectiveTierModelId(tier, req.provider), req.blockedModelIds)) {
+      if (tier !== 'fast' && !isBlockedModelId(effectiveTierModelId('fast', req.provider), req.blockedModelIds)) {
+        return { tier: 'fast', modelId: getModelId('fast', req.provider) };
+      }
+      throw new Error(
+        `No permitted model for tier "${tier}" on this instance: the tier's model and the fast-tier fallback are both blocked by the operator model blocklist.`,
+      );
+    }
+  }
   return { tier, modelId: getModelId(tier, req.provider) };
+}
+
+/**
+ * The model id a tier ACTUALLY runs under the active routing mode: the hybrid
+ * tier_set slot's model when configured, else the base provider's mapping.
+ * Used by the blocklist check above so enforcement judges the executed model,
+ * not a base mapping that hybrid routing would override anyway.
+ */
+function effectiveTierModelId(tier: ModelTier, provider: LLMProvider): string {
+  const slotModel = _routingMode === 'hybrid' ? _tierSet?.[tier]?.model_id : undefined;
+  return slotModel ?? getModelId(tier, provider);
+}
+
+/**
+ * Resolve the engine's DEFAULT main-chat tier from user config — `default_tier`
+ * clamped to `max_tier`, then blocklist-checked through {@link resolveRunModel}
+ * (a blocked default falls back to `fast`). With no blocklist this is exactly
+ * the historical `clampTier(normalizeTier(default_tier) ?? 'balanced', max_tier)`
+ * — byte-identical default path. Unlike per-run resolution this NEVER throws:
+ * a fully-blocked ladder (a CP/operator misconfiguration) must not crash-loop
+ * the container (that would take the whole instance down, UI included), so it
+ * keeps the cheapest tier and lets per-run enforcement surface the error.
+ */
+export function resolveDefaultChatTier(
+  uc: Pick<LynoxUserConfig, 'default_tier' | 'max_tier' | 'account_tier' | 'provider' | 'blocked_model_ids'>,
+): ModelTier {
+  const defaultTier = clampTier(normalizeTier(uc.default_tier) ?? 'balanced', uc.max_tier);
+  if (!uc.blocked_model_ids || uc.blocked_model_ids.length === 0) return defaultTier;
+  try {
+    return resolveRunModel({
+      requested: undefined,
+      defaultTier,
+      accountTier: uc.account_tier,
+      maxTier: uc.max_tier,
+      blockedModelIds: uc.blocked_model_ids,
+      provider: uc.provider ?? 'anthropic',
+    }).tier;
+  } catch {
+    return clampTier('fast', uc.max_tier);
+  }
 }
 
 /**
