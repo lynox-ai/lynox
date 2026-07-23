@@ -801,7 +801,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       // Honour the operator model blocklist: without this a managed trial that
       // blocks premium Anthropic ids would still run the Sonnet default here on
       // the CP pool key (the resolved model falls back to the fast tier).
-      ...(agent.toolContext.userConfig?.blocked_model_ids != null
+      ...(agent.toolContext.userConfig?.blocked_model_ids !== undefined
         ? { blockedModelIds: agent.toolContext.userConfig.blocked_model_ids }
         : {}),
     });
