@@ -91,7 +91,7 @@ describe('OpenAIAdapter', () => {
       }
     });
 
-    it('does not crash on a usage-only final chunk with no choices array (Mistral)', async () => {
+    it('survives a usage-only final chunk with no choices array and reports its usage (Mistral)', async () => {
       const server = await createMockServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write(sseChunk({
@@ -120,6 +120,200 @@ describe('OpenAIAdapter', () => {
           .map(e => (e as { delta: { text?: string } }).delta.text)
           .filter(Boolean);
         expect(textDeltas).toEqual(['Hi']);
+        // The trailing chunk carried the ONLY usage of the stream — the
+        // message_delta must be emitted after that chunk is parsed, never
+        // at finish_reason time, or it reports 0/0.
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          delta: { stop_reason?: string };
+          usage: { input_tokens: number; output_tokens: number };
+        };
+        expect(msgDelta.delta.stop_reason).toBe('end_turn');
+        expect(msgDelta.usage.input_tokens).toBe(7);
+        expect(msgDelta.usage.output_tokens).toBe(2);
+        // Event ordering must stay Anthropic-canonical even though the
+        // terminal events are now deferred past the trailing chunk.
+        const types = events.map(e => e.type);
+        expect(types.indexOf('content_block_stop')).toBeLessThan(types.indexOf('message_delta'));
+        expect(types.indexOf('message_delta')).toBeLessThan(types.indexOf('message_stop'));
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports usage from a trailing chunk with empty choices array (OpenAI include_usage / Fireworks)', async () => {
+      // OpenAI `stream_options.include_usage` semantics — used verbatim by
+      // Fireworks: the finish_reason chunk carries `usage: null`, then a
+      // SEPARATE trailing chunk arrives with `choices: []` (empty array, not
+      // missing) and the real usage. The message_delta must carry THIS
+      // chunk's totals — an emission tied to the finish_reason chunk reports
+      // 0/0 tokens downstream (billing, cost guard, run history).
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'fw-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }],
+          usage: null,
+        }));
+        res.write(sseChunk({
+          id: 'fw-1', choices: [{ index: 0, delta: {}, finish_reason: 'length' }],
+          usage: null,
+        }));
+        // Trailing usage chunk: empty choices ARRAY + real usage incl. cache.
+        res.write(sseChunk({
+          id: 'fw-1', choices: [],
+          usage: {
+            prompt_tokens: 18, completion_tokens: 30,
+            prompt_tokens_details: { cached_tokens: 4 },
+          },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          delta: { stop_reason?: string };
+          usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null };
+        };
+        expect(msgDelta).toBeDefined();
+        // finish_reason 'length' still maps to 'max_tokens' after deferral.
+        expect(msgDelta.delta.stop_reason).toBe('max_tokens');
+        // Anthropic semantics: input_tokens excludes cached (18 - 4).
+        expect(msgDelta.usage.input_tokens).toBe(14);
+        expect(msgDelta.usage.output_tokens).toBe(30);
+        expect(msgDelta.usage.cache_read_input_tokens).toBe(4);
+
+        // Ordering: content_block_stop → message_delta → message_stop.
+        const types = events.map(e => e.type);
+        expect(types.indexOf('content_block_stop')).toBeLessThan(types.indexOf('message_delta'));
+        expect(types.indexOf('message_delta')).toBeLessThan(types.indexOf('message_stop'));
+        expect(types.filter(t => t === 'message_stop').length).toBe(1);
+
+        // finalMessage() (fresh request against the same mock) must see the
+        // same totals — it reads the message_delta usage.
+        const msg = await adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }).finalMessage();
+        expect(msg.stop_reason).toBe('max_tokens');
+        expect(msg.usage.input_tokens).toBe(14);
+        expect(msg.usage.output_tokens).toBe(30);
+        expect(msg.usage.cache_read_input_tokens).toBe(4);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports usage from a trailing chunk after a tool_calls finish', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'fw-2', choices: [{
+            index: 0,
+            delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', function: { name: 'get_weather', arguments: '{"q":"ZRH"}' } }] },
+            finish_reason: null,
+          }],
+          usage: null,
+        }));
+        res.write(sseChunk({
+          id: 'fw-2', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          usage: null,
+        }));
+        res.write(sseChunk({
+          id: 'fw-2', choices: [],
+          usage: { prompt_tokens: 25, completion_tokens: 9 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          delta: { stop_reason?: string };
+          usage: { input_tokens: number; output_tokens: number };
+        };
+        expect(msgDelta.delta.stop_reason).toBe('tool_use');
+        expect(msgDelta.usage.input_tokens).toBe(25);
+        expect(msgDelta.usage.output_tokens).toBe(9);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports usage from a final data frame with no trailing newline', async () => {
+      // Some servers close the socket right after the trailing usage frame
+      // without a final newline — the frame must still reach the usage totals
+      // via the post-loop buffer flush.
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'fw-3', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+          usage: null,
+        }));
+        // No trailing newline, no [DONE] — the socket just ends.
+        res.end(`data: ${JSON.stringify({ id: 'fw-3', choices: [], usage: { prompt_tokens: 11, completion_tokens: 3 } })}`);
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          usage: { input_tokens: number; output_tokens: number };
+        };
+        expect(msgDelta.usage.input_tokens).toBe(11);
+        expect(msgDelta.usage.output_tokens).toBe(3);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports 0/0 usage when the provider never sends usage', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'nu-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null };
+        };
+        expect(msgDelta.usage.input_tokens).toBe(0);
+        expect(msgDelta.usage.output_tokens).toBe(0);
+        expect(msgDelta.usage.cache_read_input_tokens).toBeNull();
       } finally {
         server.close();
       }
