@@ -408,6 +408,14 @@ async function* translateStream(
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let totalCachedTokens = 0;
+  // Translated stop_reason, remembered when the finish_reason chunk arrives.
+  // The final message_delta is emitted only AFTER the chunk iteration ends:
+  // OpenAI `stream_options.include_usage` semantics (e.g. Fireworks) put the
+  // terminal usage in a SEPARATE trailing chunk (`choices: []`, `usage` set)
+  // AFTER the finish_reason chunk — emitting at finish_reason time reported
+  // 0/0 tokens for those providers. Mistral attaches usage to the finish
+  // chunk itself; both shapes are covered by deferring the emission.
+  let finishStopReason: string | null = null;
 
   try {
     while (true) {
@@ -527,27 +535,33 @@ async function* translateStream(
           // the downstream StreamProcessor treats 'length' as an unknown
           // stop_reason and the calling Agent loop silently drops the
           // truncated turn (no continuation, no user-visible error). T2-P1.
-          const stopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
+          finishStopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
             : choice.finish_reason === 'stop' ? 'end_turn'
             : choice.finish_reason === 'length' ? 'max_tokens'
             : choice.finish_reason;
-
-          yield {
-            type: 'message_delta',
-            delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: {
-              // Anthropic semantics: input_tokens excludes cached.
-              // Mistral SSE returns prompt_tokens including cached → subtract.
-              input_tokens: Math.max(0, totalInputTokens - totalCachedTokens),
-              output_tokens: totalOutputTokens,
-              cache_creation_input_tokens: null,
-              cache_read_input_tokens: totalCachedTokens || null,
-            },
-          } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
-
-          yield { type: 'message_stop' } as BetaRawMessageStreamEvent;
         }
       }
+    }
+
+    // Terminal events, deferred until all chunks (incl. a trailing usage-only
+    // chunk) are consumed so the token totals are complete. Anthropic event
+    // order is preserved: content_block_stop (at finish_reason time above) →
+    // message_delta → message_stop.
+    if (finishStopReason !== null) {
+      yield {
+        type: 'message_delta',
+        delta: { stop_reason: finishStopReason, stop_sequence: null },
+        usage: {
+          // Anthropic semantics: input_tokens excludes cached.
+          // Mistral SSE returns prompt_tokens including cached → subtract.
+          input_tokens: Math.max(0, totalInputTokens - totalCachedTokens),
+          output_tokens: totalOutputTokens,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: totalCachedTokens || null,
+        },
+      } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
+
+      yield { type: 'message_stop' } as BetaRawMessageStreamEvent;
     }
   } finally {
     reader.releaseLock();
