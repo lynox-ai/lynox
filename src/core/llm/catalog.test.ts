@@ -150,8 +150,9 @@ describe('LLM_CATALOG', () => {
     // catalog.ts re-literals pricing/context_window that models.ts (MODEL_CAPABILITIES) owns,
     // and has drifted before (Opus 15/75, Haiku 0.80/4, corrected in the Sonnet 5 pass). Derive
     // the expectation from the SoT so any future divergence fails HERE, not as a wrong cost display.
+    // `tier_models` re-literals the same fields, so it is under the same guard.
     let checked = 0;
-    for (const model of LLM_CATALOG.flatMap((cat) => cat.models)) {
+    for (const model of LLM_CATALOG.flatMap((cat) => [...cat.models, ...(cat.tier_models ?? [])])) {
       const cap = MODEL_CAPABILITIES[model.id];
       if (!cap) continue; // custom / provider-specific ids not in the registry
       checked++;
@@ -263,6 +264,58 @@ describe('LLM_CATALOG', () => {
     const mistral = getCatalogEntryByKey('mistral')!;
     expect(mistral.preset_id).toBe('mistral');
     expect(catalogEntryKey(mistral)).toBe('mistral');
+  });
+});
+
+describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)', () => {
+  it('fireworks pins exactly the two measured preset-slot models — no tier tag', () => {
+    const entry = getCatalogEntryByKey('fireworks')!;
+    expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
+      'accounts/fireworks/models/glm-5p2',
+      'accounts/fireworks/models/deepseek-v4-pro',
+    ]);
+    for (const m of entry.tier_models ?? []) {
+      // Both are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
+      // measured tier map) — a `tier` tag here would fake a band mapping.
+      expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
+      expect(m.capabilities).toEqual(['tool_use']);   // text-only on Fireworks
+      expect(m.residency).toContain('Fireworks');
+    }
+  });
+
+  it('the tile stays free-text: tier_models does NOT touch models or main_chat_models', () => {
+    // `models: []` is the tile contract (free-text model id, no pretended tier
+    // map) and `tier_models` exists precisely so that contract stays intact.
+    // A standard-mode picker for fireworks would be the #459 lie.
+    const entry = getCatalogEntryByKey('fireworks')!;
+    expect(entry.models).toHaveLength(0);
+    expect(entry.main_chat_models).toBeUndefined();
+  });
+
+  it('tier_models appears only on entries with an allowlisted pinned endpoint', () => {
+    // Same DPA/sub-processor tripwire as the base_url_default test above: a
+    // tier_models list implies lynox may route a user's data to that host from
+    // a picker option, so the entry must pin a vetted endpoint.
+    const offenders = LLM_CATALOG
+      .filter((e) => (e.tier_models?.length ?? 0) > 0)
+      .filter((e) => e.base_url_default === undefined || !isAllowlistedEndpoint(e.base_url_default))
+      .map(catalogEntryKey);
+    expect(offenders).toEqual([]);
+  });
+
+  it('every tier_models id is registered in MODEL_CAPABILITIES (no unmeasured picker option)', () => {
+    for (const entry of LLM_CATALOG) {
+      for (const m of entry.tier_models ?? []) {
+        expect(MODEL_CAPABILITIES[m.id], `${catalogEntryKey(entry)} → ${m.id}`).toBeDefined();
+      }
+    }
+  });
+
+  it('tier_models is runtime-frozen like models', () => {
+    const entry = getCatalogEntryByKey('fireworks')!;
+    expect(Object.isFrozen(entry.tier_models)).toBe(true);
+    expect(Object.isFrozen(entry.tier_models![0])).toBe(true);
+    expect(Object.isFrozen(entry.tier_models![0]!.pricing)).toBe(true);
   });
 });
 
@@ -465,6 +518,24 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
     expect(out?.balanced).toBe('Mistral Large 3');
     expect(out?.fast).toBe('Haiku 4.5');
     expect(out?.deep).toBe('Opus 4.6');
+  });
+
+  it('labels a Fireworks slot via tier_models — never the raw accounts/… path', () => {
+    // A Fireworks model lives ONLY in the entry's `tier_models` (the tile's
+    // `models` is free-text-empty), so the catalog-wide label lookup must scan
+    // tier_models too. Before that, a custom hybrid with a Fireworks deep slot
+    // labelled the composer band with the raw 'accounts/fireworks/models/…' id.
+    const tierSet: TierSet = {
+      fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+      deep: {
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/glm-5p2',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      },
+    };
+    const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
+    expect(out?.deep).toBe('GLM 5.2');
+    expect(out?.fast).toBe('Haiku 4.5');
   });
 });
 

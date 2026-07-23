@@ -35,6 +35,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';
 	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
+	import { tierPickerModels, defaultTierModelId, isHybridTierOption, presetTierSeed } from '../utils/llm-tier-picker.js';
 	// Shared vocabulary from the vendored wire-contract copy (byte-identical to
 	// core `src/contract/vocab.ts`) — replaces the old local enum mirrors.
 	import type { LLMProvider, ModelTier } from '../contract/vocab.js';
@@ -60,6 +61,13 @@
 		preset_id?: string;
 		display_name: string;
 		models: CatalogModel[];
+		/**
+		 * Per-tier picker options for a free-text tile (server catalog.ts). Only
+		 * feeds the hybrid per-tier editor — `models: []` keeps the tile's
+		 * free-text semantics untouched (the standard-mode model field stays a
+		 * text input, keyed off `models.length`).
+		 */
+		tier_models?: CatalogModel[];
 		/** Standard-mode "Main chat model" picker options (server-computed). */
 		main_chat_models?: MainChatOption[];
 		requires_base_url: boolean;
@@ -428,15 +436,8 @@
 		return isExpensiveModel(m.pricing);
 	}
 
-	/**
-	 * Default model id for a tier within a provider's catalog: the first model
-	 * tagged with that tier, falling back to the first model overall. Used to
-	 * seed the hybrid per-tier dropdowns. (Mistral lists two `fast` models —
-	 * this picks the first; the user freely re-picks in the dropdown.)
-	 */
-	function defaultTierModelId(entry: CatalogProvider, tier: ModelTier): string {
-		return (entry.models.find((m) => m.tier === tier) ?? entry.models[0])?.id ?? '';
-	}
+	// `defaultTierModelId` (first model tagged with the tier, else first overall
+	// — tier_models-aware) lives in ../utils/llm-tier-picker.js, imported above.
 
 	/** Catalog entry for a UI key ('anthropic' | 'mistral' | …), if present. */
 	function catalogEntryByKey(key: string): CatalogProvider | undefined {
@@ -444,10 +445,20 @@
 	}
 
 	// Providers selectable per tier in hybrid mode: the catalogued, key-via-vault
-	// ones (Anthropic + Mistral). Free-text endpoints (custom / openai-compat) and
-	// the retired Vertex tile are out of scope for the per-tier picker for now.
+	// ones (Anthropic + Mistral) PLUS free-text tiles that pin per-tier options
+	// via `tier_models` (Fireworks — its two measured preset-slot models; the
+	// tile itself stays free-text). Fully free-text endpoints (custom /
+	// openai-compat, local runtimes) and the retired Vertex tile remain out of
+	// scope. On a CP-supplied instance a tier_models entry is offered only when
+	// the CP demonstrably backs it — evidenced by the server's
+	// `available_tier_presets` signal (same loader hardening that keeps/drops
+	// the slot at config-load), so the editor never offers a provider whose
+	// save could only 403 (predicate unit-tested in ../utils/llm-tier-picker.js).
 	const hybridProviderOptions = $derived(
-		providers.filter((p) => p.models.length > 0 && p.provider !== 'vertex'),
+		providers.filter((p) => isHybridTierOption(p, {
+			cpSuppliesKey: cpSuppliesLLMKeyForInstance(),
+			availablePresets,
+		})),
 	);
 
 	/** Seed each tier's {provider, model} from a saved tier_set, else defaults. */
@@ -475,7 +486,9 @@
 				const entry = catalogEntryByKey(resolved);
 				if (entry && opts.some((o) => catalogEntryKey(o) === resolved)) {
 					key = resolved;
-					if (entry.models.some((m) => m.id === slot.model_id)) modelId = slot.model_id;
+					// tierPickerModels: a saved Fireworks slot's model lives in
+					// `tier_models` (the tile's `models` is free-text-empty).
+					if (tierPickerModels(entry).some((m) => m.id === slot.model_id)) modelId = slot.model_id;
 				}
 			}
 			const entry = catalogEntryByKey(key);
@@ -540,13 +553,21 @@
 		if (next === strategy) return;
 		const preset = next !== 'standard' && next !== 'custom' ? availablePresets[next] : undefined;
 		if (preset && !preset.available) return; // disabled card — no-op
+		const prev = strategy;
 		strategy = next;
 		// Entering Eigene seeds the per-tier editor from the persisted tier_set (a
-		// manual hybrid the user saved before), else provider defaults. It does NOT
-		// carry a preset's slots — a just-selected preset persists tier_set:{}, and a
-		// Fireworks slot has no per-tier provider tile — so switching a preset→Eigene
-		// starts from defaults, not the preset's models.
-		if (next === 'custom') seedTierSlots(config.tier_set);
+		// manual hybrid the user saved before), else provider defaults — then, when
+		// coming FROM a preset card, overlays that preset's resolved slots (the GET
+		// /api/config `available_tier_presets` rows carry each slot's model_id, and
+		// every preset slot now has a per-tier provider option — Fireworks included,
+		// via `tier_models`). So preset→Eigene starts from the preset's actual
+		// models instead of silently dropping to defaults.
+		if (next === 'custom') {
+			seedTierSlots(config.tier_set);
+			const fromPreset = prev !== 'standard' && prev !== 'custom' ? availablePresets[prev] : undefined;
+			const seed = presetTierSeed(fromPreset, hybridProviderOptions.map((p) => ({ key: catalogEntryKey(p), entry: p })));
+			if (Object.keys(seed).length > 0) tierSlots = { ...tierSlots, ...seed };
+		}
 		markDirty();
 	}
 
@@ -899,9 +920,11 @@
 	const presetSelected = $derived(strategy !== 'standard' && strategy !== 'custom');
 	// Hybrid mode is active (managed OR self-host): the per-tier editor replaces
 	// the single-provider flow (tiles + one key + residency/test). The per-tier
-	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral), which
-	// is exactly the managed curated set — so managed hybrid reuses the same UI;
-	// only the per-provider key fields are self-host-only (managed: CP supplies,
+	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral, plus
+	// tier_models tiles like Fireworks where the instance backs them) — on
+	// managed that matches the loader's slot allowlist exactly (see
+	// hybridProviderOptions), so managed hybrid reuses the same UI; only the
+	// per-provider key fields are self-host-only (managed: CP supplies,
 	// server-side `applyManagedTierSetConstraints` sources the keys at load).
 	const hybridActive = $derived(strategy === 'custom');
 	const providerLocked = $derived(!!locks.provider);
@@ -1318,7 +1341,9 @@
 				<!-- Hybrid (PR-4): each tier picks its OWN provider + model. The
 				     Standard/Hybrid decision lives at the TOP of the page (it drives
 				     this section). Provider choices = the catalogued, key-via-vault
-				     ones (Anthropic + Mistral). NO capability gating (D8 2026-06-17):
+				     ones (Anthropic + Mistral) plus tier_models-pinned tiles
+				     (Fireworks; managed-gated via available_tier_presets — see
+				     hybridProviderOptions). NO capability gating (D8 2026-06-17):
 				     every model is selectable (incl. Opus) — the included budget +
 				     per-model cost (⚡ = expensive) control spend. -->
 				<div class="space-y-3">
@@ -1342,7 +1367,7 @@
 									onchange={(e) => setTierModel(tier, e.currentTarget.value)}
 									aria-label={t('llm.model')}
 									class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-									{#each entry?.models ?? [] as m (m.id)}
+									{#each entry ? tierPickerModels(entry) : [] as m (m.id)}
 										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{isExpensive(m) ? ' ⚡' : ''}</option>
 									{/each}
 								</select>

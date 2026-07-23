@@ -65,6 +65,24 @@ export interface CatalogProviderEntry {
   /** Empty array signals free-text fallback — user types model ID themselves. */
   models: ReadonlyArray<CatalogModel>;
   /**
+   * Models the PER-TIER picker (hybrid routing's manual editor) may offer for an
+   * entry whose `models` is deliberately empty. `models: []` is the TILE's
+   * free-text contract — the user (or their runtime) picks the model, and we do
+   * not pretend to a tier map we have not measured — and it stays empty. A tier
+   * SLOT is a different promise: it pins exactly one model per band, so the
+   * picker needs a short, vetted list instead of a free-text field per tier.
+   *
+   * These are therefore only the entry's MEASURED, currently-served models —
+   * each id registered in MODEL_CAPABILITIES, pricing/context mirrored from
+   * there (same drift-guard test as `models`). Entries that ship a `models`
+   * catalog never need this: the picker uses `models` directly.
+   *
+   * Deliberately WITHOUT `tier`: these are preset-slot models (`tier: null` in
+   * the registry — no tier map exists for the endpoint), so tagging a band here
+   * would fake a mapping. The picker defaults to the first entry.
+   */
+  tier_models?: ReadonlyArray<CatalogModel>;
+  /**
    * The models pickable as the MAIN chat model in standard routing — one per
    * reachable band, the Anthropic balanced band split by served-Sonnet variant.
    * Excludes same-band catalog extras standard-mode tier-routing can't reach
@@ -445,6 +463,30 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     // it moved to a currently-served tool-capable model.
     verification: 'verified',
     notes: 'Model is free-text — pick a tool-capable one.',
+    // Per-tier picker options only (`tier_models`, see the interface doc): the
+    // two measured, currently-served models the hybrid presets pin. The TILE
+    // stays free-text (`models: []` above is untouched). No `tier` field — both
+    // are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no tier map).
+    tier_models: [
+      {
+        id: 'accounts/fireworks/models/glm-5p2',
+        label: 'GLM 5.2',
+        context_window: 1_000_000,
+        pricing: { input: 1.40, output: 4.40 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; serves the Efficient preset\'s deep slot. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/deepseek-v4-pro',
+        label: 'DeepSeek v4 Pro',
+        context_window: 1_000_000,
+        pricing: { input: 1.74, output: 3.48 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; alternative deep/big-context model. Text-only (no vision).',
+      },
+    ],
   },
 ];
 
@@ -831,9 +873,14 @@ export function mainChatTierLabelsFromTierSet(
     // provider's tier model (getModelId resolves the served balanced variant).
     // The slot's provider is not needed here — the label is looked up catalog-WIDE
     // by model id, since a slot's model can belong to any provider's entry
-    // (Mistral runs on the openai-wire entry). Fall back to the raw id.
+    // (Mistral runs on the openai-wire entry). `tier_models` is part of the
+    // lookup: a Fireworks slot's model lives ONLY there (the tile is free-text,
+    // `models: []`), and without it the picker would label the tier with the raw
+    // `accounts/fireworks/models/…` path. Fall back to the raw id.
     const modelId = slot?.model_id ?? getModelId(tier, baseProvider);
-    const label = catalog.flatMap((e) => e.models).find((m) => m.id === modelId)?.label ?? modelId;
+    const label = catalog
+      .flatMap((e) => [...e.models, ...(e.tier_models ?? [])])
+      .find((m) => m.id === modelId)?.label ?? modelId;
     pickedIds.push(modelId);
     out[tier] = label;
   }
@@ -850,11 +897,12 @@ for (const entry of LLM_CATALOG) {
     entry.main_chat_models = Object.freeze(mainChat);
   }
   Object.freeze(entry.models);
-  for (const m of entry.models) {
+  for (const m of [...entry.models, ...(entry.tier_models ?? [])]) {
     Object.freeze(m);
     if (m.capabilities) Object.freeze(m.capabilities);
     if (m.pricing) Object.freeze(m.pricing);
   }
+  if (entry.tier_models) Object.freeze(entry.tier_models);
   Object.freeze(entry);
 }
 Object.freeze(LLM_CATALOG);

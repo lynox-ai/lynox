@@ -403,6 +403,19 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
         return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
       }
+      // Write-accept ⟺ load-keep for a RAW Fireworks slot. The per-tier picker
+      // persists Fireworks directly as a tier_set slot (not only via a preset),
+      // and the host check above does not see the CP KEY — but the loader
+      // (applyManagedTierSetConstraints) keeps a Fireworks slot only when
+      // FIREWORKS_API_KEY is also provisioned. With the flag ON and the key
+      // UNSET a 200 here would be false compliance: the loader drops the slot
+      // and silently reroutes the tier to the base model. Mirror the
+      // tier_preset key-check in section 4 and reject honestly.
+      if (fireworksEnabled
+        && !process.env['FIREWORKS_API_KEY']
+        && slotUrl === FIREWORKS_API_BASE) {
+        return `Managed instance: tier_set slot '${tier}' routes to Fireworks, but the credential is not provisioned (FIREWORKS_API_KEY) — it would silently fall back to the base model. Provision the key first.`;
+      }
     }
   }
   // 4. tier_preset (model-presets W3) — EXPAND via the same TIER_PRESETS SoT the
