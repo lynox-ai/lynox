@@ -222,8 +222,9 @@ jobs:
       # the prod control plane admin API to `docker pull + recreate` the
       # staging managed instance with the freshly pushed :staging image.
       # Keeps the prod admin token out of this public repo — only the
-      # dispatch PAT lives here, which can only trigger workflows, not
-      # call the admin API directly.
+      # dispatch PAT lives here. It is scoped to lynox-pro's Contents
+      # (what repository_dispatch requires) and cannot reach the admin
+      # API; it can, however, push to lynox-pro, so treat it as such.
       - name: Dispatch engine redeploy to lynox-pro
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}
