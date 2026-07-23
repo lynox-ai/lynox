@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { resolveRunModel, resolveCrossProviderSlotCreds, setTierSetResolver } from './tier-resolver.js';
+import { resolveRunModel, resolveCrossProviderSlotCreds, setTierSetResolver, resolveDefaultChatTier } from './tier-resolver.js';
 import { getModelId, type ModelTier, type LLMProvider } from '../types/index.js';
 import type { AccountTier } from '../contract/vocab.js';
 
@@ -229,5 +229,121 @@ describe('resolveCrossProviderSlotCreds — the shared FRESH-Agent wire seam (#6
     const creds = resolveCrossProviderSlotCreds('balanced', 'openai', () => undefined);
     expect(creds.crossProviderSlot).toBe(true);
     expect(creds.apiKey).toBeUndefined(); // never a wrong key — a clean 401 surfaces at request time
+  });
+});
+
+describe('resolveRunModel — model blocklist (blocked_model_ids)', () => {
+  const BLOCKED = ['claude-sonnet-', 'claude-opus-', 'claude-fable-'];
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+
+  it('unset/empty blocklist → identical to today (byte-parity)', () => {
+    for (const blockedModelIds of [undefined, [] as string[]]) {
+      const r = resolveRunModel({
+        requested: 'balanced', defaultTier: 'fast', accountTier: 'standard',
+        maxTier: undefined, blockedModelIds, provider: 'anthropic',
+      });
+      expect(r.tier).toBe('balanced');
+      expect(r.modelId).toBe(getModelId('balanced', 'anthropic'));
+    }
+  });
+
+  it('REFUSES a pinned model id matching a blocked prefix (cannot be substituted)', () => {
+    expect(() =>
+      resolveRunModel({
+        requested: 'claude-fable-5', defaultTier: 'balanced', accountTier: 'pro',
+        maxTier: undefined, blockedModelIds: BLOCKED, provider: 'anthropic',
+      }),
+    ).toThrow(/blocked by the operator model blocklist/);
+  });
+
+  it('a pinned id OUTSIDE the blocked families still passes through verbatim', () => {
+    const r = resolveRunModel({
+      requested: 'claude-haiku-4-5-20251001', defaultTier: 'balanced', accountTier: 'pro',
+      maxTier: undefined, blockedModelIds: BLOCKED, provider: 'anthropic',
+    });
+    expect(r.modelId).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('default resolution balanced → blocked Sonnet FALLS BACK to the fast model (Haiku)', () => {
+    // The trial shape: default tier balanced would resolve to a blocked Sonnet;
+    // the run lands on the fast-tier model of the same provider instead.
+    for (const requested of [undefined, 'balanced', 'deep']) {
+      const r = resolveRunModel({
+        requested, defaultTier: 'balanced', accountTier: 'standard',
+        maxTier: undefined, blockedModelIds: BLOCKED, provider: 'anthropic',
+      });
+      expect(r.tier).toBe('fast');
+      expect(r.modelId).toBe(getModelId('fast', 'anthropic'));
+    }
+  });
+
+  it('REFUSES when the fast fallback is blocked too (never runs a blocked model silently)', () => {
+    expect(() =>
+      resolveRunModel({
+        requested: 'balanced', defaultTier: 'balanced', accountTier: 'standard',
+        maxTier: undefined, blockedModelIds: ['claude-'], provider: 'anthropic',
+      }),
+    ).toThrow(/No permitted model for tier/);
+  });
+
+  it('an allowed HYBRID slot is NOT falsely downgraded when the base mapping is blocked', () => {
+    // ⚡-preset shape: balanced routes to a Mistral slot. Blocking the Anthropic
+    // families must not push the tier down — the slot model is what runs.
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: {
+        fast: { provider: 'openai', model_id: 'ministral-8b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+        balanced: { provider: 'openai', model_id: 'mistral-medium-2604', api_base_url: 'https://api.mistral.ai/v1' },
+      },
+    });
+    const r = resolveRunModel({
+      requested: 'balanced', defaultTier: 'balanced', accountTier: 'standard',
+      maxTier: undefined, blockedModelIds: BLOCKED, provider: 'anthropic',
+    });
+    expect(r.tier).toBe('balanced'); // slot model is permitted → no downgrade
+  });
+
+  it('a BLOCKED hybrid slot model falls back to the fast tier', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: {
+        deep: { provider: 'anthropic', model_id: 'claude-fable-5' },
+      },
+    });
+    const r = resolveRunModel({
+      requested: 'deep', defaultTier: 'balanced', accountTier: 'pro',
+      // Blocklist hits the deep slot's model AND the base balanced mapping is
+      // irrelevant — fast (Haiku base) is permitted, so the run lands there.
+      maxTier: undefined, blockedModelIds: ['claude-fable-'], provider: 'anthropic',
+    });
+    expect(r.tier).toBe('fast');
+    expect(r.modelId).toBe(getModelId('fast', 'anthropic'));
+  });
+});
+
+describe('resolveDefaultChatTier — the engine default-tier derivation', () => {
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+
+  it('no blocklist → exactly the historical clamp (byte-parity)', () => {
+    expect(resolveDefaultChatTier({ default_tier: 'deep', max_tier: 'balanced', account_tier: 'standard', provider: 'anthropic', blocked_model_ids: undefined })).toBe('balanced');
+    expect(resolveDefaultChatTier({ default_tier: undefined, max_tier: undefined, account_tier: undefined, provider: undefined, blocked_model_ids: [] })).toBe('balanced');
+  });
+
+  it('a blocked default falls back to fast', () => {
+    expect(resolveDefaultChatTier({
+      default_tier: 'balanced', max_tier: 'deep', account_tier: 'standard',
+      provider: 'anthropic', blocked_model_ids: ['claude-sonnet-', 'claude-opus-', 'claude-fable-'],
+    })).toBe('fast');
+  });
+
+  it('NEVER throws — a fully-blocked ladder keeps the cheapest tier (no boot crash-loop)', () => {
+    expect(resolveDefaultChatTier({
+      default_tier: 'balanced', max_tier: undefined, account_tier: 'standard',
+      provider: 'anthropic', blocked_model_ids: ['claude-'],
+    })).toBe('fast');
   });
 });
