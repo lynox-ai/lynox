@@ -12,15 +12,39 @@
  */
 
 /** Hosts that are never a business's own site: social, directories, marketplaces,
- *  encyclopaedias, job boards, data brokers. A result on one of these is skipped. */
+ *  encyclopaedias, job boards, data brokers, review sites, maps. Matched exactly or
+ *  as a subdomain. Deliberately broad across markets, not CH-only — a national
+ *  directory slipping through is a wrong candidate the user must delete. */
 const NON_BUSINESS_HOSTS: readonly string[] = [
+  // Social / messaging (global)
   'linkedin.com', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
-  'youtube.com', 'tiktok.com', 'pinterest.com', 'wikipedia.org', 'wikimedia.org',
-  'xing.com', 'indeed.com', 'glassdoor.com', 'kununu.com', 'crunchbase.com',
-  'bloomberg.com', 'zoominfo.com', 'dnb.com', 'yelp.com', 'tripadvisor.com',
-  'google.com', 'bing.com', 'duckduckgo.com', 'amazon.com', 'ebay.com',
-  'medium.com', 'reddit.com', 'github.com', 'apple.com', 'play.google.com',
-  'moneyhouse.ch', 'local.ch', 'search.ch', 'zefix.ch', 'northdata.com',
+  'youtube.com', 'tiktok.com', 'pinterest.com', 'threads.net', 'snapchat.com',
+  'whatsapp.com', 'telegram.org', 't.me', 'vk.com', 'weibo.com', 'line.me',
+  // Encyclopaedias / forums / code / publishing
+  'wikipedia.org', 'wikimedia.org', 'reddit.com', 'medium.com', 'github.com',
+  'quora.com', 'substack.com',
+  // Marketplaces / platforms / maps
+  'google.com', 'play.google.com', 'bing.com', 'duckduckgo.com', 'amazon.com',
+  'ebay.com', 'apple.com', 'openstreetmap.org', 'foursquare.com', 'mapquest.com',
+  // Jobs / employer-review
+  'indeed.com', 'glassdoor.com', 'kununu.com', 'xing.com',
+  // Company-data brokers / registries
+  'crunchbase.com', 'bloomberg.com', 'zoominfo.com', 'dnb.com', 'opencorporates.com',
+  'northdata.com', 'manta.com', 'thomasnet.com', 'kompass.com', 'wlw.de',
+  'companieshouse.gov.uk', 'wko.at', 'firmenabc.at', 'herold.at',
+  // Business directories (national)
+  'moneyhouse.ch', 'local.ch', 'search.ch', 'zefix.ch', 'gelbeseiten.de',
+  'pagesjaunes.fr', 'yell.com', 'yellowpages.com', 'paginegialle.it', 'gulesider.no',
+  // Reviews / software-directories
+  'trustpilot.com', 'tripadvisor.com', 'g2.com', 'capterra.com', 'clutch.co',
+];
+
+/** Directory/review brands that operate under MANY country TLDs (yelp.de, yelp.co.uk,
+ *  europages.fr …). Matched when the host is `<brand>.<anything>` — the exact-host
+ *  list above cannot enumerate every TLD. */
+const NON_BUSINESS_BRANDS: readonly string[] = [
+  'yelp', 'europages', 'cylex', 'hotfrog', 'tupalo', 'yellowpages',
+  'kompass', 'paginegialle', 'goldenpages',
 ];
 
 interface DomainResult {
@@ -38,9 +62,30 @@ function hostOf(rawUrl: string): string | null {
   }
 }
 
-/** True if `host` is (or is a subdomain of) a blocklisted non-business host. */
+/** True if `host` is a blocklisted non-business host — either an exact/subdomain
+ *  match, or a multi-TLD directory brand (`yelp.de`, `yelp.co.uk`, `europages.fr`). */
 function isNonBusiness(host: string): boolean {
-  return NON_BUSINESS_HOSTS.some(b => host === b || host.endsWith(`.${b}`));
+  if (NON_BUSINESS_HOSTS.some(b => host === b || host.endsWith(`.${b}`))) return true;
+  // Brand match: the label before the (possibly multi-part) TLD equals a brand.
+  const firstLabel = host.split('.')[0];
+  return firstLabel !== undefined && NON_BUSINESS_BRANDS.includes(firstLabel);
+}
+
+/** Localized search query to surface a business's OWN homepage. The company name
+ *  dominates; a language-matched "official website" suffix biases toward the
+ *  homepage over news/directories. Unknown locales get the bare name (never an
+ *  English suffix that would skew results in a non-English market). */
+const OFFICIAL_SITE_SUFFIX: Record<string, string> = {
+  en: 'official website',
+  de: 'offizielle Website',
+  fr: 'site officiel',
+  it: 'sito ufficiale',
+  es: 'sitio web oficial',
+};
+
+export function buildDomainSearchQuery(company: string, lang: string): string {
+  const suffix = OFFICIAL_SITE_SUFFIX[lang];
+  return suffix ? `${company} ${suffix}` : company;
 }
 
 /**

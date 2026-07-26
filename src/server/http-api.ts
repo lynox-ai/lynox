@@ -41,7 +41,7 @@ import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
 import { ONBOARDING_BASICS, onboardingBasicQuestion, isOnboardingBasicKey } from '../core/onboarding-catalog.js';
 import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onboarding-promotion.js';
-import { deriveBusinessDomain } from '../core/onboarding-domain.js';
+import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
@@ -3804,10 +3804,11 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const company = typeof b?.['company'] === 'string' ? b['company'].trim().slice(0, 120) : '';
       if (!company) { errorResponse(res, 400, 'Missing company'); return; }
+      const lang = typeof b?.['lang'] === 'string' ? b['lang'] : 'en';
       const provider = engine.getSearchProvider();
       if (!provider) { jsonResponse(res, 200, { domain: null }); return; }
       try {
-        const results = await provider.search(`${company} official website`);
+        const results = await provider.search(buildDomainSearchQuery(company, lang));
         jsonResponse(res, 200, { domain: deriveBusinessDomain(results) });
       } catch {
         jsonResponse(res, 200, { domain: null });

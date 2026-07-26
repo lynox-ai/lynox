@@ -237,7 +237,7 @@
 			const res = await fetch(`${getApiBase()}/onboarding/derive-domain`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ company }),
+				body: JSON.stringify({ company, lang: getLocale() }),
 			});
 			if (!res.ok) return;
 			const data = (await res.json()) as { domain: string | null };
