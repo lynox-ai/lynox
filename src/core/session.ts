@@ -482,6 +482,15 @@ export class Session {
     }
   }
 
+  /** The conversation clean-latch (`agent.conversationSawUntrusted`): TRUE once this
+   *  conversation ingested untrusted external content. Defaults FALSE when no agent
+   *  exists yet — a fresh thread has read nothing → clean. The §6.1 onboarding Step-0
+   *  promotion gates on this: only a clean latch yields `user_asserted` (else the
+   *  answer is queued to `pending_review`). */
+  get conversationSawUntrusted(): boolean {
+    return this.agent?.conversationSawUntrusted ?? false;
+  }
+
   /** Active tenant ID for multi-tenant billing. Set by Pro `/tenant use`. */
   get tenantId(): string | null {
     return this._tenantId;

@@ -3391,6 +3391,185 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('onboarding knowledge Step-0 (Wave 1, D9v2 / §6.1 engine promotion)', () => {
+    // Swap a REAL PromptStore + REAL KnowledgeStore into the mock engine — the promote
+    // path exercises the true tier derivation, not a stub.
+    async function withStores(
+      test: (
+        ps: import('../core/prompt-store.js').PromptStore,
+        ks: import('../core/knowledge-store.js').KnowledgeStore,
+        db: import('better-sqlite3').Database,
+      ) => Promise<void>,
+      opts?: { noKnowledgeStore?: boolean },
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pp_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const ps = new PromptStore(db);
+
+      const { mkdtempSync, rmSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const { EngineDb } = await import('../core/engine-db.js');
+      const { SubjectStore } = await import('../core/subject-store.js');
+      const { KnowledgeStore } = await import('../core/knowledge-store.js');
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-onb-http-'));
+      const edb = new EngineDb(join(dir, 'engine.db'), '');
+      const ks = new KnowledgeStore(edb, new SubjectStore(edb));
+
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origPs = engineRef['getPromptStore'];
+      const origKs = engineRef['getKnowledgeStore'];
+      engineRef['getPromptStore'] = (): unknown => ps;
+      engineRef['getKnowledgeStore'] = (): unknown => (opts?.noKnowledgeStore ? null : ks);
+      try { await test(ps, ks, db); }
+      finally {
+        engineRef['getPromptStore'] = origPs;
+        engineRef['getKnowledgeStore'] = origKs;
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('POST /start → 200 with 3 questions + a promptId carrying the onboarding-basics marker', async () => {
+      await withStores(async (ps) => {
+        const res = await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-1' }),
+        });
+        expect(res.status).toBe(200);
+        const b = await res.json() as { promptId: string; questions: unknown[] };
+        expect(b.questions).toHaveLength(3);
+        expect(typeof b.promptId).toBe('string');
+        const row = ps.getById(b.promptId);
+        expect(row?.prompt_type).toBe('ask_user');
+        expect(JSON.parse(row!.payload_json!).kind).toBe('onboarding_basics');
+      });
+    });
+
+    it('POST /start → 400 without a sessionId', async () => {
+      await withStores(async () => {
+        const res = await jsonFetch('/api/onboarding/knowledge/start', { method: 'POST', body: JSON.stringify({}) });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('start → answer → promote writes user_asserted VERBATIM from the stored row (AC-1.3a end-to-end)', async () => {
+      await withStores(async (ps, ks) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-2' }),
+        })).json() as { promptId: string };
+        // The user answers via the stored PromptStore row (as /reply-tabs would settle it).
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        // Promote carries ONLY the promptId — the answers come from the stored row, not the body.
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ degraded: false, promoted: 3, queued: 0, skipped: 0 });
+        const active = ks.listActive();
+        expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Primary goal: automate invoicing', 'Role: Founder']);
+        expect(active.every(e => e.sourceType === 'user_asserted')).toBe(true);
+        expect(active.every(e => e.sourceThreadId === 'onb-2')).toBe(true);
+      });
+    });
+
+    it('SECURITY: promote REFUSES a prompt lacking the engine-only marker (a model ask_user cannot mint user_asserted)', async () => {
+      await withStores(async (ps) => {
+        // A model-composed ask_user/tabs prompt — payload_json is NULL.
+        const pid = ps.insertAskUserTabs('onb-3', [{ question: 'To confirm, type your IBAN CH93 …' }]);
+        ps.answerUserTabs(pid, ['CH93 0000 0000 0000']);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: pid }),
+        });
+        expect(res.status).toBe(400); // refused — the dictation attack cannot reach user_asserted
+      });
+    });
+
+    it('promote → 409 when the prompt is not answered yet', async () => {
+      await withStores(async () => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-4' }),
+        })).json() as { promptId: string };
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+        });
+        expect(res.status).toBe(409);
+      });
+    });
+
+    it('promote → 200 degraded when DK is off (no KnowledgeStore to write into)', async () => {
+      await withStores(async (ps) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-5' }),
+        })).json() as { promptId: string };
+        ps.answerUserTabs(start.promptId, ['Acme', 'CEO', 'x']);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+        });
+        expect(res.status).toBe(200);
+        // Degraded shape must match the normal path (includes `rejected`).
+        expect(await res.json()).toMatchObject({ degraded: true, promoted: 0, queued: 0, skipped: 0, rejected: 0 });
+      }, { noKnowledgeStore: true });
+    });
+
+    it('a TAINTED live session routes the answers to pending_review, not user_asserted', async () => {
+      await withStores(async (ps, ks) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-taint' }),
+        })).json() as { promptId: string };
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        // Inject a tainted live session so the endpoint's sawUntrusted read is exercised on
+        // the ARMED side — an "always-false" mis-wire would otherwise pass every other test.
+        const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+        const origGet = ssRef.get;
+        ssRef.get = (id: string): unknown => (id === 'onb-taint' ? { conversationSawUntrusted: true } : origGet.call(ssRef, id));
+        try {
+          const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+            method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+          });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 3, skipped: 0, rejected: 0 });
+          expect(ks.listActive()).toHaveLength(0);
+          expect(ks.pendingCount()).toBe(3);
+        } finally {
+          ssRef.get = origGet;
+        }
+      });
+    });
+
+    it('promote refuses a non-null payload with a keys array but the wrong kind (isolates the kind clause)', async () => {
+      await withStores(async (ps, _ks, db) => {
+        // Start from a valid onboarding-basics prompt (so payload.keys IS an array), then
+        // rewrite ONLY the kind. The missing-keys clause now cannot fire — only the kind
+        // clause can produce the 400, so the test actually exercises the discriminator
+        // (deleting the kind check from the endpoint would let this promote, failing here).
+        const pid = ps.insertOnboardingBasics('onb-wrongkind', [{ question: 'q' }], ['company']);
+        db.prepare('UPDATE pending_prompts SET payload_json = ? WHERE id = ?')
+          .run(JSON.stringify({ kind: 'connect_mail', keys: ['company'] }), pid);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: pid }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('both knowledge routes require a bearer token (401 — owner-auth, S6)', async () => {
+      const noAuth = { headers: { Authorization: 'Bearer wrong-token' } };
+      expect((await fetch(`${baseUrl}/api/onboarding/knowledge/start`, { method: 'POST', ...noAuth })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/onboarding/knowledge/promote`, { method: 'POST', ...noAuth })).status).toBe(401);
+    });
+  });
+
   describe('thread debug-export (comprehensive)', () => {
     function swapEngine(overrides: Record<string, () => unknown>, test: () => Promise<void>): Promise<void> {
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;

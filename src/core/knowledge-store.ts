@@ -4,7 +4,7 @@ import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
-import { maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
+import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import type { SecretStoreLike } from '../types/security.js';
 import {
@@ -432,6 +432,32 @@ export class KnowledgeStore {
         : null;
       return { ...e, text: this._maskText(e.text), subjectName };
     });
+  }
+
+  /** True iff `text` looks like a secret/credential — a shape match OR a known vault
+   *  value. Uses the STRICT matcher (the generic 40+ token catcher fires even for short
+   *  text): `write()` itself does NOT scan, and a direct caller writing an untrusted-origin
+   *  answer to a NON-credential field (the onboarding Step-0 basics) should bias toward
+   *  rejection — a bare token there is more likely a pasted credential than a business fact.
+   *  Catches vendor-prefixed keys, JWT/Bearer, 40+ char tokens, and known vault values; it
+   *  does NOT catch every short non-vendor credential ([[DEF-onboarding-secret-heuristic]]). */
+  looksLikeSecret(text: string): boolean {
+    return matchesSecretPatternStrict(text) !== null || this.secretStore?.containsSecret(text) === true;
+  }
+
+  /** True iff an ACTIVE entry's decrypted, UNMASKED text begins with `prefix`. The
+   *  onboarding Step-0 dedup key (AC-1.6, exact key-match, NOT semantic): the
+   *  engine-fixed `${label}: ` prefix is plain text (never secret-shaped → never
+   *  masked), so a re-onboarding whose key already has an active fact skips. A bounded
+   *  scan over active rows — onboarding runs once and the active set is small. */
+  hasActiveFactWithPrefix(prefix: string): boolean {
+    const rows = this.db.prepare(
+      "SELECT text FROM knowledge_entries WHERE status = 'active'",
+    ).all() as { text: string }[];
+    for (const r of rows) {
+      if (this.engine.dec(r.text).startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
