@@ -41,6 +41,7 @@ import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
 import { ONBOARDING_BASICS, onboardingBasicQuestion, isOnboardingBasicKey } from '../core/onboarding-catalog.js';
 import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onboarding-promotion.js';
+import { deriveBusinessDomain } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
@@ -3791,6 +3792,26 @@ export class LynoxHTTPApi {
         model: undefined, untrusted: sawUntrusted, step: 0,
       });
       jsonResponse(res, 200, { degraded: false, ...result });
+    });
+
+    // ── Onboarding domain derive (Onboarding W1, Activation Principle) ──
+    // Pre-fill a candidate website from the Step-0 company name so the scan step is a
+    // one-tap CONFIRM, not a blank field (propose→react). NON-agent search (SearXNG/DDG)
+    // + a pure heuristic — no model call, so provider-agnostic and free. Owner-auth
+    // (S6). Degrades to {domain:null} when search is unavailable OR nothing clean
+    // surfaces → the UI leaves the field empty (today's manual fallback, never wrong).
+    this.addStatic('user', 'POST /api/onboarding/derive-domain', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const company = typeof b?.['company'] === 'string' ? b['company'].trim().slice(0, 120) : '';
+      if (!company) { errorResponse(res, 400, 'Missing company'); return; }
+      const provider = engine.getSearchProvider();
+      if (!provider) { jsonResponse(res, 200, { domain: null }); return; }
+      try {
+        const results = await provider.search(`${company} official website`);
+        jsonResponse(res, 200, { domain: deriveBusinessDomain(results) });
+      } catch {
+        jsonResponse(res, 200, { domain: null });
+      }
     });
 
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──

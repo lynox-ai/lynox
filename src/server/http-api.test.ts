@@ -3476,6 +3476,36 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('POST /derive-domain returns a search candidate, 400 on no company, degrades to null', async () => {
+      await withStores(async () => {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origSp = engineRef['getSearchProvider'];
+        // Fake provider: first hit is LinkedIn (skipped by the heuristic), second is the site.
+        engineRef['getSearchProvider'] = (): unknown => ({
+          search: async (): Promise<unknown[]> => [
+            { title: 'X', url: 'https://linkedin.com/company/acme', snippet: '' },
+            { title: 'Acme', url: 'https://www.acme.ch/about', snippet: '' },
+          ],
+        });
+        try {
+          const ok = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+          expect(ok.status).toBe(200);
+          expect(await ok.json()).toEqual({ domain: 'https://acme.ch' });
+
+          const bad = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({}) });
+          expect(bad.status).toBe(400);
+
+          // Search unavailable → degraded null, never a 500 that would block the UI.
+          engineRef['getSearchProvider'] = (): unknown => null;
+          const deg = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+          expect(deg.status).toBe(200);
+          expect(await deg.json()).toEqual({ domain: null });
+        } finally {
+          engineRef['getSearchProvider'] = origSp;
+        }
+      });
+    });
+
     it('POST /start → 400 without a sessionId', async () => {
       await withStores(async () => {
         const res = await jsonFetch('/api/onboarding/knowledge/start', { method: 'POST', body: JSON.stringify({}) });

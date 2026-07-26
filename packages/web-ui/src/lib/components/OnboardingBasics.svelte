@@ -14,10 +14,18 @@
 	interface Props {
 		/** The onboarding thread's session id — carries source_thread_id on every promoted fact. */
 		sessionId: string;
-		/** Basics promoted (or skipped by the user) — advance to the website-scan step. */
-		onDone: () => void;
+		/** Basics promoted (or skipped) — advance to the scan step. Carries the typed
+		 *  company name (or null) so the scan step can pre-fill a candidate domain. */
+		onDone: (company: string | null) => void;
 	}
 	let { sessionId, onDone }: Props = $props();
+
+	/** The typed company answer, matched by its stable catalog header (not position). */
+	function companyAnswer(): string | null {
+		const i = questions.findIndex((q) => q.header === 'Company');
+		const val = (i >= 0 ? answers[i] : answers[0])?.trim();
+		return val && val.length > 0 ? val : null;
+	}
 
 	interface BasicQuestion {
 		question: string;
@@ -44,7 +52,7 @@
 				body: JSON.stringify({ sessionId, lang }),
 			});
 			if (!res.ok) {
-				onDone(); // fail open — skip the basics, continue onboarding
+				onDone(null); // fail open — skip the basics, continue onboarding
 				return;
 			}
 			const data = (await res.json()) as { promptId: string; questions: BasicQuestion[] };
@@ -52,7 +60,7 @@
 			questions = data.questions;
 			answers = data.questions.map(() => '');
 		} catch {
-			onDone(); // engine unreachable — don't block onboarding
+			onDone(null); // engine unreachable — don't block onboarding
 		} finally {
 			loading = false;
 		}
@@ -78,7 +86,7 @@
 			/* best-effort — onboarding continues regardless of a promote hiccup */
 		} finally {
 			saving = false;
-			onDone();
+			onDone(companyAnswer());
 		}
 	}
 
@@ -129,7 +137,7 @@
 				{saving ? t('onboard.basics_saving') : t('onboard.basics_save')}
 			</button>
 			<button
-				onclick={onDone}
+				onclick={() => onDone(null)}
 				disabled={saving}
 				class="rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text-muted hover:text-text disabled:opacity-40 transition-colors"
 			>

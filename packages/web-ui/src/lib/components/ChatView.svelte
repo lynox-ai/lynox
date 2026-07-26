@@ -146,6 +146,12 @@
 	let onboardingJustCompleted = $state(false);
 	let showUrlInput = $state(false); // scan step: collect URL in UI before LLM call
 	let onboardingUrl = $state('');
+	// Activation Principle: the Step-0 company name lets us pre-fill a candidate domain
+	// so the scan step is a one-tap CONFIRM, not a blank field. Derived via a non-agent
+	// search (no model call); fails to empty (manual) — never a wrong value to delete.
+	let onboardingCompany = $state<string | null>(null);
+	let onboardingUrlDeriving = $state(false);
+	let onboardingUrlDerived = $state(false); // the field was pre-filled from the company name
 	// D9v2 Step-0 (engine basics) pre-phase — runs BEFORE the 3-chip model flow, in the
 	// same thread. `onboardingStarted` gates the intro card; `onboardingBasicsDone` gates
 	// the hand-off to the chip stepper. No step-index server state (RF-GAP3) — a reload
@@ -207,15 +213,40 @@
 		}
 	}
 
-	function onBasicsDone(): void {
+	function onBasicsDone(company: string | null): void {
+		onboardingCompany = company;
 		onboardingBasicsDone = true;
 	}
 
 	function handleChipClick(idx: number) {
 		if (idx !== onboardingStep) return;
-		// Step 1: show URL input instead of sending immediately
-		if (idx === 0) { showUrlInput = true; return; }
+		// Step 1: show URL input instead of sending immediately, and pre-fill a
+		// candidate domain from the Step-0 company name (propose→react).
+		if (idx === 0) { showUrlInput = true; void deriveDomainCandidate(); return; }
 		sendOnboardingStep(idx);
+	}
+
+	// Best-effort domain pre-fill from the company name. Non-blocking: the input
+	// appears immediately empty and fills in if a clean candidate returns AND the
+	// user hasn't started typing. No candidate → field stays empty (manual fallback).
+	async function deriveDomainCandidate(): Promise<void> {
+		const company = onboardingCompany?.trim();
+		if (!company || onboardingUrl.trim()) return;
+		onboardingUrlDeriving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/onboarding/derive-domain`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ company }),
+			});
+			if (!res.ok) return;
+			const data = (await res.json()) as { domain: string | null };
+			if (data.domain && !onboardingUrl.trim()) {
+				onboardingUrl = data.domain;
+				onboardingUrlDerived = true;
+			}
+		} catch { /* leave the field empty — manual entry */ }
+		finally { onboardingUrlDeriving = false; }
 	}
 
 	function handleDemoChipClick(idx: number) {
@@ -2247,6 +2278,7 @@
 															type="url"
 															bind:value={onboardingUrl}
 															placeholder={t('onboard.url_placeholder')}
+															oninput={() => { onboardingUrlDerived = false; }}
 															onkeydown={(e) => e.key === 'Enter' && submitOnboardingUrl()}
 															class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[16px] md:text-sm outline-none focus:border-accent/60"
 														/>
@@ -2258,6 +2290,11 @@
 															{t('onboard.url_go')}
 														</button>
 													</div>
+													{#if onboardingUrlDeriving}
+														<p class="text-[11px] text-text-subtle">{t('onboard.url_deriving')}</p>
+													{:else if onboardingUrlDerived}
+														<p class="text-[11px] text-accent-text">{t('onboard.url_derived')}</p>
+													{/if}
 												</div>
 											{:else}
 												<!-- Clickable chip -->

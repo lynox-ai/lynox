@@ -998,6 +998,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.whats_next_chat': { de: 'Einfach loschatten', en: 'Just start chatting' },
 	'onboard.url_placeholder': { de: 'https://deine-website.de', en: 'https://your-website.com' },
 	'onboard.url_go': { de: 'Analysieren', en: 'Analyze' },
+	'onboard.url_deriving': { de: 'Ich suche kurz deine Website…', en: 'Looking up your website…' },
+	'onboard.url_derived': { de: 'Aus deinem Firmennamen vorgeschlagen — passt das?', en: 'Suggested from your company name — is this right?' },
 	// Onboarding Wave 1 (D9v2) — intro card, engine Step-0 basics, closing, per-layer reactivation
 	'onboard.intro_title': { de: 'Willkommen. Lass uns lynox auf dein Geschäft einstellen.', en: "Welcome. Let's tune lynox to your business." },
 	'onboard.intro_lead': { de: 'Zwei kurze Fragen, dann schaue ich mir deine Website an. Dauert ~2 Minuten — du kannst jederzeit überspringen.', en: "Two quick questions, then I'll look at your website. About 2 minutes — you can skip anytime." },
