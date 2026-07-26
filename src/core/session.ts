@@ -358,6 +358,7 @@ export class Session {
         defaultTier: engine.config.model ?? 'balanced',
         accountTier: uc.account_tier,
         maxTier: uc.max_tier,
+        blockedModelIds: uc.blocked_model_ids,
         provider: uc.provider ?? 'anthropic',
       }).tier;
     } else {
@@ -685,6 +686,7 @@ export class Session {
         defaultTier: runOptions.modelTier,
         accountTier: uc.account_tier,
         maxTier: uc.max_tier,
+        blockedModelIds: uc.blocked_model_ids,
         provider: uc.provider ?? 'anthropic',
       }).tier;
       if (overrideTier !== this._model) {
@@ -1719,6 +1721,7 @@ export class Session {
       defaultTier: this.engine.config.model ?? 'balanced',
       accountTier: uc.account_tier,
       maxTier: uc.max_tier,
+      blockedModelIds: uc.blocked_model_ids,
       provider: uc.provider ?? 'anthropic',
     }).tier;
 

@@ -828,6 +828,7 @@ function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config:
     defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
+    blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   }).modelId;
 }

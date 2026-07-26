@@ -40,7 +40,7 @@ import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type { HealthBody, UsageSummaryResponse } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
@@ -350,7 +350,14 @@ const MANAGED_CURATED_HOSTS = new Set<string>([
   'https://api.anthropic.com',
 ]);
 
-function enforceManagedProviderConstraints(update: Record<string, unknown>): string | null {
+function enforceManagedProviderConstraints(
+  update: Record<string, unknown>,
+  // Model blocklist (`blocked_model_ids`, env LYNOX_BLOCKED_MODEL_IDS) — the
+  // write-gate mirror of the loader's slot drop + the resolver's refusal
+  // (write-accept ⟺ load-keep ⟺ resolve): a slot naming a blocked model gets
+  // an honest 403 here, never a 200 followed by a silent load-time reroute.
+  blockedModelIds: readonly string[],
+): string | null {
   // Effective curated HYBRID-SLOT hosts (model-presets W3): the Fireworks host
   // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
   // this managed instance in (LYNOX_MANAGED_FIREWORKS_ENABLED, default OFF — broad
@@ -403,6 +410,13 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
         return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
       }
+      // Model blocklist: reject a slot naming a blocked model honestly at write
+      // time — the loader would drop it in-memory and silently reroute the tier
+      // (the same false-compliance seam as the Fireworks key check below).
+      const slotModelId = (slot as Record<string, unknown>)['model_id'];
+      if (typeof slotModelId === 'string' && isBlockedModelId(slotModelId, blockedModelIds)) {
+        return `Managed instance: tier_set slot '${tier}' model '${slotModelId}' is not available on this instance (operator model blocklist).`;
+      }
       // Write-accept ⟺ load-keep for a RAW Fireworks slot. The per-tier picker
       // persists Fireworks directly as a tier_set slot (not only via a preset),
       // and the host check above does not see the CP KEY — but the loader
@@ -433,6 +447,11 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
       const slotUrl = slot?.api_base_url;
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
         return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
+      }
+      // Model blocklist: a preset whose expanded slot names a blocked model is
+      // rejected honestly (never advertised, then silently rerouted at load).
+      if (slot && isBlockedModelId(slot.model_id, blockedModelIds)) {
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' uses model '${slot.model_id}', which is not available on this instance (operator model blocklist).`;
       }
     }
     // Write-accept ⟺ load-keep for the flag-gated Fireworks slot. The host check
@@ -3912,8 +3931,12 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (_req, res) => {
-      const { readUserConfig, applyManagedTierSetConstraints } = await import('../core/config.js');
+      const { readUserConfig, applyManagedTierSetConstraints, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
       const config = readUserConfig();
+      // Effective model blocklist (env-merged by loadConfig — readUserConfig is
+      // the raw file): threaded into the preset-availability signal and the
+      // picker labels so neither advertises a model the loader drops.
+      const effectiveBlockedModelIds = loadEffectiveConfig().blocked_model_ids;
       // Canonical redaction: strips top-level secrets (with `${key}_configured`
       // markers for the UI) AND nested tier_set/model_profiles api_keys.
       const redacted = redactConfigForResponse(config);
@@ -3977,7 +4000,7 @@ export class LynoxHTTPApi {
       // loader would actually drop a slot AND the write-gate would 403 — no false
       // advertising. Computed once; feeds both the tier_preset lock below and the
       // emitted `available_tier_presets` payload.
-      const tierPresetSignal = buildTierPresetSignal({ isManagedTier });
+      const tierPresetSignal = buildTierPresetSignal({ isManagedTier, blockedModelIds: effectiveBlockedModelIds });
       // Lock metadata for every `can_set_X = false` decision. UI renders a
       // human-readable reason instead of an unexplained disabled input.
       const locks: CapabilityLocks = {};
@@ -4101,7 +4124,7 @@ export class LynoxHTTPApi {
         // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
         // that provider), so the picker must label the CONSTRAINED set — otherwise it shows a
         // model that never routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet).
-        const constrained = isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet) : effectiveTierSet;
+        const constrained = isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet, effectiveBlockedModelIds) : effectiveTierSet;
         const tierLabels = mainChatTierLabelsFromTierSet(constrained, activeProvider);
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
@@ -4239,14 +4262,17 @@ export class LynoxHTTPApi {
       // Schema is `.strict()` (PRD-IA-V2 P1-PR-A2) — unknown fields already
       // 400 before we get here, so this loop only sees real schema fields.
       if (requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
-        const fileConfig = loadConfig() as Record<string, unknown>;
+        const effectiveConfig = loadConfig();
+        const fileConfig = effectiveConfig as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;
         // P3-FOLLOWUP-HOTFIX: value-range validation for the curated provider
         // allowlist. `provider` is in MANAGED_USER_WRITABLE_CONFIG (so the
         // strict-diff below lets it pass) — this is the additional guard that
         // caps the allowed set to Anthropic + Mistral. Reject FIRST so a
-        // malformed save can't pollute downstream config-merge state.
-        const providerReason = enforceManagedProviderConstraints(update);
+        // malformed save can't pollute downstream config-merge state. The
+        // effective model blocklist (env-merged by loadConfig) rides along so
+        // the gate can 403 a blocked tier_set/tier_preset model honestly.
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? []);
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;

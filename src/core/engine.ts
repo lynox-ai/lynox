@@ -13,7 +13,7 @@ import type {
   ContextSource,
 } from '../types/index.js';
 import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
-import { setTierSetResolver } from './tier-resolver.js';
+import { setTierSetResolver, resolveDefaultChatTier } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -272,6 +272,12 @@ export class Engine {
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
+  /**
+   * True when the ctor derived `config.model` from `default_tier` (vs. an
+   * explicit caller-supplied value) — init() may then re-derive it once the
+   * hybrid tier-set resolver is configured (model-blocklist correctness).
+   */
+  private _modelDerivedFromDefaultTier = false;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
@@ -280,7 +286,14 @@ export class Engine {
     // clamped to `max_tier` (G3) so a user pick can never exceed the CP cost
     // ceiling. normalizeTier accepts legacy brand names in an old config.json.
     if (!config.model) {
-      config.model = clampTier(normalizeTier(this.userConfig.default_tier) ?? 'balanced', this.userConfig.max_tier);
+      // `resolveDefaultChatTier` = the historical clampTier(normalizeTier(...))
+      // + the model-blocklist check (`blocked_model_ids`): a default tier whose
+      // model is blocked falls back to `fast`. NOTE: the hybrid tier-set
+      // resolver is not configured yet at ctor time, so this judges the base
+      // provider mapping; init() re-derives after _configureOpenAIResolver so
+      // an allowed hybrid slot is not left falsely downgraded.
+      config.model = resolveDefaultChatTier(this.userConfig);
+      this._modelDerivedFromDefaultTier = true;
     }
     if (!config.effort && this.userConfig.effort_level) {
       config.effort = this.userConfig.effort_level;
@@ -369,7 +382,7 @@ export class Engine {
     // Clamped to `max_tier` (G3) so a user pick can't exceed the CP cost ceiling.
     // New sessions pick this up via `session._model`; open sessions keep their
     // persisted per-thread tier (no cache-prefix churn).
-    this.config.model = clampTier(normalizeTier(this.userConfig.default_tier) ?? 'balanced', this.userConfig.max_tier);
+    this.config.model = resolveDefaultChatTier(this.userConfig);
     // Recreate API client if credentials or provider changed
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
       // Provider switch: load new SDK if needed
@@ -708,6 +721,16 @@ export class Engine {
     // resolve a `ModelTier` via `getModelId(tier, 'openai')` emit Anthropic
     // IDs that downstream endpoints (Mistral, OpenAI, …) reject.
     this._configureOpenAIResolver();
+    // Re-derive the default main-chat tier now that the hybrid tier-set
+    // resolver is configured: the ctor derivation ran before setTierSetResolver,
+    // so under a model blocklist it judged the BASE provider mapping and could
+    // conservatively downgrade a tier whose hybrid slot model is actually
+    // permitted. Only when the ctor derived the tier itself — an explicit
+    // caller-supplied `config.model` is never clobbered. No blocklist → same
+    // value as the ctor (byte-identical default path).
+    if (this._modelDerivedFromDefaultTier) {
+      this.config.model = resolveDefaultChatTier(this.userConfig);
+    }
 
     // Initialize Bugsink error reporting. Gated by:
     //   - bugsink_enabled config flag (UI toggle; default unset = legacy

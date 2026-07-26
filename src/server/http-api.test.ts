@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LynoxHooks } from '../core/engine.js';
+// Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
+// gate tests can override its return value per-test.
+import { loadConfig } from '../core/config.js';
 
 // === Mock dependencies ===
 
@@ -4338,6 +4341,72 @@ describe('LynoxHTTPApi', () => {
             expect(body.error).not.toContain('tier_set slot');
           }
         } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // Model blocklist (LYNOX_BLOCKED_MODEL_IDS): write-accept ⟺ load-keep —
+      // a tier_set slot naming a blocked model gets an honest 403 (the loader
+      // would drop it and silently reroute the tier otherwise).
+      it('PUT /api/config REJECTS a tier_set slot whose model is on the blocklist (403 with a clear reason)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        // loadConfig is module-mocked here, so the env-merged blocklist is
+        // modeled on the mock (the real env→config parse is covered by
+        // config.test.ts).
+        vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep', blocked_model_ids: ['claude-sonnet-', 'claude-opus-', 'claude-fable-'] });
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { fast: { provider: 'anthropic', model_id: 'claude-fable-5' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('model blocklist');
+        } finally {
+          vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep' });
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS the same tier_set slot when no blocklist is set (no over-rejection)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { fast: { provider: 'anthropic', model_id: 'claude-fable-5' } },
+            }),
+          });
+          // Hard 200: write-accept ⟺ load-keep — without a blocklist the loader
+          // keeps this exact slot, so the gate must accept it.
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS a tier_preset whose expanded slot uses a blocked model', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        // ⚖️ balanced preset expands to a claude-sonnet-5 deep slot → blocked.
+        vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep', blocked_model_ids: ['claude-sonnet-'] });
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'balanced' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('model blocklist');
+        } finally {
+          vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep' });
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
         }

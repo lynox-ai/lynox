@@ -58,7 +58,13 @@ function slotHost(slot: { provider: string; api_base_url?: string | undefined })
  * slot (the SAME loader logic — so availability can't disagree with what routes).
  * Self-host: every preset is available (the loader hardening never runs).
  */
-export function buildTierPresetSignal(opts: { isManagedTier: boolean }): Record<string, TierPresetInfo> {
+export function buildTierPresetSignal(opts: {
+  isManagedTier: boolean;
+  /** Effective model blocklist (`blocked_model_ids`) — a managed preset whose
+   *  slot names a blocked model renders unavailable, matching the write-gate
+   *  403 and the loader drop (no false advertising). */
+  blockedModelIds?: readonly string[] | undefined;
+}): Record<string, TierPresetInfo> {
   const out: Record<string, TierPresetInfo> = {};
   for (const name of Object.keys(TIER_PRESETS)) {
     const expanded = expandTierPreset(name);
@@ -66,7 +72,7 @@ export function buildTierPresetSignal(opts: { isManagedTier: boolean }): Record<
     const slotCount = Object.keys(expanded.tier_set).length;
     // Availability: reuse the loader hardening so the card's disabled-state can
     // never diverge from what the loader would actually route (and the write-gate 403).
-    const kept = opts.isManagedTier ? applyManagedTierSetConstraints(expanded.tier_set) : expanded.tier_set;
+    const kept = opts.isManagedTier ? applyManagedTierSetConstraints(expanded.tier_set, opts.blockedModelIds) : expanded.tier_set;
     const available = Object.keys(kept).length === slotCount;
 
     const tiers: TierPresetTierInfo[] = [];

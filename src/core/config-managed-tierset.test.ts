@@ -69,6 +69,36 @@ describe('applyManagedTierSetConstraints (PR-3d managed ship-blocker)', () => {
     expect(out.fast).toBeUndefined();
   });
 
+  // Model blocklist (LYNOX_BLOCKED_MODEL_IDS → blocked_model_ids): a slot naming
+  // a blocked model is dropped in-memory at load (config.json untouched); the
+  // tier falls back to the base provider, where the tier-resolver enforces the
+  // same blocklist. Empty/absent list = byte-identical to before.
+  describe('model blocklist (blocked_model_ids)', () => {
+    it('DROPS a slot whose model_id matches a blocked prefix (case-insensitive)', () => {
+      const out = applyManagedTierSetConstraints(
+        {
+          fast: { provider: 'anthropic', model_id: 'claude-fable-5' },
+          balanced: { provider: 'mistral', model_id: 'mistral-medium-2604' },
+        },
+        ['claude-sonnet-', 'claude-opus-', 'claude-fable-'],
+      );
+      expect(out.fast).toBeUndefined(); // blocked family → dropped
+      expect(out.balanced).toBeDefined(); // non-blocked model survives
+      expect(out.balanced!.model_id).toBe('mistral-medium-2604');
+    });
+
+    it('keeps every slot when the blocklist is empty or absent (no-op default)', () => {
+      const tierSet: Parameters<typeof applyManagedTierSetConstraints>[0] = {
+        fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+        deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' },
+      };
+      const withEmpty = applyManagedTierSetConstraints(tierSet, []);
+      const withAbsent = applyManagedTierSetConstraints(tierSet);
+      expect(Object.keys(withEmpty)).toHaveLength(2);
+      expect(withEmpty).toEqual(withAbsent);
+    });
+  });
+
   // model-presets W3 — the Fireworks canary opt-in. A Fireworks slot is kept ONLY
   // under the operator flag + a CP key, matched by the EXACT canonical endpoint.
   describe('Fireworks canary (LYNOX_MANAGED_FIREWORKS_ENABLED)', () => {

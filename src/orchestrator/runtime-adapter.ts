@@ -353,6 +353,7 @@ export async function spawnViaAgent(
     defaultTier: agentDef.defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
+    blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   });
   const model = runModel.modelId;
@@ -551,6 +552,7 @@ export async function spawnInline(
     defaultTier: (resolved?.model ?? configTier ?? 'balanced') as ModelTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
+    blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   });
   const model = runModel.modelId;

@@ -52,6 +52,7 @@ describe('Config', () => {
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     delete process.env['LYNOX_TIER_SET_JSON'];
     delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_BLOCKED_MODEL_IDS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
     delete process.env['LYNOX_API_BASE_URL'];
     delete process.env['LYNOX_MAX_TIER'];
@@ -85,6 +86,79 @@ describe('Config', () => {
     const config = loadConfig();
     expect(config.default_tier).toBe('balanced');
     expect(config.effort_level).toBe('high');
+  });
+
+  describe('model blocklist (LYNOX_BLOCKED_MODEL_IDS → blocked_model_ids)', () => {
+    const writeUserConfig = (obj: Record<string, unknown>) => {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify(obj));
+    };
+
+    it('parses the env var into blocked_model_ids (comma-separated prefixes, trimmed)', async () => {
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-sonnet-, claude-opus- ,claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().blocked_model_ids).toEqual(['claude-sonnet-', 'claude-opus-', 'claude-fable-']);
+    });
+
+    it('unset env → no blocked_model_ids (byte-identical default path)', async () => {
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().blocked_model_ids).toBeUndefined();
+    });
+
+    it('drops a BLOCKED managed tier_set slot IN-MEMORY; config.json stays byte-identical', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-opus-';
+      writeUserConfig({
+        routing_mode: 'hybrid',
+        tier_set: {
+          fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+          deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' },
+        },
+      });
+      const configPath = join(fakeHome, '.lynox', 'config.json');
+      const bytesBefore = readFileSync(configPath, 'utf-8');
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep).toBeUndefined(); // blocked slot dropped (falls back to base)
+      expect(config.tier_set?.fast?.model_id).toBe('claude-haiku-4-5-20251001'); // allowed slot kept
+      // Non-destructive clamp: the persisted user choice survives on disk, so
+      // clearing the blocklist restores it on the next reload.
+      expect(readFileSync(configPath, 'utf-8')).toBe(bytesBefore);
+    });
+
+    it('empty blocklist env leaves the managed tier_set untouched (no-op)', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = '';
+      writeUserConfig({
+        routing_mode: 'hybrid',
+        tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().tier_set?.deep?.model_id).toBe('claude-opus-4-6');
+    });
+
+    it('clears a worker_profile whose profile model is blocked (raw-id path guard)', async () => {
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+        worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+      });
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBeUndefined();
+    });
+
+    it('keeps a worker_profile whose model is NOT blocked', async () => {
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+        worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-8b-2512' },
+      });
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBe('worker');
+    });
   });
 
   describe('tier_preset expansion (model-presets W2)', () => {

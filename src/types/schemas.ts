@@ -110,6 +110,10 @@ export const LynoxUserConfigSchema = z.object({
   // AND set via env (LYNOX_MAX_TIER / LYNOX_ACCOUNT_TIER) — without them here,
   // `.strict()` strips a persisted value, nulling the whole config on write.
   max_tier:             ModelTierSchema.optional(),
+  // Operator/CP model blocklist (model-id prefixes). Present on the interface
+  // AND set via env (LYNOX_BLOCKED_MODEL_IDS) — without it here, `.strict()`
+  // strips a persisted value, nulling the whole config on write.
+  blocked_model_ids:    z.array(z.string().min(1).max(128)).optional(),
   account_tier:         z.enum(['standard', 'pro']).optional(),
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),

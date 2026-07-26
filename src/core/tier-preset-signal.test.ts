@@ -66,6 +66,17 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     expect(sig['efficient']!.available).toBe(false);
   });
 
+  it('managed with a model blocklist: a preset whose slot names a blocked model is unavailable', () => {
+    // ⚖️ balanced carries a claude-sonnet-5 deep slot — under the blocklist the
+    // loader drops it and the write-gate 403s, so the card must render disabled.
+    const sig = buildTierPresetSignal({ isManagedTier: true, blockedModelIds: ['claude-sonnet-'] });
+    expect(sig['balanced']!.available).toBe(false);
+    // Self-host is untouched — the loader hardening (and thus the blocklist
+    // availability gate) never runs there.
+    const selfHost = buildTierPresetSignal({ isManagedTier: false, blockedModelIds: ['claude-sonnet-'] });
+    expect(selfHost['balanced']!.available).toBe(true);
+  });
+
   it('resolves each tier to a concrete model_id + a catalog label (never a bare tier)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     for (const [name, preset] of Object.entries(sig)) {

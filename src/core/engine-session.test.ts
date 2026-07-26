@@ -819,6 +819,23 @@ describe('Engine + Session (Orchestrator)', () => {
       }
     });
 
+    it('falls back to fast when the requested tier resolves to a blocked model (trial cost-leak guard)', async () => {
+      // Wires the main-session model-resolution path (session.ts repickModel) to
+      // the blocklist: without `blockedModelIds: uc.blocked_model_ids` threaded
+      // through, a trial that blocks premium Anthropic ids would still run Opus
+      // on the CP pool key here. Blocking deep+balanced leaves fast (Haiku) as
+      // the only unblocked tier — the resolver must land there.
+      const { engine, session } = await createEngineAndSession();
+      engine.getUserConfig().blocked_model_ids = ['claude-opus-', 'claude-sonnet-', 'claude-fable-'];
+      try {
+        const result = session.repickModel('deep');
+        expect(result.ok && result.tier).toBe('fast');
+        expect(session.getModelTier()).toBe('fast');
+      } finally {
+        delete engine.getUserConfig().blocked_model_ids;
+      }
+    });
+
     it('refuses a downgrade that overflows the target window, with NO write (D20/F9)', async () => {
       const { engine, session } = await createEngineAndSession();
       // Force a small effective window (floors at MIN_EFFECTIVE = 32k) + an

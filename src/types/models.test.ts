@@ -25,6 +25,8 @@ import {
   setBalancedModelResolver,
   getActiveBalancedModel,
   claudeModelRejectsManualThinking,
+  isBlockedModelId,
+  parseBlockedModelIds,
 } from './models.js';
 
 describe('pricing-vs-TTL contract (cache-write must match the TTL the agent sends)', () => {
@@ -645,5 +647,42 @@ describe('claudeModelRejectsManualThinking (4.7/5-family predicate)', () => {
   it('does NOT flag non-Claude models (governed by their own provider guard)', () => {
     expect(claudeModelRejectsManualThinking('mistral-large-2512')).toBe(false);
     expect(claudeModelRejectsManualThinking('ministral-14b-2512')).toBe(false);
+  });
+});
+
+describe('isBlockedModelId + parseBlockedModelIds (operator model blocklist)', () => {
+  it('matches by PREFIX (families, not exact ids)', () => {
+    const blocked = ['claude-sonnet-', 'claude-opus-', 'claude-fable-'];
+    expect(isBlockedModelId('claude-sonnet-4-6', blocked)).toBe(true);
+    expect(isBlockedModelId('claude-sonnet-5', blocked)).toBe(true);
+    expect(isBlockedModelId('claude-opus-4-6', blocked)).toBe(true);
+    expect(isBlockedModelId('claude-fable-5', blocked)).toBe(true);
+    // Outside the blocked families: untouched.
+    expect(isBlockedModelId('claude-haiku-4-5-20251001', blocked)).toBe(false);
+    expect(isBlockedModelId('mistral-medium-2604', blocked)).toBe(false);
+    expect(isBlockedModelId('accounts/fireworks/models/glm-5p2', blocked)).toBe(false);
+  });
+
+  it('matches case-insensitively (an id cannot dodge the lock by casing)', () => {
+    expect(isBlockedModelId('Claude-Sonnet-4-6', ['claude-sonnet-'])).toBe(true);
+    expect(isBlockedModelId('claude-sonnet-4-6', ['CLAUDE-SONNET-'])).toBe(true);
+  });
+
+  it('an empty/absent list blocks nothing (byte-identical default path)', () => {
+    expect(isBlockedModelId('claude-opus-4-6', [])).toBe(false);
+    expect(isBlockedModelId('claude-opus-4-6', undefined)).toBe(false);
+  });
+
+  it('ignores blank entries — a stray comma never blocks everything', () => {
+    expect(isBlockedModelId('claude-opus-4-6', ['', '   '])).toBe(false);
+  });
+
+  it('parseBlockedModelIds splits on comma, trims, drops empties', () => {
+    expect(parseBlockedModelIds('claude-sonnet-, claude-opus- ,,claude-fable-')).toEqual([
+      'claude-sonnet-', 'claude-opus-', 'claude-fable-',
+    ]);
+    expect(parseBlockedModelIds(undefined)).toEqual([]);
+    expect(parseBlockedModelIds('')).toEqual([]);
+    expect(parseBlockedModelIds(' , ')).toEqual([]);
   });
 });

@@ -16,7 +16,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
-import { MODEL_MAP, modelCapability } from '../types/models.js';
+import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
@@ -51,6 +51,11 @@ export interface CallForStructuredJsonOptions {
    *  Overridable via `LYNOX_LLM_HELPER_MODEL` env var (the public-demo
    *  container sets this to a Haiku id to keep the daily cost-cap healthy). */
   model?: string;
+  /** Operator model blocklist (`userConfig.blocked_model_ids`). When the
+   *  provider-resolved model is on it, the helper falls back to the fast tier
+   *  instead of running a blocked, billable premium call — mirrors
+   *  `resolveRunModel`. Ignored when an explicit `model` is passed. */
+  blockedModelIds?: readonly string[];
   /**
    * Anthropic client. If omitted, a fresh client is constructed via the active
    * provider in `llm-client.ts`. Pass an existing one to share connection pool
@@ -130,16 +135,31 @@ const DEFAULT_ANTHROPIC_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? MODEL_M
  *
  * Returns `DEFAULT_ANTHROPIC_MODEL` when no provider info is available
  * (legacy callers passing a `client` directly), preserving prior behaviour.
+ *
+ * `blockedModelIds` (the operator model blocklist) mirrors `resolveRunModel`:
+ * this ancillary extraction is best-effort, so if the resolved id is blocked
+ * (e.g. a managed trial blocks `claude-sonnet-` and the Anthropic default would
+ * otherwise run Sonnet on the CP pool key) it falls back to the fast tier
+ * rather than executing a blocked, billable premium call. In the trial shape
+ * the fast tier (Haiku) is unblocked; on an openai-provider whose configured
+ * model is blocked the fast fallback is Anthropic-shaped and outside this
+ * feature's intended envelope (block premium Anthropic, keep the cheap tier).
  */
-function resolveModel(provider: ProviderConfigSnapshot | undefined): string {
-  if (provider?.provider === 'openai') {
-    const envOverride = process.env['LYNOX_LLM_HELPER_MODEL'];
-    // Only honour the env override if it's NOT a claude-* id — otherwise the
-    // public-demo override would 404 against Mistral / Gemini endpoints.
-    if (envOverride && !envOverride.startsWith('claude-')) return envOverride;
-    if (provider.openaiModelId) return provider.openaiModelId;
+function resolveModel(provider: ProviderConfigSnapshot | undefined, blockedModelIds?: readonly string[]): string {
+  const resolved = ((): string => {
+    if (provider?.provider === 'openai') {
+      const envOverride = process.env['LYNOX_LLM_HELPER_MODEL'];
+      // Only honour the env override if it's NOT a claude-* id — otherwise the
+      // public-demo override would 404 against Mistral / Gemini endpoints.
+      if (envOverride && !envOverride.startsWith('claude-')) return envOverride;
+      if (provider.openaiModelId) return provider.openaiModelId;
+    }
+    return DEFAULT_ANTHROPIC_MODEL;
+  })();
+  if (blockedModelIds && blockedModelIds.length > 0 && isBlockedModelId(resolved, blockedModelIds)) {
+    return MODEL_MAP.fast;
   }
-  return DEFAULT_ANTHROPIC_MODEL;
+  return resolved;
 }
 
 /** Rough char→token estimate. English ~3.5 chars/token; over-estimates for
@@ -283,7 +303,7 @@ export async function callForStructuredJson<T = unknown>(
     schema,
     maxInputTokens = DEFAULT_MAX_INPUT_TOKENS,
     budgetUsd = DEFAULT_BUDGET_USD,
-    model = resolveModel(providerSnapshot),
+    model = resolveModel(providerSnapshot, opts.blockedModelIds),
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
   } = opts;
 
