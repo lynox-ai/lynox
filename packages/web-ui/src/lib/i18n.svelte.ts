@@ -1007,7 +1007,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.url_go': { de: 'Analysieren', en: 'Analyze' },
 	// Onboarding Wave 1 (D9v2) — intro card, engine Step-0 basics, closing, per-layer reactivation
 	'onboard.intro_title': { de: 'Willkommen. Lass uns lynox auf dein Geschäft einstellen.', en: "Welcome. Let's tune lynox to your business." },
-	'onboard.intro_lead': { de: 'Drei kurze Fragen, dann schaue ich mir deine Website an. Dauert ~2 Minuten — du kannst jederzeit überspringen.', en: "Three quick questions, then I'll look at your website. About 2 minutes — you can skip anytime." },
+	'onboard.intro_lead': { de: 'Zwei kurze Fragen, dann schaue ich mir deine Website an. Dauert ~2 Minuten — du kannst jederzeit überspringen.', en: "Two quick questions, then I'll look at your website. About 2 minutes — you can skip anytime." },
 	'onboard.intro_start': { de: "Los geht's", en: "Let's go" },
 	'onboard.basics_step': { de: 'Die Basics', en: 'The basics' },
 	'onboard.basics_step_desc': { de: 'Firma, Rolle, Ziel — direkt gemerkt', en: 'Company, role, goal — saved directly' },

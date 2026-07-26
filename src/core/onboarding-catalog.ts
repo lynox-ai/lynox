@@ -1,8 +1,14 @@
 /**
  * Onboarding Wave 1 — the Step-0 knowledge catalog (D9v2, PRD-ONBOARDING §3/§6.1).
  *
- * The 2-3 "clean phase" basics the ENGINE poses VERBATIM before any web_research
- * taints the thread. Engine-posed (never model-composed) is the security property:
+ * The "clean phase" identity basics the ENGINE poses VERBATIM before any web_research
+ * taints the thread. Scope is deliberately just IDENTITY FACTS the user always knows
+ * (who they are, what they run) — NOT their goal. Asking "what do you want lynox to do?"
+ * cold is goal-extraction, which the Activation Principle (POSITIONING.md) rejects: a new
+ * user rarely knows yet, and the answer is vague. The goal/pain instead emerges GROUNDED
+ * in the scan-informed questions (ONBOARDING_CONTEXT[1]), where the user reacts to
+ * concrete prompts rather than generating an abstract goal.
+ * Engine-posed (never model-composed) is the security property:
  * the question text is fixed here in code, so an injection can neither compose the
  * question (the dictation attack, D5) nor alter the promoted answer. The answers are
  * promoted verbatim to `user_asserted` on a clean-latch thread by
@@ -15,9 +21,9 @@
  * user); `label` is not (an internal key that never reaches the UI as prose).
  */
 
-export type OnboardingBasicKey = 'company' | 'role' | 'goal';
+export type OnboardingBasicKey = 'company' | 'role';
 
-export const ONBOARDING_BASIC_KEYS: readonly OnboardingBasicKey[] = ['company', 'role', 'goal'] as const;
+export const ONBOARDING_BASIC_KEYS: readonly OnboardingBasicKey[] = ['company', 'role'] as const;
 
 export function isOnboardingBasicKey(s: string): s is OnboardingBasicKey {
   return (ONBOARDING_BASIC_KEYS as readonly string[]).includes(s);
@@ -50,14 +56,6 @@ export const ONBOARDING_BASICS: readonly OnboardingBasic[] = [
       de: 'Was ist deine Rolle dort?',
     },
     label: 'Role',
-  },
-  {
-    key: 'goal',
-    question: {
-      en: 'What is the main thing you want lynox to help you with?',
-      de: 'Wobei soll dich lynox hauptsächlich unterstützen?',
-    },
-    label: 'Primary goal',
   },
 ] as const;
 

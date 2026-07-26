@@ -41,19 +41,28 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
     expect(active[0]!.sourceThreadId).toBe(THREAD); // AC-1.10 identifiability
   });
 
-  it('all three basics promote; company mints an organization subject', () => {
+  it('both basics promote; company mints an organization subject', () => {
     const { ks, subjects } = makeKs();
     const answers: OnboardingBasicAnswer[] = [
       { key: 'company', answer: 'Nordberg AG' },
       { key: 'role', answer: 'Marketing lead' },
-      { key: 'goal', answer: 'automate invoicing' },
     ];
     const r = promoteOnboardingBasics(answers, { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD });
-    expect(r.promoted).toBe(3);
+    expect(r.promoted).toBe(2);
     const texts = ks.listActive().map(e => e.text).sort();
-    expect(texts).toEqual(['Company: Nordberg AG', 'Primary goal: automate invoicing', 'Role: Marketing lead']);
+    expect(texts).toEqual(['Company: Nordberg AG', 'Role: Marketing lead']);
     // company carries subject attribution (H1 findOrCreate on an active write)
     expect(subjects.findCanonical('Nordberg AG', 'organization')).not.toBeNull();
+  });
+
+  it('an unknown/stale answer key (e.g. dropped "goal") is ignored, not promoted', () => {
+    const { ks } = makeKs();
+    // Cast: 'goal' is no longer an OnboardingBasicKey — simulate a stale client
+    // sending it. The engine-side CATALOG lookup drops it (defense in depth).
+    const answers = [{ key: 'goal' as OnboardingBasicAnswer['key'], answer: 'automate invoicing' }];
+    const r = promoteOnboardingBasics(answers, { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD });
+    expect(r.promoted).toBe(0);
+    expect(ks.listActive()).toHaveLength(0);
   });
 
   it('a TAINTED latch routes every answer to pending_review, never user_asserted (D5 defense in depth)', () => {

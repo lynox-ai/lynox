@@ -2803,6 +2803,20 @@ export class LynoxHTTPApi {
       if (!ps) { jsonResponse(res, 200, { pending: false }); return; }
       const row = ps.getPending(params['id']!);
       if (!row) { jsonResponse(res, 200, { pending: false }); return; }
+      // The engine-posed onboarding Step-0 basics prompt is tabs-SHAPED (so
+      // /reply-tabs answers it) but is OWNED by the OnboardingBasics UI, not the
+      // generic chat resumable-prompt path. Never surface it here: the generic
+      // tabs card's submit calls /reply-tabs WITHOUT /promote, so answering it
+      // there would settle the prompt and silently skip the §6.1 promotion (the
+      // basics never reach durable knowledge). Same `payload.kind` discriminator
+      // the promote gate uses. Reported as no-pending → the flow resumes through
+      // OnboardingBasics, the only path that promotes.
+      if (row.payload_json) {
+        try {
+          const p = JSON.parse(row.payload_json) as { kind?: unknown };
+          if (p && p.kind === 'onboarding_basics') { jsonResponse(res, 200, { pending: false }); return; }
+        } catch { /* malformed payload → fall through to normal handling */ }
+      }
       // Never leak secret answers back to client
       const isTabs = row.prompt_type === 'ask_user' && !!row.questions_json;
       const kind = isTabs

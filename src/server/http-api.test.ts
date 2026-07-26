@@ -3441,18 +3441,38 @@ describe('LynoxHTTPApi', () => {
       }
     }
 
-    it('POST /start → 200 with 3 questions + a promptId carrying the onboarding-basics marker', async () => {
+    it('POST /start → 200 with 2 questions + a promptId carrying the onboarding-basics marker', async () => {
       await withStores(async (ps) => {
         const res = await jsonFetch('/api/onboarding/knowledge/start', {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-1' }),
         });
         expect(res.status).toBe(200);
         const b = await res.json() as { promptId: string; questions: unknown[] };
-        expect(b.questions).toHaveLength(3);
+        expect(b.questions).toHaveLength(2);
         expect(typeof b.promptId).toBe('string');
         const row = ps.getById(b.promptId);
         expect(row?.prompt_type).toBe('ask_user');
         expect(JSON.parse(row!.payload_json!).kind).toBe('onboarding_basics');
+      });
+    });
+
+    it('SECURITY: /pending-prompt hides an onboarding_basics prompt from the generic chat resume', async () => {
+      await withStores(async (ps) => {
+        // An engine-posed onboarding-basics prompt is owned by the OnboardingBasics
+        // UI. If /pending-prompt surfaced it, the chat's generic tabs card would let
+        // the user answer via /reply-tabs WITHOUT /promote → the §6.1 promotion is
+        // skipped and the basics never reach durable knowledge.
+        await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-pp' }),
+        })).json();
+        const hidden = await (await jsonFetch('/api/sessions/onb-pp/pending-prompt')).json();
+        expect(hidden).toMatchObject({ pending: false });
+
+        // Contrast (non-tautological): a normal model ask_user/tabs prompt (payload
+        // NULL) IS still surfaced — the skip is specific to the onboarding marker.
+        ps.insertAskUserTabs('sess-normal', [{ question: 'Which file?' }]);
+        const shown = await (await jsonFetch('/api/sessions/sess-normal/pending-prompt')).json();
+        expect(shown).toMatchObject({ pending: true, kind: 'tabs' });
       });
     });
 
@@ -3469,15 +3489,16 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-2' }),
         })).json() as { promptId: string };
         // The user answers via the stored PromptStore row (as /reply-tabs would settle it).
-        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        // Two catalog basics now (company, role) — the abstract goal question was dropped.
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
         // Promote carries ONLY the promptId — the answers come from the stored row, not the body.
         const res = await jsonFetch('/api/onboarding/knowledge/promote', {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
         });
         expect(res.status).toBe(200);
-        expect(await res.json()).toMatchObject({ degraded: false, promoted: 3, queued: 0, skipped: 0 });
+        expect(await res.json()).toMatchObject({ degraded: false, promoted: 2, queued: 0, skipped: 0 });
         const active = ks.listActive();
-        expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Primary goal: automate invoicing', 'Role: Founder']);
+        expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Role: Founder']);
         expect(active.every(e => e.sourceType === 'user_asserted')).toBe(true);
         expect(active.every(e => e.sourceThreadId === 'onb-2')).toBe(true);
       });
@@ -3527,7 +3548,7 @@ describe('LynoxHTTPApi', () => {
         const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-taint' }),
         })).json() as { promptId: string };
-        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
         // Inject a tainted live session so the endpoint's sawUntrusted read is exercised on
         // the ARMED side — an "always-false" mis-wire would otherwise pass every other test.
         const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
@@ -3538,9 +3559,9 @@ describe('LynoxHTTPApi', () => {
             method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
           });
           expect(res.status).toBe(200);
-          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 3, skipped: 0, rejected: 0 });
+          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 2, skipped: 0, rejected: 0 });
           expect(ks.listActive()).toHaveLength(0);
-          expect(ks.pendingCount()).toBe(3);
+          expect(ks.pendingCount()).toBe(2);
         } finally {
           ssRef.get = origGet;
         }
