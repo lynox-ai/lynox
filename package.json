@@ -95,7 +95,8 @@
     ],
     "overrides": {
       "path-to-regexp": "^8.4.0",
-      "brace-expansion": "^5.0.7",
+      "brace-expansion": ">=5.0.8",
+      "postcss": ">=8.5.18",
       "lodash-es": ">=4.18.0",
       "cookie": ">=0.7.0",
       "esbuild": ">=0.28.1",
