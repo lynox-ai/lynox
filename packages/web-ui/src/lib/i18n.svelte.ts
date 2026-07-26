@@ -992,16 +992,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.vault_skip_btn': { de: 'Später', en: 'Later' },
 	'onboard.vault_confirmed': { de: 'Vault Key gesichert. Du findest ihn jederzeit unter Settings → Config.', en: 'Vault key noted. You can find it anytime in Settings → Config.' },
 	'onboard.continue_step': { de: 'Weiter: Schritt {n}/3', en: 'Continue: Step {n}/3' },
-	'onboard.whats_next_title': { de: 'Bereit!', en: 'Ready to go!' },
-	'onboard.whats_next_subtitle': { de: 'lynox kennt jetzt dein Business. Was möchtest du als Nächstes?', en: 'lynox knows your business now. What would you like to do next?' },
-	'onboard.whats_next_google': { de: 'Gmail & Kalender verbinden', en: 'Connect Gmail & Calendar' },
-	'onboard.whats_next_google_desc': { de: 'E-Mails, Termine und Drive anbinden', en: 'Connect emails, calendar and Drive' },
-	'onboard.whats_next_mobile': { de: 'Mobile App installieren', en: 'Install mobile app' },
-	'onboard.whats_next_mobile_desc': { de: 'QR-Code scannen und als PWA nutzen', en: 'Scan QR code and use as PWA' },
-	'onboard.whats_next_notifications': { de: 'Benachrichtigungen aktivieren', en: 'Enable notifications' },
-	'onboard.whats_next_notifications_desc': { de: 'Erhalte Alerts wenn Workflows abgeschlossen sind', en: 'Get alerts when workflows complete' },
-	'onboard.whats_next_knowledge': { de: 'Wissen ansehen', en: 'Explore Knowledge' },
-	'onboard.whats_next_knowledge_desc': { de: 'Was lynox über dich gelernt hat', en: 'What lynox learned about you' },
+	// Post-onboarding closing: the generic capability tiles were removed (Activation
+	// Principle — the close proposes grounded jobs via follow-up pills, not a feature
+	// menu). Only the honest limits note + the "just chat" dismiss remain.
 	'onboard.whats_next_chat': { de: 'Einfach loschatten', en: 'Just start chatting' },
 	'onboard.url_placeholder': { de: 'https://deine-website.de', en: 'https://your-website.com' },
 	'onboard.url_go': { de: 'Analysieren', en: 'Analyze' },
