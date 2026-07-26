@@ -1,5 +1,6 @@
 // Components
 export { default as ChatView } from './components/ChatView.svelte';
+export { default as OnboardingBasics } from './components/OnboardingBasics.svelte';
 export { default as AppShell } from './components/AppShell.svelte';
 export { default as StatusBar } from './components/StatusBar.svelte';
 export { default as ContextPanel } from './components/ContextPanel.svelte';
