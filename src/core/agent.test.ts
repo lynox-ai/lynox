@@ -552,6 +552,63 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);
     });
 
+    it('loop guard: skips an identical tool call that keeps returning the same result', async () => {
+      // Regression repro for the 2026-07-26 prod loop: the agent called
+      // `api_setup view` with a hallucinated id 20× in a row, each returning the
+      // SAME ordinary (non-is_error) "not found. Use action list" string, making
+      // no progress. The deterministic RepeatCallGuard must break it: after
+      // REPEAT_LIMIT identical (call → result) pairs, the next identical call is
+      // NOT dispatched to the handler — an escalated result is returned instead.
+      const notFound = 'API profile "wrong" not found. Use action "list" to see available profiles.';
+      const handler = vi.fn().mockResolvedValue(notFound);
+      const tool = makeTool('test_lookup', handler);
+
+      const REPEATS = 8; // model insists 8×; guard must cap handler at REPEAT_LIMIT
+      for (let i = 0; i < REPEATS; i++) {
+        mockProcess.mockResolvedValueOnce(
+          toolUseResponse([{ id: `tu_${String(i)}`, name: 'test_lookup', input: { action: 'view', id: 'wrong' } }]),
+        );
+      }
+      mockProcess.mockResolvedValueOnce(endTurnResponse('gave up looping'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      const result = await agent.send('check the api');
+      expect(result).toBe('gave up looping');
+
+      // The handler ran only REPEAT_LIMIT times, not REPEATS — the loop was cut.
+      expect(handler).toHaveBeenCalledTimes(3);
+
+      // The skipped calls returned an escalated, is_error tool_result telling the
+      // agent to stop repeating (visible in the thread as a user/tool_result msg).
+      const escalated = agent.getMessages().some(
+        m => m.role === 'user' && Array.isArray(m.content) && m.content.some(
+          b => b.type === 'tool_result' && b.is_error === true
+            && typeof b.content === 'string' && /not change the outcome|do not call it again/i.test(b.content),
+        ),
+      );
+      expect(escalated).toBe(true);
+    });
+
+    it('loop guard: does NOT throttle identical calls that make progress', async () => {
+      // Same call, DIFFERENT result each turn (a poll advancing toward "done").
+      // The guard keys on the result, so this legitimate pattern is never cut.
+      let n = 0;
+      const handler = vi.fn().mockImplementation(() => Promise.resolve(`poll #${String(n++)}`));
+      const tool = makeTool('poll_status', handler);
+
+      const CALLS = 6; // > REPEAT_LIMIT, but each result differs
+      for (let i = 0; i < CALLS; i++) {
+        mockProcess.mockResolvedValueOnce(
+          toolUseResponse([{ id: `tu_${String(i)}`, name: 'poll_status', input: { id: 'job1' } }]),
+        );
+      }
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('poll the job');
+      expect(handler).toHaveBeenCalledTimes(CALLS); // never throttled
+    });
+
     it('detailedGuidance: injects on first use, exactly once per thread', async () => {
       // Extended-tool-description-on-use: a tool's fat prose lives in
       // `detailedGuidance` (NOT the cached wire description) and is injected once
