@@ -194,7 +194,17 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 5, output: 25 },
     capabilities: ['vision', 'tool_use', 'extended_thinking'],
     residency: 'US (Anthropic; DPA + GDPR)',
-    notes: 'Highest capability; ~1.7× the cost of Sonnet — reserve for deep reasoning.',
+    notes: 'Strong deep reasoning at ~1.7× the cost of Sonnet; the standard-mode deep default. Superseded by Opus 5 for new work.',
+  },
+  {
+    id: 'claude-opus-5',
+    tier: 'deep',
+    label: 'Opus 5',
+    context_window: 1_000_000,
+    pricing: { input: 5, output: 25 },
+    capabilities: ['vision', 'tool_use', 'extended_thinking'],
+    residency: 'US (Anthropic; DPA + GDPR)',
+    notes: 'Newest flagship deep model (GA 2026-07) — for complex agentic and enterprise work, same $5/$25 as Opus 4.6, adaptive thinking on by default. Offered alongside Fable 5 as a deep option.',
   },
   {
     id: 'claude-fable-5',

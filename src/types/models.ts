@@ -503,6 +503,33 @@ export const CACHE_READ_MULTIPLIER = 0.1;
 
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // === Anthropic Claude (direct + custom proxy) ===
+  // Claude Opus 5 — the new flagship deep model (GA 2026-07; Opus 4.8 is now
+  // Legacy). Additive OPT-IN only: MODEL_MAP.deep stays opus-4-6, and the
+  // max-quality deep preset stays fable-5 — re-pointing either is a deliberate
+  // behavior change gated on a bench/canary pass, NOT this catalog wave. Pricing
+  // $5/$25 (= Opus 4.8), 1M native ctx, vision (CLAUDE_FEATURES). TTL contract:
+  // cacheWrite=input×2=10, cacheRead=input×0.1=0.50 (models.test.ts pins it).
+  // Thinking is adaptive DEFAULT-ON on Opus 5 (4.8: default-off). Opus 5 adds a
+  // new per-request 400 for `thinking:disabled` + effort xhigh/max — unreachable
+  // here: when thinking is disabled the agent OMITS the field entirely rather
+  // than sending `{type:'disabled'}` (agent.ts `thinkingEnabled` gate, ~1349/1573),
+  // so a disabled deep turn just runs adaptive-ON, valid with any effort. No
+  // charsPerToken override until a live count_tokens baseline (measure-first);
+  // the tokenizer is assumed 4.7-family but not yet measured. Blocked for trials
+  // automatically via the `claude-opus-` prefix in LYNOX_BLOCKED_MODEL_IDS.
+  'claude-opus-5': {
+    id: 'claude-opus-5',
+    provider: 'anthropic',
+    tier: 'deep',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 5',
+    provenance: 'US',
+  },
   // Claude Opus 4.8 — the max-quality preset's deep model (model-presets P1).
   // Additive: MODEL_MAP.deep stays opus-4-6 (re-pointing it is a deliberate
   // behavior change, not this wave). Pricing verified against Anthropic's catalog

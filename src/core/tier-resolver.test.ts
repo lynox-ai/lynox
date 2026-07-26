@@ -258,6 +258,17 @@ describe('resolveRunModel — model blocklist (blocked_model_ids)', () => {
     ).toThrow(/blocked by the operator model blocklist/);
   });
 
+  it('REFUSES the new claude-opus-5 id via the claude-opus- prefix (catalog-add regression)', () => {
+    // The Opus 5 catalog entry ships with no blocklist change — it must be
+    // caught by the existing `claude-opus-` prefix, so a trial can never pin it.
+    expect(() =>
+      resolveRunModel({
+        requested: 'claude-opus-5', defaultTier: 'balanced', accountTier: 'pro',
+        maxTier: undefined, blockedModelIds: BLOCKED, provider: 'anthropic',
+      }),
+    ).toThrow(/blocked by the operator model blocklist/);
+  });
+
   it('a pinned id OUTSIDE the blocked families still passes through verbatim', () => {
     const r = resolveRunModel({
       requested: 'claude-haiku-4-5-20251001', defaultTier: 'balanced', accountTier: 'pro',
