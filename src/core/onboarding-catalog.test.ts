@@ -7,9 +7,9 @@ import {
 } from './onboarding-catalog.js';
 
 describe('onboarding-catalog (Step-0 basics, D9v2)', () => {
-  it('holds exactly the three Step-0 keys, in order', () => {
-    expect(ONBOARDING_BASIC_KEYS).toEqual(['company', 'role', 'goal']);
-    expect(ONBOARDING_BASICS.map(b => b.key)).toEqual(['company', 'role', 'goal']);
+  it('holds exactly the two identity Step-0 keys, in order (goal dropped, Activation Principle)', () => {
+    expect(ONBOARDING_BASIC_KEYS).toEqual(['company', 'role']);
+    expect(ONBOARDING_BASICS.map(b => b.key)).toEqual(['company', 'role']);
   });
 
   it('every basic has a localized question and a stable (non-empty) label', () => {
@@ -35,13 +35,12 @@ describe('onboarding-catalog (Step-0 basics, D9v2)', () => {
   it('only company carries a subject kind (organization)', () => {
     expect(ONBOARDING_BASICS.find(b => b.key === 'company')!.subjectKind).toBe('organization');
     expect(ONBOARDING_BASICS.find(b => b.key === 'role')!.subjectKind).toBeUndefined();
-    expect(ONBOARDING_BASICS.find(b => b.key === 'goal')!.subjectKind).toBeUndefined();
   });
 
   it('isOnboardingBasicKey narrows only the catalog keys', () => {
     expect(isOnboardingBasicKey('company')).toBe(true);
     expect(isOnboardingBasicKey('role')).toBe(true);
-    expect(isOnboardingBasicKey('goal')).toBe(true);
+    expect(isOnboardingBasicKey('goal')).toBe(false); // dropped from the catalog
     expect(isOnboardingBasicKey('payment')).toBe(false);
     expect(isOnboardingBasicKey('')).toBe(false);
   });

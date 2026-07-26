@@ -48,6 +48,7 @@
 		getChangesetLoading,
 		submitChangesetReview,
 		getSessionId,
+		ensureSession,
 		reconcileThread,
 		compactNow,
 		getIsCompacting,
@@ -85,6 +86,7 @@
 	import AgentPresenceIcon from './AgentPresenceIcon.svelte';
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
+	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -122,24 +124,73 @@
 	// "[ONBOARDING 2/3] ..." / "[ONBOARDING 3/3] ..." lines in the user-visible
 	// chat output as "Next Steps" — leaking internal orchestration naming.
 	// The agent doesn't need to know its step number; the chip UI tracks that.
+	// D9v2 (Onboarding W1): captures route through the memory tool that is actually
+	// registered — `{memoryTool}` is substituted per instance: DK-on → `remember`
+	// (research-tainted turns land as Faden chips / pending_review the user confirms),
+	// DK-off (the default) → `memory_store` (legacy flat save). Naming `remember`
+	// unconditionally would reference a non-existent tool on the DK-off majority
+	// (engine.ts registers remember XOR memory_store on `durable_memory_enabled`).
+	// Step-1's questions are SHARPENED: grounded in
+	// what the scan found, not a generic questionnaire — this is the high-value moment.
+	// Step-3's CLOSING follows the Activation Principle (POSITIONING.md): it proposes
+	// 2-3 concrete, context-grounded JOBS via suggest_follow_ups (rendered as clickable
+	// pills) instead of enumerating generic capabilities — propose→react, not a feature menu.
+	// ⚠ Prompt-behaviour change (Step-1 questions + Step-3 closing) — validate cross-provider
+	// on real models before ship ([[fb_validate_prompt_change]]). The no-sequence-marker
+	// constraint above still holds.
 	const ONBOARDING_CONTEXT = [
-		`The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You already analyzed the user's website earlier in this conversation. Now use ask_user to ask 3-5 targeted questions about what the website doesn't reveal. Use the ask_user tool with the "questions" parameter to present all questions at once (each as a separate question with free-text input). Topics: revenue model & pricing, team size & capacity, biggest current challenge, 12-month growth goal, key metrics tracked. Save their answers to memory_store when they respond. IMPORTANT: If the user skips or dismisses questions (answers contain "__dismissed__"), accept that gracefully — save whatever answers you received and move on. Do NOT re-ask dismissed questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Save competitive insights with memory_store. After the artifact_save tool call returns, write a brief chat message (1-2 sentences) confirming the artifact was saved and ending with 2-3 concrete actionable suggestions the user could take next. Respond in {locale}.`,
+		`The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Record each concrete finding as durable knowledge with the {memoryTool} tool. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
+		`You already analyzed the user's website earlier in this conversation. Now ask the 3-5 questions the research made possible — the sharp, specific ones the website does NOT answer, each GROUNDED in a concrete detail you just found. Do NOT ask a generic questionnaire: tie every question to something specific from the scan (e.g. if they sell recurring maintenance contracts, ask how they handle overdue renewals today; if the positioning is premium, ask what justifies the price to a skeptical prospect). Cover what actually moves the needle — how they make money, where the real bottleneck is, the biggest current challenge, and what success looks like in 12 months. Use the ask_user tool with the "questions" parameter to present all questions at once (each free-text). When they answer, record each answer as durable knowledge with the {memoryTool} tool. IMPORTANT: if the user skips or dismisses questions (answers contain "__dismissed__"), accept it gracefully — record whatever you received and move on; do NOT re-ask. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
+		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Record the key competitive insights as durable knowledge with the {memoryTool} tool. After artifact_save returns, write a brief 1-2 sentence chat message that confirms the artifact AND proves you understood the business by naming one concrete fact you just learned. Then call the suggest_follow_ups tool with 2-3 CONCRETE JOBS you could do for them right now — each grounded in a specific fact from the scan or their answers (e.g. "draft a re-engagement email to churned customers", "set up a watcher for overdue invoices", "compare your pricing against competitor X"). These must be specific tasks tied to their business, NOT generic capabilities ("connect Gmail", "install the app") and NOT feature enumeration. Respond in {locale}.`,
 	];
 
-	let onboardingStep = $state(0); // 0-based: which step is current
+	let onboardingStep = $state(0); // 0-based: which of the 3 model-run chips is current
 	let onboardingDismissed = $state(false);
 	let pendingOnboardingAdvance = $state(false);
 	let onboardingJustCompleted = $state(false);
-	let showUrlInput = $state(false); // Step 1: collect URL in UI before LLM call
+	let showUrlInput = $state(false); // scan step: collect URL in UI before LLM call
 	let onboardingUrl = $state('');
+	// Activation Principle: the Step-0 company name lets us pre-fill a candidate domain
+	// so the scan step is a one-tap CONFIRM, not a blank field. Derived via a non-agent
+	// search (no model call); fails to empty (manual) — never a wrong value to delete.
+	let onboardingCompany = $state<string | null>(null);
+	let onboardingUrlDeriving = $state(false);
+	let onboardingUrlDerived = $state(false); // the field was pre-filled from the company name
+	// D9v2 Step-0 (engine basics) pre-phase — runs BEFORE the 3-chip model flow, in the
+	// same thread. `onboardingStarted` gates the intro card; `onboardingBasicsDone` gates
+	// the hand-off to the chip stepper. No step-index server state (RF-GAP3) — a reload
+	// restarts from the basics, which dedup-skip already-known facts (AC-1.6/AC-1.9).
+	let onboardingStarted = $state(false);
+	let onboardingBasicsDone = $state(false);
+	let onboardingSessionId = $state<string | null>(null);
+	// The memory tool the model-run steps must name — `remember` (DK-on) vs
+	// `memory_store` (DK-off default). Set from /status.durableMemory; defaults to
+	// the DK-off majority so an unresolved status never names a DK-on-only tool.
+	let onboardingMemoryTool = $state<'remember' | 'memory_store'>('memory_store');
 
-	function loadOnboardingState() {
-		if (typeof localStorage === 'undefined') return;
-		const saved = localStorage.getItem('lynox-onboarding-step');
-		if (saved === 'done') { onboardingDismissed = true; return; }
-		if (saved) onboardingStep = Math.min(parseInt(saved, 10), ONBOARDING_CHIPS.length);
+	async function loadOnboardingState(): Promise<void> {
+		// Server-side, cross-device state (D12/AC-1.1) — no localStorage READ. The /status
+		// endpoint fails OPEN (a degraded engine.db reports done → never re-nags, AC-1.7);
+		// a transient network error here just leaves onboarding shown.
+		try {
+			const res = await fetch(`${getApiBase()}/onboarding/status`);
+			if (!res.ok) return;
+			const data = (await res.json()) as { knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean };
+			if (data.knowledgeDone || data.skipped) onboardingDismissed = true;
+			onboardingMemoryTool = data.durableMemory === true ? 'remember' : 'memory_store';
+		} catch { /* non-critical — show onboarding */ }
+	}
+
+	/** Fire-and-forget server flag write (owner-auth, set-only). Best-effort — a failed
+	 *  write never blocks the UI; the localStorage 'done' write-back (AC-1.11) is the
+	 *  fleet-rollback guard, written write-only alongside. */
+	function setOnboardingFlag(flag: 'knowledge_done' | 'skipped', value: string): void {
+		void fetch(`${getApiBase()}/onboarding/flags/${flag}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value }),
+		}).catch(() => { /* best-effort */ });
+		if (typeof localStorage !== 'undefined') localStorage.setItem('lynox-onboarding-step', 'done');
 	}
 
 	function advanceOnboarding() {
@@ -147,23 +198,64 @@
 		if (next >= ONBOARDING_CHIPS.length) {
 			onboardingDismissed = true;
 			onboardingJustCompleted = true;
-			localStorage.setItem('lynox-onboarding-step', 'done');
+			// knowledge_done carries the onboarding thread-id (AC-1.10 — the mass-repair link).
+			setOnboardingFlag('knowledge_done', onboardingSessionId ?? getSessionId() ?? '');
 		} else {
 			onboardingStep = next;
-			localStorage.setItem('lynox-onboarding-step', String(next));
 		}
 	}
 
 	function skipOnboarding() {
 		onboardingDismissed = true;
-		localStorage.setItem('lynox-onboarding-step', 'done');
+		setOnboardingFlag('skipped', new Date().toISOString());
+	}
+
+	/** Intro-card "start": establish the thread session up front so Step-0 basics, the
+	 *  scan, and the chip steps all run in ONE thread (consistent source_thread_id). */
+	async function startOnboarding(): Promise<void> {
+		onboardingStarted = true;
+		try {
+			onboardingSessionId = await ensureSession();
+		} catch {
+			// Session couldn't be created — skip Step-0 basics, let the chip flow proceed.
+			onboardingBasicsDone = true;
+		}
+	}
+
+	function onBasicsDone(company: string | null): void {
+		onboardingCompany = company;
+		onboardingBasicsDone = true;
 	}
 
 	function handleChipClick(idx: number) {
 		if (idx !== onboardingStep) return;
-		// Step 1: show URL input instead of sending immediately
-		if (idx === 0) { showUrlInput = true; return; }
+		// Step 1: show URL input instead of sending immediately, and pre-fill a
+		// candidate domain from the Step-0 company name (propose→react).
+		if (idx === 0) { showUrlInput = true; void deriveDomainCandidate(); return; }
 		sendOnboardingStep(idx);
+	}
+
+	// Best-effort domain pre-fill from the company name. Non-blocking: the input
+	// appears immediately empty and fills in if a clean candidate returns AND the
+	// user hasn't started typing. No candidate → field stays empty (manual fallback).
+	async function deriveDomainCandidate(): Promise<void> {
+		const company = onboardingCompany?.trim();
+		if (!company || onboardingUrl.trim()) return;
+		onboardingUrlDeriving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/onboarding/derive-domain`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ company, lang: getLocale() }),
+			});
+			if (!res.ok) return;
+			const data = (await res.json()) as { domain: string | null };
+			if (data.domain && !onboardingUrl.trim()) {
+				onboardingUrl = data.domain;
+				onboardingUrlDerived = true;
+			}
+		} catch { /* leave the field empty — manual entry */ }
+		finally { onboardingUrlDeriving = false; }
 	}
 
 	function handleDemoChipClick(idx: number) {
@@ -181,6 +273,7 @@
 		if (!chip) return;
 		const locale = getLocale() === 'de' ? 'German' : 'English';
 		let context = ONBOARDING_CONTEXT[idx]?.replace('{locale}', locale) ?? '';
+		context = context.replace(/\{memoryTool\}/g, onboardingMemoryTool);
 		if (url) context = context.replace('{url}', url);
 		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
 		pendingOnboardingAdvance = true;
@@ -293,7 +386,7 @@
 
 	onMount(() => {
 		void loadDisplayName();
-		loadOnboardingState();
+		void loadOnboardingState();
 		// F13 (demo-walk hardening): if the user navigated away
 		// mid-stream and came back, the SSE listener got torn down with the
 		// previous ChatView while the engine kept running the turn and
@@ -2138,6 +2231,29 @@
 									{/each}
 								</div>
 							<!-- Onboarding: all steps with done/current/future states -->
+							{:else if showOnboarding && !onboardingBasicsDone}
+								<!-- D9v2 Step-0 pre-phase: intro card → engine basics, before the chip flow -->
+								<div class="mt-6 space-y-2.5">
+									{#if !onboardingStarted}
+										<div class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 p-5 text-center space-y-3">
+											<p class="text-base font-medium text-text">{t('onboard.intro_title')}</p>
+											<p class="text-sm text-text-muted max-w-md mx-auto">{t('onboard.intro_lead')}</p>
+											<div class="pt-1">
+												<button
+													onclick={() => void startOnboarding()}
+													class="rounded-[var(--radius-sm)] bg-accent px-5 py-2 text-sm font-medium text-accent-fg hover:opacity-90 transition-opacity"
+												>
+													{t('onboard.intro_start')}
+												</button>
+											</div>
+											<button onclick={skipOnboarding} class="text-xs text-text-muted hover:text-text transition-colors">
+												{t('onboard.skip_onboarding')}
+											</button>
+										</div>
+									{:else if onboardingSessionId}
+										<OnboardingBasics sessionId={onboardingSessionId} onDone={onBasicsDone} />
+									{/if}
+								</div>
 							{:else if showOnboarding}
 								<div class="mt-6 space-y-2.5">
 									<p class="text-center text-sm text-text-muted mb-4">{t('onboard.ready_hint')}</p>
@@ -2161,10 +2277,10 @@
 												<!-- Step 1: inline URL input (skips LLM ask_user round-trip) -->
 												<div class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 p-4 space-y-3">
 													<div class="flex items-center gap-3">
-														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">1</span>
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">2</span>
 														<div class="flex-1 min-w-0">
 															<span class="text-sm font-medium text-text">{t('onboard.chip_1')}</span>
-															<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} 1/3</span>
+															<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} 2/4</span>
 														</div>
 													</div>
 													<div class="flex gap-2">
@@ -2172,6 +2288,7 @@
 															type="url"
 															bind:value={onboardingUrl}
 															placeholder={t('onboard.url_placeholder')}
+															oninput={() => { onboardingUrlDerived = false; }}
 															onkeydown={(e) => e.key === 'Enter' && submitOnboardingUrl()}
 															class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[16px] md:text-sm outline-none focus:border-accent/60"
 														/>
@@ -2183,6 +2300,11 @@
 															{t('onboard.url_go')}
 														</button>
 													</div>
+													{#if onboardingUrlDeriving}
+														<p class="text-[11px] text-text-subtle">{t('onboard.url_deriving')}</p>
+													{:else if onboardingUrlDerived}
+														<p class="text-[11px] text-accent-text">{t('onboard.url_derived')}</p>
+													{/if}
 												</div>
 											{:else}
 												<!-- Clickable chip -->
@@ -2191,11 +2313,11 @@
 													class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
 												>
 													<div class="flex items-center gap-3">
-														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 2}</span>
 														<div class="flex-1 min-w-0">
 															<div class="flex items-center gap-2">
 																<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
-																<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/3</span>
+																<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 2}/4</span>
 															</div>
 															<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 														</div>
@@ -2207,7 +2329,7 @@
 											<!-- Future: faded -->
 											<div class="w-full rounded-[var(--radius-md)] border border-border/50 bg-bg-subtle opacity-40 p-4">
 												<div class="flex items-center gap-3">
-													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 1}</span>
+													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 2}</span>
 													<div class="flex-1 min-w-0">
 														<span class="text-sm font-medium text-text-subtle">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
 														<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
@@ -2578,11 +2700,11 @@
 							class="w-full max-w-lg rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
 						>
 							<div class="flex items-center gap-3">
-								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 1}</span>
+								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 2}</span>
 								<div class="flex-1 min-w-0">
 									<div class="flex items-center gap-2">
 										<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
-										<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {onboardingStep + 1}/3</span>
+										<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {onboardingStep + 2}/4</span>
 									</div>
 									<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 								</div>
@@ -2596,44 +2718,17 @@
 				{/if}
 			{/if}
 
-			<!-- Post-onboarding "What's Next" -->
+			<!-- Post-onboarding closing (§8, Activation Principle). Honest expectation-
+			     setting only. The context-grounded JOB proposals are the model's
+			     suggest_follow_ups pills (propose→react); this block deliberately does
+			     NOT enumerate generic capabilities — capability setup (Gmail, push) is
+			     Wave 2's seeded tasks, not a feature menu crammed into the close. -->
 			{#if onboardingJustCompleted && !isStreaming && messages.length > 0}
-				<div class="mt-4 mb-2 w-full max-w-lg rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-5">
-					<h3 class="text-sm font-semibold text-text mb-1">{t('onboard.whats_next_title')}</h3>
-					<p class="text-xs text-text-muted mb-3">{t('onboard.whats_next_subtitle')}</p>
-					<div class="space-y-2">
-						<a href="/app/settings/channels/google" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_google')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_google_desc')}</p>
-							</div>
-						</a>
-						<a href="/app/settings/account/mobile" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 0 0 6 3.75v16.5a2.25 2.25 0 0 0 2.25 2.25h7.5A2.25 2.25 0 0 0 18 20.25V3.75a2.25 2.25 0 0 0-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_mobile')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_mobile_desc')}</p>
-							</div>
-						</a>
-						<a href="/app/settings/channels/notifications" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_notifications')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_notifications_desc')}</p>
-							</div>
-						</a>
-						<a href="/app/intelligence" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_knowledge')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_knowledge_desc')}</p>
-							</div>
-						</a>
-						<button onclick={() => { onboardingJustCompleted = false; }} class="w-full text-center text-xs text-text-subtle hover:text-text-muted transition-colors mt-2 py-1">
-							{t('onboard.whats_next_chat')}
-						</button>
-					</div>
+				<div class="mt-4 mb-2 w-full max-w-lg rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-4">
+					<p class="text-xs text-text-muted leading-relaxed">💡 {t('onboard.limits_note')}</p>
+					<button onclick={() => { onboardingJustCompleted = false; }} class="mt-2 text-xs text-text-subtle hover:text-text-muted transition-colors">
+						{t('onboard.whats_next_chat')}
+					</button>
 				</div>
 			{/if}
 

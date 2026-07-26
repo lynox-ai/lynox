@@ -3300,7 +3300,7 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         knowledgeDone: true, knowledgeThreadId: null, skipped: false,
-        pushNudge: null, firstSessionAt: null, degraded: true,
+        pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
       });
     });
 
@@ -3310,7 +3310,7 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({
           knowledgeDone: true, knowledgeThreadId: 'onb-42', skipped: false,
-          pushNudge: null, firstSessionAt: null, degraded: false,
+          pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: false,
         });
       });
     });
@@ -3323,7 +3323,7 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({
           knowledgeDone: true, knowledgeThreadId: null, skipped: false,
-          pushNudge: null, firstSessionAt: null, degraded: true,
+          pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
         });
       });
     });
@@ -3441,18 +3441,90 @@ describe('LynoxHTTPApi', () => {
       }
     }
 
-    it('POST /start → 200 with 3 questions + a promptId carrying the onboarding-basics marker', async () => {
+    it('POST /start → 200 with 2 questions + a promptId carrying the onboarding-basics marker', async () => {
       await withStores(async (ps) => {
         const res = await jsonFetch('/api/onboarding/knowledge/start', {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-1' }),
         });
         expect(res.status).toBe(200);
         const b = await res.json() as { promptId: string; questions: unknown[] };
-        expect(b.questions).toHaveLength(3);
+        expect(b.questions).toHaveLength(2);
         expect(typeof b.promptId).toBe('string');
         const row = ps.getById(b.promptId);
         expect(row?.prompt_type).toBe('ask_user');
         expect(JSON.parse(row!.payload_json!).kind).toBe('onboarding_basics');
+      });
+    });
+
+    it('SECURITY: /pending-prompt hides an onboarding_basics prompt from the generic chat resume', async () => {
+      await withStores(async (ps) => {
+        // An engine-posed onboarding-basics prompt is owned by the OnboardingBasics
+        // UI. If /pending-prompt surfaced it, the chat's generic tabs card would let
+        // the user answer via /reply-tabs WITHOUT /promote → the §6.1 promotion is
+        // skipped and the basics never reach durable knowledge.
+        await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-pp' }),
+        })).json();
+        const hidden = await (await jsonFetch('/api/sessions/onb-pp/pending-prompt')).json();
+        expect(hidden).toMatchObject({ pending: false });
+
+        // Contrast (non-tautological): a normal model ask_user/tabs prompt (payload
+        // NULL) IS still surfaced — the skip is specific to the onboarding marker.
+        ps.insertAskUserTabs('sess-normal', [{ question: 'Which file?' }]);
+        const shown = await (await jsonFetch('/api/sessions/sess-normal/pending-prompt')).json();
+        expect(shown).toMatchObject({ pending: true, kind: 'tabs' });
+      });
+    });
+
+    it('POST /derive-domain returns a search candidate, 400 on no company, degrades to null', async () => {
+      await withStores(async () => {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origSp = engineRef['getSearchProvider'];
+        // Fake provider captures the query so the lang→buildDomainSearchQuery passthrough
+        // is verified (a dropped `lang` would otherwise pass). First hit is LinkedIn
+        // (skipped by the heuristic), second is the site.
+        let capturedQuery = '';
+        engineRef['getSearchProvider'] = (): unknown => ({
+          search: async (q: string): Promise<unknown[]> => {
+            capturedQuery = q;
+            return [
+              { title: 'X', url: 'https://linkedin.com/company/acme', snippet: '' },
+              { title: 'Acme', url: 'https://www.acme.ch/about', snippet: '' },
+            ];
+          },
+        });
+        try {
+          const ok = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme', lang: 'de' }) });
+          expect(ok.status).toBe(200);
+          expect(await ok.json()).toEqual({ domain: 'https://acme.ch' });
+          expect(capturedQuery).toBe('Acme offizielle Website'); // lang passthrough → localized query
+
+          const bad = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({}) });
+          expect(bad.status).toBe(400);
+
+          // Search unavailable → degraded null, never a 500 that would block the UI.
+          engineRef['getSearchProvider'] = (): unknown => null;
+          const deg = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+          expect(deg.status).toBe(200);
+          expect(await deg.json()).toEqual({ domain: null });
+
+          // SECURITY: a restrictive network_policy short-circuits BEFORE any search —
+          // the company name never egresses on a locked-down instance.
+          const origCfg = engineRef['getUserConfig'] as () => Record<string, unknown>;
+          capturedQuery = '';
+          engineRef['getSearchProvider'] = (): unknown => ({ search: async (q: string): Promise<unknown[]> => { capturedQuery = q; return [{ title: 'A', url: 'https://acme.ch', snippet: '' }]; } });
+          engineRef['getUserConfig'] = (): unknown => ({ ...origCfg.call(engineRef), network_policy: 'deny-all' });
+          try {
+            const denied = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+            expect(denied.status).toBe(200);
+            expect(await denied.json()).toEqual({ domain: null });
+            expect(capturedQuery).toBe(''); // never searched
+          } finally {
+            engineRef['getUserConfig'] = origCfg;
+          }
+        } finally {
+          engineRef['getSearchProvider'] = origSp;
+        }
       });
     });
 
@@ -3469,15 +3541,16 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-2' }),
         })).json() as { promptId: string };
         // The user answers via the stored PromptStore row (as /reply-tabs would settle it).
-        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        // Two catalog basics now (company, role) — the abstract goal question was dropped.
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
         // Promote carries ONLY the promptId — the answers come from the stored row, not the body.
         const res = await jsonFetch('/api/onboarding/knowledge/promote', {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
         });
         expect(res.status).toBe(200);
-        expect(await res.json()).toMatchObject({ degraded: false, promoted: 3, queued: 0, skipped: 0 });
+        expect(await res.json()).toMatchObject({ degraded: false, promoted: 2, queued: 0, skipped: 0 });
         const active = ks.listActive();
-        expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Primary goal: automate invoicing', 'Role: Founder']);
+        expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Role: Founder']);
         expect(active.every(e => e.sourceType === 'user_asserted')).toBe(true);
         expect(active.every(e => e.sourceThreadId === 'onb-2')).toBe(true);
       });
@@ -3527,7 +3600,7 @@ describe('LynoxHTTPApi', () => {
         const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-taint' }),
         })).json() as { promptId: string };
-        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
         // Inject a tainted live session so the endpoint's sawUntrusted read is exercised on
         // the ARMED side — an "always-false" mis-wire would otherwise pass every other test.
         const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
@@ -3538,9 +3611,9 @@ describe('LynoxHTTPApi', () => {
             method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
           });
           expect(res.status).toBe(200);
-          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 3, skipped: 0, rejected: 0 });
+          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 2, skipped: 0, rejected: 0 });
           expect(ks.listActive()).toHaveLength(0);
-          expect(ks.pendingCount()).toBe(3);
+          expect(ks.pendingCount()).toBe(2);
         } finally {
           ssRef.get = origGet;
         }

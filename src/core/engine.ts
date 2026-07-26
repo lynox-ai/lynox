@@ -230,6 +230,9 @@ export class Engine {
    *  so the agent doesn't silently fabricate search results when search
    *  is unavailable. */
   private _webSearchStatus: 'configured' | 'fallback' | 'none' = 'none';
+  /** The web-search provider that landed in the registry (SearXNG or the DDG
+   *  fallback), kept for direct non-agent callers (e.g. onboarding domain derive). */
+  private _searchProvider: import('../integrations/search/index.js').SearchProvider | null = null;
   private _dataStore: DataStore | null = null;
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
   private _hooks: LynoxHooks[] = [];
@@ -1399,6 +1402,7 @@ export class Engine {
         }
         if (healthy) {
           this.registry.register(createWebSearchTool(searxng));
+          this._searchProvider = searxng;
           this._webSearchStatus = 'configured';
         } else {
           process.stderr.write(`[lynox] SearXNG not reachable at ${searxngUrl} — falling back to DuckDuckGo HTML scrape. Check if SearXNG is running.\n`);
@@ -1417,7 +1421,9 @@ export class Engine {
     if (this._webSearchStatus === 'none') {
       try {
         const { DuckDuckGoProvider, createWebSearchTool } = await import('../integrations/search/index.js');
-        this.registry.register(createWebSearchTool(new DuckDuckGoProvider()));
+        const ddg = new DuckDuckGoProvider();
+        this.registry.register(createWebSearchTool(ddg));
+        this._searchProvider = ddg;
         this._webSearchStatus = 'fallback';
         process.stderr.write('[lynox] No SearXNG configured — using DuckDuckGo HTML-scrape fallback (best-effort). Set SEARXNG_URL or run via `docker compose up` for higher-quality results.\n');
       } catch (err) {
@@ -2037,6 +2043,9 @@ export class Engine {
    *                   told to refuse search and ask for SEARXNG_URL.
    *  Drives the honesty-fallback / fallback-quality prompt suffixes. */
   getWebSearchStatus(): 'configured' | 'fallback' | 'none' { return this._webSearchStatus; }
+  /** The web-search provider (SearXNG or DDG fallback), or null if none landed.
+   *  For direct non-agent search (onboarding domain derive). */
+  getSearchProvider(): import('../integrations/search/index.js').SearchProvider | null { return this._searchProvider; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }

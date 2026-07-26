@@ -567,7 +567,7 @@ if (typeof window !== 'undefined') {
  * agent with zero history → user sees old thread in UI but agent can't see it
  * (2026-05-18 staging QA from rafael prod).
  */
-async function ensureSession(resumeThreadId?: string | null): Promise<string> {
+export async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 	if (sessionId) return sessionId;
 	// Fire the hosting-tier probe alongside session creation — by the time
 	// any LLM error surfaces, the tier is known and error copy branches
