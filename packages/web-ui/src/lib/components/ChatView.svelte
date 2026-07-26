@@ -81,6 +81,7 @@
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
 	import PromptAnchor from './PromptAnchor.svelte';
+	import { setPromptAttention, clearPromptAttention } from '../utils/prompt-attention.js';
 	import StreamingActivityBar from './StreamingActivityBar.svelte';
 	import AgentPresenceIcon from './AgentPresenceIcon.svelte';
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
@@ -1551,6 +1552,22 @@
 	const waitingOnUser = $derived(pendingPromptHead !== null);
 	const runStartedAt = $derived(getRunStartedAt());
 	const runPromptCount = $derived(getRunPromptCount());
+
+	// Out-of-tab attention: when a run parks on a prompt while this tab is hidden,
+	// signal it (title badge + one browser notification if permission is already
+	// granted) so a parked prompt does not read as a stuck/looping run. The in-tab
+	// PromptAnchor covers the looking-at-the-tab case; this covers away/other-tab.
+	$effect(() => {
+		const head = pendingPromptHead;
+		const key = head ? (head.promptId ?? head.question ?? 'pending') : null;
+		setPromptAttention(key, {
+			badge: t('attention.badge'),
+			notifyTitle: t('attention.notify_title'),
+			notifyBody: head?.question || t('attention.notify_body'),
+		});
+	});
+	// Clear the signal on unmount (navigating away mid-prompt must not strand a badge).
+	$effect(() => () => clearPromptAttention());
 
 	// Pre-compute prompt-gate signals once so the textarea's per-keystroke
 	// re-render doesn't re-walk the whole ternary chain.
@@ -3109,11 +3126,14 @@
 		</div>
 	{/if}
 
-	<!-- Only render for the brief tabs-prompt window before `inBatchMode`
-	     flips. Other prompt kinds always have their own inline form below,
-	     so showing the anchor too gives the user two visually-equivalent
-	     reply surfaces — and the [Antworten] button is only a scroll-locator. -->
-	{#if pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
+	<!-- The sticky "waiting for you" locator bar. Shown for `tabs` (before
+	     `inBatchMode` flips) AND for `permission` (single ask_user / tool consent):
+	     both are easily missed once the inline form scrolls off, so a run can park
+	     unanswered for many minutes and read as stuck. The [Antworten] button is a
+	     scroll-locator to the inline form (which owns the reply controls), not a
+	     second reply surface. `secret`/`mail` stay excluded — surfacing a credential
+	     prompt's context in a persistent bar risks leaking it (pipeline-status.ts). -->
+	{#if pendingPromptHead && (pendingPromptHead.kind === 'permission' || (pendingPromptHead.kind === 'tabs' && !inBatchMode))}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{:else if isStreaming && !pendingPermission && !pendingSecret && !pendingTabsPrompt}
 		<!-- Sticky activity surface above the input. Stays visible during
