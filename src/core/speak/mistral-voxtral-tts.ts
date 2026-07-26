@@ -10,9 +10,12 @@
  *   event: speech.audio.delta
  *   data: {"type":"speech.audio.delta","audio_data":"<base64_chunk>"}
  *
- * Endpoint rejects `language` outright (422 extra_forbidden) — the voice
- * catalog as of Phase 0 is EN-only (en_us + en_gb), so DE text is spoken with
- * an English voice by default. Do not attempt to pass `language`.
+ * Endpoint rejects `language` outright (422 extra_forbidden) — re-verified
+ * 2026-07-26 against the live API, still true on the pinned v26.03 model: the
+ * voice catalog is EN-only (en_us + en_gb, 30 voices), so DE text is spoken
+ * with an English voice by default. Do not attempt to pass `language`. (v26.03
+ * is "multilingual" only in the sense of cross-lingual cloning — an EN voice
+ * pronouncing DE text better — NOT selectable de_* voices or a language param.)
  *
  * No usage or rate-limit headers are exposed. Character counting for per-tenant
  * cost attribution happens facade-side. EU-hosted (Mistral La Plateforme, Paris).
@@ -27,13 +30,20 @@ import type {
   SpeakStreamMeta,
 } from './types.js';
 
-/** Model alias — stays on `-latest` for future-proofing per Phase 0 decision. */
-export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-latest';
+/**
+ * Pinned model version. Was `voxtral-mini-tts-latest`; pinned to the concrete
+ * v26.03 tag 2026-07-26 — `-latest` aliases violate our no-floating-tag rule
+ * (rate-limit surprises on a silent server-side bump), and v26.03 is the newest
+ * documented release (better cross-lingual pronunciation of DE text than v26.02).
+ */
+export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
 
 /**
- * Default voice — English, read DE text with a light English accent. Rafael
- * approved on the Phase 0 p300/p3000 DE samples. Swap to `de_*` once Mistral
- * ships a German voice (as of 2026-04-16, catalog is 10× EN voices only).
+ * Default voice — English, reads DE text with a light English accent. Rafael
+ * approved on the Phase 0 p300/p3000 DE samples. `de_*` are NOT available:
+ * re-checked 2026-07-26 against the live catalog (30 voices, all en_us/en_gb).
+ * The live fetch below will surface `de_*` in the Settings picker automatically
+ * the moment Mistral ships them — nothing to do here until then.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
@@ -47,10 +57,10 @@ const VOICES_MAX_PAGES = 100;
 
 /**
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
- * call is unreachable. Reflects the 10× EN catalog documented as of 2026-04-16;
- * safe to stay out-of-date because the live fetch overwrites this in the UI the
- * moment Mistral is reachable. `de_*` slugs will appear automatically once the
- * catalog ships them — do not add hardcoded DE entries here.
+ * call is unreachable. A representative EN subset (live catalog is 30 EN voices
+ * as of 2026-07-26); safe to stay out-of-date because the live fetch overwrites
+ * this in the UI the moment Mistral is reachable. `de_*` slugs will appear
+ * automatically once the catalog ships them — do not add hardcoded DE entries here.
  */
 const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
   { id: 'en_paul_neutral',    language: 'en', description: 'Paul — neutral' },
