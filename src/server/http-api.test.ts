@@ -3398,6 +3398,7 @@ describe('LynoxHTTPApi', () => {
       test: (
         ps: import('../core/prompt-store.js').PromptStore,
         ks: import('../core/knowledge-store.js').KnowledgeStore,
+        db: import('better-sqlite3').Database,
       ) => Promise<void>,
       opts?: { noKnowledgeStore?: boolean },
     ): Promise<void> {
@@ -3431,7 +3432,7 @@ describe('LynoxHTTPApi', () => {
       const origKs = engineRef['getKnowledgeStore'];
       engineRef['getPromptStore'] = (): unknown => ps;
       engineRef['getKnowledgeStore'] = (): unknown => (opts?.noKnowledgeStore ? null : ks);
-      try { await test(ps, ks); }
+      try { await test(ps, ks, db); }
       finally {
         engineRef['getPromptStore'] = origPs;
         engineRef['getKnowledgeStore'] = origKs;
@@ -3516,8 +3517,50 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
         });
         expect(res.status).toBe(200);
-        expect(await res.json()).toMatchObject({ degraded: true, promoted: 0 });
+        // Degraded shape must match the normal path (includes `rejected`).
+        expect(await res.json()).toMatchObject({ degraded: true, promoted: 0, queued: 0, skipped: 0, rejected: 0 });
       }, { noKnowledgeStore: true });
+    });
+
+    it('a TAINTED live session routes the answers to pending_review, not user_asserted', async () => {
+      await withStores(async (ps, ks) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-taint' }),
+        })).json() as { promptId: string };
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder', 'automate invoicing']);
+        // Inject a tainted live session so the endpoint's sawUntrusted read is exercised on
+        // the ARMED side — an "always-false" mis-wire would otherwise pass every other test.
+        const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+        const origGet = ssRef.get;
+        ssRef.get = (id: string): unknown => (id === 'onb-taint' ? { conversationSawUntrusted: true } : origGet.call(ssRef, id));
+        try {
+          const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+            method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+          });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 3, skipped: 0, rejected: 0 });
+          expect(ks.listActive()).toHaveLength(0);
+          expect(ks.pendingCount()).toBe(3);
+        } finally {
+          ssRef.get = origGet;
+        }
+      });
+    });
+
+    it('promote refuses a non-null payload with a keys array but the wrong kind (isolates the kind clause)', async () => {
+      await withStores(async (ps, _ks, db) => {
+        // Start from a valid onboarding-basics prompt (so payload.keys IS an array), then
+        // rewrite ONLY the kind. The missing-keys clause now cannot fire — only the kind
+        // clause can produce the 400, so the test actually exercises the discriminator
+        // (deleting the kind check from the endpoint would let this promote, failing here).
+        const pid = ps.insertOnboardingBasics('onb-wrongkind', [{ question: 'q' }], ['company']);
+        db.prepare('UPDATE pending_prompts SET payload_json = ? WHERE id = ?')
+          .run(JSON.stringify({ kind: 'connect_mail', keys: ['company'] }), pid);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: pid }),
+        });
+        expect(res.status).toBe(400);
+      });
     });
 
     it('both knowledge routes require a bearer token (401 — owner-auth, S6)', async () => {

@@ -3746,7 +3746,7 @@ export class LynoxHTTPApi {
 
       // DK off → no KnowledgeStore to promote into. Degraded, honest no-op.
       const knowledgeStore = engine.getKnowledgeStore();
-      if (!knowledgeStore) { jsonResponse(res, 200, { degraded: true, promoted: 0, queued: 0, skipped: 0 }); return; }
+      if (!knowledgeStore) { jsonResponse(res, 200, { degraded: true, promoted: 0, queued: 0, skipped: 0, rejected: 0 }); return; }
 
       // Parse the VERBATIM stored answers (JSON string[] for a tabs prompt).
       let storedAnswers: string[];
@@ -3763,8 +3763,11 @@ export class LynoxHTTPApi {
         if (isOnboardingBasicKey(k)) answers.push({ key: k, answer: storedAnswers[i]! });
       }
 
-      // Clean-latch defense in depth: read the live session's latch if present; a fresh
-      // onboarding thread has run nothing → clean → user_asserted.
+      // Clean-latch defense in depth (BEST-EFFORT): read the live session's latch if
+      // present; an evicted / fresh session reads clean → user_asserted. Safe because the
+      // PRIMARY control is engine-mediation — the answer is the verbatim PromptStore row,
+      // model-untouched — so the latch only adds S1b-dictation defence when observed armed
+      // (sessionStore.get is in-memory-only; it does not rehydrate).
       const liveSession = this.sessionStore.get(row.session_id);
       const sawUntrusted = liveSession?.conversationSawUntrusted ?? false;
 

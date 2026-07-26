@@ -84,6 +84,23 @@ export function matchesSecretPattern(text: string): string | null {
 }
 
 /**
+ * Like {@link matchesSecretPattern} but ALWAYS applies the generic 40+ char token
+ * catcher, even for short text. `matchesSecretPattern` skips that catcher under 100
+ * chars to avoid false positives in ordinary prose — a fine trade-off when scanning
+ * free text, but wrong when the field should hold NO credential at all (an onboarding
+ * business-fact answer). There a bare 40-99 char token is far more likely a pasted
+ * credential than a company/role/goal, so bias toward rejection. Does NOT close the
+ * sub-40-char class (short app-passwords, TOTP seeds) — that stays [[DEF-onboarding-secret-heuristic]].
+ */
+export function matchesSecretPatternStrict(text: string): string | null {
+  for (const pattern of SECRET_PATTERNS) {
+    const match = pattern.exec(text);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/**
  * Mask text that matches common secret patterns.
  * Replaces detected secrets with `***<last4>`.
  */

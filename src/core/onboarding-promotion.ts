@@ -9,9 +9,15 @@
  *     it, so the promoted text is provably the user's typed answer (AC-1.3a).
  *   - TAINTED thread (`sawUntrusted === true`) → `sourceUntrusted: true` →
  *     `pending_review` (provenance rule 1 OUTRANKS the channel — the operator may be
- *     relaying attacker text; the dictation attack, D5). Defense in depth: Step-0 is
- *     clean by construction, but if the latch is somehow armed the answer is queued,
- *     never trusted-written.
+ *     relaying attacker text; the dictation attack, D5).
+ *
+ * The taint latch is a BEST-EFFORT SECONDARY signal, not the primary control. The caller
+ * reads it from the live in-memory session, so an evicted / not-rehydrated session reads
+ * clean (fails OPEN, not queued). That is acceptable because the PRIMARY trust anchor is
+ * that the value is ENGINE-MEDIATED — the model never touches it (engine-posed question +
+ * verbatim PromptStore answer), so a clean read is first-party by the data path regardless
+ * of the latch. The latch only ADDS S1b-dictation defence-in-depth when it is observed
+ * armed; its absence never weakens the data-path guarantee.
  *
  * Dedup is EXACT label-prefix (AC-1.6, never semantic): a re-onboarding whose key
  * already has an active fact skips — "same semantics as a re-run" (§3). Every entry
@@ -32,8 +38,10 @@ export interface OnboardingBasicAnswer {
 
 export interface PromoteOnboardingDeps {
   readonly knowledgeStore: KnowledgeStore;
-  /** The conversation clean-latch at promotion time. TRUE routes every answer to
-   *  `pending_review` (rule 1 taint) instead of `user_asserted` (defense in depth). */
+  /** The conversation clean-latch at promotion time — a BEST-EFFORT secondary signal
+   *  (the caller reads the live session; an evicted one reads clean → fails open). TRUE
+   *  routes an answer to `pending_review` (rule 1 taint). The PRIMARY anchor is that the
+   *  value is engine-mediated (model never touched it), NOT this latch. */
   readonly sawUntrusted: boolean;
   /** The onboarding thread-id → `source_thread_id` on every written entry (AC-1.10). */
   readonly threadId: string;
@@ -52,6 +60,18 @@ export interface PromoteOnboardingResult {
 
 const CATALOG = new Map(ONBOARDING_BASICS.map(basic => [basic.key, basic] as const));
 
+/** The canonical skip marker the tabs answer path emits for an unanswered question
+ *  (http-api.ts). It is NON-empty, so a skipped basic must be filtered explicitly —
+ *  otherwise it promotes as a literal `"Company: __dismissed__"` fact. */
+const ONBOARDING_SKIP_MARKER = '__dismissed__';
+
+/** Reject an answer longer than this (count `rejected`) BEFORE `write()` throws at its
+ *  8000-char store limit. A mid-loop throw would 500 AND leave a PARTIAL promotion
+ *  (earlier answers committed, the oversized one and later ones not) that a retry cannot
+ *  complete — dedup skips the committed ones, the oversized one re-throws. A business-fact
+ *  basic fits easily; a multi-KB paste is not a basic. */
+const MAX_ONBOARDING_ANSWER_CHARS = 2000;
+
 export function promoteOnboardingBasics(
   answers: readonly OnboardingBasicAnswer[],
   deps: PromoteOnboardingDeps,
@@ -65,20 +85,34 @@ export function promoteOnboardingBasics(
     const basic = CATALOG.get(key);
     if (!basic) continue; // unknown key — ignore (also guarded at insert; defense in depth)
     const value = answer.trim();
-    if (!value) continue; // an empty / skipped answer writes nothing
+    // An empty answer, OR the canonical skip marker for an unanswered tabs question,
+    // writes nothing (the marker is non-empty, so it must be filtered explicitly).
+    if (!value || value === ONBOARDING_SKIP_MARKER) continue;
+
+    // Length cap BEFORE write() — a mid-loop throw at the 8000-char store limit would
+    // 500 and leave a partial, un-retryable promotion.
+    if (value.length > MAX_ONBOARDING_ANSWER_CHARS) {
+      rejected++;
+      continue;
+    }
 
     // Secret-shape gate — write() does NOT scan, and this promotion writes DIRECTLY. A
-    // credential-shaped answer (an IBAN typed into "company" via the dictation residual,
-    // S1b) must never land agent-readable in recall. Mirrors the remember/approve guard.
+    // credential-shaped answer (the dictation residual, S1b) must never land agent-readable
+    // in recall. Best-effort: catches vendor keys, JWT/Bearer, 40+ char tokens, and known
+    // vault values; it does NOT catch every short non-vendor credential
+    // ([[DEF-onboarding-secret-heuristic]]).
     if (deps.knowledgeStore.looksLikeSecret(value)) {
       rejected++;
       continue;
     }
 
     const prefix = `${basic.label}: `;
-    // AC-1.6 exact key-match dedup (NOT semantic): the engine-fixed label prefix is
-    // plain text (never masked), so a re-onboarding whose key already has an active
-    // fact skips — corrections go through chat, not a re-run (§3, D11).
+    // AC-1.6 exact key-match dedup (NOT semantic): skip when an active fact already starts
+    // with this engine-fixed label prefix (plain text, never masked) — "same semantics as a
+    // re-run" (§3); corrections go through chat, not a re-run (D11). The scan is GLOBAL: a
+    // pre-existing active fact with this prefix (even a lower-trust agent_inferred one)
+    // suppresses the write — accepted per AC-1.6 ("skip already-known"); a deliberate upgrade
+    // is a chat correction, never a silent re-onboard overwrite.
     if (deps.knowledgeStore.hasActiveFactWithPrefix(prefix)) {
       skipped++;
       continue;

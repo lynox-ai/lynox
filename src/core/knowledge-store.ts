@@ -4,7 +4,7 @@ import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
-import { maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
+import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import type { SecretStoreLike } from '../types/security.js';
 import {
@@ -435,12 +435,14 @@ export class KnowledgeStore {
   }
 
   /** True iff `text` looks like a secret/credential — a shape match OR a known vault
-   *  value. The same guard `remember` runs BEFORE its write and `reviewEntry` runs at
-   *  approval; `write()` itself does NOT scan, so a caller that writes DIRECTLY (the
-   *  onboarding Step-0 promotion) must gate on this before storing an untrusted-origin
-   *  answer — otherwise a credential-shaped answer would land agent-readable in `recall`. */
+   *  value. Uses the STRICT matcher (the generic 40+ token catcher fires even for short
+   *  text): `write()` itself does NOT scan, and a direct caller writing an untrusted-origin
+   *  answer to a NON-credential field (the onboarding Step-0 basics) should bias toward
+   *  rejection — a bare token there is more likely a pasted credential than a business fact.
+   *  Catches vendor-prefixed keys, JWT/Bearer, 40+ char tokens, and known vault values; it
+   *  does NOT catch every short non-vendor credential ([[DEF-onboarding-secret-heuristic]]). */
   looksLikeSecret(text: string): boolean {
-    return matchesSecretPattern(text) !== null || this.secretStore?.containsSecret(text) === true;
+    return matchesSecretPatternStrict(text) !== null || this.secretStore?.containsSecret(text) === true;
   }
 
   /** True iff an ACTIVE entry's decrypted, UNMASKED text begins with `prefix`. The
