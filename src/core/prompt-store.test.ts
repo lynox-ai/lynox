@@ -291,4 +291,19 @@ describe('PromptStore', () => {
       expect(() => store.insertConnectMail('s1', 'q2', payload)).toThrow(PromptConflictError);
     });
   });
+
+  describe('insertOnboardingBasics (Onboarding Wave 1 Step-0, D9v2)', () => {
+    it('inserts a tabs-answerable prompt carrying the engine-only onboarding_basics marker', () => {
+      const id = store.insertOnboardingBasics('s-onb', [{ question: 'Company?' }, { question: 'Role?' }], ['company', 'role']);
+      const row = store.getById(id);
+      expect(row?.prompt_type).toBe('ask_user');
+      expect(row?.questions_json).not.toBeNull(); // tabs-shaped → the existing /reply-tabs answers it
+      // The marker is the promote-path security discriminator (engine-only; a model ask_user has NULL).
+      expect(JSON.parse(row!.payload_json!)).toEqual({ kind: 'onboarding_basics', keys: ['company', 'role'] });
+    });
+
+    it('throws on an empty question set', () => {
+      expect(() => store.insertOnboardingBasics('s-onb2', [], [])).toThrow();
+    });
+  });
 });

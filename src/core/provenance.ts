@@ -7,11 +7,13 @@ import { ALL_PROVENANCE_KINDS } from '../types/memory.js';
  * re-derivable pure function of it (PRD-MEMORY-FOUNDATION §1/§3), never the only
  * thing stored. Distinct from `ProvenanceKind` (the DERIVED trust tier).
  *
- * - `user`   — a person typed it in a conversation turn. RESERVED: rule 2 admits it, but
- *              no producer emits it yet — the conversational user-turn extractor (Wave 1.5's
- *              "extract from the user's turn" half) is deferred (user turns persist in history,
- *              so it is backfillable, and it is a behaviour change deserving its own design).
- *              Until then `user_asserted` is produced only by the UI facade via `ui`.
+ * - `user`   — a person typed it in a conversation turn. First producer: the Onboarding
+ *              Wave 1 Step-0 engine promotion (`onboarding-promotion.ts`, §6.1) — the engine
+ *              writes a clean-latch Step-0 answer VERBATIM on this channel → `user_asserted`.
+ *              (The GENERAL conversational user-turn extractor — Wave 1.5's "extract from the
+ *              user's turn" half — is still deferred: user turns persist in history, so it is
+ *              backfillable, and it is a behaviour change deserving its own design.) The `ui`
+ *              facade (settings, memory editor) also produces `user_asserted` via rule 2.
  * - `ui`     — a person entered it through a UI surface (settings, memory editor).
  * - `agent`  — the model derived/extracted it on a clean turn (the extractor, the
  *              force-floored `memory_store` tool).

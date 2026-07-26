@@ -39,8 +39,11 @@ import { RunAbortedError } from '../core/agent.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
+import { ONBOARDING_BASICS, onboardingBasicQuestion, isOnboardingBasicKey } from '../core/onboarding-catalog.js';
+import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onboarding-promotion.js';
+import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
+import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type { HealthBody, UsageSummaryResponse } from '../contract/http.js';
@@ -3688,6 +3691,90 @@ export class LynoxHTTPApi {
       const removed = store.reset(flag);
       jsonResponse(res, 200, { removed, ...store.getStatus(), degraded: false });
     }));
+
+    // ── Onboarding knowledge Step-0 (Onboarding Wave 1, D9v2 / §6.1) ──
+    // The engine-posed "clean phase" basics. 'user' scope = owner-auth (S6); the model
+    // has NO tool path here. Step-0 is DECOUPLED from the model run (no model = no tools,
+    // so AC-1.12 holds structurally). The answers flow through the PromptStore so the
+    // promoted text is provably the user's typed answer (verbatim, AC-1.3a) — read from
+    // the stored row at promote time, never re-sent by the client.
+    this.addStatic('user', 'POST /api/onboarding/knowledge/start', async (_req, res, _params, body) => {
+      const promptStore = engine.getPromptStore();
+      if (!requireService(res, promptStore, 'Prompt store')) return;
+      const b = body as Record<string, unknown> | null;
+      const sessionId = typeof b?.['sessionId'] === 'string' ? b['sessionId'] : '';
+      if (!sessionId) { errorResponse(res, 400, 'Missing sessionId'); return; }
+      const lang = b?.['lang'] === 'de' ? 'de' : 'en';
+      const questions: TabQuestion[] = ONBOARDING_BASICS.map(basic => ({
+        question: onboardingBasicQuestion(basic, lang),
+        header: basic.label,
+      }));
+      const keys = ONBOARDING_BASICS.map(basic => basic.key);
+      try {
+        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys);
+        void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+          ts: Date.now(), event: 'onboarding_started', thread: sessionId,
+          model: undefined, untrusted: false, step: 0,
+        });
+        jsonResponse(res, 200, { promptId, questions });
+      } catch (err) {
+        // PromptConflictError — this session already has a pending prompt.
+        errorResponse(res, 409, err instanceof Error ? err.message : 'Could not start onboarding');
+      }
+    });
+
+    // Promote the answered Step-0 prompt. Reads the VERBATIM answers from the settled
+    // PromptStore row (NOT the request body → AC-1.3a) and runs the §6.1 promotion
+    // boundary. Refuses any prompt lacking the engine-only `onboarding_basics` marker —
+    // a model-composed ask_user/tabs prompt can never reach user_asserted this way.
+    this.addStatic('user', 'POST /api/onboarding/knowledge/promote', async (_req, res, _params, body) => {
+      const promptStore = engine.getPromptStore();
+      if (!requireService(res, promptStore, 'Prompt store')) return;
+      const b = body as Record<string, unknown> | null;
+      const promptId = typeof b?.['promptId'] === 'string' ? b['promptId'] : '';
+      if (!promptId) { errorResponse(res, 400, 'Missing promptId'); return; }
+      const row = promptStore.getById(promptId);
+      if (!row) { errorResponse(res, 404, 'No such prompt'); return; }
+
+      // Security discriminator: only an ENGINE-posed onboarding-basics prompt promotes.
+      let payload: { kind?: unknown; keys?: unknown } | null = null;
+      try { payload = row.payload_json ? JSON.parse(row.payload_json) as { kind?: unknown; keys?: unknown } : null; } catch { payload = null; }
+      if (!payload || payload.kind !== 'onboarding_basics' || !Array.isArray(payload.keys)) {
+        errorResponse(res, 400, 'Not an onboarding-basics prompt'); return;
+      }
+      if (row.status !== 'answered' || !row.answer) { errorResponse(res, 409, 'Prompt not answered yet'); return; }
+
+      // DK off → no KnowledgeStore to promote into. Degraded, honest no-op.
+      const knowledgeStore = engine.getKnowledgeStore();
+      if (!knowledgeStore) { jsonResponse(res, 200, { degraded: true, promoted: 0, queued: 0, skipped: 0 }); return; }
+
+      // Parse the VERBATIM stored answers (JSON string[] for a tabs prompt).
+      let storedAnswers: string[];
+      try {
+        const parsed = JSON.parse(row.answer) as unknown;
+        if (!Array.isArray(parsed) || !parsed.every((a): a is string => typeof a === 'string')) throw new Error('bad');
+        storedAnswers = parsed;
+      } catch { errorResponse(res, 500, 'Stored answers malformed'); return; }
+
+      const payloadKeys = (payload.keys as unknown[]).filter((k): k is string => typeof k === 'string');
+      const answers: OnboardingBasicAnswer[] = [];
+      for (let i = 0; i < payloadKeys.length && i < storedAnswers.length; i++) {
+        const k = payloadKeys[i]!;
+        if (isOnboardingBasicKey(k)) answers.push({ key: k, answer: storedAnswers[i]! });
+      }
+
+      // Clean-latch defense in depth: read the live session's latch if present; a fresh
+      // onboarding thread has run nothing → clean → user_asserted.
+      const liveSession = this.sessionStore.get(row.session_id);
+      const sawUntrusted = liveSession?.conversationSawUntrusted ?? false;
+
+      const result = promoteOnboardingBasics(answers, { knowledgeStore, sawUntrusted, threadId: row.session_id });
+      void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+        ts: Date.now(), event: 'onboarding_step_completed', thread: row.session_id,
+        model: undefined, untrusted: sawUntrusted, step: 0,
+      });
+      jsonResponse(res, 200, { degraded: false, ...result });
+    });
 
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
     // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint

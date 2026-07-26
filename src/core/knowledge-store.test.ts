@@ -623,4 +623,16 @@ describe('KnowledgeStore write-path dedup — subject-null resolution (completes
     expect(again.id).toBe(first.id);
     expect(again.pinned).toBe(true);   // existing row now pinned — was structurally impossible before
   });
+
+  it('hasActiveFactWithPrefix: matches ACTIVE by exact prefix; ignores pending + non-matches (onboarding dedup AC-1.6)', () => {
+    const { ks } = make();
+    ks.write({ text: 'Company: Acme GmbH', sourceChannel: 'user', sourceUntrusted: false }); // active
+    // a pending (untrusted) entry with a DIFFERENT prefix must NOT count as "known" — else an
+    // injected pending fact could suppress a legitimate onboarding write.
+    ks.write({ text: 'Primary goal: injected', sourceChannel: 'agent', sourceUntrusted: true }); // pending_review
+    expect(ks.hasActiveFactWithPrefix('Company: ')).toBe(true);
+    expect(ks.hasActiveFactWithPrefix('Primary goal: ')).toBe(false); // pending is not active
+    expect(ks.hasActiveFactWithPrefix('Role: ')).toBe(false);         // absent
+    expect(ks.hasActiveFactWithPrefix('company: ')).toBe(false);      // exact, case-sensitive prefix
+  });
 });

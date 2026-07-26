@@ -173,6 +173,28 @@ export class PromptStore {
     });
   }
 
+  /** Insert the engine-posed Step-0 onboarding-basics prompt (Onboarding Wave 1,
+   * D9v2). Tabs-shaped (so the existing /reply-tabs answers it), but `payload_json`
+   * carries the engine-only marker `{kind:'onboarding_basics', keys}`. That marker is
+   * the promote-path SECURITY DISCRIMINATOR: a model-composed ask_user/tabs prompt has
+   * `payload_json` NULL, so it can never be promoted to `user_asserted` via the
+   * onboarding path — only a prompt this method inserted qualifies. `keys` maps each
+   * answer slot to its catalog key. Throws PromptConflictError on collision. */
+  insertOnboardingBasics(sessionId: string, questions: TabQuestion[], keys: string[]): string {
+    if (questions.length === 0) throw new Error('insertOnboardingBasics: questions must be non-empty');
+    return this._insert({
+      sessionId,
+      promptType: 'ask_user',
+      question: questions[0]!.question,
+      optionsJson: null,
+      questionsJson: JSON.stringify(questions),
+      secretName: null,
+      secretKeyType: null,
+      multiSelect: false,
+      payloadJson: JSON.stringify({ kind: 'onboarding_basics', keys }),
+    });
+  }
+
   private _insert(args: {
     sessionId: string;
     promptType: PromptType;

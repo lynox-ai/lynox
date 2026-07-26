@@ -434,6 +434,30 @@ export class KnowledgeStore {
     });
   }
 
+  /** True iff `text` looks like a secret/credential — a shape match OR a known vault
+   *  value. The same guard `remember` runs BEFORE its write and `reviewEntry` runs at
+   *  approval; `write()` itself does NOT scan, so a caller that writes DIRECTLY (the
+   *  onboarding Step-0 promotion) must gate on this before storing an untrusted-origin
+   *  answer — otherwise a credential-shaped answer would land agent-readable in `recall`. */
+  looksLikeSecret(text: string): boolean {
+    return matchesSecretPattern(text) !== null || this.secretStore?.containsSecret(text) === true;
+  }
+
+  /** True iff an ACTIVE entry's decrypted, UNMASKED text begins with `prefix`. The
+   *  onboarding Step-0 dedup key (AC-1.6, exact key-match, NOT semantic): the
+   *  engine-fixed `${label}: ` prefix is plain text (never secret-shaped → never
+   *  masked), so a re-onboarding whose key already has an active fact skips. A bounded
+   *  scan over active rows — onboarding runs once and the active set is small. */
+  hasActiveFactWithPrefix(prefix: string): boolean {
+    const rows = this.db.prepare(
+      "SELECT text FROM knowledge_entries WHERE status = 'active'",
+    ).all() as { text: string }[];
+    for (const r of rows) {
+      if (this.engine.dec(r.text).startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
    *  masked for display (the same two-layer masking as {@link renderBlocks}). */
   readSurfaceBlocks(): { profile: string; playbook: string } {
