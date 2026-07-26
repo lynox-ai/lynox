@@ -35,7 +35,7 @@ import { isDangerous } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
-import { scanToolResult } from './output-guard.js';
+import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -151,6 +151,23 @@ export function imageAwareSerializedLen(msg: BetaMessageParam): number {
     }
   }
   return len;
+}
+
+/**
+ * Order-independent JSON serialization, used to key the repeat-call loop guard
+ * on tool input. Object keys are sorted recursively so `{a,b}` and `{b,a}` — the
+ * same call the model happened to emit with a different key order — produce the
+ * same key and are correctly seen as identical. A mismatch here can only ever be
+ * a false NEGATIVE (the guard fails to fire), never a false positive, so the
+ * canonicalization is defensive, not load-bearing.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
 }
 
 /**
@@ -412,6 +429,8 @@ export class Agent implements IAgent {
   }
 
   private _loopToolCount = 0;
+  /** Run-scoped breaker for identical, output-unchanging tool-call loops. */
+  private readonly _repeatGuard = new RepeatCallGuard();
   private _pendingMemory: Promise<void>[] = [];
   private _settledMemory = new WeakSet<Promise<void>>();
   private static readonly MAX_PENDING_MEMORY = 10;
@@ -931,6 +950,7 @@ export class Agent implements IAgent {
     this.abortController = new AbortController();
     this.continuationCount = 0;
     this._loopToolCount = 0;
+    this._repeatGuard.reset();
     this._sawUntrustedData = false;
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
@@ -1913,7 +1933,32 @@ export class Agent implements IAgent {
     return results;
   }
 
+  /**
+   * Dispatch wrapper: a deterministic breaker around the real dispatch. Before
+   * executing, it skips a call that has already produced the same result
+   * REPEAT_LIMIT times in a row (an output-unchanging loop — see RepeatCallGuard),
+   * returning an escalated tool_result instead so the agent self-corrects rather
+   * than burning model calls on a hallucinated-argument loop. After executing, it
+   * records the (call → result) pair. The key covers ALL return paths of the
+   * inner method (handler success/throw AND the early is_error returns for
+   * permission/secret/validation), so a loop on any of them is caught too.
+   */
   private async _executeOne(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
+    const guardKey = `${tc.name}\x00${stableStringify(tc.input)}`;
+    const skip = this._repeatGuard.check(guardKey);
+    if (skip) {
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, isError: true });
+      }
+      return { type: 'tool_result', tool_use_id: tc.id, content: skip.escalatedResult, is_error: true };
+    }
+    const result = await this._executeOneInner(tc);
+    const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+    this._repeatGuard.record(guardKey, content);
+    return result;
+  }
+
+  private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
     // these (see _buildToolsDef), but rehydrated streams or injected

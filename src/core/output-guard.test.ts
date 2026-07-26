@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkWriteContent, scanToolResult, ToolCallTracker } from './output-guard.js';
+import { checkWriteContent, scanToolResult, ToolCallTracker, RepeatCallGuard } from './output-guard.js';
 
 describe('checkWriteContent', () => {
   describe('detects malicious patterns', () => {
@@ -204,5 +204,81 @@ describe('ToolCallTracker', () => {
     const anomaly = tracker.checkAnomaly();
     expect(anomaly).not.toBeNull();
     expect(anomaly).toContain('google_docs');
+  });
+});
+
+describe('RepeatCallGuard', () => {
+  const K = RepeatCallGuard.REPEAT_LIMIT;
+
+  // AC-1: K identical (call → same result) pairs → the (K+1)th is skipped, with
+  // the last result echoed and a "do not repeat" hint. Mirrors the api_setup
+  // loop (a soft failure returned as an ORDINARY, non-is_error string).
+  it('skips the (K+1)th identical call that keeps returning the same result', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'api_setup {"action":"view","id":"wrong"}';
+    const result = 'API profile "wrong" not found. Use action "list" to see available profiles.';
+    for (let i = 0; i < K; i++) {
+      expect(guard.check(key)).toBeNull(); // first K execute
+      guard.record(key, result);
+    }
+    const skip = guard.check(key); // the (K+1)th
+    expect(skip).not.toBeNull();
+    expect(skip!.escalatedResult).toContain(String(K));
+    expect(skip!.escalatedResult).toContain('not found');
+    expect(skip!.escalatedResult).toMatch(/do not call it again|different/i);
+  });
+
+  // AC-2: identical calls that keep returning DIFFERENT results never trip —
+  // this is the poll-until-done / progress case (input same, output advances).
+  it('never skips when the result keeps changing (progress), even for identical input', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'check_status {"id":"job1"}';
+    for (let i = 0; i < K + 5; i++) {
+      expect(guard.check(key)).toBeNull();
+      guard.record(key, `attempt ${String(i)}: pending`); // different each time
+    }
+    expect(guard.check(key)).toBeNull();
+  });
+
+  // AC-3: different calls never trip, even if each one fails — the agent is
+  // exploring, not looping. A different key resets the streak.
+  it('never skips distinct calls even when each returns the same failure text', () => {
+    const guard = new RepeatCallGuard();
+    const sameFailure = 'not found';
+    for (let i = 0; i < K + 5; i++) {
+      const key = `api_setup {"action":"view","id":"guess${String(i)}"}`;
+      expect(guard.check(key)).toBeNull();
+      guard.record(key, sameFailure);
+    }
+  });
+
+  // A streak of identical calls interrupted by a different call resets, so the
+  // guard measures CONSECUTIVE repeats, not lifetime counts.
+  it('resets the streak when a different call interleaves', () => {
+    const guard = new RepeatCallGuard();
+    const loop = 'a {"x":1}';
+    for (let i = 0; i < K; i++) { guard.check(loop); guard.record(loop, 'same'); }
+    // interleave a different call
+    guard.record('b {"y":2}', 'other');
+    expect(guard.check(loop)).toBeNull(); // streak was broken
+  });
+
+  // Once latched, EVERY further identical repeat is skipped (state untouched on
+  // skip), so a persistent loop can't slip a call through between skips.
+  it('stays latched — repeated identical calls after the limit all skip', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'a {"x":1}';
+    for (let i = 0; i < K; i++) { guard.check(key); guard.record(key, 'same'); }
+    expect(guard.check(key)).not.toBeNull();
+    expect(guard.check(key)).not.toBeNull(); // still latched, no record() in between
+  });
+
+  it('reset() clears the latch', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'a {"x":1}';
+    for (let i = 0; i < K; i++) { guard.check(key); guard.record(key, 'same'); }
+    expect(guard.check(key)).not.toBeNull();
+    guard.reset();
+    expect(guard.check(key)).toBeNull();
   });
 });
