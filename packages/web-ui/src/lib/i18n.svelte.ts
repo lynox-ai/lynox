@@ -1020,7 +1020,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.relayer_knowledge': { de: 'Knowledge — dein Geschäft', en: 'Knowledge — your business' },
 	'onboard.relayer_knowledge_desc': { de: 'Basics + Website-Analyse erneut durchlaufen', en: 'Run basics + website analysis again' },
 	'onboard.relayer_restart': { de: 'Neu starten', en: 'Restart' },
-	'onboard.relayer_soon': { de: 'Bald', en: 'Soon' },
+	'onboard.relayer_status_done': { de: 'Abgeschlossen', en: 'Completed' },
+	'onboard.relayer_status_skipped': { de: 'Übersprungen', en: 'Skipped' },
+	'onboard.relayer_status_pending': { de: 'Offen', en: 'Not started' },
+	'onboard.relayer_restarted': { de: 'Zurückgesetzt — das Onboarding startet beim nächsten Öffnen des Chats neu.', en: 'Reset — onboarding restarts the next time you open the chat.' },
+	'onboard.relayer_open_chat': { de: 'Jetzt starten', en: 'Start now' },
+	'onboard.relayer_error': { de: 'Zurücksetzen fehlgeschlagen. Bitte erneut versuchen.', en: 'Reset failed. Please try again.' },
+	'onboard.relayer_degraded': { de: 'Onboarding-Status vorübergehend nicht verfügbar.', en: 'Onboarding state is temporarily unavailable.' },
 	'setup.title_byok': { de: 'Dein API Key', en: 'Your API Key' },
 	'setup.subtitle_byok': { de: 'Gib deinen API Key ein, um loszulegen.', en: 'Enter your API key to get started.' },
 
@@ -1044,6 +1050,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	// PRD-LIGHT-MODE (2026-05-19) — Appearance: theme preference
 	'settings.account.appearance': { de: 'Darstellung', en: 'Appearance' },
 	'settings.account.appearance_desc': { de: 'Theme wählen — System, Hell oder Dunkel.', en: 'Choose theme — System, Light or Dark.' },
+	'settings.account.onboarding': { de: 'Onboarding', en: 'Onboarding' },
+	'settings.account.onboarding_desc': { de: 'Die Ersteinrichtung Schritt für Schritt neu durchlaufen.', en: 'Re-run the initial setup, step by step.' },
 	'appearance.heading': { de: 'Darstellung', en: 'Appearance' },
 	'appearance.system_hint': { de: 'Im System-Modus folgt das Theme deinen OS-Einstellungen und wechselt automatisch.', en: 'In System mode the theme follows your OS setting and switches automatically.' },
 	'theme.heading': { de: 'Theme', en: 'Theme' },
