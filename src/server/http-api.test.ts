@@ -174,6 +174,9 @@ vi.mock('../core/engine.js', () => ({
     // getKnowledgeStore is read by GET /api/config (has_durable_memory, DK.2) +
     // the /api/knowledge/queue routes (503 when null = flag off).
     this.getKnowledgeStore = vi.fn().mockReturnValue(null);
+    // Onboarding Wave 1 flag store — null by default (engine.db degraded → fail-open
+    // on the READ side); route tests swap in a fake store.
+    this.getOnboardingFlagStore = vi.fn().mockReturnValue(null);
     this.getSubjectFootprint = vi.fn().mockReturnValue(null);
     // The saved-workflow run path now flows through the budget/credit
     // lifecycle (runGuardedSavedWorkflow), which reads these off the engine.
@@ -3266,6 +3269,125 @@ describe('LynoxHTTPApi', () => {
         const res = await jsonFetch('/api/knowledge/entries/gone/retire', { method: 'POST' });
         expect(res.status).toBe(404);
       });
+    });
+  });
+
+  describe('onboarding flags — Wave 1 foundation (owner-auth, set-only)', () => {
+    function swapEngine(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origs: Record<string, unknown> = {};
+      for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+      return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+    }
+
+    const statusShape = {
+      knowledgeDone: false, knowledgeThreadId: null, skipped: false,
+      pushNudge: null, firstSessionAt: null,
+    };
+    function fakeStore(over: Partial<typeof statusShape> = {}) {
+      const calls: Array<[string, string | undefined]> = [];
+      return {
+        calls,
+        getStatus: () => ({ ...statusShape, ...over }),
+        set: (flag: string, value: string) => { calls.push(['set:' + flag, value]); },
+        reset: (flag: string) => { calls.push(['reset:' + flag, undefined]); return true; },
+      };
+    }
+
+    // ── READ side fails OPEN (AC-1.7): a degraded engine.db reports done, never 503 ──
+    it('GET /api/onboarding/status → 200 fail-open (knowledgeDone:true, degraded:true) when the store is absent', async () => {
+      const res = await jsonFetch('/api/onboarding/status'); // default mock → null
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        knowledgeDone: true, knowledgeThreadId: null, skipped: false,
+        pushNudge: null, firstSessionAt: null, degraded: true,
+      });
+    });
+
+    it('GET /api/onboarding/status → 200 reflects the store status when present', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore({ knowledgeDone: true, knowledgeThreadId: 'onb-42' }) }, async () => {
+        const res = await jsonFetch('/api/onboarding/status');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          knowledgeDone: true, knowledgeThreadId: 'onb-42', skipped: false,
+          pushNudge: null, firstSessionAt: null, degraded: false,
+        });
+      });
+    });
+
+    // AC-1.7 must not hinge on the client's fetch-error handling: a getStatus() THROW
+    // (a flaky/locked engine.db) fails open too — 200 done:true, not a top-level 500.
+    it('GET /api/onboarding/status → 200 fail-open when the read itself throws (not a 500)', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => ({ getStatus: () => { throw new Error('database is locked'); } }) }, async () => {
+        const res = await jsonFetch('/api/onboarding/status');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          knowledgeDone: true, knowledgeThreadId: null, skipped: false,
+          pushNudge: null, firstSessionAt: null, degraded: true,
+        });
+      });
+    });
+
+    // ── WRITE side honestly 503s when it cannot persist (fail-open is a READ property) ──
+    it('POST /api/onboarding/flags/:flag → 503 when the store is absent (a write cannot fail open)', async () => {
+      const res = await jsonFetch('/api/onboarding/flags/knowledge_done', {
+        method: 'POST', body: JSON.stringify({ value: 't1' }),
+      });
+      expect(res.status).toBe(503);
+    });
+
+    it('POST /api/onboarding/flags/:flag → 200 sets the flag and returns fresh status', async () => {
+      const store = fakeStore();
+      await swapEngine({ getOnboardingFlagStore: () => store }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/knowledge_done', {
+          method: 'POST', body: JSON.stringify({ value: 'onb-thread-9' }),
+        });
+        expect(res.status).toBe(200);
+        expect(store.calls).toContainEqual(['set:knowledge_done', 'onb-thread-9']);
+      });
+    });
+
+    it('POST /api/onboarding/flags/:flag → 400 for an unknown flag (validated before the DB)', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/literacy_seen', {
+          method: 'POST', body: JSON.stringify({ value: 'x' }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('POST /api/onboarding/flags/:flag → 400 when the value exceeds the length cap', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/knowledge_done', {
+          method: 'POST', body: JSON.stringify({ value: 'x'.repeat(513) }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('DELETE /api/onboarding/flags/:flag → 200 resets the flag (Settings reactivation, AC-1.5)', async () => {
+      const store = fakeStore();
+      await swapEngine({ getOnboardingFlagStore: () => store }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/knowledge_done', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ removed: true, degraded: false });
+        expect(store.calls).toContainEqual(['reset:knowledge_done', undefined]);
+      });
+    });
+
+    it('DELETE /api/onboarding/flags/:flag → 400 for an unknown flag', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/bogus', { method: 'DELETE' });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    // ── S6: owner-auth ('user' scope) — the model has no tool path; an unauthed caller is walled ──
+    it('all onboarding routes require a bearer token (401 without — owner-auth, S6)', async () => {
+      const noAuth = { headers: { Authorization: 'Bearer wrong-token' } };
+      expect((await fetch(`${baseUrl}/api/onboarding/status`, noAuth)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/onboarding/flags/knowledge_done`, { method: 'POST', ...noAuth })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/onboarding/flags/knowledge_done`, { method: 'DELETE', ...noAuth })).status).toBe(401);
     });
   });
 

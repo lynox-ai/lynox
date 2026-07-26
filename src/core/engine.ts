@@ -21,6 +21,7 @@ import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
@@ -265,6 +266,10 @@ export class Engine {
   /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
    *  `durable_memory_enabled` is on (+ engine.db present). */
   private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
+  /** Onboarding Wave 1 — the server-side onboarding-flag store. Present whenever
+   *  engine.db is (unconditional, NOT DK-gated); null only when engine.db failed to
+   *  open (→ HTTP/flow layer fails open: onboarding counts as done, AC-1.7). */
+  private _onboardingFlagStore: OnboardingFlagStore | null = null;
   private _subjectFootprintReader: import('./subject-footprint-reader.js').SubjectFootprintReader | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
@@ -909,6 +914,11 @@ export class Engine {
       process.stderr.write(`[lynox] EngineDb init failed: ${err instanceof Error ? err.message : String(err)} — subject-graph store unavailable\n`);
       this.engineDb = null;
     }
+
+    // Onboarding Wave 1: the flag store rides engine.db unconditionally (it does NOT
+    // gate on `durable_memory_enabled` — onboarding runs regardless of DK). Null only
+    // when engine.db is unavailable, in which case the HTTP/flow layer fails open.
+    this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -1908,6 +1918,8 @@ export class Engine {
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
   getEngineDb(): EngineDb | null { return this.engineDb; }
+  /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
+  getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
