@@ -38,6 +38,7 @@ import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
+import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
@@ -3637,6 +3638,55 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : 'Retire failed';
         errorResponse(res, /no active entry/i.test(msg) ? 404 : 400, msg);
       }
+    }));
+
+    // ── Onboarding flags (Onboarding Wave 1) — server-side, cross-device state ──
+    // 'user' scope = owner-authenticated (S6): the model has NO tool path here, only
+    // the authenticated operator via the UI can read/set these. UNCONDITIONAL of the DK
+    // flag — onboarding runs regardless (the store is present whenever engine.db is).
+    // The READ side fails OPEN (AC-1.7) on BOTH failure modes — a null store (engine.db
+    // down) AND a read that throws (a flaky/locked engine.db mid-SELECT): either way it
+    // reports onboarding as done so a long-time user is never re-nagged. AC-1.7 must not
+    // hinge on how the client treats a failed fetch, so the throw path fails open too.
+    // Writes honestly 503 (they can't persist).
+    this.addStatic('user', 'GET /api/onboarding/status', async (_req, res) => {
+      const failOpen = {
+        knowledgeDone: true, knowledgeThreadId: null, skipped: false,
+        pushNudge: null, firstSessionAt: null, degraded: true,
+      };
+      const store = engine.getOnboardingFlagStore();
+      if (!store) { jsonResponse(res, 200, failOpen); return; }
+      try {
+        jsonResponse(res, 200, { ...store.getStatus(), degraded: false });
+      } catch {
+        jsonResponse(res, 200, failOpen);
+      }
+    });
+
+    // Set (upsert) one flag. Set-only for the owner, never the model. `value` carries
+    // the durable link (knowledge_done → onboarding thread-id; first_session_at →
+    // render-ack timestamp); bounded to keep it a link/state, not free text.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/onboarding/flags/:flag', async (_req, res, params, body) => {
+      const store = engine.getOnboardingFlagStore();
+      if (!requireService(res, store, 'Onboarding state')) return;
+      const flag = params['flag'] ?? '';
+      if (!isOnboardingFlag(flag)) { errorResponse(res, 400, 'Unknown onboarding flag'); return; }
+      const b = body as Record<string, unknown> | null;
+      const value = typeof b?.['value'] === 'string' ? b['value'] : '';
+      if (value.length > 512) { errorResponse(res, 400, 'value too long (max 512 chars)'); return; }
+      store.set(flag, value);
+      jsonResponse(res, 200, { ...store.getStatus(), degraded: false });
+    }));
+
+    // Reset one flag (the Settings per-layer reactivation path, AC-1.5). Idempotent —
+    // `removed:false` when the flag was already absent.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/onboarding/flags/:flag', async (_req, res, params) => {
+      const store = engine.getOnboardingFlagStore();
+      if (!requireService(res, store, 'Onboarding state')) return;
+      const flag = params['flag'] ?? '';
+      if (!isOnboardingFlag(flag)) { errorResponse(res, 400, 'Unknown onboarding flag'); return; }
+      const removed = store.reset(flag);
+      jsonResponse(res, 200, { removed, ...store.getStatus(), degraded: false });
     }));
 
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──

@@ -605,6 +605,47 @@ const MIGRATIONS: string[] = [
      char_limit INTEGER NOT NULL,
      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
    );`,
+
+  // v10 (Onboarding Wave 1 — Layer-1 foundation): the server-side, cross-device
+  // onboarding state that fixes the localStorage-local flow (PRD-ONBOARDING §1/§2.1).
+  // NEW table via CREATE (not ALTER) — additive, so a fresh DB and an upgraded DB
+  // get the identical shape, and the v1 CREATE is NEVER edited (a column added there
+  // would collide with a future ALTER on a fresh DB; ADD COLUMN has no IF NOT EXISTS).
+  //
+  //   A tiny key-value store, one row per (owner_user_id, flag). The composite PK is
+  //   the upsert key. `value` is an opaque non-secret TEXT — NEVER enc()'d (no
+  //   sensitive material lands here) and per-flag typed at the store/endpoint layer,
+  //   not by a DB CHECK (the flag axis differs per key):
+  //     · knowledge_done   → the onboarding THREAD-ID (RF-IRR1): completion + the
+  //                          durable link that makes every onboarding-written DK entry
+  //                          identifiable later (mass-repair by source_thread_id).
+  //     · skipped          → the skip timestamp (presence = skipped).
+  //     · push_nudge       → 'asked_once' | 'declined' (Wave 2, S4/RF-IRR3 nudge state).
+  //     · first_session_at → the first intro-card render-ack timestamp (DC4; written
+  //                          in Wave 1, consumed by the Wave-3 session-1-vs-2 rule).
+  //
+  //   owner_user_id follows the `subjects` precedent (`DEFAULT 'system'`, engine-db.ts
+  //   v1): engine.db has no users table, so the instance is single-operator today and
+  //   the key is user-scoped by shape — a future multi-user engine needs no migration
+  //   (D8). onboarding_flags is auto-wiped by deleteAllData() (GDPR Art. 17, enumerated
+  //   from sqlite_master) and rides the engine.db migration-export set — both structural,
+  //   no per-table plumbing (S2).
+  //
+  //   The `flag` CHECK is deliberately FORWARD-COMPLETE — it lists all four values the
+  //   schema will ever use, including the Wave-2 (push_nudge) and Wave-3-consumed
+  //   (first_session_at) keys, even though this wave only writes knowledge_done/skipped/
+  //   first_session_at. SQLite cannot ALTER a CHECK in place (it needs a table rebuild —
+  //   the exact pain the pending_prompts twin carries), so enumerating the full set now
+  //   trades nothing and avoids a later rebuild; a typo'd flag still fails loud.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (10);
+   CREATE TABLE onboarding_flags (
+     owner_user_id TEXT NOT NULL DEFAULT 'system',
+     flag          TEXT NOT NULL
+                     CHECK (flag IN ('knowledge_done','skipped','push_nudge','first_session_at')),
+     value         TEXT NOT NULL DEFAULT '',
+     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (owner_user_id, flag)
+   );`,
 ];
 
 /**

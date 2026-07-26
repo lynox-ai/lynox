@@ -15,8 +15,15 @@ import { appendBoundedJsonl } from './bounded-jsonl-log.js';
  *     numerator), with the store outcome (active / pending_review / deduped).
  * Fire-rate = remember_invoked / capture_eligible answers "why is capture dead?"
  * on the deployed model, and becomes the baseline the tuning-walk measures a new
- * mechanism against. The forward events (`propose_*`) are reserved so the coming
- * propose→confirm→apply primitive plugs into the SAME sink, not a second one.
+ * mechanism against. The `propose_*` events (once forward-reserved) are ACTIVATED by
+ * Onboarding Wave 1 (PRD-ONBOARDING §7): the Layer-1 Faden chips plug into the SAME
+ * sink, not a second one. Wave 1 also adds the `onboarding_*` FUNNEL events (flow
+ * progress — a step index, never content) so the operator can see via debug-export
+ * WHERE an onboarding stalls without reading any of the user's answers. Both ride this
+ * sink; the emit-time gate is the CALLER's `enabled` argument (below), not automatic —
+ * the Wave-1 emit sites pass the DK flag, which is the natural gate here (onboarding's
+ * capture path is the DK chip/queue, so a DK-off instance has no chips to fire — gating
+ * the funnel with the same flag is consistent, not a gap).
  *
  * Design (mirrors `context-cost-log.ts`):
  *  - Gated on the DK flag (`durable_memory_enabled`): logs only where we measure
@@ -33,10 +40,14 @@ export const CAPTURE_TELEMETRY_LOG_FILE = 'capture-telemetry.jsonl';
 export type CaptureEvent =
   | 'capture_eligible'   // a capture-eligible turn ended (denominator)
   | 'remember_invoked'   // the model recorded a durable fact (numerator)
-  // reserved — the coming propose→confirm→apply primitive shares this sink:
+  // propose→confirm→apply — ACTIVATED by Onboarding Wave 1 (Layer-1 Faden chips):
   | 'propose_shown'
   | 'propose_confirmed'
-  | 'propose_ignored';
+  | 'propose_ignored'
+  // onboarding funnel (Wave 1) — flow progress; carries the `step` index, never content:
+  | 'onboarding_started'
+  | 'onboarding_step_completed'
+  | 'onboarding_abandoned';
 
 /** The store outcome of a capture write, when the event is `remember_invoked`.
  *  Mirrors `KnowledgeStatus` (active/pending_review/rejected/superseded) + the
@@ -56,6 +67,28 @@ export interface CaptureTelemetryEntry {
   readonly untrusted: boolean;
   /** Store outcome — only set for `remember_invoked`. */
   readonly outcome?: CaptureOutcome | undefined;
+
+  // ── Onboarding Wave 1 additions (PRD-ONBOARDING §7, content rule S5) ──
+  // The S5 rule is "entry-IDs + signals only, NEVER the fact text". No field here is
+  // INTENDED for content: the payload is opaque entry-ids, enum/numeric classification
+  // signals, and the funnel step. The schema does not invite text — but note the free
+  // `string` signal fields (`entryId`/`captureSource`/`subjectKind`) are not a hard wall
+  // against a caller that deliberately stuffs text into one; keep call sites to ids/enums.
+  /** `propose_*`: the knowledge entry-id the chip refers to — an opaque handle, NOT text. */
+  readonly entryId?: string | undefined;
+  /** `propose_ignored`: true = an active discard, false/absent = a silent ignore. */
+  readonly dismissed?: boolean | undefined;
+  /** `propose_*`: where the proposal came from (a signal, not content) — e.g.
+   *  'web_research' | 'ask_user' | 'scan'. */
+  readonly captureSource?: string | undefined;
+  /** `propose_*`: the subject kind (person|organization|…) — a classification signal. */
+  readonly subjectKind?: string | undefined;
+  /** `propose_*`: the DK.3 confidence signal (identity ≥0.9 stable vs attribute 0.45–0.60). */
+  readonly confidence?: number | undefined;
+  /** `propose_*`: primary (identity) vs secondary (attribute) — the DK.3 tier split. */
+  readonly primary?: boolean | undefined;
+  /** `onboarding_*`: the funnel step index (no content). */
+  readonly step?: number | undefined;
 }
 
 /**
