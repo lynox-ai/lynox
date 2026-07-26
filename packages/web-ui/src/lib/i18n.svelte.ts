@@ -959,7 +959,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.key_saved': { de: 'Bereit zum Chatten!', en: 'Ready to chat!' },
 	'onboard.save_key': { de: 'Speichern & Starten', en: 'Save & Start' },
 	'onboard.ready_title': { de: 'Alles eingerichtet!', en: 'All set!' },
-	'onboard.ready_hint': { de: 'In 3 Schritten lernt lynox dein Business kennen.', en: 'In 3 steps, lynox learns about your business.' },
+	'onboard.ready_hint': { de: 'Schritt für Schritt lernt lynox dein Business kennen.', en: 'Step by step, lynox gets to know your business.' },
 	'onboard.chip_1': { de: 'Analysiere meine Website', en: 'Analyze my website' },
 	'onboard.chip_1_desc': { de: 'Positionierung, Zielgruppe und Tone of Voice erkennen', en: 'Detect positioning, audience, and tone of voice' },
 	'onboard.chip_2': { de: 'Erzähl mir mehr über dein Business', en: 'Tell me more about your business' },
@@ -991,7 +991,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.vault_confirm_btn': { de: 'Kopiert, weiter', en: 'Copied, continue' },
 	'onboard.vault_skip_btn': { de: 'Später', en: 'Later' },
 	'onboard.vault_confirmed': { de: 'Vault Key gesichert. Du findest ihn jederzeit unter Settings → Config.', en: 'Vault key noted. You can find it anytime in Settings → Config.' },
-	'onboard.continue_step': { de: 'Weiter: Schritt {n}/3', en: 'Continue: Step {n}/3' },
 	// Post-onboarding closing: the generic capability tiles were removed (Activation
 	// Principle — the close proposes grounded jobs via follow-up pills, not a feature
 	// menu). Only the honest limits note + the "just chat" dismiss remain.
@@ -1005,10 +1004,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.intro_lead': { de: 'Zwei kurze Fragen, dann schaue ich mir deine Website an. Dauert ~2 Minuten — du kannst jederzeit überspringen.', en: "Two quick questions, then I'll look at your website. About 2 minutes — you can skip anytime." },
 	'onboard.intro_start': { de: "Los geht's", en: "Let's go" },
 	'onboard.basics_step': { de: 'Die Basics', en: 'The basics' },
-	'onboard.basics_step_desc': { de: 'Firma, Rolle, Ziel — direkt gemerkt', en: 'Company, role, goal — saved directly' },
 	'onboard.basics_save': { de: 'Speichern & weiter', en: 'Save & continue' },
 	'onboard.basics_saving': { de: 'Speichern…', en: 'Saving…' },
-	'onboard.basics_saved': { de: 'Gemerkt', en: 'Saved' },
 	'onboard.limits_note': { de: 'Ich merke mir Geschäftskontext dauerhaft und schlage vor, bevor ich etwas Wichtiges tue. E-Mails versende ich nie ohne deine Freigabe.', en: 'I keep your business context and propose before doing anything important. I never send email without your OK.' },
 	'onboard.relayer_title': { de: 'Onboarding', en: 'Onboarding' },
 	'onboard.relayer_desc': { de: 'Die Schichten einzeln neu durchlaufen', en: 'Re-run the onboarding layers individually' },

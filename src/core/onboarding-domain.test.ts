@@ -71,6 +71,8 @@ describe('buildDomainSearchQuery (localized)', () => {
     expect(buildDomainSearchQuery('Migros', 'de')).toBe('Migros offizielle Website');
     expect(buildDomainSearchQuery('Migros', 'en')).toBe('Migros official website');
     expect(buildDomainSearchQuery('Migros', 'fr')).toBe('Migros site officiel');
+    expect(buildDomainSearchQuery('Migros', 'it')).toBe('Migros sito ufficiale');
+    expect(buildDomainSearchQuery('Migros', 'es')).toBe('Migros sitio web oficial');
   });
 
   it('falls back to the bare company name for unknown locales (no English skew)', () => {

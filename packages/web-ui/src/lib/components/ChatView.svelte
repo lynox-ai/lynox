@@ -124,9 +124,13 @@
 	// "[ONBOARDING 2/3] ..." / "[ONBOARDING 3/3] ..." lines in the user-visible
 	// chat output as "Next Steps" — leaking internal orchestration naming.
 	// The agent doesn't need to know its step number; the chip UI tracks that.
-	// D9v2 (Onboarding W1): route captures through the DK `remember` tool (not legacy
-	// memory_store) — on the research-tainted turns that means they land as Faden chips
-	// (pending_review) the user confirms. Step-1's questions are SHARPENED: grounded in
+	// D9v2 (Onboarding W1): captures route through the memory tool that is actually
+	// registered — `{memoryTool}` is substituted per instance: DK-on → `remember`
+	// (research-tainted turns land as Faden chips / pending_review the user confirms),
+	// DK-off (the default) → `memory_store` (legacy flat save). Naming `remember`
+	// unconditionally would reference a non-existent tool on the DK-off majority
+	// (engine.ts registers remember XOR memory_store on `durable_memory_enabled`).
+	// Step-1's questions are SHARPENED: grounded in
 	// what the scan found, not a generic questionnaire — this is the high-value moment.
 	// Step-3's CLOSING follows the Activation Principle (POSITIONING.md): it proposes
 	// 2-3 concrete, context-grounded JOBS via suggest_follow_ups (rendered as clickable
@@ -135,9 +139,9 @@
 	// on real models before ship ([[fb_validate_prompt_change]]). The no-sequence-marker
 	// constraint above still holds.
 	const ONBOARDING_CONTEXT = [
-		`The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Record each concrete finding as durable knowledge with the remember tool. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You already analyzed the user's website earlier in this conversation. Now ask the 3-5 questions the research made possible — the sharp, specific ones the website does NOT answer, each GROUNDED in a concrete detail you just found. Do NOT ask a generic questionnaire: tie every question to something specific from the scan (e.g. if they sell recurring maintenance contracts, ask how they handle overdue renewals today; if the positioning is premium, ask what justifies the price to a skeptical prospect). Cover what actually moves the needle — how they make money, where the real bottleneck is, the biggest current challenge, and what success looks like in 12 months. Use the ask_user tool with the "questions" parameter to present all questions at once (each free-text). When they answer, record each answer as durable knowledge with the remember tool. IMPORTANT: if the user skips or dismisses questions (answers contain "__dismissed__"), accept it gracefully — record whatever you received and move on; do NOT re-ask. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Record the key competitive insights as durable knowledge with the remember tool. After artifact_save returns, write a brief 1-2 sentence chat message that confirms the artifact AND proves you understood the business by naming one concrete fact you just learned. Then call the suggest_follow_ups tool with 2-3 CONCRETE JOBS you could do for them right now — each grounded in a specific fact from the scan or their answers (e.g. "draft a re-engagement email to churned customers", "set up a watcher for overdue invoices", "compare your pricing against competitor X"). These must be specific tasks tied to their business, NOT generic capabilities ("connect Gmail", "install the app") and NOT feature enumeration. Respond in {locale}.`,
+		`The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Record each concrete finding as durable knowledge with the {memoryTool} tool. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
+		`You already analyzed the user's website earlier in this conversation. Now ask the 3-5 questions the research made possible — the sharp, specific ones the website does NOT answer, each GROUNDED in a concrete detail you just found. Do NOT ask a generic questionnaire: tie every question to something specific from the scan (e.g. if they sell recurring maintenance contracts, ask how they handle overdue renewals today; if the positioning is premium, ask what justifies the price to a skeptical prospect). Cover what actually moves the needle — how they make money, where the real bottleneck is, the biggest current challenge, and what success looks like in 12 months. Use the ask_user tool with the "questions" parameter to present all questions at once (each free-text). When they answer, record each answer as durable knowledge with the {memoryTool} tool. IMPORTANT: if the user skips or dismisses questions (answers contain "__dismissed__"), accept it gracefully — record whatever you received and move on; do NOT re-ask. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
+		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Record the key competitive insights as durable knowledge with the {memoryTool} tool. After artifact_save returns, write a brief 1-2 sentence chat message that confirms the artifact AND proves you understood the business by naming one concrete fact you just learned. Then call the suggest_follow_ups tool with 2-3 CONCRETE JOBS you could do for them right now — each grounded in a specific fact from the scan or their answers (e.g. "draft a re-engagement email to churned customers", "set up a watcher for overdue invoices", "compare your pricing against competitor X"). These must be specific tasks tied to their business, NOT generic capabilities ("connect Gmail", "install the app") and NOT feature enumeration. Respond in {locale}.`,
 	];
 
 	let onboardingStep = $state(0); // 0-based: which of the 3 model-run chips is current
@@ -159,6 +163,10 @@
 	let onboardingStarted = $state(false);
 	let onboardingBasicsDone = $state(false);
 	let onboardingSessionId = $state<string | null>(null);
+	// The memory tool the model-run steps must name — `remember` (DK-on) vs
+	// `memory_store` (DK-off default). Set from /status.durableMemory; defaults to
+	// the DK-off majority so an unresolved status never names a DK-on-only tool.
+	let onboardingMemoryTool = $state<'remember' | 'memory_store'>('memory_store');
 
 	async function loadOnboardingState(): Promise<void> {
 		// Server-side, cross-device state (D12/AC-1.1) — no localStorage READ. The /status
@@ -167,8 +175,9 @@
 		try {
 			const res = await fetch(`${getApiBase()}/onboarding/status`);
 			if (!res.ok) return;
-			const data = (await res.json()) as { knowledgeDone?: boolean; skipped?: boolean };
+			const data = (await res.json()) as { knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean };
 			if (data.knowledgeDone || data.skipped) onboardingDismissed = true;
+			onboardingMemoryTool = data.durableMemory === true ? 'remember' : 'memory_store';
 		} catch { /* non-critical — show onboarding */ }
 	}
 
@@ -264,6 +273,7 @@
 		if (!chip) return;
 		const locale = getLocale() === 'de' ? 'German' : 'English';
 		let context = ONBOARDING_CONTEXT[idx]?.replace('{locale}', locale) ?? '';
+		context = context.replace(/\{memoryTool\}/g, onboardingMemoryTool);
 		if (url) context = context.replace('{url}', url);
 		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
 		pendingOnboardingAdvance = true;
@@ -2267,7 +2277,7 @@
 												<!-- Step 1: inline URL input (skips LLM ask_user round-trip) -->
 												<div class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 p-4 space-y-3">
 													<div class="flex items-center gap-3">
-														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">1</span>
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">2</span>
 														<div class="flex-1 min-w-0">
 															<span class="text-sm font-medium text-text">{t('onboard.chip_1')}</span>
 															<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} 2/4</span>
@@ -2303,7 +2313,7 @@
 													class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
 												>
 													<div class="flex items-center gap-3">
-														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 2}</span>
 														<div class="flex-1 min-w-0">
 															<div class="flex items-center gap-2">
 																<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
@@ -2319,7 +2329,7 @@
 											<!-- Future: faded -->
 											<div class="w-full rounded-[var(--radius-md)] border border-border/50 bg-bg-subtle opacity-40 p-4">
 												<div class="flex items-center gap-3">
-													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 1}</span>
+													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 2}</span>
 													<div class="flex-1 min-w-0">
 														<span class="text-sm font-medium text-text-subtle">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
 														<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
@@ -2690,7 +2700,7 @@
 							class="w-full max-w-lg rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
 						>
 							<div class="flex items-center gap-3">
-								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 1}</span>
+								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 2}</span>
 								<div class="flex-1 min-w-0">
 									<div class="flex items-center gap-2">
 										<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>

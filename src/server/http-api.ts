@@ -3668,14 +3668,20 @@ export class LynoxHTTPApi {
     // hinge on how the client treats a failed fetch, so the throw path fails open too.
     // Writes honestly 503 (they can't persist).
     this.addStatic('user', 'GET /api/onboarding/status', async (_req, res) => {
+      // `durableMemory` tells the client which memory tool the onboarding prompts
+      // must name — `remember` (DK-on) vs `memory_store` (DK-off default). Naming
+      // the wrong one references a non-existent tool (engine registers them XOR on
+      // `durable_memory_enabled`). failOpen defaults it to false (DK-off), the safe
+      // majority default — and onboarding is dismissed on the failOpen path anyway.
+      const durableMemory = engine.getUserConfig().durable_memory_enabled === true;
       const failOpen = {
         knowledgeDone: true, knowledgeThreadId: null, skipped: false,
-        pushNudge: null, firstSessionAt: null, degraded: true,
+        pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
       };
       const store = engine.getOnboardingFlagStore();
       if (!store) { jsonResponse(res, 200, failOpen); return; }
       try {
-        jsonResponse(res, 200, { ...store.getStatus(), degraded: false });
+        jsonResponse(res, 200, { ...store.getStatus(), durableMemory, degraded: false });
       } catch {
         jsonResponse(res, 200, failOpen);
       }
@@ -3805,6 +3811,14 @@ export class LynoxHTTPApi {
       const company = typeof b?.['company'] === 'string' ? b['company'].trim().slice(0, 120) : '';
       if (!company) { errorResponse(res, 400, 'Missing company'); return; }
       const lang = typeof b?.['lang'] === 'string' ? b['lang'] : 'en';
+      // Honor the operator's network_policy: this direct provider.search() call does
+      // NOT thread a ToolContext, so its internal egress gate would see policy=undefined
+      // (=allow-all) and leak the company name externally on a locked-down instance.
+      // Discovery is genuinely open only on allow-all/guarded (or unset=allow-all); on
+      // deny-all/allow-list we skip the search entirely → {domain:null} (manual field),
+      // never a policy bypass. (Same discovery-surface posture web_research honors.)
+      const policy = engine.getUserConfig().network_policy;
+      if (policy === 'deny-all' || policy === 'allow-list') { jsonResponse(res, 200, { domain: null }); return; }
       const provider = engine.getSearchProvider();
       if (!provider) { jsonResponse(res, 200, { domain: null }); return; }
       try {

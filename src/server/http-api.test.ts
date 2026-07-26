@@ -3300,7 +3300,7 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         knowledgeDone: true, knowledgeThreadId: null, skipped: false,
-        pushNudge: null, firstSessionAt: null, degraded: true,
+        pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
       });
     });
 
@@ -3310,7 +3310,7 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({
           knowledgeDone: true, knowledgeThreadId: 'onb-42', skipped: false,
-          pushNudge: null, firstSessionAt: null, degraded: false,
+          pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: false,
         });
       });
     });
@@ -3323,7 +3323,7 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({
           knowledgeDone: true, knowledgeThreadId: null, skipped: false,
-          pushNudge: null, firstSessionAt: null, degraded: true,
+          pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
         });
       });
     });
@@ -3480,17 +3480,24 @@ describe('LynoxHTTPApi', () => {
       await withStores(async () => {
         const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
         const origSp = engineRef['getSearchProvider'];
-        // Fake provider: first hit is LinkedIn (skipped by the heuristic), second is the site.
+        // Fake provider captures the query so the lang→buildDomainSearchQuery passthrough
+        // is verified (a dropped `lang` would otherwise pass). First hit is LinkedIn
+        // (skipped by the heuristic), second is the site.
+        let capturedQuery = '';
         engineRef['getSearchProvider'] = (): unknown => ({
-          search: async (): Promise<unknown[]> => [
-            { title: 'X', url: 'https://linkedin.com/company/acme', snippet: '' },
-            { title: 'Acme', url: 'https://www.acme.ch/about', snippet: '' },
-          ],
+          search: async (q: string): Promise<unknown[]> => {
+            capturedQuery = q;
+            return [
+              { title: 'X', url: 'https://linkedin.com/company/acme', snippet: '' },
+              { title: 'Acme', url: 'https://www.acme.ch/about', snippet: '' },
+            ];
+          },
         });
         try {
-          const ok = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+          const ok = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme', lang: 'de' }) });
           expect(ok.status).toBe(200);
           expect(await ok.json()).toEqual({ domain: 'https://acme.ch' });
+          expect(capturedQuery).toBe('Acme offizielle Website'); // lang passthrough → localized query
 
           const bad = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({}) });
           expect(bad.status).toBe(400);
@@ -3500,6 +3507,21 @@ describe('LynoxHTTPApi', () => {
           const deg = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
           expect(deg.status).toBe(200);
           expect(await deg.json()).toEqual({ domain: null });
+
+          // SECURITY: a restrictive network_policy short-circuits BEFORE any search —
+          // the company name never egresses on a locked-down instance.
+          const origCfg = engineRef['getUserConfig'] as () => Record<string, unknown>;
+          capturedQuery = '';
+          engineRef['getSearchProvider'] = (): unknown => ({ search: async (q: string): Promise<unknown[]> => { capturedQuery = q; return [{ title: 'A', url: 'https://acme.ch', snippet: '' }]; } });
+          engineRef['getUserConfig'] = (): unknown => ({ ...origCfg.call(engineRef), network_policy: 'deny-all' });
+          try {
+            const denied = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+            expect(denied.status).toBe(200);
+            expect(await denied.json()).toEqual({ domain: null });
+            expect(capturedQuery).toBe(''); // never searched
+          } finally {
+            engineRef['getUserConfig'] = origCfg;
+          }
         } finally {
           engineRef['getSearchProvider'] = origSp;
         }

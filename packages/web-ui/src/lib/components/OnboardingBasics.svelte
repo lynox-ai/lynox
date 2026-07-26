@@ -1,6 +1,6 @@
 <!--
   Onboarding Wave 1 (D9v2) — Step-0 engine basics.
-  The engine poses 2-3 catalog questions (company/role/goal) VERBATIM; the answers are
+  The engine poses the identity catalog questions (company/role) VERBATIM; the answers are
   promoted directly to durable knowledge as user_asserted (the model is never in this
   path). This is the "clean phase" before any web_research taints the thread.
   Decoupled from the model run: a plain start -> reply-tabs -> promote request cycle.
