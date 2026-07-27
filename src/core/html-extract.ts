@@ -80,6 +80,12 @@ export const MIN_USEFUL_EXTRACT_CHARS = 200;
 export interface HtmlExtractResult {
   /** Extracted text: title, meta lines, then heading-marked body text. */
   readonly text: string;
+  /**
+   * The document `<title>`, decoded and whitespace-collapsed — empty when the
+   * page has none. Read from the same CLEANED html as the meta lines, so a
+   * commented-out or scripted title can never win (invariant 2 below).
+   */
+  readonly title: string;
   readonly beforeChars: number;
   readonly afterChars: number;
   /** True when the extracted text itself hit `maxChars`. */
@@ -159,13 +165,17 @@ function safeCodePoint(cp: number): string {
  * invariant 2 in the header). On a bot-walled page these tags are often the only
  * real content served.
  */
-function extractMetaLines(cleanedHtml: string): string[] {
+function extractMetaLines(cleanedHtml: string): { lines: string[]; title: string } {
   const lines: string[] = [];
+  let pageTitle = '';
 
   const title = TITLE_RE.exec(cleanedHtml);
   if (title?.[1]) {
     const t = decodeEntities(title[1].replace(TAG_RE, ' ')).replace(/\s+/g, ' ').trim();
-    if (t) lines.push(`title: ${t}`);
+    if (t) {
+      pageTitle = t;
+      lines.push(`title: ${t}`);
+    }
   }
 
   // One pass over all <meta> tags; keep the name/property values that describe
@@ -186,7 +196,7 @@ function extractMetaLines(cleanedHtml: string): string[] {
     seen.add(dedupKey);
     lines.push(`${k}: ${clean}`);
   }
-  return lines;
+  return { lines, title: pageTitle };
 }
 
 /**
@@ -214,7 +224,7 @@ export function extractHtmlText(
     cleaned = cleaned.replace(BLOCK_TAIL_RES[i]!, ' ');
   }
 
-  const metaLines = extractMetaLines(cleaned);
+  const meta = extractMetaLines(cleaned);
 
   // <head> holds no visible text; its metadata was already captured above.
   let body = cleaned.replace(HEAD_RE, ' ');
@@ -235,9 +245,9 @@ export function extractHtmlText(
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  const composed = metaLines.length > 0 ? `${metaLines.join('\n')}\n\n${body}` : body;
+  const composed = meta.lines.length > 0 ? `${meta.lines.join('\n')}\n\n${body}` : body;
   const truncated = composed.length > maxChars;
   const text = truncated ? composed.slice(0, maxChars) : composed;
 
-  return { text, beforeChars, afterChars: text.length, truncated };
+  return { text, title: meta.title, beforeChars, afterChars: text.length, truncated };
 }

@@ -74,13 +74,11 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@huggingface/transformers": "^4.2.0",
-    "@mozilla/readability": "^0.6.0",
     "@sentry/node": "^10.46.0",
     "better-sqlite3": "^12.6.2",
     "email-reply-parser": "^2.3.5",
     "iconv-lite": "^0.7.2",
     "imapflow": "^1.0.181",
-    "linkedom": "^0.18.12",
     "mammoth": "^1.12.0",
     "nodemailer": "^9.0.1",
     "unpdf": "^1.6.2",
