@@ -8,10 +8,10 @@
  * Assesses: better-than-before · good UX · requirements met. NOT a metric gate — a
  * behavioral walk with an at-source verdict per dimension.
  *
- * Run: LYNOX_KNOWLEDGE_PROXY_URL unset → 127.0.0.1:8317. `tsx scripts/knowledge-validation-walk.ts`
+ * Run: set LYNOX_KNOWLEDGE_PROXY_URL + _KEY, then `tsx scripts/knowledge-validation-walk.ts`
  */
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from '../src/core/engine-db.js';
 import { SubjectStore } from '../src/core/subject-store.js';
@@ -26,14 +26,18 @@ import type { ToolEntry } from '../src/types/index.js';
 
 // Points at any OpenAI-wire-compatible endpoint the operator runs locally; the
 // credential comes from the environment, never from a hard-coded vendor path.
-const PROXY = process.env['LYNOX_KNOWLEDGE_PROXY_URL'] ?? 'http://127.0.0.1:8317/v1';
+const PROXY = process.env['LYNOX_KNOWLEDGE_PROXY_URL'];
 const MODEL = process.env['LYNOX_VALIDATION_MODEL'] ?? 'claude-sonnet-4-6';
+// Falsy (not ??): an exported-but-empty _KEY must not shadow a valid _KEY_FILE.
 const KEY_FILE = process.env['LYNOX_KNOWLEDGE_PROXY_KEY_FILE'];
-const KEY = process.env['LYNOX_KNOWLEDGE_PROXY_KEY']
-  ?? (KEY_FILE ? readFileSync(KEY_FILE, 'utf8').trim() : '');
-if (!KEY) {
-  throw new Error('set LYNOX_KNOWLEDGE_PROXY_KEY or LYNOX_KNOWLEDGE_PROXY_KEY_FILE');
+let KEY = process.env['LYNOX_KNOWLEDGE_PROXY_KEY'] ?? '';
+if (!KEY && KEY_FILE) {
+  try { KEY = readFileSync(KEY_FILE, 'utf8').trim(); } catch (err) {
+    throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${KEY_FILE}): ${(err as Error).message}`);
+  }
 }
+if (!PROXY) throw new Error('set LYNOX_KNOWLEDGE_PROXY_URL to the endpoint to drive');
+if (!KEY) throw new Error('set LYNOX_KNOWLEDGE_PROXY_KEY or LYNOX_KNOWLEDGE_PROXY_KEY_FILE');
 
 const SYS = [
   'You are lynox, a business assistant for an operator who runs a marketing agency with several clients.',

@@ -67,11 +67,15 @@ function parseArgs(argv: string[]): { historyDb: string; out: string; max: numbe
     const a = argv[i]!;
     if (a === '--out') { out = argv[++i] ?? out; }
     else if (a === '--max') { max = Number(argv[++i] ?? max); }
-    else if (a === '--model') { model = argv[++i] ?? model; }
+    else if (a === '--model') {
+      const v = (argv[++i] ?? '').trim();
+      if (!v || v.startsWith('--')) throw new Error('--model needs a value, e.g. --model ' + DEFAULT_GOLD_MODEL);
+      model = v;
+    }
     else if (a === '--no-llm') { useLlm = false; }
     else if (!a.startsWith('--')) { positional.push(a); }
   }
-  if (model.endsWith('-latest')) {
+  if (model.toLowerCase().endsWith('-latest')) {
     throw new Error(`refusing a '-latest' model tag (${model}): it auto-rolls, so two gold vintages stop being comparable. Pass a dated snapshot, e.g. ${DEFAULT_GOLD_MODEL}.`);
   }
   const historyDb = positional[0] ?? process.env['LYNOX_HISTORY_DB'] ?? join(homedir(), '.lynox', 'history.db');

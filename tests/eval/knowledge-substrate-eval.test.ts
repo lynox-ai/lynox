@@ -66,18 +66,25 @@ function resolveProvider(): ReplayProviderConfig | null {
   // 'proxy' — any OpenAI-wire-compatible endpoint the operator runs locally, so a
   // long eval can be pointed at a self-managed model host instead of consuming
   // shared API credits. Explicit opt-in only (never auto-picked). Configure with
-  // LYNOX_KNOWLEDGE_PROXY_URL plus either LYNOX_KNOWLEDGE_PROXY_KEY (the credential
-  // directly) or LYNOX_KNOWLEDGE_PROXY_KEY_FILE (a path to read it from); without a
+  // LYNOX_KNOWLEDGE_PROXY_URL (required — no default endpoint is baked in) plus
+  // either LYNOX_KNOWLEDGE_PROXY_KEY (the credential directly) or
+  // LYNOX_KNOWLEDGE_PROXY_KEY_FILE (a path to read it from). Without a URL or a
   // credential this provider resolves to null and the gate self-skips.
   if (forced === 'proxy') {
     let proxyKey: string | undefined = process.env['LYNOX_KNOWLEDGE_PROXY_KEY'];
     const keyFile = process.env['LYNOX_KNOWLEDGE_PROXY_KEY_FILE'];
     if (!proxyKey && keyFile) {
-      try { proxyKey = readFileSync(keyFile, 'utf8').trim(); } catch { /* not set up */ }
+      // A set-but-unreadable key file is a MISCONFIGURATION, not "not set up".
+      // Swallowing it would resolve the provider to null and self-skip the gate
+      // green — a typo in the path would read as a pass.
+      try { proxyKey = readFileSync(keyFile, 'utf8').trim(); } catch (err) {
+        throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${keyFile}): ${(err as Error).message}`);
+      }
     }
-    if (!proxyKey) return null;
+    const proxyUrl = process.env['LYNOX_KNOWLEDGE_PROXY_URL'];
+    if (!proxyKey || !proxyUrl) return null;
     const m = modelOverride ?? 'claude-sonnet-4-6';
-    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: process.env['LYNOX_KNOWLEDGE_PROXY_URL'] ?? 'http://127.0.0.1:8317/v1', model: m, openaiModelId: m };
+    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: proxyUrl, model: m, openaiModelId: m };
   }
 
   const useAnthropic = forced ? forced === 'anthropic' : Boolean(anthropicKey);

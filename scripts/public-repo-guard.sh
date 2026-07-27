@@ -53,9 +53,19 @@ HARD='control-staging\.lynox\.cloud|root@control|managed_tenant_hosts|ssh_privat
 # indirection (LYNOX_KNOWLEDGE_PROXY_URL / _KEY / _KEY_FILE); a vendor name
 # never has to appear in this repo.
 #
-# Matched case-insensitively (see the -i on the HARD grep) so the pattern can
-# stay short: it must not spell out the very name it exists to keep out.
-HARD_LOCAL_TOOLING='cli-?proxy|local-eval-key'
+# Separator-tolerant on purpose: a plain `cli-?proxy|local-eval-key` let through
+# cli_proxy, CLI_PROXY_API_KEY, local_eval_key, "cli proxy" and the vendor's
+# GitHub org — all verified to slip past it. The default port is matched too: it
+# is a unique fingerprint on its own (searching it names the product).
+#
+# The org and port fragments are CONCATENATED rather than written out. That is
+# not obfuscation against a reader — anyone reading this file sees them. It
+# exists so a full-text search for the vendor's name does not surface this repo,
+# which is the actual leak vector. Otherwise the pattern would re-plant verbatim
+# what it exists to keep out.
+_org='router'"-for-"'me'
+_port='83'"17"
+HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
 
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
@@ -95,6 +105,18 @@ is_allow_file() {
 
 violations=0
 
+# PATHS — the content greps below never see file NAMES. A vendored tooling
+# directory could therefore be committed (and enter the Docker build context)
+# while every content scan stays clean. Check the tracked paths themselves.
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  is_excluded "$f" && continue
+  if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
+    echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
+    violations=$((violations + 1))
+  fi
+done < <(list_files)
+
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   [ -f "$f" ] || continue
@@ -110,8 +132,9 @@ while IFS= read -r f; do
     violations=$((violations + 1))
   done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
 
-  # HARD (operator-local tooling) — case-INSENSITIVE, so the pattern can stay
-  # short without spelling out the vendor name. Deliberately a separate grep:
+  # HARD (operator-local tooling) — case-INSENSITIVE (the -i below), so the
+  # pattern stays short without spelling out the vendor name it keeps out.
+  # Deliberately a separate grep from the main HARD run:
   # folding -i into the main HARD run makes `lynox[_-]managed` match every
   # legitimate LYNOX_MANAGED_* env var (164 false positives when tried).
   while IFS= read -r line; do
