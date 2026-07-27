@@ -58,14 +58,25 @@ function capturingAgent(): { agent: IAgent; prompt: () => string } {
 }
 
 /**
- * The assertion that carries this whole file: the prompt has exactly the lines
- * its FRAME defines, no matter what the values contain. Counting lines (rather
- * than grepping for the forged text) is what makes it mutation-proof — remove a
- * `singleLine` call anywhere and the count goes up.
+ * The prompt has exactly the lines its FRAME defines, no matter what the values
+ * contain. Counting lines rather than grepping for the forged text is what ties
+ * this to the defect: remove the `singleLine` around a value some case forges
+ * and the count goes up.
+ *
+ * Its limit, stated because a line count is easy to over-read: it proves "N
+ * lines", NOT "the prompt tells the truth". A prompt that stopped naming the
+ * recipient entirely would still be green here — which is why the cases that
+ * carry a security decision also assert the real value is PRESENT
+ * (`expectNames`). Both halves are needed; neither implies the other.
  */
 function expectFrameLines(prompt: string, expected: number): void {
   const lines = prompt.split(BREAK_CHARS);
   expect(lines).toHaveLength(expected);
+}
+
+/** The prompt actually names the value the user is deciding about. */
+function expectNames(prompt: string, ...values: string[]): void {
+  for (const v of values) expect(prompt).toContain(v);
 }
 
 describe('Google confirmation prompts — an interpolated value cannot forge a line', () => {
@@ -84,6 +95,9 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
       expect(result).toBe('Action cancelled by user.');
       expectFrameLines(prompt(), 2);
+      // The real time must still be there — a forged Time: line next to a
+      // MISSING real one would satisfy the line count on its own.
+      expectNames(prompt(), '2026-08-01T10:00:00Z', '2026-08-01T11:00:00Z');
     });
 
     it.each(FORGERIES)('create_event keeps its frame with an attendee %#', async (forgery) => {
@@ -125,7 +139,26 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
   });
 
   describe('google_drive', () => {
-    it.each(FORGERIES)('share stays single-line with a forged email %#', async (forgery) => {
+    // `share` is the action that sends data out, so every one of its three
+    // slots is forged separately. Doing only some of them is how the first
+    // version of this file left `file_id` uncovered: the two share cases both
+    // passed a clean 'f1', so removing its guard changed nothing and the
+    // mutation survived.
+    it.each(FORGERIES)('share: forged file_id keeps the frame %#', async (forgery) => {
+      const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
+      const { agent, prompt } = capturingAgent();
+
+      const result = await tool.handler(
+        { action: 'share', file_id: forgery, email: 'bob@ok.example', role: 'writer' },
+        agent,
+      );
+
+      expect(result).toBe('Action cancelled by user.');
+      expectFrameLines(prompt(), 1);
+      expectNames(prompt(), 'bob@ok.example', 'writer');
+    });
+
+    it.each(FORGERIES)('share: forged email keeps the frame %#', async (forgery) => {
       const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
       const { agent, prompt } = capturingAgent();
 
@@ -133,9 +166,10 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
       expect(result).toBe('Action cancelled by user.');
       expectFrameLines(prompt(), 1);
+      expectNames(prompt(), 'f1', 'writer');
     });
 
-    it('share stays single-line with a forged role', async () => {
+    it('share: forged role keeps the frame', async () => {
       // `role` ends the line, so an unguarded value could append a sentence
       // that reads like a system-authored reassurance.
       const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
@@ -147,6 +181,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       );
 
       expectFrameLines(prompt(), 1);
+      expectNames(prompt(), 'someone@example.com');
     });
 
     it('move stays single-line', async () => {
@@ -189,7 +224,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       const tool = createSheetsTool(mockAuth([SCOPES.SHEETS]));
       const { agent, prompt } = capturingAgent();
 
-      await tool.handler({ action: 'format', spreadsheet_id: FORGERIES[0] as string, requests: [] }, agent);
+      await tool.handler({ action: 'format', spreadsheet_id: FORGERIES[0] as string, format_requests: [] }, agent);
 
       expectFrameLines(prompt(), 1);
     });

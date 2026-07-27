@@ -173,11 +173,15 @@ export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
           // Every interpolated value goes through `singleLine` — see
           // core/prompt-value.ts. This matters most on `share`: it is the one
-          // action here that sends tenant data OUT (to a recipient the model
-          // picks), it is invisible to `network_policy` because the host is
-          // Google's, and this prompt is therefore the only control on that
-          // path. A value ending the line could otherwise append a reassuring
-          // sentence the system never wrote.
+          // action here that sends tenant data OUT, to a recipient the model
+          // picks, and it is invisible to `network_policy` because the host is
+          // Google's. It is NOT the only control on that path — the generic
+          // permission guard prompts first (`core/agent.ts:2044`, Allow/Deny,
+          // and that one renders in a `<pre>`, so it cannot be spoofed at all).
+          // But that prompt says only "share — modifies external data": this is
+          // the only one that names the RECIPIENT, so it is the only one that
+          // makes the decision an informed one. A value ending the line could
+          // otherwise append a reassuring sentence the system never wrote.
           let confirmMsg = '';
           switch (input.action) {
             case 'upload': confirmMsg = `Upload file "${singleLine(input.file_name ?? 'unnamed')}" to Drive?`; break;

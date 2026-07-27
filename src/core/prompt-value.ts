@@ -50,9 +50,25 @@
  * range. Do NOT use it on a value that is legitimately multi-line (a knowledge
  * snippet, a mail body quote); those need the structural fix instead, not a
  * silent reflow of the user's content.
+ *
+ * Two things about the character class, both measured rather than assumed:
+ *
+ * 1. It is NOT the reason a leftover character is harmless. C1 controls (U+0085
+ *    NEL, U+0084, U+009B) survive `\s` — and are inert anyway, because neither
+ *    JS's LineTerminator set nor CSS's segment-break set contains them, so
+ *    `marked` can never see one as a line end and no renderer breaks on one.
+ *    That is a property of the ENVIRONMENT, not of this class. Anyone extending
+ *    this to a consumer that does treat C1 as a break (a terminal, a CSV or
+ *    header export) has to re-derive the class, not trust this one.
+ * 2. It strips `\p{Cf}` (bidi overrides, zero-width space, BOM) rather than
+ *    collapsing them. Those forge nothing by themselves, but they are stripped
+ *    by `clip()` in `tools/builtin/knowledge.ts` and `subjects-merge.ts`, which
+ *    guard the same kind of prompt. A SHARED helper that is weaker than the two
+ *    local ones it generalises is an invitation to a regression — the natural
+ *    next refactor ("just use the central one") would quietly remove a guard.
  */
 export function singleLine(value: string): string {
-  // C0 controls (covers CR/LF/tab) plus the Unicode line/paragraph separators,
-  // mirroring parseAddress's [\r\n\x00-\x1f] rejection.
-  return value.replace(/[\u0000-\u001f\u2028\u2029]+/g, ' ');
+  // Format characters removed outright; every break-ish character collapsed to
+  // one space. `\s` misses most of C0 and all of C1, so both are named.
+  return value.replace(/\p{Cf}/gu, '').replace(/[\s\u0000-\u001f\u0085]+/gu, ' ');
 }
