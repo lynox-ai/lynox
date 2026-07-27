@@ -124,22 +124,43 @@ const META_TAG_RE = /<meta\b[^<>]*>/gi;
 const META_KEY_RE = /(?:name|property)\s*=\s*["']([^"']+)["']/i;
 const META_CONTENT_RE = /content\s*=\s*["']([^"']*)["']/i;
 
-/** Open/close token pair for a span cut by `removeSpans`. Both must be `g`. */
-interface SpanPattern { readonly open: RegExp; readonly close: RegExp }
+/**
+ * Open/close token pair for a span cut by `removeSpans`. Both patterns must
+ * carry `g`.
+ *
+ * `dropUnterminated` decides what happens when the closer is missing, and it is
+ * NOT a detail — getting it wrong silently deletes the rest of the page:
+ *
+ *  - `true` for script/style/svg/… and for comments. A body byte-cut at the read
+ *    limit can end inside an open `<script>`, and leaking raw JS into the text is
+ *    worse than losing the tail. For comments it is also what a browser does —
+ *    an unterminated `<!--` runs to end of document.
+ *  - `false` for `<head>` and `<h1>`–`<h3>`, whose content is PAGE TEXT. Browsers
+ *    auto-close both, and unclosed or mismatched headings (`<h1>…</h2>`) are
+ *    common in hand-written markup. Dropping to end-of-input there threw away
+ *    everything after the first sloppy heading.
+ */
+interface SpanPattern {
+  readonly open: RegExp;
+  readonly close: RegExp;
+  readonly dropUnterminated: boolean;
+}
 
-const COMMENT_SPAN: SpanPattern = { open: /<!--/g, close: /-->/g };
-const HEAD_SPAN: SpanPattern = { open: /<head\b[^<>]*>/gi, close: /<\/head\s*>/gi };
-const TITLE_SPAN: SpanPattern = { open: /<title\b[^<>]*>/gi, close: /<\/title\s*>/gi };
+const COMMENT_SPAN: SpanPattern = { open: /<!--/g, close: /-->/g, dropUnterminated: true };
+const HEAD_SPAN: SpanPattern = { open: /<head\b[^<>]*>/gi, close: /<\/head\s*>/gi, dropUnterminated: false };
+const TITLE_SPAN: SpanPattern = { open: /<title\b[^<>]*>/gi, close: /<\/title\s*>/gi, dropUnterminated: false };
 
 /** Closing tags allow whitespace — `</script >` is legal HTML. */
 const BLOCK_SPANS: SpanPattern[] = BLOCK_ELEMENTS.map(el => ({
   open: new RegExp(`<${el}\\b[^<>]*>`, 'gi'),
   close: new RegExp(`<\\/${el}\\s*>`, 'gi'),
+  dropUnterminated: true,
 }));
 
 const HEADING_SPANS: SpanPattern[] = [1, 2, 3].map(lvl => ({
   open: new RegExp(`<h${lvl}\\b[^<>]*>`, 'gi'),
   close: new RegExp(`<\\/h${lvl}\\s*>`, 'gi'),
+  dropUnterminated: false,
 }));
 
 /**
@@ -149,14 +170,11 @@ const HEADING_SPANS: SpanPattern[] = [1, 2, 3].map(lvl => ({
  * Linear by construction: both patterns only ever advance via `lastIndex`, so
  * each character is examined a bounded number of times. See invariant 3.
  *
- * An UNTERMINATED span is dropped to end-of-input, which preserves the previous
- * paired-plus-tail-sweep behaviour: a body byte-truncated at the read limit can
- * end inside an open `<script>`, and leaking raw JS into the text is worse than
- * losing the tail.
+ * An UNTERMINATED span is handled per `dropUnterminated` — see `SpanPattern`.
  */
 function removeSpans(
   input: string,
-  { open, close }: SpanPattern,
+  { open, close, dropUnterminated }: SpanPattern,
   render?: (inner: string) => string,
 ): string {
   // Both patterns must carry `g`: the scan advances via `lastIndex`, which a
@@ -180,7 +198,11 @@ function removeSpans(
     close.lastIndex = innerStart;
     const closer = close.exec(input);
 
-    if (closer === null) return out; // unterminated — drop the rest
+    if (closer === null) {
+      // No closer. Either drop everything from here, or keep it verbatim and
+      // let the generic tag strip deal with the dangling open tag.
+      return dropUnterminated ? out : out + input.slice(match.index);
+    }
 
     out += render ? render(input.slice(innerStart, closer.index)) : ' ';
     cursor = closer.index + closer[0].length;
@@ -298,9 +320,6 @@ export function extractHtmlText(
 
   // Comments first, then whole block elements — BEFORE meta extraction, so
   // hidden markup cannot be promoted into the header lines (invariant 2).
-  // `removeSpans` also drops an unterminated span to end-of-input: a body
-  // byte-truncated at the read limit can end inside an open <script>, and
-  // leaking raw JS/CSS into the text is worse than losing the tail.
   let cleaned = removeSpans(source, COMMENT_SPAN);
   for (const span of BLOCK_SPANS) {
     cleaned = removeSpans(cleaned, span);

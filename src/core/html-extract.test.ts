@@ -365,11 +365,32 @@ describe('extractHtmlText', () => {
     }
   });
 
-  it('drops an unterminated span to end of input rather than leaking its content', () => {
+  it('drops an unterminated SCRIPT to end of input rather than leaking its content', () => {
+    // MUTATION: `dropUnterminated: false` on BLOCK_SPANS — raw JS reaches the model.
     const html = `<body><p>${'Fliesstext. '.repeat(40)}</p><script>SECRET_JS und noch mehr`;
     const { text } = extractHtmlText(html);
 
     expect(text).toContain('Fliesstext.');
     expect(text).not.toContain('SECRET_JS');
+  });
+
+  it('keeps the page when a HEADING is unclosed or mismatched', () => {
+    // Unclosed and cross-closed headings are ordinary sloppy markup — browsers
+    // auto-close them. Treating them like <script> and dropping to end-of-input
+    // deleted everything after the first one, which is how this started: the
+    // index-scan rewrite applied one blanket policy to every span.
+    // MUTATION: `dropUnterminated: true` on HEADING_SPANS.
+    const unclosed = extractHtmlText(`<body><p>${'pad '.repeat(60)}</p><h1>Titel<p>DANACH</p></body>`);
+    expect(unclosed.text).toContain('DANACH');
+
+    const mismatched = extractHtmlText(`<body><p>${'pad '.repeat(60)}</p><h1>Titel</h2><p>DANACH</p></body>`);
+    expect(mismatched.text).toContain('DANACH');
+  });
+
+  it('keeps the body when <head> is never closed', () => {
+    // Browsers close <head> implicitly at the first body content.
+    // MUTATION: `dropUnterminated: true` on HEAD_SPAN — the whole body vanishes.
+    const { text } = extractHtmlText(`<html><head><title>T</title><body><p>${'DANACH '.repeat(40)}</p></body>`);
+    expect(text).toContain('DANACH');
   });
 });
