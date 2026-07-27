@@ -3,6 +3,7 @@ import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
+import { singleLine } from '../../core/prompt-value.js';
 
 // === Types ===
 
@@ -170,12 +171,19 @@ export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
+          // Every interpolated value goes through `singleLine` — see
+          // core/prompt-value.ts. This matters most on `share`: it is the one
+          // action here that sends tenant data OUT (to a recipient the model
+          // picks), it is invisible to `network_policy` because the host is
+          // Google's, and this prompt is therefore the only control on that
+          // path. A value ending the line could otherwise append a reassuring
+          // sentence the system never wrote.
           let confirmMsg = '';
           switch (input.action) {
-            case 'upload': confirmMsg = `Upload file "${input.file_name ?? 'unnamed'}" to Drive?`; break;
-            case 'create_doc': confirmMsg = `Create Google Doc "${input.file_name ?? 'Untitled'}"?`; break;
-            case 'move': confirmMsg = `Move file ${input.file_id ?? '(unknown)'} to folder ${input.target_folder_id ?? '(unknown)'}?`; break;
-            case 'share': confirmMsg = `Share file ${input.file_id ?? '(unknown)'} with ${input.email ?? '(unknown)'} as ${input.role ?? 'reader'}?`; break;
+            case 'upload': confirmMsg = `Upload file "${singleLine(input.file_name ?? 'unnamed')}" to Drive?`; break;
+            case 'create_doc': confirmMsg = `Create Google Doc "${singleLine(input.file_name ?? 'Untitled')}"?`; break;
+            case 'move': confirmMsg = `Move file ${singleLine(input.file_id ?? '(unknown)')} to folder ${singleLine(input.target_folder_id ?? '(unknown)')}?`; break;
+            case 'share': confirmMsg = `Share file ${singleLine(input.file_id ?? '(unknown)')} with ${singleLine(input.email ?? '(unknown)')} as ${singleLine(input.role ?? 'reader')}?`; break;
           }
           const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
           if (answer.toLowerCase() !== 'yes' && answer !== '1') {

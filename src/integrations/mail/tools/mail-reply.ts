@@ -15,7 +15,8 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, previewAddressList, singleLine } from '../send-core.js';
+import { buildBodyBlock, previewAddressList } from '../send-core.js';
+import { singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
 import {

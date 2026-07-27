@@ -38,6 +38,7 @@ import {
   checkRecipientDedup,
   recordMailSend,
 } from './tools/rate-limit.js';
+import { singleLine } from '../../core/prompt-value.js';
 
 /**
  * Recipient count above which callers should force explicit confirmation
@@ -289,37 +290,12 @@ export function buildBodyBlock(body: string): string {
   );
 }
 
-/**
- * Collapse a header value to a single line for the confirmation preview.
- *
- * The preview is rendered as MARKDOWN in the web UI (ChatView routes a Yes/No
- * prompt through MarkdownRenderer — `marked` + DOMPurify), and a Subject is
- * attacker-influenced: on `mail_reply` it is the inbound envelope's subject,
- * i.e. chosen by whoever sent the mail. A newline in it lets the value open a
- * BLOCK-level HTML construct: `Report\n\n<!--` puts every following line — To,
- * Subject, From, the body blockquote and the oversize warning — inside an HTML
- * comment, which renders as nothing, leaving the approver clicking Yes/No on a
- * blank prompt. Collapsing to one line closes that form: verified against
- * `marked` 18 + DOMPurify that a single-line `<!--` stays inline and harmless.
- * Headers are single-line by definition, so it costs a legitimate subject
- * nothing.
- *
- * It does NOT make an attacker-chosen subject safe to render as markdown, and
- * this function should not be read as doing so. Two things stay open, both
- * verified: a single-line `<div hidden>` / `<div style="display:none">`
- * survives DOMPurify's default allowlist and re-parents the warning into an
- * invisible container (suppression), and inline markdown can render a
- * convincing FAKE warning next to the real one (spoofing). The real fix is at
- * the render layer — every Yes/No confirmation prompt goes through
- * marked+DOMPurify, while an Allow/Deny one renders in a `<pre>` and is
- * therefore already immune. Tracked as a separate item; this is the cheap
- * header-shaped part of it.
- */
-export function singleLine(value: string): string {
-  // C0 controls (covers CR/LF/tab) plus the Unicode line/paragraph separators,
-  // mirroring parseAddress's [\r\n\x00-\x1f] rejection.
-  return value.replace(/[\u0000-\u001f\u2028\u2029]+/g, ' ');
-}
+// `singleLine` lives in core/prompt-value.ts — the same forgery applies to
+// every confirmation prompt, not just mail. What is mail-SPECIFIC is why it
+// bites hardest here: on `mail_reply` the Subject is chosen by whoever sent
+// the mail, so the value is attacker-controlled without any model in the
+// loop. Headers are single-line by definition, so it costs a legitimate
+// subject nothing.
 
 /**
  * Render an address list for a preview: one line, each address flattened.
