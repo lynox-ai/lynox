@@ -48,20 +48,34 @@ const EXTERNAL_TOOLS = new Set([
 
 // ── args ─────────────────────────────────────────────────────────────────────
 
-function parseArgs(argv: string[]): { historyDb: string; out: string; max: number; useLlm: boolean } {
+/**
+ * Label-proposal model. PINNED to a dated snapshot on purpose: the caller's own
+ * default is `mistral-small-latest`, and a `-latest` tag both auto-rolls silently
+ * (behaviour drift between two gold vintages = an uncomparable measurement) and
+ * carries the deeper rate-limits we hit before. Override with `--model` only to a
+ * dated tag. Keep in sync with MISTRAL_MODEL_MAP in src/types/models.ts.
+ */
+const DEFAULT_GOLD_MODEL = 'mistral-medium-2604';
+
+function parseArgs(argv: string[]): { historyDb: string; out: string; max: number; useLlm: boolean; model: string } {
   const positional: string[] = [];
   let out = join(homedir(), '.lynox', 'knowledge-gold', 'gold.draft.jsonl');
   let max = 40;
   let useLlm = true;
+  let model = DEFAULT_GOLD_MODEL;
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
     if (a === '--out') { out = argv[++i] ?? out; }
     else if (a === '--max') { max = Number(argv[++i] ?? max); }
+    else if (a === '--model') { model = argv[++i] ?? model; }
     else if (a === '--no-llm') { useLlm = false; }
     else if (!a.startsWith('--')) { positional.push(a); }
   }
+  if (model.endsWith('-latest')) {
+    throw new Error(`refusing a '-latest' model tag (${model}): it auto-rolls, so two gold vintages stop being comparable. Pass a dated snapshot, e.g. ${DEFAULT_GOLD_MODEL}.`);
+  }
   const historyDb = positional[0] ?? process.env['LYNOX_HISTORY_DB'] ?? join(homedir(), '.lynox', 'history.db');
-  return { historyDb, out: resolve(out), max, useLlm };
+  return { historyDb, out: resolve(out), max, useLlm, model };
 }
 
 /** Refuse to write anywhere inside a git repo — the DRAFT holds real thread content. */
@@ -221,7 +235,7 @@ async function proposeGold(
 // ── main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { historyDb, out, max, useLlm } = parseArgs(process.argv.slice(2));
+  const { historyDb, out, max, useLlm, model } = parseArgs(process.argv.slice(2));
 
   assertOutsideGitRepo(out);
   if (!existsSync(historyDb)) throw new Error(`history.db not found: ${historyDb} (pass a path, set LYNOX_HISTORY_DB, or place it at ~/.lynox/history.db)`);
@@ -260,7 +274,7 @@ async function main(): Promise<void> {
     if (!key) {
       process.stderr.write('[gold-gen] no MISTRAL_API_KEY — skipping label proposal (threads get empty gold[] for manual labeling). Use --no-llm to silence.\n');
     } else {
-      const llm = createMistralEuLLMCaller({ apiKey: key, maxTokens: 2048 });
+      const llm = createMistralEuLLMCaller({ apiKey: key, maxTokens: 2048, modelId: model });
       for (let i = 0; i < selected.length; i += 1) {
         const gt = selected[i]!;
         // eslint-disable-next-line no-await-in-loop
