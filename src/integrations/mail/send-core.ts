@@ -256,6 +256,31 @@ export async function sendMail(
   return { ok: true, result, followupId };
 }
 
+/** Chars of the whitespace-flattened body rendered inline in the preview. */
+const BODY_PREVIEW_CHARS = 200;
+
+/**
+ * Render the body block for the confirmation preview.
+ *
+ * The gate exists so a human approves the RESOLVED send rather than the
+ * agent's description of it — so the preview must not silently hide most of
+ * what goes on the wire. `truncate` alone appends a bare "…", which reads the
+ * same whether 20 or 40'000 chars were cut: an approver sees a plausible
+ * opening line and no signal that a payload follows it. That is exactly the
+ * shape a prompt-injection- or hallucination-driven send takes (the body is
+ * also the exfil channel the `detectSecretInContent` scan above only covers
+ * for *credential*-shaped content, not for bulk data). So when the body does
+ * not fit, say how large it really is and that the remainder is unseen.
+ */
+export function buildBodyBlock(body: string): string {
+  const flat = body.replace(/\s+/g, ' ').trim();
+  if (flat.length <= BODY_PREVIEW_CHARS) return `> ${flat}`;
+  return (
+    `> ${truncate(flat, BODY_PREVIEW_CHARS)}\n\n` +
+    `⚠ **Body is ${String(body.length)} chars — only the first ${String(BODY_PREVIEW_CHARS - 1)} are shown above.**`
+  );
+}
+
 /**
  * Build the agent-prompt preview text the tool wrapper shows to the
  * user. Kept in send-core so the inbox-pane (if it ever surfaces a
@@ -265,14 +290,14 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
   const personaLine = ctx.accountConfig
     ? `\n  Persona: ${truncate(personaFor(ctx.accountConfig), 160)}`
     : '';
-  const bodyPreview = truncate(ctx.body.replace(/\s+/g, ' '), 200);
+  const bodyPreview = buildBodyBlock(ctx.body);
   if (ctx.isMassSend) {
     return (
       `⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients\n\n` +
       `**Account:** ${ctx.provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}\n` +
       `**Recipients:**\n${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${a.address}`).join('\n')}\n` +
       `**Subject:** ${ctx.subject}\n\n` +
-      `> ${bodyPreview}`
+      bodyPreview
     );
   }
   return (
@@ -282,7 +307,7 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
     `${ctx.bcc.length > 0 ? `\n**Bcc:** ${ctx.bcc.map((a) => a.address).join(', ')}` : ''}\n` +
     `**Subject:** ${ctx.subject}\n` +
     `**From:** ${ctx.provider.accountId}${personaLine ? ` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}\n\n` +
-    `> ${bodyPreview}`
+    bodyPreview
   );
 }
 

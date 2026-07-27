@@ -354,6 +354,25 @@ describe('mail_send tool', () => {
 // ── mail_reply ─────────────────────────────────────────────────────────────
 
 describe('mail_reply tool', () => {
+  // Reply shares mail_send's body block: the confirmation must state an
+  // oversized body's real size rather than ending in a bare "…". Reply is the
+  // likelier injection path — the untrusted inbound mail is already in context.
+  it('states the real body size in the confirmation when the body is oversized', async () => {
+    const orig = envelope(77, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'Report' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'Original.', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
+    const tool = createMailReplyTool(registry);
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
+    const body = `Sure, sending it over now.\n\n${'RECORD;'.repeat(2000)}`;
+    await tool.handler({ uid: 77, body }, agent);
+    expect(prompt).toContain(`Body is ${String(body.length)} chars`);
+    expect(prompt).toContain('only the first 199 are shown');
+  });
+
   it('blocks reply bodies that contain credentials', async () => {
     const orig = envelope(50, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'API question' });
     provider.fetch.mockResolvedValue({

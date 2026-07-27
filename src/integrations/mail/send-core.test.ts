@@ -304,6 +304,67 @@ describe('buildSendPreview', () => {
     expect(preview).toContain('MASS SEND');
     expect(preview).toContain('6 recipients');
   });
+
+  function previewFor(body: string, isMassSend = false): string {
+    return buildSendPreview({
+      provider: { accountId: 'acct-1' } as MailProvider,
+      accountConfig: null,
+      to: [RECIPIENT],
+      cc: [],
+      bcc: [],
+      subject: 'Subject',
+      body,
+      isMassSend,
+      uniqueRecipientCount: 1,
+    });
+  }
+
+  it('shows a short body in full and says nothing about truncation', () => {
+    const preview = previewFor('Short and complete.');
+    expect(preview).toContain('> Short and complete.');
+    expect(preview).not.toContain('only the first');
+  });
+
+  it('states the real body size when the body does not fit the preview', () => {
+    const preview = previewFor('x'.repeat(4000));
+    expect(preview).toContain('Body is 4000 chars');
+    expect(preview).toContain('only the first 199 are shown');
+  });
+
+  // The gate's whole purpose: an approver must not read a plausible opening
+  // line and miss that a payload rides behind it. Before this, the preview cut
+  // at 200 chars with a bare "…" — indistinguishable from a slightly-longer
+  // mail. The hidden text stays hidden (a terminal prompt is not the place to
+  // dump 40 KB), but its EXISTENCE and size must be stated.
+  it('flags the hidden remainder when a payload trails a harmless opening', () => {
+    // The opening alone fills the preview window — which is what a real
+    // injected send looks like, not a two-line stub.
+    const opening =
+      'Hi Alice,\n\nthanks for the call earlier. As promised, here is the ' +
+      'consolidated summary of the Q3 figures together with the notes from ' +
+      'the workshop, so you have everything in one place before the review ' +
+      'meeting on Thursday. Let me know if anything is unclear.\n\n';
+    const body = `${opening}${'LEAKED-RECORD;'.repeat(3000)}`;
+    const preview = previewFor(body);
+    expect(preview).toContain('thanks for the call earlier');
+    expect(preview).not.toContain('LEAKED-RECORD');
+    expect(preview).toContain(`Body is ${String(body.length)} chars`);
+    expect(preview).toMatch(/⚠ \*\*Body is \d+ chars/);
+  });
+
+  it('flags an oversized body on the mass-send path too', () => {
+    const preview = previewFor('y'.repeat(5000), true);
+    expect(preview).toContain('MASS SEND');
+    expect(preview).toContain('Body is 5000 chars');
+  });
+
+  // Whitespace-only bulk is not a hidden payload: flattening reveals the whole
+  // message, so no warning is correct even though body.length exceeds the cap.
+  it('does not warn when only collapsed whitespace exceeds the cap', () => {
+    const preview = previewFor(`Two words.${'\n'.repeat(400)}`);
+    expect(preview).toContain('> Two words.');
+    expect(preview).not.toContain('only the first');
+  });
 });
 
 describe('sendMail — recordSentMail integration', () => {
