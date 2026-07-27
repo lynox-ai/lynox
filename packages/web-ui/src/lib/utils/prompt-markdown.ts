@@ -1,4 +1,5 @@
 import { Marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 /**
  * Markdown rendering for CONFIRMATION-PROMPT text — the prompts a human answers
@@ -13,13 +14,24 @@ import { Marked } from 'marked';
  * and a `<!--` swallows them into a comment. Either way the text a human clicks
  * "Yes" to was no longer the text on screen.
  *
- * The boundary here is what marked is allowed to PRODUCE, not what a sanitizer
- * takes away afterwards. That ordering is deliberate: an allowlist at
- * generation time is closed (only these renderers can emit tags), and it is
- * verifiable in a plain node test — whereas DOMPurify needs a real DOM and
- * FAILS OPEN when it doesn't have one (`sanitize()` returns its input
- * unchanged, silently). A guard that can't be exercised by the test suite isn't
- * a guard we should be resting a security property on.
+ * Two layers, in this order and for this reason:
+ *
+ * 1. Renderer overrides on `html`, `text`, `link` and `image` so the markdown
+ *    stage does not EMIT raw HTML in the first place. This is the layer the
+ *    tests exercise, so it is the one that has to hold on its own.
+ * 2. `DOMPurify.sanitize` behind it. It cannot be exercised by the suite —
+ *    it needs a real DOM and FAILS OPEN without one, returning its input
+ *    unchanged and silently — so it is not something to rest a security
+ *    property on. It stays anyway, because "cannot be relied upon" is not
+ *    "worthless": it is what catches a marked upgrade that starts emitting
+ *    something these overrides don't anticipate.
+ *
+ * The `text` override in layer 1 is not decoration. marked marks text tokens
+ * `escaped: true` while its lexer is `inRawBlock`, which a leading `<code>`,
+ * `<kbd>`, `<pre>` or `<script>` in an interpolated value is enough to set —
+ * and the default `text` renderer returns escaped tokens VERBATIM. Without the
+ * override, `<code><img/src=x onerror=…>` in a mail subject reached the DOM as
+ * a live element.
  *
  * Scope, stated honestly: this closes SUPPRESSION. It does not stop a value
  * from adding a plausible-looking FAKE line of its own — that needs the prompt
@@ -30,13 +42,25 @@ import { Marked } from 'marked';
 /** Schemes a link inside a prompt may point at. */
 const SAFE_LINK_SCHEMES: ReadonlySet<string> = new Set(['http:', 'https:', 'mailto:']);
 
+const ESCAPE_CHARS: Readonly<Record<string, string>> = {
+	'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+};
+
+/**
+ * Mirrors marked's own `escapeReplaceNoEncode`: angle brackets and quotes always,
+ * but `&` only when it does NOT already begin an entity.
+ *
+ * Escaping every `&` unconditionally is wrong and user-visible — `Tom &amp; Jerry`
+ * in a subject came out as a literal `&amp;` on screen, and `a&nbsp;b` lost its
+ * non-breaking space. Leaving existing entities alone is safe: the HTML parser
+ * resolves `&lt;` to a character AFTER tokenising, so an entity can never become
+ * a tag.
+ */
 function escapeHtml(value: string): string {
-	return value
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;')
-		.replace(/'/g, '&#39;');
+	return value.replace(
+		/[<>"']|&(?!(?:#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g,
+		(char) => ESCAPE_CHARS[char] ?? char,
+	);
 }
 
 /**
@@ -63,25 +87,62 @@ export function isSafePromptHref(href: string): boolean {
  * It must be its OWN instance: `marked.use()` mutates the shared singleton, so
  * configuring the global would silently re-configure every chat message too.
  *
- * `breaks: true` is a security property here, not typography. The prompts put
- * one field per line separated by single newlines (`**To:** …\n**Subject:** …`).
- * Under marked's default those collapse into one run-on paragraph, which is
- * exactly the condition that makes a fake field easy to blend in. With `breaks`
- * every field keeps its own line, and since the mail previews force each
- * interpolated value through `singleLine()`, a value cannot break out of its
- * line to open a new one.
+ * `breaks: true` gives each field its own line: the prompts separate fields with
+ * single newlines (`**To:** …\n**Subject:** …`), which marked's default collapses
+ * into one run-on paragraph. A reader who cannot tell the fields apart checks
+ * nothing, so this matters for a prompt that carries a security decision.
+ *
+ * Its effect on FORGERY is not uniform, and the difference is worth knowing
+ * before reusing this reasoning:
+ *   - Where the caller forces values through `singleLine()` (the mail previews),
+ *     a value cannot contain a newline, so it cannot open a line of its own —
+ *     strictly better than the collapsed paragraph.
+ *   - Where it does not (`http_request` host/path, `api_setup`, `ask_user`), a
+ *     value carrying `\n**Host:** …` now renders that on its own row, which
+ *     looks exactly like a real field. Under the collapsed paragraph the same
+ *     payload landed mid-sentence, where a second `Host:` reads as odd. So this
+ *     makes an already-possible forgery more plausible; it does not create it.
+ * Closing that asymmetry needs the payload to mark which spans are values —
+ * see DEF-confirm-prompt-value-spoofing. It is deliberately NOT patched by
+ * escaping newlines here: this layer receives one finished string and cannot
+ * tell a frame newline from a value newline.
  */
 const promptMarked = new Marked({
 	gfm: true,
 	breaks: true,
+	tokenizer: {
+		/**
+		 * A link-reference definition produces no output at all, so a multi-line
+		 * one (`[a]: https://e "` … `"`) SWALLOWS every line caught inside its
+		 * title — measured: body quote and size warning both gone. Returning
+		 * undefined declines the token so the text falls through to a paragraph
+		 * and stays on screen. Reference-style links are of no use in a prompt.
+		 */
+		def() {
+			return undefined;
+		},
+	},
 	renderer: {
 		/**
-		 * Raw HTML — block and inline both arrive here — is rendered as visible
-		 * TEXT. This is the line that closes suppression: `<div hidden>` and
-		 * `<!--` become characters on screen instead of structure.
+		 * `<div hidden>` and `<!--` become characters on screen instead of
+		 * structure. Block and inline HTML both arrive here.
 		 */
 		html(token) {
 			return escapeHtml(token.text);
+		},
+
+		/**
+		 * marked flags text tokens `escaped: true` while its lexer is
+		 * `inRawBlock` — a leading `<code>`/`<kbd>`/`<pre>`/`<script>` in an
+		 * interpolated value sets it — and the DEFAULT text renderer returns
+		 * those verbatim. That reopened everything the `html` override closes,
+		 * up to and including a live `<img/src=x onerror=…>`. Container tokens
+		 * still recurse so inline emphasis inside a paragraph keeps working.
+		 */
+		text(token) {
+			return 'tokens' in token && token.tokens && token.tokens.length > 0
+				? this.parser.parseInline(token.tokens)
+				: escapeHtml(token.text);
 		},
 
 		/**
@@ -111,12 +172,49 @@ const promptMarked = new Marked({
 });
 
 /**
- * Render confirmation-prompt markdown to HTML that is safe to inject.
+ * Tags the prompt renderer is expected to emit — everything marked's remaining
+ * default renderers produce for the constructs the prompts actually use. Layer 2
+ * is pinned to this list rather than DOMPurify's defaults, which permit `div`,
+ * `style` and `hidden` and keep comments: exactly the suppression primitives.
  *
- * Emits only the tags marked's own renderers produce (paragraphs, emphasis,
- * lists, blockquotes, headings, code, tables, safe links) — no `div`, no
- * `style`, no `hidden`, no comments, no images.
+ * `PROMPT_EMITTED_TAGS` is asserted against real rendered output by the test
+ * suite, so a marked upgrade that starts emitting something new fails loudly
+ * instead of quietly widening what a prompt can render.
+ */
+export const PROMPT_EMITTED_TAGS: readonly string[] = [
+	'p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote',
+	'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'hr',
+	'table', 'thead', 'tbody', 'tr', 'th', 'td',
+];
+
+/**
+ * Render confirmation-prompt markdown to HTML for injection.
+ *
+ * Layer 1 (marked overrides above) is what the suite verifies and what has to
+ * hold. Layer 2 (DOMPurify, pinned to `PROMPT_EMITTED_TAGS`) runs only where a
+ * DOM exists; without one it returns its input unchanged, which is why nothing
+ * here depends on it.
  */
 export function renderPromptMarkdown(text: string): string {
-	return promptMarked.parse(text, { async: false }) as string;
+	// A prompt whose text is missing must not take the whole confirmation down
+	// with it: `{@html}` on a thrown call renders nothing, which is the very
+	// suppression this module exists to prevent — arriving by crash instead.
+	if (typeof text !== 'string' || text.length === 0) return '';
+	return sanitizePromptHtml(promptMarked.parse(text, { async: false }) as string);
+}
+
+/**
+ * Layer 2. Outside a browser — the test runner, SSR — DOMPurify's default export
+ * is an uninitialised factory that has no `sanitize` at all, so this hands the
+ * markdown stage's output straight back. That absence is not worked around on
+ * purpose: pretending layer 2 is present where it cannot run is how a fail-open
+ * guard gets mistaken for a real one.
+ */
+function sanitizePromptHtml(html: string): string {
+	if (typeof DOMPurify.sanitize !== 'function') return html;
+	return DOMPurify.sanitize(html, {
+		ALLOWED_TAGS: [...PROMPT_EMITTED_TAGS],
+		ALLOWED_ATTR: ['href', 'title', 'rel', 'target'],
+		ALLOW_DATA_ATTR: false,
+	});
 }

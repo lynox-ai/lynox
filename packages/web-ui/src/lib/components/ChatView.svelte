@@ -3020,13 +3020,16 @@
 					{#if isPermissionGuard}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
-						<!-- renderPromptMarkdown, NOT MarkdownRenderer: a confirmation
-						     prompt interpolates values the agent — or, for mail_reply, an
-						     external sender — controls, and the chat renderer passes raw
-						     HTML through, which lets such a value hide the rest of the
-						     prompt (see prompt-markdown.ts). It is also why no artifact,
-						     mermaid or iframe rendering belongs on this path. -->
-						<div class="flex-1 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1">
+						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
+						     keeps DOMPurify's defaults, which permit `div`, `style` and
+						     `hidden` and retain comments — enough for an interpolated value
+						     (for mail_reply, an external sender's subject) to hide the rest
+						     of the prompt. See prompt-markdown.ts.
+						     The wrap/min-width classes below replace the hardening that came
+						     with MarkdownRenderer's own stylesheet: without them a single
+						     long token — a tracking URL in a body preview — scrolls the
+						     prompt sideways. -->
+						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							{@html renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
