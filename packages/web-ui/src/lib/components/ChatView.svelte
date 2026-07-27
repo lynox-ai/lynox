@@ -142,7 +142,7 @@
 	const ONBOARDING_CONTEXT = [
 		`The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Record each concrete finding as durable knowledge with the {memoryTool} tool. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
 		`You already analyzed the user's website earlier in this conversation. Now ask the 3-5 questions the research made possible — the sharp, specific ones the website does NOT answer, each GROUNDED in a concrete detail you just found. Do NOT ask a generic questionnaire: tie every question to something specific from the scan (e.g. if they sell recurring maintenance contracts, ask how they handle overdue renewals today; if the positioning is premium, ask what justifies the price to a skeptical prospect). Cover what actually moves the needle — how they make money, where the real bottleneck is, the biggest current challenge, and what success looks like in 12 months. Use the ask_user tool with the "questions" parameter to present all questions at once (each free-text). When they answer, record each answer as durable knowledge with the {memoryTool} tool. IMPORTANT: if the user skips or dismisses questions (answers contain "__dismissed__"), accept it gracefully — record whatever you received and move on; do NOT re-ask. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Record the key competitive insights as durable knowledge with the {memoryTool} tool. After artifact_save returns, write a brief 1-2 sentence chat message that confirms the artifact AND proves you understood the business by naming one concrete fact you just learned. Then call the suggest_follow_ups tool with 2-3 CONCRETE JOBS you could do for them right now — each grounded in a specific fact from the scan or their answers (e.g. "draft a re-engagement email to churned customers", "set up a watcher for overdue invoices", "compare your pricing against competitor X"). These must be specific tasks tied to their business, NOT generic capabilities ("connect Gmail", "install the app") and NOT feature enumeration. Respond in {locale}.`,
+		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Record the key competitive insights as durable knowledge with the {memoryTool} tool. After artifact_save returns, write a brief 1-2 sentence chat message that confirms the artifact AND proves you understood the business by naming one concrete fact you just learned. Then call the suggest_follow_ups tool with 2-3 CONCRETE JOBS you could do for them right now — each grounded in a specific fact from the scan or their answers (e.g. "draft a re-engagement email to churned customers", "set up a watcher for overdue invoices", "compare your pricing against competitor X"). These must be specific tasks tied to their business, NOT generic capabilities ("connect Gmail", "install the app") and NOT feature enumeration. Finally, close with ONE honest expectation in a single plain sentence — a concrete limit of what lynox does right now (e.g. it acts only when you ask, unless you set up a watcher; it drafts, but you approve before anything is sent) — no hedging, no disclaimer list. Respond in {locale}.`,
 	];
 
 	let onboardingStep = $state(0); // 0-based: which of the 3 model-run chips is current
@@ -164,6 +164,10 @@
 	let onboardingStarted = $state(false);
 	let onboardingBasicsDone = $state(false);
 	let onboardingSessionId = $state<string | null>(null);
+	// The AUTHORITATIVE onboarding thread-id echoed by /promote (== every promoted fact's
+	// source_thread_id). Stamped into knowledge_done at completion so the AC-1.10 repair
+	// pointer cannot drift from the data (RF-IRR1); null on the DK-off/skip path (no facts).
+	let onboardingKnowledgeThreadId = $state<string | null>(null);
 	// The memory tool the model-run steps must name — `remember` (DK-on) vs
 	// `memory_store` (DK-off default). Set from /status.durableMemory; defaults to
 	// the DK-off majority so an unresolved status never names a DK-on-only tool.
@@ -171,26 +175,45 @@
 
 	async function loadOnboardingState(): Promise<void> {
 		// Server-side, cross-device state (D12/AC-1.1) — no localStorage READ. The /status
-		// endpoint fails OPEN (a degraded engine.db reports done → never re-nags, AC-1.7);
-		// a transient network error here just leaves onboarding shown.
+		// endpoint fails OPEN server-side (a degraded engine.db reports done → never re-nags,
+		// AC-1.7). The CLIENT MIRRORS that: a status we cannot resolve is treated as done
+		// (dismiss), NOT shown with the default memory tool — otherwise a transient failure on a
+		// DK-on instance would run the chips instructing the unregistered `memory_store`,
+		// silently losing every capture (RF-COH1).
 		try {
 			const res = await fetch(`${getApiBase()}/onboarding/status`);
-			if (!res.ok) return;
-			const data = (await res.json()) as { knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean };
+			if (!res.ok) { onboardingDismissed = true; return; }
+			const data = (await res.json()) as {
+				knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean; firstSessionAt?: string | null;
+			};
 			if (data.knowledgeDone || data.skipped) onboardingDismissed = true;
 			onboardingMemoryTool = data.durableMemory === true ? 'remember' : 'memory_store';
-		} catch { /* non-critical — show onboarding */ }
+			// first_session_at (DC4): stamp the FIRST time onboarding is seen — the session-1
+			// baseline the Wave-3 literacy rule (AC-3.7) reads. Set-once (null → now); a later
+			// re-onboard keeps the original. Skipped once onboarding is already done/dismissed.
+			if (!onboardingDismissed && !data.firstSessionAt) {
+				postOnboardingFlag('first_session_at', new Date().toISOString());
+			}
+		} catch {
+			onboardingDismissed = true; // status unresolvable → treat as done (mirror server fail-open)
+		}
 	}
 
-	/** Fire-and-forget server flag write (owner-auth, set-only). Best-effort — a failed
-	 *  write never blocks the UI; the localStorage 'done' write-back (AC-1.11) is the
-	 *  fleet-rollback guard, written write-only alongside. */
-	function setOnboardingFlag(flag: 'knowledge_done' | 'skipped', value: string): void {
+	/** Raw fire-and-forget server flag write (owner-auth, set-only). Best-effort — a failed
+	 *  write never blocks the UI. Carries NO localStorage side-effect (unlike completion). */
+	function postOnboardingFlag(flag: 'knowledge_done' | 'skipped' | 'first_session_at', value: string): void {
 		void fetch(`${getApiBase()}/onboarding/flags/${flag}`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ value }),
 		}).catch(() => { /* best-effort */ });
+	}
+
+	/** Mark completion/skip: the server flag PLUS the write-only localStorage 'done' write-back
+	 *  (AC-1.11) — the fleet-rollback guard so a downgrade never re-nags. ONLY these two flags
+	 *  write the legacy key; first_session_at (a mid-flow render-ack stamp) must not. */
+	function setOnboardingFlag(flag: 'knowledge_done' | 'skipped', value: string): void {
+		postOnboardingFlag(flag, value);
 		if (typeof localStorage !== 'undefined') localStorage.setItem('lynox-onboarding-step', 'done');
 	}
 
@@ -200,7 +223,10 @@
 			onboardingDismissed = true;
 			onboardingJustCompleted = true;
 			// knowledge_done carries the onboarding thread-id (AC-1.10 — the mass-repair link).
-			setOnboardingFlag('knowledge_done', onboardingSessionId ?? getSessionId() ?? '');
+			// Prefer the AUTHORITATIVE id echoed by /promote (== the promoted facts' source_thread_id,
+			// RF-IRR1); fall back to the session only on the DK-off/skip path where no facts were
+			// written and the link is moot.
+			setOnboardingFlag('knowledge_done', onboardingKnowledgeThreadId ?? onboardingSessionId ?? getSessionId() ?? '');
 		} else {
 			onboardingStep = next;
 		}
@@ -223,8 +249,9 @@
 		}
 	}
 
-	function onBasicsDone(company: string | null): void {
+	function onBasicsDone(company: string | null, knowledgeThreadId: string | null): void {
 		onboardingCompany = company;
+		onboardingKnowledgeThreadId = knowledgeThreadId;
 		onboardingBasicsDone = true;
 	}
 

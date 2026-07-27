@@ -15,10 +15,15 @@
 		/** The onboarding thread's session id — carries source_thread_id on every promoted fact. */
 		sessionId: string;
 		/** Basics promoted (or skipped) — advance to the scan step. Carries the typed
-		 *  company name (or null) so the scan step can pre-fill a candidate domain. */
-		onDone: (company: string | null) => void;
+		 *  company name (or null) so the scan step can pre-fill a candidate domain, and the
+		 *  AUTHORITATIVE onboarding thread-id from /promote (or null) so completion stamps
+		 *  knowledge_done with the exact source_thread_id of the promoted facts (AC-1.10). */
+		onDone: (company: string | null, knowledgeThreadId: string | null) => void;
 	}
 	let { sessionId, onDone }: Props = $props();
+
+	/** The onboarding thread-id echoed by /promote — the authoritative AC-1.10 repair link. */
+	let knowledgeThreadId: string | null = null;
 
 	/** The typed company answer, matched by its stable catalog header (not position). */
 	function companyAnswer(): string | null {
@@ -52,7 +57,7 @@
 				body: JSON.stringify({ sessionId, lang }),
 			});
 			if (!res.ok) {
-				onDone(null); // fail open — skip the basics, continue onboarding
+				onDone(null, null); // fail open — skip the basics, continue onboarding
 				return;
 			}
 			const data = (await res.json()) as { promptId: string; questions: BasicQuestion[] };
@@ -60,7 +65,7 @@
 			questions = data.questions;
 			answers = data.questions.map(() => '');
 		} catch {
-			onDone(null); // engine unreachable — don't block onboarding
+			onDone(null, null); // engine unreachable — don't block onboarding
 		} finally {
 			loading = false;
 		}
@@ -77,16 +82,20 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ promptId, answers: answers.map((a) => a.trim() || '__dismissed__') }),
 			});
-			await fetch(`${getApiBase()}/onboarding/knowledge/promote`, {
+			const promoteRes = await fetch(`${getApiBase()}/onboarding/knowledge/promote`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ promptId }),
 			});
+			if (promoteRes.ok) {
+				const pd = (await promoteRes.json()) as { threadId?: unknown };
+				if (typeof pd.threadId === 'string' && pd.threadId) knowledgeThreadId = pd.threadId;
+			}
 		} catch {
 			/* best-effort — onboarding continues regardless of a promote hiccup */
 		} finally {
 			saving = false;
-			onDone(companyAnswer());
+			onDone(companyAnswer(), knowledgeThreadId);
 		}
 	}
 
@@ -137,7 +146,7 @@
 				{saving ? t('onboard.basics_saving') : t('onboard.basics_save')}
 			</button>
 			<button
-				onclick={() => onDone(null)}
+				onclick={() => onDone(null, null)}
 				disabled={saving}
 				class="rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text-muted hover:text-text disabled:opacity-40 transition-colors"
 			>

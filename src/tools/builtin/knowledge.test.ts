@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,15 @@ import { KnowledgeStore } from '../../core/knowledge-store.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { rememberTool, recallTool, memoryBlockEditTool, memoryRetireTool, memoryFocusTool, archiveSearchTool } from './knowledge.js';
 import type { IAgent } from '../../types/index.js';
+import { appendBoundedJsonl } from '../../core/bounded-jsonl-log.js';
+
+// Mock the capture-telemetry sink so we can assert the propose_shown funnel event fires
+// from the emit site (the real appendCaptureTelemetry gate still runs — see the DK-flag cases).
+vi.mock('../../core/bounded-jsonl-log.js', () => ({ appendBoundedJsonl: vi.fn(() => Promise.resolve()) }));
+const mockSink = vi.mocked(appendBoundedJsonl);
+function captureEvents(): Array<Record<string, unknown>> {
+  return mockSink.mock.calls.map((c) => c[1] as Record<string, unknown>);
+}
 
 interface MockOpts {
   sawUntrustedData?: boolean;
@@ -16,6 +25,7 @@ interface MockOpts {
   autonomy?: 'supervised' | 'guided' | 'autonomous';
   promptAnswer?: string | null; // null = no promptUser wired
   knownSecret?: string;
+  durableMemoryEnabled?: boolean; // gates capture telemetry (propose_shown)
 }
 
 describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
@@ -34,6 +44,7 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
       sawExternalContentTool: opts.sawExternalContentTool ?? false,
       conversationSawUntrusted: opts.conversationSawUntrusted ?? false,
       autonomy: opts.autonomy ?? 'supervised',
+      durableMemoryEnabled: opts.durableMemoryEnabled ?? false,
       currentThreadId: 't1',
       currentRunId: 'r1',
       secretStore: opts.knownSecret
@@ -90,6 +101,36 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
     await rememberTool.handler({ text: 'ACME uses Stripe for billing', subject: 'ACME' }, agent); // identical → dedup
     expect(events.find((e) => e['type'] === 'knowledge_write')).toBeUndefined();
+  });
+
+  // ── propose_shown funnel (RF-GAP1 / AC-1.4) — the denominator that pairs with the
+  // review-endpoint propose_confirmed/ignored. Would fail if the emit site were removed. ──
+
+  it('remember emits propose_shown for a NEW pending_review write (DK-on), entry-id only, no fact text', async () => {
+    mockSink.mockClear();
+    const secret = 'ACME switched its bank in June';
+    const { agent } = make({ sawExternalContentTool: true, durableMemoryEnabled: true });
+    await rememberTool.handler({ text: secret, subject: 'ACME' }, agent);
+    const proposeShown = captureEvents().filter((e) => e['event'] === 'propose_shown');
+    expect(proposeShown).toHaveLength(1);
+    expect(typeof proposeShown[0]!['entryId']).toBe('string');
+    expect((proposeShown[0]!['entryId'] as string).length).toBeGreaterThan(0);
+    // S5: entry-id + signals only — the fact text must never ride the telemetry line.
+    for (const v of Object.values(proposeShown[0]!)) expect(v).not.toBe(secret);
+  });
+
+  it('remember does NOT emit propose_shown for a TRUSTED active write (not a reviewable proposal)', async () => {
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true }); // trusted turn → active, not pending_review
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    expect(captureEvents().filter((e) => e['event'] === 'propose_shown')).toHaveLength(0);
+  });
+
+  it('remember does NOT emit propose_shown when DK is off (gate)', async () => {
+    mockSink.mockClear();
+    const { agent } = make({ sawExternalContentTool: true, durableMemoryEnabled: false });
+    await rememberTool.handler({ text: 'ACME switched its bank in June', subject: 'ACME' }, agent);
+    expect(captureEvents().filter((e) => e['event'] === 'propose_shown')).toHaveLength(0);
   });
 
   it('remember routes to pending_review when an external-content tool ran this turn (H4)', async () => {
