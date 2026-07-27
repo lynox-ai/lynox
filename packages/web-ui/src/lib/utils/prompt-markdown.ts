@@ -178,8 +178,10 @@ const promptMarked = new Marked({
  *
  * This is a CEILING, not an inventory of what marked emits: `input` is emitted
  * for task lists and deliberately absent (see `PROMPT_STRIPPED_TAGS`). The tests
- * assert both directions, so a marked upgrade that emits some third thing shows
- * up as a failure instead of being silently deleted in the browser.
+ * assert both directions — but only over the markdown constructs the rich-prompt
+ * case exercises. A marked upgrade that emits something new for a construct not
+ * in that list would still slip through and be deleted in the browser, so extend
+ * the case rather than assuming the assertion is exhaustive.
  */
 export const PROMPT_EMITTED_TAGS: readonly string[] = [
 	'p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote',
@@ -226,8 +228,14 @@ export function renderPromptMarkdown(text: string): string {
 	// Returning nothing would leave the approver with bare Yes/No buttons and no
 	// text at all — the same blank prompt this module exists to prevent, just
 	// arriving through a broken payload instead of an attack. Say so instead.
-	if (typeof text !== 'string' || text.length === 0) return `<p>${MISSING_PROMPT_TEXT}</p>`;
-	return sanitizePromptHtml(promptMarked.parse(text, { async: false }) as string);
+	const html = typeof text !== 'string' || text.length === 0
+		? `<p>${MISSING_PROMPT_TEXT}</p>`
+		: (promptMarked.parse(text, { async: false }) as string);
+	// The fallback is a local literal and needs no sanitising, but routing it
+	// through anyway keeps ONE invariant instead of two: everything this function
+	// returns has passed layer 2. An exempt path is how the next edit to that
+	// string stops being reviewed as output.
+	return sanitizePromptHtml(html);
 }
 
 /**
