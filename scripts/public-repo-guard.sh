@@ -53,10 +53,16 @@ HARD='control-staging\.lynox\.cloud|root@control|managed_tenant_hosts|ssh_privat
 # indirection (LYNOX_KNOWLEDGE_PROXY_URL / _KEY / _KEY_FILE); a vendor name
 # never has to appear in this repo.
 #
-# Separator-tolerant on purpose: a plain `cli-?proxy|local-eval-key` let through
-# cli_proxy, CLI_PROXY_API_KEY, local_eval_key, "cli proxy" and the vendor's
-# GitHub org — all verified to slip past it. The default port is matched too: it
-# is a unique fingerprint on its own (searching it names the product).
+# Separator-tolerant on purpose: a hyphen-only pattern let through the
+# underscore, all-caps, space-separated and org-name spellings — each verified
+# to slip past before, blocked after. The examples are NOT written out here:
+# one of them is the product's own env-var name, i.e. exactly the kind of
+# uniquely-searchable string this class exists to keep out. See
+# tests/public-repo-guard.test.ts for the concrete cases, assembled at runtime.
+#
+# The default port is matched in its two loopback spellings (127.0.0.1: and
+# localhost:). A bare port number is deliberately NOT matched — it is too
+# common to block on its own, so `PORT = <n>` or a non-loopback host will pass.
 #
 # The org and port fragments are CONCATENATED rather than written out. That is
 # not obfuscation against a reader — anyone reading this file sees them. It

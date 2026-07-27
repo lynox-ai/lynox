@@ -36,6 +36,16 @@ const PORT = 8300 + 17;
 
 let dir: string;
 
+/** Run the guard in --staged mode inside `dir`; return the exit code. */
+function runStaged(): number {
+  try {
+    execFileSync('bash', [SCRIPT, '--staged'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    return 0;
+  } catch (err) {
+    return (err as { status?: number }).status ?? -1;
+  }
+}
+
 /** Run the guard inside `dir`; return the exit code (0 = clean). */
 function runGuard(): number {
   try {
@@ -109,13 +119,27 @@ describe('public-repo-guard — fires on planted leaks', () => {
     expect(runGuard()).not.toBe(0);
   });
 
-  it('fires in --staged mode as well (the pre-push path)', () => {
+  it('--staged scans only what is staged, not the committed tree', () => {
+    // NOTE: --staged is currently unreachable from lefthook.yml, which runs the
+    // guard over the whole tree. Covered anyway because the mode exists and is
+    // usable by hand.
+    //
+    // The earlier version of this case was tautological: commitFile() only
+    // stages, so `git ls-files` and `git diff --cached` were identical and the
+    // test stayed green even with --staged patched into a no-op. Committing a
+    // baseline first is what makes the two views differ.
     commitFile('src/leak.ts', `// uses the local ${VENDOR} endpoint\n`);
-    let code = 0;
-    try {
-      execFileSync('bash', [SCRIPT, '--staged'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
-    } catch (err) { code = (err as { status?: number }).status ?? -1; }
-    expect(code).not.toBe(0);
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'baseline'], { cwd: dir });
+
+    // Nothing staged now: the leak is committed, so --staged must be CLEAN
+    // while a full-tree run still fires. This is the assertion a no-op --staged
+    // cannot satisfy.
+    expect(runStaged()).toBe(0);
+    expect(runGuard()).not.toBe(0);
+
+    // Stage a fresh leak → --staged must fire.
+    commitFile('src/leak2.ts', `readFileSync('/etc/secrets/.${KEY_FILE_NAME}')\n`);
+    expect(runStaged()).not.toBe(0);
   });
 
   it('catches a pre-existing HARD infra marker', () => {
