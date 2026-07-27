@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { sendMail, parseAddressList, buildSendPreview, previewAddressList, singleLine, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
+import { sendMail, parseAddressList, buildSendPreview, previewAddressList, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
+import { singleLine } from '../../core/prompt-value.js';
 import type { MailAddress, MailProvider, MailSendResult } from './provider.js';
 
 vi.mock('./tools/rate-limit.js', () => {
