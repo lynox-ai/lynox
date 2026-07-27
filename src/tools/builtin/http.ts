@@ -9,6 +9,14 @@ import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, asse
 import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import {
+  extractHtmlText,
+  isHtmlContentType,
+  DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS,
+  DEFAULT_HTML_EXTRACT_MAX_CHARS,
+  MIN_USEFUL_EXTRACT_CHARS,
+} from '../../core/html-extract.js';
+import type { HtmlExtractResult } from '../../core/html-extract.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -704,6 +712,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         wallTimeout,
       ]);
 
+      // HTML gets the same protection JSON has had: a large page is extracted to
+      // text instead of dumping raw markup into the context. Opt-out via
+      // `http_html_extract: false` for the scraping case that needs the markup.
+      const isHtml = !isJson && isHtmlContentType(contentType);
+      const htmlExtractEnabled = agent.toolContext?.userConfig?.http_html_extract ?? true;
+      let htmlExtracted: HtmlExtractResult | undefined;
+
       if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
@@ -713,8 +728,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         } catch {
           body = text;
         }
+      } else if (isHtml && htmlExtractEnabled && text.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
+        const extracted = extractHtmlText(text);
+        // A near-empty extraction means the page is JS-rendered — the raw markup
+        // still carries more (inline JSON, data attributes), so keep it.
+        if (extracted.afterChars >= MIN_USEFUL_EXTRACT_CHARS) {
+          htmlExtracted = extracted;
+          body = extracted.text;
+        } else {
+          body = text;
+        }
       } else {
         body = text;
+      }
+
+      if (htmlExtracted) {
+        body +=
+          `\n[note: HTML auto-extracted to text (${htmlExtracted.beforeChars}→${htmlExtracted.afterChars} chars) ` +
+          `to protect the context window — title, meta/OG tags, headings and visible text kept; ` +
+          `scripts, styles and markup dropped` +
+          (htmlExtracted.truncated ? `; the extracted text itself hit the ${DEFAULT_HTML_EXTRACT_MAX_CHARS}-char cap` : '') +
+          `. For reading public pages prefer \`web_research\` with action='read'. ` +
+          `Set "http_html_extract": false in config if you need the raw markup.]`;
       }
 
       if (truncated) {
@@ -722,12 +757,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Active delegation hint: a half-cut response in the main context is
         // expensive (eats the cap, may still miss the field the agent needs).
         // A collector sub-agent can fetch + summarize in an isolated context
-        // and return only the relevant slice — that's the cheaper path.
-        body +=
-          `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
-          `For large responses prefer \`spawn_agent\` with role='collector' ` +
-          `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
-          `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+        // and return only the relevant slice — that's the cheaper path. After a
+        // successful extraction that bloat is already gone, so the hint would be
+        // wrong advice — say only that the page was longer than what we read.
+        body += htmlExtracted
+          ? `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`
+          : `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
+            `For large responses prefer \`spawn_agent\` with role='collector' ` +
+            `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
+            `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
       }
 
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;

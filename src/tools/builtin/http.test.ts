@@ -1949,4 +1949,120 @@ describe('httpRequestTool', () => {
       expect(callArgs.headers.Authorization).toBe('Bearer agent-set-token');
     });
   });
+
+  describe('HTML text extraction', () => {
+    // Motivated by the onboarding website scan (amazona.de, 2026-07-27): a
+    // 204KB page went into the context as raw markup — 91% of the thread's
+    // context bytes, re-billed on every following turn.
+    // Body copy must clear MIN_USEFUL_EXTRACT_CHARS — an extraction yielding
+    // near-nothing deliberately falls back to raw markup (SPA case, tested below).
+    const bigHtml = (visible: string): string =>
+      `<html><head><title>Musiker-Magazin</title>` +
+      `<meta name="description" content="Tests zu Synthesizern"/>` +
+      `<script>${'var pad=1;'.repeat(4_000)}</script>` +
+      `<style>${'.a{b:c}'.repeat(2_000)}</style>` +
+      `</head><body><h1>${visible}</h1>` +
+      `<p>${'Wir testen Synthesizer, Keyboards und Gitarren seit 1999. '.repeat(10)}</p>` +
+      `</body></html>`;
+
+    function htmlAgent(userConfig?: Record<string, unknown>): never {
+      return {
+        name: 'main',
+        toolContext: userConfig ? { userConfig } : {},
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    it('extracts a large text/html body instead of returning raw markup', async () => {
+      mockDnsPublic();
+      const html = bigHtml('Aktuelle Tests');
+      expect(html.length).toBeGreaterThan(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: html,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('title: Musiker-Magazin');
+      expect(result).toContain('description: Tests zu Synthesizern');
+      expect(result).toContain('## Aktuelle Tests');
+      expect(result).not.toContain('var pad=1;');
+      expect(result).toContain('HTML auto-extracted to text');
+      // The whole point: the result must be a fraction of the raw page.
+      expect(result.length).toBeLessThan(html.length / 10);
+    });
+
+    it('leaves a SMALL html body untouched — fetching a markup snippet still works', async () => {
+      mockDnsPublic();
+      const small = '<html><body><h1>Klein</h1><p>Kurz</p></body></html>';
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: small,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('<h1>Klein</h1>');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('honours http_html_extract: false for the scraping case', async () => {
+      mockDnsPublic();
+      const html = bigHtml('Aktuelle Tests');
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: html,
+      })));
+
+      const result = await handler(
+        { url: 'https://example.com/' },
+        htmlAgent({ http_html_extract: false }),
+      );
+
+      expect(result).toContain('var pad=1;');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('does not touch a large JSON body — that path keeps its own shaping', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { items: Array.from({ length: 50 }, (_, i) => ({ id: i, name: `n${i}` })) },
+      })));
+
+      const result = await handler({ url: 'https://api.example.com/x' }, htmlAgent());
+
+      expect(result).not.toContain('HTML auto-extracted');
+      expect(result).toContain('items');
+    });
+
+    it('does not extract a text/plain body', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/plain' },
+        body: `<h1>not markup</h1>${'x'.repeat(40_000)}`,
+      })));
+
+      const result = await handler({ url: 'https://example.com/f.txt' }, htmlAgent());
+
+      expect(result).toContain('<h1>not markup</h1>');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('keeps raw markup when extraction yields almost nothing (JS-rendered shell)', async () => {
+      mockDnsPublic();
+      const spa = `<html><head><script>window.__D__={${'"k":1,'.repeat(6_000)}"z":0}</script>` +
+        `</head><body><div id="root"></div></body></html>`;
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: spa,
+      })));
+
+      const result = await handler({ url: 'https://spa.example.com/' }, htmlAgent());
+
+      expect(result).toContain('window.__D__');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+  });
 });

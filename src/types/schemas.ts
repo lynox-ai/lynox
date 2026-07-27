@@ -177,6 +177,7 @@ export const LynoxUserConfigSchema = z.object({
   pipeline_step_result_limit: z.number().min(1_000).max(1_048_576).optional(),
   memory_extraction_limit: z.number().min(1_000).max(262_144).optional(),
   http_response_limit:     z.number().min(1_000).max(5_242_880).optional(),
+  http_html_extract:       z.boolean().optional(),
   google_oauth_scopes:     z.array(z.string()).optional(),
   enforce_https:           z.boolean().optional(),
   // Outbound egress control for the http_request tool. Operator/CP security

@@ -428,6 +428,12 @@ export interface LynoxUserConfig {
   memory_extraction_limit?: number | undefined;
   /** HTTP response body size limit in bytes. Default: 100000 */
   http_response_limit?: number | undefined;
+  /**
+   * Extract large `text/html` responses to text (title, meta/OG tags, headings,
+   * visible text) instead of returning raw markup. Default: true. Set false when
+   * you need the markup itself — scraping attributes, inspecting a page's HTML.
+   */
+  http_html_extract?: boolean | undefined;
   /** Max chars for a single tool result before truncation. Default: 80000 */
   max_tool_result_chars?: number | undefined;
   /**

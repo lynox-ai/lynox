@@ -160,7 +160,7 @@ export function loadConfig(): LynoxUserConfig {
     'memory_extraction',
     'memory_half_life_days',
     'pipeline_context_limit', 'pipeline_step_result_limit',
-    'memory_extraction_limit', 'http_response_limit',
+    'memory_extraction_limit', 'http_response_limit', 'http_html_extract',
     'enforce_https',
     'bugsink_dsn',
     'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
