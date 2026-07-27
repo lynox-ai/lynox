@@ -78,6 +78,7 @@
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
+	import { renderPromptMarkdown } from '../utils/prompt-markdown.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -3019,8 +3020,14 @@
 					{#if isPermissionGuard}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
+						<!-- renderPromptMarkdown, NOT MarkdownRenderer: a confirmation
+						     prompt interpolates values the agent — or, for mail_reply, an
+						     external sender — controls, and the chat renderer passes raw
+						     HTML through, which lets such a value hide the rest of the
+						     prompt (see prompt-markdown.ts). It is also why no artifact,
+						     mermaid or iframe rendering belongs on this path. -->
 						<div class="flex-1 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1">
-							<MarkdownRenderer content={pendingPermission.question} streaming={false} />
+							{@html renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
