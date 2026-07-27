@@ -3,7 +3,7 @@ import type {
   BetaToolResultBlockParam,
   BetaImageBlockParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
-import { contentKey, toolResultText, toolNameById, toolInputById } from './tool-result-hygiene.js';
+import { contentKey, toolResultText, toolCallsById } from './tool-result-hygiene.js';
 import { maskSecretPatterns } from './secret-store.js';
 
 /**
@@ -63,16 +63,23 @@ export interface ToolResultBlob {
   readonly descriptor: string;
   /** The full verbatim tool-result payload. */
   readonly payload: string;
+  /** The identifying call argument this descriptor was built from, so a REUSED
+   *  blob can detect that a second call had a different one (see `evictFrom`). */
+  readonly ident: string;
 }
 
 /**
  * Input keys that IDENTIFY which call a result came from, in preference order.
  *
- * An allowlist of key NAMES rather than a per-tool map: it does not drift as
- * tools are added, and it structurally excludes the payload-carrying arguments
- * (`content`, `body`, `text`) whose value would bloat the descriptor instead of
- * labelling it. `command` is included — for a `bash` result "npm test" is
- * exactly the label you want.
+ * An allowlist of key NAMES rather than a per-tool map. It excludes the
+ * payload-carrying arguments (`content`, `body`, `text`) by construction, so no
+ * tool can push its written file into the descriptor. `command` is included —
+ * for a `bash` result "npm test" is exactly the label you want.
+ *
+ * The trade: a tool whose identifying argument uses an unlisted name (say
+ * `endpoint`) degrades SILENTLY to the bare tool label. That is the safe
+ * direction — no label beats a wrong one — but it does mean this list needs a
+ * look when a tool introduces a new argument shape.
  */
 const IDENTIFYING_INPUT_KEYS = [
   'url', 'path', 'file_path', 'query', 'q', 'command',
@@ -83,69 +90,102 @@ const IDENTIFYING_INPUT_KEYS = [
 const MAX_IDENT_CHARS = 120;
 
 /**
- * Pick the argument that says WHICH call this was. Returns '' when the input
- * has no recognised identifying key — the descriptor then degrades to the old
- * tool+size+head shape rather than guessing.
+ * Query-parameter names whose VALUE is a credential. `maskSecretPatterns` only
+ * knows vendor-shaped tokens (`sk-ant-…`, `ghp_…`, AWS/Google keys); an opaque
+ * `?access_token=<40 random chars>` matches none of them, so the descriptor
+ * needs this second, name-based pass.
+ */
+const CREDENTIAL_PARAM_RE = /(token|secret|signature|sig|password|passwd|pwd|api[-_]?key|access[-_]?key|auth|credential)/i;
+
+/**
+ * Redact the credential-bearing parts of an identifying argument.
  *
- * Secret-masked: the descriptor survives into the post-compaction seed, where
- * the original `tool_use` block no longer exists. A token embedded in a URL
- * would otherwise be RE-INTRODUCED into context by the very mechanism meant to
- * shrink it.
+ * This matters more than the usual masking call because the descriptor OUTLIVES
+ * its source: it is re-rendered into the post-compaction seed, where the
+ * original `tool_use` block no longer exists. A token that rides along here is
+ * RE-INTRODUCED into context by the very mechanism meant to shrink it — and it
+ * then reappears at every later compaction.
+ *
+ * Three vectors, all verified unmasked by `maskSecretPatterns` alone:
+ * URL userinfo (`https://admin:pw@host`), credential-named query params
+ * (`?access_token=…`, `?sig=…`), and vendor tokens (which masking does catch).
+ */
+function redactIdent(raw: string): string {
+  let value = raw;
+  try {
+    const url = new URL(raw);
+    url.username = '';
+    url.password = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (CREDENTIAL_PARAM_RE.test(key)) url.searchParams.set(key, '***');
+    }
+    value = url.toString();
+  } catch {
+    // Not a URL (a path, a shell command, a query string) — masking still applies.
+  }
+  return maskSecretPatterns(value);
+}
+
+/**
+ * Pick the argument that says WHICH call this was. Returns '' when the input has
+ * no recognised identifying key — the descriptor then degrades to the bare
+ * tool label rather than guessing.
  */
 function identifyingArg(input: unknown): string {
-  if (typeof input !== 'object' || input === null) return '';
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return '';
   const rec = input as Record<string, unknown>;
   for (const key of IDENTIFYING_INPUT_KEYS) {
     const value = rec[key];
     if (typeof value !== 'string' || value.trim() === '') continue;
-    const flat = maskSecretPatterns(value).replace(/\s+/g, ' ').trim();
+    const flat = redactIdent(value).replace(/\s+/g, ' ').trim();
+    if (!flat) continue;
     return flat.length > MAX_IDENT_CHARS ? `${flat.slice(0, MAX_IDENT_CHARS)}…` : flat;
   }
   return '';
 }
 
 /**
- * Strip the framing that every wrapped tool result starts with, so the head
- * excerpt carries CONTENT rather than boilerplate.
- *
- * Without this, three different pages evicted from one thread produce three
- * byte-identical descriptors — the first 80 chars of an `http_request` result
- * are the `<untrusted_data>` tag plus `HTTP 200 OK` plus a content-type header,
- * with the page's own title still far out of reach. Scoped narrowly: the header
- * skip only runs when the payload actually opens with the wrapper AND an HTTP
- * status line, so a non-HTTP payload whose first line merely looks like
- * `key: value` keeps its real head.
+ * Bound on the payload prefix flattened for the excerpt. The excerpt keeps 80
+ * chars, so flattening the whole payload (up to the blob threshold — hundreds of
+ * KB) allocates a full second copy to throw away all but the head.
  */
-function contentHead(payload: string): string {
-  let rest = payload.replace(/^<untrusted_data[^>]*>\s*/, '');
-  const hadWrapper = rest.length !== payload.length;
-  if (hadWrapper && /^HTTP \d{3}/.test(rest)) {
-    // Drop the status line + the header block up to the first blank line.
-    const blank = rest.indexOf('\n\n');
-    if (blank >= 0) rest = rest.slice(blank + 2);
-  }
-  return rest.replace(/\s+/g, ' ').trim();
-}
+const HEAD_SCAN_CHARS = 4_096;
 
 /**
- * Build a compact one-line descriptor: tool, the identifying argument, size,
- * and a content excerpt.
+ * Build a compact one-line descriptor: tool, the identifying argument, size, and
+ * a head excerpt.
  *
  * This line is the ONLY thing the agent sees in place of an evicted payload, so
  * it has to answer "do I need this back?". A descriptor that cannot distinguish
  * two results makes forgetting SILENT — `recall_tool_result` exists, but the
- * agent has no basis to call it, and eviction becomes real information loss
- * however conservative the eviction policy is. With the call's own argument in
- * the line, eviction is paging instead: the worst case is one extra turn.
+ * agent has no basis to call it, and eviction becomes information loss however
+ * conservative the eviction policy is. The ARGUMENT is what carries that signal.
+ *
+ * The excerpt is deliberately the raw payload head, framing included. An earlier
+ * revision skipped the `<untrusted_data>` wrapper and HTTP header block to
+ * surface the page's own title, and review found three reasons that was wrong:
+ *  1. `Agent._contextHoldsUntrustedMarker()` re-derives the conversation's
+ *     untrusted taint by scanning context for that literal marker. The wrapper
+ *     text in this excerpt is the ONLY copy left after a compaction, so skipping
+ *     it silently DISARMED the durable-write gate — later `remember` writes
+ *     derived from fetched pages were recorded as trusted.
+ *  2. The seed renders descriptors as unwrapped assistant text, so surfacing the
+ *     page's first body chars puts attacker-controlled prose into agent voice.
+ *  3. It did not even work on the path that matters: when injection IS detected,
+ *     `wrapUntrustedData` prepends a `⚠ WARNING:` line, so hostile pages went
+ *     back to byte-identical excerpts.
+ * Keeping the raw head costs nothing — the argument already distinguishes the
+ * calls, which was the whole point.
  */
-function buildDescriptor(tool: string, payload: string, input?: unknown): string {
+function buildDescriptor(tool: string, payload: string, ident: string): string {
   const sizeKb = (payload.length / 1024).toFixed(1);
-  const ident = identifyingArg(input);
   const label = ident ? `${tool}(${ident})` : `${tool} result`;
 
-  const head = contentHead(payload);
+  const head = payload.slice(0, HEAD_SCAN_CHARS).replace(/\s+/g, ' ').trim();
   const excerpt = head.slice(0, 80);
-  const suffix = head.length > 80 ? '…' : '';
+  // More to come if the flattened prefix already overflows, or if we only looked
+  // at a prefix of a longer payload.
+  const suffix = head.length > 80 || payload.length > HEAD_SCAN_CHARS ? '…' : '';
 
   return excerpt
     ? `${label} · ${sizeKb} KB · ${excerpt}${suffix}`
@@ -288,11 +328,9 @@ export class ToolResultBlobStore {
     messages: readonly BetaMessageParam[],
     thresholdChars: number,
   ): Array<{ id: string; descriptor: string }> {
-    // Map tool_use_id → tool name from every assistant tool_use block (shared
-    // with the append-time dedup so both key the same content the same way).
-    const toolNames = toolNameById(messages);
-    // ...and the call inputs, so a handle can name WHICH call it stands for.
-    const toolInputs = toolInputById(messages);
+    // Map tool_use_id → {name, input} from every assistant tool_use block. The
+    // name labels the result; the input says WHICH call it stands for.
+    const toolCalls = toolCallsById(messages);
 
     const handles: Array<{ id: string; descriptor: string }> = [];
     for (const msg of messages) {
@@ -302,25 +340,35 @@ export class ToolResultBlobStore {
         const resultBlock = block as BetaToolResultBlockParam;
         const payload = toolResultText(resultBlock.content);
         if (payload.length <= thresholdChars) continue;
-        const tool = toolNames.get(resultBlock.tool_use_id) ?? 'tool';
+        const call = toolCalls.get(resultBlock.tool_use_id);
+        const tool = call?.name ?? 'tool';
         // Dedup: an identical payload already resident reuses its handle instead
         // of minting a second blob. This is what breaks the cross-compaction
         // amplifier — the same file dump re-parked at each compaction now maps
         // to ONE id. `this.get()` promotes the reused blob to most-recently-used
         // (it is being referenced again). The `payload ===` guard makes a hash
         // clash cost only a missed dedup, never a wrong reuse.
+        const ident = identifyingArg(call?.input);
         const key = contentKey(payload);
         const existingId = this.idByContent.get(key);
         if (existingId !== undefined) {
           const existing = this.get(existingId);
           if (existing !== undefined && existing.payload === payload) {
-            handles.push({ id: existingId, descriptor: existing.descriptor });
+            // ONE blob now stands for TWO different calls (a mirror page, two
+            // URLs answering the same 404). Keeping the first call's argument
+            // would label this handle with a URL it did not come from — a
+            // confidently WRONG label is worse than none, so drop the argument
+            // and fall back to the bare tool label when they disagree.
+            const descriptor = ident === existing.ident
+              ? existing.descriptor
+              : buildDescriptor(existing.tool, existing.payload, '');
+            handles.push({ id: existingId, descriptor });
             continue;
           }
         }
         const id = this.nextId();
-        const descriptor = buildDescriptor(tool, payload, toolInputs.get(resultBlock.tool_use_id));
-        this.blobs.set(id, { tool, descriptor, payload });
+        const descriptor = buildDescriptor(tool, payload, ident);
+        this.blobs.set(id, { tool, descriptor, payload, ident });
         this.totalBytes += payload.length;
         this.idByContent.set(key, id);
         this.contentById.set(id, key);
