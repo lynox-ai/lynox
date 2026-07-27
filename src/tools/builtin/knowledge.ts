@@ -112,6 +112,22 @@ export const rememberTool: ToolEntry<RememberInput> = {
       outcome: result.deduped === true ? 'deduped' : result.status,
     });
 
+    // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a
+    // review chip — the funnel DENOMINATOR that pairs with propose_confirmed/propose_ignored
+    // at the review endpoint. Fires once at creation (not per render); a trusted `active`
+    // write or a dedup no-op is not a reviewable proposal. Entry-id + signal only (S5 — never
+    // the fact text).
+    if (result.status === 'pending_review' && result.deduped !== true) {
+      void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
+        ts: Date.now(),
+        event: 'propose_shown',
+        thread: agent.currentThreadId,
+        model: agent.model,
+        untrusted: sourceUntrusted,
+        entryId: result.id,
+      });
+    }
+
     // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
     // "gemerkt · undo" confirmation, untrusted → a keep/discard review chip). Emitted for a
     // NEW write only (never a dedup no-op). This is NOT the tool-result and is never folded

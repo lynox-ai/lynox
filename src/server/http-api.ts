@@ -3617,6 +3617,19 @@ export class LynoxHTTPApi {
       try {
         const entry = store.reviewEntry(params['id']!, action, editedText);
         if (!entry) { errorResponse(res, 404, 'No queued entry with this id'); return; }
+        // Funnel (PRD-ONBOARDING §7 / AC-1.4): the human decision on a review chip pairs with
+        // propose_shown at write time. approve/edit_approve = propose_confirmed; reject =
+        // propose_ignored (dismissed:true = an active discard, per capture-telemetry S5).
+        // Entry-id only — never the fact text.
+        void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+          ts: Date.now(),
+          event: action === 'reject' ? 'propose_ignored' : 'propose_confirmed',
+          thread: undefined,
+          model: undefined,
+          untrusted: false,
+          entryId: params['id']!,
+          ...(action === 'reject' ? { dismissed: true } : {}),
+        });
         jsonResponse(res, 200, { entry });
       } catch (err) {
         errorResponse(res, 400, err instanceof Error ? err.message : 'Review failed');
@@ -3699,6 +3712,15 @@ export class LynoxHTTPApi {
       const value = typeof b?.['value'] === 'string' ? b['value'] : '';
       if (value.length > 512) { errorResponse(res, 400, 'value too long (max 512 chars)'); return; }
       store.set(flag, value);
+      // Funnel (PRD-ONBOARDING §7 / AC-1.4): an explicit skip is the server-observable
+      // abandonment signal (the third funnel event beside started/step_completed). No
+      // content — the `skipped` value is a timestamp.
+      if (flag === 'skipped') {
+        void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+          ts: Date.now(), event: 'onboarding_abandoned', thread: undefined,
+          model: undefined, untrusted: false,
+        });
+      }
       jsonResponse(res, 200, { ...store.getStatus(), degraded: false });
     }));
 
@@ -3767,7 +3789,10 @@ export class LynoxHTTPApi {
 
       // DK off → no KnowledgeStore to promote into. Degraded, honest no-op.
       const knowledgeStore = engine.getKnowledgeStore();
-      if (!knowledgeStore) { jsonResponse(res, 200, { degraded: true, promoted: 0, queued: 0, skipped: 0, rejected: 0 }); return; }
+      // `threadId` is the AUTHORITATIVE onboarding thread (== every promoted entry's
+      // source_thread_id). The client stamps knowledge_done with THIS, not a client-side
+      // session guess, so the AC-1.10 repair pointer can never drift from the data (RF-IRR1).
+      if (!knowledgeStore) { jsonResponse(res, 200, { degraded: true, threadId: row.session_id, promoted: 0, queued: 0, skipped: 0, rejected: 0 }); return; }
 
       // Parse the VERBATIM stored answers (JSON string[] for a tabs prompt).
       let storedAnswers: string[];
@@ -3797,7 +3822,7 @@ export class LynoxHTTPApi {
         ts: Date.now(), event: 'onboarding_step_completed', thread: row.session_id,
         model: undefined, untrusted: sawUntrusted, step: 0,
       });
-      jsonResponse(res, 200, { degraded: false, ...result });
+      jsonResponse(res, 200, { degraded: false, threadId: row.session_id, ...result });
     });
 
     // ── Onboarding domain derive (Onboarding W1, Activation Principle) ──

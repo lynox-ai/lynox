@@ -51,6 +51,23 @@ const mockSecretContains = vi.fn().mockReturnValue(false);
 const mockGetUserConfig = vi.fn().mockReturnValue({});
 const mockSecretResolve = vi.fn().mockReturnValue(null);
 const mockSetApiKey = vi.fn();
+
+// Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
+// records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
+// regression guard: the events existed as types but no site emitted them).
+const { captureTelemetryCalls } = vi.hoisted(() => ({
+  captureTelemetryCalls: [] as Array<{ enabled: boolean; entry: Record<string, unknown> }>,
+}));
+vi.mock('../core/capture-telemetry.js', async (orig) => {
+  const actual = await orig<typeof import('../core/capture-telemetry.js')>();
+  return {
+    ...actual,
+    appendCaptureTelemetry: (enabled: boolean, entry: unknown): Promise<void> => {
+      captureTelemetryCalls.push({ enabled, entry: entry as Record<string, unknown> });
+      return Promise.resolve();
+    },
+  };
+});
 // v1.5.2: hoisted so tests can pin "all BYOK slots trigger reloadCredentials".
 // reloadCredentials is the vault-only hot-reload path; reloadUserConfig is
 // the config.json path. Mocked separately for clarity.
@@ -3347,6 +3364,22 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('POST /flags/skipped emits onboarding_abandoned; knowledge_done does NOT (funnel drop-off, AC-1.4)', async () => {
+      const store = fakeStore();
+      mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+      await swapEngine({ getOnboardingFlagStore: () => store }, async () => {
+        captureTelemetryCalls.length = 0;
+        await jsonFetch('/api/onboarding/flags/skipped', { method: 'POST', body: JSON.stringify({ value: '2026-07-27T00:00:00Z' }) });
+        const abandoned = captureTelemetryCalls.filter((c) => c.entry['event'] === 'onboarding_abandoned');
+        expect(abandoned).toHaveLength(1);
+        expect(abandoned[0]!.enabled).toBe(true); // gated on the DK flag
+        // Contrast (non-tautological): completing (knowledge_done) is NOT an abandonment.
+        captureTelemetryCalls.length = 0;
+        await jsonFetch('/api/onboarding/flags/knowledge_done', { method: 'POST', body: JSON.stringify({ value: 'onb-x' }) });
+        expect(captureTelemetryCalls.filter((c) => c.entry['event'] === 'onboarding_abandoned')).toHaveLength(0);
+      });
+    });
+
     it('POST /api/onboarding/flags/:flag → 400 for an unknown flag (validated before the DB)', async () => {
       await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
         const res = await jsonFetch('/api/onboarding/flags/literacy_seen', {
@@ -3548,7 +3581,9 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
         });
         expect(res.status).toBe(200);
-        expect(await res.json()).toMatchObject({ degraded: false, promoted: 2, queued: 0, skipped: 0 });
+        // threadId is the authoritative onboarding thread (== every entry's source_thread_id):
+        // the client stamps knowledge_done with it, so the AC-1.10 repair pointer never drifts.
+        expect(await res.json()).toMatchObject({ degraded: false, threadId: 'onb-2', promoted: 2, queued: 0, skipped: 0 });
         const active = ks.listActive();
         expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Role: Founder']);
         expect(active.every(e => e.sourceType === 'user_asserted')).toBe(true);
@@ -3590,8 +3625,9 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
         });
         expect(res.status).toBe(200);
-        // Degraded shape must match the normal path (includes `rejected`).
-        expect(await res.json()).toMatchObject({ degraded: true, promoted: 0, queued: 0, skipped: 0, rejected: 0 });
+        // Degraded shape must match the normal path (includes `rejected` + the threadId the
+        // client still needs to stamp knowledge_done, even with nothing durable written).
+        expect(await res.json()).toMatchObject({ degraded: true, threadId: 'onb-5', promoted: 0, queued: 0, skipped: 0, rejected: 0 });
       }, { noKnowledgeStore: true });
     });
 
@@ -3640,6 +3676,31 @@ describe('LynoxHTTPApi', () => {
       const noAuth = { headers: { Authorization: 'Bearer wrong-token' } };
       expect((await fetch(`${baseUrl}/api/onboarding/knowledge/start`, { method: 'POST', ...noAuth })).status).toBe(401);
       expect((await fetch(`${baseUrl}/api/onboarding/knowledge/promote`, { method: 'POST', ...noAuth })).status).toBe(401);
+    });
+
+    it('review endpoint emits propose_confirmed (approve) and propose_ignored+dismissed (reject) — the funnel numerator (AC-1.4)', async () => {
+      await withStores(async (_ps, ks) => {
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+        // A pending_review proposal (untrusted origin) — exactly the chip a user decides on.
+        const a = ks.write({ text: 'ACME switched banks', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'onb-rev', kind: 'fact' });
+        captureTelemetryCalls.length = 0;
+        const approve = await jsonFetch(`/api/knowledge/queue/${a.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+        expect(approve.status).toBe(200);
+        const confirmed = captureTelemetryCalls.find((c) => c.entry['event'] === 'propose_confirmed');
+        expect(confirmed).toBeDefined();
+        expect(confirmed!.enabled).toBe(true);
+        expect(confirmed!.entry['entryId']).toBe(a.id);
+        expect(confirmed!.entry['dismissed']).toBeUndefined(); // an approve is not a discard
+
+        const b = ks.write({ text: 'ACME uses Xero', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'onb-rev', kind: 'fact' });
+        captureTelemetryCalls.length = 0;
+        const reject = await jsonFetch(`/api/knowledge/queue/${b.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'reject' }) });
+        expect(reject.status).toBe(200);
+        const ignored = captureTelemetryCalls.find((c) => c.entry['event'] === 'propose_ignored');
+        expect(ignored).toBeDefined();
+        expect(ignored!.entry['entryId']).toBe(b.id);
+        expect(ignored!.entry['dismissed']).toBe(true); // reject = an active discard
+      });
     });
   });
 
