@@ -24,7 +24,10 @@ import DOMPurify from 'dompurify';
  *    unchanged and silently — so it is not something to rest a security
  *    property on. It stays anyway, because "cannot be relied upon" is not
  *    "worthless": it is what catches a marked upgrade that starts emitting
- *    something these overrides don't anticipate.
+ *    something these overrides don't anticipate. It is not free, though — on
+ *    such a tag it DELETES, in the browser only, and losing content is this
+ *    module's own threat. That is why the tag lists below are pinned in both
+ *    directions instead of trusted.
  *
  * The `text` override in layer 1 is not decoration. marked marks text tokens
  * `escaped: true` while its lexer is `inRawBlock`, which a leading `<code>`,
