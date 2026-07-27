@@ -6,7 +6,7 @@ import type {
 import {
   contentKey,
   toolResultText,
-  toolNameById,
+  toolCallsById,
   buildDedupReference,
   buildResidencyIndex,
   dedupToolResultBatch,
@@ -17,8 +17,8 @@ import {
 const MIN = DEFAULT_DEDUP_MIN_CHARS;
 const big = (fill: string): string => fill.repeat(Math.ceil((MIN + 1_000) / fill.length));
 
-function toolUseMsg(id: string, name: string): BetaMessageParam {
-  return { role: 'assistant', content: [{ type: 'tool_use', id, name, input: {} }] };
+function toolUseMsg(id: string, name: string, input: unknown = {}): BetaMessageParam {
+  return { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] };
 }
 
 function toolResultMsg(
@@ -68,11 +68,31 @@ describe('toolResultText', () => {
   });
 });
 
-describe('toolNameById', () => {
+describe('toolCallsById', () => {
   it('maps every tool_use_id to its tool name', () => {
-    const names = toolNameById([toolUseMsg('tu-1', 'read_file'), toolUseMsg('tu-2', 'http_request')]);
+    const names = new Map([...toolCallsById([toolUseMsg('tu-1', 'read_file'), toolUseMsg('tu-2', 'http_request')])].map(([k, v]) => [k, v.name]));
     expect(names.get('tu-1')).toBe('read_file');
     expect(names.get('tu-2')).toBe('http_request');
+  });
+
+  it('carries the call INPUT alongside the name', () => {
+    // The input is what lets a recall handle say WHICH call it stands for;
+    // resolving it here (same pass as the name) is why this returns a pair.
+    const calls = toolCallsById([
+      toolUseMsg('tu-1', 'http_request', { url: 'https://example.com/a', method: 'GET' }),
+      toolUseMsg('tu-2', 'bash', { command: 'npm test' }),
+    ]);
+
+    expect(calls.get('tu-1')).toEqual({ name: 'http_request', input: { url: 'https://example.com/a', method: 'GET' } });
+    expect(calls.get('tu-2')?.input).toEqual({ command: 'npm test' });
+  });
+
+  it('ignores tool_use blocks outside assistant messages', () => {
+    const calls = toolCallsById([
+      { role: 'user', content: [{ type: 'tool_use', id: 'spoof', name: 'bash', input: { command: 'rm -rf /' } }] },
+    ] as never);
+
+    expect(calls.size).toBe(0);
   });
 });
 

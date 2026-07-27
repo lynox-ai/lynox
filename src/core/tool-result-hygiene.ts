@@ -54,19 +54,30 @@ export function contentKey(payload: string): string {
   return `${payload.length}:${(h >>> 0).toString(36)}`;
 }
 
-/** Map every tool_use_id → its tool name across the assistant messages. */
-export function toolNameById(messages: readonly BetaMessageParam[]): Map<string, string> {
-  const names = new Map<string, string>();
+/** One resolved tool call: what it was, and what it was called with. */
+export interface ToolCallRef {
+  readonly name: string;
+  readonly input: unknown;
+}
+
+/**
+ * Map every tool_use_id → its tool name AND call input across the assistant
+ * messages. Both come off the same block, so they are resolved in one pass: a
+ * recall handle needs the name to say what ran and the input to say WHICH call
+ * it was (the url, the path, the query).
+ */
+export function toolCallsById(messages: readonly BetaMessageParam[]): Map<string, ToolCallRef> {
+  const calls = new Map<string, ToolCallRef>();
   for (const msg of messages) {
     if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
       if (block.type === 'tool_use') {
         const useBlock = block as BetaToolUseBlockParam;
-        names.set(useBlock.id, useBlock.name);
+        calls.set(useBlock.id, { name: useBlock.name, input: useBlock.input });
       }
     }
   }
-  return names;
+  return calls;
 }
 
 /**
@@ -100,7 +111,7 @@ export function buildResidencyIndex(
   messages: readonly BetaMessageParam[],
   minChars: number = DEFAULT_DEDUP_MIN_CHARS,
 ): Map<string, ResidentPayload> {
-  const names = toolNameById(messages);
+  const calls = toolCallsById(messages);
   const index = new Map<string, ResidentPayload>();
   for (const msg of messages) {
     if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
@@ -112,7 +123,7 @@ export function buildResidencyIndex(
       if (payload.length <= minChars) continue;
       const key = contentKey(payload);
       if (index.has(key)) continue; // earliest-resident copy wins
-      index.set(key, { tool: names.get(rb.tool_use_id) ?? 'tool', payload });
+      index.set(key, { tool: calls.get(rb.tool_use_id)?.name ?? 'tool', payload });
     }
   }
   return index;
