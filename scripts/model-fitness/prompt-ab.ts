@@ -47,7 +47,9 @@ function loadKey(env: string, cfgKey: string): string {
   return process.env[env] ?? (typeof cfg[cfgKey] === 'string' ? cfg[cfgKey] as string : '');
 }
 
-/** Replace the marker-bounded slice in the LAST user message. Throws if absent. */
+/** Replace the marker-bounded slice in the last user message that CONTAINS the
+ *  marker (scanning from the end). Throws if no user message has it — a silent
+ *  no-op would report an A/B that never varied anything. */
 function applyVariant(messages: MsgParam[], spec: VariantSpec, replacement: string): MsgParam[] {
   const out = JSON.parse(JSON.stringify(messages)) as MsgParam[];
   for (let i = out.length - 1; i >= 0; i--) {
@@ -113,7 +115,16 @@ function urlOf(input: Record<string, unknown>): string {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const positional = argv.filter(a => !a.startsWith('--'));
+  // Skip the token AFTER a value-taking flag, or `--runs 5 body.json spec.json`
+  // would take "5" as the body path and fail with a confusing ENOENT.
+  const VALUE_FLAGS = new Set(['--runs', '--also-anthropic']);
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (VALUE_FLAGS.has(a)) { i++; continue; }
+    if (a.startsWith('--')) continue;
+    positional.push(a);
+  }
   const bodyPath = positional[0];
   const specPath = positional[1];
   if (!bodyPath || !specPath) {

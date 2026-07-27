@@ -1995,7 +1995,12 @@ describe('httpRequestTool', () => {
 
     it('leaves a SMALL html body untouched — fetching a markup snippet still works', async () => {
       mockDnsPublic();
-      const small = '<html><body><h1>Klein</h1><p>Kurz</p></body></html>';
+      // Prose well over MIN_USEFUL_EXTRACT_CHARS, so the ONLY reason this stays
+      // raw is the 30k threshold. With a tiny page the min-useful fallback would
+      // return raw anyway and the test would pass even with the threshold deleted.
+      const small = `<html><body><h1>Klein</h1><p>${'Sichtbarer Fliesstext. '.repeat(30)}</p></body></html>`;
+      expect(small.length).toBeGreaterThan(500);
+      expect(small.length).toBeLessThan(30_000);
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
         headers: { 'content-type': 'text/html' },
         body: small,
@@ -2005,6 +2010,57 @@ describe('httpRequestTool', () => {
 
       expect(result).toContain('<h1>Klein</h1>');
       expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('pins the threshold as strictly-greater: exactly 30_000 chars stays raw', async () => {
+      mockDnsPublic();
+      const filler = 'Fliesstext. ';
+      const head = '<html><body><p>';
+      const tail = '</p></body></html>';
+      const body = head + filler.repeat(Math.ceil(30_000 / filler.length)) + tail;
+      const exact = `${body.slice(0, 30_000 - tail.length)}${tail}`.slice(0, 30_000);
+      expect(exact.length).toBe(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: exact,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('reports BOTH notes when a >100KB page is read-truncated and then extracted', async () => {
+      mockDnsPublic();
+      // Over DEFAULT_RESPONSE_BYTES, so readBodyLimited truncates first. The
+      // combined branch must swap the collector hint for the read-limit note —
+      // after extraction the context-bloat advice would be wrong.
+      const huge = bigHtml('Aktuelle Tests') +
+        `<p>${'Weiterer sichtbarer Fliesstext. '.repeat(4_000)}</p>`;
+      expect(huge.length).toBeGreaterThan(100_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: huge,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('HTML auto-extracted to text');
+      expect(result).toContain('exceeded the 98KB read limit');
+      expect(result).not.toContain("role='collector'");
+    });
+
+    it('flags the 24k cap when the extracted TEXT itself overflows', async () => {
+      mockDnsPublic();
+      const wordy = `<html><body><p>${'Sichtbarer Fliesstext ohne Markup. '.repeat(1_200)}</p></body></html>`;
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: wordy,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('hit the 24000-char cap');
     });
 
     it('honours http_html_extract: false for the scraping case', async () => {
@@ -2026,9 +2082,14 @@ describe('httpRequestTool', () => {
 
     it('does not touch a large JSON body — that path keeps its own shaping', async () => {
       mockDnsPublic();
+      // Must clear the 30k HTML threshold too, otherwise the size gate — not the
+      // content-type branch — is what keeps the HTML path out, and the test would
+      // stay green even if the branches were ordered wrongly.
+      const items = Array.from({ length: 900 }, (_, i) => ({ id: i, name: `name-${i}`, note: 'x'.repeat(30) }));
+      expect(JSON.stringify({ items }).length).toBeGreaterThan(30_000);
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
         headers: { 'content-type': 'application/json' },
-        json: { items: Array.from({ length: 50 }, (_, i) => ({ id: i, name: `n${i}` })) },
+        json: { items },
       })));
 
       const result = await handler({ url: 'https://api.example.com/x' }, htmlAgent());
