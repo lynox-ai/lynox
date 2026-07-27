@@ -274,11 +274,41 @@ const BODY_PREVIEW_CHARS = 200;
  */
 export function buildBodyBlock(body: string): string {
   const flat = body.replace(/\s+/g, ' ').trim();
+  if (flat.length === 0) return '> _(empty body)_';
   if (flat.length <= BODY_PREVIEW_CHARS) return `> ${flat}`;
+  const shown = truncate(flat, BODY_PREVIEW_CHARS);
+  // Count from the rendered string (minus the ellipsis truncate appends) rather
+  // than re-deriving truncate's own `max - 1`: a change there would otherwise
+  // make this sentence quietly lie. Both numbers are `flat` lengths — mixing in
+  // the raw `body.length` would overstate the hidden volume for any normal
+  // multi-line mail, since collapsing only ever shortens.
+  const shownChars = shown.length - 1;
   return (
-    `> ${truncate(flat, BODY_PREVIEW_CHARS)}\n\n` +
-    `⚠ **Body is ${String(body.length)} chars — only the first ${String(BODY_PREVIEW_CHARS - 1)} are shown above.**`
+    `> ${shown}\n\n` +
+    `⚠ **Body is ${String(flat.length)} chars — only the first ${String(shownChars)} are shown above.**`
   );
+}
+
+/**
+ * Collapse a header value to a single line for the confirmation preview.
+ *
+ * The preview is rendered as MARKDOWN in the web UI (ChatView routes a Yes/No
+ * prompt through MarkdownRenderer — `marked` + DOMPurify), and a Subject is
+ * attacker-influenced: on `mail_reply` it is the inbound envelope's subject,
+ * i.e. chosen by whoever sent the mail. A newline in it lets the value open a
+ * BLOCK-level HTML construct: `Report\n\n<!--` swallows every following line —
+ * To, Subject, From, the body blockquote and the oversize warning — into an
+ * HTML comment that DOMPurify then strips, leaving the approver clicking
+ * Yes/No on a blank prompt. Verified against `marked` 18: only the newline form
+ * does this; a single-line `<!--` stays inline and harmless. So collapsing to
+ * one line is the whole fix, and it costs nothing for a legitimate subject
+ * (headers are single-line by definition — `parseAddress` already drops CR/LF
+ * in recipients for the same reason).
+ */
+export function singleLine(value: string): string {
+  // C0 controls (covers CR/LF/tab) plus the Unicode line/paragraph separators,
+  // mirroring parseAddress's [\r\n\x00-\x1f] rejection.
+  return value.replace(/[\u0000-\u001f\u2028\u2029]+/g, ' ');
 }
 
 /**
@@ -296,7 +326,7 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
       `⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients\n\n` +
       `**Account:** ${ctx.provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}\n` +
       `**Recipients:**\n${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${a.address}`).join('\n')}\n` +
-      `**Subject:** ${ctx.subject}\n\n` +
+      `**Subject:** ${singleLine(ctx.subject)}\n\n` +
       bodyPreview
     );
   }
@@ -305,7 +335,7 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
     `**To:** ${ctx.to.map((a) => a.address).join(', ')}` +
     `${ctx.cc.length > 0 ? `\n**Cc:** ${ctx.cc.map((a) => a.address).join(', ')}` : ''}` +
     `${ctx.bcc.length > 0 ? `\n**Bcc:** ${ctx.bcc.map((a) => a.address).join(', ')}` : ''}\n` +
-    `**Subject:** ${ctx.subject}\n` +
+    `**Subject:** ${singleLine(ctx.subject)}\n` +
     `**From:** ${ctx.provider.accountId}${personaLine ? ` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}\n\n` +
     bodyPreview
   );

@@ -305,19 +305,21 @@ describe('buildSendPreview', () => {
     expect(preview).toContain('6 recipients');
   });
 
-  function previewFor(body: string, isMassSend = false): string {
+  function previewFor(body: string, isMassSend = false, subject = 'Subject'): string {
     return buildSendPreview({
       provider: { accountId: 'acct-1' } as MailProvider,
       accountConfig: null,
       to: [RECIPIENT],
       cc: [],
       bcc: [],
-      subject: 'Subject',
+      subject,
       body,
       isMassSend,
       uniqueRecipientCount: 1,
     });
   }
+
+  const flatten = (s: string): string => s.replace(/\s+/g, ' ').trim();
 
   it('shows a short body in full and says nothing about truncation', () => {
     const preview = previewFor('Short and complete.');
@@ -325,10 +327,32 @@ describe('buildSendPreview', () => {
     expect(preview).not.toContain('only the first');
   });
 
-  it('states the real body size when the body does not fit the preview', () => {
-    const preview = previewFor('x'.repeat(4000));
+  // Pins the RENDERED quote against the claimed count. If truncate's slice
+  // arithmetic changed, the quote and the sentence would disagree and this
+  // fails — asserting only the sentence would not catch that.
+  it('shows exactly the first 199 chars plus an ellipsis, and says so', () => {
+    const preview = previewFor('z'.repeat(4000));
+    expect(preview).toContain(`> ${'z'.repeat(199)}…`);
     expect(preview).toContain('Body is 4000 chars');
     expect(preview).toContain('only the first 199 are shown');
+  });
+
+  // The two lengths must not be mixed: 300 chars of text around 500 newlines is
+  // 1100 raw but 601 flattened. Reporting the raw number overstates the hidden
+  // volume by 499 chars for what is really a normal multi-line mail — and every
+  // fixture whose body has no whitespace (`'x'.repeat(n)`) is blind to it.
+  it('states the flattened body size, not the raw length', () => {
+    const body = `${'A'.repeat(300)}${'\n'.repeat(500)}${'B'.repeat(300)}`;
+    expect(body.length).toBe(1100);
+    expect(flatten(body).length).toBe(601);
+    const preview = previewFor(body);
+    expect(preview).toContain('Body is 601 chars');
+    expect(preview).not.toContain('1100');
+  });
+
+  it('does not warn at exactly the cap, warns one char over', () => {
+    expect(previewFor('c'.repeat(200))).not.toContain('only the first');
+    expect(previewFor('c'.repeat(201))).toContain('Body is 201 chars');
   });
 
   // The gate's whole purpose: an approver must not read a plausible opening
@@ -348,8 +372,7 @@ describe('buildSendPreview', () => {
     const preview = previewFor(body);
     expect(preview).toContain('thanks for the call earlier');
     expect(preview).not.toContain('LEAKED-RECORD');
-    expect(preview).toContain(`Body is ${String(body.length)} chars`);
-    expect(preview).toMatch(/⚠ \*\*Body is \d+ chars/);
+    expect(preview).toContain(`Body is ${String(flatten(body).length)} chars`);
   });
 
   it('flags an oversized body on the mass-send path too', () => {
@@ -364,6 +387,21 @@ describe('buildSendPreview', () => {
     const preview = previewFor(`Two words.${'\n'.repeat(400)}`);
     expect(preview).toContain('> Two words.');
     expect(preview).not.toContain('only the first');
+  });
+
+  it('marks a whitespace-only body explicitly instead of rendering an empty quote', () => {
+    expect(previewFor('\n\n   \t ')).toContain('_(empty body)_');
+  });
+
+  // The prompt is markdown-rendered in the web UI, and on mail_reply the
+  // subject comes from the REMOTE sender. A newline in it opens a block-level
+  // HTML comment that swallows every following line — including this warning —
+  // leaving the approver clicking Yes/No on a blank prompt.
+  it('keeps a newline in the subject from swallowing the rest of the prompt', () => {
+    const preview = previewFor('q'.repeat(400), false, 'Report\n\n<!--');
+    expect(preview).toContain('Body is 400 chars');
+    const opensBlockHtml = preview.split('\n').some((l) => l.trimStart().startsWith('<!--'));
+    expect(opensBlockHtml).toBe(false);
   });
 });
 

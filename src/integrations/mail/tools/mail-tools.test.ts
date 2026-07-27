@@ -369,8 +369,32 @@ describe('mail_reply tool', () => {
     const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
     const body = `Sure, sending it over now.\n\n${'RECORD;'.repeat(2000)}`;
     await tool.handler({ uid: 77, body }, agent);
-    expect(prompt).toContain(`Body is ${String(body.length)} chars`);
+    const flatLen = body.replace(/\s+/g, ' ').trim().length;
+    expect(prompt).toContain(`Body is ${String(flatLen)} chars`);
     expect(prompt).toContain('only the first 199 are shown');
+  });
+
+  // The reply confirmation renders the REMOTE sender's subject, and the prompt
+  // is markdown-rendered in the web UI. A newline there opens a block-level
+  // HTML comment that swallows the recipients, the body quote and the oversize
+  // warning, leaving a blank prompt to approve. The subject must stay one line.
+  it('keeps a remote sender newline in the subject from swallowing the prompt', async () => {
+    const orig = envelope(78, {
+      messageId: '<orig@x>',
+      from: 'attacker@example.com',
+      subject: 'Invoice\n\n<!--',
+    });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'Original.', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['attacker@example.com'], rejected: [] });
+    const tool = createMailReplyTool(registry);
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
+    await tool.handler({ uid: 78, body: 'q'.repeat(400) }, agent);
+    expect(prompt).toContain('Body is 400 chars');
+    expect(prompt.split('\n').some((l) => l.trimStart().startsWith('<!--'))).toBe(false);
   });
 
   it('blocks reply bodies that contain credentials', async () => {
