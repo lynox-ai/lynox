@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { sendMail, parseAddressList, buildSendPreview, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
+import { sendMail, parseAddressList, buildSendPreview, previewAddressList, singleLine, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
 import type { MailAddress, MailProvider, MailSendResult } from './provider.js';
 
 vi.mock('./tools/rate-limit.js', () => {
@@ -394,14 +394,30 @@ describe('buildSendPreview', () => {
   });
 
   // The prompt is markdown-rendered in the web UI, and on mail_reply the
-  // subject comes from the REMOTE sender. A newline in it opens a block-level
-  // HTML comment that swallows every following line — including this warning —
-  // leaving the approver clicking Yes/No on a blank prompt.
-  it('keeps a newline in the subject from swallowing the rest of the prompt', () => {
-    const preview = previewFor('q'.repeat(400), false, 'Report\n\n<!--');
+  // subject comes from the REMOTE sender. A LINE BREAK is what lets such a
+  // value open a block-level construct (`\n\n<!--` puts the rest of the prompt
+  // — including the warning below — inside an HTML comment, which renders as
+  // nothing). So the property to pin is structural: no attacker-supplied header
+  // introduces a break. Asserting "no line starts with <!--" instead would pass
+  // a singleLine that only handled \n — CR alone is an equally valid CommonMark
+  // line ending — and would miss every other block opener.
+  it('renders an attacker-supplied multi-line subject on exactly one line', () => {
+    const preview = previewFor('q'.repeat(400), false, 'Report\r\n\r\n<!--');
+    const subjectLines = preview.split('\n').filter((l) => l.includes('**Subject:**'));
+    expect(subjectLines).toHaveLength(1);
+    expect(subjectLines[0]).toContain('<!--');
     expect(preview).toContain('Body is 400 chars');
-    const opensBlockHtml = preview.split('\n').some((l) => l.trimStart().startsWith('<!--'));
-    expect(opensBlockHtml).toBe(false);
+  });
+
+  it('flattens every line-breaking character in a header value', () => {
+    expect(singleLine('a\r\nb\u2028c\u2029d\te')).toBe('a b c d e');
+    expect(singleLine('Report\r\r\r<!--')).not.toMatch(/[\r\n\u2028\u2029]/);
+  });
+
+  // mail_reply takes its recipients straight from the inbound envelope, never
+  // through parseAddressList — so the preview cannot rely on that guard.
+  it('flattens addresses in the recipient list', () => {
+    expect(previewAddressList([{ address: 'a@x.com\r\n\r\n<!--' }])).toBe('a@x.com <!--');
   });
 });
 

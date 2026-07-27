@@ -15,7 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, singleLine } from '../send-core.js';
+import { buildBodyBlock, previewAddressList, singleLine } from '../send-core.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
 import {
@@ -199,8 +199,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         const bodyPreview = buildBodyBlock(input.body);
 
         const preview = `**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**\n\n` +
-          `**To:** ${toAddrs.map(a => a.address).join(', ')}` +
-          `${ccAddrs.length > 0 ? `\n**Cc:** ${ccAddrs.map(a => a.address).join(', ')}` : ''}\n` +
+          `**To:** ${previewAddressList(toAddrs)}` +
+          `${ccAddrs.length > 0 ? `\n**Cc:** ${previewAddressList(ccAddrs)}` : ''}\n` +
           `**Subject:** ${singleLine(subject)}\n` +
           `**From:** ${sendProvider.accountId}${smartNote}${personaNote}\n\n` +
           bodyPreview;
