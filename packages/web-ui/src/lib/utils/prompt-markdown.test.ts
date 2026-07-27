@@ -2,7 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
-import { renderPromptMarkdown, isSafePromptHref, PROMPT_EMITTED_TAGS } from './prompt-markdown.js';
+import {
+	renderPromptMarkdown,
+	isSafePromptHref,
+	PROMPT_EMITTED_TAGS,
+	PROMPT_STRIPPED_TAGS,
+	PROMPT_ALLOWED_ATTR,
+} from './prompt-markdown.js';
 
 /**
  * Two measurements, because the vectors split into two kinds and neither check
@@ -160,20 +166,61 @@ describe('renderPromptMarkdown — nothing outside the expected tag set is emitt
 		expect(visibleText(out)).toContain('<div hidden>');
 	});
 
-	// Pins the list itself to reality: a marked upgrade that starts emitting
-	// something new must fail here rather than silently widen what a prompt can
-	// render. Exercises every construct the real prompt builders use.
-	it('a full-featured prompt stays inside PROMPT_EMITTED_TAGS', () => {
-		const rich = [
-			'# Heading', '## Sub', '**bold** _em_ ~~del~~ `code`',
-			'> quote', '- a\n- b', '1. one\n2. two', '---',
-			'| a | b |\n| --- | --- |\n| 1 | 2 |',
-			'```json\n{"a":1}\n```', '[link](https://example.com)',
-			'text with\nsingle newline',
-		].join('\n\n');
-		const unexpected = emittedTags(renderPromptMarkdown(rich))
-			.filter((tag) => !PROMPT_EMITTED_TAGS.includes(tag));
-		expect(unexpected).toStrictEqual([]);
+	// Pins the tag set to reality in BOTH directions. Anything marked emits is
+	// either permitted or knowingly stripped — a third case would be deleted in
+	// the browser and invisible to CI, which is content loss. Task lists are in
+	// here specifically because `input` slipped past an earlier version of this
+	// test that only checked the permitted list.
+	const RICH_PROMPT = [
+		'# Heading', '## Sub', '**bold** _em_ ~~del~~ `code`',
+		'> quote', '- a\n- b', '1. one\n2. two', '3. third\n4. fourth', '---',
+		'| a | b |\n| :-- | --: |\n| 1 | 2 |',
+		'```json\n{"a":1}\n```', '[link](https://example.com)',
+		'- [ ] todo\n- [x] done',
+		'text with\nsingle newline',
+	].join('\n\n');
+
+	it('a full-featured prompt emits only permitted or knowingly-stripped tags', () => {
+		const unaccounted = emittedTags(renderPromptMarkdown(RICH_PROMPT)).filter(
+			(tag) => !PROMPT_EMITTED_TAGS.includes(tag) && !PROMPT_STRIPPED_TAGS.includes(tag),
+		);
+		expect(unaccounted).toStrictEqual([]);
+	});
+
+	it('really does emit every knowingly-stripped tag', () => {
+		// Otherwise the list is a place to park guesses: a name nothing produces
+		// looks like a considered decision while documenting nothing.
+		const emitted = emittedTags(renderPromptMarkdown(RICH_PROMPT));
+		expect(PROMPT_STRIPPED_TAGS.filter((tag) => !emitted.includes(tag))).toStrictEqual([]);
+	});
+
+	it('carries task-list text outside the checkbox element', () => {
+		// `input` is void, so its removal by layer 2 can only cost the box. This
+		// asserts the precondition — the text lives in the <li>, not the input —
+		// which is what makes stripping `input` safe.
+		const visible = visibleText(renderPromptMarkdown('> - [ ] todo item\n> - [x] done item'));
+		expect(visible).toContain('todo item');
+		expect(visible).toContain('done item');
+	});
+
+	// These two assert the CONFIGURATION, not its effect, and the distinction is
+	// the honest part: layer 2 does not run in the test environment, so no test
+	// here can observe an attribute being kept or dropped. They exist so that
+	// removing an entry fails deliberately rather than silently — an earlier
+	// version asserted `start="3"` in the output and passed with `start` absent
+	// from the list, which measured nothing at all.
+	it('keeps `start` permitted, so an ordered list is not renumbered', () => {
+		// marked emits <ol start="3"> for `3. third`; dropping the attribute would
+		// renumber it to 1, 2 and the prompt would show values its text does not.
+		expect(renderPromptMarkdown('3. third\n4. fourth')).toContain('start="3"');
+		expect(PROMPT_ALLOWED_ATTR).toContain('start');
+	});
+
+	it('keeps the attribute list free of anything that can carry script', () => {
+		const dangerous = PROMPT_ALLOWED_ATTR.filter(
+			(attr) => attr.startsWith('on') || attr === 'style' || attr === 'srcdoc',
+		);
+		expect(dangerous).toStrictEqual([]);
 	});
 });
 
@@ -225,12 +272,17 @@ describe('renderPromptMarkdown — content is never dropped', () => {
 		expect(isSafePromptHref('javascript:alert(1)')).toBe(false);
 	});
 
-	// A throw inside {@html} renders nothing — the same suppression, arriving by
-	// crash. The engine types this as a string, so this covers the runtime gap.
-	it('returns empty instead of throwing on absent text', () => {
+	// The question is the dialog's ONLY text, so absent text must not render as
+	// nothing: bare Yes/No buttons are the blank prompt this module prevents,
+	// reached through a broken payload rather than an attack. A throw inside
+	// {@html} has the same effect. The engine types this as a string, so this
+	// covers the runtime gap.
+	it('says the text is missing rather than rendering an empty prompt', () => {
 		for (const bad of [undefined, null, '', 42]) {
 			expect(() => renderPromptMarkdown(bad as unknown as string)).not.toThrow();
-			expect(renderPromptMarkdown(bad as unknown as string)).toBe('');
+			const visible = visibleText(renderPromptMarkdown(bad as unknown as string));
+			expect(visible).toContain('Prompt text unavailable');
+			expect(visible).toContain('Deny unless');
 		}
 	});
 });
@@ -298,12 +350,23 @@ describe('ChatView wiring', () => {
 	);
 
 	it('renders the prompt through renderPromptMarkdown', () => {
-		expect(source).toContain('{@html renderPromptMarkdown(pendingPermission.question)}');
-		expect(source).toContain("import { renderPromptMarkdown } from '../utils/prompt-markdown.js'");
+		// Whitespace-tolerant: a formatter run must not silently disarm the guard.
+		expect(source).toMatch(/\{@html\s+renderPromptMarkdown\(\s*pendingPermission\.question\s*\)\s*\}/);
+		expect(source).toMatch(/import\s*\{\s*renderPromptMarkdown\s*\}\s*from\s*'\.\.\/utils\/prompt-markdown\.js'/);
 	});
 
-	it('never routes prompt text through the chat markdown renderer', () => {
-		expect(source).not.toMatch(/<MarkdownRenderer[^>]*content=\{pendingPermission\.question\}/);
+	// An allowlist of every MarkdownRenderer call, not a search for one bad
+	// pattern. Matching on `content={pendingPermission.question}` was evadable by
+	// a line break or a local alias (`content={q}`) — this notices any new call
+	// site at all, which is the property actually wanted.
+	it('routes only chat message text through the chat markdown renderer', () => {
+		// All three are assistant/chat message text inside the messages loop.
+		// A fourth entry appearing here is the signal to check whether it carries
+		// prompt text — this list existing is what makes that visible.
+		const contents = [...source.matchAll(/<MarkdownRenderer[^>]*?content=\{([^}]*)\}/gs)]
+			.map((m) => m[1]!.replace(/\s+/g, ' ').trim())
+			.sort();
+		expect(contents).toStrictEqual(['gBlock.text', 'lg.text', 'msg.content']);
 	});
 
 	it('keeps the Allow/Deny branch on plain pre', () => {

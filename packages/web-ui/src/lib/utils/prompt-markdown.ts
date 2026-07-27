@@ -172,14 +172,14 @@ const promptMarked = new Marked({
 });
 
 /**
- * Tags the prompt renderer is expected to emit — everything marked's remaining
- * default renderers produce for the constructs the prompts actually use. Layer 2
- * is pinned to this list rather than DOMPurify's defaults, which permit `div`,
- * `style` and `hidden` and keep comments: exactly the suppression primitives.
+ * What layer 2 permits. Pinned to this list rather than DOMPurify's defaults,
+ * which allow `div`, `style` and `hidden` and keep comments — exactly the
+ * suppression primitives.
  *
- * `PROMPT_EMITTED_TAGS` is asserted against real rendered output by the test
- * suite, so a marked upgrade that starts emitting something new fails loudly
- * instead of quietly widening what a prompt can render.
+ * This is a CEILING, not an inventory of what marked emits: `input` is emitted
+ * for task lists and deliberately absent (see `PROMPT_STRIPPED_TAGS`). The tests
+ * assert both directions, so a marked upgrade that emits some third thing shows
+ * up as a failure instead of being silently deleted in the browser.
  */
 export const PROMPT_EMITTED_TAGS: readonly string[] = [
 	'p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote',
@@ -188,33 +188,66 @@ export const PROMPT_EMITTED_TAGS: readonly string[] = [
 ];
 
 /**
+ * Tags marked emits that layer 2 removes on purpose. Listed explicitly because
+ * the difference between "deliberately stripped" and "overlooked" is invisible
+ * once it only happens in a browser.
+ *
+ * `input` comes from GFM task lists (`- [ ] x`). A prompt has no business
+ * carrying an input element, and the tag is void — removing it costs the
+ * checkbox and nothing else, the item's text is untouched.
+ */
+export const PROMPT_STRIPPED_TAGS: readonly string[] = ['input'];
+
+/**
+ * Attributes layer 2 keeps. `start` is here for a content reason, not a cosmetic
+ * one: marked renders `3. third` as `<ol start="3">`, and dropping the attribute
+ * silently renumbers the list to 1, 2 — the prompt would then display different
+ * values than the text it was built from. `class` (code fences) and `align`
+ * (table cells) are dropped; both are purely presentational here, since this
+ * path has no syntax highlighter.
+ */
+export const PROMPT_ALLOWED_ATTR: readonly string[] = ['href', 'title', 'rel', 'target', 'start'];
+
+/**
+ * Shown when a prompt arrives without text. Not localised on purpose: it marks a
+ * broken payload, never normal operation, and an untranslated warning beats the
+ * alternative below.
+ */
+const MISSING_PROMPT_TEXT = '⚠ <strong>Prompt text unavailable.</strong> Deny unless you know what this is.';
+
+/**
  * Render confirmation-prompt markdown to HTML for injection.
  *
  * Layer 1 (marked overrides above) is what the suite verifies and what has to
- * hold. Layer 2 (DOMPurify, pinned to `PROMPT_EMITTED_TAGS`) runs only where a
- * DOM exists; without one it returns its input unchanged, which is why nothing
- * here depends on it.
+ * hold. Layer 2 (DOMPurify) runs only where a DOM exists; without one it returns
+ * its input unchanged, which is why nothing here depends on it.
  */
 export function renderPromptMarkdown(text: string): string {
-	// A prompt whose text is missing must not take the whole confirmation down
-	// with it: `{@html}` on a thrown call renders nothing, which is the very
-	// suppression this module exists to prevent — arriving by crash instead.
-	if (typeof text !== 'string' || text.length === 0) return '';
+	// Returning nothing would leave the approver with bare Yes/No buttons and no
+	// text at all — the same blank prompt this module exists to prevent, just
+	// arriving through a broken payload instead of an attack. Say so instead.
+	if (typeof text !== 'string' || text.length === 0) return `<p>${MISSING_PROMPT_TEXT}</p>`;
 	return sanitizePromptHtml(promptMarked.parse(text, { async: false }) as string);
 }
 
 /**
  * Layer 2. Outside a browser — the test runner, SSR — DOMPurify's default export
- * is an uninitialised factory that has no `sanitize` at all, so this hands the
+ * is an uninitialised factory with no `sanitize` at all, so this hands the
  * markdown stage's output straight back. That absence is not worked around on
  * purpose: pretending layer 2 is present where it cannot run is how a fail-open
  * guard gets mistaken for a real one.
+ *
+ * Its own failure mode is worth naming rather than assuming it is free upside:
+ * anything outside the lists above is DELETED, in the browser only, where no CI
+ * run can see it. On an unanticipated tag that is content loss — the very thing
+ * layer 1 is built to prevent. Hence the tests pin both what may appear and what
+ * is knowingly stripped, so the set never drifts unobserved.
  */
 function sanitizePromptHtml(html: string): string {
 	if (typeof DOMPurify.sanitize !== 'function') return html;
 	return DOMPurify.sanitize(html, {
 		ALLOWED_TAGS: [...PROMPT_EMITTED_TAGS],
-		ALLOWED_ATTR: ['href', 'title', 'rel', 'target'],
+		ALLOWED_ATTR: [...PROMPT_ALLOWED_ATTR],
 		ALLOW_DATA_ATTR: false,
 	});
 }
