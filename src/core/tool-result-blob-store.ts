@@ -90,12 +90,40 @@ const IDENTIFYING_INPUT_KEYS = [
 const MAX_IDENT_CHARS = 120;
 
 /**
- * Query-parameter names whose VALUE is a credential. `maskSecretPatterns` only
- * knows vendor-shaped tokens (`sk-ant-…`, `ghp_…`, AWS/Google keys); an opaque
- * `?access_token=<40 random chars>` matches none of them, so the descriptor
- * needs this second, name-based pass.
+ * Query-parameter name WORDS whose value is a credential. `maskSecretPatterns`
+ * only knows vendor-shaped tokens (`sk-ant-…`, `ghp_…`, AWS/Google keys); an
+ * opaque `?access_token=<40 random chars>` matches none of them, so the
+ * descriptor needs this second, name-based pass.
+ *
+ * Matched per WORD, not as a substring — a substring test redacts `?design=`,
+ * `?assignee=` and `?signal_strength=` because they all contain "sig", which
+ * destroys exactly the useful labels this descriptor exists to provide.
  */
-const CREDENTIAL_PARAM_RE = /(token|secret|signature|sig|password|passwd|pwd|api[-_]?key|access[-_]?key|auth|credential)/i;
+const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
+  'token', 'secret', 'signature', 'sig', 'password', 'passwd', 'pwd',
+  'auth', 'credential', 'credentials', 'jwt', 'bearer', 'apikey', 'accesskey',
+]);
+
+/** Compound forms that only read as credentials when joined (`api_key`, not `key`). */
+const CREDENTIAL_COMPOUND_RE = /(api|access|secret|private|auth)[-_]?key/i;
+
+/** Split a parameter name into lowercase words: `accessToken`, `X-Amz-Signature`, `api_key`. */
+function keyWords(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map(w => w.toLowerCase());
+}
+
+function isCredentialParam(key: string): boolean {
+  if (CREDENTIAL_COMPOUND_RE.test(key)) return true;
+  const words = keyWords(key);
+  // Bare `key` is a credential only as the WHOLE name (`?key=` on Google APIs);
+  // as a word it would swallow `?sort_key=`.
+  if (words.length === 1 && words[0] === 'key') return true;
+  return words.some(w => CREDENTIAL_WORDS.has(w));
+}
 
 /**
  * Redact the credential-bearing parts of an identifying argument.
@@ -117,7 +145,7 @@ function redactIdent(raw: string): string {
     url.username = '';
     url.password = '';
     for (const key of [...url.searchParams.keys()]) {
-      if (CREDENTIAL_PARAM_RE.test(key)) url.searchParams.set(key, '***');
+      if (isCredentialParam(key)) url.searchParams.set(key, '***');
     }
     value = url.toString();
   } catch {

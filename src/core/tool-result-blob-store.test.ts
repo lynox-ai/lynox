@@ -459,6 +459,31 @@ describe('recall handle descriptors', () => {
     expect(d2).toContain('sig=***');
   });
 
+  it('matches credential param names by WORD, not by substring', () => {
+    // A substring test redacts `?design=`, `?assignee=` and `?signal_strength=`
+    // because all three contain "sig" — destroying exactly the useful labels
+    // this descriptor exists to provide. Both directions are pinned here.
+    const store = new ToolResultBlobStore();
+    const keep = ['design=modern', 'assignee=rafael', 'signal_strength=7', 'sort_key=name', 'category=authors'];
+    const redact = ['sig=abc123', 'signature=abc123', 'api_key=abc123', 'access_token=abc123', 'accessToken=abc123', 'key=abc123'];
+    const messages: BetaMessageParam[] = [];
+    [...keep, ...redact].forEach((qs, i) => {
+      messages.push(toolUseMsg(`tu-${i}`, 'http_request', { url: `https://shop.de/?${qs}` }));
+      messages.push(toolResultMsg(`tu-${i}`, `${i}-${'k'.repeat(5_000)}`));
+    });
+
+    const descriptors = store.evictFrom(messages, T).map(h => h.descriptor);
+
+    keep.forEach((qs, i) => {
+      expect(descriptors[i], `${qs} must stay readable`).toContain(qs);
+    });
+    redact.forEach((qs, i) => {
+      const d = descriptors[keep.length + i]!;
+      expect(d, `${qs} must be redacted`).toContain('=***');
+      expect(d).not.toContain('abc123');
+    });
+  });
+
   it('masks a vendor token that is not in a query param', () => {
     const store = new ToolResultBlobStore();
     const handles = store.evictFrom([
