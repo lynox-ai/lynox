@@ -15,6 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
+import { buildBodyBlock, previewAddressList, singleLine } from '../send-core.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
 import {
@@ -188,14 +189,21 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           ? ` _(smart reply-from, read via ${readProvider.accountId})_` : '';
         const personaNote = sendAccountConfig
           ? ` · _${truncate(personaFor(sendAccountConfig), 80)}_` : '';
-        const bodyPreview = truncate(input.body.replace(/\s+/g, ' '), 200);
+        // Shared with mail_send's preview: an oversized body must state its
+        // real size instead of ending in a bare "…". Reply is the likelier
+        // injection path of the two — the untrusted inbound mail is already in
+        // context when the body gets composed. Both subject renders go through
+        // `singleLine` for the same reason: here the value is the REMOTE
+        // sender's subject, and a newline in it can swallow the rest of this
+        // prompt (see singleLine's doc).
+        const bodyPreview = buildBodyBlock(input.body);
 
-        const preview = `**Reply to "${original.envelope.subject || '(no subject)'}"?**\n\n` +
-          `**To:** ${toAddrs.map(a => a.address).join(', ')}` +
-          `${ccAddrs.length > 0 ? `\n**Cc:** ${ccAddrs.map(a => a.address).join(', ')}` : ''}\n` +
-          `**Subject:** ${subject}\n` +
+        const preview = `**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**\n\n` +
+          `**To:** ${previewAddressList(toAddrs)}` +
+          `${ccAddrs.length > 0 ? `\n**Cc:** ${previewAddressList(ccAddrs)}` : ''}\n` +
+          `**Subject:** ${singleLine(subject)}\n` +
           `**From:** ${sendProvider.accountId}${smartNote}${personaNote}\n\n` +
-          `> ${bodyPreview}`;
+          bodyPreview;
 
         const answer = await agent.promptUser(preview, ['Yes', 'No']);
         if (!isApproval(answer)) {

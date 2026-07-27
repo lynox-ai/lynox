@@ -256,6 +256,85 @@ export async function sendMail(
   return { ok: true, result, followupId };
 }
 
+/** Chars of the whitespace-flattened body rendered inline in the preview. */
+const BODY_PREVIEW_CHARS = 200;
+
+/**
+ * Render the body block for the confirmation preview.
+ *
+ * The gate exists so a human approves the RESOLVED send rather than the
+ * agent's description of it — so the preview must not silently hide most of
+ * what goes on the wire. `truncate` alone appends a bare "…", which reads the
+ * same whether 20 or 40'000 chars were cut: an approver sees a plausible
+ * opening line and no signal that a payload follows it. That is exactly the
+ * shape a prompt-injection- or hallucination-driven send takes (the body is
+ * also the exfil channel the `detectSecretInContent` scan above only covers
+ * for *credential*-shaped content, not for bulk data). So when the body does
+ * not fit, say how large it really is and that the remainder is unseen.
+ */
+export function buildBodyBlock(body: string): string {
+  const flat = body.replace(/\s+/g, ' ').trim();
+  if (flat.length === 0) return '> _(empty body)_';
+  if (flat.length <= BODY_PREVIEW_CHARS) return `> ${flat}`;
+  const shown = truncate(flat, BODY_PREVIEW_CHARS);
+  // Count from the rendered string (minus the ellipsis truncate appends) rather
+  // than re-deriving truncate's own `max - 1`: a change there would otherwise
+  // make this sentence quietly lie. Both numbers are `flat` lengths — mixing in
+  // the raw `body.length` would overstate the hidden volume for any normal
+  // multi-line mail, since collapsing only ever shortens.
+  const shownChars = shown.length - 1;
+  return (
+    `> ${shown}\n\n` +
+    `⚠ **Body is ${String(flat.length)} chars — only the first ${String(shownChars)} are shown above.**`
+  );
+}
+
+/**
+ * Collapse a header value to a single line for the confirmation preview.
+ *
+ * The preview is rendered as MARKDOWN in the web UI (ChatView routes a Yes/No
+ * prompt through MarkdownRenderer — `marked` + DOMPurify), and a Subject is
+ * attacker-influenced: on `mail_reply` it is the inbound envelope's subject,
+ * i.e. chosen by whoever sent the mail. A newline in it lets the value open a
+ * BLOCK-level HTML construct: `Report\n\n<!--` puts every following line — To,
+ * Subject, From, the body blockquote and the oversize warning — inside an HTML
+ * comment, which renders as nothing, leaving the approver clicking Yes/No on a
+ * blank prompt. Collapsing to one line closes that form: verified against
+ * `marked` 18 + DOMPurify that a single-line `<!--` stays inline and harmless.
+ * Headers are single-line by definition, so it costs a legitimate subject
+ * nothing.
+ *
+ * It does NOT make an attacker-chosen subject safe to render as markdown, and
+ * this function should not be read as doing so. Two things stay open, both
+ * verified: a single-line `<div hidden>` / `<div style="display:none">`
+ * survives DOMPurify's default allowlist and re-parents the warning into an
+ * invisible container (suppression), and inline markdown can render a
+ * convincing FAKE warning next to the real one (spoofing). The real fix is at
+ * the render layer — every Yes/No confirmation prompt goes through
+ * marked+DOMPurify, while an Allow/Deny one renders in a `<pre>` and is
+ * therefore already immune. Tracked as a separate item; this is the cheap
+ * header-shaped part of it.
+ */
+export function singleLine(value: string): string {
+  // C0 controls (covers CR/LF/tab) plus the Unicode line/paragraph separators,
+  // mirroring parseAddress's [\r\n\x00-\x1f] rejection.
+  return value.replace(/[\u0000-\u001f\u2028\u2029]+/g, ' ');
+}
+
+/**
+ * Render an address list for a preview: one line, each address flattened.
+ *
+ * `mail_send` gets its recipients from `parseAddressList`, which already drops
+ * any segment containing CR/LF. `mail_reply` does NOT: its default recipient is
+ * `original.envelope.replyTo[0] ?? original.envelope.from[0]` and its Cc comes
+ * from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
+ * through `parseAddress`. The guarantee is therefore not uniform across
+ * callers, so the preview does not depend on it.
+ */
+export function previewAddressList(addrs: ReadonlyArray<MailAddress>): string {
+  return addrs.map((a) => singleLine(a.address)).join(', ');
+}
+
 /**
  * Build the agent-prompt preview text the tool wrapper shows to the
  * user. Kept in send-core so the inbox-pane (if it ever surfaces a
@@ -265,24 +344,24 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
   const personaLine = ctx.accountConfig
     ? `\n  Persona: ${truncate(personaFor(ctx.accountConfig), 160)}`
     : '';
-  const bodyPreview = truncate(ctx.body.replace(/\s+/g, ' '), 200);
+  const bodyPreview = buildBodyBlock(ctx.body);
   if (ctx.isMassSend) {
     return (
       `⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients\n\n` +
       `**Account:** ${ctx.provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}\n` +
-      `**Recipients:**\n${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${a.address}`).join('\n')}\n` +
-      `**Subject:** ${ctx.subject}\n\n` +
-      `> ${bodyPreview}`
+      `**Recipients:**\n${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}\n` +
+      `**Subject:** ${singleLine(ctx.subject)}\n\n` +
+      bodyPreview
     );
   }
   return (
     `**Send email?**\n\n` +
-    `**To:** ${ctx.to.map((a) => a.address).join(', ')}` +
-    `${ctx.cc.length > 0 ? `\n**Cc:** ${ctx.cc.map((a) => a.address).join(', ')}` : ''}` +
-    `${ctx.bcc.length > 0 ? `\n**Bcc:** ${ctx.bcc.map((a) => a.address).join(', ')}` : ''}\n` +
-    `**Subject:** ${ctx.subject}\n` +
+    `**To:** ${previewAddressList(ctx.to)}` +
+    `${ctx.cc.length > 0 ? `\n**Cc:** ${previewAddressList(ctx.cc)}` : ''}` +
+    `${ctx.bcc.length > 0 ? `\n**Bcc:** ${previewAddressList(ctx.bcc)}` : ''}\n` +
+    `**Subject:** ${singleLine(ctx.subject)}\n` +
     `**From:** ${ctx.provider.accountId}${personaLine ? ` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}\n\n` +
-    `> ${bodyPreview}`
+    bodyPreview
   );
 }
 

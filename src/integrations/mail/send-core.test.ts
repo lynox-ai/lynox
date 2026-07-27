@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { sendMail, parseAddressList, buildSendPreview, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
+import { sendMail, parseAddressList, buildSendPreview, previewAddressList, singleLine, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
 import type { MailAddress, MailProvider, MailSendResult } from './provider.js';
 
 vi.mock('./tools/rate-limit.js', () => {
@@ -303,6 +303,121 @@ describe('buildSendPreview', () => {
     });
     expect(preview).toContain('MASS SEND');
     expect(preview).toContain('6 recipients');
+  });
+
+  function previewFor(body: string, isMassSend = false, subject = 'Subject'): string {
+    return buildSendPreview({
+      provider: { accountId: 'acct-1' } as MailProvider,
+      accountConfig: null,
+      to: [RECIPIENT],
+      cc: [],
+      bcc: [],
+      subject,
+      body,
+      isMassSend,
+      uniqueRecipientCount: 1,
+    });
+  }
+
+  const flatten = (s: string): string => s.replace(/\s+/g, ' ').trim();
+
+  it('shows a short body in full and says nothing about truncation', () => {
+    const preview = previewFor('Short and complete.');
+    expect(preview).toContain('> Short and complete.');
+    expect(preview).not.toContain('only the first');
+  });
+
+  // Pins the RENDERED quote against the claimed count. If truncate's slice
+  // arithmetic changed, the quote and the sentence would disagree and this
+  // fails — asserting only the sentence would not catch that.
+  it('shows exactly the first 199 chars plus an ellipsis, and says so', () => {
+    const preview = previewFor('z'.repeat(4000));
+    expect(preview).toContain(`> ${'z'.repeat(199)}…`);
+    expect(preview).toContain('Body is 4000 chars');
+    expect(preview).toContain('only the first 199 are shown');
+  });
+
+  // The two lengths must not be mixed: 300 chars of text around 500 newlines is
+  // 1100 raw but 601 flattened. Reporting the raw number overstates the hidden
+  // volume by 499 chars for what is really a normal multi-line mail — and every
+  // fixture whose body has no whitespace (`'x'.repeat(n)`) is blind to it.
+  it('states the flattened body size, not the raw length', () => {
+    const body = `${'A'.repeat(300)}${'\n'.repeat(500)}${'B'.repeat(300)}`;
+    expect(body.length).toBe(1100);
+    expect(flatten(body).length).toBe(601);
+    const preview = previewFor(body);
+    expect(preview).toContain('Body is 601 chars');
+    expect(preview).not.toContain('1100');
+  });
+
+  it('does not warn at exactly the cap, warns one char over', () => {
+    expect(previewFor('c'.repeat(200))).not.toContain('only the first');
+    expect(previewFor('c'.repeat(201))).toContain('Body is 201 chars');
+  });
+
+  // The gate's whole purpose: an approver must not read a plausible opening
+  // line and miss that a payload rides behind it. Before this, the preview cut
+  // at 200 chars with a bare "…" — indistinguishable from a slightly-longer
+  // mail. The hidden text stays hidden (a terminal prompt is not the place to
+  // dump 40 KB), but its EXISTENCE and size must be stated.
+  it('flags the hidden remainder when a payload trails a harmless opening', () => {
+    // The opening alone fills the preview window — which is what a real
+    // injected send looks like, not a two-line stub.
+    const opening =
+      'Hi Alice,\n\nthanks for the call earlier. As promised, here is the ' +
+      'consolidated summary of the Q3 figures together with the notes from ' +
+      'the workshop, so you have everything in one place before the review ' +
+      'meeting on Thursday. Let me know if anything is unclear.\n\n';
+    const body = `${opening}${'LEAKED-RECORD;'.repeat(3000)}`;
+    const preview = previewFor(body);
+    expect(preview).toContain('thanks for the call earlier');
+    expect(preview).not.toContain('LEAKED-RECORD');
+    expect(preview).toContain(`Body is ${String(flatten(body).length)} chars`);
+  });
+
+  it('flags an oversized body on the mass-send path too', () => {
+    const preview = previewFor('y'.repeat(5000), true);
+    expect(preview).toContain('MASS SEND');
+    expect(preview).toContain('Body is 5000 chars');
+  });
+
+  // Whitespace-only bulk is not a hidden payload: flattening reveals the whole
+  // message, so no warning is correct even though body.length exceeds the cap.
+  it('does not warn when only collapsed whitespace exceeds the cap', () => {
+    const preview = previewFor(`Two words.${'\n'.repeat(400)}`);
+    expect(preview).toContain('> Two words.');
+    expect(preview).not.toContain('only the first');
+  });
+
+  it('marks a whitespace-only body explicitly instead of rendering an empty quote', () => {
+    expect(previewFor('\n\n   \t ')).toContain('_(empty body)_');
+  });
+
+  // The prompt is markdown-rendered in the web UI, and on mail_reply the
+  // subject comes from the REMOTE sender. A LINE BREAK is what lets such a
+  // value open a block-level construct (`\n\n<!--` puts the rest of the prompt
+  // — including the warning below — inside an HTML comment, which renders as
+  // nothing). So the property to pin is structural: no attacker-supplied header
+  // introduces a break. Asserting "no line starts with <!--" instead would pass
+  // a singleLine that only handled \n — CR alone is an equally valid CommonMark
+  // line ending — and would miss every other block opener.
+  it('renders an attacker-supplied multi-line subject on exactly one line', () => {
+    const preview = previewFor('q'.repeat(400), false, 'Report\r\n\r\n<!--');
+    const subjectLines = preview.split('\n').filter((l) => l.includes('**Subject:**'));
+    expect(subjectLines).toHaveLength(1);
+    expect(subjectLines[0]).toContain('<!--');
+    expect(preview).toContain('Body is 400 chars');
+  });
+
+  it('flattens every line-breaking character in a header value', () => {
+    expect(singleLine('a\r\nb\u2028c\u2029d\te')).toBe('a b c d e');
+    expect(singleLine('Report\r\r\r<!--')).not.toMatch(/[\r\n\u2028\u2029]/);
+  });
+
+  // mail_reply takes its recipients straight from the inbound envelope, never
+  // through parseAddressList — so the preview cannot rely on that guard.
+  it('flattens addresses in the recipient list', () => {
+    expect(previewAddressList([{ address: 'a@x.com\r\n\r\n<!--' }])).toBe('a@x.com <!--');
   });
 });
 
