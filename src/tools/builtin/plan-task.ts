@@ -108,42 +108,89 @@ export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[]
 
 // --- Business-friendly presentation ---
 
+/**
+ * Split a model-authored value into lines so each one can be quoted.
+ *
+ * `marked` only ever treats CR and LF as line endings, so those are what can
+ * start a new markdown construct. U+2028/U+2029 are included anyway: the
+ * BROWSER breaks on them even though the parser does not, and a line that looks
+ * separate to the reader should be marked as quoted like any other.
+ */
+const MODEL_TEXT_LINE_BREAK = /\r\n|[\r\n\u2028\u2029]/;
+
+/**
+ * Prefix every line of a model-authored value with `> ` so it renders inside a
+ * blockquote.
+ *
+ * This prompt mixes two kinds of text in ONE string: what the model wrote (the
+ * summary, the findings, the step names) and what the system computed (the cost
+ * estimate, the "[your input needed]" marker). The cost line is the only number
+ * here the model did not choose — it comes from `estimatePipelineCost` over the
+ * run history — which makes it precisely the line worth forging.
+ *
+ * Unlike the confirmation prompts in `integrations/google`, the values here sit
+ * at the START of a line, so an unguarded one can open real markdown BLOCK
+ * constructs, not just fake a line. And `singleLine` is the wrong tool: a plan
+ * summary is legitimately multi-line, so flattening it would damage the feature
+ * to protect the display. Quoting keeps multi-line values intact and moves the
+ * boundary to where the reader can see it — a forged "Estimated cost" line
+ * appears inside the quote, the real one outside it.
+ *
+ * EVERY line has to be prefixed, blank ones included: a bare empty line ends
+ * the blockquote in CommonMark, and everything after it would be outside the
+ * quote again — which is the exact escape this is built to prevent.
+ */
+function quoteModelText(value: string): string[] {
+  return value.split(MODEL_TEXT_LINE_BREAK).map((line) => (line === '' ? '>' : `> ${line}`));
+}
+
 function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | undefined): string {
-  const lines: string[] = [];
+  const quoted: string[] = [];
 
   // Context — brief, conversational
   if (input.context) {
-    lines.push(input.context.summary);
+    quoted.push(...quoteModelText(input.context.summary));
     if (input.context.findings && input.context.findings.length > 0) {
       for (const f of input.context.findings) {
-        lines.push(`  - ${f}`);
+        quoted.push(...quoteModelText(`  - ${f}`));
       }
     }
-    lines.push('');
+    quoted.push('>');
   }
 
-  lines.push(input.summary);
-  lines.push('');
+  quoted.push(...quoteModelText(input.summary));
+  quoted.push('>');
 
-  // Phased plan or flat steps
+  // Phased plan or flat steps. The step number and the marker are system text
+  // sitting on a model-written line, so they are inside the quote and a step
+  // name could imitate them — the authoritative statement about who has to act
+  // is the system line below, outside the quote.
+  const userStepNumbers: number[] = [];
   if (input.phases && input.phases.length > 0) {
     for (let p = 0; p < input.phases.length; p++) {
       const phase = input.phases[p]!;
-      const marker = phase.assignee === 'user' ? ' [your input needed]' : '';
-      lines.push(`${p + 1}. ${phase.name}${marker}`);
+      const isUser = phase.assignee === 'user';
+      if (isUser) userStepNumbers.push(p + 1);
+      const marker = isUser ? ' [your input needed]' : '';
+      quoted.push(...quoteModelText(`${p + 1}. ${phase.name}${marker}`));
     }
   } else if (input.steps && input.steps.length > 0) {
     for (let i = 0; i < input.steps.length; i++) {
-      lines.push(`${i + 1}. ${input.steps[i]}`);
+      quoted.push(...quoteModelText(`${i + 1}. ${input.steps[i] ?? ''}`));
     }
   }
 
+  // Everything from here is system-authored and deliberately OUTSIDE the quote.
+  const lines = [...quoted, ''];
+
+  if (userStepNumbers.length > 0) {
+    lines.push(`Your input is needed at step ${userStepNumbers.join(', ')}.`);
+  }
   if (estimatedCostUsd !== undefined && estimatedCostUsd > 0.01) {
-    lines.push('');
     lines.push(`Estimated cost: ~$${estimatedCostUsd.toFixed(2)}`);
   }
+  if (lines[lines.length - 1] !== '') lines.push('');
 
-  lines.push('');
   lines.push('Shall I proceed?');
   return lines.join('\n');
 }

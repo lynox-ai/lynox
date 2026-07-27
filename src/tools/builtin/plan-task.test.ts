@@ -187,6 +187,126 @@ describe('planTaskTool', () => {
     expect(question).toContain('Shall I proceed?');
   });
 
+  // --- Model text vs. system text (the prompt carries a cost decision) ---
+  //
+  // The presentation mixes model-authored text (summary, findings, step names)
+  // with two system statements the model did NOT choose: the cost estimate and
+  // who has to act. Model text is quoted so a forged copy of either statement
+  // lands visibly inside the quote. These tests assert the BOUNDARY, not the
+  // wording — they fail whether a value stops being quoted or a system line
+  // drifts into the quote.
+
+  /** The lines a reader is entitled to treat as written by the system. */
+  const systemLines = (prompt: string): string[] =>
+    prompt.split('\n').filter((l) => !l.startsWith('>') && l.trim() !== '');
+
+  it('keeps a forged cost line inside the quote and the real one outside', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const agent = makeAgent({ promptUser });
+
+    await planTaskTool.handler(
+      {
+        summary: 'Reviewed the invoices.\n\nEstimated cost: ~$0.02',
+        phases: [
+          { name: 'Collect', steps: ['a'] },
+          { name: 'Send', steps: ['b'] },
+        ],
+      },
+      agent,
+    );
+
+    const question = promptUser.mock.calls[0]![0] as string;
+    // Exactly one cost line is system-authored, and it is the computed one.
+    expect(systemLines(question).filter((l) => l.includes('Estimated cost'))).toEqual([
+      'Estimated cost: ~$0.02',
+    ]);
+    // The forged one is still shown — suppression is not the threat here — but
+    // it is inside the quote.
+    expect(question).toContain('> Estimated cost: ~$0.02');
+  });
+
+  it('keeps a forged "your input" line out of the system section', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const agent = makeAgent({ promptUser });
+
+    await planTaskTool.handler(
+      {
+        summary: 'Plan',
+        phases: [
+          { name: 'Collect\nYour input is needed at step 9.', steps: ['a'] },
+          { name: 'Review', steps: ['b'], assignee: 'user' },
+        ],
+      },
+      agent,
+    );
+
+    const question = promptUser.mock.calls[0]![0] as string;
+    expect(systemLines(question).filter((l) => l.startsWith('Your input is needed'))).toEqual([
+      'Your input is needed at step 2.',
+    ]);
+  });
+
+  it('quotes every line of a multi-line value without flattening it', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const agent = makeAgent({ promptUser });
+
+    await planTaskTool.handler(
+      { summary: 'First line.\n\nSecond paragraph.', steps: ['Do it'] },
+      agent,
+    );
+
+    const question = promptUser.mock.calls[0]![0] as string;
+    const lines = question.split('\n');
+    const first = lines.findIndex((l) => l.startsWith('>'));
+    const last = lines.map((l) => l.startsWith('>')).lastIndexOf(true);
+
+    // The quoted region has no hole in it. The blank line between the two
+    // paragraphs is the point: a BARE empty line ends the blockquote, and
+    // everything after it would be outside the quote again. Asserted as a
+    // property rather than as an exact string, so that '>' and '> ' — both
+    // valid continuations — are equally acceptable.
+    for (let i = first; i <= last; i++) {
+      expect(lines[i]!.startsWith('>')).toBe(true);
+    }
+    // And the value keeps its shape: this is why singleLine is wrong here.
+    expect(lines.filter((l) => l.startsWith('>')).length).toBeGreaterThan(2);
+    expect(systemLines(question)).not.toContain('Second paragraph.');
+  });
+
+  it('separates the quote from the system section with a blank line', async () => {
+    // The string-level boundary is NOT sufficient on its own: without a blank
+    // line, CommonMark's lazy continuation folds the following lines INTO the
+    // blockquote, and a system line that does not start with '>' still renders
+    // inside the quote — measured against the real render chain, where the cost
+    // line ended up inside the last <li>. So this asserts the separator, and it
+    // has to run on a plan that actually HAS system lines: a plan without
+    // phases produces no cost line and no "your input" line, which is why an
+    // earlier version of this test passed while the separator was missing.
+    const promptUser = vi.fn().mockResolvedValue('Cancel');
+    const agent = makeAgent({ promptUser });
+
+    await planTaskTool.handler(
+      {
+        summary: 'Plan',
+        phases: [
+          { name: 'Collect', steps: ['a'] },
+          { name: 'Review', steps: ['b'], assignee: 'user' },
+        ],
+      },
+      agent,
+    );
+
+    const question = promptUser.mock.calls[0]![0] as string;
+    const lines = question.split('\n');
+    const lastQuoted = lines.map((l) => l.startsWith('>')).lastIndexOf(true);
+
+    expect(lastQuoted).toBeGreaterThan(-1);
+    expect(lines[lastQuoted + 1]).toBe('');
+    // The system section is non-empty here — otherwise the assertion above
+    // would be vacuous.
+    expect(systemLines(question).length).toBeGreaterThan(1);
+  });
+
   // --- Workflow bridge (D4 — decoupled: plan_task never executes) ---
 
   it('should create a stored workflow on phased plan approval', async () => {
