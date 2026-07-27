@@ -9,7 +9,7 @@
 //   LYNOX_EVAL=1 ANTHROPIC_API_KEY=… npx vitest run tests/eval/knowledge-substrate-eval.test.ts
 //
 // Corpus: the committed synthetic fixture by default. For the REAL gate run, point
-// LYNOX_KNOWLEDGE_GOLD at rafael's frozen gold-set OUTSIDE this public repo (a
+// LYNOX_KNOWLEDGE_GOLD at the operator's frozen gold-set OUTSIDE this public repo (a
 // `.json` GoldCorpus or a `.jsonl` of GoldThread rows) — real thread content must
 // never land in the public core repo.
 //
@@ -20,7 +20,7 @@
 //   - SANITY floors (recall/junk) so the instrument does not false-fail on benign
 //     model drift.
 //   - The FLIP decision (recall ≥ 0.7 AND junk ≤ 0.2, worst of N) is PRINTED via
-//     meetsGate() for the human to read — the canary flip is rafael's call on the
+//     meetsGate() for the human to read — the canary flip is the operator's call on the
 //     frozen gold-set, not this test's.
 
 import { readFileSync } from 'node:fs';
@@ -54,7 +54,7 @@ function readConfigKey(field: string): string | undefined {
  * gate runs on whatever stack the operator uses. Anthropic (Haiku) when an
  * Anthropic key is present; otherwise Mistral EU (`api.mistral.ai/v1`) when a
  * Mistral key is present — the latter is the only path that runs on a
- * Mistral-only box AND keeps rafael's real thread content in the EU (mirrors the
+ * Mistral-only box AND keeps real thread content in the EU (mirrors the
  * gold-gen label pass). `LYNOX_KNOWLEDGE_PROVIDER`/`_MODEL` override.
  */
 function resolveProvider(): ReplayProviderConfig | null {
@@ -63,17 +63,28 @@ function resolveProvider(): ReplayProviderConfig | null {
   const mistralKey = process.env['MISTRAL_API_KEY'] ?? readConfigKey('mistral_api_key');
   const modelOverride = process.env['LYNOX_KNOWLEDGE_MODEL'];
 
-  // 'proxy' — a local CLIProxyAPI (github.com/router-for-me/CLIProxyAPI) exposing
-  // Claude models over the OpenAI wire on localhost, backed by the operator's
-  // Claude subscription. Operator-chosen for LOCAL eval runs so the CP's API
-  // credits stay reserved for tenants. Explicit opt-in only (never auto-picked);
-  // the client key is the localhost-only credential the proxy config defines.
+  // 'proxy' — any OpenAI-wire-compatible endpoint the operator runs locally, so a
+  // long eval can be pointed at a self-managed model host instead of consuming
+  // shared API credits. Explicit opt-in only (never auto-picked). Configure with
+  // LYNOX_KNOWLEDGE_PROXY_URL (required — no default endpoint is baked in) plus
+  // either LYNOX_KNOWLEDGE_PROXY_KEY (the credential directly) or
+  // LYNOX_KNOWLEDGE_PROXY_KEY_FILE (a path to read it from). Without a URL or a
+  // credential this provider resolves to null and the gate self-skips.
   if (forced === 'proxy') {
-    let proxyKey: string | undefined;
-    try { proxyKey = readFileSync(join(homedir(), '.cli-proxy-api', '.local-eval-key'), 'utf8').trim(); } catch { /* not set up */ }
-    if (!proxyKey) return null;
+    let proxyKey: string | undefined = process.env['LYNOX_KNOWLEDGE_PROXY_KEY'];
+    const keyFile = process.env['LYNOX_KNOWLEDGE_PROXY_KEY_FILE'];
+    if (!proxyKey && keyFile) {
+      // A set-but-unreadable key file is a MISCONFIGURATION, not "not set up".
+      // Swallowing it would resolve the provider to null and self-skip the gate
+      // green — a typo in the path would read as a pass.
+      try { proxyKey = readFileSync(keyFile, 'utf8').trim(); } catch (err) {
+        throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${keyFile}): ${(err as Error).message}`);
+      }
+    }
+    const proxyUrl = process.env['LYNOX_KNOWLEDGE_PROXY_URL'];
+    if (!proxyKey || !proxyUrl) return null;
     const m = modelOverride ?? 'claude-sonnet-4-6';
-    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: process.env['LYNOX_KNOWLEDGE_PROXY_URL'] ?? 'http://127.0.0.1:8317/v1', model: m, openaiModelId: m };
+    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: proxyUrl, model: m, openaiModelId: m };
   }
 
   const useAnthropic = forced ? forced === 'anthropic' : Boolean(anthropicKey);
@@ -148,7 +159,7 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       }
     }
     const worst = worstOf(reports);
-    process.stdout.write(`\n[knowledge-eval] WORST OF ${RUNS} — flip gate (recall≥${GATE.recall}, junk≤${GATE.junkRate}): ${meetsGate(worst) ? 'MET ✓ (canary flip is rafael\'s call)' : 'NOT MET (hold flip)'}\n${formatReport(worst)}\n`);
+    process.stdout.write(`\n[knowledge-eval] WORST OF ${RUNS} — flip gate (recall≥${GATE.recall}, junk≤${GATE.junkRate}): ${meetsGate(worst) ? 'MET ✓ (canary flip is the operator\'s call)' : 'NOT MET (hold flip)'}\n${formatReport(worst)}\n`);
 
     // HARD — deterministic H4 security invariant: no untrusted write may land active/pinned.
     expect(worst.routing.violations, JSON.stringify(worst.routing.violations, null, 2)).toHaveLength(0);

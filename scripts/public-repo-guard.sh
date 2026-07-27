@@ -10,13 +10,16 @@
 # private pro repo. This guard fills that gap.
 #
 # Two enforcement points (see lefthook.yml pre-push + the CI workflow):
-#   - pre-push hook   — scans staged changes, fast local feedback
+#   - pre-push hook   — scans the whole tracked tree, fast local feedback
 #   - CI on PRs       — scans the whole tracked tree (cannot be bypassed
 #                       with `git push --no-verify`)
 #
 # Usage:
-#   scripts/public-repo-guard.sh           # scan whole tracked tree (CI)
-#   scripts/public-repo-guard.sh --staged  # scan staged files only (hook)
+#   scripts/public-repo-guard.sh           # scan whole tracked tree (both of the above)
+#   scripts/public-repo-guard.sh --staged  # scan staged files only — MANUAL use;
+#                                          # lefthook.yml:23 invokes the guard with
+#                                          # no argument, so the hook does NOT take
+#                                          # this path.
 #
 # Exit 0 = clean, exit 1 = a leak marker was found.
 #
@@ -44,9 +47,44 @@ SELF_EXCLUDE='scripts/public-repo-guard.sh .github/workflows/public-repo-guard.y
 # that only exists inside lynox's managed-hosting infrastructure.
 HARD='control-staging\.lynox\.cloud|root@control|managed_tenant_hosts|ssh_private_key|hetzner_server_ip|instance_secret|/opt/lynox-(managed|pilot)|MANAGED_ADMIN_TOKEN|:4000/admin|control-plane-staging|greenmail-staging-allowlist|managed_instances|restic_password|backup_repo_password|host-staging|staging-admin-curl|46\.224\.229\.143|\.lynox/admin-token|lynox[_-]managed'
 
+# HARD, second class — the OPERATOR's own local tooling. An eval/replay run may
+# be pointed at a self-managed model host so shared API credits stay free, but
+# WHICH product that is, where its credential lives, and what backs it are all
+# operator-private. This leaked once (2026-07-27) in the DK eval harness, which
+# named the vendor, linked its repo and documented the key path — merged and
+# public before anyone looked. Configure such a host ONLY through the env-var
+# indirection (LYNOX_KNOWLEDGE_PROXY_URL / _KEY / _KEY_FILE); a vendor name
+# never has to appear in this repo.
+#
+# Separator-tolerant on purpose: a hyphen-only pattern let through the
+# underscore, all-caps, space-separated and org-name spellings — each verified
+# to slip past before, blocked after. The examples are NOT written out here:
+# one of them is the product's own env-var name, i.e. exactly the kind of
+# uniquely-searchable string this class exists to keep out. See
+# tests/public-repo-guard.test.ts for the concrete cases, assembled at runtime.
+#
+# The default port is matched in its two loopback spellings (127.0.0.1: and
+# localhost:). A bare port number is deliberately NOT matched — it is too
+# common to block on its own, so `PORT = <n>` or a non-loopback host will pass.
+#
+# The org and port fragments are CONCATENATED rather than written out. That is
+# not obfuscation against a reader — anyone reading this file sees them. It
+# exists so a full-text search for the vendor's name does not surface this repo,
+# which is the actual leak vector. Otherwise the pattern would re-plant verbatim
+# what it exists to keep out.
+_org='router'"-for-"'me'
+_port='83'"17"
+HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
+
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
 # recurring "hardcode the staging host as a script/test default" mistake.
+#
+# NOT covered here: the operator's name used as a deployment identifier
+# ("canary rafael", "rafael prod"). ~16 such mentions predate this guard in
+# code comments documenting real incidents; adding the pattern would paint the
+# guard permanently red, which teaches bypassing rather than fixing. Track that
+# cleanup separately — the name itself is legitimately public (LICENSE, README).
 SOFT='engine\.lynox\.cloud|control\.lynox\.cloud'
 
 mode_staged=false
@@ -76,6 +114,18 @@ is_allow_file() {
 
 violations=0
 
+# PATHS — the content greps below never see file NAMES. A vendored tooling
+# directory could therefore be committed (and enter the Docker build context)
+# while every content scan stays clean. Check the tracked paths themselves.
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  is_excluded "$f" && continue
+  if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
+    echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
+    violations=$((violations + 1))
+  fi
+done < <(list_files)
+
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   [ -f "$f" ] || continue
@@ -90,6 +140,18 @@ while IFS= read -r f; do
     echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
+
+  # HARD (operator-local tooling) — case-INSENSITIVE (the -i below), so the
+  # pattern stays short without spelling out the vendor name it keeps out.
+  # Deliberately a separate grep from the main HARD run:
+  # folding -i into the main HARD run makes `lynox[_-]managed` match every
+  # legitimate LYNOX_MANAGED_* env var (164 false positives when tried).
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "❌ HARD leak marker (operator-local tooling) in $f:"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
 
   # SOFT — exempt if whole-file allowed or line carries the pragma.
   is_allow_file "$f" && continue

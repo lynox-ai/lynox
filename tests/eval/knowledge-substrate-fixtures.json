@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generatedAt": "2026-07-16",
-  "generator": "hand-authored synthetic seed (DK.0) — replace with a frozen gold.jsonl from rafael's history.db for the real gate run",
+  "generator": "hand-authored synthetic seed (DK.0) — replace with a frozen gold.jsonl from a real history.db for the real gate run",
   "note": "SYNTHETIC ONLY. All organisations/people are placeholders (Meridian AG, Nordwind GmbH, Solaris Ltd, Acme Corp, *.example). No real customer content — the real, human-labeled gold-set lives OUTSIDE this public repo (see LYNOX_KNOWLEDGE_GOLD in knowledge-substrate-eval.test.ts). This fixture is the default replay corpus + the contract-test shape fixture; it is intentionally easy (clear durable facts, clean junk-control) so a passing eval proves the harness wiring, not model quality.",
   "threads": [
     {

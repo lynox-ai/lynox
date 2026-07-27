@@ -14,7 +14,6 @@ build/
 *.db-wal
 *.db-shm
 secrets.json
-cliproxyapi
 coverage/
 tests/performance/results.json
 tests/performance/*.log

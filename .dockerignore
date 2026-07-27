@@ -19,7 +19,6 @@ secrets.json
 coverage/
 docs/
 scripts/
-cliproxyapi
 *.png
 *.pem
 *.key

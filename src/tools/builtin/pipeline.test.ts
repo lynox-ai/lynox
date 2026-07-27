@@ -59,7 +59,7 @@ import { buildRunCtx } from '../../orchestrator/runner.js';
 
 const mockConfig: LynoxUserConfig = {
   api_key: 'test-key',
-  api_base_url: 'http://localhost:8317',
+  api_base_url: 'http://localhost:11434',
 };
 
 const mockTools: ToolEntry[] = [
