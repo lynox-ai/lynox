@@ -44,9 +44,28 @@ SELF_EXCLUDE='scripts/public-repo-guard.sh .github/workflows/public-repo-guard.y
 # that only exists inside lynox's managed-hosting infrastructure.
 HARD='control-staging\.lynox\.cloud|root@control|managed_tenant_hosts|ssh_private_key|hetzner_server_ip|instance_secret|/opt/lynox-(managed|pilot)|MANAGED_ADMIN_TOKEN|:4000/admin|control-plane-staging|greenmail-staging-allowlist|managed_instances|restic_password|backup_repo_password|host-staging|staging-admin-curl|46\.224\.229\.143|\.lynox/admin-token|lynox[_-]managed'
 
+# HARD, second class — the OPERATOR's own local tooling. An eval/replay run may
+# be pointed at a self-managed model host so shared API credits stay free, but
+# WHICH product that is, where its credential lives, and what backs it are all
+# operator-private. This leaked once (2026-07-27) in the DK eval harness, which
+# named the vendor, linked its repo and documented the key path — merged and
+# public before anyone looked. Configure such a host ONLY through the env-var
+# indirection (LYNOX_KNOWLEDGE_PROXY_URL / _KEY / _KEY_FILE); a vendor name
+# never has to appear in this repo.
+#
+# Matched case-insensitively (see the -i on the HARD grep) so the pattern can
+# stay short: it must not spell out the very name it exists to keep out.
+HARD_LOCAL_TOOLING='cli-?proxy|local-eval-key'
+
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
 # recurring "hardcode the staging host as a script/test default" mistake.
+#
+# NOT covered here: the operator's name used as a deployment identifier
+# ("canary rafael", "rafael prod"). ~16 such mentions predate this guard in
+# code comments documenting real incidents; adding the pattern would paint the
+# guard permanently red, which teaches bypassing rather than fixing. Track that
+# cleanup separately — the name itself is legitimately public (LICENSE, README).
 SOFT='engine\.lynox\.cloud|control\.lynox\.cloud'
 
 mode_staged=false
@@ -90,6 +109,17 @@ while IFS= read -r f; do
     echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
+
+  # HARD (operator-local tooling) — case-INSENSITIVE, so the pattern can stay
+  # short without spelling out the vendor name. Deliberately a separate grep:
+  # folding -i into the main HARD run makes `lynox[_-]managed` match every
+  # legitimate LYNOX_MANAGED_* env var (164 false positives when tried).
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "❌ HARD leak marker (operator-local tooling) in $f:"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
 
   # SOFT — exempt if whole-file allowed or line carries the pragma.
   is_allow_file "$f" && continue

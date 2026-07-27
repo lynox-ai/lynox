@@ -65,7 +65,7 @@ function makeMailReadStub(): { tool: ToolEntry; stage: (payload: string | undefi
  * Provider config for the replay + judge — provider-agnostic so the gate runs on
  * whatever stack the operator actually uses. Anthropic (default) OR an
  * OpenAI-compatible provider (Mistral EU, `provider:'openai'` +
- * `api.mistral.ai/v1`) — the latter keeps rafael's REAL thread content in the EU,
+ * `api.mistral.ai/v1`) — the latter keeps REAL thread content in the EU,
  * mirroring `scripts/knowledge-gold-gen.ts`'s Mistral-EU label pass, and is the
  * only path that runs on a Mistral-only box. The wiring mirrors the proven
  * `tests/online/openai-provider.test.ts` Mistral agent.

@@ -7,8 +7,8 @@
 #
 # The eval self-gates (LYNOX_EVAL + an API key from env/~/.lynox/config.json)
 # and resolves the provider itself (Anthropic if a key is present, else
-# Mistral EU pinned to the stable dated tag; `proxy` = the local CLIProxyAPI
-# on 127.0.0.1:8317 backed by the operator's Claude subscription). Gold
+# Mistral EU pinned to the stable dated tag; `proxy` = a locally-run
+# OpenAI-wire endpoint, configured via LYNOX_KNOWLEDGE_PROXY_URL/_KEY). Gold
 # corpora live OUTSIDE the repo (~/.lynox/knowledge-gold/) and are never
 # committed.
 set -euo pipefail

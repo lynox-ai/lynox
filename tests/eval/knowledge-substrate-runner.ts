@@ -38,7 +38,7 @@
 //                            reported as a coverage diagnostic (did the replay
 //                            reach the untrusted path at all).
 //
-// Gate (PRD §5/§10): flip on canary `rafael` only at recall ≥ 0.7 AND
+// Gate (PRD §5/§10): flip on the canary instance only at recall ≥ 0.7 AND
 // junk-rate ≤ 0.2, taking the WORST of 2-3 replay runs, and routing must be
 // clean (an untrusted write escaping the queue is a security regression, not a
 // tuning knob).

@@ -1,7 +1,7 @@
 /**
  * Behavioral validation walk of the Durable Knowledge Substrate (flag ON).
  * Drives realistic operator↔assistant conversations through a real durable-ON Agent
- * (LLM via the local CLIProxyAPI) and reads GROUND TRUTH after each scenario:
+ * (LLM via a locally-run OpenAI-wire endpoint) and reads GROUND TRUTH after each scenario:
  *   - the every-turn FOCUS BLOCK (renderBlocks) → the no-cross-client-bleed check + UX
  *   - the PENDING QUEUE (listPending) → the injection-resistance check
  *   - the ACTIVE entries + subjects → capture + correction/dedup
@@ -24,9 +24,16 @@ import {
 } from '../src/tools/builtin/knowledge.js';
 import type { ToolEntry } from '../src/types/index.js';
 
+// Points at any OpenAI-wire-compatible endpoint the operator runs locally; the
+// credential comes from the environment, never from a hard-coded vendor path.
 const PROXY = process.env['LYNOX_KNOWLEDGE_PROXY_URL'] ?? 'http://127.0.0.1:8317/v1';
 const MODEL = process.env['LYNOX_VALIDATION_MODEL'] ?? 'claude-sonnet-4-6';
-const KEY = readFileSync(join(homedir(), '.cli-proxy-api', '.local-eval-key'), 'utf8').trim();
+const KEY_FILE = process.env['LYNOX_KNOWLEDGE_PROXY_KEY_FILE'];
+const KEY = process.env['LYNOX_KNOWLEDGE_PROXY_KEY']
+  ?? (KEY_FILE ? readFileSync(KEY_FILE, 'utf8').trim() : '');
+if (!KEY) {
+  throw new Error('set LYNOX_KNOWLEDGE_PROXY_KEY or LYNOX_KNOWLEDGE_PROXY_KEY_FILE');
+}
 
 const SYS = [
   'You are lynox, a business assistant for an operator who runs a marketing agency with several clients.',
