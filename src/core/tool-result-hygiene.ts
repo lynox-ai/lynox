@@ -70,6 +70,25 @@ export function toolNameById(messages: readonly BetaMessageParam[]): Map<string,
 }
 
 /**
+ * Map every tool_use_id → its call INPUT. Companion to `toolNameById`, walking
+ * the same blocks: a recall handle needs the argument that says WHICH call this
+ * was (the url, the path, the query), and the input is the only place it lives.
+ */
+export function toolInputById(messages: readonly BetaMessageParam[]): Map<string, unknown> {
+  const inputs = new Map<string, unknown>();
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === 'tool_use') {
+        const useBlock = block as BetaToolUseBlockParam;
+        inputs.set(useBlock.id, useBlock.input);
+      }
+    }
+  }
+  return inputs;
+}
+
+/**
  * The deterministic reference that replaces an elided duplicate payload. Terse +
  * timestamp-free on purpose: it becomes part of the stable cached prefix, so its
  * text must never depend on volatile inputs. Names the tool and tells the model

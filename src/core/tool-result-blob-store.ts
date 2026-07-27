@@ -3,7 +3,8 @@ import type {
   BetaToolResultBlockParam,
   BetaImageBlockParam,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
-import { contentKey, toolResultText, toolNameById } from './tool-result-hygiene.js';
+import { contentKey, toolResultText, toolNameById, toolInputById } from './tool-result-hygiene.js';
+import { maskSecretPatterns } from './secret-store.js';
 
 /**
  * Phase 2 — Context Hygiene. Default blob threshold in characters.
@@ -64,14 +65,91 @@ export interface ToolResultBlob {
   readonly payload: string;
 }
 
-/** Build a compact one-line descriptor from the tool name + payload head. */
-function buildDescriptor(tool: string, payload: string): string {
-  const head = payload
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 80);
+/**
+ * Input keys that IDENTIFY which call a result came from, in preference order.
+ *
+ * An allowlist of key NAMES rather than a per-tool map: it does not drift as
+ * tools are added, and it structurally excludes the payload-carrying arguments
+ * (`content`, `body`, `text`) whose value would bloat the descriptor instead of
+ * labelling it. `command` is included — for a `bash` result "npm test" is
+ * exactly the label you want.
+ */
+const IDENTIFYING_INPUT_KEYS = [
+  'url', 'path', 'file_path', 'query', 'q', 'command',
+  'collection', 'namespace', 'name', 'id',
+] as const;
+
+/** Max chars of the identifying argument kept in a descriptor. */
+const MAX_IDENT_CHARS = 120;
+
+/**
+ * Pick the argument that says WHICH call this was. Returns '' when the input
+ * has no recognised identifying key — the descriptor then degrades to the old
+ * tool+size+head shape rather than guessing.
+ *
+ * Secret-masked: the descriptor survives into the post-compaction seed, where
+ * the original `tool_use` block no longer exists. A token embedded in a URL
+ * would otherwise be RE-INTRODUCED into context by the very mechanism meant to
+ * shrink it.
+ */
+function identifyingArg(input: unknown): string {
+  if (typeof input !== 'object' || input === null) return '';
+  const rec = input as Record<string, unknown>;
+  for (const key of IDENTIFYING_INPUT_KEYS) {
+    const value = rec[key];
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    const flat = maskSecretPatterns(value).replace(/\s+/g, ' ').trim();
+    return flat.length > MAX_IDENT_CHARS ? `${flat.slice(0, MAX_IDENT_CHARS)}…` : flat;
+  }
+  return '';
+}
+
+/**
+ * Strip the framing that every wrapped tool result starts with, so the head
+ * excerpt carries CONTENT rather than boilerplate.
+ *
+ * Without this, three different pages evicted from one thread produce three
+ * byte-identical descriptors — the first 80 chars of an `http_request` result
+ * are the `<untrusted_data>` tag plus `HTTP 200 OK` plus a content-type header,
+ * with the page's own title still far out of reach. Scoped narrowly: the header
+ * skip only runs when the payload actually opens with the wrapper AND an HTTP
+ * status line, so a non-HTTP payload whose first line merely looks like
+ * `key: value` keeps its real head.
+ */
+function contentHead(payload: string): string {
+  let rest = payload.replace(/^<untrusted_data[^>]*>\s*/, '');
+  const hadWrapper = rest.length !== payload.length;
+  if (hadWrapper && /^HTTP \d{3}/.test(rest)) {
+    // Drop the status line + the header block up to the first blank line.
+    const blank = rest.indexOf('\n\n');
+    if (blank >= 0) rest = rest.slice(blank + 2);
+  }
+  return rest.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Build a compact one-line descriptor: tool, the identifying argument, size,
+ * and a content excerpt.
+ *
+ * This line is the ONLY thing the agent sees in place of an evicted payload, so
+ * it has to answer "do I need this back?". A descriptor that cannot distinguish
+ * two results makes forgetting SILENT — `recall_tool_result` exists, but the
+ * agent has no basis to call it, and eviction becomes real information loss
+ * however conservative the eviction policy is. With the call's own argument in
+ * the line, eviction is paging instead: the worst case is one extra turn.
+ */
+function buildDescriptor(tool: string, payload: string, input?: unknown): string {
   const sizeKb = (payload.length / 1024).toFixed(1);
-  return `${tool} result · ${sizeKb} KB · ${head}${payload.length > 80 ? '…' : ''}`;
+  const ident = identifyingArg(input);
+  const label = ident ? `${tool}(${ident})` : `${tool} result`;
+
+  const head = contentHead(payload);
+  const excerpt = head.slice(0, 80);
+  const suffix = head.length > 80 ? '…' : '';
+
+  return excerpt
+    ? `${label} · ${sizeKb} KB · ${excerpt}${suffix}`
+    : `${label} · ${sizeKb} KB`;
 }
 
 /**
@@ -213,6 +291,8 @@ export class ToolResultBlobStore {
     // Map tool_use_id → tool name from every assistant tool_use block (shared
     // with the append-time dedup so both key the same content the same way).
     const toolNames = toolNameById(messages);
+    // ...and the call inputs, so a handle can name WHICH call it stands for.
+    const toolInputs = toolInputById(messages);
 
     const handles: Array<{ id: string; descriptor: string }> = [];
     for (const msg of messages) {
@@ -239,7 +319,7 @@ export class ToolResultBlobStore {
           }
         }
         const id = this.nextId();
-        const descriptor = buildDescriptor(tool, payload);
+        const descriptor = buildDescriptor(tool, payload, toolInputs.get(resultBlock.tool_use_id));
         this.blobs.set(id, { tool, descriptor, payload });
         this.totalBytes += payload.length;
         this.idByContent.set(key, id);

@@ -13,10 +13,10 @@ import {
 const T = DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
 
 /** Build an assistant message containing one tool_use block. */
-function toolUseMsg(id: string, name: string): BetaMessageParam {
+function toolUseMsg(id: string, name: string, input: unknown = {}): BetaMessageParam {
   return {
     role: 'assistant',
-    content: [{ type: 'tool_use', id, name, input: {} }],
+    content: [{ type: 'tool_use', id, name, input }],
   };
 }
 
@@ -356,5 +356,130 @@ describe('evictImagesFrom (#4 big-image preserve)', () => {
       { role: 'assistant', content: 'hi' },
     ];
     expect(evictImagesFrom(messages)).toHaveLength(0);
+  });
+});
+
+describe('recall handle descriptors', () => {
+  /** Payload shaped like a real wrapped http_request result. */
+  function httpPayload(title: string): string {
+    return '<untrusted_data source="http_response">\nHTTP 200 OK\n' +
+      'content-type: text/html; charset=utf-8\n\n' +
+      `title: ${title}\n\n${'Fliesstext. '.repeat(500)}\n</untrusted_data>`;
+  }
+
+  it('distinguishes results of the same tool by their call argument', () => {
+    // The regression this fixes: the head excerpt used to start at the wrapper,
+    // so three different pages produced BYTE-IDENTICAL descriptors and the agent
+    // could not tell which handle held which page.
+    const store = new ToolResultBlobStore();
+    const pages = [
+      ['https://konkurrent-a.de/preise', 'Preise & Pakete'],
+      ['https://konkurrent-b.de/ueber-uns', 'Über uns'],
+    ] as const;
+    const messages: BetaMessageParam[] = [];
+    pages.forEach(([url, title], i) => {
+      messages.push(toolUseMsg(`tu-${i}`, 'http_request', { url, method: 'GET' }));
+      messages.push(toolResultMsg(`tu-${i}`, httpPayload(title)));
+    });
+
+    const handles = store.evictFrom(messages, T);
+
+    expect(handles).toHaveLength(2);
+    expect(new Set(handles.map(h => h.descriptor)).size).toBe(2);
+    expect(handles[0]!.descriptor).toContain('https://konkurrent-a.de/preise');
+    expect(handles[0]!.descriptor).toContain('Preise & Pakete');
+    expect(handles[1]!.descriptor).toContain('https://konkurrent-b.de/ueber-uns');
+  });
+
+  it('skips the untrusted-data wrapper and HTTP headers in the excerpt', () => {
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'http_request', { url: 'https://example.com/' }),
+      toolResultMsg('tu-1', httpPayload('Echter Titel')),
+    ], T);
+
+    expect(handles[0]!.descriptor).not.toContain('untrusted_data');
+    expect(handles[0]!.descriptor).not.toContain('HTTP 200');
+    expect(handles[0]!.descriptor).not.toContain('content-type');
+    expect(handles[0]!.descriptor).toContain('Echter Titel');
+  });
+
+  it('keeps the real head of a payload that merely LOOKS header-shaped', () => {
+    // The header skip is scoped to wrapper+HTTP-status openings, so an ordinary
+    // `key: value` first line must not be eaten.
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'read_file', { path: '/etc/app.conf' }),
+      toolResultMsg('tu-1', `hostname: prod-01\n\n${'x'.repeat(5_000)}`),
+    ], T);
+
+    expect(handles[0]!.descriptor).toContain('hostname: prod-01');
+    expect(handles[0]!.descriptor).toContain('/etc/app.conf');
+  });
+
+  it('masks a secret embedded in the identifying argument', () => {
+    // The descriptor survives into the post-compaction seed, where the original
+    // tool_use block is gone — an unmasked token would be RE-INTRODUCED by the
+    // very mechanism meant to shrink the context.
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'http_request', { url: 'https://api.example.com/v1?key=sk-ant-abcdefghijklmnopqrstuvwx' }),
+      toolResultMsg('tu-1', 'y'.repeat(5_000)),
+    ], T);
+
+    expect(handles[0]!.descriptor).not.toContain('sk-ant-abcdefghijklmnopqrstuvwx');
+    expect(handles[0]!.descriptor).toContain('api.example.com');
+  });
+
+  it('never uses a payload-carrying argument as the label', () => {
+    // `content` would put the whole written file back into the descriptor —
+    // the allowlist of key NAMES is what structurally prevents that.
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'write_file', { path: '/tmp/out.md', content: 'A'.repeat(9_000) }),
+      toolResultMsg('tu-1', 'z'.repeat(5_000)),
+    ], T);
+
+    expect(handles[0]!.descriptor).toContain('/tmp/out.md');
+    expect(handles[0]!.descriptor).not.toContain('AAAA');
+    expect(handles[0]!.descriptor.length).toBeLessThan(300);
+  });
+
+  it('labels a bash result with its command', () => {
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'bash', { command: 'npm test' }),
+      toolResultMsg('tu-1', 'w'.repeat(5_000)),
+    ], T);
+
+    expect(handles[0]!.descriptor).toContain('bash(npm test)');
+  });
+
+  it('truncates an over-long identifying argument but keeps its head', () => {
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'http_request', { url: `https://example.com/${'p'.repeat(400)}` }),
+      toolResultMsg('tu-1', 'v'.repeat(5_000)),
+    ], T);
+
+    const d = handles[0]!.descriptor;
+    // Asserting the argument specifically — a bare `…`/length check would also
+    // pass on the old descriptor, whose ellipsis came from the head excerpt.
+    expect(d).toContain('https://example.com/ppp');
+    expect(d).not.toContain('p'.repeat(200));
+    expect(d.length).toBeLessThan(300);
+  });
+
+  it('degrades to the bare tool label when no key identifies the call', () => {
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom([
+      toolUseMsg('tu-1', 'memory_list', { limit: 50 }),
+      toolResultMsg('tu-1', 'u'.repeat(5_000)),
+    ], T);
+
+    // The distinguishing bit is the LABEL: `memory_list result` (no argument)
+    // versus `memory_list(...)`. A prefix-only match would hold either way.
+    expect(handles[0]!.descriptor).toContain('memory_list result · 4.9 KB');
+    expect(handles[0]!.descriptor).not.toContain('memory_list(');
   });
 });
