@@ -102,7 +102,7 @@ describe('public-repo-guard — fires on planted leaks', () => {
     expect(runGuard()).not.toBe(0);
   });
 
-  it('catches the default port, which fingerprints the product on its own', () => {
+  it('catches the loopback spelling of the default port', () => {
     commitFile('src/leak.ts', `const url = 'http://127.0.0.1:${PORT}/v1';\n`);
     expect(runGuard()).not.toBe(0);
   });
@@ -114,7 +114,7 @@ describe('public-repo-guard — fires on planted leaks', () => {
     expect(runGuard()).not.toBe(0);
   });
 
-  it('catches the localhost spelling of the port too', () => {
+  it('catches the localhost spelling of the default port too', () => {
     commitFile('src/leak.ts', `const url = 'http://localhost:${PORT}/v1';\n`);
     expect(runGuard()).not.toBe(0);
   });

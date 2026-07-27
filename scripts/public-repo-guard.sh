@@ -10,13 +10,16 @@
 # private pro repo. This guard fills that gap.
 #
 # Two enforcement points (see lefthook.yml pre-push + the CI workflow):
-#   - pre-push hook   — scans staged changes, fast local feedback
+#   - pre-push hook   — scans the whole tracked tree, fast local feedback
 #   - CI on PRs       — scans the whole tracked tree (cannot be bypassed
 #                       with `git push --no-verify`)
 #
 # Usage:
-#   scripts/public-repo-guard.sh           # scan whole tracked tree (CI)
-#   scripts/public-repo-guard.sh --staged  # scan staged files only (hook)
+#   scripts/public-repo-guard.sh           # scan whole tracked tree (both of the above)
+#   scripts/public-repo-guard.sh --staged  # scan staged files only — MANUAL use;
+#                                          # lefthook.yml:23 invokes the guard with
+#                                          # no argument, so the hook does NOT take
+#                                          # this path.
 #
 # Exit 0 = clean, exit 1 = a leak marker was found.
 #
