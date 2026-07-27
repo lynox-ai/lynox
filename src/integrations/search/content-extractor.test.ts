@@ -187,9 +187,9 @@ describe('extractContent', () => {
     // returned it alone — docs.stripe.com/ and the GitHub REST reference both
     // came back as bare JSON payloads.
     //
-    // MUTATION that kills this test: reintroduce ANY step that picks one subtree
-    // as "the article" instead of stripping the whole document. Whichever region
-    // such a step chooses, at least one of the four assertions below fails.
+    // MUTATION that kills this test: reintroduce a step that picks a subtree
+    // BELOW <body> as "the article". The four regions below sit in four
+    // different subtrees, so any such pick drops at least one assertion.
     htmlResponse(`<html><head><title>Send an email</title></head><body>
       <nav><a href="/docs/auth">Authentication</a><a href="/docs/webhooks">Webhooks</a></nav>
       <aside>Requires the emails.send scope.</aside>
@@ -244,6 +244,79 @@ describe('extractContent', () => {
 
     const result = await extractContent('https://example.com/readme.txt');
     expect(result.content).toBe('if 3 <b and b> 4 then stop');
+  });
+
+  it('still honours maxChars on a text/plain body', async () => {
+    // MUTATION: `truncated = false; content = body` in the plain-text branch.
+    // Without this test that passes 54/54, and a 500 KB text/plain body walks
+    // straight into the model's context — the exact blowup this path caps.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/plain; charset=utf-8' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('x'.repeat(5_000)));
+          controller.close();
+        },
+      }),
+    });
+
+    const result = await extractContent('https://example.com/big.txt', 100);
+    expect(result.content.length).toBe(100);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('keeps the raw body when a LARGE page extracts to almost nothing', async () => {
+    // A JS-rendered shell, or a body byte-cut inside an open <script>, strips to
+    // a few dozen characters — measured 197 for a 500 KB news homepage. The raw
+    // markup still carries inline JSON and data attributes, so it beats the
+    // boilerplate. MUTATION: drop the guard, and the assertion on the payload fails.
+    const shell = `<html><head><title>News</title></head><body><div id="app"></div>` +
+      `<script>window.__DATA__={"headline":"Marker aus dem Inline-JSON"};${'/*pad*/'.repeat(6_000)}` +
+      `</body></html>`;
+    expect(shell.length).toBeGreaterThan(30_000);
+    htmlResponse(shell);
+
+    const result = await extractContent('https://example.com');
+    expect(result.content).toContain('Marker aus dem Inline-JSON');
+  });
+
+  it('does NOT keep raw markup just because a SMALL page is short', async () => {
+    // The size condition is what turns "extraction was short" into a failure
+    // signal. Without it a tiny document comes back as raw tags, which is
+    // strictly worse than its own text.
+    // MUTATION: drop `body.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS`.
+    htmlResponse('<html><head><title>Kurz</title></head><body><p>Wenig Text.</p></body></html>');
+
+    const result = await extractContent('https://example.com');
+    expect(result.content).toContain('Wenig Text.');
+    expect(result.content).not.toContain('<p>');
+  });
+
+  it('strips markup for content types beyond text/html', async () => {
+    // The outer gate admits anything containing `html` or `text`, but
+    // `isHtmlContentType` only matches text/html and application/xhtml. Routing
+    // on it alone handed text/xml and application/html back as raw tags, which
+    // the previous tag-stripping path never did.
+    // MUTATION: route on isHtmlContentType instead of isMarkupContentType.
+    for (const ct of ['text/xml', 'application/html']) {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': ct }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('<root><item>Nutzdaten</item></root>'));
+            controller.close();
+          },
+        }),
+      });
+
+      const result = await extractContent('https://example.com/feed');
+      expect(result.content).toContain('Nutzdaten');
+      expect(result.content).not.toContain('<item>');
+    }
   });
 
   it('blocks 172.16.x.x private range', async () => {

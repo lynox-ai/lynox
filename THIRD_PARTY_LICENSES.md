@@ -8,7 +8,6 @@ The following dependencies are licensed under the Apache License 2.0.
 The full license text is available at: https://www.apache.org/licenses/LICENSE-2.0
 
 - **@huggingface/transformers** - Copyright Hugging Face Inc.
-- **@mozilla/readability** - Copyright Mozilla Foundation
 - **dompurify** (dual-licensed MPL-2.0 OR Apache-2.0) - Copyright Dr.-Ing. Mario Heiderich, Cure53
 - **google-auth-library** - Copyright Google LLC (used by Google Workspace OAuth integration)
 - **@anthropic-ai/vertex-sdk** (optional peer dependency) — Copyright Anthropic. Install only if using the Vertex provider; loaded via dynamic import in `src/core/vertex-oauth.ts`.
@@ -23,7 +22,6 @@ The following dependencies are licensed under the MIT License.
 - **uqr** - Copyright Anthony Fu (QR rendering in `MobileAccess.svelte`)
 - **better-sqlite3** - Copyright Joshua Wise
 - **zod** - Copyright Colin McDonnell
-- **linkedom** - Copyright Andrea Giammarchi
 - **html2canvas** - Copyright Niklas von Hertzen
 - **marked** - Copyright Christopher Jeffrey
 - **mermaid** - Copyright Knut Sveidqvist
@@ -46,10 +44,6 @@ The following dependency is licensed under the GNU Lesser General Public License
 The full license text is available at: https://www.gnu.org/licenses/lgpl-3.0.html
 
 - **libvips** - Copyright libvips contributors (https://github.com/libvips/libvips) - Bundled as prebuilt binaries via the `@img/sharp-libvips-{platform}` packages, pulled transitively through `sharp` (image-processing dependency of `@huggingface/transformers`). As required by the LGPL, users have the right to replace the bundled libvips binaries with their own builds; the prebuilt libvips binaries inside `node_modules/@img/sharp-libvips-*` can be swapped for a locally-built libvips by following the sharp installation guide at https://sharp.pixelplumbing.com/install/#custom-libvips.
-
-## ISC License
-
-- **linkedom** - Copyright Andrea Giammarchi (also dual-listed above; ISC is the primary license)
 
 ## External Tools (Docker only)
 

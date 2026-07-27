@@ -92,7 +92,7 @@ SearXNG doesn't need to be exposed to the internet — only lynox needs to reach
 | Setup | Zero | Docker container or URL env | Zero |
 | Rate limits | API rate limits | Unlimited | DDG may rate-limit / CAPTCHA |
 
-**Content enrichment:** lynox automatically fetches full page content for the top 3 search results using its built-in content extractor (Readability-based). A 10-second timeout ensures search stays responsive even when pages are slow.
+**Content enrichment:** lynox automatically fetches full page content for the top 3 search results using its built-in content extractor, which strips the whole document to text rather than guessing which part is "the article". A 10-second timeout ensures search stays responsive even when pages are slow.
 
 **DDG fallback caveats:** parses HTML (brittle if DDG changes layout), no `time_range` filter, no topic categories, and occasional empty results under load. Treat it as the "agent doesn't have to fabricate" safety net, not a replacement for SearXNG.
 
